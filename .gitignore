@@ -1,8 +1,17 @@
 .idea/
 *.iml
 target/
+benchmark-results/
+__pycache__/
+/var
 pom.xml.versionsBackup
 test-output/
 .*.swp
 .*.swo
 .DS_Store
+re2_upstream/
+
+# Profiling tools
+hsdis-*.dylib
+async-profiler-*/
+*.jfr
