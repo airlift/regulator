@@ -9,6 +9,8 @@ test-output/
 .*.swp
 .*.swo
 .DS_Store
+/CLAUDE.local.md
+/AGENTS.override.md
 re2_upstream/
 
 # Profiling tools
