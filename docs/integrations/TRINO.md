@@ -159,6 +159,9 @@ Joni fork. Measure:
 Run on current Intel and AWS Graviton systems. Report normal workload classes
 separately from extreme outliers.
 
+The authoritative execution and acceptance protocol is
+[`benchmarks/QUALIFICATION_PLAN.md`](../benchmarks/QUALIFICATION_PLAN.md).
+
 ## Adoption package
 
 A Trino proposal should contain:

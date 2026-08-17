@@ -1,15 +1,17 @@
-# Regulator Documentation
+# Regulator documentation
 
-This directory contains current user, reviewer, and maintainer documentation
-for Regulator. Development notebooks and intermediate benchmark reports are
-not retained in the repository.
+Start with the API and language guides to use Regulator. For changes to the
+library, read the maintenance guide and design decisions. Development notebooks
+and intermediate benchmark reports are not kept here.
 
-## Start Here
+## Start here
 
-1. [`reference/REGULATOR_API.md`](reference/REGULATOR_API.md) describes the public API and lifecycle contracts.
-2. [`integrations/REGEXP_LANGUAGES.md`](integrations/REGEXP_LANGUAGES.md) explains how to choose a pattern language.
+- [API guide](reference/REGULATOR_API.md): matching, captures, ownership, and lifecycle.
+- [Pattern languages](integrations/REGEXP_LANGUAGES.md): choose the right compiler.
+- [Maintenance guide](MAINTAINING_REGULATOR.md): validate changes, measure performance, and prepare a release.
+- [Design decisions](../REGULATOR_DECISIONS.md): accepted trade-offs and differences from upstream RE2.
 
-## Language Reference
+## Language reference
 
 | Document | Purpose |
 |---|---|
@@ -19,7 +21,7 @@ not retained in the repository.
 | [`reference/languages/TRINO_LIKE.md`](reference/languages/TRINO_LIKE.md) | Trino SQL LIKE syntax and semantics |
 | [`reference/languages/UNSUPPORTED_FEATURES.md`](reference/languages/UNSUPPORTED_FEATURES.md) | Unsupported constructs and future-support policy |
 
-## API And Integration
+## API and integration
 
 | Document | Purpose |
 |---|---|
@@ -28,13 +30,35 @@ not retained in the repository.
 | [`integrations/JVM_UNICODE.md`](integrations/JVM_UNICODE.md) | JVM-sourced Unicode policy and regeneration |
 | [`reference/REVERSE_DFA.md`](reference/REVERSE_DFA.md) | Reverse-DFA design reference |
 
-## Documentation Rules
+## Correctness and development
 
-- Keep user-facing language and API documents descriptive rather than chronological.
+| Document | Purpose |
+|---|---|
+| [`porting/WORKFLOW.md`](porting/WORKFLOW.md) | Upstream-grounded implementation workflow |
+| [`porting/TEST_MAP.md`](porting/TEST_MAP.md) | Upstream C++ test coverage map |
+| [`coding-standards.md`](coding-standards.md) | Implementation, naming, and comment conventions |
+| [`testing.md`](testing.md) | Test conventions |
+| [`git.md`](git.md) | Commit and history conventions |
+
+## Performance
+
+| Document | Purpose |
+|---|---|
+| [`benchmarks/METHODOLOGY.md`](benchmarks/METHODOLOGY.md) | Benchmark execution and performance-analysis method |
+| [`benchmarks/WORKLOAD_ORGANIZATION.md`](benchmarks/WORKLOAD_ORGANIZATION.md) | Workload populations, comparator coverage, and aggregation rules |
+| [`benchmarks/QUALIFICATION_PLAN.md`](benchmarks/QUALIFICATION_PLAN.md) | Final Intel and Graviton qualification plan |
+| [AWS collection guide](../tools/re2-benchmark/aws/README.md) | Freeze, plan, run, recover, and budget machine-hours and cost |
+| [`reference/OPTIMIZATION_REGISTRY.md`](reference/OPTIMIZATION_REGISTRY.md) | Important upstream and Java-specific optimization inventory |
+| [`MAINTAINING_REGULATOR.md`](MAINTAINING_REGULATOR.md) | Proportional performance gates for future changes |
+
+## Documentation rules
+
+- Record only implemented, intentional design decisions in `REGULATOR_DECISIONS.md`.
+- Describe current behavior in language and API docs, not the history of its implementation.
 - Do not commit intermediate benchmark results, campaign notebooks, raw profiles, or rejected experiments.
-- Commit one reproducible final benchmark report for a frozen review or release candidate.
+- Commit one reproducible final benchmark data set for a frozen review or release candidate.
 
-## Upstream Source
+## Upstream source
 
 - Repository: <https://github.com/google/re2>
 - Pinned commit: `972a15cedd008d846f1a39b2e88ce48d7f166cbd`
