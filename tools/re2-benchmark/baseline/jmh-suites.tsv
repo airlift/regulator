@@ -1,0 +1,12 @@
+shard_id	suite	filter	parameters	systems	comparator	allocation_contract
+compile-public	compile	^io\.airlift\.regulator\.(BenchmarkRe2CompileFocused|BenchmarkRe2CompilerPhases)\..*$	-	regulator-native-access	pinned-native-where-equivalent	recorded
+compile-public	public-compile	^io\.airlift\.regulator\.BenchmarkJavaRegexpPublicApi\.compile$	-	regulator-native-access	pinned-native-or-absolute	recorded
+compile-public	public-api	^io\.airlift\.regulator\.(BenchmarkRe2PublicApi\..*|BenchmarkJavaRegexpPublicApi\.(?!compile$).*|BenchmarkPatternCollections\..*)$	-	regulator-native-access,regulator-object-row	pinned-native-or-absolute	recorded
+expression-plans-a	expression-plans	^io\.airlift\.regulator\.BenchmarkExpressionPlans\.(?!.*ProtectedControl).*$	workload=EMPTY_ABSENT,EXACT_MATCH,TINY_ABSENT,TINY_BEGINNING,SHORT_MIDDLE,KIB_EARLY,KIB_LATE,LARGE_ABSENT,LARGE_END	regulator-native-access,regulator-object-row	general-route-control	allocation-free
+expression-plans-a	expression-controls	^io\.airlift\.regulator\.BenchmarkExpressionPlans\..*ProtectedControl.*$	-	regulator-native-access,regulator-object-row	general-route-control	allocation-free
+expression-plans-b	expression-plans	^io\.airlift\.regulator\.BenchmarkExpressionPlans\.(?!.*ProtectedControl).*$	workload=MIB_ABSENT,MIB_LATE,DENSE_FALSE,DENSE_TRUE,MULTIBYTE,UTF8_PREFIX_REMAINDER,UTF8_SUFFIX_PREFIX,NON_ZERO_OFFSET	regulator-native-access,regulator-object-row	general-route-control	allocation-free
+accepted-routes	accepted-routes	^io\.airlift\.regulator\.(BenchmarkDfaCountMatches|BenchmarkBoundedCharacterClassCounter|BenchmarkSingleByteRepeatMatcher|BenchmarkNfaCaptureScaling|BenchmarkDfaSmallByteSet|BenchmarkDfaSelfLoopExitScan|BenchmarkLiteralCorpus)\..*$	-	regulator-native-access,regulator-object-row	pinned-native-where-equivalent	recorded
+trino-operations	trino-public-operations	^io\.airlift\.regulator\.BenchmarkTrinoRegexp\..*$	-	regulator-native-access,regulator-object-row	joni	operation-dependent
+trino-search-edges	trino-search-edges	^io\.airlift\.regulator\.BenchmarkTrinoRegexpSearchEdges\..*$	-	regulator-native-access,regulator-object-row	absolute	operation-dependent
+lifecycle	lifecycle	^io\.airlift\.regulator\.BenchmarkDfaCache\.(?!searchSharedColdWave$).*$	-	regulator-native-access,regulator-object-row	pinned-native-where-equivalent	recorded
+lifecycle-shared-cold	lifecycle	^io\.airlift\.regulator\.BenchmarkDfaCache\.searchSharedColdWave$	-	regulator-native-access,regulator-object-row	pinned-native-where-equivalent	recorded

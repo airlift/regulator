@@ -53,12 +53,16 @@ public class BenchmarkTrinoLike
         private LikeMatcher trinoOptimized;
         private Slice sliceInput;
         private byte[] byteInput;
+        private Slice slicePattern;
+        private String stringPattern;
 
         @Setup
         public void setup()
         {
             Input input = scenario.input();
-            candidate = TrinoLikePattern.compile(Slices.utf8Slice(input.pattern()));
+            slicePattern = Slices.utf8Slice(input.pattern());
+            stringPattern = input.pattern();
+            candidate = TrinoLikePattern.compile(slicePattern);
             trinoSql = LikeMatcher.compile(input.pattern(), Optional.empty(), false);
             trinoOptimized = LikeMatcher.compile(input.pattern(), Optional.empty(), true);
             byteInput = input.input();
@@ -148,6 +152,55 @@ public class BenchmarkTrinoLike
     public boolean trinoOptimized(BenchmarkData data)
     {
         return data.trinoOptimized.match(data.byteInput);
+    }
+
+    @Benchmark
+    public TrinoLikePattern candidateCompile(BenchmarkData data)
+    {
+        return TrinoLikePattern.compile(data.slicePattern);
+    }
+
+    @Benchmark
+    public LikeMatcher trinoSqlCompile(BenchmarkData data)
+    {
+        return LikeMatcher.compile(data.stringPattern, Optional.empty(), false);
+    }
+
+    @Benchmark
+    public boolean candidateSingleUse(BenchmarkData data)
+    {
+        return TrinoLikePattern.compile(data.slicePattern).matches(data.sliceInput);
+    }
+
+    @Benchmark
+    public boolean trinoSqlSingleUse(BenchmarkData data)
+    {
+        return LikeMatcher.compile(data.stringPattern, Optional.empty(), false).match(data.byteInput);
+    }
+
+    @Benchmark
+    public boolean trinoOptimizedSingleUse(BenchmarkData data)
+    {
+        return LikeMatcher.compile(data.stringPattern, Optional.empty(), true).match(data.byteInput);
+    }
+
+    public static void main(String[] args)
+    {
+        BenchmarkTrinoLike benchmark = new BenchmarkTrinoLike();
+        for (Scenario scenario : Scenario.values()) {
+            BenchmarkData data = new BenchmarkData();
+            data.scenario = scenario;
+            data.setup();
+            boolean expected = scenario.input().expected();
+            if (benchmark.candidateSingleUse(data) != expected ||
+                    benchmark.trinoSqlSingleUse(data) != expected ||
+                    benchmark.trinoOptimizedSingleUse(data) != expected ||
+                    benchmark.candidateCompile(data).matches(data.sliceInput) != expected ||
+                    benchmark.trinoSqlCompile(data).match(data.byteInput) != expected) {
+                throw new IllegalStateException("LIKE lifecycle mismatch for " + scenario);
+            }
+        }
+        System.out.println("Verified 60 Trino LIKE lifecycle comparisons");
     }
 
     private static Input benchmarkInput(String pattern, byte[] input, boolean expected)

@@ -120,6 +120,15 @@ jobs:
       - name: Test commit description checker
         run: python3 .github/scripts/test-check-commit-descriptions.py
 
+  benchmark-tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Validate benchmark tooling offline
+        run: python3 tools/re2-benchmark/validate-tooling.py
+
   build:
     name: Build (Java ${{ matrix.java-version }}, native access ${{ matrix.native-access }})
     runs-on: ubuntu-latest
@@ -158,6 +167,7 @@ jobs:
     needs:
       - check-commits-dispatcher
       - check-commit
+      - benchmark-tooling
       - test-commit-checker
       - build
     runs-on: ubuntu-latest
@@ -166,14 +176,16 @@ jobs:
       - name: Check results
         env:
           BUILD_RESULT: ${{ needs.build.result }}
+          BENCHMARK_TOOLING_RESULT: ${{ needs.benchmark-tooling.result }}
           CHECK_COMMIT_RESULT: ${{ needs.check-commit.result }}
           CHECKER_TEST_RESULT: ${{ needs.test-commit-checker.result }}
           DISPATCHER_RESULT: ${{ needs.check-commits-dispatcher.result }}
         run: |
           if [[ "$BUILD_RESULT" != success ]] ||
+              [[ "$BENCHMARK_TOOLING_RESULT" != success ]] ||
               [[ "$CHECK_COMMIT_RESULT" == failure || "$CHECK_COMMIT_RESULT" == cancelled ]] ||
               [[ "$CHECKER_TEST_RESULT" != success ]] ||
               [[ "$DISPATCHER_RESULT" == failure || "$DISPATCHER_RESULT" == cancelled ]]; then
-            echo "CI failed: build=$BUILD_RESULT check-commit=$CHECK_COMMIT_RESULT checker-test=$CHECKER_TEST_RESULT dispatcher=$DISPATCHER_RESULT" >&2
+            echo "CI failed: build=$BUILD_RESULT benchmark-tooling=$BENCHMARK_TOOLING_RESULT check-commit=$CHECK_COMMIT_RESULT checker-test=$CHECKER_TEST_RESULT dispatcher=$DISPATCHER_RESULT" >&2
             exit 1
           fi

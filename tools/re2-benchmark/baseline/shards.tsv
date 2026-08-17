@@ -1,0 +1,38 @@
+shard_id	description	mode
+rebar-a	Complete applicable Rebar corpus, deterministic workload-model partition A	baseline-shard
+rebar-b	Complete applicable Rebar corpus, deterministic workload-model partition B	baseline-shard
+rebar-c	Complete applicable Rebar corpus, deterministic workload-model partition C	baseline-shard
+rebar-d	Complete applicable Rebar corpus, deterministic workload-model partition D	baseline-shard
+rebar-e	Complete applicable Rebar corpus, deterministic workload-model partition E	baseline-shard
+rebar-f	Complete applicable Rebar corpus, deterministic workload-model partition F	baseline-shard
+rebar-g	Complete applicable Rebar corpus, deterministic workload-model partition G	baseline-shard
+rebar-h	Complete applicable Rebar corpus, deterministic workload-model partition H	baseline-shard
+rebar-i	Complete applicable Rebar corpus, deterministic workload-model partition I	baseline-shard
+rebar-j	Complete applicable Rebar corpus, deterministic workload-model partition J	baseline-shard
+rebar-k	Complete applicable Rebar corpus, deterministic workload-model partition K	baseline-shard
+rebar-l	Complete applicable Rebar corpus, deterministic workload-model partition L	baseline-shard
+rebar-m	Complete applicable Rebar corpus, deterministic workload-model partition M	baseline-shard
+rebar-n	Complete applicable Rebar corpus, deterministic workload-model partition N	baseline-shard
+rebar-o	Complete applicable Rebar corpus, deterministic workload-model partition O	baseline-shard
+rebar-p	Complete applicable Rebar corpus, deterministic workload-model partition P	baseline-shard
+rebar-q	Complete applicable Rebar corpus, deterministic workload-model partition Q	baseline-shard
+rebar-r	Complete applicable Rebar corpus, deterministic workload-model partition R	baseline-shard
+rebar-s	Complete applicable Rebar corpus, deterministic workload-model partition S	baseline-shard
+rebar-t	Complete applicable Rebar corpus, deterministic workload-model partition T	baseline-shard
+lifecycle	Allocation, cache, reset, fallback, and concurrency	baseline-shard
+lifecycle-shared-cold	Shared-program cold-cache wave controls	baseline-shard
+retained-memory	Retained-memory census for Regulator and Joni	baseline-shard
+trino-final-line	Trino final-line operation matrix against Joni	baseline-shard
+trino-operations	Application-shaped and diagnostic Trino regular-expression operations against Joni	baseline-shard
+trino-search-edges	Regulator-only Trino search-edge diagnostics	baseline-shard
+trino-like	Trino LIKE against current Trino implementations	baseline-shard
+like-compile	Trino LIKE pattern construction against Trino SQL	baseline-shard
+like-single-use	Trino LIKE construction and first match against Trino SQL	baseline-shard
+like-dfa-single-use	Trino LIKE first match for DFA-eligible patterns in both modes	baseline-shard
+compile-public	Parser, compiler, public matching, Java, rewrite, set, and prefilter APIs	baseline-shard
+accepted-routes	Accepted scanners, count paths, and capture scaling	baseline-shard
+expression-plans-a	Expression plans, workload partition A	baseline-shard
+expression-plans-b	Expression plans, workload partition B	baseline-shard
+traditional-extra	Traditional successful, alternate, and large fixed pairs	baseline-shard
+traditional-search	Traditional failed-search DFA, NFA, and public RE2 pairs	baseline-shard
+traditional-capture	Traditional parse, capture, full-match, practical, and miscellaneous pairs	baseline-shard

@@ -19,11 +19,13 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def record(build_directory):
-    binary = build_directory / "language_benchmark"
+def record(build_directory, target="language_benchmark"):
+    if target not in {"language_benchmark", "language_bulk_benchmark"}:
+        raise ValueError("unknown native language target")
+    binary = build_directory / target
     commands_path = build_directory / "compile_commands.json"
     commands = json.loads(commands_path.read_text())
-    runner_commands = [command for command in commands if command["file"].endswith("/language/language_benchmark.cc")]
+    runner_commands = [command for command in commands if command["file"].endswith(f"/language/{target}.cc")]
     if len(runner_commands) != 1:
         raise ValueError("missing or ambiguous native compilation command")
     source = Path(runner_commands[0]["file"])
@@ -56,4 +58,4 @@ def record(build_directory):
 
 
 if __name__ == "__main__":
-    record(Path(sys.argv[1]).resolve())
+    record(Path(sys.argv[1]).resolve(), sys.argv[2] if len(sys.argv) > 2 else "language_benchmark")
