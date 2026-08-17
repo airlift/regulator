@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 
 /**
@@ -109,6 +110,36 @@ final class Utf8
     static int decodedCodePoint(long decoded)
     {
         return (int) decoded;
+    }
+
+    static int firstInvalidOffset(Slice input)
+    {
+        byte[] bytes = input.byteArray();
+        int startOffset = input.byteArrayOffset();
+        int byteOffset = startOffset;
+        int endOffset = startOffset + input.length();
+
+        // Fast path: pure ASCII input is always valid UTF-8.
+        while (byteOffset < endOffset && (bytes[byteOffset] & 0x80) == 0) {
+            byteOffset++;
+        }
+        if (byteOffset == endOffset) {
+            return -1;
+        }
+
+        while (byteOffset < endOffset) {
+            long decodedRune = decode(bytes, byteOffset, endOffset);
+            int decodedWidth = decodedWidth(decodedRune);
+            if (decodedWidth == 0) {
+                return byteOffset - startOffset;
+            }
+            int decodedCodePoint = decodedCodePoint(decodedRune);
+            if (decodedWidth == 1 && decodedCodePoint == RUNE_ERROR && (bytes[byteOffset] & 0xFF) >= 0x80) {
+                return byteOffset - startOffset;
+            }
+            byteOffset += decodedWidth;
+        }
+        return -1;
     }
 
     static int encodedLength(int codePoint)
