@@ -1,0 +1,6 @@
+source_case	pattern	decision	workload_id	reason
+dot-star-x	.*x.*	diagnostic-only	-	Synthetic single-byte dot-star probe remains in the diagnostic matrix
+dot-star-alternation	.*(x|y).*	diagnostic-only	-	Synthetic alternation dot-star probe remains in the diagnostic matrix
+longdotstar	.*coolfunctionname.*	included	trinoDotStarLiteral	Translated to rotating changing Slice values
+phone	\d{3}/\d{3}/\d{4}	included	trinoPhone	Translated exactly with deterministic changing inputs
+literal	literal	included	trinoLiteral	Translated exactly with deterministic changing inputs
