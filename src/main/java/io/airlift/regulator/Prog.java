@@ -35,6 +35,7 @@ import static java.util.Objects.requireNonNull;
 final class Prog
 {
     private static final long BIT_STATE_BITMAP_MAXIMUM_BYTES = 256L * 1024L;
+    private static final int FUSED_PREFIX_VECTOR_MINIMUM_BYTES = 1024;
 
     public enum MatchKind
     {
@@ -48,6 +49,7 @@ final class Prog
     {
         REPEATED_BYTE,
         FUSED_SWAR,
+        FUSED_VECTOR,
     }
 
     // VarHandles for SWAR byte scanning (8-byte and 4-byte at a time)
@@ -320,7 +322,7 @@ final class Prog
      * <p>
      * When {@code true}:
      * <ul>
-     * <li>Execution scans bytes right-to-left (backward)
+     * <li>{@link io.airlift.regulator.Dfa#search} scans bytes right-to-left (backward)
      * <li>Anchor flags are swapped from pattern semantics: {@code ^} becomes {@code $}, {@code $} becomes {@code ^}
      * <li>Used in Phase 2 of two-phase search to find match start after forward DFA found end
      * <li>Memory budget typically 1/3 of total (vs 2/3 for forward)
@@ -335,6 +337,7 @@ final class Prog
      * See {@code REVERSE_DFA.md} for usage examples and complete documentation.
      *
      * @see io.airlift.regulator.Compiler#compile for reverse compilation
+     * @see io.airlift.regulator.Dfa#search for search execution
      */
     private boolean reversed;
 
@@ -375,6 +378,9 @@ final class Prog
 
     // DFA caching with memory budgets (like upstream RE2).
     private long dfaMemory;  // Total DFA memory budget
+    private final AtomicReference<Dfa.DfaInstance> dfaFirstMatch = new AtomicReference<>();
+    private final AtomicReference<Dfa.DfaInstance> dfaLongestMatch = new AtomicReference<>();
+    private final AtomicReference<Dfa.DfaInstance> dfaManyMatch = new AtomicReference<>();
     // Immutable flattened instruction tables for NFA no-submatch fast path.
     private final AtomicReference<NoSubmatchTables> noSubmatchNfaTables = new AtomicReference<>();
     // Compact immutable instructions built lazily after flattening and shared by capture engines.
@@ -892,6 +898,11 @@ final class Prog
         return prefixSize == 1 && !prefixFoldCase;
     }
 
+    boolean usesVectorForSingleBytePrefix(int length)
+    {
+        return VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES;
+    }
+
     boolean usesFoldCasePrefixCandidateScan()
     {
         return prefixFoldCase;
@@ -901,6 +912,9 @@ final class Prog
     {
         if (prefixFoldCase || prefixSize <= 1 || prefix[0] >= 0) {
             return PrefixAccelStrategy.REPEATED_BYTE;
+        }
+        if (VectorSupport.isAvailable() && length >= FUSED_PREFIX_VECTOR_MINIMUM_BYTES) {
+            return PrefixAccelStrategy.FUSED_VECTOR;
         }
         return PrefixAccelStrategy.FUSED_SWAR;
     }
@@ -916,6 +930,9 @@ final class Prog
         }
         if (!canUseSingleBytePrefixAccelFastPath()) {
             throw new IllegalStateException("single-byte prefix accel fast path not configured");
+        }
+        if (usesVectorForSingleBytePrefix(length)) {
+            return VectorByteSetScanner.find(data, offset, length, prefix[0], (byte) 0, (byte) 0, 1);
         }
         return indexOfSWAR(data, offset, length, prefixFrontBroadcastMask);
     }
@@ -1003,6 +1020,15 @@ final class Prog
         }
 
         PrefixAccelStrategy strategy = prefixAccelStrategy(length);
+        if (strategy == PrefixAccelStrategy.FUSED_VECTOR) {
+            return VectorPrefixScanner.find(
+                    data,
+                    offset,
+                    length,
+                    prefix,
+                    0,
+                    prefixSize - 1);
+        }
         if (strategy == PrefixAccelStrategy.FUSED_SWAR) {
             return prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length);
         }
@@ -1396,6 +1422,60 @@ final class Prog
     public long dfaMemory()
     {
         return dfaMemory;
+    }
+
+    /**
+     * Get or create cached DFA with memory budget.
+     * Like upstream Prog::GetDFA().
+     */
+    public Dfa.DfaInstance getCachedDfa(Dfa.DfaInstance.Kind kind)
+    {
+        requireNonNull(kind, "kind is null");
+        AtomicReference<Dfa.DfaInstance> ref = dfaReference(kind);
+
+        // Fast path - already cached
+        Dfa.DfaInstance cached = ref.get();
+        if (cached != null) {
+            return cached;
+        }
+
+        // Lazy initialization with memory budget
+        long budget = switch (kind) {
+            case MANY_MATCH -> dfaMemory;
+            case FIRST_MATCH -> dfaMemory / 2;
+            case LONGEST_MATCH -> reversed ? dfaMemory : dfaMemory / 2;
+        };
+        if (budget <= 0) {
+            return null;
+        }
+        Dfa.DfaInstance newDfa = new Dfa.DfaInstance(this, kind, budget);
+
+        if (!newDfa.ok()) {
+            // Budget too small to even initialize DFA
+            return null;
+        }
+
+        // CAS to cache
+        if (ref.compareAndSet(null, newDfa)) {
+            return newDfa;
+        }
+        // Lost race - use winner's DFA
+        return ref.get();
+    }
+
+    Dfa.DfaInstance cachedDfaIfPresent(Dfa.DfaInstance.Kind kind)
+    {
+        requireNonNull(kind, "kind is null");
+        return dfaReference(kind).get();
+    }
+
+    private AtomicReference<Dfa.DfaInstance> dfaReference(Dfa.DfaInstance.Kind kind)
+    {
+        return switch (kind) {
+            case FIRST_MATCH -> dfaFirstMatch;
+            case LONGEST_MATCH -> dfaLongestMatch;
+            case MANY_MATCH -> dfaManyMatch;
+        };
     }
 
     NoSubmatchTables getOrCreateNoSubmatchTables()
