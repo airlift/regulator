@@ -96,6 +96,11 @@ final class Compiler
         return compile(regexp, reversed, maxMemory, true);
     }
 
+    static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory)
+    {
+        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true);
+    }
+
     static long estimatedProgramMemory(Prog program)
     {
         long memory = CPP_PROG_OVERHEAD_BYTES + ((long) program.size() * CPP_INSTRUCTION_BYTES);
