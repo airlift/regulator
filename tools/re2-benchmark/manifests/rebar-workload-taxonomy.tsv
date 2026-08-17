@@ -1,0 +1,14 @@
+name_regex	model_regex	population	family	reason
+.*	compile	compilation	pattern-compilation	Compilation is a lifecycle cost, not execution throughput
+^curated/(06-cloud-flare-redos|14-quadratic)/.*	(?!compile).*	diagnostics-and-stress	adversarial	Curated catastrophic and quadratic stress cases
+^curated/(?!06-cloud-flare-redos/|14-quadratic/).*	(?!compile).*	bulk-text	rebar-curated	Official Rebar corpus execution over fixed bulk inputs
+^(captures|dictionary/search|grep)/.*	(?!compile).*	bulk-text	text-processing	Capture, dictionary, and grep corpus processing
+^imported/(leipzig|sherlock)/.*	(?!compile).*	bulk-text	classic-text	Classic book and text-search corpora
+^imported/(lh3lh3-reb|mariomka)/.*	(?!compile).*	bulk-text	structured-text	Email, URI, and IP corpus processing
+^unicode/.*	(?!compile).*	bulk-text	unicode-text	Unicode corpus processing
+^wild/.*	(?!compile).*	bulk-text	production-derived	Production-derived regex and corpus cases
+^folly/.*	(?!compile).*	diagnostics-and-stress	engine-probe	Synthetic engine behavior probes
+^imported/rsc/.*	(?!compile).*	diagnostics-and-stress	synthetic-scaling	Synthetic regex-engine scaling cases
+^opt/.*	(?!compile).*	diagnostics-and-stress	optimizer-probe	Optimization-specific route and algorithm probes
+^reported/.*	(?!compile).*	diagnostics-and-stress	reported-regression	Reported bugs and performance regressions
+^slow/.*	(?!compile).*	diagnostics-and-stress	adversarial	Explicitly slow and adversarial cases

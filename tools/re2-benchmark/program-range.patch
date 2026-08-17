@@ -1,0 +1,35 @@
+diff --git a/re2/testing/regexp_benchmark.cc b/re2/testing/regexp_benchmark.cc
+--- a/re2/testing/regexp_benchmark.cc
++++ b/re2/testing/regexp_benchmark.cc
+@@ -1603,3 +1603,31 @@
+ BENCHMARK(PossibleMatchRange_NoProg);
++
++void PossibleMatchRangeProgCommon(benchmark::State& state, const char* regexp) {
++  Prog* prog = GetCachedProg(regexp);
++  std::string min;
++  std::string max;
++  for (auto _ : state) {
++    ABSL_CHECK(prog->PossibleMatchRange(&min, &max, 16));
++    benchmark::DoNotOptimize(min);
++    benchmark::DoNotOptimize(max);
++  }
++}
++
++void PossibleMatchRange_Prog_Trivial(benchmark::State& state) {
++  PossibleMatchRangeProgCommon(state, ".*");
++}
++void PossibleMatchRange_Prog_Complex(benchmark::State& state) {
++  PossibleMatchRangeProgCommon(state, "^abc[def]?[gh]{1,2}.*");
++}
++void PossibleMatchRange_Prog_Prefix(benchmark::State& state) {
++  PossibleMatchRangeProgCommon(state, "^some_random_prefix.*");
++}
++void PossibleMatchRange_Prog_NoProg(benchmark::State& state) {
++  PossibleMatchRangeProgCommon(state, "^some_random_string$");
++}
++BENCHMARK(PossibleMatchRange_Prog_Trivial);
++BENCHMARK(PossibleMatchRange_Prog_Complex);
++BENCHMARK(PossibleMatchRange_Prog_Prefix);
++BENCHMARK(PossibleMatchRange_Prog_NoProg);
+ 
+ }  // namespace re2
