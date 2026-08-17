@@ -1,0 +1,79 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.airlift.regulator;
+
+import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.Field;
+import java.util.List;
+
+import static io.airlift.regulator.InstOp.CAPTURE;
+import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class TestBitStateCaptureInstructionWords
+{
+    @Test
+    public void testBitStateCreatesAndReusesPackedInstructions()
+            throws ReflectiveOperationException
+    {
+        Prog program = compileProg("(a+)(a)");
+        Field instructionWordsField = instructionWordsField();
+        assertThat(instructionWordsField.get(program)).isNull();
+
+        int[] captures = new int[6];
+        assertThat(BitState.search(program, Slices.utf8Slice("aa"), true, Prog.MatchKind.FULL_MATCH, captures)).isTrue();
+        Object instructionWords = instructionWordsField.get(program);
+        assertThat(instructionWords).isInstanceOf(long[].class);
+        assertThat(captures).containsExactly(0, 2, 0, 1, 1, 2);
+
+        assertThat(BitState.search(program, Slices.utf8Slice("aaa"), true, Prog.MatchKind.FULL_MATCH, captures)).isTrue();
+        assertThat(instructionWordsField.get(program)).isSameAs(instructionWords);
+        assertThat(captures).containsExactly(0, 3, 0, 2, 2, 3);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPackedInstructionsOwnCaptureUndoExecution()
+            throws ReflectiveOperationException
+    {
+        Prog program = compileProg("(a+)(a)");
+        long[] instructionWords = program.getOrCreateCaptureInstructionWords();
+
+        Field instructionsField = Prog.class.getDeclaredField("insts");
+        instructionsField.setAccessible(true);
+        List<Prog.Inst> instructions = (List<Prog.Inst>) instructionsField.get(program);
+        for (int instructionId = 0; instructionId < instructions.size(); instructionId++) {
+            Prog.Inst instruction = instructions.get(instructionId);
+            if (instruction.opcode() == CAPTURE) {
+                instructions.set(instructionId, null);
+            }
+        }
+
+        assertThat(program.getOrCreateCaptureInstructionWords()).isSameAs(instructionWords);
+        int[] captures = new int[6];
+        assertThat(BitState.search(program, Slices.utf8Slice("aaa"), true, Prog.MatchKind.FULL_MATCH, captures)).isTrue();
+        assertThat(captures).containsExactly(0, 3, 0, 2, 2, 3);
+    }
+
+    private static Field instructionWordsField()
+            throws ReflectiveOperationException
+    {
+        Field field = Prog.class.getDeclaredField("captureInstructionWords");
+        field.setAccessible(true);
+        assertThat(field.getType()).isEqualTo(long[].class);
+        return field;
+    }
+}

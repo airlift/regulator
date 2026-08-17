@@ -221,6 +221,49 @@ final class Nfa
         }
     }
 
+    static int searchTagged(
+            Prog prog,
+            Slice context,
+            int start,
+            int end,
+            boolean anchored,
+            Prog.MatchKind matchKind,
+            int[] groupZero,
+            Workspace workspace)
+    {
+        if (prog.start() == 0 || start < 0 || end < start || end > context.length()) {
+            return -1;
+        }
+        int contextBegin = context.byteArrayOffset();
+        // compileSet's anchor flags describe DFA set execution, not the source expression.
+        // TaggedAlternationProgram excludes source anchors and supplies the actual search mode.
+        try {
+            NoSubmatchNfaImpl nfa = new NoSubmatchNfaImpl(
+                    context.byteArray(),
+                    prog,
+                    prog.start(),
+                    contextBegin + start,
+                    contextBegin + end,
+                    contextBegin,
+                    contextBegin + context.length(),
+                    anchored || matchKind == Prog.MatchKind.FULL_MATCH,
+                    matchKind != Prog.MatchKind.FIRST_MATCH,
+                    matchKind == Prog.MatchKind.FULL_MATCH,
+                    workspace);
+            if (!nfa.search()) {
+                return -1;
+            }
+            nfa.writeGroupZero(groupZero);
+            return prog.inst(nfa.matchInstruction).matchId();
+        }
+        catch (RuntimeException | Error failure) {
+            if (workspace != null) {
+                workspace.invalidate();
+            }
+            throw failure;
+        }
+    }
+
     /**
      * Anchored full match (equivalent to RE2 {@code ANCHOR_BOTH}): the regexp must match
      * starting at the beginning of {@code text} and ending at the end of {@code text}.
@@ -363,6 +406,7 @@ final class Nfa
         private boolean matched;
         private int matchStart;
         private int matchEnd;
+        private int matchInstruction;
 
         private NoSubmatchNfaImpl(
                 byte[] bytes,
@@ -445,6 +489,7 @@ final class Nfa
                             case OP_MATCH -> {
                                 matched = true;
                                 matchEnd = textEnd;
+                                matchInstruction = id;
                                 id = 0;
                             }
                             default -> id = 0;
@@ -539,12 +584,14 @@ final class Nfa
                                 matched = true;
                                 matchStart = startPos;
                                 matchEnd = endPos;
+                                matchInstruction = id;
                             }
                         }
                         else {
                             matched = true;
                             matchStart = startPos;
                             matchEnd = endPos;
+                            matchInstruction = id;
 
                             runQueue.clear();
                             return 0;
