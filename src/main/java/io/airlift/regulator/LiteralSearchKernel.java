@@ -19,6 +19,7 @@ import io.airlift.slice.Slice;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 
 import static java.util.Objects.requireNonNull;
 
@@ -69,6 +70,15 @@ final class LiteralSearchKernel
                 ? findSingleByte(inputBytes, searchStart, searchEnd)
                 : findFrontAndBack(inputBytes, searchStart, searchEnd);
         return matchOffset < 0 ? -1 : matchOffset - inputOffset;
+    }
+
+    boolean matchesAt(Slice input, int offset)
+    {
+        if (offset < 0 || offset > input.length() - literal.length) {
+            return false;
+        }
+        int inputOffset = input.byteArrayOffset() + offset;
+        return Arrays.equals(input.byteArray(), inputOffset, inputOffset + literal.length, literal, 0, literal.length);
     }
 
     private int findFrontAndBack(byte[] input, int searchStart, int searchEnd)

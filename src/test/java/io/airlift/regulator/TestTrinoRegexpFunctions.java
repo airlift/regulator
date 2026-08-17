@@ -221,6 +221,28 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
+    public void testLiteralGapContainsKeepsDfaRoute()
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8("(alpha)(?s:.)(omega)"));
+
+        assertThat(regexp.usesLiteralGapMatcherForDiagnostics()).isFalse();
+        assertThat(regexp.contains(utf8("xxalpha💰omegayy"))).isTrue();
+        assertThat(regexp.pattern().booleanPartialMatchStrategyForDiagnostics())
+                .isEqualTo(Re2.BooleanPartialMatchStrategy.GENERAL);
+        assertThat(regexp.pattern().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH))
+                .as("literal-gap contains route initialized the existing general boolean-search DFA")
+                .isNotNull();
+        assertThat(regexp.contains(utf8("xxalphaomegayy"))).isFalse();
+        assertThat(regexp.contains(utf8("xxalpha💰-omegayy"))).isFalse();
+        assertThat(regexp.extract(utf8("xxalpha💰omegayy"), 2)).isEqualTo(utf8("omega"));
+
+        assertThat(TrinoRegexp.compile(utf8("alpha.omega")).usesLiteralGapMatcherForDiagnostics()).isFalse();
+        assertThat(TrinoRegexp.compile(utf8("^alpha(?s:.)omega")).usesLiteralGapMatcherForDiagnostics()).isFalse();
+        assertThat(TrinoRegexp.compile(utf8("alpha(?s:.)omega$")).usesLiteralGapMatcherForDiagnostics()).isFalse();
+        assertThat(TrinoRegexp.compile(utf8("(?i:alpha)(?s:.)omega")).usesLiteralGapMatcherForDiagnostics()).isFalse();
+    }
+
+    @Test
     public void testOrderedLiteralMatcherMemoryIsReservedFromForwardDfa()
     {
         Slice pattern = utf8("first(?s:.*)second(?s:.*)third");

@@ -177,6 +177,11 @@ public sealed class TrinoRegexp
         return false;
     }
 
+    boolean usesLiteralGapMatcherForDiagnostics()
+    {
+        return false;
+    }
+
     long orderedLiteralMatcherRetainedSizeForDiagnostics()
     {
         return 0;
