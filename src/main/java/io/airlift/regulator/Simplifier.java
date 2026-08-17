@@ -404,7 +404,8 @@ final class Simplifier
 
         if (mode == Mode.PARSE) {
             // Like RE2's parser, only discard capture-free scalar alternatives.
-            // A byte wildcard is not a Unicode scalar wildcard.
+            // A byte wildcard is not a Unicode scalar wildcard, and a full fold
+            // can consume several scalars even when its source is one literal.
             boolean haveAnyByte = false;
             boolean haveAnyChar = false;
             for (Regexp alternative : simplifiedAlternatives) {
@@ -422,7 +423,11 @@ final class Simplifier
                 for (Regexp alternative : simplifiedAlternatives) {
                     byteAlternatives &= alternative.op() == RegexpOp.ANY_BYTE;
                     scalarAlternatives &= switch (alternative.op()) {
-                        case LITERAL, CHAR_CLASS, ANY_CHAR -> true;
+                        case LITERAL -> (flags & Regexp.FULL_CASE_FOLD) == 0 ||
+                                !UnicodeFullCaseFold.requiresFullCaseFold(new int[] {alternative.rune()});
+                        case CHAR_CLASS -> (alternative.parseFlags() & Regexp.FULL_CASE_FOLD) == 0 ||
+                                UnicodeFullCaseFold.multiCharacterTokens(alternative.charClass()).isEmpty();
+                        case ANY_CHAR -> true;
                         case ANY_BYTE -> (flags & Regexp.LATIN1) != 0;
                         default -> false;
                     };
@@ -598,7 +603,7 @@ final class Simplifier
         int alternativeIndex = 0;
         while (alternativeIndex < alternatives.size()) {
             LeadingString base = leadingString(alternatives.get(alternativeIndex));
-            if (base == null || base.runes.length == 0) {
+            if (base == null || base.runes.length == 0 || requiresFullCaseFold(base.flags, base.runes)) {
                 factoredAlternatives.add(alternatives.get(alternativeIndex));
                 alternativeIndex++;
                 continue;
@@ -609,7 +614,7 @@ final class Simplifier
             int endIndex = alternativeIndex + 1;
             for (; endIndex < alternatives.size(); endIndex++) {
                 LeadingString next = leadingString(alternatives.get(endIndex));
-                if (next == null || next.flags != base.flags) {
+                if (next == null || next.flags != base.flags || requiresFullCaseFold(next.flags, next.runes)) {
                     break;
                 }
                 int same = commonPrefixLength(base.runes, next.runes, commonLen);
@@ -726,7 +731,16 @@ final class Simplifier
     private static boolean isRound3CharClassCandidate(Regexp regexp, int flags)
     {
         return (regexp.op() == RegexpOp.LITERAL || regexp.op() == RegexpOp.CHAR_CLASS) &&
-                ((regexp.parseFlags() ^ flags) & Regexp.LATIN1) == 0;
+                ((regexp.parseFlags() ^ flags) & Regexp.LATIN1) == 0 &&
+                (regexp.op() != RegexpOp.LITERAL || (regexp.parseFlags() & Regexp.FULL_CASE_FOLD) == 0 ||
+                        !UnicodeFullCaseFold.requiresFullCaseFold(new int[] {regexp.rune()}));
+    }
+
+    private static boolean requiresFullCaseFold(int flags, int[] runes)
+    {
+        // Full folds can consume multiple code points, including across a new factored
+        // prefix boundary. Keep those literals intact; simple folding still factors.
+        return (flags & Regexp.FULL_CASE_FOLD) != 0 && UnicodeFullCaseFold.requiresFullCaseFold(runes);
     }
 
     private static CharClass mergeAlternativesIntoCharClass(List<Regexp> alternatives, int startIndex, int endIndex)
@@ -782,7 +796,7 @@ final class Simplifier
         while (cursor.op() == RegexpOp.CONCAT && cursor.childCount() > 0) {
             cursor = cursor.child(0);
         }
-        int runeFlags = cursor.parseFlags() & (Regexp.FOLD_CASE | Regexp.LATIN1);
+        int runeFlags = cursor.parseFlags() & (Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD | Regexp.LATIN1);
         if (cursor.op() == RegexpOp.LITERAL) {
             return new LeadingString(new int[] {cursor.rune()}, runeFlags);
         }
@@ -1029,7 +1043,8 @@ final class Simplifier
                             followingExpression.op() == RegexpOp.LITERAL_STRING &&
                             followingExpression.runes().length > 0 &&
                             followingExpression.runes()[0] == repeatedAtom.rune() &&
-                            ((repeatedAtom.parseFlags() & Regexp.FOLD_CASE) == (followingExpression.parseFlags() & Regexp.FOLD_CASE))) {
+                            repeatedAtom.parseFlags() == followingExpression.parseFlags() &&
+                            !requiresFullCaseFold(followingExpression.parseFlags(), followingExpression.runes())) {
                         return true;
                     }
                 }
