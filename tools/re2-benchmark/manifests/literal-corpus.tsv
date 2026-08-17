@@ -1,0 +1,4 @@
+language	rebar_revision	source_path	resource_path	uncompressed_bytes	sha256	count	case_insensitive_count
+ENGLISH	463d00f31887e84c38467805b9e3122c314b9521	benchmarks/haystacks/opensubtitles/en-sampled.txt	src/test/resources/io/airlift/regulator/literal-corpus/en-sampled.txt.gzip	899232	0d40805f6d02c8fe02bd75945b98911891f707e8ecb939e018446858065d76ea	513	522
+RUSSIAN	463d00f31887e84c38467805b9e3122c314b9521	benchmarks/haystacks/opensubtitles/ru-sampled.txt	src/test/resources/io/airlift/regulator/literal-corpus/ru-sampled.txt.gzip	1570556	7ffddb21336a1bfb4a9e2df4bb77eea0305c0010a57c5d3c56e0dfead9e80a90	724	746
+CHINESE	463d00f31887e84c38467805b9e3122c314b9521	benchmarks/haystacks/opensubtitles/zh-sampled.txt	src/test/resources/io/airlift/regulator/literal-corpus/zh-sampled.txt.gzip	813478	f129e81928c58ecbba0ccbb63b36679355345248df057d1e9ded670d6e9c964b	30	30
