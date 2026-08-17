@@ -1,0 +1,56 @@
+# Pinned Trino LIKE behavior corpus. Hex columns are raw bytes.
+# id\tpattern-hex\tescape-code-point-or--\tinput-hex\tsql-nonoptimized\toptimized
+empty-empty		-		true	true
+empty-nonempty		-	61	false	false
+percent-empty	25	-		true	true
+percent-ascii	25	-	616263	true	true
+percent-malformed	25	-	ff	true	true
+underscore-empty	5f	-		false	false
+underscore-ascii	5f	-	61	true	true
+underscore-multibyte	5f	-	f09f92b0	true	true
+underscore-invalid-single	5f	-	ff	false	false
+underscore-overlong	5f	-	c0af	true	true
+literal-match	6e6565646c65	-	6e6565646c65	true	true
+literal-miss	6e6565646c65	-	6e6565646c78	false	false
+prefix-empty-suffix	6e6565646c6525	-	6e6565646c65	true	true
+prefix-match	6e6565646c6525	-	6e6565646c652d7461696c	true	true
+prefix-miss	6e6565646c6525	-	78782d6e6565646c65	false	false
+suffix-match	256e6565646c65	-	7072652d6e6565646c65	true	true
+suffix-miss	256e6565646c65	-	6e6565646c652d706f7374	false	false
+contains-match	256e6565646c6525	-	7072652d6e6565646c652d706f7374	true	true
+contains-miss	256e6565646c6525	-	7072652d6e65646c652d706f7374	false	false
+redundant-percent	2525256e6565646c65	-	7072652d6e6565646c65	true	true
+ordered-match	25616c706861256f6d65676125	-	7878616c7068612d2d6f6d6567617979	true	true
+ordered-miss	25616c706861256f6d65676125	-	78786f6d6567612d2d616c7068617979	false	false
+ordered-overlap	256162612561626125	-	6162616261	false	false
+ordered-dense-false	2561616225626261256161622562626125	-	616161616262626261616161	false	false
+one-between-match	616c7068615f6f6d656761	-	616c706861786f6d656761	true	true
+one-between-unicode	616c7068615f6f6d656761	-	616c706861f09f92b06f6d656761	true	true
+one-between-empty-miss	616c7068615f6f6d656761	-	616c7068616f6d656761	false	false
+mixed-match	25616c7068615f6f6d65676125	-	7878616c706861f09f92b06f6d6567617979	true	true
+mixed-malformed	25616c7068615f6f6d65676125	-	7878616c706861ff6f6d6567617979	false	false
+newline-percent	256e6565646c6525	-	610a6e6565646c650a62	true	true
+escaped-percent	5c25	5c	25	true	true
+escaped-underscore	5c5f	5c	5f	true	true
+escaped-escape	5c5c	5c	5c	true	true
+escaped-mixed	255c5f25	5c	61615f6262	true	true
+non-backslash-escape	7825785f7878	78	255f78	true	true
+error-dangling-escape	5c	5c		error	error
+error-invalid-escape	5c78	5c	78	error	error
+malformed-pattern-replacement-match	ff	-	efbfbd	true	true
+malformed-pattern-raw-miss	ff	-	ff	false	false
+malformed-pattern-around-wildcard	ff25	-	efbfbd616263	true	true
+malformed-input-prefix-match	6125	-	61ff	true	true
+malformed-input-percent-match	256125	-	ff61ff	true	true
+malformed-input-one-overlong	255f25	-	61c0af62	true	true
+malformed-input-one-invalid	255f25	-	61ff62	true	true
+subrange-literal-match	6e6565646c65	-	6e6565646c65	true	true
+underscore-invalid-continuation	5f	-	c241	true	false
+underscore-out-of-range	5f	-	f7bfbfbf	true	true
+underscore-truncated	5f	-	e282	false	false
+supplementary-nfa-quirk	25f09f98805f25	-	f09f988078	false	false
+supplementary-fjs	25f09f988025	-	f09f988078	true	true
+wildcard-normalization-left	255f	-	6162	true	true
+wildcard-normalization-right	5f25	-	6162	true	true
+wildcard-normalization-mixed	5f255f25	-	616263	true	true
+escaped-backslash-literal	5c616263	-	5c616263	true	true

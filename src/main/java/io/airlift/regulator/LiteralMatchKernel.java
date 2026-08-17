@@ -19,6 +19,51 @@ final class LiteralMatchKernel
 {
     private LiteralMatchKernel() {}
 
+    // The first and last words overlap for non-power-of-two lengths. Together they
+    // cover every literal byte without reading outside the matched range. This
+    // byte-equality kernel has no regex or LIKE language semantics of its own.
+    static final class ShortLiteral
+    {
+        private final int width;
+        private final int lastOffset;
+        private final long first;
+        private final long last;
+
+        ShortLiteral(Slice literal)
+        {
+            int length = literal.length();
+            if (length < 1 || length > 16) {
+                throw new IllegalArgumentException("short literal length must be between 1 and 16");
+            }
+            width = Math.min(Integer.highestOneBit(length), Long.BYTES);
+            lastOffset = length - width;
+            first = read(literal, 0, width);
+            last = read(literal, lastOffset, width);
+        }
+
+        boolean matchesAt(Slice input, int offset)
+        {
+            return switch (width) {
+                case 1 -> input.getByte(offset) == first;
+                case 2 -> ((input.getShort(offset) ^ first) | (input.getShort(offset + lastOffset) ^ last)) == 0;
+                case 4 -> ((input.getInt(offset) ^ first) | (input.getInt(offset + lastOffset) ^ last)) == 0;
+                case 8 -> ((input.getLong(offset) ^ first) | (input.getLong(offset + lastOffset) ^ last)) == 0;
+                default -> throw new IllegalStateException("unknown literal word width: " + width);
+            };
+        }
+
+        private static long read(Slice input, int offset, int width)
+        {
+            return switch (width) {
+                case 1 -> input.getByte(offset);
+                case 2 -> input.getShort(offset);
+                case 4 -> input.getInt(offset);
+                case 8 -> input.getLong(offset);
+                default -> throw new IllegalArgumentException("unknown literal word width: " + width);
+            };
+        }
+    }
+
     static boolean equals(Slice input, Slice literal)
     {
         return input.length() == literal.length() && matchesAt(input, 0, literal);
