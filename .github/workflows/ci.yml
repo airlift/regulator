@@ -28,7 +28,7 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -79,7 +79,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.check-commits-dispatcher.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: ${{ matrix.commit }}
@@ -97,7 +97,7 @@ jobs:
 
       - name: Install Java
         if: steps.compile-cache.outputs.cache-hit != 'true'
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: 25
@@ -115,12 +115,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Test commit description checker
         run: python3 .github/scripts/test-check-commit-descriptions.py
 
   build:
+    name: Build (Java ${{ matrix.java-version }}, native access ${{ matrix.native-access }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -129,18 +130,28 @@ jobs:
         java-version:
           - 25
           - 26
+        native-access:
+          - disabled
+          - enabled
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Java
-        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: ${{ matrix.java-version }}
           cache: maven
 
       - name: Build
-        run: ./mvnw clean install -B -V -P ci
+        env:
+          NATIVE_ACCESS: ${{ matrix.native-access }}
+        run: |
+          arguments=()
+          if [[ "$NATIVE_ACCESS" == enabled ]]; then
+            arguments+=("-Dregulator.nativeAccessJvmArgument=--enable-native-access=ALL-UNNAMED")
+          fi
+          ./mvnw clean install -B -V -P ci "${arguments[@]}"
 
   ci-success:
     if: always()
