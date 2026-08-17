@@ -98,6 +98,22 @@ public final class Re2BenchmarkRunner
         return text;
     }
 
+    /**
+     * Matches native SearchCachedDFA's boolean-only request and failure check.
+     */
+    public static boolean searchDfaBoolean(Prog prog, Slice text, boolean anchored)
+    {
+        return dfaBooleanResult(Dfa.search(prog, text, anchored, Prog.MatchKind.FIRST_MATCH, false));
+    }
+
+    static boolean dfaBooleanResult(long result)
+    {
+        if (result == Dfa.SEARCH_FAILED) {
+            throw new IllegalStateException("DFA benchmark exhausted its resources");
+        }
+        return result != Dfa.SEARCH_NO_MATCH;
+    }
+
     public static Prog compileProg(String pattern)
     {
         Slice patBytes = Slices.wrappedBuffer(pattern.getBytes(StandardCharsets.UTF_8));
