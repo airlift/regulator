@@ -35,6 +35,26 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestTaggedAlternationProgram
 {
     @Test
+    public void testTextDependentAlternationUsesScalarNfaWorkspace()
+    {
+        Slice expression = utf8Slice(largeAlternation("\\bfoo\\b", "foo", "."));
+        Slice input = utf8Slice("foo foo");
+        for (Re2Matcher matcher : List.of(
+                JavaRegexp.compile(expression).matcher(input),
+                TrinoRegexp.compile(expression).pattern().matcher(input))) {
+            assertThat(matcher.find()).isTrue();
+            assertMatch(matcher, 0, 3, 1);
+            assertThat(matcher.find()).isTrue();
+            assertMatch(matcher, 3, 4, 3);
+            assertThat(matcher.find()).isTrue();
+            assertMatch(matcher, 4, 7, 1);
+            assertThat(matcher.find()).isFalse();
+            // This shape has one participating branch, so no per-thread capture array is needed.
+            assertThat(matcher.nfaWorkspace().groupZeroWorkspaceReuseCountForDiagnostics()).isGreaterThan(0);
+        }
+    }
+
+    @Test
     public void testOrderedBranchCaptureUsesTaggedRoute()
     {
         // Pinned re2_golden reports 0:1,0:1,-1:-1,-1:-1 for the first match.

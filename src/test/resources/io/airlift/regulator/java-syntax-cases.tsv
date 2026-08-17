@@ -1,0 +1,51 @@
+# expected	pattern	reason
+ACCEPT	(?<name>x)	Java named capture syntax is supported
+ACCEPT	(?:x)	Noncapturing groups are supported
+ACCEPT	[a-z&&[^bc]]	Java character-class intersection is supported
+ACCEPT	[a-d[m-p]]	Java nested character-class union is supported
+ACCEPT	[a-z&&[^m-p]]	Java character-class subtraction is supported
+ACCEPT	\Q[x]\E	Quoted literal is supported outside character classes
+ACCEPT	\x{10000}	Braced Unicode escapes are supported
+ACCEPT	\u0041	Java four-digit Unicode escapes are supported
+ACCEPT	\uD83D\uDCB0	Paired surrogate escapes lower to one supplementary code point
+ACCEPT	\h	Java horizontal-whitespace escape is supported
+ACCEPT	\v	Java vertical-whitespace escape is supported
+ACCEPT	\e	ASCII escape character is supported
+ACCEPT	\cA	Control-character escape is supported
+ACCEPT	\N{WHITE SMILING FACE}	Named code-point escape is supported
+ACCEPT	(?i)k	ASCII case-insensitive mode is supported
+ACCEPT	\p{IsLatin}	Java Is-prefixed script syntax is supported
+ACCEPT	\p{script=Latin}	Java explicit script syntax is supported
+ACCEPT	\p{InBasic_Latin}	Java Unicode block syntax is supported
+ACCEPT	\p{javaLowerCase}	JVM-backed Java binary properties are supported
+ACCEPT	abc$	Java final-terminator semantics are supported
+ACCEPT	\babc\b	Java word boundaries use Java combining-aware classification
+ACCEPT	\Babc	Java non-boundaries use Java combining-aware classification
+ACCEPT	\Z	Java final-terminator boundary is supported
+REJECT	\G	Previous-match boundary is stateful
+REJECT	\C	This is not a Java Pattern escape
+ACCEPT	(?m)abc	Java multiline anchors are supported
+ACCEPT	(?d)abc	Unix-lines mode is supported
+ACCEPT	(?u)abc	Unicode case-insensitive mode uses JVM-derived simple folding
+ACCEPT	(?U)abc	Unicode character-class mode uses JVM-derived predicates
+ACCEPT	(?x)abc	Java comments mode is supported throughout the grammar
+REJECT	\R	Java linebreak escape requires atomic CRLF behavior under repetition
+ACCEPT	[\Qabc\E]	Quoted character-class atoms are supported
+REJECT	[\R-z]	Linebreak escape is not legal inside a Java character class
+ACCEPT	[ab&&]	Java permits a trailing empty intersection operand
+ACCEPT	[&&ab]	Java permits a leading empty intersection operand
+REJECT	[&&]	An intersection with no character-class operand is invalid
+REJECT	[\Q\E]	An empty quoted character class is invalid
+REJECT	(?=abc)	Lookahead is outside the supported regular subset
+REJECT	(?<=a)bc	Lookbehind is outside the supported regular subset
+REJECT	(?>abc)	Atomic groups require unsupported matching semantics
+REJECT	a++	Possessive quantifiers require unsupported matching semantics
+REJECT	(a)\1	Backreferences are not regular
+REJECT	\0	Java octal escapes require at least one digit after the leading zero
+REJECT	(a?)*	Nullable repeated captures require Java capture-reset semantics
+REJECT	(a*)+	Nullable repeated captures require Java capture-reset semantics
+REJECT	a{1001}	The current compiler cannot represent larger counted repetitions compactly
+REJECT	(?<1name>a)	Java capture names must begin with an ASCII letter
+REJECT	(?<na_me>a)	Java capture names contain only ASCII letters and digits
+REJECT	(?<name>a)(?<name>b)	Duplicate capture names are rejected
+REJECT	\p{Latin}	Java bare script names require the Is or script prefix
