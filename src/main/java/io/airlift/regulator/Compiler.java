@@ -31,6 +31,12 @@ final class Compiler
         BYTEMAP,
     }
 
+    enum Dialect
+    {
+        RE2,
+        TRINO,
+    }
+
     private static final int RUNES_SELF = 0x80;
     private static final int UTF_MAX = 4;
     private static final int MAX_INSTRUCTIONS = 1 << 24;
@@ -88,17 +94,27 @@ final class Compiler
      */
     static Prog compile(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compile(regexp, reversed, maxMemory, false);
+        return compile(regexp, reversed, maxMemory, false, Dialect.RE2);
     }
 
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compile(regexp, reversed, maxMemory, true);
+        return compile(regexp, reversed, maxMemory, true, Dialect.RE2);
+    }
+
+    static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect)
+    {
+        return compile(regexp, reversed, maxMemory, true, dialect);
     }
 
     static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true);
+        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, Dialect.RE2);
+    }
+
+    static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect)
+    {
+        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, dialect);
     }
 
     static long estimatedProgramMemory(Prog program)
@@ -110,9 +126,9 @@ final class Compiler
         return memory + program.onePassMemory();
     }
 
-    private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized)
+    private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect)
     {
-        Prog program = compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, normalized);
+        Prog program = compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, normalized, dialect);
         if (!reversed) {
             program.prepareOnePass();
         }
@@ -121,9 +137,14 @@ final class Compiler
 
     static Prog compileSet(Regexp regexp, boolean unanchored, boolean anchorBoth, long maxMemory)
     {
+        return compileSet(regexp, unanchored, anchorBoth, maxMemory, Dialect.RE2);
+    }
+
+    static Prog compileSet(Regexp regexp, boolean unanchored, boolean anchorBoth, long maxMemory, Dialect dialect)
+    {
         requireNonNull(regexp, "regexp is null");
         CompilerState compiler = new CompilerState();
-        compiler.setup(regexp.parseFlags(), maxMemory);
+        compiler.setup(regexp.parseFlags(), maxMemory, dialect);
         compiler.setAnchorBoth = anchorBoth;
 
         Regexp simplifiedRegexp = Simplifier.simplify(regexp);
@@ -143,13 +164,13 @@ final class Compiler
     static Prog compileForBenchmark(Regexp regexp, boolean reversed, long maxMemory, CompileStage stage)
     {
         // Benchmark-only hook to isolate Compiler pipeline stages.
-        return compileInternal(regexp, reversed, maxMemory, stage, false, false);
+        return compileInternal(regexp, reversed, maxMemory, stage, false, false, Dialect.RE2);
     }
 
     static Prog compileNormalizedForBenchmark(Regexp regexp, boolean reversed, long maxMemory, CompileStage stage)
     {
         // Benchmark-only hook to isolate stages after AST normalization.
-        return compileInternal(regexp, reversed, maxMemory, stage, false, true);
+        return compileInternal(regexp, reversed, maxMemory, stage, false, true, Dialect.RE2);
     }
 
     private static Prog compileInternal(
@@ -158,12 +179,13 @@ final class Compiler
             long maxMemory,
             CompileStage stage,
             boolean configureForwardMetadata,
-            boolean normalized)
+            boolean normalized,
+            Dialect dialect)
     {
         requireNonNull(regexp, "regexp is null");
         requireNonNull(stage, "stage is null");
         CompilerState compiler = new CompilerState();
-        compiler.setup(regexp.parseFlags(), maxMemory);
+        compiler.setup(regexp.parseFlags(), maxMemory, dialect);
         compiler.reversed = reversed;
 
         // Match upstream compile.cc: compiler runs Regexp::Simplify() first,
@@ -458,13 +480,15 @@ final class Compiler
         boolean reversed;
         boolean setAnchorBoth;
         boolean skipDominatorPass;
+        Dialect dialect;
 
         Encoding encoding = Encoding.UTF8;
         int maxInstructions;
         long maxMemory;
 
-        void setup(int flags, long maxMemory)
+        void setup(int flags, long maxMemory, Dialect dialect)
         {
+            this.dialect = requireNonNull(dialect, "dialect is null");
             this.maxMemory = maxMemory;
             if ((flags & Regexp.LATIN1) != 0) {
                 encoding = Encoding.LATIN1;
@@ -517,8 +541,8 @@ final class Compiler
                     }
                     yield fragment;
                 }
-                case STAR -> star(childFragments.getFirst(), (regexp.parseFlags() & Regexp.NON_GREEDY) != 0);
-                case PLUS -> plus(childFragments.getFirst(), (regexp.parseFlags() & Regexp.NON_GREEDY) != 0);
+                case STAR -> repeatUnbounded(childFragments.getFirst(), (regexp.parseFlags() & Regexp.NON_GREEDY) != 0, true);
+                case PLUS -> repeatUnbounded(childFragments.getFirst(), (regexp.parseFlags() & Regexp.NON_GREEDY) != 0, false);
                 case QUEST -> quest(childFragments.getFirst(), (regexp.parseFlags() & Regexp.NON_GREEDY) != 0);
                 case REPEAT -> throw new RegexpCompileException("REPEAT must be simplified before compilation");
                 case CAPTURE -> capture(childFragments.getFirst(), regexp.captureIndex());
@@ -679,6 +703,116 @@ final class Compiler
             }
 
             return new Fragment(id, PatchList.append(program, left.end, right.end), left.nullable || right.nullable);
+        }
+
+        private Fragment repeatUnbounded(Fragment fragment, boolean nonGreedy, boolean zeroIterationsAllowed)
+        {
+            if (dialect == Dialect.TRINO && fragment.nullable && !nonGreedy) {
+                return trinoGreedyNullableLoop(fragment, zeroIterationsAllowed);
+            }
+            return zeroIterationsAllowed ? star(fragment, nonGreedy) : plus(fragment, nonGreedy);
+        }
+
+        private Fragment trinoGreedyNullableLoop(Fragment fragment, boolean zeroIterationsAllowed)
+        {
+            Fragment consumedExit = noOperation();
+            PatchList.patch(program, fragment.end, consumedExit.begin);
+
+            Fragment emptyExit = noOperation();
+            int originalInstructionLimit = program.size();
+            int[] clones = new int[originalInstructionLimit];
+            clones[consumedExit.begin] = emptyExit.begin;
+            SparseSet pending = new SparseSet(originalInstructionLimit);
+            int loopEntry = clonePreConsumptionInstruction(
+                    fragment.begin,
+                    consumedExit.begin,
+                    emptyExit.begin,
+                    clones,
+                    pending,
+                    originalInstructionLimit);
+
+            for (int pendingIndex = 0; pendingIndex < pending.size(); pendingIndex++) {
+                int originalId = pending.denseAt(pendingIndex);
+                Prog.Inst original = program.inst(originalId);
+                Prog.Inst clone = program.inst(clones[originalId]);
+                switch (original.opcode()) {
+                    case ALT -> {
+                        clone.setOut(clonePreConsumptionInstruction(
+                                original.out(),
+                                consumedExit.begin,
+                                emptyExit.begin,
+                                clones,
+                                pending,
+                                originalInstructionLimit));
+                        clone.setOut1(clonePreConsumptionInstruction(
+                                original.out1(),
+                                consumedExit.begin,
+                                emptyExit.begin,
+                                clones,
+                                pending,
+                                originalInstructionLimit));
+                    }
+                    case CAPTURE, EMPTY_WIDTH, NOP -> clone.setOut(clonePreConsumptionInstruction(
+                            original.out(),
+                            consumedExit.begin,
+                            emptyExit.begin,
+                            clones,
+                            pending,
+                            originalInstructionLimit));
+                    case BYTE_RANGE -> throw new AssertionError("byte instructions are not pending");
+                    case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + original.opcode());
+                }
+            }
+
+            Fragment optionalIteration = quest(new Fragment(loopEntry, emptyExit.end, true), false);
+            PatchList.patch(program, consumedExit.end, optionalIteration.begin);
+            if (zeroIterationsAllowed) {
+                return optionalIteration;
+            }
+            // PLUS must enter the body once, but every boundary after a consuming iteration may
+            // stop if the structurally nullable body cannot match at the new input position.
+            return new Fragment(loopEntry, optionalIteration.end, true);
+        }
+
+        private int clonePreConsumptionInstruction(
+                int originalId,
+                int consumedExit,
+                int emptyExit,
+                int[] clones,
+                SparseSet pending,
+                int originalInstructionLimit)
+        {
+            if (originalId == consumedExit) {
+                return emptyExit;
+            }
+            if (originalId <= 0 || originalId >= originalInstructionLimit) {
+                throw new RegexpCompileException("invalid nullable-loop instruction: " + originalId);
+            }
+            int existing = clones[originalId];
+            if (existing != 0) {
+                return existing;
+            }
+
+            Prog.Inst original = program.inst(originalId);
+            Prog.Inst clone = original.copy();
+            switch (original.opcode()) {
+                case BYTE_RANGE -> {
+                    // The cloned first byte enters the original graph after making progress.
+                }
+                case ALT -> {
+                    clone.setOut(0);
+                    clone.setOut1(0);
+                    pending.insertNew(originalId);
+                }
+                case CAPTURE, EMPTY_WIDTH, NOP -> {
+                    clone.setOut(0);
+                    pending.insertNew(originalId);
+                }
+                case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + original.opcode());
+            }
+            int cloneId = add(clone);
+            clones[originalId] = cloneId;
+            return cloneId;
         }
 
         private Fragment plus(Fragment fragment, boolean nonGreedy)

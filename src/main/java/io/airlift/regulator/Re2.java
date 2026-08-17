@@ -77,6 +77,10 @@ public final class Re2
     // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk.
     private static final int MAX_DIRECT_BYTE_SCAN_BYTES = 64;
 
+    // Internal construction metadata, stored outside the parser flag range to preserve Re2's
+    // compact object layout. It is consulted only by lazy reverse-program compilation.
+    private static final int TRINO_COMPILER_DIALECT_FLAG = 1 << 31;
+
     // Above this size the existing rejection paths are already cheap, while loading
     // minimum-width metadata measurably affected the sub-nanosecond anchored path.
     private static final int MINIMUM_LENGTH_CHECK_LIMIT = 4 * 1024;
@@ -348,6 +352,7 @@ public final class Re2
     private Re2(
             int flags,
             long maxMemory,
+            Compiler.Dialect compilerDialect,
             boolean longestMatch,
             Slice pattern,
             Regexp regexp,
@@ -365,7 +370,8 @@ public final class Re2
             Map<Integer, String> capturingGroupNames,
             BoundedCharacterClassCounter compactBoundedCharacterClass)
     {
-        this.flags = flags;
+        requireNonNull(compilerDialect, "compilerDialect is null");
+        this.flags = compilerDialect == Compiler.Dialect.TRINO ? flags | TRINO_COMPILER_DIALECT_FLAG : flags;
         this.maxMemory = maxMemory;
         this.longestMatch = longestMatch;
         this.pattern = requireNonNull(pattern, "pattern is null");
@@ -629,7 +635,74 @@ public final class Re2
         return build(pattern.copy(), parsed, flags, maxMemory, false);
     }
 
+    static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory)
+    {
+        requireNonNull(pattern, "pattern is null");
+        requireNonNull(parsed, "parsed is null");
+        if (maxMemory <= 0) {
+            throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
+        }
+
+        long forwardMemory = Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
+        Regexp entireRegexp = parsed.regexp();
+        FixedWidthByteSpanMatcher fixedWidthMatcher = shouldAnalyzeFixedWidthByteSpanForTrino(parsed)
+                ? FixedWidthByteSpanMatcher.analyze(entireRegexp)
+                : null;
+        if (fixedWidthMatcher != null) {
+            Regexp normalizedRegexp = Simplifier.simplify(entireRegexp);
+            ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp);
+            Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, forwardMemory, Compiler.Dialect.TRINO);
+            if (fixedWidthMatcher.estimatedRetainedSize() <= placeholderProgram.dfaMemory()) {
+                placeholderProgram.setDfaMemory(0);
+                BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram);
+                return new Re2(
+                        flags,
+                        maxMemory,
+                        Compiler.Dialect.TRINO,
+                        false,
+                        pattern.copy(),
+                        entireRegexp,
+                        expressionAnalysis,
+                        fixedWidthMatcher,
+                        null,
+                        null,
+                        false,
+                        MatchLength.analyze(entireRegexp).encoded(),
+                        -1,
+                        placeholderProgram,
+                        booleanPlans,
+                        0,
+                        null,
+                        null,
+                        null);
+            }
+        }
+        return build(pattern.copy(), parsed, flags, maxMemory, false, Compiler.Dialect.TRINO);
+    }
+
+    static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)
+    {
+        Regexp regexp = parsed.regexp();
+        // Exact literals have a smaller dedicated route. Avoid allocating byte predicates for a
+        // shape that cannot reach the fixed-width subtype.
+        return parsed.capturingGroupCount() == 0 &&
+                regexp.op() != RegexpOp.LITERAL &&
+                regexp.op() != RegexpOp.LITERAL_STRING &&
+                regexp.requiredPrefix() == null;
+    }
+
     private static Re2 build(Slice pattern, ParseResult parsed, int flags, long maxMemory, boolean longestMatch)
+    {
+        return build(pattern, parsed, flags, maxMemory, longestMatch, Compiler.Dialect.RE2);
+    }
+
+    private static Re2 build(
+            Slice pattern,
+            ParseResult parsed,
+            int flags,
+            long maxMemory,
+            boolean longestMatch,
+            Compiler.Dialect compilerDialect)
     {
         long reverseMemory = Math.max(1, maxMemory / 3);
         long forwardMemory = Math.max(1, maxMemory - reverseMemory);
@@ -647,14 +720,14 @@ public final class Re2
 
             ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(entireRegexp);
             long availableMemory = forwardMemory - counterMemory;
-            Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, availableMemory);
+            Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, availableMemory, compilerDialect);
             placeholderProgram.setDfaMemory(0);
             BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram);
             Prog partialProgram = placeholderProgram;
             if (Dfa.nativeAccessEnabled() && RetainedCharacterClassCountDfa.supports(entireRegexp)) {
                 try {
                     Regexp normalizedRegexp = Simplifier.simplify(entireRegexp);
-                    Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory);
+                    Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect);
                     if (countProgram.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
                         partialProgram = countProgram;
                     }
@@ -666,6 +739,7 @@ public final class Re2
             return new Re2(
                     flags,
                     maxMemory,
+                    compilerDialect,
                     false,
                     pattern,
                     entireRegexp,
@@ -704,7 +778,7 @@ public final class Re2
         Regexp normalizedSuffixRegexp = suffixRegexp == entireRegexp ? normalizedRegexp : Simplifier.simplify(suffixRegexp);
 
         // Compute captures from the entire regexp (named groups come from the full pattern).
-        Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory);
+        Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect);
         MatchLength.Analysis matchLength = MatchLength.analyze(suffixRegexp);
         ExpressionAnalysis.LiteralSequence literalSequence = expressionAnalysis.literalSequence();
         Slice exactLiteral = literalSequence == null || literalSequence.anchoredAtStart() || literalSequence.anchoredAtEnd()
@@ -722,12 +796,13 @@ public final class Re2
                 suffixRegexp,
                 semanticProgram,
                 booleanPlans,
-                forwardMemory);
+                forwardMemory,
+                compilerDialect);
         if (loweredBooleanProgram != null) {
             booleanPlans = selectLoweredBooleanPlans(booleanPlans, loweredBooleanProgram.program());
         }
         TaggedAlternationProgram taggedAlternationProgram = requiredPrefix == null && loweredBooleanProgram == null
-                ? TaggedAlternationProgram.compile(entireRegexp, capturingGroupCount, longestMatch, semanticProgram)
+                ? TaggedAlternationProgram.compile(entireRegexp, capturingGroupCount, longestMatch, semanticProgram, compilerDialect)
                 : null;
         booleanPlans = booleanPlans.withTaggedAlternationProgram(taggedAlternationProgram);
         WordRunMatcher wordRunMatcher = requiredPrefix == null && loweredBooleanProgram == null
@@ -755,6 +830,7 @@ public final class Re2
         return new Re2(
                 flags,
                 maxMemory,
+                compilerDialect,
                 longestMatch,
                 pattern,
                 entireRegexp,
@@ -777,7 +853,8 @@ public final class Re2
             Regexp suffixRegexp,
             Prog semanticProgram,
             BooleanPlans booleanPlans,
-            long forwardMemory)
+            long forwardMemory,
+            Compiler.Dialect compilerDialect)
     {
         if (!requiresProgramExecution(booleanPlans.find()) &&
                 booleanPlans.lookingAt() != BooleanPlanKind.GENERAL) {
@@ -792,7 +869,7 @@ public final class Re2
         Regexp normalizedRegexp = Simplifier.simplify(loweredRegexp);
         Prog program;
         try {
-            program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory);
+            program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory, compilerDialect);
         }
         catch (RegexpCompileException ignored) {
             // An optional boolean optimization must not reject a valid semantic program.
@@ -837,7 +914,12 @@ public final class Re2
 
     int flags()
     {
-        return flags;
+        return flags & ~TRINO_COMPILER_DIALECT_FLAG;
+    }
+
+    private Compiler.Dialect compilerDialect()
+    {
+        return (flags & TRINO_COMPILER_DIALECT_FLAG) == 0 ? Compiler.Dialect.RE2 : Compiler.Dialect.TRINO;
     }
 
     /**
@@ -991,6 +1073,23 @@ public final class Re2
     DotStarLiteralSpanMatcher createDotStarLiteralSpanMatcher()
     {
         return DotStarLiteralSpanMatcher.analyze(expressionAnalysis);
+    }
+
+    OrderedLiteralMatcher createOrderedLiteralMatcher()
+    {
+        return OrderedLiteralMatcher.analyze(expressionAnalysis);
+    }
+
+    boolean tryReserveForwardDfaMemory(long retainedSize)
+    {
+        if (retainedSize <= 0 ||
+                booleanPlans.loweredProgram() != null ||
+                booleanPlans.taggedAlternationProgram() != null ||
+                retainedSize > partialProg.dfaMemory()) {
+            return false;
+        }
+        partialProg.setDfaMemory(partialProg.dfaMemory() - retainedSize);
+        return true;
     }
 
     FixedWidthByteSpanMatcher createFixedWidthByteSpanMatcher()
@@ -2717,7 +2816,7 @@ public final class Re2
         // Compile from the stored normalized suffix instead of re-parsing or re-simplifying.
         Prog prog;
         try {
-            prog = Compiler.compileNormalized(normalizedReverseRegexp, true, reverseMemory);
+            prog = Compiler.compileNormalized(normalizedReverseRegexp, true, reverseMemory, compilerDialect());
         }
         catch (RegexpCompileMemoryLimitException ignored) {
             return null;

@@ -39,7 +39,8 @@ final class TaggedAlternationProgram
             Regexp expression,
             int capturingGroupCount,
             boolean longestMatch,
-            Prog semanticProgram)
+            Prog semanticProgram,
+            Compiler.Dialect compilerDialect)
     {
         if (longestMatch ||
                 semanticProgram.isOnePass() ||
@@ -72,7 +73,8 @@ final class TaggedAlternationProgram
                     Regexp.alternate(parseFlags, taggedBranches),
                     false,
                     false,
-                    availableForwardMemory);
+                    availableForwardMemory,
+                    compilerDialect);
         }
         catch (RegexpCompileException ignored) {
             // This program is optional; the semantic capture engines remain the fallback.

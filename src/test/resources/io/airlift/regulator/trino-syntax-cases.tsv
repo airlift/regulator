@@ -1,0 +1,63 @@
+# expected	pattern	reason
+ACCEPT	(?<name>x)	Java named capture syntax is supported
+ACCEPT	(?'name'x)	Joni apostrophe named capture syntax is supported
+ACCEPT	[[:alpha:]]	POSIX character class is supported by Joni
+ACCEPT	[a-z&&[^bc]]	Java character-class intersection is supported
+ACCEPT	[a-d[m-p]]	Java nested character-class union is supported
+ACCEPT	[a-z&&[^m-p]]	Java character-class subtraction is supported
+ACCEPT	\C	Joni treats the unknown escape as literal C
+ACCEPT	\Q[x]\E	Quoted literal is supported outside character classes
+ACCEPT	[\Q\E]	Quote markers are literals inside character classes
+ACCEPT	\x{10000}	Braced Unicode escape is supported
+ACCEPT	\u0041	Java four-digit Unicode escape is supported
+ACCEPT	\R	Joni treats the unknown escape as literal R
+ACCEPT	\h	Joni treats the unknown escape as literal h
+ACCEPT	\H	Joni treats the unknown escape as literal H
+ACCEPT	\v	Joni treats v as a vertical-tab escape
+ACCEPT	\V	Joni treats the unknown escape as literal V
+ACCEPT	\e	ASCII escape character is supported
+ACCEPT	\101	Joni interprets a numeric escape as octal when it is not a backreference
+ACCEPT	\11	Joni interprets a short numeric escape as octal when it is not a backreference
+ACCEPT	\cA	Control-character escape is supported
+ACCEPT	\x	An incomplete hex escape is literal x
+ACCEPT	\u	An incomplete Unicode escape is literal u
+ACCEPT	\u12	Joni accepts one to four Unicode hex digits
+ACCEPT	\k	k is literal without a named-reference delimiter
+ACCEPT	\q	Joni treats an unknown alphabetic escape as a literal
+ACCEPT	\X	Joni treats this escape as literal X
+ACCEPT	(a)\g<1>	Joni treats g as a literal rather than a subroutine reference
+ACCEPT	\E	A standalone quote terminator is literal E
+ACCEPT	a{01,003}	Joni accepts leading zeroes in counted repetitions
+ACCEPT	(?m)^b$	Multiline anchors use LF-only line boundaries
+ACCEPT	(?x)a b	Comments mode is supported
+ACCEPT	\p{OldItalic}	Trino Unicode script names omit underscores
+ACCEPT	\p{InBasicLatin}	Trino Unicode blocks use the In prefix
+ACCEPT	\p{javaLowerCase}	JVM-backed Java binary properties are supported
+ACCEPT	\p{Alphabetic}	Direct binary Unicode properties are supported
+ACCEPT	\p{lu}	Unicode category names are case-insensitive
+ACCEPT	\p{inBasicLatin}	Unicode block prefixes are case-insensitive
+ACCEPT	\p{JAVALOWERCASE}	Java property names are case-insensitive
+REJECT	(?P<name>x)	RE2 named capture syntax is not Trino Java syntax
+REJECT	(?=x)	Lookahead requires unsupported assertion semantics
+REJECT	(?<=x)y	Lookbehind requires unsupported assertion semantics
+REJECT	(?>x)	Atomic groups require unsupported matching semantics
+REJECT	x++	Possessive quantifiers require unsupported matching semantics
+REJECT	(x)\1	Backreferences are not regular
+REJECT	\G	Previous-match boundary is stateful
+REJECT	\Z	Final-terminator boundary requires a separate zero-width operation
+REJECT	\xE9	Joni treats non-ASCII two-digit hex escapes as raw bytes
+REJECT	\351	Joni treats non-ASCII octal escapes as raw bytes
+REJECT	a{1001}	The current compiler cannot represent Joni's larger counted repetitions compactly
+REJECT	(?<x>a)(?<x>b)	Duplicate capture names are rejected
+REJECT	(?<1>x)	Capture names cannot begin with a digit
+REJECT	[a&&]	The initial subset rejects empty intersection operands
+REJECT	[&&a]	The initial subset rejects empty intersection operands
+REJECT	[a-\d]	A complete character class cannot be a range endpoint
+REJECT	(?U)a+	Joni rejects Java Unicode-character-class mode
+REJECT	(?u)a+	Joni rejects explicit Unicode-case mode
+REJECT	(?d)a	Joni rejects Unix-lines mode
+REJECT	\uD800	Surrogate escapes are not supported
+REJECT	\uD800\uDC00	Surrogate pairs must use a braced code-point escape
+REJECT	\p{Old_Italic}	Trino Unicode property names omit underscores
+REJECT	\p{IsHiragana}	Trino scripts do not use the Is prefix
+REJECT	\p{script=Hiragana}	Trino scripts do not use a property prefix
