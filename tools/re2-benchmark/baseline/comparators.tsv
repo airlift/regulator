@@ -1,0 +1,7 @@
+component	version_or_revision	source_identity	artifact_sha256
+native-re2	972a15cedd008d846f1a39b2e88ce48d7f166cbd	https://github.com/google/re2.git	-
+rebar	463d00f31887e84c38467805b9e3122c314b9521	https://github.com/BurntSushi/rebar.git	-
+trino	c7503d170344c4e266f03fdb39e53c82aa7e3594	https://github.com/trinodb/trino.git	-
+airlift-joni	2.1.5.3	2f7697ccf955b4f81185ec05d5ab96b7fe89e444	521c1bcc51d5b1de83dcdf285f48c01afd5dbb434b34fdc61442e63b67562efe
+temurin-x64	25.0.4+7	https://github.com/adoptium/temurin25-binaries	e58fcdcd637b25c03ca84cbbcefc70d11efb8f4b4cbd05decc9f661769d77f94
+temurin-aarch64	25.0.4+7	https://github.com/adoptium/temurin25-binaries	621f7196f0b682fb557da58bec89bd7dfe5419811fe1c0ba75c9cc8432f084c7

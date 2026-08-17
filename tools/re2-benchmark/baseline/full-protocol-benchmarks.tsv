@@ -1,0 +1,12 @@
+shard_id	route	jmh_benchmark	full_parameters	bounded_parameters
+accepted-routes	native-access	io.airlift.regulator.BenchmarkBoundedCharacterClassCounter.specialized	sourceLength=32768;workload=ascii	sourceLength=32768;workload=mixed,russian
+accepted-routes	object-row	io.airlift.regulator.BenchmarkBoundedCharacterClassCounter.specialized	sourceLength=32768;workload=ascii	sourceLength=32768;workload=mixed,russian
+accepted-routes	native-access	io.airlift.regulator.BenchmarkDfaCountMatches.batched	sourceLength=32768;workload=boundedContext	sourceLength=32768;workload=denseWords,captureShape
+accepted-routes	object-row	io.airlift.regulator.BenchmarkDfaCountMatches.batched	sourceLength=32768;workload=boundedContext	sourceLength=32768;workload=denseWords,captureShape
+accepted-routes	native-access	io.airlift.regulator.BenchmarkLiteralCorpus.count	language=ENGLISH	language=CHINESE,RUSSIAN
+accepted-routes	object-row	io.airlift.regulator.BenchmarkLiteralCorpus.count	language=ENGLISH	language=CHINESE,RUSSIAN
+expression-plans-b	native-access	io.airlift.regulator.BenchmarkExpressionPlans.findLiteral	workload=UTF8_PREFIX_REMAINDER	workload=MIB_ABSENT,MIB_LATE,DENSE_FALSE,DENSE_TRUE,MULTIBYTE,UTF8_SUFFIX_PREFIX,NON_ZERO_OFFSET
+expression-plans-b	object-row	io.airlift.regulator.BenchmarkExpressionPlans.findLiteral	workload=UTF8_PREFIX_REMAINDER	workload=MIB_ABSENT,MIB_LATE,DENSE_FALSE,DENSE_TRUE,MULTIBYTE,UTF8_SUFFIX_PREFIX,NON_ZERO_OFFSET
+trino-final-line	native-access	io.trino.operator.scalar.BenchmarkTrinoFinalLine.countRegulator	sourceLength=1024,32768;workload=captureLateMatch	sourceLength=1024,32768;workload=literalNoMatch,literalLateMatch,characterClassNoMatch,characterClassLateMatch,characterClassLongMatch,captureNoMatch,captureLongMatch,alternationNoMatch,alternationLateMatch,alternationLongMatch
+traditional-search	native-access	io.airlift.regulator.BenchmarkRe2Search.searchEasy0DfaBoolean	textSize=32768	textSize=8,64,512,4096,262144,2097152,16777216
+traditional-search	object-row	io.airlift.regulator.BenchmarkRe2Search.searchEasy0DfaBoolean	textSize=32768	textSize=8,64,512,4096,262144,2097152,16777216
