@@ -1,6 +1,7 @@
 .idea/
 *.iml
 target/
+benchmark-report/node_modules/
 benchmark-results/
 __pycache__/
 /var

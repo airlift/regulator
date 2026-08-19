@@ -48,6 +48,7 @@ and intermediate benchmark reports are not kept here.
 | [`benchmarks/WORKLOAD_ORGANIZATION.md`](benchmarks/WORKLOAD_ORGANIZATION.md) | Workload populations, comparator coverage, and aggregation rules |
 | [`benchmarks/QUALIFICATION_PLAN.md`](benchmarks/QUALIFICATION_PLAN.md) | Final Intel and Graviton qualification plan |
 | [AWS collection guide](../tools/re2-benchmark/aws/README.md) | Freeze, plan, run, recover, and budget machine-hours and cost |
+| [Interactive benchmark report](https://airlift.github.io/regulator/benchmarks/) | Sortable C9g, C8g, and C8i results for native-memory and pure-Java routes |
 | [`reference/OPTIMIZATION_REGISTRY.md`](reference/OPTIMIZATION_REGISTRY.md) | Important upstream and Java-specific optimization inventory |
 | [`MAINTAINING_REGULATOR.md`](MAINTAINING_REGULATOR.md) | Proportional performance gates for future changes |
 
@@ -57,6 +58,8 @@ and intermediate benchmark reports are not kept here.
 - Describe current behavior in language and API docs, not the history of its implementation.
 - Do not commit intermediate benchmark results, campaign notebooks, raw profiles, or rejected experiments.
 - Commit one reproducible final benchmark data set for a frozen review or release candidate.
+- Version 1.0 may first publish a labeled preliminary snapshot of development measurements and targeted updates. Preserve per-row source identities and replace it with the complete released-artifact campaign afterward.
+- Generate the README summary and interactive report from the same versioned data.
 
 ## Upstream source
 

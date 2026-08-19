@@ -1,0 +1,23 @@
+{
+  "name": "regulator-benchmark-report",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit && node scripts/test-language-report.mjs && npm run build && python3 -m unittest discover -s scripts -p 'test_*.py' && python3 scripts/report_data.py check"
+  },
+  "dependencies": {
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
+  }
+}

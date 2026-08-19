@@ -264,7 +264,10 @@ uncertainty. They do not satisfy the final campaign's replication requirements.
    blindly rerun a potentially completed publication.
 5. Run the full qualification against the released artifact and tagged source
    following [final qualification](#final-qualification). Record the artifact
-   checksum.
+   checksum. Import the accepted report data and regenerate the README using
+   the [report instructions](../benchmark-report/README.md), then run
+   `npm run check`. Verify the deployed Pages report after those changes are
+   merged. Its refresh is separate from publishing the library artifact.
 
 ## Benchmark reproduction
 

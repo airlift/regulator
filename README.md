@@ -71,6 +71,29 @@ TrinoLikePattern likePattern = TrinoLikePattern.compile(patternBytes);
 
 The same text can compile in two languages and mean different things.
 
+## Performance
+
+The table below summarizes the current C9g measurements. Your results will
+depend on the pattern, input, pattern reuse, CPU architecture, and native memory
+access. See the
+[interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
+for individual workloads, Intel and Graviton results, absolute time differences,
+and pure-Java comparisons.
+
+Comparisons measure corresponding public operations using each library's own
+input and output types. Input conversion is outside the timings.
+
+<!-- benchmark-summary:start -->
+| C9g workload | Regulator performance |
+|---|---:|
+| RE2 | 2.1× faster than native RE2 |
+| Java regex | 1.5× faster than JDK Pattern |
+| Trino regex | 3.1× faster than Joni |
+| LIKE | 4.2× faster than Trino SQL LIKE |
+
+_Source: 1.0 preliminary results. Development builds with targeted updates; per-row sources are in the report. Reused-pattern, family-balanced medians; not predictions for an arbitrary application._
+<!-- benchmark-summary:end -->
+
 ## Runtime acceleration
 
 Regulator works without special JVM flags. These optional flags enable faster

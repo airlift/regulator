@@ -21,6 +21,11 @@ the released 1.0 artifact. Version 1.0 ships with labeled preliminary results
 from existing measurements and targeted updates. The postrelease campaign
 replaces them.
 
+The [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
+loads the committed versioned result data and supports platform, memory-mode,
+and sortable workload comparisons. Its source and update instructions are in
+[`../../benchmark-report/`](../../benchmark-report/).
+
 Intermediate measurements, rejected experiments, raw profiles, and campaign
 notebooks are local working data and are not committed. The preliminary 1.0
 publication snapshot is an explicit exception: it preserves each row's actual
