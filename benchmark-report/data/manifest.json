@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "reportSchemaVersion": 2,
+  "current": "regulator-b227617cdb717fecce2ed4750bb00b874a8c01b7-ca486c9b15c0fd49.json.gz",
+  "releases": [
+    {
+      "schemaVersion": 2,
+      "candidate": "b227617cdb717fecce2ed4750bb00b874a8c01b7",
+      "label": "1.0 preliminary results",
+      "file": "regulator-b227617cdb717fecce2ed4750bb00b874a8c01b7-ca486c9b15c0fd49.json.gz"
+    }
+  ]
+}
