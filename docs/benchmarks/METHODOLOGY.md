@@ -118,6 +118,7 @@ Representative JMH classes include:
 | `BenchmarkDfaSelfLoopExitScan` | Small exit-byte candidate scanning |
 | `BenchmarkBoundedCharacterClassCounter` | Specialized counting versus repeated matching |
 | `BenchmarkRe2PublicApi` | Boolean, caller-buffer, result, and matcher APIs |
+| `BenchmarkClickBenchRegexp` | [ClickBench URL pattern](CLICKBENCH_REGEXP.md): dot-all matching, capture, replacement, and host/path scaling |
 | `BenchmarkExpressionPlans` | Direct expression plans and general controls |
 | `BenchmarkEverydayTrinoRegexp` | Application-shaped Trino operations over rotating Slice values |
 | `BenchmarkTrinoRegexp` | Fixed-haystack Trino operation diagnostics |
