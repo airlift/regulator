@@ -21,12 +21,28 @@ identified by selection and immutable filename, not selection alone.
 To update results without changing page code:
 
 ```bash
+npm ci --prefix benchmark-report
 python3 benchmark-report/scripts/report_data.py import path/to/benchmark-data.json
 python3 benchmark-report/scripts/report_data.py update-readme
 cd benchmark-report
-npm ci
 npm run check
 ```
+
+README generation invokes the report's TypeScript summary through Node.js, so
+install the report dependencies before running `update-readme` or `check`.
+The summary uses the same workload classification and equivalent-work checks
+as the dashboard. It has separate everyday and text-processing columns, each
+using C9g native-access measurements and a geometric mean of the eligible row
+time ratios, with each row weighted equally. Each row retains its existing
+aggregation of paired-host measurements; raw repetitions are not pooled.
+Everyday regex results use reused contains/count operations. LIKE uses warmed
+matches, excludes `ORDERED_DENSE_FALSE`, and includes both measured DFA settings
+where applicable. Text processing follows the visible text-processing section;
+LIKE has no separate text-processing summary. Non-comparable, incompatible,
+unfinished, compilation, and synthetic-stress results do not enter either column.
+Valid rows with timing-variation or host-disagreement warnings remain in the
+summary. These warnings describe variability, not incorrect results or unequal
+API work. The dashboard preserves them when displaying individual rows.
 
 Import checks platform and memory-mode coverage, stores the data as deterministic
 gzip with a hash of the uncompressed JSON, and updates the manifest. Both JSON

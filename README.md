@@ -73,26 +73,27 @@ The same text can compile in two languages and mean different things.
 
 ## Performance
 
-The table below summarizes the current C9g measurements. Your results will
-depend on the pattern, input, pattern reuse, CPU architecture, and native memory
-access. See the
-[interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
-for individual workloads, Intel and Graviton results, absolute time differences,
-and pure-Java comparisons.
+Regulator's speedup over each library, comparing everyday expressions and larger
+text-processing workloads separately. Your results will depend on the pattern,
+input, pattern reuse, CPU architecture, and native memory access.
 
 Comparisons measure corresponding public operations using each library's own
 input and output types. Input conversion is outside the timings.
 
 <!-- benchmark-summary:start -->
-| C9g workload | Regulator performance |
-|---|---:|
-| RE2 | 2.1× faster than native RE2 |
-| Java regex | 1.5× faster than JDK Pattern |
-| Trino regex | 3.1× faster than Joni |
-| LIKE | 4.2× faster than Trino SQL LIKE |
+| Compared with | Everyday expressions | Text processing |
+|---|---:|---:|
+| Native RE2 | 2.4× faster | 1.7× faster |
+| Java regex | 2.1× faster | 6.5× faster |
+| Trino regex (Joni) | 3.9× faster | 4.0× faster |
+| Trino LIKE | 5.5× faster | — |
 
-_Source: 1.0 preliminary results. Development builds with targeted updates; per-row sources are in the report. Reused-pattern, family-balanced medians; not predictions for an arbitrary application._
+_Source: 1.0 preliminary results. Development builds with targeted updates; per-row sources are in the report. C9g with native access enabled and compiled patterns reused. Geometric mean of per-workload time ratios; input conversion excluded._
 <!-- benchmark-summary:end -->
+
+See the [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
+for individual workloads, Intel and Graviton results, absolute time differences,
+and pure-Java comparisons.
 
 ## Runtime acceleration
 

@@ -129,13 +129,28 @@ Display grouping follows the workload's purpose, not its timing or source
 directory. Reviewed display exceptions do not alter recorded populations or
 measurements; the renderer and its tests define those exceptions.
 
-Within application-shaped results, report each operation and family separately.
-For a compact summary, reduce the cases in each family to one statistic, then
-weight those family statistics equally. Do not let families with more rows
-dominate the summary. Show the individual cases alongside the family statistic.
+The README shows separate everyday-expression and text-processing summaries
+for C9g with native access enabled. It uses the dashboard's classification and
+equivalent-work checks, then computes the geometric mean of the eligible row
+candidate/comparator time ratios. Each row has equal weight. Family and
+collection labels do not change that weight; families with more eligible rows
+contribute more to the summary. This describes the benchmark collection, not
+an application workload distribution or total elapsed time saved.
 
-Bulk text summaries are likewise family-balanced. Compilation and diagnostics
-have no cross-family headline aggregate.
+Each row keeps its existing aggregation of paired-host measurements. Do not
+pool raw timing repetitions across workloads. Compute the geometric mean in
+log space to avoid overflow and underflow. Only completed, comparable results
+contribute; a timeout never becomes a numeric speedup. Timing variation and
+host disagreement do not invalidate otherwise comparable measurements, so
+those row ratios remain eligible. Individual report rows retain their warnings;
+the aggregate is not a claim that every workload wins on every host.
+
+Everyday regex summaries use reused contains and count. The LIKE summary uses
+warmed matches, including both measured DFA settings where applicable, but
+excludes the dense-false stress case. DFA-enabled and disabled rows each
+contribute one ratio, just like other eligible rows.
+LIKE has no separate text-processing suite. Its text-processing cell shows a dash.
+Compilation and diagnostics have no headline aggregate.
 
 ## Evidence gate
 
