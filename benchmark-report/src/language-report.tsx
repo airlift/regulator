@@ -14,8 +14,8 @@ export type Result = {
   deltaNsPerByte?: number | null;
   warnings: string[];
   hosts: Array<{
-    instanceId: string;
-    replica: number;
+    instanceId?: string;
+    replica?: number;
     candidate: { medianNs?: number; meanNs?: number; epochMeansNs?: number[]; state: string; reason?: string };
     comparator: { medianNs?: number; meanNs?: number; epochMeansNs?: number[]; state: string; reason?: string };
   }>;
@@ -42,6 +42,7 @@ export type Row = {
   measurementWarnings?: string[];
   workContract?: string;
   workload?: { pattern: string; description?: string; performanceContext?: string; inputDescription?: string; flags?: string[]; inputs?: Array<{ text: string; bytes: number }> };
+  patternSummary?: { bytes: number; sourceUrl?: string; fullPatternAvailable: boolean };
 };
 export type ReportData = {
   schemaVersion: 2;
@@ -54,6 +55,8 @@ export type ReportData = {
   provenance: Record<string, unknown>;
   presentation?: { reviewPreview: boolean };
   publication?: { status: "preliminary"; note: string; sourcePolicy: "mixed-development-revisions" };
+  fullResultsUrl?: string;
+  selection?: Selection;
 };
 
 type Sort = { key: string; descending: boolean } | null;
@@ -241,13 +244,22 @@ function operationDescription(row: Row): string {
   } as Record<string, string>)[operation] || operationName(operation);
 }
 
-function Name({ row, reused, comparator, hideOperation = false, missingSingle = false }: { row: Row; reused?: Row; comparator: string; hideOperation?: boolean; missingSingle?: boolean }) {
+type EvidenceProps = { row: Row; reused?: Row; comparator: string; hideOperation?: boolean; missingSingle?: boolean };
+
+function Name(props: EvidenceProps) {
+  const [open, setOpen] = useState(false);
+  const { row, hideOperation = false } = props;
+  return <details className="row-evidence" onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>{row.name.replace(/^everyday\//, "")}{!hideOperation && <small>{row.operation === "execute" ? row.model : operationName(row.operation)}</small>}</summary>
+    {open && <RowEvidence {...props} />}
+  </details>;
+}
+
+export function RowEvidence({ row, reused, comparator, missingSingle = false }: EvidenceProps) {
   const reason = (result: Result) => result.reason?.replace(/\bcandidate:/g, "Regulator:").replace(/\bcomparator:/g, `${comparator}:`);
   const commentary = workloadCommentary(reused ?? row);
   const singleUseCommentary = reused ? workloadCommentary(row).performance : undefined;
-  return <details className="row-evidence">
-    <summary>{row.name.replace(/^everyday\//, "")}{!hideOperation && <small>{row.operation === "execute" ? row.model : operationName(row.operation)}</small>}</summary>
-    <div className="row-evidence-body">
+  return <div className="row-evidence-body">
       {missingSingle && <p>Single-use timings were not collected with Trino's DFA enabled. Single-use comparisons are left blank.</p>}
       {comparisonIssue(row) && <p>{comparisonIssue(row)!.reason}</p>}
       {row.result.reason && <p>{reused && "Single use: "}{reason(row.result)}</p>}
@@ -256,6 +268,9 @@ function Name({ row, reused, comparator, hideOperation = false, missingSingle = 
       {singleUseCommentary && singleUseCommentary !== commentary.performance && <><h4>Single-use performance context</h4><p>{singleUseCommentary}</p></>}
       {commentary.performance && <><h4>{reused && singleUseCommentary !== commentary.performance ? "Multi-use performance context" : "Performance context"}</h4><p>{commentary.performance}</p></>}
       {(row.workload || row.mapping) && <><h4>Pattern</h4><pre>{row.workload?.pattern ?? row.mapping!.patternPreview}</pre></>}
+      {row.patternSummary && <p>This pattern contains {numberFormat.format(row.patternSummary.bytes / 1000)} KB of regex text. Only a short preview is shown.
+        {row.patternSummary.sourceUrl && <> See the <a href={row.patternSummary.sourceUrl}>benchmark definition and pattern source</a>.</>}
+        {row.patternSummary.fullPatternAvailable && <> The full pattern is also included in the full results download.</>}</p>}
       {row.workload?.flags?.length ? <p>Flags: {row.workload.flags.join(", ")}</p> : null}
       <p>{operationDescription(row)}{reused && ` ${operationDescription(reused)}`}</p>
       {row.inputBytes != null && <p>{new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(row.inputBytes)} input bytes per operation{!Number.isInteger(row.inputBytes) && " on average"}.</p>}
@@ -264,8 +279,7 @@ function Name({ row, reused, comparator, hideOperation = false, missingSingle = 
       {row.measurementWarnings?.length ? <><h4>{reused ? "Single-use measurement variation" : "Measurement variation"}</h4><p>{row.measurementWarnings.join(". ")}.</p></> : null}
       {reused?.measurementWarnings?.length ? <><h4>Multi-use measurement variation</h4><p>{reused.measurementWarnings.join(". ")}.</p></> : null}
       {row.mapping && !row.result.reason && !["identical", "direct"].includes(row.mapping.status) && <p>{row.mapping.reason}</p>}
-    </div>
-  </details>;
+    </div>;
 }
 
 function operationName(operation: string): string {
@@ -390,16 +404,13 @@ function selectionFromUrl(): Selection {
     memory: parameters.get("memory") === "safe" ? "safe" : "native" };
 }
 
-export function LanguageReport({ data }: { data: ReportData }) {
-  const [selection, setSelection] = useState(selectionFromUrl);
-  useEffect(() => {
-    const onChange = () => setSelection(selectionFromUrl());
-    window.addEventListener("hashchange", onChange);
-    return () => window.removeEventListener("hashchange", onChange);
-  }, []);
+export function LanguageReport({ data, selection = selectionFromUrl(), onSelect, loading, error, onRetry }: {
+  data: ReportData; selection?: Selection; onSelect?: (selection: Selection) => void;
+  loading?: boolean; error?: string | null; onRetry?: () => void;
+}) {
   const select = (changes: Partial<Selection>) => {
     const next = { ...selection, ...changes };
-    setSelection(next);
+    onSelect?.(next);
     window.location.hash = new URLSearchParams(next).toString();
   };
   const { language, cpu, memory } = selection;
@@ -449,47 +460,115 @@ export function LanguageReport({ data }: { data: ReportData }) {
       {stress.length > 0 && <details className="diagnostic-group"><summary>Synthetic stress<span>{stress.length} rows</span></summary><ResultsTable rows={stress} comparator={comparator} /></details>}
     </div>)}
     {pending.length > 0 && section("Measurements awaiting alignment", "Historical evidence, not equivalent-work speed comparisons. The reason is shown beside each measurement. No timings have been corrected or estimated.", <ResultsTable rows={pending} comparator={comparator} />)}
-    {selectedRows.length === 0 && <p>No measurements are available for this selection.</p>}
+    {loading ? <p role="status">Loading benchmark results…</p> : error ? <p role="alert">Unable to load results: {error} <button onClick={onRetry}>Retry</button></p> : selectedRows.length === 0 && <p>No measurements are available for this selection.</p>}
     <footer className="scan-footer">
-      <button type="button" onClick={() => {
+      {data.fullResultsUrl ? <a href={data.fullResultsUrl} download>Download full results (JSON.gz)</a> : <button type="button" onClick={() => {
         const url = URL.createObjectURL(new Blob([JSON.stringify(downloadData(data))], { type: "application/json" }));
         const link = document.createElement("a");
         link.href = url;
         link.download = "regulator-benchmark-results.json";
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }}>Download raw results (JSON)</button>
+      }}>Download raw results (JSON)</button>}
     </footer>
   </main>;
 }
 
 declare global { interface Window { __REGULATOR_REPORT__?: ReportData } }
 
-function App() {
-  const [data, setData] = useState<ReportData | null>(window.__REGULATOR_REPORT__ || null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    if (data) return;
-    const controller = new AbortController();
-    async function load() {
-      try {
-        const response = await fetch("./data/manifest.json", { signal: controller.signal });
-        if (!response.ok) throw new Error(`Manifest request failed: ${response.status}`);
-        const manifest = await response.json() as { current?: string; reportSchemaVersion?: number };
-        if (manifest.reportSchemaVersion !== 2 || !manifest.current || !/^[A-Za-z0-9._-]+$/.test(manifest.current)) throw new Error("Unsupported report manifest");
-        const results = await fetch(`./data/${manifest.current}`, { signal: controller.signal });
-        if (!results.ok) throw new Error(`Data request failed: ${results.status}`);
-        const loaded = await results.json() as ReportData;
-        if (loaded.schemaVersion !== 2) throw new Error("Unsupported report data");
-        setData(loaded);
+type SiteManifest = Omit<ReportData, "rows"> & { siteSchemaVersion: 1; pages: Record<string, string> };
+export const selectionKey = ({ language, cpu, memory }: Selection) => `${language}-${cpu}-${memory}`;
+
+// The manifest renders the loading view before any page arrives. Check the same
+// display contract for both; full benchmark-evidence validation stays in tooling.
+function validateDisplayMetadata(data: Omit<ReportData, "rows">) {
+  const text = (value: unknown) => typeof value === "string" && value.trim().length > 0;
+  if (!["currentLabel", "currentCandidate", "jdk"].every(key => text(data?.sources?.[key as keyof ReportData["sources"]]))
+      || !cpuOrder.every(cpu => text(data?.platforms?.[cpu]))
+      || !languageOrder.every(language => text(data?.languages?.[language]?.label) && text(data?.languages?.[language]?.comparator))
+      || (data?.publication !== undefined && !text(data.publication?.note))) {
+    throw new Error("Invalid report display metadata");
+  }
+}
+
+export function createReportLoader(request: typeof fetch) {
+  let manifestPromise: Promise<SiteManifest> | undefined;
+  const pages = new Map<string, Promise<ReportData>>();
+  async function read(url: string, options?: RequestInit) {
+    const response = await request(url, options);
+    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+    return response.json();
+  }
+  return {
+    manifest(): Promise<SiteManifest> {
+      manifestPromise ??= read("./data/manifest.json", { cache: "no-cache" }).then((value: SiteManifest) => {
+        validateDisplayMetadata(value);
+        if (value.siteSchemaVersion !== 1 || value.schemaVersion !== 2 || !value.pages
+            || !/^\.\/data\/[A-Za-z0-9._-]+\.json\.gz$/.test(value.fullResultsUrl || "")) throw new Error("Unsupported report manifest");
+        return value;
+      }).catch(error => { manifestPromise = undefined; throw error; });
+      return manifestPromise;
+    },
+    page(selection: Selection, manifest: SiteManifest): Promise<ReportData> {
+      const selectionId = selectionKey(selection);
+      const filename = manifest.pages[selectionId];
+      if (!filename || !/^[A-Za-z0-9._-]+\.json$/.test(filename)) return Promise.reject(new Error("Missing report selection"));
+      const key = `${selectionId}/${filename}`;
+      if (!pages.has(key)) {
+        const requestedManifest = manifestPromise;
+        pages.set(key, read(`./data/${filename}`).then((value: ReportData) => {
+          validateDisplayMetadata(value);
+          if (value.schemaVersion !== 2 || !value.selection || selectionKey(value.selection) !== selectionId
+              || !Array.isArray(value.rows) || value.rows.some(row => row.language !== selection.language
+                || row.platform !== selection.cpu || row.memoryMode !== selection.memory)) throw new Error("Incorrect report selection");
+          return value;
+        }).catch(error => {
+          pages.delete(key);
+          // A deployment may have removed this manifest's files. Let the next
+          // attempt revalidate it, without evicting a newer in-flight manifest.
+          if (manifestPromise === requestedManifest) manifestPromise = undefined;
+          throw error;
+        }));
       }
-      catch (failure) { if (!controller.signal.aborted) setError(String(failure)); }
-    }
-    void load();
-    return () => controller.abort();
-  }, [data]);
-  if (error) return <main className="loading-page error">Unable to load results: {error}</main>;
-  return data ? <LanguageReport data={data} /> : <main className="loading-page">Loading benchmark results…</main>;
+      return pages.get(key)!;
+    },
+  };
+}
+
+function App() {
+  const embedded = window.__REGULATOR_REPORT__;
+  const [selection, setSelection] = useState(selectionFromUrl);
+  const [loader] = useState(() => createReportLoader(fetch));
+  const [manifest, setManifest] = useState<SiteManifest | null>(null);
+  const [loaded, setLoaded] = useState<ReportData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const onChange = () => setSelection(selectionFromUrl());
+    window.addEventListener("hashchange", onChange);
+    return () => window.removeEventListener("hashchange", onChange);
+  }, []);
+  useEffect(() => {
+    if (embedded) return;
+    let cancelled = false;
+    setError(null);
+    void loader.manifest().then(async manifest => {
+      if (cancelled) return;
+      setManifest(manifest);
+      const data = await loader.page(selection, manifest);
+      if (!cancelled) setLoaded(data);
+    }).catch(failure => { if (!cancelled) setError(String(failure)); });
+    // Requests are cached across selections. A late response cannot replace the active view.
+    return () => { cancelled = true; };
+  }, [selection.language, selection.cpu, selection.memory, attempt, embedded, loader]);
+  const active = embedded || (loaded?.selection && selectionKey(loaded.selection) === selectionKey(selection) ? loaded : null);
+  const data = active || (manifest && { ...manifest, rows: [] });
+  const retry = () => setAttempt(value => value + 1);
+  if (!data) return <main className="loading-page">{error
+    ? <p role="alert">Unable to load results: {error} <button onClick={retry}>Retry</button></p>
+    : <p role="status">Loading benchmark results…</p>}</main>;
+  return <LanguageReport data={data} selection={selection} onSelect={setSelection}
+    loading={!active && !error} error={error} onRetry={retry} />;
 }
 
 const root = typeof document === "undefined" ? null : document.getElementById("root");
