@@ -11,8 +11,14 @@ selection, even when opening a local file.
 
 Local checks require Node.js 22 or newer and Python 3.11 or newer on `PATH`.
 
-The page loads `data/manifest.json`, then fetches the selected immutable JSON
-file. To update results without changing page code:
+The page loads a small `data/manifest.json`, then fetches one immutable JSON
+file for the selected language, CPU, and memory setting. There are 24 page
+files. Each includes the tables and ordinary row details, so expanding a row
+needs no further download. Previously visited selections are cached in memory.
+After a page request fails, the next attempt revalidates the manifest so an open
+tab can recover when a deployment replaces the page files. Cached pages are
+identified by selection and immutable filename, not selection alone.
+To update results without changing page code:
 
 ```bash
 python3 benchmark-report/scripts/report_data.py import path/to/benchmark-data.json
@@ -28,9 +34,29 @@ and `.json.gz` inputs are supported. It preserves previous entries; choosing
 which reports to publish is a separate decision.
 
 Compression keeps the checked-in data below GitHub's large-file warning. Import
-and CI reject stored files of 50 MiB or larger. The site build decompresses the
-data and rewrites its output manifest to point to ordinary JSON files. Browser
-loading, raw downloads, and the standalone report need no compression support.
+and CI reject stored files of 50 MiB or larger. The site build derives compact
+page files from that evidence without changing the input data. GitHub Pages
+compresses JSON responses over HTTP; browsers decompress them automatically.
+No client-side compression library is needed.
+
+The footer links directly to a complete `.json.gz` download, including every
+configuration, all supplied patterns, per-host measurements, previous results,
+provenance, report classifications and commentary. Browsing never fetches that
+file. Original publication files are also retained as gzip in the site artifact.
+The generated page files are not substitutes for the evidence download.
+
+Patterns larger than 4,096 UTF-8 bytes have a 240-codepoint preview in the UI,
+their full byte size, and a pinned benchmark-source link where available.
+Mapping-only captures retain their existing preview and declared byte size.
+The download preserves full patterns when supplied by the capture; a preview-only
+capture links to its benchmark source where available. Row detail contents are
+rendered only while expanded. The largest example is `dictionary/search/english-10` in the
+text processing table.
+
+`npm run check` compares all 24 compact tables with the original data, verifies
+the complete download, and checks selection caching and retry behavior. Current
+page files must stay below 600 KB uncompressed and 65 KB gzipped. These limits
+apply to each page's data, not the shared JavaScript and stylesheet.
 
 Keep released-version reports when historical comparisons are useful.
 Development snapshots belong in an external evidence archive, not the release
@@ -43,9 +69,10 @@ old measurement datasets.
 
 For language-organized data, the build also produces
 `target/benchmark-report/benchmarks/regulator-benchmarks.html`. Open that file
-directly in a browser. Its script, styles and report data are embedded; it does
-not need a local server or network access. The normal site build still keeps
-the data separate so updates do not require page-code changes.
+directly in a browser. Its script, styles and complete report data are embedded;
+it does not need a local server or network access. This offline artifact remains
+large by design, and its download button exports the full JSON locally. Normal
+site browsing uses the small per-selection files instead.
 
 `npm run check` validates the language-organized data and retained releases,
 the README summary, table rendering and numeric sorting. It also builds a

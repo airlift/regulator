@@ -1,20 +1,16 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import vm from "node:vm";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import ts from "typescript";
 import { readData } from "./read-data.mjs";
+import { loadReportModule } from "./load-report-module.mjs";
 
-const source = await readFile(new URL("../src/language-report.tsx", import.meta.url), "utf8");
-const exports = {};
-const context = { module: { exports }, exports, require: createRequire(new URL('../src/language-report.tsx', import.meta.url)), URLSearchParams, Intl };
-vm.runInNewContext(ts.transpileModule(source, {
-  compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText, context);
-const { sorted, duration, comparisonText, tone, comparisonIssue, downloadData, displayResult, outcomeLabel, lifecycleRows, workloadSection, workloadCommentary, LanguageReport } = exports;
+const { report: exports, context } = await loadReportModule();
+const { sorted, duration, comparisonText, tone, comparisonIssue, downloadData, displayResult, outcomeLabel, lifecycleRows, workloadSection, workloadCommentary, LanguageReport, RowEvidence } = exports;
+const detailsHtml = (row, reused, extra = {}) => renderToStaticMarkup(React.createElement(RowEvidence, {
+  row: { ...row, measurementWarnings: row.result.warnings }, reused, comparator: 'native RE2', ...extra,
+}));
 
 const input = [{ id: "µs", ns: 1250 }, { id: "ns", ns: 950 }, { id: "timeout", ns: null }, { id: "ms", ns: 2000000 }];
 assert.equal(sorted(input, { key: "ns", descending: false }, (row, key) => row[key]).map(row => row.id).join(","), "ns,µs,ms,timeout");
@@ -58,8 +54,9 @@ const html = renderToStaticMarkup(React.createElement(LanguageReport, { data }))
 assert.match(html, /Regex pattern lifecycle/);
 assert.doesNotMatch(html, /<h2>Pattern construction/);
 assert.ok(downloadData(data).rows.some(entry => entry.operation === 'compile'));
-assert.match(html, /Compile the pattern, then test one input/);
-assert.match(html, /using a warmed compiled pattern/);
+assert.doesNotMatch(html, /row-evidence-body/);
+assert.match(detailsHtml(row, reused), /Compile the pattern, then test one input/);
+assert.match(detailsHtml(row, reused), /using a warmed compiled pattern/);
 assert.doesNotMatch(html, /Single-use measurements|Multi-use measurements/);
 assert.match(html, /type="checkbox"/);
 assert.match(html, /Pure Java/);
@@ -149,7 +146,7 @@ assert.equal(displayResult({ ...partial, hosts: [] }).candidateNs, undefined);
 const partialHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [{ ...reused, result: partial }] } }));
 assert.match(partialHtml, /<td class="measurement">100.00 ns<\/td><td class="measurement"><\/td>/);
 assert.match(partialHtml, /native RE2 did not finish/);
-assert.match(partialHtml.match(/class="row-evidence-body">(.*?)<\/div>/s)[1], /execution exceeded 30 s/);
+assert.match(detailsHtml({ ...reused, result: partial }), /execution exceeded 30 s/);
 assert.doesNotMatch(partialHtml, /class="outcome-reason"/);
 assert.match(partialHtml, /class="measurement delta"><\/td>/);
 
@@ -181,7 +178,7 @@ assert.doesNotMatch(dfaHtml, /Adversarial|reused match|<small>single use/);
 const enabledHtml = dfaHtml.match(/<tr><td><details[^]*?ANY_ASCII · DFA enabled[^]*?<\/tr>/)[0].split('ANY_ASCII · DFA enabled')[1];
 assert.match(enabledHtml, /<td class="measurement"><\/td><td class="measurement delta "><\/td>/);
 assert.doesNotMatch(dfaHtml, /break-even/i);
-assert.match(enabledHtml, /Single-use timings were not collected/);
+assert.match(detailsHtml(enabled, enabled, { missingSingle: true }), /Single-use timings were not collected/);
 const enabledSingle = { ...dfaRows[0], id: 'optimized-single', caseId: enabled.caseId };
 const completeDfaLifecycle = lifecycleRows([...dfaRows, enabled, enabledSingle]);
 assert.equal(completeDfaLifecycle.length, 2);
@@ -228,7 +225,7 @@ const mismatched = { ...reused, source: 'baseline', operation: 'possibleMatchRan
 const mismatchedHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [mismatched] } }));
 assert.match(mismatchedHtml, /Measurements awaiting alignment/);
 assert.match(mismatchedHtml, /Different API work/);
-assert.match(mismatchedHtml, /internal program range analysis/);
+assert.match(detailsHtml(mismatched), /internal program range analysis/);
 assert.match(mismatchedHtml, /comparison-row na/);
 assert.match(mismatchedHtml, /100.00 ns/);
 const annotated = downloadData({ ...data, rows: [mismatched] });
@@ -268,8 +265,8 @@ const preliminaryData = { ...data, publication: preliminaryPublication, rows: [{
 const preliminaryHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: preliminaryData }));
 assert.match(preliminaryHtml, /Development builds with targeted updates/);
 assert.match(preliminaryHtml, /5.00× slower/);
-assert.match(preliminaryHtml, /Measurement variation/);
-assert.match(preliminaryHtml, /sample precision exceeds 5%/);
+assert.match(detailsHtml(preliminaryData.rows[0]), /Measurement variation/);
+assert.match(detailsHtml(preliminaryData.rows[0]), /sample precision exceeds 5%/);
 assert.doesNotMatch(preliminaryHtml, /Engine abcdef/);
 const disputedHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...preliminaryData, rows: [{ ...reused, result: { ...result, warnings: ['Hosts disagree about which engine is faster'] } }] } }));
 assert.match(disputedHtml, /no consistent winner/);
@@ -277,7 +274,7 @@ assert.doesNotMatch(disputedHtml, /5.00× slower/);
 assert.deepEqual(downloadData(preliminaryData).rows[0].result.warnings, ['sample precision exceeds 5%']);
 
 const contextRow = { ...reused, workload: { pattern: 'a<b>.*', inputDescription: '20 bytes of text.', inputs: [{ text: 'example <input>', bytes: 15 }] } };
-const contextHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [contextRow] } }));
+const contextHtml = detailsHtml(contextRow);
 assert.match(contextHtml, /a&lt;b&gt;\.\*/);
 assert.match(contextHtml, /20 input bytes per operation/);
 assert.match(contextHtml, /Rotating inputs/);
@@ -313,11 +310,10 @@ assert.match(workloadCommentary({ ...qualifiedVeryl, language: 're2' }).performa
 assert.equal(workloadCommentary({ ...qualifiedVeryl, caseId: 'reported/i13-subset-regex/huge-unicode-nosuffixlit' }).performance, undefined);
 assert.match(workloadCommentary({ ...qualifiedVeryl, caseId: 'reported/i13-subset-regex/huge-unicode' }).performance, /ending x first/);
 context.window = { location: { hash: '#language=java&cpu=c9g&memory=native' } };
-const commentaryHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [qualifiedVeryl] } }));
+const commentaryHtml = detailsHtml(qualifiedVeryl);
 assert.ok(commentaryHtml.indexOf('What this tests') < commentaryHtml.indexOf('<h4>Pattern</h4>'));
 assert.match(commentaryHtml, /<h4>Performance context<\/h4>/);
-const lifecycleCommentaryHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [literalCount,
-  { ...literalCount, id: 'single-literal-count', operation: 'singleUseCount' }] } }));
+const lifecycleCommentaryHtml = detailsHtml({ ...literalCount, id: 'single-literal-count', operation: 'singleUseCount' }, literalCount);
 assert.match(lifecycleCommentaryHtml, /Multi-use performance context/);
 delete context.window;
 assert.equal(workloadCommentary({ ...reused, caseId: 'unannotated' }).description, undefined);
@@ -339,7 +335,7 @@ assert.match(workloadCommentary({ ...suffixSingle, caseId: 'trino-like/ANY_ASCII
 assert.match(workloadCommentary({ ...suffixSingle, caseId: 'trino-like/ANY_ASCII' }).performance, /DFA optimization disabled/);
 assert.match(workloadCommentary({ ...suffixSingle, caseId: 'trino-like/ANY_MULTIBYTE' }).performance, /DFA optimization disabled/);
 context.window = { location: { hash: '#language=like&cpu=c9g&memory=native' } };
-const likeNotesHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [suffixSingle, suffixReused] } }));
+const likeNotesHtml = detailsHtml(suffixSingle, suffixReused);
 assert.match(likeNotesHtml, /Single-use performance context/);
 assert.match(likeNotesHtml, /Multi-use performance context/);
 assert.match(likeNotesHtml, /Cheaper construction/);
