@@ -5,32 +5,38 @@ Regulator is a high-performance regular-expression engine for UTF-8
 bounded memory, making it a good fit for data-processing systems that compile
 patterns once and apply them repeatedly.
 
+## Performance
+
+Regulator's speedup over each library for everyday expressions and larger
+text-processing workloads:
+
+<!-- benchmark-summary:start -->
+| Compared with | Everyday expressions | Text processing |
+|---|---:|---:|
+| Native RE2 | 2.4× faster | 1.7× faster |
+| Java regex | 2.1× faster | 6.5× faster |
+| Trino regex (Joni) | 3.9× faster | 4.0× faster |
+| Trino LIKE | 5.5× faster | — |
+
+_Source: 1.0 preliminary results. Development builds with targeted updates; per-row sources are in the report. C9g with native access enabled and compiled patterns reused. Geometric mean of per-workload time ratios; input conversion excluded._
+<!-- benchmark-summary:end -->
+
+See the [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
+for individual workloads, Intel and Graviton results, absolute time differences,
+and pure-Java comparisons.
+
+Results depend on the pattern, input, pattern reuse, CPU architecture, and native
+memory access. Comparisons measure corresponding public operations using each
+library's own input and output types. Input conversion is outside the timings.
+
+## Supported languages
+
 Regulator provides separate compilers for:
 
 - RE2 syntax
 - Trino regular-expression syntax
 - the regular subset of Java `Pattern`
 - Trino SQL `LIKE` patterns
-
-The three regex compilers share Regulator's RE2-based matching engines. SQL
-`LIKE` has its own parser, planner, and wildcard matcher. It shares specialized
-literal matchers with the regex engines where the languages behave the same way.
-
-## Dependency
-
-Regulator is published as `io.airlift:regulator` and requires Java 25 or newer.
-Releases are tested on Java 25 and the current feature release used by Trino,
-including short-term-support releases.
-
-```xml
-<dependency>
-    <groupId>io.airlift</groupId>
-    <artifactId>regulator</artifactId>
-    <version>${regulator.version}</version>
-</dependency>
-```
-
-Slice is Regulator's only runtime dependency.
 
 ## Usage
 
@@ -71,31 +77,27 @@ TrinoLikePattern likePattern = TrinoLikePattern.compile(patternBytes);
 
 The same text can compile in two languages and mean different things.
 
-## Performance
+## Dependency
 
-Regulator's speedup over each library, comparing everyday expressions and larger
-text-processing workloads separately. Your results will depend on the pattern,
-input, pattern reuse, CPU architecture, and native memory access.
+Regulator is published as `io.airlift:regulator` and requires Java 25 or newer.
+Releases are tested on Java 25 and the current feature release used by Trino,
+including short-term-support releases.
 
-Comparisons measure corresponding public operations using each library's own
-input and output types. Input conversion is outside the timings.
+```xml
+<dependency>
+    <groupId>io.airlift</groupId>
+    <artifactId>regulator</artifactId>
+    <version>${regulator.version}</version>
+</dependency>
+```
 
-<!-- benchmark-summary:start -->
-| Compared with | Everyday expressions | Text processing |
-|---|---:|---:|
-| Native RE2 | 2.4× faster | 1.7× faster |
-| Java regex | 2.1× faster | 6.5× faster |
-| Trino regex (Joni) | 3.9× faster | 4.0× faster |
-| Trino LIKE | 5.5× faster | — |
-
-_Source: 1.0 preliminary results. Development builds with targeted updates; per-row sources are in the report. C9g with native access enabled and compiled patterns reused. Geometric mean of per-workload time ratios; input conversion excluded._
-<!-- benchmark-summary:end -->
-
-See the [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
-for individual workloads, Intel and Graviton results, absolute time differences,
-and pure-Java comparisons.
+Slice is Regulator's only runtime dependency.
 
 ## Runtime acceleration
+
+The three regex compilers share Regulator's RE2-based matching engines. SQL
+`LIKE` has its own parser, planner, and wildcard matcher. It shares specialized
+literal matchers with the regex engines where the languages behave the same way.
 
 Regulator works without special JVM flags. These optional flags enable faster
 paths without changing matching behavior:
