@@ -110,6 +110,26 @@ export function workloadSection(row: Row): string {
   return row.population;
 }
 
+export function summaryRatios(data: ReportData) {
+  // Sum logs instead of multiplying ratios, which can overflow or underflow.
+  const geometricMean = (rows: Row[]) => rows.length
+    ? Math.exp(rows.reduce((sum, row) => sum + Math.log(row.result.ratio!), 0) / rows.length)
+    : null;
+  return Object.fromEntries(languageOrder.map(language => {
+    // Host disagreement describes variability, not invalid measurements. Keep
+    // those row estimates in this summary; individual rows retain their warnings.
+    const rows = data.rows.filter(row => row.language === language && row.platform === "c9g"
+      && row.memoryMode === "native" && row.result.state === "compared" && !comparisonIssue(row)
+      && Number.isFinite(row.result.ratio) && row.result.ratio! > 0);
+    return [language, {
+      everyday: geometricMean(rows.filter(row => language === "like"
+        ? workloadSection(row) === "like" && row.operation === "matches" && row.caseId !== "trino-like/ORDERED_DENSE_FALSE"
+        : workloadSection(row) === "ordinary-scalar" && ["reusedContains", "reusedCount"].includes(row.operation))),
+      textProcessing: language === "like" ? null : geometricMean(rows.filter(row => workloadSection(row) === "bulk-text")),
+    }];
+  }));
+}
+
 export function workloadCommentary(row: Row) {
   const matches = (note: { cases?: string[]; prefixes?: string[] }) =>
     note.cases?.includes(row.caseId) || note.prefixes?.some(prefix => row.caseId.startsWith(prefix));

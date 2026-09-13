@@ -50,6 +50,57 @@ const data = { schemaVersion: 2, sources: { currentLabel: "Test capture", curren
   platforms: { c9g: "C9g", c8g: "C8g", c8i: "Intel" }, memoryModes: { native: "Native", safe: "Pure Java" },
   languages: { re2: { label: "RE2", comparator: "native RE2" }, java: { label: "Java regex", comparator: "JDK Pattern" }, trino: { label: "Trino regex", comparator: "Joni" }, like: { label: "LIKE", comparator: "Trino SQL LIKE" } },
   rows: [row, reused, { ...row, id: "compile", operation: "compile" }], methodology: ["Test method"], provenance: { candidate: "test" } };
+
+// README columns give each eligible row equal weight and use the same
+// classification and equivalent-work checks as the report tables.
+const summaryRow = (family, ratio, changes = {}) => ({ ...reused, family,
+  result: { ...result, ratio }, ...changes });
+const summaryRows = [
+  ...Array.from({ length: 10 }, () => summaryRow("many", 0.1)),
+  summaryRow("middle", 2), summaryRow("last", 4),
+  summaryRow("text", 0.25, { population: "bulk-text", operation: "execute" }),
+  summaryRow("text", 0.75, { population: "bulk-text", operation: "execute" }),
+];
+const assertRatio = (actual, expected) => assert.ok(Math.abs(actual / expected - 1) < 1e-12, `${actual} != ${expected}`);
+assertRatio(exports.summaryRatios({ ...data, rows: summaryRows }).re2.everyday, Math.pow(0.1 ** 10 * 2 * 4, 1 / 12));
+assertRatio(exports.summaryRatios({ ...data, rows: summaryRows }).re2.textProcessing, Math.sqrt(0.25 * 0.75));
+assert.deepEqual(exports.summaryRatios({ ...data, rows: summaryRows.map(row => ({ ...row, family: "one" })) }),
+  exports.summaryRatios({ ...data, rows: summaryRows }), "Collection labels do not change the weighting");
+const uncertain = summaryRow("variation", 0.5, { result: { ...result, ratio: 0.5,
+  warnings: ["Hosts disagree about which engine is faster"] } });
+assert.equal(comparisonText(uncertain.result), "no consistent winner");
+// Valid variable measurements still contribute to descriptive summaries.
+assertRatio(exports.summaryRatios({ ...data, rows: [uncertain] }).re2.everyday, 0.5);
+assertRatio(exports.summaryRatios({ ...data, rows: [uncertain, summaryRow("other", 2)] }).re2.everyday, 1);
+assertRatio(exports.summaryRatios({ ...data, rows: [1e200, 1e200, 1e-200, 1e-200]
+  .map(ratio => summaryRow("range", ratio)) }).re2.everyday, 1);
+const excluded = [
+  { platform: "c8i" }, { memoryMode: "safe" }, { operation: "singleUseContains" },
+  { operation: "compile" }, { population: "diagnostics-and-stress" },
+  { population: "bulk-text", caseId: "unicode/codepoints/any-one", operation: "execute" },
+  { population: "bulk-text", caseId: "captures/contiguous-letters", operation: "execute" },
+  { population: "bulk-text", caseId: "imported/sherlock/repeated-class-negation", operation: "execute" },
+  { population: "bulk-text", operation: "execute", model: "count", workContract: "obsolete" },
+  { result: { ...result, state: "did-not-finish", ratio: 0.001 } },
+  { result: { ...result, state: "not-compatible", ratio: 0.001 } },
+  ...[0, -1, NaN, Infinity].map(ratio => ({ result: { ...result, ratio } })),
+].map(changes => summaryRow("excluded", 0.001, changes));
+assert.deepEqual(exports.summaryRatios({ ...data, rows: [...summaryRows, ...excluded] }),
+  exports.summaryRatios({ ...data, rows: summaryRows }));
+const reclassified = summaryRow("text", 0.25, { caseId: "reported/i787-keywords/ascii",
+  population: "diagnostics-and-stress", operation: "execute" });
+assert.equal(exports.summaryRatios({ ...data, rows: [reclassified] }).re2.textProcessing, 0.25);
+const likeSummaryRows = [
+  summaryRow("LIKE", 0.25, { language: "like", population: "like", operation: "matches", caseId: "trino-like/ANY_ASCII" }),
+  summaryRow("LIKE", 0.25, { language: "like", population: "like", operation: "matches", caseId: "trino-like/PREFIX_LARGE" }),
+  summaryRow("Optional Trino DFA matcher", 0.75, { language: "like", population: "diagnostics-and-stress", operation: "matches",
+    caseId: "trino-like/ANY_ASCII/optimized", comparator: "Trino DFA" }),
+  summaryRow("LIKE", 100, { language: "like", population: "like", operation: "matches", caseId: "trino-like/ORDERED_DENSE_FALSE" }),
+];
+const likeSummary = exports.summaryRatios({ ...data, rows: likeSummaryRows }).like;
+assertRatio(likeSummary.everyday, Math.cbrt(0.25 * 0.25 * 0.75));
+assert.equal(likeSummary.textProcessing, null);
+assert.equal(exports.summaryRatios({ ...data, rows: [] }).java.everyday, null);
 const html = renderToStaticMarkup(React.createElement(LanguageReport, { data }));
 assert.match(html, /Regex pattern lifecycle/);
 assert.doesNotMatch(html, /<h2>Pattern construction/);

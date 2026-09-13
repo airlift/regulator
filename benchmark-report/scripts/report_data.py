@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -205,24 +206,22 @@ def ratio_text(ratio: float) -> str:
     return f"{ratio:.1f}× slower"
 
 
-def comparison_text(ratio: float, comparator: str) -> str:
-    result = ratio_text(ratio)
-    if result == "within 2%":
-        return f"within 2% of {comparator}"
-    return f"{result} than {comparator}"
-
-
 def summary_markdown(data: dict) -> str:
-    from language_data import LANGUAGES, headline_ratios
-    ratios = headline_ratios(data)
-    lines = [SUMMARY_START, "| C9g workload | Regulator performance |", "|---|---:|"]
-    for language, labels in LANGUAGES.items():
-        lines.append(f"| {labels['label']} | {comparison_text(ratios[language], labels['comparator'])} |")
+    calculated = subprocess.run(['node', str(REPORT_ROOT / 'scripts/summary-ratios.mjs')],
+                                input=encode_json(data), text=True, capture_output=True, check=True)
+    ratios = json.loads(calculated.stdout)
+    comparators = {'re2': 'Native RE2', 'java': 'Java regex', 'trino': 'Trino regex (Joni)', 'like': 'Trino LIKE'}
+    lines = [SUMMARY_START, "| Compared with | Everyday expressions | Text processing |", "|---|---:|---:|"]
+    for language, comparator in comparators.items():
+        cells = [ratio_text(value) if value is not None else '—'
+                 for value in (ratios[language]['everyday'], ratios[language]['textProcessing'])]
+        lines.append(f"| {comparator} | {' | '.join(cells)} |")
     source = data['sources']['currentLabel']
     source += (". Development builds with targeted updates; per-row sources are in the report"
                if data.get('publication', {}).get('status') == 'preliminary'
                else f" `{data['sources']['currentCandidate']}`")
-    lines.extend(("", f"_Source: {source}. Reused-pattern, family-balanced medians; not predictions for an arbitrary application._", SUMMARY_END))
+    lines.extend(("", f"_Source: {source}. C9g with native access enabled and compiled patterns reused. "
+                  "Geometric mean of per-workload time ratios; input conversion excluded._", SUMMARY_END))
     return "\n".join(lines)
 
 

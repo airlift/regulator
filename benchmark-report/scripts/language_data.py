@@ -291,19 +291,3 @@ def validate_language_report(data):
               for language in ('re2', 'java', 'trino')}
     if shared['re2'] != shared['java'] or shared['re2'] != shared['trino']:
         raise ValueError('shared workload identities differ across regex languages')
-
-
-def headline_ratios(data):
-    result = {}
-    for language in LANGUAGES:
-        families = defaultdict(list)
-        for row in data['rows']:
-            if (row['language'] == language and row['platform'] == 'c9g' and row['memoryMode'] == 'native'
-                    and row['result']['state'] == 'compared'
-                    and ((row['population'] == 'ordinary-scalar' and row['operation'] in {'reusedContains', 'reusedCount'})
-                         or (language == 'like' and row['source'] == 'baseline' and row['operation'] == 'matches' and row['population'] == 'like'))):
-                families[row['family']].append(row['result']['ratio'])
-        if not families:
-            raise ValueError(f'no headline workload for {language}')
-        result[language] = median([median(values) for values in families.values()])
-    return result

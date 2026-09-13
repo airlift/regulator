@@ -203,8 +203,10 @@ class TestReportData(unittest.TestCase):
                 self.assertEqual(['candidate', 'previous'], [entry['candidate'] for entry in manifest['releases']])
                 self.assertEqual(report, current)
                 summary = report_data.summary_markdown(current)
-                self.assertIn('JDK', summary)
+                self.assertIn('| Java regex | 2.0× faster | — |', summary)
                 self.assertIn('Joni', summary)
+                self.assertIn('| Compared with | Everyday expressions | Text processing |', summary)
+                self.assertIn('| Trino LIKE | 2.0× faster | — |', summary)
 
     def test_preliminary_summary_does_not_claim_one_measured_commit(self):
         report = report_fixture()
