@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.LongSupplier;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -369,18 +370,39 @@ public class TestRe2Set
             assertThat(set.matchesAny(input)).isTrue();
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            if (set.matchesAny(input)) {
-                matchCount++;
+        long allocatedBytes = minimumAllocatedBytes(10_000, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                if (set.matchesAny(input)) {
+                    matchCount++;
+                }
             }
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+            return matchCount;
+        });
 
-        assertThat(matchCount).isEqualTo(10_000);
         assertThat(allocatedBytes / 10_000).isZero();
+    }
+
+    /**
+     * Runs {@code operations} three times, checks each result, and returns the fewest bytes the
+     * current thread allocated in one run. An allocation per operation appears in every run. A
+     * one-time allocation does not: when a counter overflow requests a C2 compile, the compile
+     * broker loads the method's signature classes on the requesting thread, which can add tens of
+     * kilobytes to one run.
+     */
+    private static long minimumAllocatedBytes(long expectedResult, LongSupplier operations)
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        long threadId = Thread.currentThread().threadId();
+        long minimumAllocatedBytes = Long.MAX_VALUE;
+        for (int run = 0; run < 3; run++) {
+            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+            long result = operations.getAsLong();
+            long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+            assertThat(result).isEqualTo(expectedResult);
+            minimumAllocatedBytes = Math.min(minimumAllocatedBytes, allocatedBytes);
+        }
+        return minimumAllocatedBytes;
     }
 
     @Test

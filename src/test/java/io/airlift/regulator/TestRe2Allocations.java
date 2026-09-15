@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
 import java.util.Arrays;
+import java.util.function.LongSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -66,29 +67,27 @@ public class TestRe2Allocations
             assertThat(suffix.matches(malformedPrefixInput)).isTrue();
         }
 
-        long threadId = Thread.currentThread().threadId();
-        threadBean.getThreadAllocatedBytes(threadId);
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            matchCount += contains.find(containsInput) ? 1 : 0;
-            matchCount += !contains.find(absentInput) ? 1 : 0;
-            matchCount += !literal.find(absentInput) ? 1 : 0;
-            matchCount += normalizedLiteral.find(containsInput) ? 1 : 0;
-            matchCount += nullable.find(Slices.EMPTY_SLICE) ? 1 : 0;
-            matchCount += equals.find(literalInput) ? 1 : 0;
-            matchCount += startsWith.find(prefixInput) ? 1 : 0;
-            matchCount += endsWith.find(suffixInput) ? 1 : 0;
-            matchCount += literal.lookingAt(prefixInput) ? 1 : 0;
-            matchCount += literal.matches(literalInput) ? 1 : 0;
-            matchCount += prefix.matches(prefixInput) ? 1 : 0;
-            matchCount += prefix.matches(malformedSuffixInput) ? 1 : 0;
-            matchCount += suffix.matches(suffixInput) ? 1 : 0;
-            matchCount += suffix.matches(malformedPrefixInput) ? 1 : 0;
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        long allocatedBytes = minimumAllocatedBytes(140_000, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                matchCount += contains.find(containsInput) ? 1 : 0;
+                matchCount += !contains.find(absentInput) ? 1 : 0;
+                matchCount += !literal.find(absentInput) ? 1 : 0;
+                matchCount += normalizedLiteral.find(containsInput) ? 1 : 0;
+                matchCount += nullable.find(Slices.EMPTY_SLICE) ? 1 : 0;
+                matchCount += equals.find(literalInput) ? 1 : 0;
+                matchCount += startsWith.find(prefixInput) ? 1 : 0;
+                matchCount += endsWith.find(suffixInput) ? 1 : 0;
+                matchCount += literal.lookingAt(prefixInput) ? 1 : 0;
+                matchCount += literal.matches(literalInput) ? 1 : 0;
+                matchCount += prefix.matches(prefixInput) ? 1 : 0;
+                matchCount += prefix.matches(malformedSuffixInput) ? 1 : 0;
+                matchCount += suffix.matches(suffixInput) ? 1 : 0;
+                matchCount += suffix.matches(malformedPrefixInput) ? 1 : 0;
+            }
+            return matchCount;
+        });
 
-        assertThat(matchCount).isEqualTo(140_000);
         assertThat(allocatedBytes / 10_000).isZero();
     }
 
@@ -106,17 +105,16 @@ public class TestRe2Allocations
             assertThat(pattern.find(source)).isFalse();
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            if (pattern.find(source)) {
-                matchCount++;
+        long allocatedBytes = minimumAllocatedBytes(0, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                if (pattern.find(source)) {
+                    matchCount++;
+                }
             }
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+            return matchCount;
+        });
 
-        assertThat(matchCount).isZero();
         assertThat(allocatedBytes / 10_000).isZero();
     }
 
@@ -139,12 +137,8 @@ public class TestRe2Allocations
             assertThat(runFinalLineBooleanOperations(pattern, absent, matched, anchored)).isEqualTo(30_000);
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int matchCount = runFinalLineBooleanOperations(pattern, absent, matched, anchored);
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        long allocatedBytes = minimumAllocatedBytes(30_000, () -> runFinalLineBooleanOperations(pattern, absent, matched, anchored));
 
-        assertThat(matchCount).isEqualTo(30_000);
         assertThat(allocatedBytes / 10_000).isZero();
     }
 
@@ -164,17 +158,38 @@ public class TestRe2Allocations
             assertThat(emptyPattern.count(source)).isEqualTo(2);
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        long matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            matchCount += pattern.count(source);
-            matchCount += emptyPattern.count(source);
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        long allocatedBytes = minimumAllocatedBytes(40_000, () -> {
+            long matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                matchCount += pattern.count(source);
+                matchCount += emptyPattern.count(source);
+            }
+            return matchCount;
+        });
 
-        assertThat(matchCount).isEqualTo(40_000);
         assertThat(allocatedBytes / 10_000).isZero();
+    }
+
+    /**
+     * Runs {@code operations} three times, checks each result, and returns the fewest bytes the
+     * current thread allocated in one run. An allocation per operation appears in every run. A
+     * one-time allocation does not: when a counter overflow requests a C2 compile, the compile
+     * broker loads the method's signature classes on the requesting thread, which can add tens of
+     * kilobytes to one run.
+     */
+    private static long minimumAllocatedBytes(long expectedResult, LongSupplier operations)
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        long threadId = Thread.currentThread().threadId();
+        long minimumAllocatedBytes = Long.MAX_VALUE;
+        for (int run = 0; run < 3; run++) {
+            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+            long result = operations.getAsLong();
+            long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+            assertThat(result).isEqualTo(expectedResult);
+            minimumAllocatedBytes = Math.min(minimumAllocatedBytes, allocatedBytes);
+        }
+        return minimumAllocatedBytes;
     }
 
     private static int runFinalLineBooleanOperations(TrinoRegexp pattern, Slice absent, Slice matched, Slice anchored)
@@ -208,18 +223,16 @@ public class TestRe2Allocations
             assertThat(wildcard.matches(wildcardInput)).isTrue();
         }
 
-        long threadId = Thread.currentThread().threadId();
-        threadBean.getThreadAllocatedBytes(threadId);
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            matchCount += contains.matches(containsInput) ? 1 : 0;
-            matchCount += ordered.matches(orderedInput) ? 1 : 0;
-            matchCount += wildcard.matches(wildcardInput) ? 1 : 0;
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+        long allocatedBytes = minimumAllocatedBytes(30_000, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                matchCount += contains.matches(containsInput) ? 1 : 0;
+                matchCount += ordered.matches(orderedInput) ? 1 : 0;
+                matchCount += wildcard.matches(wildcardInput) ? 1 : 0;
+            }
+            return matchCount;
+        });
 
-        assertThat(matchCount).isEqualTo(30_000);
         assertThat(allocatedBytes / 10_000).isZero();
     }
 
@@ -242,17 +255,16 @@ public class TestRe2Allocations
             assertThat(pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)).isTrue();
         }
 
-        long threadId = Thread.currentThread().threadId();
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            if (pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)) {
-                matchCount++;
+        long allocatedBytes = minimumAllocatedBytes(10_000, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                if (pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)) {
+                    matchCount++;
+                }
             }
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+            return matchCount;
+        });
 
-        assertThat(matchCount).isEqualTo(10_000);
         assertThat(groups).containsExactly(16_384, 16_391, 16_384, 16_387, 16_388, 16_391);
         assertThat(allocatedBytes / 10_000).isZero();
     }
@@ -272,18 +284,16 @@ public class TestRe2Allocations
             assertThat(pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)).isTrue();
         }
 
-        long threadId = Thread.currentThread().threadId();
-        threadBean.getThreadAllocatedBytes(threadId);
-        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
-        int matchCount = 0;
-        for (int iteration = 0; iteration < 10_000; iteration++) {
-            if (pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)) {
-                matchCount++;
+        long allocatedBytes = minimumAllocatedBytes(10_000, () -> {
+            int matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                if (pattern.matchInto(source, Re2.Anchor.UNANCHORED, groups)) {
+                    matchCount++;
+                }
             }
-        }
-        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+            return matchCount;
+        });
 
-        assertThat(matchCount).isEqualTo(10_000);
         assertThat(groups).containsExactly(16, 23, 16, 19, 20, 23);
         assertThat(allocatedBytes / 10_000).isZero();
     }
