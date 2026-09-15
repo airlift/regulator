@@ -129,9 +129,10 @@ match where the pattern permits it.
 Matchers are mutable and not thread-safe. Separate matchers can share a
 compiled expression. Returned groups are zero-copy views that retain their
 original input storage after reset. Do not mutate input while matching it.
-Match iteration uses the existing regex execution machinery and the
-literal-alternation matcher where applicable; it does not require the same
-specialized route as each higher-level Trino operation.
+Match iteration uses the existing regex execution machinery, the Trino
+[scan plan](../../benchmarks/TRINO_SCAN_PLAN.md) when the pattern selects one,
+and the literal-alternation matcher where applicable; it does not require the
+same specialized route as each higher-level Trino operation.
 
 ## Unsupported features
 

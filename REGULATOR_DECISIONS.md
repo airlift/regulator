@@ -300,16 +300,22 @@ compile-time plans for exact literal, nullable-start, contains, equality,
 prefix, and suffix expressions. `Re2.find` caches its strategy in a primitive
 field to avoid a dependent metadata load in tiny direct calls. The direct
 strategy uses one byte. The shared single-byte matcher cache adds one reference,
-bringing the `Re2` layout to 96 bytes with compressed references.
+bringing the `Re2` layout to 96 bytes with compressed references. A Trino scan
+plan dispatches on a second strategy byte that fits in the same 96-byte layout.
+When a pattern also has a scan plan, full-Slice `find` keeps the literal
+contains, prefix, equality, and final-line equality kernels, which answer
+without reading past the literal; other boolean strategies yield to the plan.
+Scan-plan boolean calls also stop once a match is certain, as described in
+the [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md#integration).
 
 These plans apply only when normalized expression analysis proves equivalent
 existence semantics. APIs that accept a range, return boundaries or captures,
 or produce a `MatchResult` retain the ordinary DFA, OnePass, BitState, and NFA
-cascade. Trino's explicit single-byte matcher also shares the byte scanner;
-RE2 and Java matcher construction retain their existing routes.
-Unsupported shapes, position-dependent assertions, and other unproven forms
-retain the ordinary path. The single-byte table is initialized lazily; subsequent
-direct boolean calls allocate no matching storage.
+cascade when no Trino scan plan applies. Trino's explicit single-byte matcher
+also shares the byte scanner; RE2 and Java matcher construction retain their
+existing routes. Unsupported shapes, position-dependent assertions, and other
+unproven forms retain the ordinary path. The single-byte table is initialized
+lazily; subsequent direct boolean calls allocate no matching storage.
 
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
@@ -758,3 +764,60 @@ treated as a Joni search-optimizer defect rather than a Trino language rule.
 `TrinoRegexp` follows the Java semantics and has a direct regression test for
 this case. The final benchmark matrix must cover direct, lowered, short
 OnePass, allocation, and ordinary-route final-line cases.
+
+## Trino Specialized Byte Scans
+
+The Trino frontend may select a bounded scan plan for literals, deterministic
+character runs, optional bodies, nested captures, and terminal tails. Preserve
+specified matching and capture behavior on valid UTF-8. Malformed Trino input
+has a garbage-in, garbage-out contract, while bounded input access and normal
+matcher lifecycle behavior remain required. This does not relax RE2 or Java
+semantics or authorize a public malformed-input opt-in. The plan performs no
+runtime code generation, and the ordinary semantic program remains the
+fallback. The [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md) describes
+the executors and optional-capture execution.
+
+Plans require the logical input start. A capture-free plan must contain a
+character run. This rule keeps literal-only patterns on their direct routes.
+
+Character sets must be ASCII-only or have uniform non-ASCII membership.
+Variable repetition requires a continuation disjoint from the repeated set
+across both arms of optional groups, so a run never gives characters back;
+exact counts need no such proof. Finite bounds count characters, not bytes.
+Repeated captures, nested repetitions, repeated multi-operation bodies, and
+whole-pattern nullable expressions keep the ordinary engine.
+
+Fixed budgets bound each plan's retained memory and each attempt's retries:
+
+- The complete plan and its literal storage are charged against the forward
+  DFA memory budget. A plan that does not fit keeps the ordinary route, so a
+  pattern's retained memory stays within the bound already applied to its DFA.
+- Optional literals and optional forks share four retry checkpoints, as in
+  ClickHouse, so an attempt explores at most sixteen combinations and its retry
+  state fits in two longs and an int without allocation.
+- A plan has at most 32 operations plus one terminal operation, so operation
+  indices fit the retry stack's six-bit fields. Nesting depth is limited to
+  sixteen and explicit repeat counts to 1000, matching ClickHouse. A literal is
+  limited to 256 bytes.
+
+Rejected development alternatives are recorded to prevent repeating them
+without new evidence:
+
+- Separate boolean operation arrays regressed the URL and mixed controls.
+- Selecting the ordinary boolean route by optional count and short input length
+  regressed the targeted retry workload.
+- Fusing captured runs in richer plans improved isolated cases but regressed
+  the representative interleaved mix on all three target hosts. Keep explicit
+  capture saves outside compacted linear plans.
+- A distinct captured-run opcode regressed individual and grouped workloads.
+- Saving capture start before scanning regressed mixed capture and extraction.
+- Compacting tails and delimiter captures in richer builder plans improved
+  dot-all mixes but more than doubled normal-dot mixed boolean time on Arm.
+  Keep those representations unchanged until measured as a separate optimization.
+- A byte opcode removed a native dependent load but regressed core URL operations;
+  retain enum dispatch until a measured alternative justifies changing it.
+
+Other protected controls retain unresolved differences. These are not accepted
+release trade-offs and require qualification before broad adoption. The
+development campaign evidence is in the private archive; see the
+[archive index](docs/benchmarks/trino-scan-plan-archives.json).
