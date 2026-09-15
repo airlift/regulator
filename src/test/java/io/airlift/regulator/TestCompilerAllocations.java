@@ -67,6 +67,28 @@ public class TestCompilerAllocations
         assertThat(allocatedBytes / iterations).isLessThan(40_000);
     }
 
+    @Test
+    public void testTrinoScanContinuationAnalysisUsesCompactStorage()
+    {
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        ParseResult parsed = TrinoRegexpParser.parse(
+                utf8Slice("^((a)?(b)?(c)?(d)?)abcd([^/]+)/$"),
+                Regexp.LIKE_PERL);
+        for (int iteration = 0; iteration < 10_000; iteration++) {
+            assertThat(TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount())).isNotNull();
+        }
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        int iterations = 10_000;
+        for (int iteration = 0; iteration < iterations; iteration++) {
+            TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount());
+        }
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(allocatedBytes / iterations).isLessThan(8_000);
+    }
+
     private static ThreadMXBean allocatedMemoryBean()
     {
         ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();

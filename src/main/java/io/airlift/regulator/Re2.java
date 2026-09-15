@@ -73,6 +73,8 @@ public final class Re2
     private static final byte BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS = 11;
     private static final byte BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA = 12;
     private static final byte BOOLEAN_FIND_SINGLE_BYTE = 13;
+    private static final byte BOOLEAN_FIND_TRINO_SCAN = 14;
+    private static final byte BOOLEAN_FIND_PARTIAL_TRINO_SCAN = 15;
 
     // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk.
     private static final int MAX_DIRECT_BYTE_SCAN_BYTES = 64;
@@ -343,6 +345,9 @@ public final class Re2
     private final BooleanPlans booleanPlans;
     // Cached directly on Re2 because an extra dependent load measurably affects tiny find operations.
     private final byte booleanFindStrategy;
+    // Scan-plan executor for calls that reach matchInternal. A retained literal boolean kernel
+    // may answer full-Slice find while boundaries, captures, and ranges still use the plan.
+    private final byte trinoScanStrategy;
 
     private volatile Prog reverseProg;
     private volatile boolean reverseProgComputed;
@@ -413,7 +418,22 @@ public final class Re2
         else {
             singleByteMatcher = SingleByteMatcher.unsupported();
         }
+        byte scanStrategy = BOOLEAN_FIND_GENERAL;
+        if (booleanPlans.trinoScanPlan() != null) {
+            scanStrategy = booleanPlans.trinoScanPlan().isPartialMatch()
+                    ? BOOLEAN_FIND_PARTIAL_TRINO_SCAN
+                    : BOOLEAN_FIND_TRINO_SCAN;
+            // Literal kernels answer existence without reading past the literal; keep them for
+            // full-Slice find. Every other strategy that can coexist with a plan is replaced.
+            if (findStrategy != BOOLEAN_FIND_CONTAINS &&
+                    findStrategy != BOOLEAN_FIND_STARTS_WITH &&
+                    findStrategy != BOOLEAN_FIND_EQUALS &&
+                    findStrategy != BOOLEAN_FIND_EQUALS_FINAL_LINE) {
+                findStrategy = scanStrategy;
+            }
+        }
         this.booleanFindStrategy = findStrategy;
+        this.trinoScanStrategy = scanStrategy;
         this.capturingGroupCount = capturingGroupCount;
         this.namedCapturingGroups = namedCapturingGroups;
         this.capturingGroupNames = capturingGroupNames;
@@ -805,12 +825,26 @@ public final class Re2
                 exactLiteral == null ? -1 : exactLiteral.length(),
                 requiredPrefix,
                 semanticProgram);
-        LoweredBooleanProgram loweredBooleanProgram = compileLoweredBooleanProgram(
-                suffixRegexp,
-                semanticProgram,
-                booleanPlans,
-                forwardMemory,
-                compilerDialect);
+        // Reuse the compiler's anchor proof to reject unanchored patterns without allocating
+        // a temporary scan-plan analysis. A stripped required prefix carries the start anchor.
+        TrinoScanPlan trinoScanPlan = compilerDialect == Compiler.Dialect.TRINO &&
+                (requiredPrefix != null || semanticProgram.anchorStart())
+                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount)
+                : null;
+        long scanPlanSize = trinoScanPlan == null ? 0 : trinoScanPlan.estimatedRetainedSize();
+        if (trinoScanPlan != null && scanPlanSize <= semanticProgram.dfaMemory()) {
+            semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - scanPlanSize);
+            booleanPlans = booleanPlans.withTrinoScanPlan(trinoScanPlan);
+        }
+        LoweredBooleanProgram loweredBooleanProgram = null;
+        if (booleanPlans.trinoScanPlan() == null) {
+            loweredBooleanProgram = compileLoweredBooleanProgram(
+                    suffixRegexp,
+                    semanticProgram,
+                    booleanPlans,
+                    forwardMemory,
+                    compilerDialect);
+        }
         if (loweredBooleanProgram != null) {
             booleanPlans = selectLoweredBooleanPlans(booleanPlans, loweredBooleanProgram.program());
         }
@@ -917,7 +951,7 @@ public final class Re2
         BooleanPartialMatchStrategy partialMatchStrategy = find == BooleanPlanKind.LOWERED_PROGRAM
                 ? BooleanPartialMatchStrategy.LOWERED_PROGRAM
                 : plans.partialMatchStrategy();
-        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher());
+        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.trinoScanPlan());
     }
 
     private static boolean requiresProgramExecution(BooleanPlanKind plan)
@@ -1040,6 +1074,25 @@ public final class Re2
     boolean hasRetainedFixedWidthByteSpanMatcher()
     {
         return fixedWidthByteSpanMatcher() != null;
+    }
+
+    boolean usesTrinoScanPlanForDiagnostics()
+    {
+        return booleanPlans.trinoScanPlan() != null;
+    }
+
+    boolean usesPartialTrinoScanPlanForDiagnostics()
+    {
+        return trinoScanStrategy == BOOLEAN_FIND_PARTIAL_TRINO_SCAN;
+    }
+
+    /**
+     * Returns whether full-Slice {@link #find(Slice)} dispatches to the scan plan rather than
+     * a retained literal kernel. Other calls reach the plan through the plan dispatch strategy.
+     */
+    boolean usesTrinoScanPlanForFindForDiagnostics()
+    {
+        return booleanFindStrategy != BOOLEAN_FIND_GENERAL && booleanFindStrategy == trinoScanStrategy;
     }
 
     boolean usesTaggedAlternationForDiagnostics()
@@ -1204,7 +1257,14 @@ public final class Re2
         requireNonNull(input, "input is null");
         byte strategy = booleanFindStrategy;
         if (strategy != BOOLEAN_FIND_GENERAL) {
-            if (strategy == BOOLEAN_FIND_SINGLE_BYTE) {
+            // The single-byte strategy and the scan strategies are the highest values, so one
+            // comparison keeps them off the established literal dispatch. A scan strategy appears
+            // here only when it equals trinoScanStrategy; a retained literal kernel keeps its own
+            // value.
+            if (strategy >= BOOLEAN_FIND_SINGLE_BYTE) {
+                if (strategy != BOOLEAN_FIND_SINGLE_BYTE) {
+                    return findWithTrinoScanPlan(input, strategy);
+                }
                 if (input.length() > MAX_DIRECT_BYTE_SCAN_BYTES) {
                     return matchInto(input, Anchor.UNANCHORED, null);
                 }
@@ -1217,6 +1277,21 @@ public final class Re2
             return optimizedPartialMatch(input, strategy);
         }
         return matchInto(input, Anchor.UNANCHORED, null);
+    }
+
+    /**
+     * Answers full-Slice {@link #find(Slice)} with the scan plan. It is out of line so that find
+     * stays small enough for C2 to inline into its callers.
+     */
+    private boolean findWithTrinoScanPlan(Slice input, byte strategy)
+    {
+        TrinoScanPlan plan = booleanPlans.trinoScanPlan();
+        int length = input.length();
+        return switch (strategy) {
+            case BOOLEAN_FIND_TRINO_SCAN -> plan.matchEndAnchored(input, 0, length, false, null);
+            case BOOLEAN_FIND_PARTIAL_TRINO_SCAN -> plan.matchPartial(input, 0, length, false, null);
+            default -> throw new IllegalStateException("not a scan strategy: " + strategy);
+        };
     }
 
     /**
@@ -2090,6 +2165,14 @@ public final class Re2
 
         Anchor anchorMode = (anchor == null) ? Anchor.UNANCHORED : anchor;
 
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_TRINO_SCAN && end == contextEnd) {
+            return start == contextStart && booleanPlans.trinoScanPlan().matchEndAnchored(
+                    text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
+        }
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_PARTIAL_TRINO_SCAN && end == contextEnd) {
+            return start == contextStart && booleanPlans.trinoScanPlan().matchPartial(
+                    text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
+        }
         if (prog == partialProg && booleanPlans.disjointSuffixRepeatMatcher() != null) {
             long span = booleanPlans.disjointSuffixRepeatMatcher().search(text, start, end, anchorMode);
             if (span == Dfa.SEARCH_NO_MATCH) {
@@ -2459,7 +2542,7 @@ public final class Re2
             case ENDS_WITH_FINAL_LINE -> BooleanPlanKind.ENDS_WITH_FINAL_LINE;
             case LOWERED_PROGRAM -> BooleanPlanKind.LOWERED_PROGRAM;
         };
-        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null);
+        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null);
     }
 
     private static BooleanPartialMatchStrategy selectBooleanPartialMatchStrategy(
@@ -2515,7 +2598,8 @@ public final class Re2
             case BOOLEAN_FIND_EQUALS_FINAL_LINE -> BooleanPartialMatchStrategy.EQUALS_FINAL_LINE;
             case BOOLEAN_FIND_ENDS_WITH_FINAL_LINE -> BooleanPartialMatchStrategy.ENDS_WITH_FINAL_LINE;
             case BOOLEAN_FIND_LOWERED_PROGRAM, BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO -> BooleanPartialMatchStrategy.LOWERED_PROGRAM;
-            case BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS, BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA, BOOLEAN_FIND_SINGLE_BYTE -> BooleanPartialMatchStrategy.GENERAL;
+            case BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS, BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA, BOOLEAN_FIND_SINGLE_BYTE,
+                 BOOLEAN_FIND_TRINO_SCAN, BOOLEAN_FIND_PARTIAL_TRINO_SCAN -> BooleanPartialMatchStrategy.GENERAL;
             default -> throw new IllegalArgumentException("unknown boolean find strategy: " + strategy);
         };
     }
@@ -2607,26 +2691,32 @@ public final class Re2
             TaggedAlternationProgram taggedAlternationProgram,
             WordRunMatcher wordRunMatcher,
             WholeInputCapturePlan wholeInputCapturePlan,
-            DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher)
+            DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher,
+            TrinoScanPlan trinoScanPlan)
     {
+        private BooleanPlans withTrinoScanPlan(TrinoScanPlan trinoScanPlan)
+        {
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
+        }
+
         private BooleanPlans withTaggedAlternationProgram(TaggedAlternationProgram taggedAlternationProgram)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
         }
 
         private BooleanPlans withWordRunMatcher(WordRunMatcher wordRunMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
         }
 
         private BooleanPlans withWholeInputCapturePlan(WholeInputCapturePlan wholeInputCapturePlan)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
         }
 
         private BooleanPlans withDisjointSuffixRepeatMatcher(DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
         }
     }
 

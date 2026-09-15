@@ -1,0 +1,12 @@
+{
+  "access": "Private evidence storage. Use credentials authorized to read the benchmark archive bucket.",
+  "archives": [
+    {
+      "name": "trino-scan-plan-20260914-20261001",
+      "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/87345e53c0b66bc3db813ce15334f71516bdf5e0/trino-scan-plan-20260914-20261001/campaign-results.tar.gz",
+      "version_id": "CtOPhe_Tv2LkXSUDO9QgcCi4b4wB.s9G",
+      "archive_sha256": "fb98d228abda8ed8529a760c2eece3ea3dabda79150c9531c3537b210eae0060",
+      "source_manifest_sha256": "4f564cf412e378df22d10374513e4cd08e37d39e6cb08f3fb56f0daf7d4011b9"
+    }
+  ]
+}

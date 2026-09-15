@@ -51,6 +51,7 @@ and intermediate benchmark reports are not kept here.
 | [Interactive benchmark report](https://airlift.github.io/regulator/benchmarks/) | Sortable results by language, platform, and native-memory or pure-Java route |
 | [Measurement quality](benchmarks/MEASUREMENT_QUALITY.md) | Timing uncertainty, native controls, repaired protocols and reproduction |
 | [Regulator 1.0 benchmark results](benchmarks/RESULTS_1.0.md) | Released-artifact coverage, findings, limitations, and evidence retrieval |
+| [`benchmarks/TRINO_SCAN_PLAN.md`](benchmarks/TRINO_SCAN_PLAN.md) | Trino specialized scan-plan design, eligibility, and benchmarks |
 | [`reference/OPTIMIZATION_REGISTRY.md`](reference/OPTIMIZATION_REGISTRY.md) | Important upstream and Java-specific optimization inventory |
 | [`MAINTAINING_REGULATOR.md`](MAINTAINING_REGULATOR.md) | Proportional performance gates for future changes |
 
