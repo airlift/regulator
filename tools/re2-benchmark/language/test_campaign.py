@@ -87,7 +87,7 @@ class TestLanguageCampaign(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum"):
             transport.unpack(path, self.root / "bad-hash", "changed", batch["platform"], batch["shard"], 1)
         with self.assertRaisesRegex(ValueError, "assignment"):
-            transport.unpack(path, self.root / "bad-host", checksum, "c8i", batch["shard"], 1)
+            transport.unpack(path, self.root / "bad-host", checksum, "r8i", batch["shard"], 1)
         for index, name in enumerate(("../escape", "/absolute", "link")):
             with tarfile.open(path, "w:gz") as archive:
                 member = tarfile.TarInfo(name)

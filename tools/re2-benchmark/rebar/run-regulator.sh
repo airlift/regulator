@@ -27,11 +27,12 @@ case ${REBAR_NATIVE_ACCESS:?REBAR_NATIVE_ACCESS must be enabled or disabled} in
         ;;
 esac
 if [[ -n ${REBAR_HEAP_SIZE:-} ]]; then
-    java_options+=(
-        "-Xms${REBAR_HEAP_SIZE}"
-        "-Xmx${REBAR_HEAP_SIZE}"
-        -XX:+AlwaysPreTouch
-    )
+    java_options+=("-Xms${REBAR_HEAP_SIZE}" "-Xmx${REBAR_HEAP_SIZE}")
+    case ${REBAR_HEAP_PRETOUCH:-true} in
+        true) java_options+=(-XX:+AlwaysPreTouch) ;;
+        false) java_options+=(-XX:-AlwaysPreTouch) ;;
+        *) echo "REBAR_HEAP_PRETOUCH must be true or false" >&2; exit 1 ;;
+    esac
 fi
 if [[ ${REBAR_PRINT_COMPILATION:-false} == true ]]; then
     java_options+=(-XX:+PrintCompilation)

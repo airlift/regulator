@@ -10,7 +10,7 @@ import host_duration
 import host_session
 
 
-MAXIMUM_SHARDS = 37
+MAXIMUM_SHARDS = 44
 MAXIMUM_HOST_SECONDS = 90 * 60
 HOST_BOOTSTRAP_ALLOWANCE_SECONDS = 10 * 60
 

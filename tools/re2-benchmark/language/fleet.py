@@ -15,7 +15,7 @@ import collection
 import source_bracket
 
 
-PLATFORMS = ("c9g", "c8g", "c8i")
+PLATFORMS = ("r9g", "r8g", "r8i")
 BATCH_OPERATION_BUDGET = 1
 
 

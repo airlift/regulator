@@ -33,6 +33,13 @@ compile-public	Parser, compiler, public matching, Java, rewrite, set, and prefil
 accepted-routes	Accepted scanners, count paths, and capture scaling	baseline-shard
 expression-plans-a	Expression plans, workload partition A	baseline-shard
 expression-plans-b	Expression plans, workload partition B	baseline-shard
-traditional-extra	Traditional successful, alternate, and large fixed pairs	baseline-shard
+traditional-extra-easy2	Case-insensitive failed search, full timing	baseline-shard
+traditional-extra-fanout	Unicode fanout search, full timing	baseline-shard
+traditional-extra-success	Successful search, full timing	baseline-shard
+traditional-extra-success1	Successful one-byte search, full timing	baseline-shard
+traditional-extra-alt-match	Alternate full-match DFA and public API, full timing	baseline-shard
+traditional-extra-alt-engines	Alternate full-match OnePass and BitState, full timing	baseline-shard
+traditional-extra-big-fixed	Large fixed-pattern search, full timing	baseline-shard
 traditional-search	Traditional failed-search DFA, NFA, and public RE2 pairs	baseline-shard
 traditional-capture	Traditional parse, capture, full-match, practical, and miscellaneous pairs	baseline-shard
+traditional-extra-success-engines	Successful OnePass and BitState search, full timing	baseline-shard

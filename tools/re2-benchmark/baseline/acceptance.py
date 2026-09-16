@@ -6,13 +6,14 @@ import math
 import re
 from collections import Counter
 from pathlib import Path
+import topology
 
 
 SCHEMA_VERSION = "2"
 EXPECTED_PLATFORMS = {
-    "c8i": ("intel", "c8i."),
-    "c8g": ("arm", "c8g."),
-    "c9g": ("arm", "c9g."),
+    "r8i": ("intel", "r8i."),
+    "r8g": ("arm", "r8g."),
+    "r9g": ("arm", "r9g."),
 }
 SESSION_FIELDS = (
     "schema_version",
@@ -587,7 +588,9 @@ def write_receipt(path, receipt):
 
 
 def load_platforms(path):
-    rows = read_tsv(path, ("platform", "architecture", "instance_type"))
+    fields = ("platform", "architecture", "instance_type", "vcpus",
+              "concurrency_instance_type", "concurrency_vcpus")
+    rows = read_tsv(path, fields)
     duplicates = duplicate_values(row["platform"] for row in rows)
     if duplicates:
         raise ValidationError(f"{path} has duplicate platforms: {duplicates}")
@@ -597,13 +600,10 @@ def load_platforms(path):
             f"platform identities must be {sorted(EXPECTED_PLATFORMS)}, found {sorted(platforms)}")
     for platform, (architecture, instance_prefix) in EXPECTED_PLATFORMS.items():
         row = platforms[platform]
-        if row["architecture"] != architecture:
-            raise ValidationError(
-                f"platform {platform} architecture must be {architecture!r}, found {row['architecture']!r}")
-        if not row["instance_type"].startswith(instance_prefix):
-            raise ValidationError(
-                f"platform {platform} instance_type must start with {instance_prefix!r}, "
-                f"found {row['instance_type']!r}")
+        try:
+            topology.validate(row)
+        except ValueError as error:
+            raise ValidationError(f"platform {platform}: {error}") from error
     return platforms
 
 
@@ -693,10 +693,11 @@ def validate_campaign(
             raise ValidationError(
                 f"{context} architecture is {receipt['architecture']!r}, "
                 f"expected {platform_row['architecture']!r}")
-        if receipt["instance_type"] != platform_row["instance_type"]:
+        expected_instance = topology.instance_type(platform_row, shard_id)
+        if receipt["instance_type"] != expected_instance:
             raise ValidationError(
                 f"{context} instance_type is {receipt['instance_type']!r}, "
-                f"expected {platform_row['instance_type']!r}")
+                f"expected {expected_instance!r}")
 
         systems = parse_systems(receipt["systems"], context)
         if receipt["systems"] != canonical_systems(systems):

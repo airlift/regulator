@@ -41,7 +41,7 @@ class TestRebarPreparation(unittest.TestCase):
                 executable(scripts / "rebar/build-regulator.sh",
                            f"mkdir -p {shlex.quote(str(repository / 'target'))}\n"
                            f"echo fixture > {shlex.quote(str(repository / 'target/rebar-classpath.txt'))}\n")
-                executable(rebar / "target/release/rebar", "exit 0\n")
+                executable(rebar / "target/release/rebar", '[[ ${REBAR_HEAP_PRETOUCH} == false ]]\n')
                 for name in ("definitions/curated", "haystacks", "regexes"):
                     (rebar / "benchmarks" / name).mkdir(parents=True)
                 (rebar / "benchmarks/engines.toml").write_text('[[engine]]\n  name = "re2"\n  cwd = "fixture"\n')
@@ -77,7 +77,8 @@ prepare_pinned_trino() {
     echo fixture > "${PINNED_TRINO_WORK_DIR}/provenance.properties"
 }
 '''
-                    result = subprocess.run(["bash"], input=script + preparation, env=environment,
+                    script += 'export REBAR_HEAP_PRETOUCH=true\n'
+                    result = subprocess.run(["bash"], input=script + preparation + '[[ ${REBAR_HEAP_PRETOUCH} == true ]]\n', env=environment,
                                             text=True, capture_output=True, timeout=30)
                     self.assertEqual(0, result.returncode, result.stdout + result.stderr)
                     config = (shared / "rebar/rebar-a/benchmarks/engines.toml").read_bytes()

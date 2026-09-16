@@ -86,6 +86,16 @@ iteration counts while avoiding a new forked JVM for every row:
   selection follows the benchmark row onto its configured classpath; a Trino
   benchmark on the special pinned classpath must generate the same bounded and
   full side files that the default candidate classpath generates.
+- The released-1.0 smoke rejected `searchEasy2DfaBoolean(textSize=32768)`
+  with an 18.6% protocol median difference on R8g. A subsequent 4096-byte
+  representative differed by 46.1% on R8i's pure-Java route, with full-run
+  process medians near 1.28 and 1.90 microseconds. These distributions do not
+  establish that shorter iterations caused the different medians. The entire
+  `BenchmarkRe2SearchExtra` family now uses full timing in eight
+  `traditional-extra-*` shards. Each route has at most 30 JMH rows, and both
+  applicable memory routes fit the unchanged 90-minute static host deadline.
+  The split preserves every Java/native pair and input size. Original rejected
+  measurements remain evidence; they are not accepted final samples.
 - Fast allocating rows require special scrutiny because a 50 ms window can
   contain zero collections in most iterations and concentrate collection cost
   in one iteration that a median discards. The `countRegulator`
@@ -193,7 +203,12 @@ smoke or qualification protocol.
 - `rebar` prepares the pinned corpus and engines, verifies the exact
   deterministic manifest partition, preserves the native-before/Regulator/
   native-after invocation, and runs applicable Joni rows in a separate ordered
-  invocation. The checksummed applicability ledger covers all 238 logical
+  invocation. Untimed Regulator and Joni verification keeps each engine's heap
+  size but disables heap pre-touch: Rebar's deadline includes JVM startup, and
+  faulting unused heap pages can exhaust it before verification starts. Timed
+  invocations explicitly enable pre-touch and retain their original heap,
+  warmup, measurement and timeout settings. Both settings are recorded in the
+  route metadata. The checksummed applicability ledger covers 238 logical
   workloads; 225 have Joni rows, while the 13 syntax or semantic
   incompatibilities remain explicit reporting events. A compatible Joni row
   that exceeds the 30-second verification or 120-second measurement limit is

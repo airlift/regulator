@@ -188,6 +188,16 @@ class TestProtocolRepresentatives(unittest.TestCase):
             self.assertFalse(full_parameters & bounded_parameters, row)
             self.assertEqual(manifest_parameters, full_parameters | bounded_parameters, row)
 
+    def testExtraSearchFamilyUsesOnlyFullProtocolShards(self):
+        manifest = self.read_tsv(BASELINE / "rows.tsv")
+        shards = {row["shard_id"] for row in manifest
+                  if row["benchmark"].startswith("io.airlift.regulator.BenchmarkRe2SearchExtra.")}
+        self.assertEqual(8, len(shards))
+        bounded = VALIDATOR.bounded_routes(manifest, VALIDATOR.load_dispatch(BASELINE / "shard-dispatch.tsv"))
+        self.assertFalse(shards & {shard for shard, _ in bounded})
+        for filename in ("full-protocol-benchmarks.tsv", "protocol-representatives.tsv"):
+            self.assertFalse(shards & {row["shard_id"] for row in self.read_tsv(BASELINE / filename)})
+
     def testLiteralCorpusEnglishCountUsesFullProtocolForBothMemoryRoutes(self):
         overrides = self.read_tsv(BASELINE / "full-protocol-benchmarks.tsv")
         literal_corpus_overrides = {

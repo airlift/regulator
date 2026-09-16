@@ -759,6 +759,10 @@ def calibration(arguments):
     write_tsv(arguments.output, fields, rows)
 
 
+class ProtocolQualificationError(ValueError):
+    """Valid timing evidence failed the numerical protocol gate."""
+
+
 def protocol_equivalence(arguments):
     process_count = 5
     if len(arguments.specialized) != process_count:
@@ -834,7 +838,7 @@ def protocol_equivalence(arguments):
             failures.append(f"{key} specialized relative standard error={format_number(specialized_rse)}")
     write_tsv(arguments.output, tuple(rows[0]), rows)
     if failures:
-        raise ValueError(
+        raise ProtocolQualificationError(
             f"Specialized JMH protocol failed the median or relative standard error gate "
             f"(maximum median difference {format_number(arguments.maximum)}, maximum RSE 0.05): "
             f"{', '.join(failures)}")
@@ -1103,6 +1107,8 @@ def main():
     arguments = argument_parser.parse_args()
     try:
         arguments.function(arguments)
+    except ProtocolQualificationError as error:
+        argument_parser.exit(42, str(error) + "\n")
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
         argument_parser.error(str(error))
 

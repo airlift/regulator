@@ -11,52 +11,27 @@ engineering diagnostics are separate from both.
 
 Do not collect performance evidence on a development machine. Local commands
 may validate manifests, scripts, and protocol behavior, but performance
-decisions require the pinned C8i, C8g, and C9g hosts in `baseline/platforms.tsv`.
+decisions require the pinned R8i, R8g, and R9g hosts in `baseline/platforms.tsv`.
 
 ## Machine-hours and cost
 
-Budget roughly **1,500 machine-hours** for a full collection across all three
-platforms, including both baseline and language comparisons. A machine-hour
-means one entire EC2 instance running for one hour, not one vCPU-hour.
-Parallel workers shorten elapsed time; they do not reduce total machine-hours.
+Estimate machine-hours from the job inventory and full smoke timings,
+including startup and retries. Parallel workers reduce elapsed time, not
+aggregate machine-hours. Refresh regional prices before collection.
 
-This is a planning allowance, not a fixed requirement or an upper bound. The
-September 2026 development capture recorded about 190 machine-hours for accepted
-primary baseline sessions and 750 for accepted primary language sessions, about
-940 combined. Those are measured host-session durations, not billed instance
-lifetimes. They exclude smoke, confirmations, failed or redundant attempts,
-later follow-ups, and startup outside the measured sessions.
+Ordinary workers use two-vCPU `r8i.large`, `r8g.large`, and `r9g.large`
+instances with 16 GiB RAM and 40 GiB gp3 roots. The `lifecycle-shared-cold`
+shard uses the corresponding eight-vCPU `.2xlarge` instance and affinity
+`0-7`; ordinary workloads use CPU `0`. The measured heap remains 8 GiB.
+Forked JMH launchers use 64–256 MiB and pass the measured JVM options to
+the fork. Host receipts verify CPU count, affinity, memory, and disk headroom.
 
-The current baseline shard model estimates about 424 machine-hours for its
-three primary replicas across three platforms, including bootstrap/build
-allowances. Combining that estimate with the historical 750 language hours and
-adding roughly 25% contingency gives the rounded 1,500-hour budget. Recheck the
-job plans and smoke durations before launching. Corpus changes, slow cases,
-packing, interruptions, and retries can move the total substantially.
-
-For a dollar reference, Linux shared-tenancy On-Demand rates in `us-west-2`,
-checked September 12, 2026, are:
-
-| Instance | USD per machine-hour | 500 hours |
-| --- | ---: | ---: |
-| `c8i.2xlarge` | $0.37484 | $187.42 |
-| `c8g.2xlarge` | $0.31904 | $159.52 |
-| `c9g.2xlarge` | $0.34776 | $173.88 |
-| Total, 1,500 hours evenly split | | **$520.82** |
-
-Source: [AWS EC2 regional price catalog](https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current/us-west-2/index.csv),
-rates effective September 1, 2026. About **$521 in On-Demand compute** is an
-estimate at those rates, not the actual bill for the development capture.
-It excludes EBS, S3, data transfer, and taxes. Use actual billable instance
-lifetimes and market rates to reconcile spending; accepted benchmark durations
-alone undercount it.
-
-**Prefer Spot for full runs.** This is expensive enough that the discount
-matters. The controller already tries Spot first and falls back to the same
-On-Demand instance type when needed. Spot prices vary by time and availability
-zone, and interrupted attempts consume paid time before restarting. Budget for
-fallback and retries rather than assuming every hour gets a Spot discount.
-The concurrency ceiling is not a spending cap.
+Use `--release-version 1.0` to measure the published JAR. The collector
+checks its checksum and class origins, and requires diagnostic production
+sources to match the release. `--smoke-protocol qualification` exercises
+full timing during smoke; both selections are frozen on first execution.
+Phase deadlines account for total and per-platform host waves plus a retry
+wave. `--phase-timeout-seconds` sets an explicit frozen deadline.
 
 For a focused change, budget only the affected cases and protected controls.
 A source bracket measures three legs on each host, so include all three in its
@@ -136,7 +111,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --candidate-archive /durable/path/candidate.tar.gz \
   --candidate-provenance /durable/path/candidate-provenance.tsv \
   --result-root /durable/path/<campaign-id>/smoke \
-  --max-concurrent 64
+  --max-concurrent 64 --release-version 1.0
 ```
 
 The primary phase requires the accepted smoke root and runs three independent
@@ -151,7 +126,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --candidate-provenance /durable/path/candidate-provenance.tsv \
   --smoke-results /durable/path/<campaign-id>/smoke \
   --result-root /durable/path/<campaign-id>/primary \
-  --max-concurrent 64
+  --max-concurrent 64 --release-version 1.0
 ```
 
 Use confirmation only for the bounded list emitted by preliminary reduction:
@@ -166,7 +141,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --primary-results /durable/path/<campaign-id>/primary \
   --confirmation-jobs /durable/path/confirmation-jobs.tsv \
   --result-root /durable/path/<campaign-id>/confirmation \
-  --max-concurrent 64
+  --max-concurrent 64 --release-version 1.0
 ```
 
 The controller can start with fewer than 64 hosts; that number is a ceiling.

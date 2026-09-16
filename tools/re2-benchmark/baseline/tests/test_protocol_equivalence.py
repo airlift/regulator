@@ -97,12 +97,19 @@ class TestProtocolEquivalence(unittest.TestCase):
     def test_rejects_divergent_specialized_protocol(self):
         self.write_inputs(106)
         result = self.run_tool()
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 42)
         self.assertIn("maximum median difference 0.050000000000000003", result.stderr)
         with self.output.open(newline="") as input_file:
             rows = list(csv.DictReader(input_file, delimiter="\t"))
         self.assertEqual(2, len(rows))
         self.assertEqual({"rejected"}, {row["outcome"] for row in rows})
+
+    def test_malformed_evidence_does_not_use_statistical_rejection_status(self):
+        self.write_inputs(100)
+        self.reference.write_text("invalid json")
+        result = self.run_tool()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotEqual(result.returncode, 42)
 
     def test_median_difference_boundary(self):
         for specialized_score, accepted in (

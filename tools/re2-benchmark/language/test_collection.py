@@ -16,6 +16,19 @@ SPEC.loader.exec_module(collection)
 
 
 class TestCollection(unittest.TestCase):
+    def test_jmh_launcher_heap_is_separate_from_measured_forks(self):
+        for mode in collection.MODES:
+            command = collection.jmh_command("java", "fixture.classpath", mode)
+            launcher = command[:command.index("org.openjdk.jmh.Main")]
+            fork = command[command.index("-jvmArgs") + 1].split()
+            self.assertIn("-Xmx256m", launcher)
+            self.assertNotIn("-Xmx8g", launcher)
+            self.assertIn("-Xmx8g", fork)
+            self.assertIn("-Xms8g", fork)
+            self.assertIn("-XX:+AlwaysPreTouch", fork)
+            self.assertEqual("--enable-native-access=ALL-UNNAMED" in fork, mode == "native")
+            self.assertIn("-Xmx8g", collection.java_command("java", "fixture.classpath", mode))
+
     def test_work_contract_distinguishes_output_assisted_counts(self):
         manifest = {"suite": "language-bulk"}
         for language in ("re2", "java"):
@@ -51,7 +64,7 @@ class TestCollection(unittest.TestCase):
         provenance = results / "provenance.json"
         provenance.write_text('{"source_commit":"old"}')
         with self.assertRaisesRegex(ValueError, "will not overwrite.*call contract"):
-            collection.measure(self.directory, results, "java", "classes", "native", "c9g", "unused")
+            collection.measure(self.directory, results, "java", "classes", "native", "r9g", "unused")
         self.assertEqual(provenance.read_text(), '{"source_commit":"old"}')
 
     def test_new_measurement_rejects_historical_bulk_verifier(self):
@@ -61,7 +74,7 @@ class TestCollection(unittest.TestCase):
                 patch.object(collection, 'load', return_value=manifest), \
                 patch.object(collection, 'validate_manifest'):
             with self.assertRaisesRegex(ValueError, 'boundary-and-byte verification'):
-                collection.measure(self.directory, self.root / 'results', 'java', 'classes', 'native', 'c9g', 'unused')
+                collection.measure(self.directory, self.root / 'results', 'java', 'classes', 'native', 'r9g', 'unused')
 
     def test_reject_missing_duplicate_and_unrecorded_translations(self):
         broken = copy.deepcopy(self.manifest)
@@ -188,6 +201,11 @@ class TestCollection(unittest.TestCase):
         path = self.root / "jmh.json"
         path.write_text(json.dumps(data))
         observed = collection.raw_samples(path, "jdk", "compile")
+        with self.assertRaisesRegex(ValueError, "JVM arguments"):
+            collection.raw_samples(path, "jdk", "compile", expected_jvm_arguments=collection.measured_jvm_arguments("safe"))
+        data[0]["jvmArgs"] = collection.measured_jvm_arguments("safe")
+        path.write_text(json.dumps(data))
+        collection.raw_samples(path, "jdk", "compile", expected_jvm_arguments=collection.measured_jvm_arguments("safe"))
         self.assertEqual(observed["samples_ns"], data[0]["primaryMetric"]["rawData"])
         self.assertEqual(observed["allocation"]["rawData"], [[99, 101] * 5 for _ in range(5)])
         with self.assertRaisesRegex(ValueError, "different engine"):
@@ -340,10 +358,11 @@ class TestCollection(unittest.TestCase):
         def measurement_process(command, prefix, **kwargs):
             measured.append(command)
             if "org.openjdk.jmh.Main" in command:
-                operation = command[command.index("org.openjdk.jmh.Main") + 1].split(r"\.")[-1].removesuffix("$")
+                operation = next(value for value in command if value.startswith("^")).split(r"\.")[-1].removesuffix("$")
                 engine = next(value.removeprefix("engine=") for value in command if value.startswith("engine="))
                 workload = next(value.removeprefix("workloadFile=") for value in command if value.startswith("workloadFile="))
                 raw = [{"benchmark": collection.CLASS + "." + operation,
+                        "jvmArgs": command[command.index("-jvmArgs") + 1].split(),
                         "params": {"engine": engine, "workloadFile": workload},
                         "forks": 5, "warmupIterations": 10, "measurementIterations": 10,
                         "warmupTime": "1 s", "measurementTime": "1 s", "threads": 1, "mode": "avgt",
@@ -362,11 +381,11 @@ class TestCollection(unittest.TestCase):
         with patch.object(collection.platform, "system", return_value="Linux"), \
                 patch.object(collection, "runner_identity", return_value=runners), \
                 patch.object(collection.subprocess, "check_output", side_effect=host_command), \
-                patch.object(collection, "host_identity", return_value={"instanceType": "c9g.xlarge"}), \
+                patch.object(collection, "host_identity", return_value={"instanceType": "r9g.xlarge"}), \
                 patch.object(collection.jvm_build, "validate_receipt"), \
                 patch.object(collection, "run_process", side_effect=measurement_process):
             collection.measure(Path(os.path.relpath(self.directory)), Path(os.path.relpath(results)), "java", "classpath",
-                               str(native), "c9g", jvm_receipt)
+                               str(native), "r9g", jvm_receipt)
         exported = collection.load(results / "language-results.json")
         self.assertEqual(len(measured), 585 - 2)
         for operation in ("compile", "singleUseContains", "reusedContains"):

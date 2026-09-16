@@ -226,6 +226,18 @@ def java_command(java, classpath, mode):
     return command + ["-cp", classpath]
 
 
+def measured_jvm_arguments(mode):
+    arguments = ["--add-modules=jdk.incubator.vector", "-Xms8g", "-Xmx8g", "-XX:+UseG1GC", "-XX:+AlwaysPreTouch"]
+    if mode == "native":
+        arguments.append("--enable-native-access=ALL-UNNAMED")
+    return arguments
+
+
+def jmh_command(java, classpath, mode):
+    return [java, "--add-modules=jdk.incubator.vector", "-Xms64m", "-Xmx256m", "-cp", classpath,
+            "org.openjdk.jmh.Main", "-jvmArgs", " ".join(measured_jvm_arguments(mode))]
+
+
 def runner_identity(java, classpath, native):
     return {**jvm_build.jvm_identity(java, classpath), "native_binary_sha256": digest(Path(native).read_bytes())}
 
@@ -244,7 +256,7 @@ def host_identity(platform_id):
         identity = json.load(response)
     if not identity["instanceType"].startswith(platform_id + "."):
         raise ValueError("EC2 instance does not match requested platform")
-    expected_architecture = "x86_64" if platform_id == "c8i" else "aarch64"
+    expected_architecture = "x86_64" if platform_id == "r8i" else "aarch64"
     if platform.machine() != expected_architecture:
         raise ValueError("CPU architecture does not match requested platform")
     return identity
@@ -405,7 +417,8 @@ def validate_operation_receipt(case, language, operation, receipt):
         raise ValueError("operation timeout was not reproduced at the frozen limit")
 
 
-def raw_samples(path, engine, operation, workload=None, benchmark_class=CLASS, expected_result=None):
+def raw_samples(path, engine, operation, workload=None, benchmark_class=CLASS, expected_result=None,
+                expected_jvm_arguments=None):
     data = load(path)
     if engine == "native-re2":
         rows = [row for row in data["benchmarks"] if row.get("run_type") == "iteration"]
@@ -419,6 +432,8 @@ def raw_samples(path, engine, operation, workload=None, benchmark_class=CLASS, e
         if len(data) != 1 or data[0]["benchmark"] != benchmark_class + "." + operation:
             raise ValueError("unexpected JMH row")
         row = data[0]
+        if expected_jvm_arguments is not None and row.get("jvmArgs") != expected_jvm_arguments:
+            raise ValueError("measured JVM arguments differ from the frozen protocol")
         if row["params"]["engine"] != engine or (workload is not None and row["params"]["workloadFile"] != workload):
             raise ValueError("JMH measured a different engine or workload")
         if benchmark_class.endswith("BenchmarkLanguageBulk") and (
@@ -515,6 +530,7 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
         "native_build": native_build,
         "jvm_build": build_receipt,
         "benchmark_contract_version": 3,
+        "measured_jvm_arguments": {mode: measured_jvm_arguments(mode) for mode in MODES},
         "manifest_sha256": evidence["manifest_sha256"],
     }
     save(results / "provenance.json", provenance)
@@ -536,7 +552,7 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
                            "--benchmark_min_warmup_time=10", "--benchmark_time_unit=ns",
                            "--benchmark_out_format=json", f"--benchmark_out={raw}"]
             else:
-                command = java_command(java, classpath, mode) + ["org.openjdk.jmh.Main", "^" + benchmark_class(manifest) + r"\." + operation + "$",
+                command = jmh_command(java, classpath, mode) + ["^" + benchmark_class(manifest) + r"\." + operation + "$",
                            "-p", f"engine={engine}", "-p", f"workloadFile={workload}",
                            "-f", "5", "-wi", "10", "-i", "10", "-w", "1s", "-r", "1s",
                            "-prof", "gc", "-rf", "json", "-rff", str(raw), "-foe", "true"]
@@ -546,7 +562,7 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
             if receipt["outcome"] != "completed":
                 # Aggregate fork timeout is a collection failure, not proof that one regex call timed out.
                 raise ValueError(f"measurement process exceeded protocol budget: {row_id}")
-            observations_data[row_id] = {"outcome": "compared", **raw_samples(raw, engine, operation, workload, benchmark_class(manifest), case.get("expected_result")),
+            observations_data[row_id] = {"outcome": "compared", **raw_samples(raw, engine, operation, workload, benchmark_class(manifest), case.get("expected_result"), measured_jvm_arguments(mode)),
                                          "raw_file": str(raw.relative_to(results)), "command": command}
             save(results / "observations.partial.json", observations_data)
     save(results / "observations.json", observations_data)
@@ -555,6 +571,10 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
 
 def export(directory, results, *, write=True):
     directory, results = directory.resolve(), results.resolve()
+    provenance = load(results / "provenance.json")
+    if provenance.get("jvm_build", {}).get("released_artifact") is not None and provenance.get("measured_jvm_arguments") != {
+            mode: measured_jvm_arguments(mode) for mode in MODES}:
+        raise ValueError("release measurement lacks the frozen JVM memory protocol")
     manifest = load(directory / "manifest.json")
     validate_manifest(manifest, directory)
     evidence = load(results / "verification.json")
@@ -580,7 +600,9 @@ def export(directory, results, *, write=True):
                     for identity, row, engine in zip((candidate_id, comparator_id), pair, (candidate, comparator)):
                         if row["outcome"] == "compared":
                             verified_workload = evidence["receipts"][identity.rsplit("/", 1)[0]]["command"][-1]
-                            observed = raw_samples(results / row["raw_file"], engine, operation, verified_workload, benchmark_class(manifest), case.get("expected_result"))
+                            measured_mode = mode if engine == candidate else "safe"
+                            expected_arguments = provenance.get("measured_jvm_arguments", {}).get(measured_mode)
+                            observed = raw_samples(results / row["raw_file"], engine, operation, verified_workload, benchmark_class(manifest), case.get("expected_result"), expected_arguments)
                             if any(row[key] != observed[key] for key in observed):
                                 raise ValueError("raw samples changed since reduction")
                         elif row["outcome"] not in {"not-compatible", "did-not-finish"}:
@@ -596,7 +618,6 @@ def export(directory, results, *, write=True):
                                  "operation": operation, "candidate": candidate_id, "comparator": comparator_id,
                                  "input_bytes_per_operation": None if operation == "compile" else case["input_bytes_per_operation"],
                                  "matches_per_count_operation": case["matches_per_count_operation"] if operation.endswith("Count") else None})
-    provenance = load(results / "provenance.json")
     # Never stamp a current call contract onto an archived measurement. Only a
     # collector that recorded this version before timing can emit these claims.
     if "benchmark_contract_version" in provenance:
@@ -614,6 +635,9 @@ def export(directory, results, *, write=True):
         raise ValueError("exported JVM artifacts differ from build receipt")
     if provenance["jvm_build"]["source_tree"] != provenance["source_tree"]:
         raise ValueError("exported JVM build identifies a different source tree")
+    if "released_artifact" in provenance["jvm_build"]:
+        jvm_build.released_artifact.validate_saved(
+            provenance["jvm_build"]["released_artifact"], provenance["jvm_build"]["jvm"])
     exported = {"schema_version": 2, "manifest": manifest, "verification": evidence,
                 "provenance": provenance, "runners": runners,
                 "observations": data, "comparisons": rows}
@@ -630,7 +654,7 @@ def main():
     parser.add_argument("--java", default="java")
     parser.add_argument("--classpath")
     parser.add_argument("--native-runner")
-    parser.add_argument("--platform", choices=("c9g", "c8g", "c8i"))
+    parser.add_argument("--platform", choices=("r9g", "r8g", "r8i"))
     parser.add_argument("--jvm-build-receipt", type=Path)
     parser.add_argument("--source-archive", type=Path)
     parser.add_argument("--candidate-provenance", type=Path)

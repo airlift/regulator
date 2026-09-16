@@ -1,10 +1,12 @@
 import copy
 import shutil
 import unittest
+from unittest.mock import patch
 
 import batch_acceptance
 import collection
 import fleet
+import released_artifact
 import source_bracket
 import test_fleet
 
@@ -40,9 +42,9 @@ class TestBatchAcceptance(unittest.TestCase):
         collection.save(worker / "worker.json", {"kind": "qualification", "package": self.package})
         collection.save(worker / "cpu-affinity.json", [0])
         self.environment = {
-            "verification_status": "verified", "benchmark_mode": "language-batch", "platform": "c9g",
+            "verification_status": "verified", "benchmark_mode": "language-batch", "platform": "r9g",
             "shard": self.batch["shard"], "replica": "1", "benchmark_heap_size": "8g",
-            "instance_id": "i-0", "instance_type": "c9g.xlarge", "regulator_commit": "commit",
+            "instance_id": "i-0", "instance_type": "r9g.xlarge", "regulator_commit": "commit",
             "baseline_campaign": "test", "host_epoch": "1", "campaign_architecture": "arm",
             "regulator_archive_sha256": "archive", "comparator_manifest_sha256": "pins",
             "java_runtime_version": "25.0.4+7-LTS"}
@@ -109,6 +111,26 @@ class TestBatchAcceptance(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected result"):
             batch_acceptance.validate(self.result)
 
+    def test_released_batch_requires_the_frozen_release_manifest(self):
+        expected = released_artifact.manifest(collection.ROOT, "1.0")
+        exported_path = self.job_result / "language-results.json"
+        exported = collection.load(exported_path)
+        exported["provenance"]["jvm_build"]["released_artifact"] = {"manifest": expected}
+        collection.save(exported_path, exported)
+        self.environment["regulator_release_version"] = "1.0"
+        self.write_environment()
+        with patch.object(batch_acceptance.collection, "export",
+                          side_effect=lambda _inputs, result, write=False: collection.load(result / "language-results.json")):
+            batch_acceptance.validate(self.result)
+            for field, value in (("source_commit", "0" * 40), ("engine_tree", "0" * 40),
+                                 ("jar_sha256", "0" * 64)):
+                changed = copy.deepcopy(exported)
+                changed["provenance"]["jvm_build"]["released_artifact"]["manifest"] = {
+                    **expected, field: value}
+                collection.save(exported_path, changed)
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, "selected released artifact"):
+                    batch_acceptance.validate(self.result)
+
 
 class TestBracketAcceptance(unittest.TestCase):
     def setUp(self):
@@ -151,7 +173,7 @@ class TestBracketAcceptance(unittest.TestCase):
         path = result / "provenance.json"
         original = collection.load(path)
         for field, value in (("source_commit", "wrong"), ("source_tree", "wrong"),
-                             ("instance_identity", {"instanceId": "other", "instanceType": "c9g.xlarge"})):
+                             ("instance_identity", {"instanceId": "other", "instanceType": "r9g.xlarge"})):
             collection.save(path, {**original, field: value})
             with self.subTest(field=field), self.assertRaises(ValueError):
                 collection.export(self.fixture.inputs / self.fixture.package["packages"][0]["directory"], result)

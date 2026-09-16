@@ -537,6 +537,8 @@ if [[ "${PLAN_ONLY}" == true ]]; then
         printf 'rebar_system_row_count=%s\n' "${rebar_system_row_count}"
         printf 'rebar_joni_row_count=%s\n' "${rebar_joni_row_count}"
         printf 'rebar_primary_semantic_timeout=%s\n' "${REBAR_PRIMARY_SEMANTIC_TIMEOUT}"
+        printf 'rebar_verification_heap_pretouch=false\n'
+        printf 'rebar_measurement_heap_pretouch=true\n'
         printf 'rebar_primary_verification_estimate_seconds=%s\n' \
             "${rebar_primary_verification_estimate_seconds}"
         printf 'rebar_joni_semantic_timeout=%s\n' "${REBAR_JONI_SEMANTIC_TIMEOUT}"
@@ -625,6 +627,8 @@ manifest_sha256=$(sha256sum "${MANIFEST}" | awk '{print $1}')
     printf 'native_minimum_time=%s\n' "${NATIVE_MINIMUM_TIME}"
     printf 'cpu_list=%s\n' "${CPU_LIST}"
     printf 'heap_size=%s\n' "${HEAP_SIZE}"
+    printf 'rebar_verification_heap_pretouch=false\n'
+    printf 'rebar_measurement_heap_pretouch=true\n'
     printf 'shared_work_dir=%s\n' "${SHARED_WORK_DIR}"
     printf 'defer_acceptance=%s\n' "${DEFER_ACCEPTANCE}"
     printf 'joni_comparator_order=%s\n' "${JONI_COMPARATOR_ORDER}"
@@ -676,6 +680,16 @@ manifest_sha256=$(sha256sum "${MANIFEST}" | awk '{print $1}')
     -DincludeScope=test \
     -Dmdep.outputFile="${RESULT_DIR}/classpath.txt")
 CLASSPATH="${ROOT}/target/test-classes:${ROOT}/target/classes:$(cat "${RESULT_DIR}/classpath.txt")"
+if [[ -n "${REGULATOR_RELEASE_VERSION:-}" ]]; then
+    CLASSPATH=$(python3 "${ROOT}/tools/re2-benchmark/language/released_artifact.py" \
+        --root "${ROOT}" --version "${REGULATOR_RELEASE_VERSION}" \
+        --classpath "${CLASSPATH}" --production-classes "${ROOT}/target/classes" \
+        --destination "${RESULT_DIR}/release")
+    cp "${RESULT_DIR}/release/release-artifact.json" "${RESULT_DIR}/release-artifact.json"
+    printf 'release_version=%s\nrelease_artifact_sha256=%s\n' \
+        "${REGULATOR_RELEASE_VERSION}" \
+        "$(sha256sum "${RESULT_DIR}/release-artifact.json" | awk '{print $1}')" >> "${RESULT_DIR}/run-metadata.txt"
+fi
 
 route_jvm_arguments=(--illegal-native-access=deny --add-modules=jdk.incubator.vector)
 if [[ "${ROUTE}" == native-access ]]; then
@@ -683,6 +697,7 @@ if [[ "${ROUTE}" == native-access ]]; then
 fi
 jmh_process_jvm_arguments=("${route_jvm_arguments[@]}" -Xms"${HEAP_SIZE}" -Xmx"${HEAP_SIZE}" -XX:+AlwaysPreTouch)
 jmh_fork_arguments="${jmh_process_jvm_arguments[*]}"
+jmh_launcher_jvm_arguments=("${route_jvm_arguments[@]}" -Xms64m -Xmx256m)
 jmh_host_compiler_arguments=()
 
 prepare_jmh_host_compiler_arguments()
@@ -813,6 +828,12 @@ prepare_trino_like()
 
 prepare_rebar()
 {
+    # Rebar's verification deadline includes JVM startup. Pre-touch can spend
+    # that entire allowance faulting unused heap pages before the runner starts.
+    # Keep each engine's heap size and correctness checks, but defer page faults
+    # in this untimed phase. Timed invocations explicitly restore pre-touch.
+    local REBAR_HEAP_PRETOUCH=false
+    export REBAR_HEAP_PRETOUCH
     REBAR_ROOT=${REBAR_ROOT:?REBAR_ROOT is required for Rebar baseline shards}
     export TRINO_COMPARATOR_WORK_DIR="${SHARED_WORK_DIR}/pinned-trino"
     if tr ',' '\n' <<<"${systems}" | grep -Fqx joni; then
@@ -1067,7 +1088,7 @@ run_calibration_jmh_with_classpath()
     local output=$3
     shift 3
     taskset --cpu-list "${CPU_LIST}" \
-        java "${route_jvm_arguments[@]}" \
+        java "${jmh_launcher_jvm_arguments[@]}" \
         -cp "${classpath}" \
         org.openjdk.jmh.Main "${filter}" \
         -f "${CALIBRATION_FORKS}" \
@@ -1077,7 +1098,7 @@ run_calibration_jmh_with_classpath()
         -r "${CALIBRATION_MEASUREMENT_TIME}" \
         -foe true \
         -prof gc \
-        -jvmArgsAppend "${jmh_fork_arguments}" \
+        -jvmArgs "${jmh_fork_arguments}" \
         -rf json \
         -rff "${output}" \
         "$@"
@@ -1143,7 +1164,7 @@ PY
         local output_prefix="${RESULT_DIR}/raw/protocol-${representative_index}"
         local reference_output="${output_prefix}-reference.json"
         taskset --cpu-list "${CPU_LIST}" \
-            java "${route_jvm_arguments[@]}" \
+            java "${jmh_launcher_jvm_arguments[@]}" \
             -cp "${classpath}" \
             org.openjdk.jmh.Main "${filter}" \
             -f "${PROTOCOL_QUALIFICATION_PROCESS_COUNT}" \
@@ -1153,7 +1174,7 @@ PY
             -r 1s \
             -foe true \
             -prof gc \
-            -jvmArgsAppend "${jmh_fork_arguments}" \
+            -jvmArgs "${jmh_fork_arguments}" \
             -rf json \
             -rff "${reference_output}" \
             "${parameter_arguments[@]}" |
@@ -1322,7 +1343,7 @@ run_jmh_with_classpath()
             done < <(tr ';' '\n' <<<"${full_parameters}")
             JMH_INPUT_FILES+=("${full_protocol_output}")
             taskset --cpu-list "${CPU_LIST}" \
-                java "${route_jvm_arguments[@]}" \
+                java "${jmh_launcher_jvm_arguments[@]}" \
                 -cp "${classpath}" \
                 org.openjdk.jmh.Main "^${full_protocol_benchmark//./\\.}$" \
                 -f 5 \
@@ -1332,7 +1353,7 @@ run_jmh_with_classpath()
                 -r 1s \
                 -foe true \
                 -prof gc \
-                -jvmArgsAppend "${jmh_fork_arguments}" \
+                -jvmArgs "${jmh_fork_arguments}" \
                 -rf json \
                 -rff "${full_protocol_output}" \
                 "${full_parameter_arguments[@]}"
@@ -1353,7 +1374,7 @@ run_joni_jmh_with_classpath()
     shift 3
     local joni_time=${BASELINE_JONI_JMH_TIME:-${JMH_PROCESS_TIME}}
     taskset --cpu-list "${CPU_LIST}" \
-        java "${route_jvm_arguments[@]}" \
+        java "${jmh_launcher_jvm_arguments[@]}" \
         -cp "${classpath}" \
         org.openjdk.jmh.Main "${filter}" \
         -f "${JONI_JMH_FORKS}" \
@@ -1363,7 +1384,7 @@ run_joni_jmh_with_classpath()
         -r "${joni_time}" \
         -foe true \
         -prof gc \
-        -jvmArgsAppend "${jmh_fork_arguments}" \
+        -jvmArgs "${jmh_fork_arguments}" \
         -rf json \
         -rff "${output}" \
         "$@"
@@ -1880,6 +1901,8 @@ run_memory_census_shard()
 
 run_rebar_shard()
 {
+    local REBAR_HEAP_PRETOUCH=true
+    export REBAR_HEAP_PRETOUCH
     run_rebar_primary_phase()
     {
         taskset --cpu-list "${CPU_LIST}" \

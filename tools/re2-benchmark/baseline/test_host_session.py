@@ -202,13 +202,13 @@ class HostFixture:
         session = {
             "schema_version": "2",
             "campaign_id": "campaign",
-            "platform": "c8i",
+            "platform": "r8i",
             "shard_id": "shard",
             "replica_id": "1",
             "instance_id": "i-1",
             "host_epoch": "epoch-1",
             "architecture": "intel",
-            "instance_type": "c8i.2xlarge",
+            "instance_type": "r8i.2xlarge",
             "availability_zone": "us-west-2a",
             "systems": systems,
         }

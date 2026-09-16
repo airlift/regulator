@@ -166,8 +166,8 @@ the frozen-source check correctly rejects as extra files. Do not exempt caches
 from source validation or reuse an already-modified extracted directory.
 
 Run `verify` with this classpath, then run `measure` with the same manifest,
-result directory, classpath, and native runner arguments, plus `--platform c9g`,
-`c8g`, or `c8i` and
+result directory, classpath, and native runner arguments, plus `--platform r9g`,
+`r8g`, or `r8i` and
 `--jvm-build-receipt target/language-jvm-build/jvm-build.json`.
 It refuses non-Linux hosts, a dirty source tree, changed runner binaries, the
 wrong pinned JDK, or a mismatched EC2 instance identity. Verification must be
@@ -212,7 +212,7 @@ python3 tools/re2-benchmark/language/fleet.py validate \
 
 Each partition contains one logical case and one language, with the comparator
 and both Regulator memory modes kept together. The everyday corpus produces
-39 partitions and 351 jobs across C9g, C8g, C8i and three independent host
+39 partitions and 351 jobs across R9g, R8g, R8i and three independent host
 replicas. The plan records the intended ceiling of 64 concurrent hosts.
 `fleet.py` does not allocate or schedule hosts, so that field is not a capacity
 reservation or an enforced scheduler setting.

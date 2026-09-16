@@ -47,7 +47,7 @@ class TestFleet(unittest.TestCase):
         for mutation in (lambda plan: plan["partitions"].pop(),
                          lambda plan: plan["partitions"].append(plan["partitions"][0]),
                          lambda plan: plan["jobs"].pop(),
-                         lambda plan: plan["jobs"][0].update(platform="c8i"),
+                         lambda plan: plan["jobs"][0].update(platform="r8i"),
                          lambda plan: plan.update(replicas=True),
                          lambda plan: plan.update(parent_manifest_sha256="changed"),
                          lambda plan: plan["partitions"][0].update(id="../../escape")):
@@ -107,11 +107,11 @@ class TestFleet(unittest.TestCase):
                 patch.object(collection, "verify", side_effect=make_results) as verify, \
                 patch.object(collection, "measure") as measure:
             fleet.run_job(self.directory, job["id"], results, "java", "classpath", "native", receipt)
-            host.assert_called_once_with("c9g")
+            host.assert_called_once_with("r9g")
             partition = self.directory / "partitions" / job["partition"]
             output = results / job["id"]
             verify.assert_called_once_with(partition, output, "java", "classpath", "native")
-            measure.assert_called_once_with(partition, output, "java", "classpath", "native", "c9g", receipt, None, None)
+            measure.assert_called_once_with(partition, output, "java", "classpath", "native", "r9g", receipt, None, None)
             self.assertEqual(collection.load(output / "job.json")["job"], job)
 
     def write_results(self, plan):

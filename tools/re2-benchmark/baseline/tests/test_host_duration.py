@@ -31,6 +31,30 @@ class TestHostDuration(unittest.TestCase):
                 _, _, _, host_seconds = host_duration.estimate(metadata, 600)
                 self.assertLessEqual(host_seconds, 5400)
 
+    def test_traditional_extra_full_timing_shards_fit_host_deadline(self):
+        with (BASELINE / "shard-dispatch.tsv").open() as source:
+            dispatch = [row for row in csv.DictReader(source, delimiter="\t")
+                        if row["shard_id"].startswith("traditional-extra-")]
+        self.assertEqual(8, len(dispatch))
+        for shard in dispatch:
+            with self.subTest(shard=shard["shard_id"]), tempfile.TemporaryDirectory() as directory:
+                metadata = []
+                for route, handler in (("native-access", "native_access_handler"),
+                                       ("object-row", "object_row_handler")):
+                    if shard[handler] == "-":
+                        continue
+                    destination = Path(directory) / route
+                    subprocess.run([str(BASELINE / "run-shard.sh"), shard["shard_id"], "qualification",
+                                    route, str(destination)],
+                                   env={**os.environ, "BASELINE_PLAN_ONLY": "true", "BASELINE_DEFER_ACCEPTANCE": "true"},
+                                   check=True, capture_output=True, text=True, timeout=30)
+                    path = destination / "run-metadata.txt"
+                    self.assertIn("jmh_execution_protocol=multi-row-process-full", path.read_text())
+                    self.assertIn("protocol_qualification_required=false", path.read_text())
+                    metadata.append(path)
+                _, _, _, host_seconds = host_duration.estimate(metadata, 600)
+                self.assertLessEqual(host_seconds, 5400)
+
     def write_metadata(self, root, route, seconds, shared):
         path = root / f"{route}.txt"
         path.write_text(

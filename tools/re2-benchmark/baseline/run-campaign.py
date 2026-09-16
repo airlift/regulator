@@ -23,6 +23,8 @@ import batch_acceptance
 import collection as language_collection
 import fleet as language_fleet
 from campaign import LanguageCampaign
+from topology import CONCURRENCY_SHARDS
+import released_artifact
 
 PROACTIVE_SPOT_CAPACITY_THRESHOLD = 32
 TOTAL_INSTANCE_LIMIT = 64
@@ -86,6 +88,8 @@ class Platform:
     cargo_package: str
     rust_package: str
     time_package: str
+    concurrency_instance_type: str = ""
+    concurrency_vcpus: int = 0
 
 
 @dataclass(frozen=True)
@@ -128,6 +132,12 @@ def parse_args():
     parser.add_argument("--max-concurrent-per-platform", type=int, default=TOTAL_INSTANCE_LIMIT)
     parser.add_argument("--shard", action="append", dest="selected_shards",
                         help="baseline shard to recollect; repeat to select a subset")
+    parser.add_argument("--release-version", default="",
+                        help="measure the pinned published JAR instead of source-built classes")
+    parser.add_argument("--smoke-protocol", choices=("smoke", "qualification"), default="smoke",
+                        help="use qualification timing in baseline smoke")
+    parser.add_argument("--phase-timeout-seconds", type=int,
+                        help="frozen phase wall-clock limit; otherwise derive from topology plus capacity waits")
     parser.add_argument("--candidate-ref")
     parser.add_argument("--candidate-archive", type=Path)
     parser.add_argument("--candidate-provenance", type=Path)
@@ -140,7 +150,33 @@ def language_campaign(arguments):
     return getattr(arguments, "language_campaign", None)
 
 
+def execution_policy(arguments):
+    return {"release_version": getattr(arguments, "release_version", ""),
+            "smoke_protocol": getattr(arguments, "smoke_protocol", "smoke"),
+            "phase_timeout_seconds": getattr(arguments, "topology_deadline_seconds", None)}
+
+
+def validate_execution_policy(arguments, result_root):
+    expected = execution_policy(arguments)
+    path = result_root / "execution-policy.json"
+    if path.exists():
+        if json.loads(path.read_text()) != expected:
+            raise UnsafeCampaignError("campaign execution policy changed on restart")
+        return
+    temporary = path.with_suffix(".new")
+    with temporary.open("w") as output:
+        json.dump(expected, output, sort_keys=True)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+    fsync_directory(result_root)
+
+
+
 def phase_timeout(arguments):
+    if getattr(arguments, "topology_deadline_seconds", None) is not None:
+        return arguments.topology_deadline_seconds
     language = language_campaign(arguments)
     if language:
         return language.deadline_seconds(arguments.max_concurrent, JOB_TIMEOUT_SECONDS,
@@ -174,7 +210,9 @@ def read_platforms(directory):
             row["glibc_package"],
             row["cargo_package"],
             row["rust_package"],
-            row["time_package"])
+            row["time_package"],
+            row.get("concurrency_instance_type", ""),
+            int(row.get("concurrency_vcpus", 0)))
             for row in csv.DictReader(input_file, delimiter="\t")]
 
 
@@ -224,10 +262,17 @@ def build_jobs(phase, platforms, shards, confirmation_jobs):
             for platform in platforms
         ]
     return [
-        Job(platform, shard, replica, host_epoch, 1, "spot")
+        Job(concurrency_platform(platform, shard), shard, replica, host_epoch, 1, "spot")
         for host_epoch, (platform, shard, replica) in enumerate(
             matrix, start=PHASE_HOST_EPOCH_START[phase])
     ]
+
+
+def concurrency_platform(platform, shard):
+    if shard in CONCURRENCY_SHARDS and platform.concurrency_instance_type:
+        return replace(platform, instance_type=platform.concurrency_instance_type, vcpus=platform.concurrency_vcpus)
+    return platform
+
 
 
 def platform_has_capacity(candidate, running, arguments):
@@ -246,13 +291,18 @@ def validate_configuration(arguments, jobs):
         raise SystemExit(f"per-platform concurrency must be between 1 and {TOTAL_INSTANCE_LIMIT}")
     if arguments.phase == "primary" and len(jobs) == 0:
         raise SystemExit("primary campaign has no jobs")
-    if arguments.phase == "primary":
-        bounded_waves = math.ceil(len(jobs) / arguments.max_concurrent)
-        required_seconds = (bounded_waves + 1) * JOB_TIMEOUT_SECONDS
-        if required_seconds > phase_timeout(arguments):
-            raise SystemExit(
-                "primary campaign topology cannot fit its phase deadline with one retry wave: "
-                f"requires {required_seconds}s, allows {phase_timeout(arguments)}s")
+    counts = {}
+    for job in jobs:
+        counts[job.platform.name] = counts.get(job.platform.name, 0) + 1
+    bounded_waves = max(math.ceil(len(jobs) / arguments.max_concurrent),
+                        max((math.ceil(count / per_platform) for count in counts.values()), default=0))
+    required_seconds = (bounded_waves + 1) * JOB_TIMEOUT_SECONDS
+    explicit_deadline = getattr(arguments, "phase_timeout_seconds", None)
+    arguments.topology_deadline_seconds = (explicit_deadline if explicit_deadline is not None else
+                                          max(PHASE_TIMEOUT_SECONDS[arguments.phase], required_seconds + 3600))
+    if arguments.topology_deadline_seconds < required_seconds:
+        raise SystemExit("campaign topology cannot fit its phase deadline with one retry wave: "
+                         f"requires {required_seconds}s, allows {arguments.topology_deadline_seconds}s")
     if language_campaign(arguments) and campaign_heap_size(arguments) != "8g":
         raise SystemExit("language protocol requires an 8g heap")
     identities = [job.identity for job in jobs]
@@ -394,6 +444,7 @@ def frozen_input_fingerprint(root, arguments, jobs_path):
     if language_campaign(arguments):
         tracked_inputs.extend(directory / "plan.json" for directory, _ in language_campaign(arguments).plans.values())
     return (
+        execution_policy(arguments),
         check_output(["git", "rev-parse", f"{arguments.candidate_ref}^{{commit}}"], cwd=root),
         tuple((str(path), hashlib.sha256(path.read_bytes()).hexdigest()) for path in tracked_inputs),
     )
@@ -446,7 +497,7 @@ def validate_phase_prerequisite(root, arguments, platforms, result_root, expecte
     platform_by_name = {platform.name: platform for platform in platforms}
     manifest = campaign_manifest(root, arguments)
     for ledger_receipt in ledger:
-        platform = platform_by_name[ledger_receipt["platform"]]
+        platform = concurrency_platform(platform_by_name[ledger_receipt["platform"]], ledger_receipt["shard_id"])
         job = Job(
             platform,
             ledger_receipt["shard_id"],
@@ -462,6 +513,9 @@ def validate_phase_prerequisite(root, arguments, platforms, result_root, expecte
                 manifest,
                 result_directory / "session.tsv",
                 result_directory / "observed-rows.tsv")
+            version = getattr(arguments, "release_version", "")
+            if version:
+                released_artifact.validate_baseline(result_directory, released_artifact.manifest(root, version))
         except (OSError, RuntimeError, ValidationError, ValueError) as error:
             raise SystemExit(
                 f"{phase} prerequisite artifacts are not accepted for {job.identity}: {error}") from error
@@ -763,7 +817,7 @@ def job_result_root(result_root, job):
 def job_environment(job, arguments, root, result_root):
     environment = os.environ.copy()
     architecture = job.platform.architecture
-    benchmark_protocol = "smoke" if arguments.phase == "smoke" else "qualification"
+    benchmark_protocol = getattr(arguments, "smoke_protocol", "smoke") if arguments.phase == "smoke" else "qualification"
     environment.update({
         "AWS_REGION": environment.get("AWS_REGION", "us-west-2"),
         "CAMPAIGN_PROVENANCE": "qualification",
@@ -776,6 +830,9 @@ def job_environment(job, arguments, root, result_root):
         "CAMPAIGN_HOST_EPOCH": str(job.host_epoch),
         "CAMPAIGN_ARCHITECTURES": architecture,
         "INSTANCE_MARKET_TYPE": job.market,
+        "REGULATOR_RELEASE_VERSION": getattr(arguments, "release_version", ""),
+        "BENCHMARK_CPU_LIST": "0-7" if job.shard in CONCURRENCY_SHARDS else "0",
+        "BENCHMARK_EXPECTED_VCPUS": str(job.platform.vcpus),
         "TIMEOUT_SECONDS": str(JOB_TIMEOUT_SECONDS),
         "RESULT_ROOT": str(job_result_root(result_root, job)),
         "TRINO_REVISION": "c7503d170344c4e266f03fdb39e53c82aa7e3594",
@@ -989,6 +1046,14 @@ def validate_capacity(path):
         raise RuntimeError("host-session observed an OOM kill")
     if exit_status != 0:
         raise RuntimeError(f"host-session capacity evidence reports exit status {exit_status}")
+    disk_fields = ("disk_available_before_bytes", "disk_available_after_bytes", "minimum_available_disk_bytes")
+    if any(field in values for field in disk_fields):
+        try:
+            before, after, minimum = (int(values[field]) for field in disk_fields)
+        except (KeyError, ValueError) as error:
+            raise RuntimeError("invalid disk capacity evidence") from error
+        if minimum < 2 * 1024**3 or min(before, after) < minimum:
+            raise RuntimeError("host-session did not preserve the required disk headroom")
     if values["capacity_status"] != "accepted":
         raise RuntimeError(f"host-session capacity status is {values['capacity_status']!r}")
     return values
@@ -1004,6 +1069,15 @@ def validate_job_artifacts(result_root, job):
     if not receipt.is_file():
         raise RuntimeError(f"{job.identity} has no acceptance receipt")
     validate_capacity(session / label / "re2-results" / "host-capacity.txt")
+    if job.platform.concurrency_instance_type:
+        environment = read_properties(receipt.parent / "environment-manifest.txt")
+        if environment.get("logical_cpu_count") != str(job.platform.vcpus):
+            raise UnsafeCampaignError("host logical CPU count differs from the frozen topology")
+        if job.workload == "baseline-shard":
+            expected_affinity = "0-7" if job.shard in CONCURRENCY_SHARDS else "0"
+            routes = list((receipt.parent / "routes").glob("*/run-metadata.txt"))
+            if not routes or any(read_properties(path).get("cpu_list") != expected_affinity for path in routes):
+                raise UnsafeCampaignError("route CPU affinity differs from the frozen topology")
     if job.workload == "language-batch":
         try:
             if batch_acceptance.validate(receipt.parent) != read_receipt(receipt):
@@ -1153,7 +1227,17 @@ def persist_accepted_receipt(path, receipt_path):
     return receipt
 
 
-def validate_receipt_candidate(root, arguments, job, receipt):
+def validate_receipt_candidate(root, arguments, job, receipt, receipt_path=None):
+    version = getattr(arguments, "release_version", "")
+    if version:
+        identity = released_artifact.manifest(root, version)
+        if job.workload == "language-batch":
+            if receipt.get("released_artifact") != identity:
+                raise UnsafeCampaignError("language receipt does not identify the selected release")
+        else:
+            if receipt_path is None:
+                raise UnsafeCampaignError("released baseline requires recovered artifact evidence")
+            released_artifact.validate_baseline(receipt_path.parent, identity)
     expected = {
         "campaign_id": arguments.campaign_id,
         "platform": job.platform.name,
@@ -1192,7 +1276,7 @@ def recover_accepted_sessions(root, arguments, result_root, jobs, accepted_sessi
         artifact_receipt = read_receipt(receipt_path)
         if artifact_receipt != receipt:
             raise UnsafeCampaignError(f"accepted ledger differs from artifacts for {job.identity}")
-        validate_receipt_candidate(root, arguments, job, receipt)
+        validate_receipt_candidate(root, arguments, job, receipt, receipt_path)
         accepted[logical_identity] = receipt
 
     for base_job in jobs:
@@ -1217,7 +1301,7 @@ def recover_accepted_sessions(root, arguments, result_root, jobs, accepted_sessi
                 raise UnsafeCampaignError(f"{job.identity} contains multiple acceptance receipts")
             receipt_path = validate_job_artifacts(result_root, job)
             receipt = read_receipt(receipt_path)
-            validate_receipt_candidate(root, arguments, job, receipt)
+            validate_receipt_candidate(root, arguments, job, receipt, receipt_path)
             accepted_candidates.append((job, receipt_path, receipt))
         if len(accepted_candidates) > 1:
             epochs = [job.host_epoch for job, _, _ in accepted_candidates]
@@ -1578,6 +1662,7 @@ def execute_jobs(arguments, root, result_root, jobs):
 
 
 def execute_jobs_locked(arguments, root, result_root, jobs):
+    validate_execution_policy(arguments, result_root)
     runner = root / "tools/re2-benchmark/aws/run-campaign.sh"
     jobs_path = result_root / "jobs.tsv"
     expected_fingerprint = frozen_input_fingerprint(root, arguments, jobs_path)
@@ -1771,7 +1856,7 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                         unresolved.append((job, failure_detail))
                     else:
                         receipt = read_receipt(receipt_path)
-                        validate_receipt_candidate(root, arguments, job, receipt)
+                        validate_receipt_candidate(root, arguments, job, receipt, receipt_path)
                         persist_accepted_receipt(accepted_sessions, receipt_path)
                         write_attempt(attempts_path, job, "accepted")
                         accepted[job.logical_identity] = receipt
@@ -1807,6 +1892,10 @@ def main():
     arguments = parse_args()
     directory = Path(__file__).resolve().parent
     root = directory.parents[2]
+    if arguments.release_version:
+        release = released_artifact.manifest(root, arguments.release_version)
+        if released_artifact.production_tree(root) != release["engine_tree"]:
+            raise SystemExit("production source differs from the selected release")
     result_root = arguments.result_root or root / "benchmark-results" / "pre-review-baseline" / arguments.campaign_id / arguments.phase
     platforms = read_platforms(directory)
     shards = read_shards(directory)

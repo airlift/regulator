@@ -142,7 +142,18 @@ def traditional_shard(pair):
     if class_name in {"BenchmarkRe2Search", "BenchmarkRe2SearchNfa"}:
         return "traditional-search"
     if class_name == "BenchmarkRe2SearchExtra":
-        return "traditional-extra"
+        # Keep this family on full timing after bounded-protocol disagreement.
+        # Separate case groups keep both memory routes within one host deadline.
+        case = pair.identifier.split("/")[1]
+        if case == "alternate-match" and pair.engine not in {"dfa", "re2"}:
+            return "traditional-extra-alt-engines"
+        if case in {"success", "success-one-byte"} and pair.engine not in {"dfa", "re2"}:
+            return "traditional-extra-success-engines"
+        groups = {"easy2": "easy2", "fanout": "fanout", "success": "success",
+                  "success-one-byte": "success1", "alternate-match": "alt-match", "big-fixed": "big-fixed"}
+        if case not in groups:
+            raise ValueError(f"unassigned traditional extra case: {pair.identifier}")
+        return f"traditional-extra-{groups[case]}"
     return "traditional-capture"
 
 

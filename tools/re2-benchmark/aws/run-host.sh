@@ -59,6 +59,11 @@ esac
 RESULT_DIR=$(mkdir -p "$3" && cd "$3" && pwd)
 PHYSICAL_CPU_LIST=$(lscpu -p=CPU,CORE,SOCKET | awk -F, '!/^#/ {key=$2 ":" $3; if (!seen[key]++) {cpus=(cpus == "" ? $1 : cpus "," $1)}} END {print cpus}')
 PHYSICAL_CORE_COUNT=$(awk -F, '{print NF}' <<<"${PHYSICAL_CPU_LIST}")
+LOGICAL_CPU_COUNT=$(nproc --all)
+if [[ -n "${BENCHMARK_EXPECTED_VCPUS:-}" && "${LOGICAL_CPU_COUNT}" != "${BENCHMARK_EXPECTED_VCPUS}" ]]; then
+    echo "Logical CPU count differs from the frozen worker topology" >&2
+    exit 1
+fi
 RE2_CAMPAIGN_ID=${RE2_CAMPAIGN_ID:?RE2_CAMPAIGN_ID is required}
 RE2_CAMPAIGN_PLATFORM=${RE2_CAMPAIGN_PLATFORM:?RE2_CAMPAIGN_PLATFORM is required}
 RE2_CAMPAIGN_SHARD_ID=${RE2_CAMPAIGN_SHARD_ID:?RE2_CAMPAIGN_SHARD_ID is required}
@@ -183,6 +188,8 @@ record_environment()
         printf 'campaign_architecture=%s\n' "${RE2_ENGINEERING_ARCHITECTURE:-unknown}"
         printf 'benchmark_mode=%s\n' "${BENCHMARK_MODE}"
         printf 'benchmark_heap_size=%s\n' "${BENCHMARK_HEAP_SIZE:-8g}"
+        printf 'regulator_release_version=%s\n' "${REGULATOR_RELEASE_VERSION:-}"
+        printf 'logical_cpu_count=%s\n' "${LOGICAL_CPU_COUNT}"
         printf 'baseline_protocol=%s\n' "${BASELINE_PROTOCOL}"
         printf 'baseline_selected_route=%s\n' "${BASELINE_SELECTED_ROUTE:-all}"
         printf 'baseline_joni_jmh_time=%s\n' "${BASELINE_JONI_JMH_TIME:-default}"
@@ -284,12 +291,14 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
     swap_total_bytes=$(awk '/^SwapTotal:/ {print $2 * 1024; exit}' /proc/meminfo)
     swap_free_before_bytes=$(awk '/^SwapFree:/ {print $2 * 1024; exit}' /proc/meminfo)
     oom_kills_before=$(awk '$1 == "oom_kill" {print $2; exit}' /proc/vmstat)
+    disk_available_before_bytes=$(df -B1 --output=avail "${REGULATOR_DIR}" | awk 'NR == 2 {print $1}')
     {
         printf 'memory_total_bytes=%.0f\n' "${memory_total_bytes}"
         printf 'memory_available_before_bytes=%.0f\n' "${memory_available_before_bytes}"
         printf 'swap_total_bytes=%.0f\n' "${swap_total_bytes}"
         printf 'swap_free_before_bytes=%.0f\n' "${swap_free_before_bytes}"
         printf 'oom_kills_before=%s\n' "${oom_kills_before}"
+        printf 'disk_available_before_bytes=%s\n' "${disk_available_before_bytes}"
     } > "${capacity_file}"
     if [[ "${BENCHMARK_MODE}" == language-batch ]]; then
         session_command=(bash "${REGULATOR_DIR}/tools/re2-benchmark/language/run-host-session.sh"
@@ -307,13 +316,16 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
     memory_available_after_bytes=$(awk '/^MemAvailable:/ {print $2 * 1024; exit}' /proc/meminfo)
     swap_free_after_bytes=$(awk '/^SwapFree:/ {print $2 * 1024; exit}' /proc/meminfo)
     oom_kills_after=$(awk '$1 == "oom_kill" {print $2; exit}' /proc/vmstat)
+    disk_available_after_bytes=$(df -B1 --output=avail "${REGULATOR_DIR}" | awk 'NR == 2 {print $1}')
+    minimum_available_disk_bytes=$((2 * 1024 * 1024 * 1024))
     minimum_available_memory_bytes=$((2 * 1024 * 1024 * 1024))
     minimum_fractional_memory_bytes=$(awk -v total="${memory_total_bytes}" 'BEGIN {printf "%.0f", total / 10}')
     if ((minimum_fractional_memory_bytes > minimum_available_memory_bytes)); then
         minimum_available_memory_bytes=${minimum_fractional_memory_bytes}
     fi
     capacity_status=accepted
-    if ((host_session_status != 0 ||
+    if ((disk_available_before_bytes < minimum_available_disk_bytes ||
+            disk_available_after_bytes < minimum_available_disk_bytes ||
             memory_available_after_bytes < minimum_available_memory_bytes ||
             swap_free_before_bytes < swap_total_bytes ||
             swap_free_after_bytes < swap_total_bytes ||
@@ -325,10 +337,13 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         printf 'minimum_available_memory_bytes=%s\n' "${minimum_available_memory_bytes}"
         printf 'swap_free_after_bytes=%.0f\n' "${swap_free_after_bytes}"
         printf 'oom_kills_after=%s\n' "${oom_kills_after}"
+        printf 'disk_available_after_bytes=%s\n' "${disk_available_after_bytes}"
+        printf 'minimum_available_disk_bytes=%s\n' "${minimum_available_disk_bytes}"
         printf 'capacity_status=%s\n' "${capacity_status}"
     } >> "${capacity_file}"
     if [[ "${capacity_status}" != accepted ]]; then
         echo "Host capacity gate rejected the baseline session; see ${capacity_file}" >&2
         exit 1
     fi
-exit 0
+# Preserve the dedicated protocol-rejection status only after resource checks.
+exit "${host_session_status}"

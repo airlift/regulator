@@ -1,6 +1,12 @@
 shard_id	native_access_handler	native_access_systems	object_row_handler	object_row_systems	semantic_tests	blocker
 traditional-search	traditional	regulator-native-access,native-re2-before,native-re2-after	traditional	regulator-object-row	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
-traditional-extra	traditional	regulator-native-access,native-re2-before,native-re2-after	traditional	regulator-object-row	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
+traditional-extra-easy2	traditional	regulator-native-access,native-re2-before,native-re2-after	traditional	regulator-object-row	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
+traditional-extra-fanout	traditional	regulator-native-access,native-re2-before,native-re2-after	traditional	regulator-object-row	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
+traditional-extra-success	traditional	regulator-native-access,native-re2-before,native-re2-after	traditional	regulator-object-row	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
+traditional-extra-success1	traditional	regulator-native-access,native-re2-before,native-re2-after	traditional	regulator-object-row	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
+traditional-extra-alt-match	traditional	regulator-native-access,native-re2-before,native-re2-after	traditional	regulator-object-row	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
+traditional-extra-alt-engines	traditional	regulator-native-access,native-re2-before,native-re2-after	-	-	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
+traditional-extra-big-fixed	traditional	regulator-native-access,native-re2-before,native-re2-after	traditional	regulator-object-row	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
 traditional-capture	traditional	regulator-native-access,native-re2-before,native-re2-after	traditional	regulator-object-row	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
 compile-public	jmh	regulator-native-access	jmh	regulator-object-row	TestBaselinePublicApiBenchmarks,TestBenchmarkRe2CompileFocused,TestBenchmarkRe2CompilerPhases,TestBenchmarkRe2PublicApi	-
 expression-plans-a	jmh	regulator-native-access	jmh	regulator-object-row	TestBenchmarkExpressionPlans,TestRe2BooleanPlans,TestRe2BooleanPlanSemantics,TestUtf8	-
@@ -36,3 +42,4 @@ rebar-t	rebar	regulator-native-access,native-re2-before,native-re2-after,joni	re
 lifecycle	lifecycle	regulator-native-access	lifecycle	regulator-object-row	TestBenchmarkDfaCache	-
 lifecycle-shared-cold	lifecycle	regulator-native-access	lifecycle	regulator-object-row	TestBenchmarkDfaCache	-
 retained-memory	memory-census	regulator-native-access,joni	memory-census	regulator-object-row	TestBenchmarkDfaCache	-
+traditional-extra-success-engines	traditional	regulator-native-access,native-re2-before,native-re2-after	-	-	TestTraditionalBenchmarkInputs,TestBenchmarkRe2SearchExtra	-
