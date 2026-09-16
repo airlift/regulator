@@ -46,6 +46,15 @@ class LanguageCampaign:
             selected.setdefault((partition["language"], model), partition["id"])
         result = set(selected.values())
         partitions = {(partition["case"], partition["language"]): partition["id"] for partition in plan["partitions"]}
+        isolated = {partitions[tuple(pair)] for pair in plan.get("duration_policy", {}).get("isolated_pairs", [])}
+        result.update(isolated)
+        if "duration_policy" in plan:
+            # Batches include isolated partitions in the same duration order.
+            # Exercise the longest packed batch as well as every isolated one.
+            packed = next((batch for batch in plan["host_batches"]
+                           if all(identity.split("/")[1] not in isolated for identity in batch["jobs"])), None)
+            if packed is not None:
+                result.update(identity.split("/")[1] for identity in packed["jobs"])
         for pair in manifest.get("smoke_required_pairs", []):
             if not isinstance(pair, list) or len(pair) != 2 or not all(isinstance(value, str) for value in pair):
                 raise ValueError("invalid required smoke case/language pair")

@@ -13,13 +13,15 @@ from pathlib import Path
 
 import collection
 import source_bracket
+import batching
 
 
 PLATFORMS = ("r9g", "r8g", "r8i")
 BATCH_OPERATION_BUDGET = 1
+DEFAULT_MAX_CONCURRENT_HOSTS = 64
 
 
-def host_batches(manifest, partitions, replicas, operation_budget=None):
+def host_batches(manifest, partitions, replicas, operation_budget=None, duration_policy=None):
     """Group whole language partitions, never split a native/safe/comparator comparison."""
     if operation_budget is None:
         operation_budget = BATCH_OPERATION_BUDGET
@@ -36,6 +38,9 @@ def host_batches(manifest, partitions, replicas, operation_budget=None):
         operations += count
     if group:
         groups.append(group)
+    if duration_policy is not None:
+        counts = {part["id"]: len(collection.case_operations(manifest, cases[part["case"]])) for part in partitions}
+        groups = batching.groups(partitions, counts, operation_budget, duration_policy)
     return [{"id": f"{platform}/{manifest['suite']}-{index:04d}/replica-{replica}",
              "platform": platform, "shard": f"{manifest['suite']}-{index:04d}", "replica": replica,
              "jobs": [f"{platform}/{partition}/replica-{replica}" for partition in group]}
@@ -54,12 +59,15 @@ def copy_inputs(manifest, source, destination):
         shutil.copyfile(source / name, target)
 
 
-def prepare(manifest_directory, destination, replicas=3, selection=None, operation_budget=None):
+def prepare(manifest_directory, destination, replicas=3, selection=None, operation_budget=None, duration_policy=None,
+            max_concurrent_hosts=DEFAULT_MAX_CONCURRENT_HOSTS):
     manifest_directory, destination = manifest_directory.resolve(), destination.resolve()
     if operation_budget is None:
         operation_budget = BATCH_OPERATION_BUDGET
     if type(replicas) is not int or replicas < 1:
         raise ValueError("replicas must be positive")
+    if type(max_concurrent_hosts) is not int or max_concurrent_hosts < 1:
+        raise ValueError("max concurrent hosts must be a positive integer")
     manifest = collection.load(manifest_directory / "manifest.json")
     collection.validate_manifest(manifest, manifest_directory)
     if "parent_manifest_sha256" in manifest or "selected_languages" in manifest:
@@ -70,6 +78,8 @@ def prepare(manifest_directory, destination, replicas=3, selection=None, operati
         raise ValueError('invalid or duplicate fleet selection')
     if type(operation_budget) is not int or not 1 <= operation_budget <= 16:
         raise ValueError('operation budget must be between 1 and 16')
+    if duration_policy is not None:
+        batching.validate(duration_policy, [{"case": case, "language": language} for case, language in selected])
     destination.mkdir(parents=True, exist_ok=False)
     source = destination / "source"
     source.mkdir()
@@ -96,11 +106,13 @@ def prepare(manifest_directory, destination, replicas=3, selection=None, operati
              "partition": partition["id"], "replica": replica}
             for partition in partitions for replica in range(1, replicas + 1) for platform in PLATFORMS]
     plan = {"schema_version": 2, "parent_manifest_sha256": parent_hash, "replicas": replicas,
-            "platforms": list(PLATFORMS), "max_concurrent_hosts": 64,
+            "platforms": list(PLATFORMS), "max_concurrent_hosts": max_concurrent_hosts,
             "capacity_policy": "up to the limit; continue with available hosts",
             "partitions": partitions, "jobs": jobs,
-            "host_batches": host_batches(manifest, partitions, replicas, operation_budget),
+            "host_batches": host_batches(manifest, partitions, replicas, operation_budget, duration_policy),
             "batch_operation_budget": operation_budget}
+    if duration_policy is not None:
+        plan["duration_policy"] = duration_policy
     if selection is not None:
         plan['selection'] = [list(identity) for identity in sorted(selected)]
     collection.save(destination / "plan.json", plan)
@@ -120,7 +132,7 @@ def validate(directory):
     parent_hash = collection.digest((source / "manifest.json").read_bytes())
     if (plan["schema_version"] != 2 or plan["parent_manifest_sha256"] != parent_hash or
             plan["platforms"] != list(PLATFORMS) or type(plan["replicas"]) is not int or plan["replicas"] < 1 or
-            plan["max_concurrent_hosts"] != 64):
+            type(plan["max_concurrent_hosts"]) is not int or plan["max_concurrent_hosts"] < 1):
         raise ValueError("invalid fleet protocol or source identity")
     expected = {(case["id"], language) for case in manifest["cases"] for language in collection.ENGINES}
     if 'selection' in plan:
@@ -161,7 +173,7 @@ def validate(directory):
     budget = plan.get('batch_operation_budget')
     if type(budget) is not int or not 1 <= budget <= 16:
         raise ValueError('invalid batch operation budget')
-    if plan.get("host_batches") != host_batches(manifest, plan["partitions"], plan["replicas"], budget):
+    if plan.get("host_batches") != host_batches(manifest, plan["partitions"], plan["replicas"], budget, plan.get("duration_policy")):
         raise ValueError("incomplete or changed host batch assignments")
     return plan
 
@@ -381,8 +393,10 @@ def main():
     prepare_parser.add_argument("--manifest-directory", type=Path, required=True)
     prepare_parser.add_argument("--output-directory", type=Path, required=True)
     prepare_parser.add_argument("--replicas", type=int, default=3)
+    prepare_parser.add_argument("--max-concurrent-hosts", type=int, default=DEFAULT_MAX_CONCURRENT_HOSTS)
     prepare_parser.add_argument("--selection", type=Path, help="JSON array of [case ID, language] pairs")
     prepare_parser.add_argument("--batch-operation-budget", type=int, default=BATCH_OPERATION_BUDGET)
+    prepare_parser.add_argument("--duration-policy", type=Path, help="frozen partition duration estimates and isolated slow comparisons")
     package_parser = commands.add_parser("package-job")
     package_parser.add_argument("--plan-directory", type=Path, required=True)
     package_parser.add_argument("--job", required=True)
@@ -420,7 +434,8 @@ def main():
     if args.command == "prepare":
         selection = collection.load(args.selection) if args.selection else None
         plan = prepare(args.manifest_directory, args.output_directory, args.replicas,
-                       selection, args.batch_operation_budget)
+                       selection, args.batch_operation_budget, collection.load(args.duration_policy) if args.duration_policy else None,
+                       max_concurrent_hosts=args.max_concurrent_hosts)
         print(f"Prepared {len(plan['jobs'])} same-host jobs; no hosts allocated")
     elif args.command == "package-job":
         package_job(args.plan_directory, args.job, args.output_directory)

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
@@ -80,6 +80,34 @@ class TestRunCampaign(unittest.TestCase):
             candidate_archive_sha256="0" * 64,
             engine_tree="d" * 40)
 
+    def test_shared_fleet_contains_rejections_after_cleanup(self):
+        for classification in ("protocol-qualification", "benchmark-failure", "none", "invalid-artifacts"):
+            with self.subTest(classification=classification), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                result_root = root / "results"
+                result_root.mkdir()
+                arguments = self.arguments(root, maximum_concurrent=2)
+                budget = Mock(policy={"hourly_rates": {self.platform.instance_type: {"spot": 0.2}}})
+                budget.reserve.return_value = (True, "")
+                arguments.shared_budget = budget
+                jobs = [RUN_CAMPAIGN.Job(self.platform, shard, 1, index, 1, "spot")
+                        for index, shard in enumerate(("traditional-extra", "traditional-search", "traditional-capture"), 1)]
+                processes = [FakeProcess(100 + job.host_epoch, status=0 if classification == "invalid-artifacts" else 1,
+                             poll_action=lambda job=job: self.write_cleanup_session(
+                                 result_root, job, failure_classification=classification)) for job in jobs]
+                with patch.object(RUN_CAMPAIGN, "recover_budget_reservations"), \
+                        patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=processes), \
+                        patch.object(RUN_CAMPAIGN.time, "sleep"):
+                    with self.assertRaises(SystemExit):
+                        RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, jobs)
+                budget.halt.assert_not_called()
+                self.assertEqual(budget.release.call_count, 3)
+                self.assertTrue(all(not process.signals for process in processes))
+                unresolved = (result_root / "unresolved-jobs.tsv").read_text()
+                for job in jobs:
+                    self.assertIn(job.shard, unresolved)
+                self.assertNotIn("accepted", (result_root / "job-attempts.tsv").read_text())
+
     def test_release_campaign_rejects_missing_and_different_language_artifacts(self):
         root = SCRIPT.parents[3]
         arguments = self.arguments(root)
@@ -89,7 +117,6 @@ class TestRunCampaign(unittest.TestCase):
             with self.subTest(receipt=receipt), self.assertRaisesRegex(RuntimeError, "selected release"):
                 RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, job, receipt)
 
-
     def test_release_campaign_requires_baseline_artifact_proof_on_recovery(self):
         root = SCRIPT.parents[3]
         arguments = self.arguments(root)
@@ -98,6 +125,15 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "recovered artifact evidence"):
             RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, job, {})
 
+    def test_platform_limit_applies_independently_of_global_capacity(self):
+        arguments = SimpleNamespace(max_concurrent=9, max_concurrent_per_platform=3)
+        job = SimpleNamespace(platform=SimpleNamespace(name='r9g'))
+        other = SimpleNamespace(platform=SimpleNamespace(name='r8i'))
+        running = {index: (None, job, None) for index in range(3)}
+        self.assertFalse(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
+        self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(other, running, arguments))
+        del running[0]
+        self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
 
     def test_pinned_jobs_allocate_two_vcpus_except_multicore_shard(self):
         platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
@@ -113,16 +149,68 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual(environment["BENCHMARK_EXPECTED_VCPUS"], str(expected_vcpus))
             self.assertEqual(environment["BENCHMARK_CPU_LIST"], "0-7" if expected_vcpus == 8 else "0")
 
+    def test_spot_only_replacements_never_fall_back(self):
+        for attempt in (1, 2):
+            for classification, detail in (
+                    ("retryable-spot", "launch-capacity:InsufficientInstanceCapacity"),
+                    ("retryable-spot", "instance-terminated-capacity-oversubscribed"),
+                    ("retryable-capacity", "vcpu-limit:VcpuLimitExceeded"),
+                    ("retryable-infrastructure", "wrapper failed")):
+                with self.subTest(attempt=attempt, classification=classification, detail=detail):
+                    job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, attempt, "spot")
+                    replacement = RUN_CAMPAIGN.replacement_job(
+                        job, 11, classification, detail, spot_only=True)
+                    self.assertEqual(replacement.market, "spot")
+                    self.assertEqual(replacement.attempt, attempt + 1)
+        job = RUN_CAMPAIGN.replace(job, market="on-demand")
+        with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "On-Demand"):
+            RUN_CAMPAIGN.replacement_job(job, 11, "retryable-spot", "interrupted", spot_only=True)
 
-    def test_platform_limit_applies_independently_of_global_capacity(self):
-        arguments = SimpleNamespace(max_concurrent=9, max_concurrent_per_platform=3)
-        job = SimpleNamespace(platform=SimpleNamespace(name='r9g'))
-        other = SimpleNamespace(platform=SimpleNamespace(name='r8i'))
-        running = {index: (None, job, None) for index in range(3)}
-        self.assertFalse(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
-        self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(other, running, arguments))
-        del running[0]
-        self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
+    def test_spot_only_policy_and_reserve_are_frozen_on_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            arguments = SimpleNamespace(spot_only=True, spot_vcpu_reserve=0)
+            RUN_CAMPAIGN.validate_execution_policy(arguments, root)
+            RUN_CAMPAIGN.validate_execution_policy(arguments, root)
+            arguments.spot_only = False
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
+                RUN_CAMPAIGN.validate_execution_policy(arguments, root)
+            arguments.spot_only, arguments.spot_vcpu_reserve = True, 32
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
+                RUN_CAMPAIGN.validate_execution_policy(arguments, root)
+            arguments.spot_vcpu_reserve = 0
+            arguments.smoke_protocol = 'qualification'
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
+                RUN_CAMPAIGN.validate_execution_policy(arguments, root)
+
+    def test_spot_only_launcher_rejects_on_demand_before_aws(self):
+        environment = dict(os.environ, CAMPAIGN_SPOT_ONLY="1", INSTANCE_MARKET_TYPE="on-demand")
+        result = subprocess.run([str(AWS_RUNNER), "test"], env=environment, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Spot-only policy prohibits On-Demand", result.stderr)
+
+    def test_spot_only_quota_shortage_waits_without_on_demand(self):
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result_root = root / "results"
+            result_root.mkdir()
+            arguments = self.arguments(root)
+            arguments.spot_only, arguments.spot_vcpu_reserve = True, 0
+            process = FakeProcess(110, status=1, poll_action=lambda: self.write_cleanup_session(
+                result_root, job, failure_classification="benchmark-failure"))
+            with patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=[
+                        {"available": 0}, {"available": 8}]), \
+                    patch.object(RUN_CAMPAIGN, "current_on_demand_capacity") as on_demand, \
+                    patch.object(RUN_CAMPAIGN, "CAPACITY_RETRY_SECONDS", 0), \
+                    patch.object(RUN_CAMPAIGN.time, "sleep"), \
+                    patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process) as popen:
+                with self.assertRaises(SystemExit):
+                    RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, [job])
+            on_demand.assert_not_called()
+            self.assertEqual(popen.call_args.kwargs["env"]["INSTANCE_MARKET_TYPE"], "spot")
+            self.assertEqual(popen.call_args.kwargs["env"]["CAMPAIGN_SPOT_ONLY"], "1")
+            self.assertIn("Spot-only policy waiting", (result_root / "job-attempts.tsv").read_text())
 
     def frozen_candidate(self, root):
         repository = root / "repository"
@@ -650,18 +738,112 @@ class TestRunCampaign(unittest.TestCase):
             [(replica, platform) for replica in (1, 2, 3) for platform in ("r8i", "r8g")],
             [(job.replica, job.platform.name) for job in jobs[:6]])
 
-    def test_campaign_accepts_up_to_sixty_four_concurrent_hosts(self):
+    def test_shared_policy_checks_the_actual_aws_account_and_region(self):
+        arguments = SimpleNamespace(shared_budget=SimpleNamespace(
+            policy={"account": "123456789012", "region": "us-east-2"}))
+        for account, region in (("234567890123", "us-east-2"), ("123456789012", "us-west-2")):
+            with self.subTest(account=account, region=region), \
+                    patch.dict(os.environ, {"AWS_REGION": region}), \
+                    patch.object(RUN_CAMPAIGN, "check_output", return_value=account), \
+                    self.assertRaisesRegex(SystemExit, "differs from the shared fleet policy"):
+                RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+
+    def test_aws_preflight_uses_routed_worker_topologies(self):
+        platform = RUN_CAMPAIGN.replace(
+            self.platform,
+            instance_type="r8i.large",
+            vcpus=2,
+            concurrency_instance_type="r8i.2xlarge",
+            concurrency_vcpus=8)
+        jobs = RUN_CAMPAIGN.build_jobs("smoke", [platform], ["lifecycle-shared-cold"], None)
+        arguments = SimpleNamespace(shared_budget=None, spot_only=True, spot_vcpu_reserve=4)
+        spot_quota = 11
+
+        def aws_result(command, **_):
+            if "get-caller-identity" in command:
+                return "123456789012"
+            if RUN_CAMPAIGN.STANDARD_SPOT_QUOTA_CODE in command:
+                return str(spot_quota)
+            if RUN_CAMPAIGN.STANDARD_ON_DEMAND_QUOTA_CODE in command:
+                return "100"
+            if "describe-images" in command:
+                return "x86_64\tavailable\t137112412989"
+            if "describe-instance-type-offerings" in command:
+                return "us-west-2a" if "Name=instance-type,Values=r8i.large" in command else ""
+            raise AssertionError(command)
+
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
+                self.assertRaisesRegex(SystemExit, "cannot admit one host"):
+            RUN_CAMPAIGN.validate_aws(arguments, [platform], jobs)
+
+        spot_quota = 12
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
+                self.assertRaisesRegex(SystemExit, "r8i.2xlarge is not offered"):
+            RUN_CAMPAIGN.validate_aws(arguments, [platform], jobs)
+
+    def test_aws_preflight_rejects_deadline_capacity_above_effective_spot_quota(self):
+        policy = {"account": "123456789012", "region": "us-west-2",
+                  "max_vcpus": 64, "spot_vcpu_reserve": 16}
+        arguments = SimpleNamespace(
+            shared_budget=SimpleNamespace(policy=policy), spot_only=True, spot_vcpu_reserve=16)
+
+        def aws_result(command, **_):
+            if "get-caller-identity" in command:
+                return policy["account"]
+            if RUN_CAMPAIGN.STANDARD_SPOT_QUOTA_CODE in command:
+                return "64"
+            if RUN_CAMPAIGN.STANDARD_ON_DEMAND_QUOTA_CODE in command:
+                return "100"
+            if "describe-images" in command:
+                return "x86_64\tavailable\t137112412989"
+            if "describe-instance-type-offerings" in command:
+                return "us-west-2a"
+            raise AssertionError(command)
+
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
+                self.assertRaisesRegex(SystemExit, "max_vcpus exceeds"):
+            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+        policy["max_vcpus"] = 48
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
+            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+
+    def test_campaign_concurrency_uses_configuration(self):
         jobs = RUN_CAMPAIGN.build_jobs(
             "primary", [self.platform], ["traditional-search"], None)
+        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary")
+        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.execute = True
+        with self.assertRaisesRegex(SystemExit, "requires a shared fleet budget"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.shared_budget = SimpleNamespace(policy={"max_hosts": 512, "max_vcpus": 1024,
+                                                          "spot_vcpu_reserve": 16})
+        arguments.spot_only, arguments.spot_vcpu_reserve = True, 16
+        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.spot_vcpu_reserve = 0
+        with self.assertRaisesRegex(SystemExit, "reserve matching its policy"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.spot_vcpu_reserve = 16
+        arguments.max_concurrent = 0
+        with self.assertRaisesRegex(SystemExit, "positive integer"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
 
-        RUN_CAMPAIGN.validate_configuration(
-            SimpleNamespace(campaign_id="baseline", max_concurrent=64, phase="primary"),
-            jobs)
-
-        with self.assertRaisesRegex(SystemExit, "between 1 and 64"):
-            RUN_CAMPAIGN.validate_configuration(
-                SimpleNamespace(campaign_id="baseline", max_concurrent=65, phase="primary"),
-                jobs)
+    def test_deadline_uses_shared_fleet_host_and_vcpu_limits(self):
+        jobs = RUN_CAMPAIGN.build_jobs("primary", [self.platform], ["traditional-search"], None)
+        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary",
+                                    spot_only=True, spot_vcpu_reserve=0,
+                                    shared_budget=SimpleNamespace(policy={"max_hosts": 512, "max_vcpus": 8,
+                                                                         "spot_vcpu_reserve": 0}),
+                                    phase_timeout_seconds=2 * RUN_CAMPAIGN.JOB_TIMEOUT_SECONDS)
+        with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.shared_budget.policy.update(max_vcpus=1024, max_hosts=1)
+        with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.shared_budget.policy["max_hosts"] = 512
+        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.shared_budget.policy["max_vcpus"] = 1
+        with self.assertRaisesRegex(SystemExit, "cannot admit every worker type"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
 
     def test_primary_topology_fits_deadline_with_retry_headroom(self):
         platforms = [
@@ -684,7 +866,6 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(
                 SimpleNamespace(campaign_id="baseline", max_concurrent=32, phase="primary", phase_timeout_seconds=36000),
                 jobs)
-
 
     def test_full_manifest_deadline_accounts_for_platform_and_vcpu_limits(self):
         jobs = RUN_CAMPAIGN.build_jobs("primary", RUN_CAMPAIGN.read_platforms(SCRIPT.parent),
@@ -723,6 +904,30 @@ class TestRunCampaign(unittest.TestCase):
                 self.assertEqual(
                     environment["BASELINE_EXPECTED_ENGINE_TREE"],
                     "d" * 40)
+
+    def test_spot_retry_visits_each_pool_independently_of_global_epochs(self):
+        source = AWS_RUNNER.read_text()
+        selector = source[source.index('select_subnet()'):source.index('\ncreate_user_data()')]
+        fixture = '''
+aws_cli() {
+    if [[ "$*" == *describe-instance-type-offerings* ]]; then
+        printf 'us-west-2a us-west-2b us-west-2c us-west-2d\\n'
+    else
+        printf 'subnet-a subnet-b subnet-c subnet-d\\n'
+    fi
+}
+VPC_ID=vpc-test
+CAMPAIGN_PLATFORM=r8i
+CAMPAIGN_SHARD_ID=rebar-i
+CAMPAIGN_REPLICA_ID=1
+for CAMPAIGN_ATTEMPT in 1 2 3 4; do
+    CAMPAIGN_HOST_EPOCH=$((CAMPAIGN_ATTEMPT * 4 + 1))
+    select_subnet r8i.large
+done
+'''
+        result = subprocess.run(['bash', '-c', selector + fixture], capture_output=True, text=True, check=True)
+        self.assertEqual(set(result.stdout.splitlines()), {'subnet-a', 'subnet-b', 'subnet-c', 'subnet-d'})
+        self.assertEqual(len(result.stdout.splitlines()), 4)
 
     def test_aws_command_uses_standard_credential_chain_without_profile(self):
         with patch.dict(os.environ, {"AWS_REGION": "us-east-1"}, clear=True):
@@ -1718,6 +1923,50 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual(replacement.attempt, 2)
             self.assertEqual(next_epoch, 12)
 
+    def test_budget_recovery_releases_settled_prelaunch_reservation(self):
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result_root = Path(temporary_directory)
+            attempts = result_root / "job-attempts.tsv"
+            RUN_CAMPAIGN.write_attempt(attempts, job, "starting")
+            budget = Mock()
+            budget.reservations.return_value = [{
+                "campaign_id": "baseline",
+                "logical_identity": job.logical_identity,
+                "host_epoch": job.host_epoch,
+                "attempt": job.attempt,
+            }]
+
+            with patch.object(RUN_CAMPAIGN, "wrapper_process_id", return_value=None), \
+                    patch.object(RUN_CAMPAIGN.time, "sleep"):
+                RUN_CAMPAIGN.settle_detached_attempts(result_root, [job], attempts)
+            RUN_CAMPAIGN.recover_budget_reservations(
+                budget, SimpleNamespace(campaign_id="baseline"), result_root, [job], attempts)
+
+            budget.release.assert_called_once_with("baseline", 10, cleanup_verified=True)
+
+    def test_budget_recovery_requires_cleanup_after_launch(self):
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result_root = Path(temporary_directory)
+            attempts = result_root / "job-attempts.tsv"
+            RUN_CAMPAIGN.write_attempt(attempts, job, "starting")
+            RUN_CAMPAIGN.write_attempt(attempts, job, "started", "wrapper_pid=123")
+            RUN_CAMPAIGN.write_attempt(attempts, job, "retryable-infrastructure", "controller stopped")
+            budget = Mock()
+            budget.reservations.return_value = [{
+                "campaign_id": "baseline",
+                "logical_identity": job.logical_identity,
+                "host_epoch": job.host_epoch,
+                "attempt": job.attempt,
+            }]
+
+            with self.assertRaisesRegex(RuntimeError, "produced no result directory"):
+                RUN_CAMPAIGN.recover_budget_reservations(
+                    budget, SimpleNamespace(campaign_id="baseline"), result_root, [job], attempts)
+
+            budget.release.assert_not_called()
+
     def test_resume_epoch_accounts_for_accepted_replacement(self):
         accepted_job = RUN_CAMPAIGN.Job(
             self.platform, "traditional-search", 1, 1, 1, "spot")
@@ -1915,11 +2164,13 @@ class TestRunCampaign(unittest.TestCase):
             self.platform, "traditional-search", 1, 10, 1, "spot")
         instances = [
             {
+                "instance_id": "i-external",
                 "instance_type": "m8gd.4xlarge",
                 "lifecycle": "spot",
                 "tags": [],
             },
             {
+                "instance_id": "i-local",
                 "instance_type": "r8i.2xlarge",
                 "lifecycle": "spot",
                 "tags": [
@@ -1928,13 +2179,27 @@ class TestRunCampaign(unittest.TestCase):
                 ],
             },
             {
+                "instance_id": "i-on-demand",
                 "instance_type": "r8i.2xlarge",
                 "lifecycle": None,
                 "tags": [],
             },
         ]
+        requests = [
+            {
+                "instance_id": "i-local",
+                "instance_type": "r8i.2xlarge",
+                "tags": [],
+            },
+            {
+                "instance_id": None,
+                "instance_type": "r8g.large",
+                "tags": [],
+            },
+        ]
         descriptions = [
             {"instance_type": "r8i.2xlarge", "vcpus": 8},
+            {"instance_type": "r8g.large", "vcpus": 2},
             {"instance_type": "m8gd.4xlarge", "vcpus": 16},
         ]
 
@@ -1943,6 +2208,8 @@ class TestRunCampaign(unittest.TestCase):
                 return "352"
             if "describe-instances" in command:
                 return json.dumps(instances)
+            if "describe-spot-instance-requests" in command:
+                return json.dumps(requests)
             if "describe-instance-types" in command:
                 return json.dumps(descriptions)
             raise AssertionError(command)
@@ -1953,10 +2220,10 @@ class TestRunCampaign(unittest.TestCase):
 
         self.assertEqual(capacity, {
             "quota": 352,
-            "used": 16,
+            "used": 18,
             "reserved": 8,
             "safety_reserve": 32,
-            "available": 296,
+            "available": 294,
         })
 
     def test_spot_quota_shortage_changes_unlaunched_job_to_on_demand(self):

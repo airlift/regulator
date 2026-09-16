@@ -11,9 +11,23 @@ TRANSFER_PREFIX=${TRANSFER_PREFIX:-}
 INTEL_INSTANCE_TYPE=${INTEL_INSTANCE_TYPE:-r8i.large}
 ARM_INSTANCE_TYPE=${ARM_INSTANCE_TYPE:-r8g.large}
 INSTANCE_MARKET_TYPE=${INSTANCE_MARKET_TYPE:-on-demand}
+CAMPAIGN_SPOT_ONLY=${CAMPAIGN_SPOT_ONLY:-0}
+CAMPAIGN_SPOT_MAX_PRICE=${CAMPAIGN_SPOT_MAX_PRICE:-}
+if [[ -n "${CAMPAIGN_SPOT_MAX_PRICE}" && ! "${CAMPAIGN_SPOT_MAX_PRICE}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    echo "Invalid Spot price ceiling" >&2
+    exit 1
+fi
 REGULATOR_RELEASE_VERSION=${REGULATOR_RELEASE_VERSION:-}
 if [[ -n "${REGULATOR_RELEASE_VERSION}" && ! "${REGULATOR_RELEASE_VERSION}" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
     echo "Invalid release version" >&2
+    exit 1
+fi
+if [[ "${CAMPAIGN_SPOT_ONLY}" != 0 && "${CAMPAIGN_SPOT_ONLY}" != 1 ]]; then
+    echo "CAMPAIGN_SPOT_ONLY must be 0 or 1" >&2
+    exit 1
+fi
+if [[ "${CAMPAIGN_SPOT_ONLY}" == 1 && "${INSTANCE_MARKET_TYPE}" != spot ]]; then
+    echo "Spot-only policy prohibits On-Demand launches" >&2
     exit 1
 fi
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-5400}
@@ -26,6 +40,7 @@ CAMPAIGN_PLATFORM=${CAMPAIGN_PLATFORM:-r8i}
 CAMPAIGN_SHARD_ID=${CAMPAIGN_SHARD_ID:-traditional-search}
 CAMPAIGN_REPLICA_ID=${CAMPAIGN_REPLICA_ID:-1}
 CAMPAIGN_HOST_EPOCH=${CAMPAIGN_HOST_EPOCH:-1}
+CAMPAIGN_ATTEMPT=${CAMPAIGN_ATTEMPT:-1}
 BASELINE_PROTOCOL=${BASELINE_PROTOCOL:-qualification}
 BASELINE_PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
 BASELINE_CANDIDATE_ARCHIVE=${BASELINE_CANDIDATE_ARCHIVE:-}
@@ -157,8 +172,9 @@ if [[ "${CAMPAIGN_MODE}" == baseline-shard ]] &&
     echo "CAMPAIGN_SHARD_ID is not in the baseline shard manifest: ${CAMPAIGN_SHARD_ID}" >&2
     exit 1
 fi
-if [[ ! ${CAMPAIGN_REPLICA_ID} =~ ^[1-9][0-9]*$ || ! ${CAMPAIGN_HOST_EPOCH} =~ ^[1-9][0-9]*$ ]]; then
-    echo "CAMPAIGN_REPLICA_ID and CAMPAIGN_HOST_EPOCH must be positive integers" >&2
+if [[ ! ${CAMPAIGN_REPLICA_ID} =~ ^[1-9][0-9]*$ || ! ${CAMPAIGN_HOST_EPOCH} =~ ^[1-9][0-9]*$ ||
+        ! ${CAMPAIGN_ATTEMPT} =~ ^[1-9][0-9]*$ ]]; then
+    echo "CAMPAIGN_REPLICA_ID, CAMPAIGN_HOST_EPOCH, and CAMPAIGN_ATTEMPT must be positive integers" >&2
     exit 1
 fi
 case "${CAMPAIGN_PLATFORM}" in
@@ -834,6 +850,7 @@ select_subnet()
     local instance_type=$1
     local available_zones
     local replica_index
+    local placement_seed
     local subnet_count
     local subnets
     local zone_values
@@ -856,7 +873,10 @@ select_subnet()
     if [[ ${subnet_count} -eq 0 ]]; then
         return
     fi
-    replica_index=$(((CAMPAIGN_REPLICA_ID - 1) % subnet_count))
+    # Keep the initial placement stable for this job, then visit a different
+    # pool on each retry regardless of other jobs' allocated host epochs.
+    placement_seed=$(printf '%s' "${CAMPAIGN_PLATFORM}/${CAMPAIGN_SHARD_ID}/replica-${CAMPAIGN_REPLICA_ID}" | cksum | awk '{print $1}')
+    replica_index=$(((placement_seed + CAMPAIGN_ATTEMPT - 1) % subnet_count))
     printf '%s\n' "${subnet_array[${replica_index}]}"
 }
 
@@ -1076,9 +1096,13 @@ launch_instance()
         --iam-instance-profile "Name=${INSTANCE_PROFILE_NAME}" \
         --instance-initiated-shutdown-behavior terminate)
     if [[ "${INSTANCE_MARKET_TYPE}" == spot ]]; then
+        spot_options='SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate'
+        if [[ -n "${CAMPAIGN_SPOT_MAX_PRICE}" ]]; then
+            spot_options+=",MaxPrice=${CAMPAIGN_SPOT_MAX_PRICE}"
+        fi
         launch_arguments+=(
             --instance-market-options
-            'MarketType=spot,SpotOptions={SpotInstanceType=one-time,InstanceInterruptionBehavior=terminate}')
+            "MarketType=spot,SpotOptions={${spot_options}}")
     fi
 
     for attempt in {1..5}; do
@@ -1260,6 +1284,7 @@ platform=${CAMPAIGN_PLATFORM}
 shard=${CAMPAIGN_SHARD_ID}
 replica=${CAMPAIGN_REPLICA_ID}
 host_epoch=${CAMPAIGN_HOST_EPOCH}
+attempt=${CAMPAIGN_ATTEMPT}
 campaign_provenance=${CAMPAIGN_PROVENANCE}
 source_snapshot_kind=${SOURCE_SNAPSHOT_KIND}
 aws_profile=${AWS_PROFILE:-default-credential-chain}

@@ -17,17 +17,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from acceptance import RECEIPT_FIELDS, ValidationError, normalize_heap_size, validate_campaign, validate_host_results
+from topology import CONCURRENCY_SHARDS
+from fleet_budget import BudgetError, FleetBudget
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
 import batch_acceptance
 import collection as language_collection
 import fleet as language_fleet
-from campaign import LanguageCampaign
-from topology import CONCURRENCY_SHARDS
 import released_artifact
+from campaign import LanguageCampaign
 
 PROACTIVE_SPOT_CAPACITY_THRESHOLD = 32
-TOTAL_INSTANCE_LIMIT = 64
+DEFAULT_MAX_CONCURRENT = 64
 STANDARD_ON_DEMAND_QUOTA_CODE = "L-1216C47A"
 STANDARD_SPOT_QUOTA_CODE = "L-34B43A08"
 STANDARD_INSTANCE_FAMILIES = frozenset("acdhimrtz")
@@ -128,16 +129,21 @@ def parse_args():
     parser.add_argument("--smoke-results", type=Path)
     parser.add_argument("--primary-results", type=Path)
     parser.add_argument("--result-root", type=Path)
-    parser.add_argument("--max-concurrent", type=int, default=TOTAL_INSTANCE_LIMIT)
-    parser.add_argument("--max-concurrent-per-platform", type=int, default=TOTAL_INSTANCE_LIMIT)
-    parser.add_argument("--shard", action="append", dest="selected_shards",
-                        help="baseline shard to recollect; repeat to select a subset")
+    parser.add_argument("--max-concurrent", type=int, default=DEFAULT_MAX_CONCURRENT)
+    parser.add_argument("--max-concurrent-per-platform", type=int, default=DEFAULT_MAX_CONCURRENT)
+    parser.add_argument("--spot-only", action="store_true",
+                        help="wait and retry on Spot; prohibit On-Demand launches and fallback")
+    parser.add_argument("--spot-vcpu-reserve", type=int, default=SPOT_VCPU_SAFETY_RESERVE)
     parser.add_argument("--release-version", default="",
-                        help="measure the pinned published JAR instead of source-built classes")
+                        help="measure the pinned published JAR for this version instead of source-built classes")
     parser.add_argument("--smoke-protocol", choices=("smoke", "qualification"), default="smoke",
-                        help="use qualification timing in baseline smoke")
+                        help="use qualification timing in baseline smoke to validate full shard durations")
     parser.add_argument("--phase-timeout-seconds", type=int,
                         help="frozen phase wall-clock limit; otherwise derive from topology plus capacity waits")
+    parser.add_argument("--fleet-budget", type=Path,
+                        help="shared Spot fleet policy; all controllers must use the same coordinator directory")
+    parser.add_argument("--shard", action="append", dest="selected_shards",
+                        help="baseline shard to recollect; repeat to select a subset")
     parser.add_argument("--candidate-ref")
     parser.add_argument("--candidate-archive", type=Path)
     parser.add_argument("--candidate-provenance", type=Path)
@@ -151,9 +157,15 @@ def language_campaign(arguments):
 
 
 def execution_policy(arguments):
-    return {"release_version": getattr(arguments, "release_version", ""),
+    return {"spot_only": getattr(arguments, "spot_only", False),
+            "spot_vcpu_reserve": getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE),
+            "release_version": getattr(arguments, "release_version", ""),
             "smoke_protocol": getattr(arguments, "smoke_protocol", "smoke"),
-            "phase_timeout_seconds": getattr(arguments, "topology_deadline_seconds", None)}
+            "max_concurrent": getattr(arguments, "max_concurrent", DEFAULT_MAX_CONCURRENT),
+            "max_concurrent_per_platform": getattr(arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT),
+            "phase_timeout_seconds": getattr(arguments, "topology_deadline_seconds", None),
+            "fleet_budget": str(arguments.shared_budget.policy_path) if getattr(arguments, "shared_budget", None) else None,
+            "fleet_policy": arguments.shared_budget.policy if getattr(arguments, "shared_budget", None) else None}
 
 
 def validate_execution_policy(arguments, result_root):
@@ -173,14 +185,13 @@ def validate_execution_policy(arguments, result_root):
     fsync_directory(result_root)
 
 
-
 def phase_timeout(arguments):
     if getattr(arguments, "topology_deadline_seconds", None) is not None:
         return arguments.topology_deadline_seconds
     language = language_campaign(arguments)
     if language:
         return language.deadline_seconds(arguments.max_concurrent, JOB_TIMEOUT_SECONDS,
-                                         getattr(arguments, 'max_concurrent_per_platform', TOTAL_INSTANCE_LIMIT))
+                                         getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT))
     return PHASE_TIMEOUT_SECONDS[arguments.phase]
 
 
@@ -274,28 +285,44 @@ def concurrency_platform(platform, shard):
     return platform
 
 
-
 def platform_has_capacity(candidate, running, arguments):
-    limit = getattr(arguments, 'max_concurrent_per_platform', TOTAL_INSTANCE_LIMIT)
+    limit = getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT)
     return sum(job.platform.name == candidate.platform.name for _, job, _ in running.values()) < limit
 
 
 def validate_configuration(arguments, jobs):
     campaign_heap_size(arguments)
+    if getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) < 0:
+        raise SystemExit("Spot vCPU reserve must not be negative")
+    if getattr(arguments, "spot_only", False) and any(job.market != "spot" for job in jobs):
+        raise SystemExit("Spot-only campaigns cannot contain On-Demand jobs")
+    budget = getattr(arguments, "shared_budget", None)
+    if budget and (not getattr(arguments, "spot_only", False) or
+                   getattr(arguments, "spot_vcpu_reserve", None) != budget.policy["spot_vcpu_reserve"]):
+        raise SystemExit("shared fleet requires --spot-only and a reserve matching its policy")
+    if getattr(arguments, "execute", False) and arguments.max_concurrent > DEFAULT_MAX_CONCURRENT and budget is None:
+        raise SystemExit("more than 64 workers requires a shared fleet budget")
     if not arguments.campaign_id or len(arguments.campaign_id) > 63:
         raise SystemExit("campaign_id must contain 1-63 characters")
-    if arguments.max_concurrent < 1 or arguments.max_concurrent > TOTAL_INSTANCE_LIMIT:
-        raise SystemExit(f"max concurrency must be between 1 and {TOTAL_INSTANCE_LIMIT}")
-    per_platform = getattr(arguments, 'max_concurrent_per_platform', TOTAL_INSTANCE_LIMIT)
-    if not 1 <= per_platform <= TOTAL_INSTANCE_LIMIT:
-        raise SystemExit(f"per-platform concurrency must be between 1 and {TOTAL_INSTANCE_LIMIT}")
+    if type(arguments.max_concurrent) is not int or arguments.max_concurrent < 1:
+        raise SystemExit("max concurrency must be a positive integer")
+    per_platform = getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT)
+    if type(per_platform) is not int or per_platform < 1:
+        raise SystemExit("per-platform concurrency must be a positive integer")
     if arguments.phase == "primary" and len(jobs) == 0:
         raise SystemExit("primary campaign has no jobs")
     counts = {}
     for job in jobs:
         counts[job.platform.name] = counts.get(job.platform.name, 0) + 1
-    bounded_waves = max(math.ceil(len(jobs) / arguments.max_concurrent),
-                        max((math.ceil(count / per_platform) for count in counts.values()), default=0))
+    host_limit = min(arguments.max_concurrent, budget.policy["max_hosts"]) if budget else arguments.max_concurrent
+    vcpu_waves = 0
+    if budget:
+        if any(job.platform.vcpus > budget.policy["max_vcpus"] for job in jobs):
+            raise SystemExit("shared fleet vCPU limit cannot admit every worker type")
+        vcpu_waves = math.ceil(sum(job.platform.vcpus for job in jobs) / budget.policy["max_vcpus"])
+    bounded_waves = max(math.ceil(len(jobs) / host_limit),
+                        max((math.ceil(count / per_platform) for count in counts.values()), default=0),
+                        vcpu_waves)
     required_seconds = (bounded_waves + 1) * JOB_TIMEOUT_SECONDS
     explicit_deadline = getattr(arguments, "phase_timeout_seconds", None)
     arguments.topology_deadline_seconds = (explicit_deadline if explicit_deadline is not None else
@@ -319,6 +346,7 @@ def validate_durable_paths(root, arguments, result_root):
         ("result root", result_root),
         ("candidate archive", arguments.candidate_archive),
         ("candidate provenance", arguments.candidate_provenance),
+        ("shared fleet policy", getattr(arguments, "fleet_budget", None)),
     )
     for label, path in paths:
         if path is None:
@@ -599,9 +627,13 @@ def aws_output(arguments):
     return command
 
 
-def validate_aws(arguments, platforms):
+def validate_aws(arguments, platforms, jobs=None):
     prefix = aws_output(arguments)
-    check_output(prefix + ["sts", "get-caller-identity", "--query", "Account", "--output", "text"])
+    account = check_output(prefix + ["sts", "get-caller-identity", "--query", "Account", "--output", "text"])
+    budget = getattr(arguments, "shared_budget", None)
+    if budget and (account != budget.policy["account"] or
+                   os.environ.get("AWS_REGION", "us-west-2") != budget.policy["region"]):
+        raise SystemExit("AWS account or region differs from the shared fleet policy")
     spot_quota = float(check_output(prefix + [
         "service-quotas", "get-service-quota", "--service-code", "ec2",
         "--quota-code", STANDARD_SPOT_QUOTA_CODE, "--query", "Quota.Value", "--output", "text",
@@ -610,14 +642,27 @@ def validate_aws(arguments, platforms):
         "service-quotas", "get-service-quota", "--service-code", "ec2",
         "--quota-code", STANDARD_ON_DEMAND_QUOTA_CODE, "--query", "Quota.Value", "--output", "text",
     ]))
-    minimum_vcpus = min(platform.vcpus for platform in platforms)
-    has_spot_capacity = spot_quota >= SPOT_VCPU_SAFETY_RESERVE + minimum_vcpus
-    has_on_demand_capacity = on_demand_quota >= ON_DEMAND_VCPU_SAFETY_RESERVE + minimum_vcpus
+    if budget:
+        effective_spot_quota = spot_quota - budget.policy["spot_vcpu_reserve"]
+        if budget.policy["max_vcpus"] > effective_spot_quota:
+            raise SystemExit(
+                "shared fleet max_vcpus exceeds the Standard Spot quota after its reserve")
+    required_platforms = list({
+        (platform.name, platform.instance_type): platform
+        for platform in ([job.platform for job in jobs] if jobs is not None else platforms)
+    }.values())
+    if not required_platforms:
+        required_platforms = platforms
+    maximum_vcpus = max(platform.vcpus for platform in required_platforms)
+    has_spot_capacity = spot_quota >= getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) + maximum_vcpus
+    has_on_demand_capacity = on_demand_quota >= ON_DEMAND_VCPU_SAFETY_RESERVE + maximum_vcpus
+    if getattr(arguments, "spot_only", False) and not has_spot_capacity:
+        raise SystemExit("Standard Spot quota cannot admit one host after the configured reserve")
     if not has_spot_capacity and not has_on_demand_capacity:
         raise SystemExit(
             f"Neither Standard Spot nor On-Demand quota can admit one host after safety reserves: "
             f"spot={spot_quota:g}, on-demand={on_demand_quota:g}")
-    for platform in platforms:
+    for platform in required_platforms:
         expected_architecture = "x86_64" if platform.architecture == "intel" else "arm64"
         image = check_output(prefix + [
             "ec2", "describe-images", "--image-ids", platform.ami_id,
@@ -636,6 +681,35 @@ def validate_aws(arguments, platforms):
 
 def is_standard_instance_type(instance_type):
     return bool(instance_type) and instance_type[0].lower() in STANDARD_INSTANCE_FAMILIES
+
+
+def shared_spot_snapshot(arguments):
+    prefix = aws_output(arguments)
+    quota = int(float(check_output(prefix + ["service-quotas", "get-service-quota", "--service-code", "ec2",
+                      "--quota-code", STANDARD_SPOT_QUOTA_CODE, "--query", "Quota.Value", "--output", "text"])))
+    instances = json.loads(check_output(prefix + ["ec2", "describe-instances", "--filters",
+                           "Name=instance-lifecycle,Values=spot", "Name=instance-state-name,Values=pending,running",
+                           "--query", "Reservations[].Instances[].{id:InstanceId,type:InstanceType,tags:Tags}",
+                           "--output", "json"]))
+    requests = json.loads(check_output(prefix + ["ec2", "describe-spot-instance-requests", "--filters",
+                          "Name=state,Values=open,active", "--query",
+                          "SpotInstanceRequests[].{id:SpotInstanceRequestId,instance_id:InstanceId,type:LaunchSpecification.InstanceType,tags:Tags}",
+                          "--output", "json"]))
+    if any(not item.get("type") for item in instances + requests):
+        raise BudgetError("cannot account for a Spot instance or request with no instance type")
+    instances = [item for item in instances if is_standard_instance_type(item["type"])]
+    requests = [item for item in requests if is_standard_instance_type(item["type"])]
+    types = sorted({item["type"] for item in instances + requests})
+    metadata = json.loads(check_output(prefix + ["ec2", "describe-instance-types", "--instance-types", *types,
+                          "--query", "InstanceTypes[].{type:InstanceType,vcpus:VCpuInfo.DefaultVCpus}",
+                          "--output", "json"])) if types else []
+    vcpus = {item["type"]: int(item["vcpus"]) for item in metadata}
+    for item in instances + requests:
+        if item["type"] not in vcpus:
+            raise BudgetError("AWS omitted requested vCPU metadata")
+        tags = {tag["Key"]: tag["Value"] for tag in item.pop("tags", None) or []}
+        item.update(vcpus=vcpus[item["type"]], campaign_id=tags.get("BaselineCampaign"), host_epoch=tags.get("HostEpoch"))
+    return {"quota": quota, "instances": instances, "requests": requests}
 
 
 def current_on_demand_capacity(arguments, campaign_id, running_jobs):
@@ -724,14 +798,26 @@ def current_spot_capacity(arguments, campaign_id, running_jobs):
     instances = json.loads(check_output(prefix + [
         "ec2", "describe-instances",
         "--filters", "Name=instance-state-name,Values=pending,running",
-        "--query", "Reservations[].Instances[].{instance_type:InstanceType,lifecycle:InstanceLifecycle,tags:Tags}",
+        "--query", "Reservations[].Instances[].{instance_id:InstanceId,instance_type:InstanceType,lifecycle:InstanceLifecycle,tags:Tags}",
         "--output", "json",
     ]) or "[]")
-    instance_types = sorted({
-        instance["instance_type"]
-        for instance in instances
-        if instance.get("lifecycle") == "spot" and is_standard_instance_type(instance.get("instance_type"))
-    })
+    requests = json.loads(check_output(prefix + [
+        "ec2", "describe-spot-instance-requests",
+        "--filters", "Name=state,Values=open,active",
+        "--query", "SpotInstanceRequests[].{instance_id:InstanceId,instance_type:LaunchSpecification.InstanceType,tags:Tags}",
+        "--output", "json",
+    ]) or "[]")
+    instance_types = sorted(
+        {
+            instance["instance_type"]
+            for instance in instances
+            if instance.get("lifecycle") == "spot" and is_standard_instance_type(instance.get("instance_type"))
+        } |
+        {
+            request["instance_type"]
+            for request in requests
+            if is_standard_instance_type(request.get("instance_type"))
+        })
     vcpus_by_type = {}
     if instance_types:
         descriptions = json.loads(check_output(prefix + [
@@ -751,6 +837,7 @@ def current_spot_capacity(arguments, campaign_id, running_jobs):
     }
     used_vcpus = 0
     observed_running_epochs = set()
+    visible_instance_ids = {instance.get("instance_id") for instance in instances if instance.get("instance_id")}
     for instance in instances:
         instance_type = instance.get("instance_type")
         if instance.get("lifecycle") != "spot" or not is_standard_instance_type(instance_type):
@@ -770,20 +857,40 @@ def current_spot_capacity(arguments, campaign_id, running_jobs):
             used_vcpus += vcpus_by_type[instance_type]
         except KeyError as error:
             raise RuntimeError(f"AWS omitted vCPU metadata for {instance_type}") from error
+    for request in requests:
+        instance_type = request.get("instance_type")
+        if request.get("instance_id") in visible_instance_ids or not is_standard_instance_type(instance_type):
+            continue
+        tags = {
+            tag["Key"]: tag["Value"]
+            for tag in request.get("tags") or []
+        }
+        if tags.get("BaselineCampaign") == campaign_id and tags.get("HostEpoch") in running_epochs:
+            host_epoch = tags["HostEpoch"]
+            if host_epoch in observed_running_epochs:
+                raise UnsafeCampaignError(
+                    f"multiple active campaign resources use host epoch {host_epoch}")
+            observed_running_epochs.add(host_epoch)
+            continue
+        try:
+            used_vcpus += vcpus_by_type[instance_type]
+        except KeyError as error:
+            raise RuntimeError(f"AWS omitted vCPU metadata for {instance_type}") from error
 
     reserved_vcpus = sum(
         job.platform.vcpus
         for job in running_jobs
         if job.market == "spot"
     )
+    safety_reserve = getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE)
     available_vcpus = max(
         0,
-        quota - used_vcpus - reserved_vcpus - SPOT_VCPU_SAFETY_RESERVE)
+        quota - used_vcpus - reserved_vcpus - safety_reserve)
     return {
         "quota": quota,
         "used": used_vcpus,
         "reserved": reserved_vcpus,
-        "safety_reserve": SPOT_VCPU_SAFETY_RESERVE,
+        "safety_reserve": safety_reserve,
         "available": available_vcpus,
     }
 
@@ -815,7 +922,11 @@ def job_result_root(result_root, job):
 
 
 def job_environment(job, arguments, root, result_root):
+    if getattr(arguments, "spot_only", False) and job.market != "spot":
+        raise UnsafeCampaignError("Spot-only policy prohibits launching an On-Demand job")
     environment = os.environ.copy()
+    if getattr(arguments, "shared_budget", None):
+        environment["CAMPAIGN_SPOT_MAX_PRICE"] = str(arguments.shared_budget.policy["hourly_rates"][job.platform.instance_type]["spot"])
     architecture = job.platform.architecture
     benchmark_protocol = getattr(arguments, "smoke_protocol", "smoke") if arguments.phase == "smoke" else "qualification"
     environment.update({
@@ -828,8 +939,10 @@ def job_environment(job, arguments, root, result_root):
         "CAMPAIGN_SHARD_ID": job.shard,
         "CAMPAIGN_REPLICA_ID": str(job.replica),
         "CAMPAIGN_HOST_EPOCH": str(job.host_epoch),
+        "CAMPAIGN_ATTEMPT": str(job.attempt),
         "CAMPAIGN_ARCHITECTURES": architecture,
         "INSTANCE_MARKET_TYPE": job.market,
+        "CAMPAIGN_SPOT_ONLY": "1" if getattr(arguments, "spot_only", False) else "0",
         "REGULATOR_RELEASE_VERSION": getattr(arguments, "release_version", ""),
         "BENCHMARK_CPU_LIST": "0-7" if job.shard in CONCURRENCY_SHARDS else "0",
         "BENCHMARK_EXPECTED_VCPUS": str(job.platform.vcpus),
@@ -1104,11 +1217,15 @@ def validate_failed_job(result_root, job):
     return session, cleanup
 
 
-def replacement_job(job, host_epoch, failure_classification, failure_detail):
+def replacement_job(job, host_epoch, failure_classification, failure_detail, *, spot_only=False):
     if (failure_classification != "retryable-capacity" and
             job.attempt >= MAX_REPLACEMENTS_PER_JOB + 1):
         raise RuntimeError(f"{job.logical_identity} exhausted its bounded replacement allowance")
-    if failure_classification == "retryable-capacity":
+    if spot_only:
+        if job.market != "spot":
+            raise UnsafeCampaignError("Spot-only policy cannot resume an On-Demand attempt")
+        market = "spot"
+    elif failure_classification == "retryable-capacity":
         market = "on-demand"
     elif job.market == "spot":
         # One interrupted Spot replacement is allowed. Explicit unavailability
@@ -1326,6 +1443,39 @@ def read_attempts(path):
         return list(reader)
 
 
+def recover_budget_reservations(budget, arguments, result_root, jobs, attempts_path):
+    by_identity = {job.logical_identity: job for job in jobs}
+    attempts = read_attempts(attempts_path)
+    latest_by_epoch = {}
+    started_epochs = set()
+    for row in attempts:
+        key = (row["platform"], row["shard_id"], int(row["replica"]), int(row["host_epoch"]))
+        latest_by_epoch[key] = row
+        if row["outcome"] == "started":
+            started_epochs.add(key)
+    for item in budget.reservations(result_root):
+        if item["campaign_id"] != arguments.campaign_id or item["logical_identity"] not in by_identity:
+            raise UnsafeCampaignError("shared fleet reservation identifies a different controller")
+        job = replace(by_identity[item["logical_identity"]], host_epoch=item["host_epoch"], attempt=item["attempt"])
+        key = (job.platform.name, job.shard, job.replica, job.host_epoch)
+        latest = latest_by_epoch.get(key)
+        stopped_before_launch = latest is None or (
+            latest["outcome"] == "retryable-infrastructure" and
+            key not in started_epochs)
+        if stopped_before_launch:
+            # No attempt record, or the settled pre-Popen outcome, proves this
+            # reservation could not have launched a wrapper.
+            if latest is None:
+                write_attempt(
+                    attempts_path,
+                    job,
+                    "retryable-infrastructure",
+                    "controller stopped before wrapper start")
+        else:
+            validate_cleanup_manifest(result_root, job)
+        budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
+
+
 def job_from_attempt(row, jobs_by_logical_identity):
     logical_identity = f"{row['platform']}/{row['shard_id']}/replica-{row['replica']}"
     base_job = jobs_by_logical_identity.get(logical_identity)
@@ -1414,7 +1564,7 @@ def settle_detached_attempts(result_root, jobs, attempts_path):
         time.sleep(15)
 
 
-def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted):
+def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted, *, spot_only=False):
     attempts = read_attempts(attempts_path)
     attempts_by_epoch = {
         (row["platform"], row["shard_id"], int(row["replica"]), int(row["host_epoch"])): row
@@ -1452,6 +1602,11 @@ def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted):
                 attempt_row,
                 {base_job.logical_identity: base_job})
             classification = attempt_row["outcome"]
+            if classification == "queued-capacity" and not any(
+                    int(row["host_epoch"]) == previous_job.host_epoch and row["outcome"] in {"starting", "started"}
+                    for row in attempts):
+                pending.append((previous_job, 0))
+                continue
             if classification not in {
                     "retryable-spot", "retryable-capacity", "retryable-infrastructure"}:
                 unresolved.append((
@@ -1463,7 +1618,7 @@ def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted):
                     previous_job,
                     maximum_epoch + 1,
                     classification,
-                    attempt_row["detail"])
+                    attempt_row["detail"], spot_only=spot_only)
             except RuntimeError as error:
                 unresolved.append((previous_job, str(error)))
             else:
@@ -1501,7 +1656,7 @@ def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted):
         if classification in {"retryable-spot", "retryable-capacity", "retryable-infrastructure"}:
             try:
                 replacement = replacement_job(
-                    previous_job, maximum_epoch + 1, classification, detail)
+                    previous_job, maximum_epoch + 1, classification, detail, spot_only=spot_only)
             except RuntimeError as error:
                 unresolved.append((previous_job, str(error)))
             else:
@@ -1585,7 +1740,7 @@ def validate_language_state(root, arguments, result_root):
     expected = {
         "schema_version": 1, "campaign_id": arguments.campaign_id, "phase": arguments.phase,
         "plans": language.fingerprint(), "max_concurrent": arguments.max_concurrent,
-        "max_concurrent_per_platform": getattr(arguments, 'max_concurrent_per_platform', TOTAL_INSTANCE_LIMIT),
+        "max_concurrent_per_platform": getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT),
         "phase_timeout_seconds": phase_timeout(arguments), "job_timeout_seconds": JOB_TIMEOUT_SECONDS,
         "heap_size": campaign_heap_size(arguments),
         "candidate_commit": check_output(["git", "rev-parse", "HEAD"], cwd=root),
@@ -1673,10 +1828,13 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
     validate_language_state(root, arguments, result_root)
     started_at = campaign_started_at(result_root / "campaign-state.tsv", arguments)
     settle_detached_attempts(result_root, jobs, attempts_path)
+    budget = getattr(arguments, "shared_budget", None)
+    if budget:
+        recover_budget_reservations(budget, arguments, result_root, jobs, attempts_path)
     accepted = recover_accepted_sessions(
         root, arguments, result_root, jobs, accepted_sessions)
     pending, unresolved, next_host_epoch = prepare_resumed_jobs(
-        result_root, jobs, attempts_path, accepted)
+        result_root, jobs, attempts_path, accepted, spot_only=getattr(arguments, "spot_only", False))
     pending = [(job, time.monotonic() + delay) for job, delay in pending]
     capacity_waits = set()
     elapsed_seconds = max(0, time.time() - started_at)
@@ -1685,6 +1843,8 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
     deadline_reached = False
     try:
         while pending or running:
+            if budget:
+                budget.check()
             now = time.monotonic()
             if now >= deadline and not deadline_reached:
                 deadline_reached = True
@@ -1695,12 +1855,17 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
             launched = False
             while pending and len(running) < arguments.max_concurrent:
                 selected_index = None
+                blocked_vcpus = None
                 for index, (candidate, ready_at) in enumerate(pending):
                     if ready_at > now:
                         continue
                     if not platform_has_capacity(candidate, running, arguments):
                         continue
-                    if candidate.market == "spot" and arguments.max_concurrent > PROACTIVE_SPOT_CAPACITY_THRESHOLD:
+                    if budget and blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
+                        continue
+                    if candidate.market == "spot" and (
+                            getattr(arguments, "spot_only", False) or
+                            arguments.max_concurrent > PROACTIVE_SPOT_CAPACITY_THRESHOLD) and budget is None:
                         try:
                             spot_capacity = current_spot_capacity(
                                 arguments,
@@ -1720,6 +1885,15 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                                     f"Spot capacity query failed: {error}")
                             continue
                         if spot_capacity["available"] < candidate.platform.vcpus:
+                            if getattr(arguments, "spot_only", False):
+                                pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
+                                wait_key = (candidate.identity, "spot-capacity")
+                                if wait_key not in capacity_waits:
+                                    capacity_waits.add(wait_key)
+                                    write_attempt(attempts_path, candidate, "queued-capacity",
+                                                  "Spot-only policy waiting for quota; " +
+                                                  ";".join(f"{key}={value}" for key, value in spot_capacity.items()))
+                                continue
                             candidate = replace(candidate, market="on-demand")
                             pending[index] = (candidate, ready_at)
                             wait_key = (candidate.identity, "spot-to-on-demand")
@@ -1757,6 +1931,23 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                                     "queued-capacity",
                                     ";".join(f"{key}={value}" for key, value in capacity.items()))
                             continue
+                    if budget:
+                        try:
+                            admitted, reason = budget.reserve(arguments.campaign_id, candidate, result_root,
+                                                              lambda: shared_spot_snapshot(arguments))
+                        except BudgetError:
+                            raise
+                        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                            admitted, reason = False, f"shared capacity query failed: {error}"
+                        if not admitted:
+                            pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
+                            if (candidate.identity, reason) not in capacity_waits:
+                                capacity_waits.add((candidate.identity, reason))
+                                write_attempt(attempts_path, candidate, "queued-capacity", reason)
+                            if reason != "fleet quota or pending-launch limit" or candidate.platform.vcpus == 2:
+                                break
+                            blocked_vcpus = candidate.platform.vcpus
+                            continue
                     selected_index = index
                     break
                 if selected_index is None:
@@ -1777,11 +1968,14 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                         start_new_session=True)
                 except OSError as error:
                     log.close()
+                    if budget:
+                        budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
                     detail = f"controller could not start wrapper: {error}"
                     write_attempt(attempts_path, job, "retryable-infrastructure", detail)
                     try:
                         replacement = replacement_job(
-                            job, next_host_epoch, "retryable-infrastructure", detail)
+                            job, next_host_epoch, "retryable-infrastructure", detail,
+                            spot_only=getattr(arguments, "spot_only", False))
                     except RuntimeError as replacement_error:
                         unresolved.append((job, str(replacement_error)))
                     else:
@@ -1811,7 +2005,8 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                     if classification in {"retryable-spot", "retryable-capacity", "retryable-infrastructure"}:
                         try:
                             replacement = replacement_job(
-                                job, next_host_epoch, classification, detail)
+                                job, next_host_epoch, classification, detail,
+                                spot_only=getattr(arguments, "spot_only", False))
                         except RuntimeError as error:
                             failure_detail = f"status={status}; {error}"
                             unresolved.append((job, failure_detail))
@@ -1835,6 +2030,7 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                             events_path, "rejected-session", arguments.campaign_id, job,
                             failed_session, "job-failure", failure_detail)
                         unresolved.append((job, failure_detail))
+                        # Cleanup is proven. Preserve the rejection and let independent jobs finish.
                 else:
                     try:
                         receipt_path = validate_job_artifacts(result_root, job)
@@ -1854,6 +2050,7 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                         except (OSError, RuntimeError):
                             pass
                         unresolved.append((job, failure_detail))
+                        # Cleanup is proven. Preserve the rejection and let independent jobs finish.
                     else:
                         receipt = read_receipt(receipt_path)
                         validate_receipt_candidate(root, arguments, job, receipt, receipt_path)
@@ -1861,12 +2058,24 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                         write_attempt(attempts_path, job, "accepted")
                         accepted[job.logical_identity] = receipt
             for process_id in completed:
+                if budget:
+                    budget.release(arguments.campaign_id, running[process_id][1].host_epoch, cleanup_verified=True)
                 del running[process_id]
             if running or (pending and not launched):
-                time.sleep(5)
+                time.sleep(1 if budget else 5)
     except (Exception, KeyboardInterrupt) as error:
+        if budget:
+            # Stop the other collector's admissions and ask it to drain too.
+            # Cleanup must still run if persisting the stop marker fails.
+            try:
+                budget.halt(str(error) or type(error).__name__)
+            except (OSError, RuntimeError):
+                pass
         try:
             terminate_and_validate_cleanup(running, result_root)
+            if budget:
+                for _, job, _ in running.values():
+                    budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
         except RuntimeError as cleanup_error:
             reason = str(error) or type(error).__name__
             raise UnsafeCampaignError(f"{reason}; {cleanup_error}") from error
@@ -1890,6 +2099,8 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
 
 def main():
     arguments = parse_args()
+    if arguments.fleet_budget:
+        arguments.shared_budget = FleetBudget(arguments.fleet_budget)
     directory = Path(__file__).resolve().parent
     root = directory.parents[2]
     if arguments.release_version:
@@ -1922,7 +2133,7 @@ def main():
         validate_source(root, arguments)
         validate_dependencies(root, arguments, jobs)
         validate_prerequisites(root, arguments, platforms)
-        validate_aws(arguments, platforms)
+        validate_aws(arguments, platforms, jobs)
         execute_jobs(arguments, root, result_root, jobs)
 
 

@@ -213,7 +213,8 @@ python3 tools/re2-benchmark/language/fleet.py validate \
 Each partition contains one logical case and one language, with the comparator
 and both Regulator memory modes kept together. The everyday corpus produces
 39 partitions and 351 jobs across R9g, R8g, R8i and three independent host
-replicas. The plan records the intended ceiling of 64 concurrent hosts.
+replicas. `--max-concurrent-hosts` records the intended concurrency in the
+plan and defaults to 64.
 `fleet.py` does not allocate or schedule hosts, so that field is not a capacity
 reservation or an enforced scheduler setting.
 
@@ -401,18 +402,29 @@ one complete language partition, keeping its native/safe/comparator measurements
 together. Targeted campaigns can supply `--selection` as a JSON array of
 `[case ID, language]` pairs and a `--batch-operation-budget` from 1 through 16.
 Selection and batch membership are frozen in the plan and validated on reuse.
-The operation budget is a packing limit, not a time estimate. Slow corpus passes
+For the complete bulk corpus, also pass `--duration-policy PATH` with frozen
+per-case/language duration estimates and isolated slow or timeout pairs.
+The packer enforces both the operation budget and batch-duration ceiling.
+Smoke includes every isolated pair and the longest estimated packed batch.
+Historical estimates plan work; smoke durations determine whether it fits.
+The operation budget alone is a packing limit, not a time estimate. Slow corpus passes
 can take seconds per iteration; check measured pass costs and all forks against
 the host deadline before grouping them. Each host builds once,
 then runs its partitions sequentially on one pinned CPU. Regenerate older
 schema-1 plans. `fleet.py package-batch` and `worker.py --batch-directory`
 exercise this boundary without needing the full corpus on the worker.
 
-The controller uses up to 64 hosts and continues with available capacity.
+The controller uses the configured concurrency and shared fleet budget.
+Use `--spot-only`, a `--spot-vcpu-reserve` matching the policy, and the same
+`--fleet-budget` file for baseline and language collection. Select
+`--release-version 1.0` to reproduce measurements of the published artifact.
+See the [AWS guide](../aws/README.md#shared-fleet-budget).
 Use `--max-concurrent` and `--max-concurrent-per-platform` to impose smaller
 total and CPU-family limits. Running retries count toward those limits. The
 language safety deadline is derived from batch count, requested concurrency,
-the 90-minute per-host limit, and one retry wave. This is a worst-case bound,
+per-platform and vCPU waves, the 90-minute per-host limit, one retry wave,
+and a capacity-wait allowance. `--phase-timeout-seconds` can set a larger
+frozen deadline. This is a worst-case bound,
 not an ETA. The candidate, plan hashes, batch membership, heap, concurrency,
 and deadlines are persisted; changing them on restart is rejected.
 

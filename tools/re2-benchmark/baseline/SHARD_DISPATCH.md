@@ -96,6 +96,10 @@ iteration counts while avoiding a new forked JVM for every row:
   applicable memory routes fit the unchanged 90-minute static host deadline.
   The split preserves every Java/native pair and input size. Original rejected
   measurements remain evidence; they are not accepted final samples.
+- Numerical protocol rejection has exit status 42. It leaves the host
+  unaccepted and the campaign incomplete, without terminating unrelated jobs
+  or automatically retrying the rejected timings. Malformed evidence, semantic
+  failures, and resource failures retain the shared fleet stop behavior.
 - Fast allocating rows require special scrutiny because a 50 ms window can
   contain zero collections in most iterations and concentrate collection cost
   in one iteration that a median discards. The `countRegulator`
