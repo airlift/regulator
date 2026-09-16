@@ -65,6 +65,25 @@ class TestLanguageCampaign(unittest.TestCase):
             with self.subTest(pair=pair), self.assertRaises(ValueError):
                 campaign.LanguageCampaign.smoke_partitions(manifest, plan)
 
+    def test_smoke_selects_the_longest_non_isolated_batch(self):
+        manifest = {"cases": [{"id": name, "model": "count"}
+                              for name in ("short", "isolated", "long")]}
+        plan = {
+            "partitions": [
+                {"id": "short-id", "case": "short", "language": "java"},
+                {"id": "isolated-id", "case": "isolated", "language": "java"},
+                {"id": "long-id", "case": "long", "language": "java"},
+            ],
+            "duration_policy": {"isolated_pairs": [["isolated", "java"]]},
+            "host_batches": [
+                {"jobs": ["suite/isolated-id/r9g/1"]},
+                {"jobs": ["suite/long-id/r9g/1"]},
+                {"jobs": ["suite/short-id/r9g/1"]},
+            ],
+        }
+        self.assertEqual(campaign.LanguageCampaign.smoke_partitions(manifest, plan),
+                         {"short-id", "isolated-id", "long-id"})
+
     def test_changed_plan_and_missing_replicas_cannot_resume(self):
         workload = campaign.LanguageCampaign([self.directory], "primary")
         identity = next(iter(workload.batches))

@@ -42,6 +42,15 @@ class TestFleet(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             fleet.prepare(self.source, self.directory)
 
+    def test_plan_concurrency_is_configurable(self):
+        with patch.object(sys, "argv", ["fleet.py", "prepare", "--manifest-directory", str(self.source),
+                                       "--output-directory", str(self.directory), "--max-concurrent-hosts", "512"]):
+            fleet.main()
+        self.assertEqual(fleet.validate(self.directory)["max_concurrent_hosts"], 512)
+        for value in (0, -1, True, 1.5):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "positive integer"):
+                fleet.prepare(self.source, self.root / "invalid", max_concurrent_hosts=value)
+
     def test_reject_incomplete_duplicate_or_changed_plan(self):
         original = self.prepare_small_plan()
         for mutation in (lambda plan: plan["partitions"].pop(),
@@ -76,6 +85,25 @@ class TestFleet(unittest.TestCase):
             with self.subTest(selection=selection, budget=budget), self.assertRaises(ValueError):
                 fleet.prepare(self.source, self.directory, selection=selection, operation_budget=budget)
             self.assertFalse(self.directory.exists())
+
+    def test_duration_plan_preserves_the_full_replica_matrix(self):
+        manifest = collection.load(self.source / "manifest.json")
+        estimates = {case["id"] + "/" + language: 300 for case in manifest["cases"] for language in collection.ENGINES}
+        policy = {"schema_version": 1, "source_sha256": "a" * 64, "partition_seconds": estimates,
+                  "isolated_pairs": [[manifest["cases"][0]["id"], "java"]], "max_batch_seconds": 4200,
+                  "bootstrap_seconds": 600}
+        plan = fleet.prepare(self.source, self.directory, operation_budget=10, duration_policy=policy)
+        self.assertEqual(len(plan["jobs"]), 351)
+        self.assertEqual(fleet.validate(self.directory), plan)
+        self.assertEqual(sorted(job for batch in plan["host_batches"] for job in batch["jobs"]),
+                         sorted(job["id"] for job in plan["jobs"]))
+        for batch in plan["host_batches"]:
+            if any("case-0000-java" in job for job in batch["jobs"]):
+                self.assertEqual(len(batch["jobs"]), 1)
+        plan["host_batches"][0]["jobs"].append(plan["host_batches"][1]["jobs"][0])
+        collection.save(self.directory / "plan.json", plan)
+        with self.assertRaisesRegex(ValueError, "batch assignments"):
+            fleet.validate(self.directory)
 
     def test_reject_changed_partition_even_with_updated_checksum(self):
         plan = self.prepare_small_plan()

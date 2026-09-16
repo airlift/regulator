@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import test_run_campaign as baseline_tests
+import test_fleet_budget
 
 import campaign
 import collection
@@ -75,6 +76,25 @@ class TestLanguageController(unittest.TestCase):
         raw.write_text("[]\n")
         with self.assertRaisesRegex(RuntimeError, "invalid language evidence"):
             self.execute(FAKE_MUST_NOT_RUN="1")
+
+    def test_shared_budget_releases_only_completed_and_cleaned_attempts(self):
+        fixture = test_fleet_budget.TestFleetBudget()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        policy = fixture.policy
+        policy["hourly_rates"] = {family + ".large": {"spot": 0.065, "total": 0.075}
+                                  for family in ("r8i", "r8g", "r9g")}
+        fixture.path.write_text(collection.encode(policy).decode())
+        self.arguments.shared_budget = CONTROLLER.FleetBudget(fixture.path)
+        self.arguments.spot_only, self.arguments.spot_vcpu_reserve = True, 0
+        with patch.object(CONTROLLER, "shared_spot_snapshot", return_value={"quota": 4, "instances": [], "requests": []}), \
+                patch.object(CONTROLLER, "CAPACITY_RETRY_SECONDS", 0.01):
+            self.execute(FAKE_INTERRUPT_EPOCH="1")
+        state = collection.load(self.arguments.shared_budget.state_path)
+        self.assertEqual(state["reservations"], {})
+        self.assertEqual(len(state["completed"]), 10)
+        self.assertGreater(state["machine_hours"], 0)
+        self.assertTrue(all(item["instance_type"].endswith(".large") for item in state["completed"].values()))
 
     def test_restart_rejects_changed_candidate_plan_and_deadline(self):
         self.execute()
