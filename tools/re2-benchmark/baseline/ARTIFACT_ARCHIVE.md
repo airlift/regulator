@@ -79,6 +79,14 @@ python3 tools/re2-benchmark/baseline/archive_results.py \
 Keep these paths outside Maven's `target` directory. This command writes to
 AWS; agents require explicit authorization for that upload and destination.
 
+Archives larger than S3's 5 GB single-request limit use multipart upload. Each part has a locally
+computed SHA-256 that S3 must confirm, and the uploader verifies the complete
+local file before conditionally completing the object. It reconstructs S3's
+composite checksum from the ordered part digests and verifies the stored
+version, size, encryption and metadata. The full-file SHA-256 remains in the
+object metadata and retrieval TSV; use it to verify an independent download.
+A failed upload aborts its unfinished multipart session.
+
 The retrieval TSV has one row containing the immutable S3 URI and version ID,
 archive SHA-256, candidate commit and ref, campaign ID, absolute source
 directory, archived source-file count, and source-manifest SHA-256. Keep the
