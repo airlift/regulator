@@ -21,6 +21,8 @@ DEFAULT_REGION = "us-west-2"
 ARCHIVE_ROOT = "campaign-results"
 EMBEDDED_MANIFEST = "ARTIFACT_SHA256.tsv"
 KEY_PREFIX = "pre-review-baseline"
+SINGLE_PUT_LIMIT = 5_000_000_000
+MULTIPART_PART_SIZE = 128 * 1024**2
 RETRIEVAL_FIELDS = (
     "s3_uri",
     "version_id",
@@ -68,6 +70,10 @@ class HashingReader:
         self.digest.update(data)
         self.bytes_read += len(data)
         return data
+
+
+def multipart_required(size):
+    return size > SINGLE_PUT_LIMIT
 
 
 class AwsCli:
@@ -443,18 +449,23 @@ def upload_archive(aws, bucket, key, account_id, details, candidate_commit, cand
         "file-count": str(details.file_count),
         "source-manifest-sha256": details.source_manifest_sha256,
     }
+    expected_checksum = details.checksum_sha256
     try:
-        response = aws.call(
-            "s3api", "put-object",
-            "--bucket", bucket,
-            "--key", key,
-            "--body", str(details.path),
-            "--expected-bucket-owner", account_id,
-            "--if-none-match", "*",
-            "--checksum-algorithm", "SHA256",
-            "--checksum-sha256", details.checksum_sha256,
-            "--server-side-encryption", "AES256",
-            "--metadata", json.dumps(metadata, sort_keys=True, separators=(",", ":")))
+        if multipart_required(details.size):
+            response, expected_checksum = upload_multipart_archive(
+                aws, bucket, key, account_id, details, metadata)
+        else:
+            response = aws.call(
+                "s3api", "put-object",
+                "--bucket", bucket,
+                "--key", key,
+                "--body", str(details.path),
+                "--expected-bucket-owner", account_id,
+                "--if-none-match", "*",
+                "--checksum-algorithm", "SHA256",
+                "--checksum-sha256", details.checksum_sha256,
+                "--server-side-encryption", "AES256",
+                "--metadata", json.dumps(metadata, sort_keys=True, separators=(",", ":")))
     except AwsError as error:
         if "PreconditionFailed" in error.stderr or "(412)" in error.stderr:
             raise ArchiveError(f"immutable artifact already exists: s3://{bucket}/{key}") from error
@@ -463,7 +474,7 @@ def upload_archive(aws, bucket, key, account_id, details, candidate_commit, cand
     version_id = response.get("VersionId")
     if not version_id or version_id == "null":
         raise ArchiveError("S3 upload did not return a version ID")
-    if response.get("ChecksumSHA256") != details.checksum_sha256:
+    if response.get("ChecksumSHA256") != expected_checksum:
         raise ArchiveError("S3 upload response checksum does not match the local archive")
 
     head = aws.call(
@@ -473,16 +484,70 @@ def upload_archive(aws, bucket, key, account_id, details, candidate_commit, cand
         "--version-id", version_id,
         "--checksum-mode", "ENABLED",
         "--expected-bucket-owner", account_id)
-    verify_uploaded_object(response, head, details, metadata)
+    verify_uploaded_object(response, head, details, metadata, expected_checksum)
+    if multipart_required(details.size) and head.get("ChecksumType") != "COMPOSITE":
+        raise ArchiveError("multipart archive is missing its composite checksum type")
     return version_id
 
 
-def verify_uploaded_object(response, head, details, expected_metadata):
+
+def upload_multipart_archive(aws, bucket, key, account_id, details, metadata):
+    common = ("--bucket", bucket, "--key", key, "--expected-bucket-owner", account_id)
+    response = aws.call(
+        "s3api", "create-multipart-upload", *common,
+        "--checksum-algorithm", "SHA256", "--checksum-type", "COMPOSITE",
+        "--server-side-encryption", "AES256",
+        "--metadata", json.dumps(metadata, sort_keys=True, separators=(",", ":")))
+    upload_id = response["UploadId"]
+    completed = False
+    parts = []
+    part_checksums = []
+    whole_checksum = hashlib.sha256()
+    size = 0
+    part_size = max(MULTIPART_PART_SIZE, (details.size + 9999) // 10000)
+    try:
+        with tempfile.TemporaryDirectory(prefix="archive-parts-", dir=details.path.parent) as temporary:
+            part_path = Path(temporary) / "part"
+            with details.path.open("rb") as source:
+                while block := source.read(part_size):
+                    size += len(block)
+                    whole_checksum.update(block)
+                    checksum = hashlib.sha256(block).digest()
+                    encoded = base64.b64encode(checksum).decode("ascii")
+                    part_path.write_bytes(block)
+                    part_number = len(parts) + 1
+                    part = aws.call(
+                        "s3api", "upload-part", *common, "--upload-id", upload_id,
+                        "--part-number", str(part_number), "--body", str(part_path),
+                        "--checksum-algorithm", "SHA256", "--checksum-sha256", encoded)
+                    if part.get("ChecksumSHA256") != encoded or not part.get("ETag"):
+                        raise ArchiveError("S3 multipart part checksum or ETag is invalid")
+                    parts.append({"PartNumber": part_number, "ETag": part["ETag"], "ChecksumSHA256": encoded})
+                    part_checksums.append(checksum)
+            if size != details.size or whole_checksum.hexdigest() != details.sha256:
+                raise ArchiveError("local archive changed during multipart upload")
+            completion = Path(temporary) / "complete.json"
+            completion.write_text(json.dumps({"Parts": parts}))
+            response = aws.call(
+                "s3api", "complete-multipart-upload", *common, "--upload-id", upload_id,
+                "--multipart-upload", "file://" + str(completion),
+                "--if-none-match", "*", "--checksum-type", "COMPOSITE")
+            completed = True
+        # S3's multipart SHA-256 covers the ordered part digests. The full-file
+        # SHA-256 above remains in metadata and the independent retrieval record.
+        composite = base64.b64encode(hashlib.sha256(b"".join(part_checksums)).digest()).decode("ascii")
+        return response, composite + "-" + str(len(parts))
+    finally:
+        if not completed:
+            aws.call("s3api", "abort-multipart-upload", *common, "--upload-id", upload_id)
+
+def verify_uploaded_object(response, head, details, expected_metadata, expected_checksum=None):
+    expected_checksum = expected_checksum or details.checksum_sha256
     version_id = response.get("VersionId")
     checks = {
         "version ID": head.get("VersionId") == version_id,
-        "returned checksum": response.get("ChecksumSHA256") == details.checksum_sha256,
-        "stored checksum": head.get("ChecksumSHA256") == details.checksum_sha256,
+        "returned checksum": response.get("ChecksumSHA256") == expected_checksum,
+        "stored checksum": head.get("ChecksumSHA256") == expected_checksum,
         "stored size": head.get("ContentLength") == details.size,
         "server-side encryption": head.get("ServerSideEncryption") == "AES256",
         "object metadata": head.get("Metadata") == expected_metadata,

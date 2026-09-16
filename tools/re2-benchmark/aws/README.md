@@ -267,3 +267,16 @@ See:
 - `../baseline/ACCEPTANCE.md` for host and campaign receipts
 - `../baseline/REPORTING.md` for reduction and report generation
 - `../baseline/ARTIFACT_ARCHIVE.md` for permanent evidence storage
+
+### Recovering uploads during cleanup
+
+After verifying instance termination, the wrapper inventories and downloads
+all uploaded result objects into the session's `recovered-uploads` directory.
+It records each object's size and local SHA-256 before deleting the transfer
+prefix. A failed inventory or download retains that prefix and fails cleanup.
+Recovered uploads are raw evidence and do not become accepted sessions.
+
+This covers late uploads and results available when a controller aborts.
+Measurements still on an interrupted or forcibly terminated host may never
+reach S3; the recovery receipt states that limitation. After cleanup is proven, a benchmark or artifact
+rejection leaves its host unaccepted while unrelated jobs finish.

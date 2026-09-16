@@ -1,4 +1,6 @@
+import base64
 import csv
+import json
 import hashlib
 import importlib.util
 import io
@@ -337,6 +339,79 @@ class TestArchiveResults(unittest.TestCase):
             key,
             f"pre-review-baseline/{'a' * 40}/campaign-1/campaign-results.tar.gz")
 
+
+
+class TestMultipartUpload(unittest.TestCase):
+    def testSinglePutLimitUsesS3DecimalBytes(self):
+        self.assertEqual(ARCHIVE_RESULTS.SINGLE_PUT_LIMIT, 5_000_000_000)
+        self.assertFalse(ARCHIVE_RESULTS.multipart_required(5_000_000_000))
+        self.assertTrue(ARCHIVE_RESULTS.multipart_required(5_000_000_001))
+
+    def exercise_upload(self, bad_part=False, changed_archive=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "archive.tar.gz"
+            path.write_bytes(b"abcdefghij")
+            checksum = hashlib.sha256(path.read_bytes()).digest()
+            details = ARCHIVE_RESULTS.ArchiveDetails(
+                path, "0" * 64 if changed_archive else checksum.hex(),
+                base64.b64encode(checksum).decode(), 10, 1, b"manifest", "a" * 64)
+            part_hashes = [hashlib.sha256(part).digest() for part in (b"abcd", b"efgh", b"ij")]
+            composite = base64.b64encode(hashlib.sha256(b"".join(part_hashes)).digest()).decode() + "-3"
+            calls = []
+            metadata = {}
+
+            def call(*arguments, **_):
+                nonlocal metadata
+                calls.append(arguments)
+                operation = arguments[1]
+                if operation == "list-object-versions":
+                    return {}
+                if operation == "create-multipart-upload":
+                    metadata = json.loads(arguments[arguments.index("--metadata") + 1])
+                    return {"UploadId": "upload-1"}
+                if operation == "upload-part":
+                    body = Path(arguments[arguments.index("--body") + 1]).read_bytes()
+                    actual = base64.b64encode(hashlib.sha256(body).digest()).decode()
+                    self.assertEqual(arguments[arguments.index("--checksum-sha256") + 1], actual)
+                    return {"ETag": "etag", "ChecksumSHA256": "corrupt" if bad_part else actual}
+                if operation == "complete-multipart-upload":
+                    self.assertEqual(arguments[arguments.index("--if-none-match") + 1], "*")
+                    completion = Path(arguments[arguments.index("--multipart-upload") + 1].removeprefix("file://"))
+                    parts = json.loads(completion.read_text())["Parts"]
+                    self.assertEqual([part["PartNumber"] for part in parts], [1, 2, 3])
+                    return {"VersionId": "version-1", "ChecksumSHA256": composite}
+                if operation == "head-object":
+                    return {"VersionId": "version-1", "ChecksumSHA256": composite,
+                            "ChecksumType": "COMPOSITE", "ContentLength": 10,
+                            "ServerSideEncryption": "AES256", "Metadata": metadata}
+                if operation == "abort-multipart-upload":
+                    return {}
+                raise AssertionError("unexpected upload operation: " + operation)
+
+            with patch.object(ARCHIVE_RESULTS, "SINGLE_PUT_LIMIT", 1, create=True), \
+                    patch.object(ARCHIVE_RESULTS, "MULTIPART_PART_SIZE", 4, create=True):
+                if bad_part or changed_archive:
+                    with self.assertRaises(ARCHIVE_RESULTS.ArchiveError):
+                        ARCHIVE_RESULTS.upload_archive(
+                            SimpleNamespace(call=call), "bucket", "key", "account", details,
+                            "commit", "ref", "campaign")
+                    self.assertEqual(calls[-1][1], "abort-multipart-upload")
+                    self.assertNotIn("complete-multipart-upload", [call[1] for call in calls])
+                else:
+                    version = ARCHIVE_RESULTS.upload_archive(
+                        SimpleNamespace(call=call), "bucket", "key", "account", details,
+                        "commit", "ref", "campaign")
+                    self.assertEqual(version, "version-1")
+                    self.assertEqual(len([call for call in calls if call[1] == "upload-part"]), 3)
+
+    def testMultipartPreservesChecksumsAndConditionalCompletion(self):
+        self.exercise_upload()
+
+    def testBadPartAbortsBeforePublishing(self):
+        self.exercise_upload(bad_part=True)
+
+    def testChangedArchiveAbortsBeforePublishing(self):
+        self.exercise_upload(changed_archive=True)
 
 if __name__ == "__main__":
     unittest.main()

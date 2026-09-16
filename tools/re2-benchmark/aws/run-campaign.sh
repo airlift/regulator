@@ -578,6 +578,21 @@ discover_campaign_instances()
     [[ ${query_succeeded} -ne 0 ]]
 }
 
+recover_uploaded_results()
+{
+    # Instances have terminated, so the inventory cannot race a late upload.
+    # Keep these bytes separate from accepted/extracted results on abort.
+    local recovery_dir="${SESSION_DIR}/recovered-uploads"
+    local prefix="${RESULT_PREFIX}/"
+    mkdir -p "${recovery_dir}"
+    aws_cli s3api list-objects-v2 --bucket "${BUCKET}" --prefix "${prefix}" \
+        --output json > "${recovery_dir}/inventory.json" || return 1
+    aws_cli s3 cp "s3://${BUCKET}/${prefix}" "${recovery_dir}/objects/" \
+        --recursive --only-show-errors || return 1
+    python3 "${SCRIPT_DIR}/verify-recovered-results.py" \
+        "${recovery_dir}" "${prefix}"
+}
+
 cleanup()
 {
     local status=$?
@@ -589,6 +604,7 @@ cleanup()
     local iam_cleanup_status=not-created
     local instance_cleanup_status=not-created
     local preserve_resources=0
+    local result_recovery_status=not-required
     trap - EXIT
     # A controller abort can arrive after cleanup has already started.
     trap '' INT TERM
@@ -676,7 +692,16 @@ cleanup()
             iam_cleanup_status=verified
         fi
     fi
-    if [[ ${preserve_resources} -eq 0 && -n "${BUCKET}" ]]; then
+    if [[ ${preserve_resources} -eq 0 && -n "${BUCKET}" && ${#INSTANCE_IDS[@]} -gt 0 ]]; then
+        result_recovery_status=failed
+        if recover_uploaded_results; then
+            result_recovery_status=verified
+        else
+            echo "Result recovery failed; retaining the transfer bucket or prefix" >&2
+            cleanup_failed=1
+        fi
+    fi
+    if [[ ${preserve_resources} -eq 0 && -n "${BUCKET}" && "${result_recovery_status}" != failed ]]; then
         if [[ ${BUCKET_OWNED} -ne 0 ]]; then
             retry_cleanup_command s3 rm "s3://${BUCKET}" --recursive || true
             retry_cleanup_command s3api delete-bucket --bucket "${BUCKET}" || true
@@ -720,6 +745,7 @@ cleanup()
             printf 'instances_terminated=%s\n' "${instance_cleanup_status}"
             printf 'iam_removed=%s\n' "${iam_cleanup_status}"
             printf 'bucket_removed=%s\n' "${bucket_cleanup_status}"
+            printf 'uploaded_result_recovery=%s\n' "${result_recovery_status}"
             printf 'bucket_owned=%s\n' "${BUCKET_OWNED}"
             printf 'object_prefix=%s\n' "${OBJECT_PREFIX}"
             printf 'network_resources=default-vpc-reused\n'
