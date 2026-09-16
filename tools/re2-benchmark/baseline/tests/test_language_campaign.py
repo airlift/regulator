@@ -189,6 +189,7 @@ environment = {
     "replica": os.environ["CAMPAIGN_REPLICA_ID"], "host_epoch": epoch,
     "baseline_campaign": os.environ["CAMPAIGN_ID"], "campaign_architecture": os.environ["CAMPAIGN_ARCHITECTURES"],
     "benchmark_heap_size": "8g", "instance_id": "i-" + epoch, "instance_type": instance_type,
+    "logical_cpu_count": os.environ["BENCHMARK_EXPECTED_VCPUS"],
     "regulator_commit": "commit", "regulator_archive_sha256": "archive",
     "java_runtime_version": "25.0.4+7", "comparator_manifest_sha256": os.environ["FAKE_PINS"]}
 (result / "environment-manifest.txt").write_text("".join(f"{key}={value}\n" for key, value in environment.items()))

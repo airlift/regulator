@@ -8,6 +8,7 @@ from pathlib import Path
 import collection
 import fleet
 import focused_controls
+import released_artifact
 import source_bracket
 
 
@@ -126,6 +127,13 @@ def validate(directory):
                 "25.0.4+7" not in environment["java_runtime_version"]):
             raise ValueError("language comparator or JDK identity differs from the host")
         current = {key: provenance[key] for key in ("source_commit", "source_tree", "comparators_sha256", "jdk")}
+        release = provenance["jvm_build"].get("released_artifact")
+        version = environment.get("regulator_release_version")
+        if version:
+            expected_release = released_artifact.manifest(collection.ROOT, version)
+            if release is None or release["manifest"] != expected_release:
+                raise ValueError("language partition lacks the selected released artifact")
+        current["released_artifact"] = release["manifest"] if release else None
         if candidate is not None and current != candidate:
             raise ValueError("language batch mixes candidates or comparator revisions")
         candidate = current
@@ -148,6 +156,8 @@ def validate(directory):
         "exports": exports,
     }
     bracket = validate_source_bracket(inputs, worker, batch, environment, candidate)
+    if candidate["released_artifact"] is not None:
+        receipt["released_artifact"] = candidate["released_artifact"]
     if bracket is not None:
         receipt["source_bracket"] = bracket
     return receipt

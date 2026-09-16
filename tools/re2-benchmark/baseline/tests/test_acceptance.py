@@ -23,6 +23,7 @@ from acceptance import (  # noqa: E402
     validate_host_results,
     verify_protocol_qualification,
 )
+import topology  # noqa: E402
 
 
 class TestAcceptance(unittest.TestCase):
@@ -47,13 +48,13 @@ class TestAcceptance(unittest.TestCase):
         values = {
             "schema_version": "2",
             "campaign_id": "campaign",
-            "platform": "c8i",
+            "platform": "r8i",
             "shard_id": "alpha",
             "replica_id": "1",
             "instance_id": "i-00000000000000001",
             "host_epoch": "epoch-001",
             "architecture": "intel",
-            "instance_type": "c8i.2xlarge",
+            "instance_type": "r8i.2xlarge",
             "availability_zone": "us-west-2a",
             "systems": "engine,native",
         }
@@ -367,18 +368,19 @@ class TestAcceptance(unittest.TestCase):
         platforms = self.directory / "platforms.tsv"
         write_tsv(
             platforms,
-            ("platform", "architecture", "instance_type"),
+            ("platform", "architecture", "instance_type", "vcpus",
+             "concurrency_instance_type", "concurrency_vcpus"),
             [
-                ("c8i", "intel", "c8i.2xlarge"),
-                ("c8g", "arm", "c8g.2xlarge"),
-                ("c9g", "arm", "c9g.2xlarge"),
+                ("r8i", "intel", "r8i.large", "2", "r8i.2xlarge", "8"),
+                ("r8g", "arm", "r8g.large", "2", "r8g.2xlarge", "8"),
+                ("r9g", "arm", "r9g.large", "2", "r9g.2xlarge", "8"),
             ])
         shards = self.directory / "shards.tsv"
         write_tsv(shards, ("shard_id",), [("alpha",), ("beta",)])
 
         receipts = []
         sequence = 0
-        for platform, architecture in (("c8i", "intel"), ("c8g", "arm"), ("c9g", "arm")):
+        for platform, architecture in (("r8i", "intel"), ("r8g", "arm"), ("r9g", "arm")):
             for shard_id in ("alpha", "beta"):
                 for replica_id in replicas:
                     sequence += 1
@@ -389,7 +391,7 @@ class TestAcceptance(unittest.TestCase):
                         instance_id=f"i-{sequence:017x}",
                         host_epoch=f"epoch-{sequence:03d}",
                         architecture=architecture,
-                        instance_type=f"{platform}.2xlarge")
+                        instance_type=f"{platform}.large")
                     observed = self.directory / f"observed-{sequence}.tsv"
                     write_tsv(observed, ("row_id", "shard_id", "system"), [
                         (f"{shard_id}/{'a' if shard_id == 'alpha' else 'b'}/engine", shard_id, "engine"),
@@ -405,6 +407,66 @@ class TestAcceptance(unittest.TestCase):
         result = validate_campaign(self.manifest, platforms, shards, receipts_path, "campaign")
         self.assertEqual(result["accepted_sessions"], 18)
         self.assertEqual(result["accepted_rows"], 36)
+
+    def test_platform_file_requires_and_validates_both_worker_topologies(self):
+        platforms, _, _, _ = self.build_campaign()
+        loaded = __import__('acceptance').load_platforms(platforms)
+        self.assertEqual("r8g.large", topology.instance_type(loaded["r8g"], "alpha"))
+        self.assertEqual("r8g.2xlarge", topology.instance_type(loaded["r8g"], "lifecycle-shared-cold"))
+        with platforms.open() as source:
+            rows = list(csv.DictReader(source, delimiter="\t"))
+        for field, value in (
+                ("concurrency_vcpus", ""),
+                ("instance_type", "r8i.2xlarge"),
+                ("concurrency_instance_type", "r8i.large"),
+                ("architecture", "arm"),
+                ("vcpus", "8")):
+            changed = [dict(row) for row in rows]
+            changed[0][field] = value
+            write_dict_tsv(platforms, changed[0].keys(), changed)
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                __import__('acceptance').load_platforms(platforms)
+            write_dict_tsv(platforms, rows[0].keys(), rows)
+
+    def test_shared_cold_campaign_accepts_only_multicore_workers(self):
+        shard = "lifecycle-shared-cold"
+        write_tsv(self.manifest, ("row_id", "shard_id", "suite", "system"), [
+            (f"{shard}/fixture/engine", shard, "lifecycle", "engine"),
+            (f"{shard}/fixture/native", shard, "lifecycle", "native"),
+        ])
+        platforms = self.directory / "platforms.tsv"
+        write_tsv(platforms, (
+            "platform", "architecture", "instance_type", "vcpus",
+            "concurrency_instance_type", "concurrency_vcpus"), [
+                ("r8i", "intel", "r8i.large", "2", "r8i.2xlarge", "8"),
+                ("r8g", "arm", "r8g.large", "2", "r8g.2xlarge", "8"),
+                ("r9g", "arm", "r9g.large", "2", "r9g.2xlarge", "8"),
+            ])
+        shards = self.directory / "shards.tsv"
+        write_tsv(shards, ("shard_id",), [(shard,)])
+        receipts = []
+        sequence = 0
+        for platform, architecture in (("r8i", "intel"), ("r8g", "arm"), ("r9g", "arm")):
+            for replica in (1, 2, 3):
+                sequence += 1
+                session = self.write_session(
+                    platform=platform, shard_id=shard, replica_id=str(replica),
+                    instance_id=f"i-{sequence:017x}", host_epoch=f"shared-{sequence}",
+                    architecture=architecture, instance_type=f"{platform}.2xlarge")
+                observed = self.directory / f"shared-observed-{sequence}.tsv"
+                write_tsv(observed, ("row_id", "shard_id", "system"), [
+                    (f"{shard}/fixture/engine", shard, "engine"),
+                    (f"{shard}/fixture/native", shard, "native"),
+                ])
+                receipts.append(self.validate(session, observed))
+        ledger = self.directory / "shared-receipts.tsv"
+        write_dict_tsv(ledger, RECEIPT_FIELDS, receipts)
+        result = validate_campaign(self.manifest, platforms, shards, ledger, "campaign")
+        self.assertEqual(9, result["accepted_sessions"])
+        receipts[0]["instance_type"] = "r8i.large"
+        write_dict_tsv(ledger, RECEIPT_FIELDS, receipts)
+        with self.assertRaisesRegex(ValidationError, "instance_type"):
+            validate_campaign(self.manifest, platforms, shards, ledger, "campaign")
 
     def test_accepts_complete_smoke_campaign(self):
         platforms, shards, receipts_path, _ = self.build_campaign((1,))

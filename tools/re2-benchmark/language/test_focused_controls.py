@@ -81,7 +81,7 @@ class TestFocusedControls(unittest.TestCase):
                     "descriptor": descriptor, "mode": mode,
                     "manifest_sha256": collection.digest((partition / "manifest.json").read_bytes()),
                     "raw_sha256": collection.digest((output / "raw.json").read_bytes()),
-                    "command": collection.java_command("java", "classes", mode)})
+                    "command": collection.jmh_command("java", "classes", mode)})
             self.assertEqual(len(focused_controls.validate_results(partition, results, runners)), 2)
             receipt = output / "receipt.json"
             original = receipt.read_bytes()
@@ -92,7 +92,8 @@ class TestFocusedControls(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "source build"):
                 focused_controls.validate_results(partition, results, {"classpath": [{"path": "other"}]})
             data = collection.load(receipt)
-            data["command"].append("--enable-native-access=ALL-UNNAMED")
+            jvm_arguments = data["command"].index("-jvmArgs") + 1
+            data["command"][jvm_arguments] += " --enable-native-access=ALL-UNNAMED"
             collection.save(receipt, data)
             with self.assertRaisesRegex(ValueError, "memory mode"):
                 focused_controls.validate_results(partition, results, runners)

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "group_id": "io.airlift",
+  "artifact_id": "regulator",
+  "version": "1.0",
+  "source_commit": "68e42b7d2a104798524189aac7e2a008b49c3d4a",
+  "engine_tree": "1a0bc1dbab54333e4615f29440de243d1edc4940",
+  "jar_sha256": "8f2591e7cf1d3e3a92cda61a63a5b8feda8ecbd2b71b9d077dc257f62b61fb75"
+}

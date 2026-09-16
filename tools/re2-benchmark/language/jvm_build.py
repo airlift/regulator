@@ -13,6 +13,7 @@ import tarfile
 import zipfile
 
 import source_archive
+import released_artifact
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -51,17 +52,7 @@ def java_executable(java):
 
 
 def jvm_identity(java, classpath):
-    artifacts = []
-    for entry in classpath.split(os.pathsep):
-        if not entry:
-            raise ValueError("empty classpath entry")
-        path = Path(entry).resolve()
-        if not path.exists():
-            raise ValueError(f"missing classpath entry: {path}")
-        files = sorted(path.rglob("*")) if path.is_dir() else [path]
-        artifacts.append({"path": str(path), "files": {
-            str(file.relative_to(path) if path.is_dir() else file.name): digest(file.read_bytes())
-            for file in files if file.is_file()}})
+    artifacts = released_artifact.classpath_identity(classpath)
     java_path = java_executable(java)
     return {"java_path": str(java_path), "java_binary_sha256": digest(java_path.read_bytes()),
             "jdk": subprocess.check_output([java, "-version"], stderr=subprocess.STDOUT).decode(),
@@ -94,6 +85,13 @@ def validate_receipt(receipt, root, java, classpath, archive=None, provenance=No
     if receipt["comparators_sha256"] != digest(pins.read_bytes()):
         raise ValueError("JVM build comparator pins changed")
     validate_joni(classpath, pins)
+    release = receipt.get("released_artifact")
+    version = os.environ.get("REGULATOR_RELEASE_VERSION")
+    if version and (release is None or release["manifest"] != released_artifact.manifest(root, version)):
+        raise ValueError("JVM build does not identify the selected released artifact")
+    if release is not None:
+        released_artifact.validate_saved(release, receipt["jvm"])
+        released_artifact.validate_classpath(classpath, Path(release["jar_path"]), release["manifest"])
 
 
 def build(destination, java="java", root=ROOT, archive=None, provenance=None):
@@ -116,7 +114,11 @@ def build(destination, java="java", root=ROOT, archive=None, provenance=None):
                "-Dmaven.gitcommitid.skip=true", "-DincludeScope=test", f"-Dmdep.outputFile={dependencies}"]
     with (destination / "build.log").open("wb") as log:
         subprocess.run(command, cwd=checkout, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
-    classpath = os.pathsep.join([str(checkout / "target/test-classes"), str(checkout / "target/classes"),
+    version = os.environ.get("REGULATOR_RELEASE_VERSION")
+    production = checkout / "target/classes"
+    if version:
+        production, release_identity = released_artifact.prepare(checkout, version, destination / "release")
+    classpath = os.pathsep.join([str(checkout / "target/test-classes"), str(production),
                                 dependencies.read_text().strip()])
     require_clean_source(root, archive, provenance)
     if source_identity(root, archive, provenance) != source:
@@ -126,6 +128,9 @@ def build(destination, java="java", root=ROOT, archive=None, provenance=None):
     receipt = {"schema_version": 1, **source, "archive_sha256": digest(archive_bytes),
                "command": command, "comparators_sha256": digest(pins.read_bytes()),
                "jvm": jvm_identity(str(java_path), classpath)}
+    if version:
+        receipt["released_artifact"] = released_artifact.attest(
+            classpath, production, release_identity, destination / "release", str(java_path))
     (destination / "classpath.txt").write_text(classpath + "\n")
     (destination / "jvm-build.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
     return receipt

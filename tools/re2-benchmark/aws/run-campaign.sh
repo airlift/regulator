@@ -8,16 +8,21 @@ AWS_PROFILE=${AWS_PROFILE:-}
 AWS_REGION=${AWS_REGION:-us-west-2}
 TRANSFER_BUCKET=${TRANSFER_BUCKET:-}
 TRANSFER_PREFIX=${TRANSFER_PREFIX:-}
-INTEL_INSTANCE_TYPE=${INTEL_INSTANCE_TYPE:-c8i.8xlarge}
-ARM_INSTANCE_TYPE=${ARM_INSTANCE_TYPE:-c8g.4xlarge}
+INTEL_INSTANCE_TYPE=${INTEL_INSTANCE_TYPE:-r8i.large}
+ARM_INSTANCE_TYPE=${ARM_INSTANCE_TYPE:-r8g.large}
 INSTANCE_MARKET_TYPE=${INSTANCE_MARKET_TYPE:-on-demand}
+REGULATOR_RELEASE_VERSION=${REGULATOR_RELEASE_VERSION:-}
+if [[ -n "${REGULATOR_RELEASE_VERSION}" && ! "${REGULATOR_RELEASE_VERSION}" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+    echo "Invalid release version" >&2
+    exit 1
+fi
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-5400}
 CAMPAIGN_PROVENANCE=${CAMPAIGN_PROVENANCE:-qualification}
 RESULT_ROOT=${RESULT_ROOT:-"${REGULATOR_DIR}/benchmark-results/re2-qualification"}
 CAMPAIGN_MODE=${CAMPAIGN_MODE:-baseline-shard}
 CAMPAIGN_ARCHITECTURES=${CAMPAIGN_ARCHITECTURES:-intel}
 CAMPAIGN_ID=${CAMPAIGN_ID:-baseline}
-CAMPAIGN_PLATFORM=${CAMPAIGN_PLATFORM:-c8i}
+CAMPAIGN_PLATFORM=${CAMPAIGN_PLATFORM:-r8i}
 CAMPAIGN_SHARD_ID=${CAMPAIGN_SHARD_ID:-traditional-search}
 CAMPAIGN_REPLICA_ID=${CAMPAIGN_REPLICA_ID:-1}
 CAMPAIGN_HOST_EPOCH=${CAMPAIGN_HOST_EPOCH:-1}
@@ -157,20 +162,20 @@ if [[ ! ${CAMPAIGN_REPLICA_ID} =~ ^[1-9][0-9]*$ || ! ${CAMPAIGN_HOST_EPOCH} =~ ^
     exit 1
 fi
 case "${CAMPAIGN_PLATFORM}" in
-    c8i)
-        if [[ "${CAMPAIGN_ARCHITECTURES}" != intel || "${INTEL_INSTANCE_TYPE}" != c8i.* ]]; then
-            echo "Platform c8i requires CAMPAIGN_ARCHITECTURES=intel and a c8i instance" >&2
+    r8i)
+        if [[ "${CAMPAIGN_ARCHITECTURES}" != intel || "${INTEL_INSTANCE_TYPE}" != r8i.* ]]; then
+            echo "Platform r8i requires CAMPAIGN_ARCHITECTURES=intel and a r8i instance" >&2
             exit 1
         fi
         ;;
-    c8g | c9g)
+    r8g | r9g)
         required_instance_type="${CAMPAIGN_PLATFORM}.*"
         if [[ "${CAMPAIGN_ARCHITECTURES}" != arm || "${ARM_INSTANCE_TYPE}" != ${required_instance_type} ]]; then
             echo "Platform ${CAMPAIGN_PLATFORM} requires CAMPAIGN_ARCHITECTURES=arm and a ${CAMPAIGN_PLATFORM} instance" >&2
             exit 1
         fi
         ;;
-    *) echo "CAMPAIGN_PLATFORM must be c8i, c8g, or c9g: ${CAMPAIGN_PLATFORM}" >&2; exit 1 ;;
+    *) echo "CAMPAIGN_PLATFORM must be r8i, r8g, or r9g: ${CAMPAIGN_PLATFORM}" >&2; exit 1 ;;
 esac
 case "${INSTANCE_MARKET_TYPE}" in
     on-demand | spot) ;;
@@ -995,6 +1000,7 @@ export EXPECTED_AMI_ID='${expected_ami_id}'
 export RE2_ENGINEERING_ARCHITECTURE='${campaign_architecture}'
 export RE2_BENCHMARK_MODE='${CAMPAIGN_MODE}'
 export INSTANCE_MARKET_TYPE='${INSTANCE_MARKET_TYPE}'
+export REGULATOR_RELEASE_VERSION='${REGULATOR_RELEASE_VERSION}'
 export BENCHMARK_JAVA_ARCHIVE_URL='${java_archive_url}'
 export BENCHMARK_JAVA_ARCHIVE_SHA256='${java_archive_sha256}'
 export REBAR_ROOT='/opt/re2-work/rebar'
@@ -1003,6 +1009,8 @@ export JONI_COMPARATOR_ORDER='${JONI_COMPARATOR_ORDER}'
 export REBAR_WORKLOAD_DEFINITIONS_SHA256='${REBAR_WORKLOAD_DEFINITIONS_SHA256}'
 export REBAR_SELECTED_DEFINITIONS_SHA256='${REBAR_SELECTED_DEFINITIONS_SHA256}'
 export BENCHMARK_HEAP_SIZE='${BENCHMARK_HEAP_SIZE:-8g}'
+export BENCHMARK_CPU_LIST='${BENCHMARK_CPU_LIST:-0}'
+export BENCHMARK_EXPECTED_VCPUS='${BENCHMARK_EXPECTED_VCPUS:-}'
 
 trino_directory=
 if [[ '${CAMPAIGN_USES_TRINO}' == true ]]; then
@@ -1063,7 +1071,7 @@ launch_instance()
         --instance-type "${instance_type}" \
         --count 1 \
         --network-interfaces "DeviceIndex=0,SubnetId=${subnet},Groups=${SECURITY_GROUP_ID},AssociatePublicIpAddress=true" \
-        --block-device-mappings "DeviceName=${root_device},Ebs={VolumeSize=100,VolumeType=gp3,DeleteOnTermination=true,Encrypted=true}" \
+        --block-device-mappings "DeviceName=${root_device},Ebs={VolumeSize=40,VolumeType=gp3,DeleteOnTermination=true,Encrypted=true}" \
         --metadata-options HttpTokens=required,HttpEndpoint=enabled \
         --iam-instance-profile "Name=${INSTANCE_PROFILE_NAME}" \
         --instance-initiated-shutdown-behavior terminate)
@@ -1316,7 +1324,11 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
             result_status=$(cat "${SESSION_DIR}/${label}/re2-results/exit-status")
             if [[ "${result_status}" != 0 ]]; then
                 echo "${label} run failed with status ${result_status}" >&2
-                record_failure_classification benchmark-failure "remote-exit-status:${result_status}"
+                if [[ "${result_status}" == 42 && "${CAMPAIGN_MODE}" == baseline-shard ]]; then
+                    record_failure_classification protocol-qualification "remote-exit-status:${result_status}"
+                else
+                    record_failure_classification benchmark-failure "remote-exit-status:${result_status}"
+                fi
                 campaign_failed=1
                 continue
             fi

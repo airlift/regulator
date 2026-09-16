@@ -99,8 +99,10 @@ class TestSemanticIdentity(unittest.TestCase):
                     script = "set -euo pipefail\n" + "\n".join(f"{key}={shlex.quote(value)}" for key, value in variables.items()) + "\n"
                     script += '''
 normalized_files=()
+export REBAR_HEAP_PRETOUCH=false
 taskset() { shift 2; "$@"; }
 fake_rebar() {
+    [[ ${REBAR_HEAP_PRETOUCH} == true ]] || return 99
     local engine=primary
     while [[ $# -gt 0 ]]; do
         if [[ "$1" == -e ]]; then engine=$2; fi
@@ -220,7 +222,7 @@ REBAR_JONI_BENCHMARK_FILTER=$(python3 "${RESULT_TOOL}" jmh-filter --manifest "${
             hosts = []
             for replica, observed in enumerate(executions):
                 hosts.append({
-                    **by_id[row_id], **observed[row_id], "platform": "c8i", "rebar_corpus": "curated",
+                    **by_id[row_id], **observed[row_id], "platform": "r8i", "rebar_corpus": "curated",
                     "confirmation": "true" if replica == 3 else "false", "semantic_outcome": "verified",
                     "calibration_drift": "0", "native_bracket_drift": "0",
                     "contract_identity": observed[row_id]["result_checksum"],

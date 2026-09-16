@@ -6,14 +6,15 @@ import importlib.util
 import sys
 from collections import Counter
 from pathlib import Path
+import topology
 
 
 EXPECTED_ROW_COUNT = 5475
-EXPECTED_SHARD_COUNT = 37
+EXPECTED_SHARD_COUNT = 44
 EXPECTED_PLATFORMS = {
-    "c8i": ("intel", "c8i.2xlarge", "8"),
-    "c8g": ("arm", "c8g.2xlarge", "8"),
-    "c9g": ("arm", "c9g.2xlarge", "8"),
+    "r8i": ("intel", "r8i.large", "2"),
+    "r8g": ("arm", "r8g.large", "2"),
+    "r9g": ("arm", "r9g.large", "2"),
 }
 EXPECTED_COMPARATORS = {
     "native-re2": "972a15cedd008d846f1a39b2e88ce48d7f166cbd",
@@ -166,6 +167,7 @@ def main():
     if len(platform_rows) != len(platforms) or set(platforms) != set(EXPECTED_PLATFORMS):
         raise SystemExit(f"unexpected platform identities: {sorted(platforms)}")
     for platform, expected in EXPECTED_PLATFORMS.items():
+        topology.validate(platforms[platform])
         actual = platforms[platform]
         if (actual["architecture"], actual["instance_type"], actual["vcpus"]) != expected:
             raise SystemExit(f"unexpected {platform} configuration")

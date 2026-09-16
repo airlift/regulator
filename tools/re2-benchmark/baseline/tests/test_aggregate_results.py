@@ -48,11 +48,27 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+class TestLikeComparisonCoverage(unittest.TestCase):
+    def test_lifecycle_sql_comparison_does_not_require_optional_dfa(self):
+        manifest = read_tsv(BASELINE / 'rows.tsv')
+        for shard in ('like-compile', 'like-single-use', 'trino-like', 'like-dfa-single-use'):
+            with self.subTest(shard=shard):
+                rows = [row for row in manifest if row['shard_id'] == shard]
+                expected = {row['row_id'] for row in rows if row['system'] == 'regulator'}
+                specs = aggregate_results.comparison_specs(rows)
+                self.assertEqual(expected, {candidate['row_id'] for _, candidate, comparator, _ in specs
+                                            if comparator == 'trino-sql'})
+                dfa_expected = expected if any(row['system'] == 'trino-optimized' for row in rows) else set()
+                self.assertEqual(dfa_expected, {candidate['row_id'] for _, candidate, comparator, _ in specs
+                                                if comparator == 'trino-optimized'})
+                self.assertEqual(len(expected) + len(dfa_expected), len(specs))
+
+
 class CampaignFixture:
     platforms = {
-        "c8i": ("intel", "c8i.2xlarge"),
-        "c8g": ("arm", "c8g.2xlarge"),
-        "c9g": ("arm", "c9g.2xlarge"),
+        "r8i": ("intel", "r8i.large"),
+        "r8g": ("arm", "r8g.large"),
+        "r9g": ("arm", "r9g.large"),
     }
 
     def __init__(self, root):
@@ -72,8 +88,10 @@ class CampaignFixture:
         self.campaign_source_manifest = root / "campaign-artifact.tsv.source-manifest.tsv"
         self.rows = self._manifest_rows()
         write_tsv(self.manifest, aggregate_results.MANIFEST_FIELDS, self.rows)
-        write_tsv(self.platform_file, ("platform", "architecture", "instance_type"), (
-            {"platform": platform, "architecture": values[0], "instance_type": values[1]}
+        write_tsv(self.platform_file, ("platform", "architecture", "instance_type", "vcpus",
+                                       "concurrency_instance_type", "concurrency_vcpus"), (
+            {"platform": platform, "architecture": values[0], "instance_type": values[1],
+             "vcpus": "2", "concurrency_instance_type": platform + ".2xlarge", "concurrency_vcpus": "8"}
             for platform, values in self.platforms.items()))
         write_tsv(self.shard_file, ("shard_id", "description"), ({"shard_id": "only", "description": "test"},))
         native_systems = sorted({row["system"] for row in self.rows if row["system"] != "regulator-object-row"})
@@ -94,7 +112,7 @@ class CampaignFixture:
                 self.add_session(platform, replica)
         self.write_ledgers()
         write_tsv(self.events, aggregate_results.EVENT_FIELDS[:-1], ({
-            "event_type": "interruption", "campaign_id": "test-campaign", "platform": "c8g",
+            "event_type": "interruption", "campaign_id": "test-campaign", "platform": "r8g",
             "shard_id": "only", "replica_id": "2", "instance_id": "i-interrupted",
             "host_epoch": "interrupted-epoch", "reason": "Spot interruption",
             "artifact_uri": "s3://bucket/rejected/interrupted.tar.zst", "artifact_sha256": "e" * 64,
@@ -412,15 +430,15 @@ class TestAggregateResults(unittest.TestCase):
             self.aggregate()
 
     def test_rejects_environment_route_heap_disagreement(self):
-        directory = self.fixture.session_directories[("c8i", 1)]
+        directory = self.fixture.session_directories[("r8i", 1)]
         environment = directory / "environment-manifest.txt"
         environment.write_text(environment.read_text().replace("benchmark_heap_size=8g", "benchmark_heap_size=2g"))
-        self.fixture.rewrite_evidence_artifact("c8i", 1, "environment-manifest.txt")
+        self.fixture.rewrite_evidence_artifact("r8i", 1, "environment-manifest.txt")
         with self.assertRaisesRegex(aggregate_results.ReductionError, "heap_size"):
             self.aggregate()
 
     def test_rejects_route_heap_disagreement_and_missing_heap(self):
-        directory = self.fixture.session_directories[("c8i", 1)]
+        directory = self.fixture.session_directories[("r8i", 1)]
         artifact = "routes/object-row/run-metadata.txt"
         metadata = directory / artifact
         original = metadata.read_text()
@@ -428,21 +446,21 @@ class TestAggregateResults(unittest.TestCase):
                                      ("", "missing candidate identity fields")):
             with self.subTest(replacement=replacement):
                 metadata.write_text(original.replace("heap_size=8g\n", replacement))
-                self.fixture.rewrite_evidence_artifact("c8i", 1, artifact)
+                self.fixture.rewrite_evidence_artifact("r8i", 1, artifact)
                 with self.assertRaisesRegex(aggregate_results.ReductionError, message):
                     self.aggregate()
 
     def test_rejects_honest_confirmation_with_different_heap(self):
-        self.fixture.add_session("c8i", 4)
-        directory = self.fixture.session_directories[("c8i", 4)]
+        self.fixture.add_session("r8i", 4)
+        directory = self.fixture.session_directories[("r8i", 4)]
         for artifact in ("environment-manifest.txt", "routes/native-access/run-metadata.txt", "routes/object-row/run-metadata.txt"):
             path = directory / artifact
             path.write_text(path.read_text().replace("heap_size=8g", "heap_size=2g"))
-            self.fixture.rewrite_evidence_artifact("c8i", 4, artifact)
+            self.fixture.rewrite_evidence_artifact("r8i", 4, artifact)
         receipt = validate_confirmation_host_results(self.fixture.manifest, directory / "session.tsv", directory / "observed-rows.tsv")
         self.assertEqual("2g", receipt["heap_size"])
         self.fixture.confirmations[0] = receipt
-        self.fixture.rewrite_receipt("c8i", 4)
+        self.fixture.rewrite_receipt("r8i", 4)
         self.fixture.write_ledgers()
         with self.assertRaisesRegex(aggregate_results.ReductionError, "multiple candidate identities"):
             self.aggregate()
@@ -488,7 +506,7 @@ class TestAggregateResults(unittest.TestCase):
         host_rows = []
         for row in manifest:
             host_rows.append({
-                "platform": "c8i",
+                "platform": "r8i",
                 "host_epoch": "epoch",
                 "replica_id": "1",
                 "confirmation": "false",
@@ -515,7 +533,7 @@ class TestAggregateResults(unittest.TestCase):
     def test_extended_rebar_mismatch_is_not_numerically_aggregated(self):
         host_rows = [
             {
-                "platform": "c8i",
+                "platform": "r8i",
                 "row_id": "extended/regulator-native-access",
                 "shard_id": "rebar-a",
                 "confirmation": "false",
@@ -536,7 +554,7 @@ class TestAggregateResults(unittest.TestCase):
     def test_joni_did_not_finish_is_not_numerically_aggregated(self):
         host_rows = [
             {
-                "platform": "c8i",
+                "platform": "r8i",
                 "row_id": "curated/joni",
                 "shard_id": "rebar-a",
                 "confirmation": "false",
@@ -563,7 +581,7 @@ class TestAggregateResults(unittest.TestCase):
         ]
         host_rows = [
             {
-                "platform": "c8i",
+                "platform": "r8i",
                 "host_epoch": "epoch",
                 "row_id": row["row_id"],
                 "semantic_outcome": (
@@ -591,7 +609,7 @@ class TestAggregateResults(unittest.TestCase):
         self.assertEqual(summary["host_rows"], len(self.fixture.rows) * 9)
         ratios = read_tsv(self.fixture.output / "comparison-aggregates.tsv")
         native = next(row for row in ratios
-                      if row["platform"] == "c8i" and
+                      if row["platform"] == "r8i" and
                       "/native/search/regulator-native-access::native-re2" in row["comparison_id"])
         self.assertLess(float(native["median_ratio"]), 1.0)
         self.assertEqual(native["direction"], "faster")
@@ -633,7 +651,7 @@ class TestAggregateResults(unittest.TestCase):
         self.assertEqual(report.read_bytes(), first)
         text = first.decode()
         self.assertIn("Below 1.0 is faster", text)
-        self.assertLess(text.index("### C8I"), text.index("### C8G"))
+        self.assertLess(text.index("### R8I"), text.index("### R8G"))
         self.assertIn("Curated Rebar", text)
         self.assertIn("Extended Rebar (Informational)", text)
         self.assertIn("Spot interruption", text)
@@ -641,24 +659,24 @@ class TestAggregateResults(unittest.TestCase):
         self.assertIn("_None._", text)
 
     def test_confirmation_host_is_preserved(self):
-        self.fixture.add_session("c8i", 4)
+        self.fixture.add_session("r8i", 4)
         self.fixture.write_ledgers()
         self.fixture.write_artifact_index()
         self.aggregate()
         aggregate = next(row for row in read_tsv(self.fixture.output / "row-aggregates.tsv")
-                         if row["platform"] == "c8i")
+                         if row["platform"] == "r8i")
         self.assertEqual(aggregate["host_count"], "4")
         self.assertEqual(aggregate["confirmation_host_count"], "1")
         host_rows = read_tsv(self.fixture.output / "host-rows.tsv")
         self.assertTrue(any(row["confirmation"] == "true" for row in host_rows))
 
     def test_missing_primary_session_is_rejected(self):
-        shutil.rmtree(self.fixture.session_directories[("c9g", 3)])
+        shutil.rmtree(self.fixture.session_directories[("r9g", 3)])
         with self.assertRaisesRegex(aggregate_results.ReductionError, "accepted artifact coverage mismatch"):
             self.aggregate()
 
     def test_unexpected_accepted_session_is_rejected(self):
-        directory = self.fixture.session_directories[("c9g", 3)]
+        directory = self.fixture.session_directories[("r9g", 3)]
         clone = self.fixture.artifacts / "unexpected"
         shutil.copytree(directory, clone)
         receipt = read_tsv(clone / "acceptance-receipt.tsv")[0]
@@ -690,20 +708,20 @@ class TestAggregateResults(unittest.TestCase):
             self.aggregate()
 
     def test_nested_route_artifact_tampering_is_rejected(self):
-        directory = self.fixture.session_directories[("c8i", 1)]
+        directory = self.fixture.session_directories[("r8i", 1)]
         (directory / "routes/native-access/raw/measurement.json").write_text("tampered\n")
         with self.assertRaisesRegex(aggregate_results.ReductionError, "raw artifact checksum mismatch"):
             self.aggregate()
 
     def test_route_evidence_manifest_tampering_is_rejected(self):
-        directory = self.fixture.session_directories[("c8i", 1)]
+        directory = self.fixture.session_directories[("r8i", 1)]
         with (directory / "route-evidence.tsv").open("a", encoding="utf-8") as output_file:
             output_file.write("host\tmissing\tsha256\t" + "0" * 64 + "\n")
         with self.assertRaisesRegex(aggregate_results.ReductionError, "evidence manifest checksum"):
             self.aggregate()
 
     def test_capacity_identity_tampering_is_rejected(self):
-        directory = self.fixture.session_directories[("c8i", 1)]
+        directory = self.fixture.session_directories[("r8i", 1)]
         path = directory / "host-capacity.txt"
         path.write_text(path.read_text().replace(
             "memory_total_bytes=34359738368", "memory_total_bytes=34359738367"))
@@ -711,7 +729,7 @@ class TestAggregateResults(unittest.TestCase):
             self.aggregate()
 
     def test_incomplete_final_capacity_is_rejected(self):
-        directory = self.fixture.session_directories[("c8i", 1)]
+        directory = self.fixture.session_directories[("r8i", 1)]
         path = directory / "host-capacity.txt"
         path.write_text("\n".join(
             line for line in path.read_text().splitlines()
@@ -720,7 +738,7 @@ class TestAggregateResults(unittest.TestCase):
             self.aggregate()
 
     def test_valid_looking_final_capacity_tampering_is_rejected_by_archive_binding(self):
-        directory = self.fixture.session_directories[("c8i", 1)]
+        directory = self.fixture.session_directories[("r8i", 1)]
         path = directory / "host-capacity.txt"
         path.write_text(path.read_text().replace("wall_seconds=120", "wall_seconds=121"))
         with self.assertRaisesRegex(aggregate_results.ReductionError, "not bound by the campaign archive"):
@@ -797,61 +815,61 @@ class TestAggregateResults(unittest.TestCase):
 
     def test_contract_identity_disagreement_is_unresolved(self):
         row_id = "only/native/search/regulator-native-access"
-        self.fixture.mutate_observed("c8i", 3, row_id, "result_checksum", "f" * 64)
+        self.fixture.mutate_observed("r8i", 3, row_id, "result_checksum", "f" * 64)
         self.aggregate()
         row = next(row for row in read_tsv(self.fixture.output / "row-aggregates.tsv")
-                   if row["platform"] == "c8i" and row["row_id"] == row_id)
+                   if row["platform"] == "r8i" and row["row_id"] == row_id)
         self.assertEqual(row["contract_identity_status"], "mismatch")
         self.assertIn("contract-identity-mismatch", row["unresolved_reasons"])
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [
-            {"platform": "c8i", "shard_id": "only"}])
+            {"platform": "r8i", "shard_id": "only"}])
 
     def test_host_cv_and_allocation_are_unresolved(self):
         row_id = "only/native/search/regulator-native-access"
-        self.fixture.mutate_observed("c8i", 3, row_id, "score", "200")
-        self.fixture.mutate_observed("c8i", 2, row_id, "allocation_bytes", "8")
+        self.fixture.mutate_observed("r8i", 3, row_id, "score", "200")
+        self.fixture.mutate_observed("r8i", 2, row_id, "allocation_bytes", "8")
         self.aggregate()
         row = next(row for row in read_tsv(self.fixture.output / "row-aggregates.tsv")
-                   if row["platform"] == "c8i" and row["row_id"] == row_id)
+                   if row["platform"] == "r8i" and row["row_id"] == row_id)
         self.assertIn("host-cv-above-5-percent", row["unresolved_reasons"])
         self.assertIn("allocation-free-row-allocated", row["unresolved_reasons"])
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [
-            {"platform": "c8i", "shard_id": "only"}])
+            {"platform": "r8i", "shard_id": "only"}])
 
     def test_precision_rejected_replica_is_preserved_as_unresolved(self):
         row_id = "only/joni/count/regulator-native-access"
-        self.fixture.mutate_observed("c8i", 2, row_id, "outcome", "precision-rejected")
+        self.fixture.mutate_observed("r8i", 2, row_id, "outcome", "precision-rejected")
 
         self.aggregate()
 
         row = next(row for row in read_tsv(self.fixture.output / "row-aggregates.tsv")
-                   if row["platform"] == "c8i" and row["row_id"] == row_id)
+                   if row["platform"] == "r8i" and row["row_id"] == row_id)
         self.assertIn("precision-rejected", row["unresolved_reasons"])
         comparison = next(
             row for row in read_tsv(self.fixture.output / "comparison-aggregates.tsv")
-            if row["platform"] == "c8i" and row["candidate_row_id"] == row_id)
+            if row["platform"] == "r8i" and row["candidate_row_id"] == row_id)
         self.assertEqual("true", comparison["unresolved"])
         self.assertIn("precision-rejected", comparison["unresolved_reasons"])
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [
-            {"platform": "c8i", "shard_id": "only"}])
+            {"platform": "r8i", "shard_id": "only"}])
 
     def test_allocation_violation_alone_does_not_request_confirmation(self):
         row_id = "only/native/search/regulator-native-access"
-        self.fixture.mutate_observed("c8i", 2, row_id, "allocation_bytes", "8")
+        self.fixture.mutate_observed("r8i", 2, row_id, "allocation_bytes", "8")
         self.aggregate()
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [])
 
     def test_material_host_direction_disagreement_is_unresolved(self):
         row_id = "only/joni/count/regulator-native-access"
-        self.fixture.mutate_observed("c8i", 1, row_id, "score", "80")
-        self.fixture.mutate_observed("c8i", 2, row_id, "score", "120")
+        self.fixture.mutate_observed("r8i", 1, row_id, "score", "80")
+        self.fixture.mutate_observed("r8i", 2, row_id, "score", "120")
         self.aggregate()
         row = next(row for row in read_tsv(self.fixture.output / "comparison-aggregates.tsv")
-                   if row["platform"] == "c8i" and row["candidate_row_id"] == row_id)
+                   if row["platform"] == "r8i" and row["candidate_row_id"] == row_id)
         self.assertEqual(row["unresolved"], "true")
         self.assertIn("host-direction-disagreement", row["unresolved_reasons"])
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [
-            {"platform": "c8i", "shard_id": "only"}])
+            {"platform": "r8i", "shard_id": "only"}])
 
     def test_primary_ratio_variability_requests_confirmation(self):
         candidate = "only/joni/count/regulator-native-access"
@@ -863,29 +881,29 @@ class TestAggregateResults(unittest.TestCase):
         )
         for replica, (candidate_score, comparator_score) in enumerate(
                 zip(candidate_scores, comparator_scores, strict=True), 1):
-            self.fixture.mutate_observed("c8i", replica, candidate, "score", str(candidate_score))
-            self.fixture.mutate_observed("c8i", replica, comparator, "score", str(comparator_score))
+            self.fixture.mutate_observed("r8i", replica, candidate, "score", str(candidate_score))
+            self.fixture.mutate_observed("r8i", replica, comparator, "score", str(comparator_score))
 
         self.aggregate()
 
         row = next(row for row in read_tsv(self.fixture.output / "comparison-aggregates.tsv")
-                   if row["platform"] == "c8i" and row["candidate_row_id"] == candidate)
+                   if row["platform"] == "r8i" and row["candidate_row_id"] == candidate)
         self.assertGreater(float(row["primary_ratio_host_cv"]), 0.05)
         self.assertIn("ratio-host-cv-above-5-percent", row["unresolved_reasons"])
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [
-            {"platform": "c8i", "shard_id": "only"}])
+            {"platform": "r8i", "shard_id": "only"}])
 
     def test_exact_ratio_variability_limit_does_not_request_confirmation(self):
         candidate = "only/joni/count/regulator-native-access"
         comparator = "only/joni/count/joni"
         for replica, ratio in enumerate((0.95, 1.0, 1.05), 1):
-            self.fixture.mutate_observed("c8i", replica, candidate, "score", str(ratio * 100))
-            self.fixture.mutate_observed("c8i", replica, comparator, "score", "100")
+            self.fixture.mutate_observed("r8i", replica, candidate, "score", str(ratio * 100))
+            self.fixture.mutate_observed("r8i", replica, comparator, "score", "100")
 
         self.aggregate()
 
         row = next(row for row in read_tsv(self.fixture.output / "comparison-aggregates.tsv")
-                   if row["platform"] == "c8i" and row["candidate_row_id"] == candidate)
+                   if row["platform"] == "r8i" and row["candidate_row_id"] == candidate)
         self.assertEqual(row["primary_ratio_host_cv"], "0.05")
         self.assertNotIn("ratio-host-cv-above-5-percent", row["unresolved_reasons"])
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [])
@@ -893,18 +911,18 @@ class TestAggregateResults(unittest.TestCase):
     def test_confirmation_can_resolve_primary_ratio_variability(self):
         candidate = "only/joni/count/regulator-native-access"
         comparator = "only/joni/count/joni"
-        self.fixture.add_session("c8i", 4)
+        self.fixture.add_session("r8i", 4)
         for replica, ratio in enumerate((0.94, 1.0, 1.06, 1.0), 1):
             candidate_score = (97, 100, 103, 100)[replica - 1]
-            self.fixture.mutate_observed("c8i", replica, candidate, "score", str(candidate_score))
-            self.fixture.mutate_observed("c8i", replica, comparator, "score", str(candidate_score / ratio))
+            self.fixture.mutate_observed("r8i", replica, candidate, "score", str(candidate_score))
+            self.fixture.mutate_observed("r8i", replica, comparator, "score", str(candidate_score / ratio))
         self.fixture.write_ledgers()
         self.fixture.write_artifact_index()
 
         self.aggregate()
 
         row = next(row for row in read_tsv(self.fixture.output / "comparison-aggregates.tsv")
-                   if row["platform"] == "c8i" and row["candidate_row_id"] == candidate)
+                   if row["platform"] == "r8i" and row["candidate_row_id"] == candidate)
         self.assertGreater(float(row["primary_ratio_host_cv"]), 0.05)
         self.assertLessEqual(float(row["ratio_host_cv"]), 0.05)
         self.assertNotIn("ratio-host-cv-above-5-percent", row["unresolved_reasons"])
@@ -913,17 +931,17 @@ class TestAggregateResults(unittest.TestCase):
     def test_confirmation_at_exact_ratio_variability_limit_is_resolved(self):
         candidate = "only/joni/count/regulator-native-access"
         comparator = "only/joni/count/joni"
-        self.fixture.add_session("c8i", 4)
+        self.fixture.add_session("r8i", 4)
         for replica, ratio in enumerate((0.925, 1.025, 1.025, 1.025), 1):
-            self.fixture.mutate_observed("c8i", replica, candidate, "score", str(ratio * 100))
-            self.fixture.mutate_observed("c8i", replica, comparator, "score", "100")
+            self.fixture.mutate_observed("r8i", replica, candidate, "score", str(ratio * 100))
+            self.fixture.mutate_observed("r8i", replica, comparator, "score", "100")
         self.fixture.write_ledgers()
         self.fixture.write_artifact_index()
 
         self.aggregate()
 
         row = next(row for row in read_tsv(self.fixture.output / "comparison-aggregates.tsv")
-                   if row["platform"] == "c8i" and row["candidate_row_id"] == candidate)
+                   if row["platform"] == "r8i" and row["candidate_row_id"] == candidate)
         self.assertEqual(row["ratio_host_cv"], "0.05")
         self.assertNotIn("ratio-host-cv-above-5-percent", row["unresolved_reasons"])
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [])
@@ -936,18 +954,18 @@ class TestAggregateResults(unittest.TestCase):
     def test_persistent_ratio_variability_remains_unresolved_after_confirmation(self):
         candidate = "only/joni/count/regulator-native-access"
         comparator = "only/joni/count/joni"
-        self.fixture.add_session("c8i", 4)
+        self.fixture.add_session("r8i", 4)
         for replica, ratio in enumerate((0.92, 1.0, 1.08, 1.0), 1):
             candidate_score = (96, 100, 104, 100)[replica - 1]
-            self.fixture.mutate_observed("c8i", replica, candidate, "score", str(candidate_score))
-            self.fixture.mutate_observed("c8i", replica, comparator, "score", str(candidate_score / ratio))
+            self.fixture.mutate_observed("r8i", replica, candidate, "score", str(candidate_score))
+            self.fixture.mutate_observed("r8i", replica, comparator, "score", str(candidate_score / ratio))
         self.fixture.write_ledgers()
         self.fixture.write_artifact_index()
 
         self.aggregate()
 
         row = next(row for row in read_tsv(self.fixture.output / "comparison-aggregates.tsv")
-                   if row["platform"] == "c8i" and row["candidate_row_id"] == candidate)
+                   if row["platform"] == "r8i" and row["candidate_row_id"] == candidate)
         self.assertGreater(float(row["ratio_host_cv"]), 0.05)
         self.assertIn("ratio-host-cv-above-5-percent", row["unresolved_reasons"])
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [])
@@ -955,39 +973,39 @@ class TestAggregateResults(unittest.TestCase):
     def test_scaling_class_disagreement_is_unresolved(self):
         for size in (10, 100, 1000):
             self.fixture.mutate_observed(
-                "c8i", 3, f"only/scale/{size}/regulator-native-access", "score", "100")
+                "r8i", 3, f"only/scale/{size}/regulator-native-access", "score", "100")
         self.aggregate()
         rows = [row for row in read_tsv(self.fixture.output / "row-aggregates.tsv")
-                if row["platform"] == "c8i" and "/scale/" in row["row_id"]
+                if row["platform"] == "r8i" and "/scale/" in row["row_id"]
                 and row["system"] == "regulator-native-access"]
         self.assertTrue(rows)
         self.assertTrue(all("scaling-class-mismatch" in row["unresolved_reasons"] for row in rows))
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [
-            {"platform": "c8i", "shard_id": "only"}])
+            {"platform": "r8i", "shard_id": "only"}])
 
     def test_existing_confirmation_consumes_platform_shard_allowance(self):
-        self.fixture.add_session("c8i", 4)
+        self.fixture.add_session("r8i", 4)
         self.fixture.write_ledgers()
         self.fixture.write_artifact_index()
         row_id = "only/native/search/regulator-native-access"
-        self.fixture.mutate_observed("c8i", 3, row_id, "score", "200")
+        self.fixture.mutate_observed("r8i", 3, row_id, "score", "200")
         self.aggregate()
         self.assertEqual(read_tsv(self.fixture.output / "confirmation-jobs.tsv"), [])
 
     def test_accepted_calibration_drift_above_gate_is_rejected(self):
-        directory = self.fixture.session_directories[("c8i", 1)]
+        directory = self.fixture.session_directories[("r8i", 1)]
         artifact = "routes/native-access/calibration.tsv"
         rows = read_tsv(directory / artifact)
         rows[1]["score"] = "106"
         rows[0]["before_after_drift"] = "0.06"
         rows[1]["before_after_drift"] = "0.06"
         write_tsv(directory / artifact, tuple(rows[0]), rows)
-        self.fixture.rewrite_evidence_artifact("c8i", 1, artifact)
+        self.fixture.rewrite_evidence_artifact("r8i", 1, artifact)
         with self.assertRaisesRegex(aggregate_results.ReductionError, "calibration drift gate"):
             self.aggregate()
 
     def test_native_bracket_drift_above_gate_marks_only_affected_rows_unresolved(self):
-        directory = self.fixture.session_directories[("c8i", 1)]
+        directory = self.fixture.session_directories[("r8i", 1)]
         artifact = "routes/native-access/native-bracket.tsv"
         rows = read_tsv(directory / artifact)
         affected_benchmark = "curated/work[model=count;workload=curated/work]"
@@ -995,13 +1013,13 @@ class TestAggregateResults(unittest.TestCase):
         affected["after_score_ns"] = "106"
         affected["before_after_drift"] = "0.06"
         write_tsv(directory / artifact, tuple(rows[0]), rows)
-        self.fixture.rewrite_evidence_artifact("c8i", 1, artifact)
+        self.fixture.rewrite_evidence_artifact("r8i", 1, artifact)
         self.aggregate()
 
         row_aggregates = read_tsv(self.fixture.output / "row-aggregates.tsv")
         affected_rows = [
             row for row in row_aggregates
-            if row["platform"] == "c8i" and row["benchmark"] == "curated/work"
+            if row["platform"] == "r8i" and row["benchmark"] == "curated/work"
         ]
         self.assertTrue(affected_rows)
         self.assertTrue(all(row["unresolved"] == "true" for row in affected_rows))
@@ -1011,7 +1029,7 @@ class TestAggregateResults(unittest.TestCase):
 
         unaffected_rows = [
             row for row in row_aggregates
-            if row["platform"] == "c8i" and row["benchmark"] == "extended/work"
+            if row["platform"] == "r8i" and row["benchmark"] == "extended/work"
         ]
         self.assertTrue(unaffected_rows)
         self.assertTrue(all(
@@ -1021,13 +1039,13 @@ class TestAggregateResults(unittest.TestCase):
         comparisons = read_tsv(self.fixture.output / "comparison-aggregates.tsv")
         affected_comparisons = [
             row for row in comparisons
-            if row["platform"] == "c8i" and "curated/work/count" in row["candidate_row_id"]
+            if row["platform"] == "r8i" and "curated/work/count" in row["candidate_row_id"]
         ]
         self.assertTrue(affected_comparisons)
         self.assertTrue(all(row["unresolved"] == "true" for row in affected_comparisons))
         self.assertEqual(
             read_tsv(self.fixture.output / "confirmation-jobs.tsv"),
-            [{"platform": "c8i", "shard_id": "only"}],
+            [{"platform": "r8i", "shard_id": "only"}],
         )
 
     def test_throughput_ratio_is_inverted_to_cost(self):
@@ -1052,7 +1070,7 @@ class TestAggregateResults(unittest.TestCase):
         events = []
         for event_type in ("interruption", "rejected-session", "exclusion"):
             events.append({
-                "event_type": event_type, "campaign_id": "test-campaign", "platform": "c8i",
+                "event_type": event_type, "campaign_id": "test-campaign", "platform": "r8i",
                 "shard_id": "only", "replica_id": "1", "instance_id": "i-event",
                 "host_epoch": f"{event_type}-epoch", "reason": f"{event_type} reason",
                 "artifact_uri": f"s3://bucket/{event_type}.log", "artifact_sha256": "d" * 64,

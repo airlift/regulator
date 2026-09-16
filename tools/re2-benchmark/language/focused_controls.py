@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 import platform
 import re
+import shlex
 
 import collection
 
@@ -99,8 +100,8 @@ def run(partition, results, java, classpath):
                     if expected["outcome"] != "completed" or expected["trace"] != verification["trace"]:
                         raise ValueError("focused lifecycle comparator mismatch")
             raw = output / "raw.json"
-            command = collection.java_command(java, classpath, mode) + [
-                "org.openjdk.jmh.Main", "^" + re.escape(descriptor["benchmark"]) + "$",
+            command = collection.jmh_command(java, classpath, mode) + [
+                "^" + re.escape(descriptor["benchmark"]) + "$",
                 "-f", "5", "-wi", "10", "-i", "10", "-w", "1s", "-r", "1s",
                 "-prof", "gc", "-rf", "json", "-rff", str(raw), "-foe", "true"]
             for key, value in parameters.items():
@@ -144,8 +145,12 @@ def validate_results(partition, results, runners):
         validate_raw(raw, descriptor, parameters)
         command = receipt["command"]
         classpath = ":".join(entry["path"] for entry in runners["classpath"])
+        try:
+            measured_arguments = shlex.split(command[command.index("-jvmArgs") + 1])
+        except (IndexError, ValueError):
+            measured_arguments = None
         if (command[command.index("-cp") + 1] != classpath or
-                ("--enable-native-access=ALL-UNNAMED" in command) != (mode == "native")):
+                measured_arguments != collection.measured_jvm_arguments(mode)):
             raise ValueError("focused control uses a different source build or memory mode")
         hashes[str(path.relative_to(results))] = collection.digest(path.read_bytes())
     return hashes

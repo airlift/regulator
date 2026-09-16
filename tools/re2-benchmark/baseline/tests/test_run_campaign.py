@@ -57,9 +57,9 @@ class FakeProcess:
 class TestRunCampaign(unittest.TestCase):
     def setUp(self):
         self.platform = RUN_CAMPAIGN.Platform(
-            "c8i",
+            "r8i",
             "intel",
-            "c8i.2xlarge",
+            "r8i.2xlarge",
             8,
             "ami-test",
             "https://example.invalid/jdk.tar.gz",
@@ -80,10 +80,44 @@ class TestRunCampaign(unittest.TestCase):
             candidate_archive_sha256="0" * 64,
             engine_tree="d" * 40)
 
+    def test_release_campaign_rejects_missing_and_different_language_artifacts(self):
+        root = SCRIPT.parents[3]
+        arguments = self.arguments(root)
+        arguments.release_version = "1.0"
+        job = RUN_CAMPAIGN.Job(self.platform, "language", 1, 1, 1, "spot", "language-batch")
+        for receipt in ({}, {"released_artifact": {"version": "1.1"}}):
+            with self.subTest(receipt=receipt), self.assertRaisesRegex(RuntimeError, "selected release"):
+                RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, job, receipt)
+
+
+    def test_release_campaign_requires_baseline_artifact_proof_on_recovery(self):
+        root = SCRIPT.parents[3]
+        arguments = self.arguments(root)
+        arguments.release_version = "1.0"
+        job = RUN_CAMPAIGN.Job(self.platform, "engine", 1, 1, 1, "spot")
+        with self.assertRaisesRegex(RuntimeError, "recovered artifact evidence"):
+            RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, job, {})
+
+
+    def test_pinned_jobs_allocate_two_vcpus_except_multicore_shard(self):
+        platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
+        jobs = RUN_CAMPAIGN.build_jobs("primary", platforms, ["engine", "lifecycle-shared-cold"], None)
+        self.assertEqual(len(jobs), 18)
+        for job in jobs:
+            expected_vcpus = 8 if job.shard == "lifecycle-shared-cold" else 2
+            expected_size = ".2xlarge" if expected_vcpus == 8 else ".large"
+            self.assertEqual(job.platform.vcpus, expected_vcpus)
+            self.assertEqual(job.platform.instance_type, job.platform.name + expected_size)
+            arguments = self.arguments(SCRIPT.parents[3])
+            environment = RUN_CAMPAIGN.job_environment(job, arguments, SCRIPT.parents[3], Path("results"))
+            self.assertEqual(environment["BENCHMARK_EXPECTED_VCPUS"], str(expected_vcpus))
+            self.assertEqual(environment["BENCHMARK_CPU_LIST"], "0-7" if expected_vcpus == 8 else "0")
+
+
     def test_platform_limit_applies_independently_of_global_capacity(self):
         arguments = SimpleNamespace(max_concurrent=9, max_concurrent_per_platform=3)
-        job = SimpleNamespace(platform=SimpleNamespace(name='c9g'))
-        other = SimpleNamespace(platform=SimpleNamespace(name='c8i'))
+        job = SimpleNamespace(platform=SimpleNamespace(name='r9g'))
+        other = SimpleNamespace(platform=SimpleNamespace(name='r8i'))
         running = {index: (None, job, None) for index in range(3)}
         self.assertFalse(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
         self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(other, running, arguments))
@@ -168,13 +202,13 @@ class TestRunCampaign(unittest.TestCase):
         return {
             "schema_version": "2",
             "campaign_id": "baseline",
-            "platform": "c8i",
+            "platform": "r8i",
             "shard_id": "traditional-search",
             "replica_id": "1",
             "instance_id": "i-00000000000000001",
             "host_epoch": "10",
             "architecture": "intel",
-            "instance_type": "c8i.2xlarge",
+            "instance_type": "r8i.2xlarge",
             "availability_zone": "us-west-2a",
             "systems": "regulator-native-access",
             "row_count": "1",
@@ -465,6 +499,16 @@ class TestRunCampaign(unittest.TestCase):
 
             regenerate.assert_called_once()
 
+            arguments.release_version = '1.0'
+            with patch.object(RUN_CAMPAIGN, "validate_campaign"), \
+                    patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=artifact_receipt), \
+                    patch.object(RUN_CAMPAIGN, "validate_host_results", return_value=receipt), \
+                    patch.object(RUN_CAMPAIGN.released_artifact, "manifest", return_value={}), \
+                    patch.object(RUN_CAMPAIGN.released_artifact, "validate_baseline", side_effect=ValueError('missing release proof')):
+                with self.assertRaisesRegex(SystemExit, 'missing release proof'):
+                    RUN_CAMPAIGN.validate_phase_prerequisite(
+                        root, arguments, [self.platform], results, (1,), "smoke")
+
     def test_prerequisite_rejects_unreproducible_receipt(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -540,6 +584,10 @@ class TestRunCampaign(unittest.TestCase):
             ("memory_available_after_bytes=29000000000\nswap_free_after_bytes=536870912\noom_kills_after=0\n", "consumed swap"),
             ("memory_available_after_bytes=29000000000\nswap_free_after_bytes=1073741824\noom_kills_after=1\n", "OOM kill"),
             ("memory_available_after_bytes=3000000000\nswap_free_after_bytes=1073741824\noom_kills_after=0\n", "memory headroom"),
+            ("memory_available_after_bytes=29000000000\nswap_free_after_bytes=1073741824\noom_kills_after=0\n"
+             "disk_available_before_bytes=30000000000\ndisk_available_after_bytes=1073741824\nminimum_available_disk_bytes=2147483648\n", "disk headroom"),
+            ("memory_available_after_bytes=29000000000\nswap_free_after_bytes=1073741824\noom_kills_after=0\n"
+             "disk_available_before_bytes=30000000000\n", "invalid disk capacity"),
         )
         for suffix, message in cases:
             with self.subTest(message=message), tempfile.TemporaryDirectory() as temporary_directory:
@@ -562,7 +610,7 @@ class TestRunCampaign(unittest.TestCase):
     def test_phase_epoch_ranges_do_not_overlap(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             confirmation_file = Path(temporary_directory) / "confirmation.tsv"
-            confirmation_file.write_text("platform\tshard_id\nc8i\ttraditional-search\n")
+            confirmation_file.write_text("platform\tshard_id\nr8i\ttraditional-search\n")
             smoke = RUN_CAMPAIGN.build_jobs(
                 "smoke", [self.platform], ["traditional-search"], None)
             primary = RUN_CAMPAIGN.build_jobs(
@@ -575,9 +623,9 @@ class TestRunCampaign(unittest.TestCase):
 
     def test_rebar_jobs_run_before_shorter_shards(self):
         second_platform = RUN_CAMPAIGN.Platform(
-            "c8g",
+            "r8g",
             "arm",
-            "c8g.2xlarge",
+            "r8g.2xlarge",
             8,
             "ami-test",
             "https://example.invalid/jdk.tar.gz",
@@ -599,7 +647,7 @@ class TestRunCampaign(unittest.TestCase):
             ["rebar-a"] * 6 + ["rebar-b"] * 6 + ["traditional-search"] * 6,
             [job.shard for job in jobs])
         self.assertEqual(
-            [(replica, platform) for replica in (1, 2, 3) for platform in ("c8i", "c8g")],
+            [(replica, platform) for replica in (1, 2, 3) for platform in ("r8i", "r8g")],
             [(job.replica, job.platform.name) for job in jobs[:6]])
 
     def test_campaign_accepts_up_to_sixty_four_concurrent_hosts(self):
@@ -619,10 +667,10 @@ class TestRunCampaign(unittest.TestCase):
         platforms = [
             self.platform,
             RUN_CAMPAIGN.Platform(
-                "c8g", "arm", "c8g.2xlarge", 8, "ami", "jdk", "0" * 64,
+                "r8g", "arm", "r8g.2xlarge", 8, "ami", "jdk", "0" * 64,
                 "gcc", "cmake", "glibc", "cargo", "rust", "time"),
             RUN_CAMPAIGN.Platform(
-                "c9g", "arm", "c9g.2xlarge", 8, "ami", "jdk", "0" * 64,
+                "r9g", "arm", "r9g.2xlarge", 8, "ami", "jdk", "0" * 64,
                 "gcc", "cmake", "glibc", "cargo", "rust", "time"),
         ]
         shards = [f"shard-{index}" for index in range(33)]
@@ -634,8 +682,19 @@ class TestRunCampaign(unittest.TestCase):
 
         with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
             RUN_CAMPAIGN.validate_configuration(
-                SimpleNamespace(campaign_id="baseline", max_concurrent=32, phase="primary"),
+                SimpleNamespace(campaign_id="baseline", max_concurrent=32, phase="primary", phase_timeout_seconds=36000),
                 jobs)
+
+
+    def test_full_manifest_deadline_accounts_for_platform_and_vcpu_limits(self):
+        jobs = RUN_CAMPAIGN.build_jobs("primary", RUN_CAMPAIGN.read_platforms(SCRIPT.parent),
+                                       RUN_CAMPAIGN.read_shards(SCRIPT.parent), None)
+        arguments = SimpleNamespace(campaign_id="final", max_concurrent=64, phase="primary")
+        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 8 * 5400 + 3600)
+        arguments.max_concurrent_per_platform = 10
+        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 15 * 5400 + 3600)
 
     def test_campaign_phase_maps_to_execution_protocol(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -653,6 +712,9 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual(
                 RUN_CAMPAIGN.job_environment(job, arguments, root, root)["BASELINE_PROTOCOL"],
                 "smoke")
+
+            arguments.smoke_protocol = 'qualification'
+            self.assertEqual(RUN_CAMPAIGN.job_environment(job, arguments, root, root)["BASELINE_PROTOCOL"], "qualification")
 
             for phase in ("primary", "confirmation"):
                 arguments.phase = phase
@@ -959,7 +1021,7 @@ class TestRunCampaign(unittest.TestCase):
                 "OBJECT_PREFIX=\n"
                 "CAMPAIGN_MODE=baseline-shard\n"
                 "CAMPAIGN_ID=baseline\n"
-                "CAMPAIGN_PLATFORM=c8i\n"
+                "CAMPAIGN_PLATFORM=r8i\n"
                 "CAMPAIGN_SHARD_ID=rebar-c\n"
                 "CAMPAIGN_REPLICA_ID=1\n"
                 "CAMPAIGN_HOST_EPOCH=10\n"
@@ -1006,7 +1068,7 @@ class TestRunCampaign(unittest.TestCase):
                 "BUCKET=test-bucket\n"
                 "CAMPAIGN_MODE=baseline-shard\n"
                 "CAMPAIGN_ID=baseline\n"
-                "CAMPAIGN_PLATFORM=c8i\n"
+                "CAMPAIGN_PLATFORM=r8i\n"
                 "CAMPAIGN_SHARD_ID=rebar-c\n"
                 "CAMPAIGN_REPLICA_ID=1\n"
                 "CAMPAIGN_HOST_EPOCH=10\n"
@@ -1049,7 +1111,7 @@ class TestRunCampaign(unittest.TestCase):
                 "OBJECT_PREFIX=\n"
                 "CAMPAIGN_MODE=baseline-shard\n"
                 "CAMPAIGN_ID=baseline\n"
-                "CAMPAIGN_PLATFORM=c8i\n"
+                "CAMPAIGN_PLATFORM=r8i\n"
                 "CAMPAIGN_SHARD_ID=rebar-c\n"
                 "CAMPAIGN_REPLICA_ID=1\n"
                 "CAMPAIGN_HOST_EPOCH=10\n"
@@ -1352,7 +1414,7 @@ class TestRunCampaign(unittest.TestCase):
         self.assertEqual(source.count('"${profiler_arguments[@]}"'), 2)
         self.assertIn('secondary_metric_arguments=(--allow-missing-secondary-metrics)', source)
         self.assertIn('jmh_process_jvm_arguments=("${route_jvm_arguments[@]}"', source)
-        self.assertGreaterEqual(source.count('-jvmArgsAppend "${jmh_fork_arguments}"'), 2)
+        self.assertGreaterEqual(source.count('-jvmArgs "${jmh_fork_arguments}"'), 2)
 
     def test_replacement_allowance_is_bounded(self):
         final_attempt = RUN_CAMPAIGN.Job(
@@ -1809,7 +1871,7 @@ class TestRunCampaign(unittest.TestCase):
                 "tags": [],
             },
             {
-                "instance_type": "c8i.2xlarge",
+                "instance_type": "r8i.2xlarge",
                 "lifecycle": None,
                 "tags": [
                     {"Key": "BaselineCampaign", "Value": "baseline"},
@@ -1817,13 +1879,13 @@ class TestRunCampaign(unittest.TestCase):
                 ],
             },
             {
-                "instance_type": "c8i.2xlarge",
+                "instance_type": "r8i.2xlarge",
                 "lifecycle": "spot",
                 "tags": [],
             },
         ]
         descriptions = [
-            {"instance_type": "c8i.2xlarge", "vcpus": 8},
+            {"instance_type": "r8i.2xlarge", "vcpus": 8},
             {"instance_type": "m8gd.4xlarge", "vcpus": 16},
         ]
 
@@ -1858,7 +1920,7 @@ class TestRunCampaign(unittest.TestCase):
                 "tags": [],
             },
             {
-                "instance_type": "c8i.2xlarge",
+                "instance_type": "r8i.2xlarge",
                 "lifecycle": "spot",
                 "tags": [
                     {"Key": "BaselineCampaign", "Value": "baseline"},
@@ -1866,13 +1928,13 @@ class TestRunCampaign(unittest.TestCase):
                 ],
             },
             {
-                "instance_type": "c8i.2xlarge",
+                "instance_type": "r8i.2xlarge",
                 "lifecycle": None,
                 "tags": [],
             },
         ]
         descriptions = [
-            {"instance_type": "c8i.2xlarge", "vcpus": 8},
+            {"instance_type": "r8i.2xlarge", "vcpus": 8},
             {"instance_type": "m8gd.4xlarge", "vcpus": 16},
         ]
 

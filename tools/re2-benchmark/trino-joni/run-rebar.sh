@@ -18,7 +18,12 @@ if [[ -n ${REBAR_JONI_EXTRA_JAVA_OPTIONS:-} ]]; then
     java_options+=("${extra_java_options[@]}")
 fi
 if [[ -n ${REBAR_HEAP_SIZE:-} ]]; then
-    java_options+=("-Xms${REBAR_HEAP_SIZE}" "-Xmx${REBAR_HEAP_SIZE}" -XX:+AlwaysPreTouch)
+    java_options+=("-Xms${REBAR_HEAP_SIZE}" "-Xmx${REBAR_HEAP_SIZE}")
+    case ${REBAR_HEAP_PRETOUCH:-true} in
+        true) java_options+=(-XX:+AlwaysPreTouch) ;;
+        false) java_options+=(-XX:-AlwaysPreTouch) ;;
+        *) echo "REBAR_HEAP_PRETOUCH must be true or false" >&2; exit 1 ;;
+    esac
 fi
 
 exec java "${java_options[@]}" -cp "$(cat "${CLASSPATH_FILE}")" io.airlift.regulator.RebarJoniRunner "$@"

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import topology
 import hashlib
 import json
 import math
@@ -206,12 +207,19 @@ def load_manifest(path, expected_count):
 
 
 def load_platforms(path):
-    rows = read_tsv(path, ("platform", "architecture", "instance_type"))
+    fields = ("platform", "architecture", "instance_type", "vcpus",
+              "concurrency_instance_type", "concurrency_vcpus")
+    rows = read_tsv(path, fields)
     platforms = {row["platform"]: row for row in rows}
     if len(platforms) != len(rows):
         raise ReductionError("platform file contains duplicate platform identities")
-    if set(platforms) != {"c8i", "c8g", "c9g"}:
-        raise ReductionError(f"platforms must be c8i, c8g, and c9g; found {sorted(platforms)}")
+    if set(platforms) != {"r8i", "r8g", "r9g"}:
+        raise ReductionError(f"platforms must be r8i, r8g, and r9g; found {sorted(platforms)}")
+    for name, platform in platforms.items():
+        try:
+            topology.validate(platform)
+        except ValueError as error:
+            raise ReductionError(f"platform {name}: {error}") from error
     return platforms
 
 
@@ -291,7 +299,7 @@ def verify_receipt_coverage(primary, confirmation, platforms, shards, manifest_r
         platform = platforms.get(row["platform"])
         if platform is None or row["shard_id"] not in shards:
             raise ReductionError(f"{context} has an unknown platform or shard")
-        if row["architecture"] != platform["architecture"] or row["instance_type"] != platform["instance_type"]:
+        if row["architecture"] != platform["architecture"] or row["instance_type"] != topology.instance_type(platform, row["shard_id"]):
             raise ReductionError(f"{context} does not match the frozen platform")
         systems = row["systems"].split(",")
         if systems != sorted(set(systems)) or set(systems) != systems_by_shard[row["shard_id"]]:
@@ -933,9 +941,9 @@ def comparison_specs(manifest_rows):
         if "joni" in by_system:
             for system in candidate_systems:
                 specs.append((logical_id, by_system[system], "joni", (by_system["joni"],)))
-        if by_system.keys() >= {"regulator", "trino-optimized", "trino-sql"}:
-            specs.append((logical_id, by_system["regulator"], "trino-optimized", (by_system["trino-optimized"],)))
-            specs.append((logical_id, by_system["regulator"], "trino-sql", (by_system["trino-sql"],)))
+        for comparator in ("trino-optimized", "trino-sql"):
+            if by_system.keys() >= {"regulator", comparator}:
+                specs.append((logical_id, by_system["regulator"], comparator, (by_system[comparator],)))
         descriptors = {row["comparator"] for row in rows}
         if "general-route-control" in descriptors and by_system.keys() >= {
                 "regulator-native-access", "regulator-object-row"}:
@@ -1368,7 +1376,7 @@ def build_confirmation_jobs(row_aggregates, host_rows, comparisons, scaling, ses
         for session in sessions if session.confirmation
     }
     eligible -= already_confirmed
-    platform_order = {platform: index for index, platform in enumerate(("c8i", "c8g", "c9g"))}
+    platform_order = {platform: index for index, platform in enumerate(("r8i", "r8g", "r9g"))}
     rows = [
         {"platform": platform, "shard_id": shard_id}
         for platform, shard_id in sorted(
@@ -1652,7 +1660,7 @@ def aggregate(arguments):
         "campaign_id": primary[0]["campaign_id"],
         "manifest_rows": len(manifest_rows),
         "manifest_sha256": manifest_digest,
-        "platforms": [name for name in ("c8i", "c8g", "c9g") if name in platforms],
+        "platforms": [name for name in ("r8i", "r8g", "r9g") if name in platforms],
         "shards": sorted(shards),
         "primary_sessions": len(primary),
         "rebar_outcomes": len(rebar_outcomes),

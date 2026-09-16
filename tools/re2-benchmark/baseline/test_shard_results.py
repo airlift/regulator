@@ -111,6 +111,7 @@ class TestShardResults(unittest.TestCase):
                 "CLASSPATH=ordinary\n"
                 "CPU_LIST=0\n"
                 "jmh_process_jvm_arguments=()\n"
+                "jmh_launcher_jvm_arguments=(-Xms64m -Xmx256m)\n"
                 "jmh_host_compiler_arguments=()\n"
                 "route_jvm_arguments=()\n"
                 "jmh_fork_arguments=-Xmx1g\n"
@@ -170,12 +171,12 @@ class TestShardResults(unittest.TestCase):
                 "jmh_static_duration_estimate_seconds": "1706",
                 "route_static_duration_estimate_seconds": "2870",
             },
-            "traditional-extra": {
-                "protocol_qualification_estimate_seconds": "132",
-                "native_system_row_count": "248",
-                "native_measurement_estimate_seconds": "1240",
+            "traditional-extra-easy2": {
+                "protocol_qualification_estimate_seconds": "0",
+                "native_system_row_count": "32",
+                "native_measurement_estimate_seconds": "160",
                 "native_build_startup_allowance_seconds": "900",
-                "route_static_duration_estimate_seconds": "3126",
+                "jmh_execution_protocol": "multi-row-process-full",
             },
             "rebar-a": {
                 "rebar_system_row_count": "48",
@@ -237,6 +238,9 @@ class TestShardResults(unittest.TestCase):
                     metadata = dict(
                         line.split("=", 1)
                         for line in (result_directory / "run-metadata.txt").read_text().splitlines())
+                    if row["shard_id"].startswith("traditional-extra-"):
+                        self.assertEqual("multi-row-process-full", metadata["jmh_execution_protocol"])
+                        self.assertEqual("false", metadata["protocol_qualification_required"])
                     self.assertLessEqual(
                         float(metadata["route_static_duration_estimate_seconds"]),
                         float(metadata["route_static_duration_limit_seconds"]),
