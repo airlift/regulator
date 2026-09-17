@@ -15,6 +15,7 @@ LANGUAGES = {
     'like': {'label': 'LIKE', 'comparator': 'Trino SQL LIKE'},
 }
 PLATFORMS = {'c9g': 'C9g · Graviton5', 'c8g': 'C8g · Graviton4', 'c8i': 'C8i · Intel'}
+RELEASE_PLATFORMS = {'r9g': 'R9g · Graviton5', 'r8g': 'R8g · Graviton4', 'r8i': 'R8i · Intel'}
 MEMORY_MODES = {'native': 'Native memory', 'safe': 'Pure Java'}
 STATES = {'compared', 'not-compatible', 'did-not-finish'}
 
@@ -106,7 +107,7 @@ def reduce_hosts(hosts, normalization_bytes=None):
     }
 
 
-def language_rows(data, manifests, selection=None):
+def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
     observations = {(tuple(row['logical_identity']), row['id']): row for row in data['observations']}
     if len(observations) != len(data['observations']):
         raise ValueError('duplicate observation')
@@ -173,13 +174,66 @@ def language_rows(data, manifests, selection=None):
         raise ValueError('invalid or duplicate language selection')
     expected = {(language, platform, mode, f'{suite}/{case_id}/{operation}')
                 for suite, case_id, language in selected
-                for platform in PLATFORMS for mode in MEMORY_MODES
+                for platform in platforms for mode in MEMORY_MODES
                 for operation in (('compile', 'singleUseContains', 'singleUseCount', 'reusedContains', 'reusedCount')
-                                  if suite == 'language-lifecycle' else ('execute',))}
+                                  if suite == 'language-lifecycle' else
+                                  ('compile',) if cases[suite, case_id]['model'] == 'compile' else ('execute',))}
     actual = {(row['language'], row['platform'], row['memoryMode'], row['id']) for row in rows}
     if actual != expected or len(rows) != len(expected):
         raise ValueError(f'language coverage mismatch: expected {len(expected)}, got {len(rows)}')
     return rows
+
+
+def validate_estimate(result):
+    """Check declared point estimates and intervals without inventing raw samples."""
+    estimator = result.get('estimator')
+    if estimator is not None and estimator not in {'mean', 'median'}:
+        raise ValueError('unknown timing estimator')
+    if estimator == 'mean':
+        for side, field in (('candidate', 'candidateNs'), ('comparator', 'comparatorNs')):
+            costs = [host[side].get('meanNs') for host in result['hosts']]
+            if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0 for value in costs):
+                raise ValueError('mean estimator requires measured host means')
+            if not math.isclose(result[field], mean(costs), rel_tol=1e-10):
+                raise ValueError('mean estimate differs from equal-weight host means')
+        if not math.isclose(result['ratio'], result['candidateNs'] / result['comparatorNs'], rel_tol=1e-10):
+            raise ValueError('mean ratio differs from ratio of mean costs')
+        if not math.isclose(result['deltaNs'], result['candidateNs'] - result['comparatorNs'], rel_tol=1e-10, abs_tol=1e-12):
+            raise ValueError('mean delta differs from operation costs')
+    interval = result.get('uncertainty')
+    if interval is None:
+        return
+    if (estimator is None or interval.get('method') != 'hierarchical-bootstrap-v1' or interval.get('level') != .95
+            or interval.get('replicates') != 4000 or interval.get('hostCount') != len(result['hosts'])):
+        raise ValueError('invalid uncertainty method or independent-host count')
+    def bounds(values):
+        if (not isinstance(values, list) or len(values) != 2
+                or any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0 for value in values)
+                or values[0] > values[1]):
+            raise ValueError('invalid uncertainty interval or process range')
+    for key in ('ratioInterval', 'candidateIntervalNs', 'comparatorIntervalNs'):
+        bounds(interval.get(key))
+    for side in ('candidate', 'comparator'):
+        values = interval.get('forkMeanRangeNs', {}).get(side)
+        if values is not None:
+            bounds(values)
+        counts = interval.get('processCounts', {}).get(side)
+        if (not isinstance(counts, list) or len(counts) != len(result['hosts'])
+                or any(value is not None and (type(value) is not int or value <= 0) for value in counts)):
+            raise ValueError('invalid independent-process counts')
+
+
+def validate_hardware(row):
+    allocation = row.get('hardware')
+    if allocation is None:
+        return
+    instance_type = allocation.get('instanceType')
+    expected = {row['platform'] + '.large': 2, row['platform'] + '.2xlarge': 8}
+    if instance_type not in expected or allocation.get('allocatedVcpus') != expected[instance_type]:
+        raise ValueError('invalid row hardware allocation')
+    if any(host.get('instanceType') != instance_type or host.get('allocatedVcpus') != expected[instance_type]
+           for host in row['result']['hosts']):
+        raise ValueError('comparison mixes hardware allocations or lacks host provenance')
 
 
 def validate_language_report(data):
@@ -195,7 +249,8 @@ def validate_language_report(data):
             raise ValueError('invalid preliminary publication metadata')
         if data.get('presentation', {}).get('reviewPreview'):
             raise ValueError('preliminary publication cannot use private-preview presentation')
-    if set(data['platforms']) != set(PLATFORMS) or set(data['memoryModes']) != set(MEMORY_MODES):
+    platforms = data['platforms']
+    if set(platforms) not in (set(PLATFORMS), set(RELEASE_PLATFORMS)) or set(data['memoryModes']) != set(MEMORY_MODES):
         raise ValueError('missing platform or memory mode')
     if set(data['languages']) != set(LANGUAGES):
         raise ValueError('missing language')
@@ -210,7 +265,7 @@ def validate_language_report(data):
     lifecycle = defaultdict(set)
     for row in data['rows']:
         language, platform, mode = row['language'], row['platform'], row['memoryMode']
-        if language not in LANGUAGES or platform not in PLATFORMS or mode not in MEMORY_MODES:
+        if language not in LANGUAGES or platform not in platforms or mode not in MEMORY_MODES:
             raise ValueError('unknown language, CPU, or memory mode')
         identity = (language, platform, mode, row['id'])
         if identity in seen:
@@ -242,6 +297,7 @@ def validate_language_report(data):
         size = row['inputBytes']
         if size is not None and (isinstance(size, bool) or not isinstance(size, (int, float)) or not math.isfinite(size) or size < 0):
             raise ValueError('invalid input size')
+        validate_hardware(row)
         results = [row['result']]
         if 'originalResult' in row:
             results.append(row['originalResult'])
@@ -270,18 +326,26 @@ def validate_language_report(data):
                         raise ValueError('invalid input-byte normalization')
                     if not math.isclose(normalized, result['deltaNs'] / row['inputBytes'], rel_tol=1e-10, abs_tol=1e-12):
                         raise ValueError('normalized delta does not match operation delta')
+                validate_estimate(result)
             else:
+                if result.get('uncertainty') is not None:
+                    raise ValueError('non-comparable outcome cannot have ratio uncertainty')
                 if not result.get('reason') or any(key in result for key in ('ratio', 'candidateNs', 'comparatorNs', 'deltaNs', 'deltaNsPerByte')):
                     raise ValueError('non-comparable result must have a reason and no numerical comparison')
     for language in LANGUAGES:
-        for platform in PLATFORMS:
+        for platform in platforms:
             for mode in MEMORY_MODES:
                 operations = coverage[language, platform, mode]
-                required = ({('baseline', 'matches'), ('like-supplement', 'compile'), ('like-supplement', 'singleUse')}
-                            if language == 'like' else {('language', operation) for operation in ('compile', 'reusedContains', 'reusedCount', 'singleUseContains', 'singleUseCount', 'execute')})
+                if language == 'like':
+                    source = 'baseline' if data.get('provenance', {}).get('releasedArtifact') else 'like-supplement'
+                    required = {('baseline', 'matches'), (source, 'compile'), (source, 'singleUse')}
+                else:
+                    required = {('language', operation) for operation in (
+                        'compile', 'reusedContains', 'reusedCount',
+                        'singleUseContains', 'singleUseCount', 'execute')}
                 if not required <= operations:
                     raise ValueError(f'incomplete language/lifecycle coverage: {language}/{platform}/{mode}')
-                if identities[language, platform, mode] != identities[language, 'c9g', 'native']:
+                if identities[language, platform, mode] != identities[language, next(iter(platforms)), 'native']:
                     raise ValueError('workload identities differ across CPUs or memory modes')
     for operations in lifecycle.values():
         for single, reused in (('singleUse', 'matches'), ('singleUseContains', 'reusedContains'), ('singleUseCount', 'reusedCount')):

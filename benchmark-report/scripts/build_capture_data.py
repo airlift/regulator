@@ -163,9 +163,16 @@ def build(arguments):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('language', 'baseline', 'lifecycle-manifest', 'bulk-manifest', 'like-capture', 'like-manifest', 'output'):
-        parser.add_argument('--' + name, type=Path, required=True)
+        parser.add_argument('--' + name, type=Path, required=name == 'output')
+    parser.add_argument('--released-campaign', type=Path, help='complete release campaign paths and pinned artifact version')
     arguments = parser.parse_args()
-    report = build(arguments)
+    if arguments.released_campaign:
+        from release_capture import build as build_release
+        report = build_release(arguments.released_campaign)
+    else:
+        if any(getattr(arguments, name) is None for name in ('language', 'baseline', 'lifecycle_manifest', 'bulk_manifest', 'like_capture', 'like_manifest')):
+            parser.error('legacy capture requires all language, baseline, manifest, and LIKE inputs')
+        report = build(arguments)
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(json.dumps(report, allow_nan=False, ensure_ascii=False, separators=(',', ':')) + '\n')
     print(f"Built {len(report['rows'])} report rows from verified captures: {arguments.output}")

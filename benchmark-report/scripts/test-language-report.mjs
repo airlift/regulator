@@ -51,6 +51,15 @@ const data = { schemaVersion: 2, sources: { currentLabel: "Test capture", curren
   languages: { re2: { label: "RE2", comparator: "native RE2" }, java: { label: "Java regex", comparator: "JDK Pattern" }, trino: { label: "Trino regex", comparator: "Joni" }, like: { label: "LIKE", comparator: "Trino SQL LIKE" } },
   rows: [row, reused, { ...row, id: "compile", operation: "compile" }], methodology: ["Test method"], provenance: { candidate: "test" } };
 
+const releaseData = { ...data, platforms: { r9g: "R9g", r8g: "R8g", r8i: "R8i" },
+  rows: data.rows.map(row => ({ ...row, platform: "r9g" })) };
+assert.deepEqual(Array.from(exports.cpuOrder(releaseData)), ["r9g", "r8g", "r8i"]);
+const releaseHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: releaseData }));
+assert.match(releaseHtml, /R9g/);
+assert.match(releaseHtml, /R8i/);
+assert.doesNotMatch(releaseHtml, />C9g</);
+assert.equal(exports.summaryRatios(releaseData).re2.everyday, exports.summaryRatios(data).re2.everyday);
+
 // README columns give each eligible row equal weight and use the same
 // classification and equivalent-work checks as the report tables.
 const summaryRow = (family, ratio, changes = {}) => ({ ...reused, family,
@@ -430,7 +439,7 @@ if (capture.schemaVersion === 2) {
       'Qualified comparisons must not still await API alignment');
   }
   for (const language of ['re2', 'java', 'trino', 'like']) {
-    for (const cpu of ['c9g', 'c8g', 'c8i']) {
+    for (const cpu of exports.cpuOrder(capture)) {
       for (const memory of ['native', 'safe']) {
         const selected = capture.rows.filter(entry => entry.language === language && entry.platform === cpu && entry.memoryMode === memory);
         assert.ok(selected.length > 0, `Missing view ${language}/${cpu}/${memory}`);
@@ -483,3 +492,26 @@ if (capture.schemaVersion === 2) {
   console.log('All 24 current-data language/CPU/memory views and raw download contents passed');
 }
 console.log("Language report rendering, contract isolation, unit sorting, lifecycle and display tests passed");
+
+// A precise small difference and an uncertain large point estimate are different outcomes.
+const meanEstimate = { ...result, estimator: "mean", ratio: .999, candidateNs: 99.9,
+  comparatorNs: 100, deltaNs: -.1, hosts: [{}, {}, {}], warnings: [], uncertainty: {
+    method: "hierarchical-bootstrap-v1", level: .95, ratioInterval: [.98, 1.02],
+    candidateIntervalNs: [98, 102], comparatorIntervalNs: [99, 101],
+    forkMeanRangeNs: { candidate: [97, 103], comparator: [98, 102] },
+  } };
+assert.equal(comparisonText(meanEstimate), "no clear difference");
+assert.equal(tone(meanEstimate), "tie");
+const preciseMean = { ...meanEstimate, ratio: .99,
+  uncertainty: { ...meanEstimate.uncertainty, ratioInterval: [.985, .995] } };
+assert.equal(tone(preciseMean), "win");
+assert.match(comparisonText(preciseMean), /faster/);
+assert.equal(tone({ ...preciseMean, warnings: ["historical warning"] }), "win");
+const meanRow = { id: "mean-test", caseId: "mean-test", name: "mean-test", operation: "execute",
+  model: "count", population: "bulk-text", family: "test", language: "java", platform: "r9g",
+  memoryMode: "native", inputBytes: 100, source: "language", result: meanEstimate };
+const meanHtml = detailsHtml(meanRow);
+assert.match(meanHtml, /Approximate 95% intervals/);
+assert.match(meanHtml, /Observed process means/);
+assert.match(meanHtml, /Ratio of mean costs/);
+assert.doesNotMatch(meanHtml, /Same-host ratio median/);
