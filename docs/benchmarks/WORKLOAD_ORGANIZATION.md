@@ -19,7 +19,13 @@ into a row-count-weighted overall score.
 | Application-shaped scalar operations | Compiled patterns applied to changing, short and medium inputs | Native RE2, JDK Pattern, or Joni for the selected language; Joni for additional Trino operations | Primary application view |
 | Bulk text search | Whole files, books, source trees, dictionaries, and large logs | Native RE2, JDK Pattern, or Joni for the selected language, where supported | Separate throughput view |
 | Compilation | Cold and repeated pattern compilation | Comparator for the pattern language | Integrated lifecycle view; compile-only data in raw downloads |
-| Diagnostics and stress | Algorithm probes, reported bugs, adversarial inputs, quadratic cases, cache pressure, and scaling | Applicable engines | Appendix and causal investigation only |
+| User-relevant adversarial and stress | Pathological inputs, reported failures, quadratic cases, and resource pressure that users can encounter | Applicable public APIs | Folded report section; excluded from headlines |
+
+Internal route probes, compiler experiments, synthetic scaling sweeps, memory
+censuses, and capacity checks are diagnostic evidence rather than a fifth
+publication population. Run them only when a qualification result or an
+explicit investigation requires them. Give that work its own frozen inventory,
+budget, and archive; do not make it part of every release campaign.
 
 Trino SQL LIKE remains a separate Trino-specific population. It compares
 Regulator with Trino's optimized and reference LIKE implementations and does
@@ -90,21 +96,32 @@ receive same-host measurements; a row that exceeds the semantic timeout is
 reported as a runtime `did-not-finish` outcome. Neither incompatibility nor a
 timeout manufactures a numeric comparison.
 
-## Diagnostics and stress
+## Adversarial workloads and internal diagnostics
 
-This population includes:
+The public adversarial and stress population contains cases that help users
+understand behavior they may encounter, even when the input is deliberately
+pathological. Examples include reported regressions, ReDoS-shaped inputs,
+quadratic replacement cases, and bounded cache pressure exercised through a
+public API.
+
+The internal diagnostic inventory includes:
 
 - optimizer and engine-route probes
 - synthetic RSC and Folly cases
-- reported regressions and historical bugs
-- explicitly slow, quadratic, and ReDoS inputs
-- cache, memory, concurrency, and fallback tests
-- fixed-size scaling and generated-code investigations
+- fixed-size and parameterized scaling sweeps
+- compiler, cache, memory, concurrency, and fallback probes
+- generated-code investigations
 
-Adversarial and stress results remain visible in folded sections. Internal
-diagnostics remain in the preserved raw evidence and are excluded from the
-developer-facing preliminary report. Neither population's count, median, nor
+Public adversarial and stress results remain visible in folded sections.
+Internal diagnostics stay in the private evidence archive and are absent from
+the public report and its download. Neither population's count, median, nor
 direction changes an application or bulk-text summary.
+
+Classify by purpose before collection. A diagnostic result does not become a
+release benchmark because it is favorable, complete, or useful to a later
+analysis. Promote a workload only through a reviewed change to the frozen
+publication inventory, based on a user-facing question and independently of
+its measured outcome.
 
 ## Reporting and weighting
 
@@ -122,8 +139,8 @@ Within each regex language page, report in this order:
 
 LIKE has its own integrated lifecycle table. Put ordinary prefix, suffix,
 exact, and contains shapes first and dense-false stress last, keeping DFA
-variants adjacent. Compile-only results remain in raw downloads rather than a
-separate table.
+variants adjacent. Compile-only rows retained by the frozen publication
+inventory remain in the public download rather than a separate table.
 
 Display grouping follows the workload's purpose, not its timing or source
 directory. Reviewed display exceptions do not alter recorded populations or
@@ -167,3 +184,23 @@ Before an AWS measurement campaign:
 AWS remains the only performance authority. Local execution may compile and
 verify semantics, manifests, row discovery, and report logic, but local timing
 is not retained or used for decisions.
+
+## Release evidence tiers
+
+A release keeps three deliberately separate artifacts:
+
+1. The public report and public download use one frozen publication inventory.
+   The download has the same rows as that inventory, including rows intentionally
+   hidden from the page layout; it does not contain campaign-only diagnostics.
+2. Measurement-quality evidence supports statements about uncertainty,
+   repeatability, and platform controls. Keep it narrowly scoped to the claims
+   it tests and link the resulting assessment from the report.
+3. The private campaign archive preserves internal diagnostics, failed and
+   superseded attempts, raw process data, profiles, receipts, and the complete
+   capture needed for later audit.
+
+The publication generator projects final measurements onto the frozen public
+inventory before import. Validation rejects extra rows, missing rows, reordered
+identities, or changed workload content. This makes the public download a
+reproducible user-facing data product while the private archive preserves the
+broader investigation record.

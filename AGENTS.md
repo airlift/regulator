@@ -55,9 +55,16 @@ contracts, target-host measurements, and analysis procedures. Check
 `REGULATOR_DECISIONS.md` for accepted trade-offs affecting the proposed change.
 These project rules apply without requiring any personal agent skills.
 
+Before planning or publishing a release benchmark, also read
+[`docs/benchmarks/WORKLOAD_ORGANIZATION.md`](docs/benchmarks/WORKLOAD_ORGANIZATION.md).
+Freeze the user-facing publication inventory before collection; keep targeted
+measurement-quality evidence and internal diagnostics in their separate
+inventories and archives. Never expand the public report or download with
+campaign-only probes merely because they were collected.
+
 ## Implementation Standards
 
-- **API cleanup before 1.0.** An explicitly approved pre-release cleanup may use direct renames instead of temporary bridge APIs. This exception expires with the first 1.0 publication; preserve published API compatibility afterward.
+- **Published API compatibility.** Version 1.0 is released. Preserve its public API compatibility; the pre-release direct-rename exception has expired.
 - **Features must be fully implemented.** A fix that only works for one mode (e.g., LATIN1) but not the default mode (UTF-8) is NOT complete. Do not claim something is "fixed" unless it works for all supported configurations.
 - **Verify against the actual benchmark.** If a plan targets a specific benchmark, the fix must improve that exact benchmark, not a variant of it.
 - **Default mode is UTF-8.** Most patterns compile with UTF-8 encoding by default. Any optimization must work for UTF-8 programs, not just LATIN1.

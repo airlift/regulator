@@ -1,0 +1,775 @@
+{
+  "access": "Private evidence storage. Use credentials authorized to read the benchmark archive bucket.",
+  "archives": [
+    {
+      "name": "language-primary-v6",
+      "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/02cfc7d4fa202f284d955da9d08cf8cfc06b26da/language-primary-v6-deduplicated/campaign-results.tar.gz",
+      "version_id": "zLU20ZhrPTWF3i13T7to19If9p7CwDQR",
+      "archive_sha256": "d57e4639f1993eb6749025729cd4a2c38f35f78caff280a794e8f921fab57932",
+      "source_manifest_sha256": "ef5c2d188a29d5e24a7bde4c6b372ea5e6ef4825322d6863ad1c80a429d4d766"
+    },
+    {
+      "name": "baseline-final-v6",
+      "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/f0551a294154adb7bb0bf0825a1f28aae333f002/baseline-final-v6-deduplicated/campaign-results.tar.gz",
+      "version_id": "xlHYVgFJ5pb65UQkzRGrNvifDFo5QUcs",
+      "archive_sha256": "01565787602a4e29b684fede205f9077dbfaa35096c3336e96380c727f1bb4db",
+      "source_manifest_sha256": "d5256d060d7ab6a4bab104a4b120d89f496e796c168dd5ae8b61f30136fd921a"
+    }
+  ],
+  "measurement_followup": {
+    "analysis_archive": "measurement-final-analysis-20260917",
+    "archives": [
+      {
+        "name": "measurement-bit-state-long-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/90fc3aad0436403d8dbac8cfe86d7d59c4227f22/measurement-bit-state-long-20260917/campaign-results.tar.gz",
+        "version_id": "XZozz73Z0WMBE1qYCPJ1PAt1kPo.wt5K",
+        "archive_sha256": "7287f3aa67bf349fc1427e372379d7db0ec073e1cda0c03f18f443ab7e5818bd",
+        "source_manifest_sha256": "97cd7bccc9552a0a46d04b8105301a9375ea4385e913643ddfcb647288e5e1eb",
+        "content_index_sha256": "b90d06d79fa1ce2c25ec934ba86dcd8ceb25a1f35ec8021a14bf24fc4caa84fa",
+        "restored_files": 1720,
+        "collector_commit_at_archive": "90fc3aad0436403d8dbac8cfe86d7d59c4227f22"
+      },
+      {
+        "name": "measurement-callback-temporal-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/5f4d7b0f648cee0485f4b64229290b0b1826f1c1/measurement-callback-temporal-20260917/campaign-results.tar.gz",
+        "version_id": "2DK42ffXDxnFZTHe2vvFi5STgqtRG_qb",
+        "archive_sha256": "d3345c4cf671626f744306b89e9c69a0cc771eb185a0f2c6f2bf604810255db0",
+        "source_manifest_sha256": "aa1393d34eb4998bbbed1302d66dceaebda1d414a41324cfbf0b05708bfe5c41",
+        "content_index_sha256": "65a70bd48432bdccc24367afe184827cb7c929a9ae8f7562524f6cd05c8f319c",
+        "restored_files": 836,
+        "collector_commit_at_archive": "5f4d7b0f648cee0485f4b64229290b0b1826f1c1"
+      },
+      {
+        "name": "measurement-capture-temporal-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/a33ed6cc5121273d88b01ab1afb8895da20dd67d/measurement-capture-temporal-20260917/campaign-results.tar.gz",
+        "version_id": "_3XKGsrpPqrIb6R1uoN67ulDFjLDkOrp",
+        "archive_sha256": "f6b7e42699b5eab9bb868e82b3adeac293adf7626ef37379bb59f4860076da1c",
+        "source_manifest_sha256": "14c7150b0f70a48bf80d364b2905191dab6d3e055da3df58cc2fd144f09717e6",
+        "content_index_sha256": "cce2e4d556bc47ae861e69499dae925a4631243143ce983f76d2c43590b6bee5",
+        "restored_files": 419,
+        "collector_commit_at_archive": "a33ed6cc5121273d88b01ab1afb8895da20dd67d"
+      },
+      {
+        "name": "measurement-closed-controls-0918-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-closed-controls-0918-20260917/campaign-results.tar.gz",
+        "version_id": "kpmIhPeQzp7OD96OgknLaS8miT2ebNQx",
+        "archive_sha256": "624858397c6b78f415461af1da05bb3caa92a31c66733891ed6c05e8062aad1a",
+        "source_manifest_sha256": "53863dab264d0c728bfc363ef6d0d61de620f290d9fc2f2bbdd931bd006bf123",
+        "content_index_sha256": "60377a3cfd2983261563ea77f50d410e3d27ff275aa9309039ca7762d598d90d",
+        "restored_files": 2927,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-collector-history-322f6b6-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/322f6b60577510a954f6e0e40a2e7b64a17ec8c6/measurement-collector-history-322f6b6-20260917/campaign-results.tar.gz",
+        "version_id": "SJ9epBR3FABz7rwmTr9UH_mQl1yrTbZd",
+        "archive_sha256": "b6a69318bc4a0a00446312bd7f174f46327e8f36fe75750ea9458d09de409708",
+        "source_manifest_sha256": "d95f4d520d39e33aa1398890798d6e92d526b6754668c78ec9d58173ed719216",
+        "content_index_sha256": "73a094d36faaecd1c0812fccd5678716607a2a8612ee114093af3ee8dd8445b7",
+        "restored_files": 2,
+        "collector_commit_at_archive": "322f6b60577510a954f6e0e40a2e7b64a17ec8c6"
+      },
+      {
+        "name": "measurement-collector-history-64c6e2-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-collector-history-64c6e2-20260917/campaign-results.tar.gz",
+        "version_id": "3r00sF16xiOBn8sU3ZE5nfylsKogoZ9a",
+        "archive_sha256": "0a1eb12cf218e2c11b85c7d08a16b09364713c363bbf2941f7ea6a12b832b6fb",
+        "source_manifest_sha256": "c333010224694a84d54c2350db962fce06ca79c25cf914a93bd78342e00aed3d",
+        "content_index_sha256": "6cc9883a16ff2c84ebc5714a7f78c75266dbda002ba9911aa185845cfc9d05ad",
+        "restored_files": 2,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-compilation-temporal-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/a33ed6cc5121273d88b01ab1afb8895da20dd67d/measurement-compilation-temporal-20260917/campaign-results.tar.gz",
+        "version_id": "qSNneoTJIn09lDyWHbXBA9vefCGxSGnl",
+        "archive_sha256": "4512f8730c059e91c5002761058547796578ed248143ef367dec1b62b3a38352",
+        "source_manifest_sha256": "6872eedb2a7ee17542cc62470426d2b35f5ea6d7865bdbb793a86f9eeb20e260",
+        "content_index_sha256": "58304e6c60cf8f651103e2d4930b7b014684cdbee9ffba7cc7800cccab20643b",
+        "restored_files": 715,
+        "collector_commit_at_archive": "a33ed6cc5121273d88b01ab1afb8895da20dd67d"
+      },
+      {
+        "name": "measurement-diagnostics-initial-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/5b89626c2cddf52f31c4e200bb44e13c3c0859cb/measurement-diagnostics-initial-20260917/campaign-results.tar.gz",
+        "version_id": "zBQnKk0Q_JpNJ_yY8GNHSnOiqN4QyVPs",
+        "archive_sha256": "584a86207305e292029fc11e420499475d3a33411fe1018539ed1dcd34b26e9a",
+        "source_manifest_sha256": "7430a7dff8508a412a152601612389a4941a26e72cb147b58ce3c58d805bfe82",
+        "content_index_sha256": "ae53c3e1ee83c6efdabbfc2265c9426c9ee584ef9509bd5b4b9b0d59dc981f20",
+        "restored_files": 26477,
+        "collector_commit_at_archive": "5b89626c2cddf52f31c4e200bb44e13c3c0859cb"
+      },
+      {
+        "name": "measurement-diagnostics-supplement-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/5b89626c2cddf52f31c4e200bb44e13c3c0859cb/measurement-diagnostics-supplement-20260917/campaign-results.tar.gz",
+        "version_id": "1fv8EnXqjXH.vFZs5hNsRfEzik2W0iyM",
+        "archive_sha256": "958b0b4c18e087081f83d58c1c54c3339d5d422cf68932e6db3dc6af5c0954f9",
+        "source_manifest_sha256": "43c9735b0c38a8b66dc479dcd1ba440ed83458bcb545e4eede8ec8a04eb44e5e",
+        "content_index_sha256": "54d7ff15ff637ab6ab7bf24490cf0a5373f70406260cd2c6e546396dd76eb719",
+        "restored_files": 6765,
+        "collector_commit_at_archive": "5b89626c2cddf52f31c4e200bb44e13c3c0859cb"
+      },
+      {
+        "name": "measurement-final-analysis-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/b45c851895c48e299fc17fdc1dc4e0c74102bb41/measurement-final-analysis-20260917/campaign-results.tar.gz",
+        "version_id": "f.3Uq_V161cUf.uwLmKgadMY6H2YkARU",
+        "archive_sha256": "23304f9f09a6f441f38638ad48b161c871c9ccd1b1fee258901cfa3db63c1a39",
+        "source_manifest_sha256": "6093759bd8fa29c98bf60d47a38d966c625e74557eb69a522eab2bf691dbedce",
+        "content_index_sha256": "a49ba64713ae826a4f48be5eec065f88d7373323c100834e1e13507749de4375",
+        "restored_files": 4823,
+        "collector_commit_at_archive": "b45c851895c48e299fc17fdc1dc4e0c74102bb41"
+      },
+      {
+        "name": "measurement-final-corrections-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/b45c851895c48e299fc17fdc1dc4e0c74102bb41/measurement-final-corrections-20260917/campaign-results.tar.gz",
+        "version_id": "gRgBUjBIHwtZvXaHAAGOt5CKFWrkochX",
+        "archive_sha256": "c99d3e2ed5756321cc95c6e2e58fac10dabba39948e84c6233924186667aa780",
+        "source_manifest_sha256": "844fcf3f3ef48b664b138f7349149d9398570c659839186501fca20f61bad9bb",
+        "content_index_sha256": "d5a57b7cb60bc1b339ea2ce404b67d236838d3f6a4346cfcda77cf805859322a",
+        "restored_files": 2630,
+        "collector_commit_at_archive": "b45c851895c48e299fc17fdc1dc4e0c74102bb41"
+      },
+      {
+        "name": "measurement-final-line-r9g-temporal-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/a33ed6cc5121273d88b01ab1afb8895da20dd67d/measurement-final-line-r9g-temporal-20260917/campaign-results.tar.gz",
+        "version_id": "6wmFop1.IZcFG65g6GFXJFrzK7Lot7XO",
+        "archive_sha256": "9de32221c8c54e23b93753e65d86ebb9266b1fc8e3be62ca4333b9480ad8158c",
+        "source_manifest_sha256": "897c40e9e8c3df4c94a93be0d598dd63911eb8d1c4e31fe7b2c52e557d483b39",
+        "content_index_sha256": "05986f15754a8552c00033be202c7675a51f697d89660022347f7b9bcc656220",
+        "restored_files": 949,
+        "collector_commit_at_archive": "a33ed6cc5121273d88b01ab1afb8895da20dd67d"
+      },
+      {
+        "name": "measurement-final-line-temporal-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d450c2b199b4ce3b76c8a09160f6b9427d68ef9f/measurement-final-line-temporal-20260917/campaign-results.tar.gz",
+        "version_id": "QqhTKtsf3Trdd3lq8zdkcedT.FUnXe6z",
+        "archive_sha256": "f52ca9e32ac6cca23572101b5dfd3ef9aee2bee1a39e209fb80f313cbb736a31",
+        "source_manifest_sha256": "dc1baf49d19685dd72669ae3479aae383329acf758c0074a1daa9e354dc3c9d1",
+        "content_index_sha256": "bfdd5919dea45becc71b5a0e03a8b0971aee352bae584006a66d883c51ece1c8",
+        "restored_files": 945,
+        "collector_commit_at_archive": "d450c2b199b4ce3b76c8a09160f6b9427d68ef9f"
+      },
+      {
+        "name": "measurement-final-long-controls-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f/measurement-final-long-controls-20260917/campaign-results.tar.gz",
+        "version_id": "U3ky2gQ6znXH7ImMEo7.mCNNwuDZwMH4",
+        "archive_sha256": "a45edd64c3abd620682db9e4a6f0d7af4f45a2a6794dfd8ec22efcdafc45878e",
+        "source_manifest_sha256": "beaef93ab1f8d772995339365eb3491f57f9ccf0bf1c7c6856d3c72cb863a6b5",
+        "content_index_sha256": "92db603b12a739740f617211682fc296cc1ebd9e6627082854dcc2c9f69daf3e",
+        "restored_files": 873,
+        "collector_commit_at_archive": "ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f"
+      },
+      {
+        "name": "measurement-formal-001-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/6ec0ce96c9d8e63bade8923735c63455057a4657/measurement-formal-001-20260917/campaign-results.tar.gz",
+        "version_id": "EjNrZCHlxOC4__cBVrr70VK3ippgP47e",
+        "archive_sha256": "b662b11009fc747c3557e1b2f32c7eb0117a211a7dbcf35ca59e0b8b3ced0182",
+        "source_manifest_sha256": "df702cda87b2ce4526f8fe978638fa99e9dfad5a909107c5f4814b501ccd5470",
+        "content_index_sha256": "35c67876e40eec533daa4b91033470139ac6fd50ed54e5e168df1321f315ffe5",
+        "restored_files": 4841,
+        "collector_commit_at_archive": "6ec0ce96c9d8e63bade8923735c63455057a4657"
+      },
+      {
+        "name": "measurement-formal-002-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/6ec0ce96c9d8e63bade8923735c63455057a4657/measurement-formal-002-20260917/campaign-results.tar.gz",
+        "version_id": "AwzyVuoE_g3.iWdYhoc0WtyJNB0pYsTF",
+        "archive_sha256": "b0965ff8f04d79fcce3d559a51366b8d4b65aa8091f801a9e4f341937696e92e",
+        "source_manifest_sha256": "b652ddd5ca8361647159472a224f9e7bdb04b9ea2e10aa2b36b11f9a63db7e51",
+        "content_index_sha256": "04bf4064704cb5f2df8499f56c1044169eedc6e01bb6901ec60064a22da05bed",
+        "restored_files": 8819,
+        "collector_commit_at_archive": "6ec0ce96c9d8e63bade8923735c63455057a4657"
+      },
+      {
+        "name": "measurement-formal-003-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/6ec0ce96c9d8e63bade8923735c63455057a4657/measurement-formal-003-20260917/campaign-results.tar.gz",
+        "version_id": "Md9wp86BCIMEwBZxL2tBL3F7t9inmTGz",
+        "archive_sha256": "b64b6d5b29dc6f496aae81ded936b8b0310166c3682d07d883751fc7ecf0e6c0",
+        "source_manifest_sha256": "fa799daa44383cbe24a6346455d1231738405c45774c9b6f68b27791b1c49717",
+        "content_index_sha256": "d9c22f9b463bffbc65e206b55e0bed9f80468bbe0fc28a3710ed5ffa1e4c9d64",
+        "restored_files": 3634,
+        "collector_commit_at_archive": "6ec0ce96c9d8e63bade8923735c63455057a4657"
+      },
+      {
+        "name": "measurement-formal-004-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/6ec0ce96c9d8e63bade8923735c63455057a4657/measurement-formal-004-20260917/campaign-results.tar.gz",
+        "version_id": "LN6Hcw6vL8TGP2vnrva4yEDXxjCLbgDs",
+        "archive_sha256": "851bbafc76e802b391b910793924e1aaff3bd018f49a48cdbb67eea2863a9f95",
+        "source_manifest_sha256": "cc4b78735cc70d9591070e491e18be1d223f5f485a9636f49461bdbcf34de16c",
+        "content_index_sha256": "5c44f6a9d0b1b62eb9ea03944467f468814f311c6c8234c9ccfd22313cde34ec",
+        "restored_files": 7962,
+        "collector_commit_at_archive": "6ec0ce96c9d8e63bade8923735c63455057a4657"
+      },
+      {
+        "name": "measurement-formal-005-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/830a6035cb8ba5a3d544db5faf78782d52903daa/measurement-formal-005-20260917/campaign-results.tar.gz",
+        "version_id": "gvGpYGPEFkEfNHVQ3aQR21_yrC71L_xF",
+        "archive_sha256": "642d8bd67b7bca7afa7129b99e856cab4a98f99a9285d044d983830316df529d",
+        "source_manifest_sha256": "3c5d8202938cc165b041694c21dc6f39ed33ed6c5d8667927036d962e48c1ac1",
+        "content_index_sha256": "9f303eecb7e372fb962cab3d684a5f14076f3b40c48f910f379398f8417bf735",
+        "restored_files": 5854,
+        "collector_commit_at_archive": "830a6035cb8ba5a3d544db5faf78782d52903daa"
+      },
+      {
+        "name": "measurement-formal-006-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-006-20260917/campaign-results.tar.gz",
+        "version_id": "K5R9G3Dtk9MQRg6xH7SzgCcQUgbWR5ak",
+        "archive_sha256": "f8f666a3e5ad100c1aaa671d133ec58e928b840c1afa812d18df9879034a13fa",
+        "source_manifest_sha256": "f2886fc6cda19c0960669d0dfbf980c36d6636dc56f3129989a98a1e4c02b560",
+        "content_index_sha256": "b114816290e2ad787eca53b6f12bed9146c93a3c1dd3c2196d5b5f30d4b72cfc",
+        "restored_files": 5010,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-007-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-007-20260917/campaign-results.tar.gz",
+        "version_id": "souH9bURToZr.7mkopC1ZNpcMsrQj.x3",
+        "archive_sha256": "6f2acdef8503e16722545bbe6b7ddc397f3e94376f0b4ffdc3a18675198c88f1",
+        "source_manifest_sha256": "a376e0076c83744f69b5c020a56bf09c61cc68fb71dc520882d99c0451527c98",
+        "content_index_sha256": "dc8418dedf5e2e063de5f550484d03d124aa2b1ede30709b4d811d6e707b83fe",
+        "restored_files": 4978,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-008-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-008-20260917/campaign-results.tar.gz",
+        "version_id": "TYvR4ePx_XESc4YAbFFpV78E15wb2CVb",
+        "archive_sha256": "3461630a08f47ab2e3f0adcf061968df8fc1c270e9799b90b1249db346ce7404",
+        "source_manifest_sha256": "b1cbe2e13c78f9c8a439a64345767c6d20249f543b741a7b794b9df22a18ee54",
+        "content_index_sha256": "0f4d22fe1b55856735e5315e92149df525add055ba5568b8cd7a934b155ea988",
+        "restored_files": 9126,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-009-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-009-20260917/campaign-results.tar.gz",
+        "version_id": "BMnZRBnsqbZ_IXGTeWAhpwkJqcPe_JLl",
+        "archive_sha256": "0944fa6726706f922adf8abbf6da9b02ca2f51b6501e103c0630d171b6cc3d79",
+        "source_manifest_sha256": "f02574bf449e3b0f00a8995a85de20c4133bae07b89020d4d2d5b1b208c5184c",
+        "content_index_sha256": "b9ea6f5256217dccc77ee5fb6c7631e675a07ad72ca3991d113dd952391d74a2",
+        "restored_files": 16782,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-010-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-010-20260917/campaign-results.tar.gz",
+        "version_id": "wisdO4w1I9R6KF64JSSdPIM9nstnCXqx",
+        "archive_sha256": "089d494f4e6064b136af9880bfbf5f998fb728642b7a91a692d80a845f1ff1c2",
+        "source_manifest_sha256": "f6a81d557226b4c0480a4da05a84e39832a13a1b8da13d8e99e965c9abab64e2",
+        "content_index_sha256": "20fd22726b6b4673402e8b230111b615bfad1fc42cc95206c434849e9a757a4f",
+        "restored_files": 12118,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-011-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-011-20260917/campaign-results.tar.gz",
+        "version_id": "UvKVn1natbV9oFnuHMegoldaHYddFTrF",
+        "archive_sha256": "b69d7b57accb406bc636791b6335a67e202cb80e6cebe3d7f6981d98c7500eb2",
+        "source_manifest_sha256": "b1c73dd8ec6c34d368e3bc52a319bb9e1567d82049adb1c7f9598ebb68ebfd89",
+        "content_index_sha256": "52e6238da68c72394e1df8bf8003877d81d1ea39cf997bc1a45ed9f1b437d6b1",
+        "restored_files": 8499,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-012-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-012-20260917/campaign-results.tar.gz",
+        "version_id": "MJ3fltVTaApiR0_8KVxo5nWUauFR6Z.Y",
+        "archive_sha256": "b489c02ccede8588ebd4f8ca2809b5678b6af5694d90c4997351e9a2ce016077",
+        "source_manifest_sha256": "f8cc6093610fb64c2a3d77eaf69705abad4e2ce6f6bb9b28054559a8b292d540",
+        "content_index_sha256": "357e965fc567b99c43627e253eef588960d89d069ffbcde4caf35b02d36de0e4",
+        "restored_files": 10197,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-013-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-013-20260917/campaign-results.tar.gz",
+        "version_id": "UsWHHEPl9vWNATDT39WZFOqrGSdEjb9D",
+        "archive_sha256": "66cf453c0487f9a2a81a00760fd87f6c2f0e8c5f797113785b686a0557b29bba",
+        "source_manifest_sha256": "9fffa8ae84177063175d499b2f556e7adf267b4b44d9fed6253b3376223b9c53",
+        "content_index_sha256": "7ae51365c0ad979e4c74da084d94cee2ef5051a330dbd8027427d0356d1c9647",
+        "restored_files": 7461,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-014-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-014-20260917/campaign-results.tar.gz",
+        "version_id": "YQ6oo5bIerDtyEDehP7hnmmNECc4ebcB",
+        "archive_sha256": "6c312bf205942b2812eeaf026e7e84cbf903f92548ebd51ae24c829404df5dff",
+        "source_manifest_sha256": "855e1c27b1c132437a03293fbf52145c38d6636745e8120cc3971735ac1b9a4a",
+        "content_index_sha256": "8e6e8c7094bc3691c23f41090a2d88027c7a8c46112396cf6c5d698bd15a4ef3",
+        "restored_files": 4791,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-015-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/64c6e297cf2b11f4e171f4d313a18b977f03d2a9/measurement-formal-015-20260917/campaign-results.tar.gz",
+        "version_id": "ru11UV3nhrjd8ppFM8D6zb6iSk0F_F43",
+        "archive_sha256": "75c291f380e03c57a4e7b5886cfceb479f81b9936b19568adf024c6fe1cf3ba3",
+        "source_manifest_sha256": "b7e6ac59746883509e54427ccb7fa7eb7155b4d01fce6a6e5f946d54a00e5668",
+        "content_index_sha256": "403ae17a4270b25ec6182cdfe133e6b3cbc53e007680e8fcc45a95e213ba589f",
+        "restored_files": 9803,
+        "collector_commit_at_archive": "64c6e297cf2b11f4e171f4d313a18b977f03d2a9"
+      },
+      {
+        "name": "measurement-formal-016-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f/measurement-formal-016-20260917/campaign-results.tar.gz",
+        "version_id": "viLJgc2uFN2TURzHSaaKbn43mP4Ga5Z3",
+        "archive_sha256": "b5b1904967b14ef7147997f77682cea1a25e95ec952f466c39b3aee081474424",
+        "source_manifest_sha256": "dcafbb8e5f905bb4b90bdcd27692f01ddad83745741cdae751f1b29b0bff39b6",
+        "content_index_sha256": "4e0d3f9691493afc7a7e3bfb9e4b012385489ab8e0428ab6846aa91dbe7d886a",
+        "restored_files": 9350,
+        "collector_commit_at_archive": "ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f"
+      },
+      {
+        "name": "measurement-formal-017-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f/measurement-formal-017-20260917/campaign-results.tar.gz",
+        "version_id": "RUsu30DaQgcD_R..VOftGoOdE7Y5rjvI",
+        "archive_sha256": "7f325d8fbe3e07282224aa15f3f79b9162833a57ef9ef21602228e4367acac58",
+        "source_manifest_sha256": "525bc68e6982c5a81c5f3a1f23c33000a6a36ab57dba7c8d0c4e6d9c5a281361",
+        "content_index_sha256": "b0d1c1ed98f6e87f9f036cb3ebc905c63d0a51f903e1664b3822378dd8b1f60a",
+        "restored_files": 9288,
+        "collector_commit_at_archive": "ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f"
+      },
+      {
+        "name": "measurement-formal-018-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f/measurement-formal-018-20260917/campaign-results.tar.gz",
+        "version_id": "1JSlOe91GxsD5quSqoPm_qv8G8tre3l2",
+        "archive_sha256": "4e30e45edb508e7764408021bc363bd8812ca9bfc8de71082ac5b4e3f4b3531b",
+        "source_manifest_sha256": "8213d2127beaca9121fdc144921c128ef050d43c4c53d93a53d136a0cfbedfb0",
+        "content_index_sha256": "aa3dde91965b9fd9dd9474ef68682ed850fd9ae22e60461bf0eb802494d773d4",
+        "restored_files": 10660,
+        "collector_commit_at_archive": "ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f"
+      },
+      {
+        "name": "measurement-formal-019-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f/measurement-formal-019-20260917/campaign-results.tar.gz",
+        "version_id": "OSdVobyn0UT8zDF.zJNWrJm1HJQY4mDb",
+        "archive_sha256": "3ff6cd18c89a44e47ae96211a050827935ddf3c6439036e39418bf00e2b36d24",
+        "source_manifest_sha256": "ae50abf9b449b39cdd5668e33a25bd7a57381f12ff0fc59e6f72b6de44e87264",
+        "content_index_sha256": "6dc4aa7435e5aa93d4b777c3c3db8848e057c2394c1d9fa1eec13ee9bc48b4cc",
+        "restored_files": 6840,
+        "collector_commit_at_archive": "ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f"
+      },
+      {
+        "name": "measurement-formal-020-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/322f6b60577510a954f6e0e40a2e7b64a17ec8c6/measurement-formal-020-20260917/campaign-results.tar.gz",
+        "version_id": "Z3To75aOUzwVpDTG3YtIcD75V1gxXKFx",
+        "archive_sha256": "d4df7e2bc094dede9e41e592ac9566a21e5d078b9c0428f63ce696049a0bcc88",
+        "source_manifest_sha256": "3a6b338bfbaaf49d23f9f56bdff39256f7d3b07a01f6f1753bf24149786fbfd2",
+        "content_index_sha256": "ab70e2714c6f3edbac49009d28308b2d73aa4668b532a11073b0d27640180bd0",
+        "restored_files": 11237,
+        "collector_commit_at_archive": "322f6b60577510a954f6e0e40a2e7b64a17ec8c6"
+      },
+      {
+        "name": "measurement-formal-021-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-021-20260917/campaign-results.tar.gz",
+        "version_id": "youVlM.OXSBWkRY9Xlv3mejBe3GH03Eb",
+        "archive_sha256": "cf7f951217c0442e7c5ad0126f6720a4c0aaf9242c59ca3056568aa682dca64a",
+        "source_manifest_sha256": "907831d91af0dd5c49a9f3e6029919b67d455d60cce32a4db681d46081e868fb",
+        "content_index_sha256": "75805ee5a59c38d3cea33059be764afba82c0ffb866b3ba9c5bae7527a5f55b5",
+        "restored_files": 6814,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-022-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-022-20260917/campaign-results.tar.gz",
+        "version_id": "K7w2mE8Q2PxJClWDDK8Tu7HGcutAP9uo",
+        "archive_sha256": "4644d524000c8ce49f15bd09817958656331fa7aa8efc276e9498cc8685e6f6f",
+        "source_manifest_sha256": "70cfa5f4fa0d3807537b4c72d11dd39a250ee01012b5a710c7cb48fe396f0c23",
+        "content_index_sha256": "d81e5675ef74f7357ae548fad3f1dc54b23f6316bb3ae239f3e7cba75ae10bbe",
+        "restored_files": 8540,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-023-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-023-20260917/campaign-results.tar.gz",
+        "version_id": "9WuXqdMU7XnAADSuFrHHODfyBm0K2Had",
+        "archive_sha256": "5d510e97db7e32010be43575265fb07afd5129545aa13d24fd43927f96e458f9",
+        "source_manifest_sha256": "b22f0ff523fbe38348ba55e39bf6a322e0104acd938980ee18863adc89f6a15b",
+        "content_index_sha256": "68130aed85732deb438f1f953615dbde1d40ce6e8e5a9b7d62329c551bce3823",
+        "restored_files": 12556,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-024-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-024-20260917/campaign-results.tar.gz",
+        "version_id": "tjIA1eYWH3y8_ftsoJG.1AZ4zs9uWPwY",
+        "archive_sha256": "655aabd4692addf14b580fb716d02e7f1d36d4ff2798795dbae47d4295692b1e",
+        "source_manifest_sha256": "cd0769942557d040d81fa07fbbb3f762f07379289b8d8acd9c864547a26603c4",
+        "content_index_sha256": "93d1419c098e46f56879dfd0762f03dca76b2a40eb10dafa52e7db0b0d2d4b67",
+        "restored_files": 6633,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-025-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-025-20260917/campaign-results.tar.gz",
+        "version_id": "t3ZVOmPNoMX6Q_ZrvgDBnGAtXfPm_lSP",
+        "archive_sha256": "e3143541a6f6a8b2ad0f378aba923310e8576c45db95ed2528edcb309b5dcb86",
+        "source_manifest_sha256": "90568808a3a004fc04a8a2169244fda716ed602a0bc3c86001c16dd812ba4906",
+        "content_index_sha256": "4a7b41698f3c5b9d9cb851a98d885ec01001100d4f7ad980a1fac470a5dd756e",
+        "restored_files": 11692,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-026-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-026-20260917/campaign-results.tar.gz",
+        "version_id": "D32PNwtBmglfj1iXoSTzx4Ze7T4sMkss",
+        "archive_sha256": "3d3b79dd888be64c53580b44d5609356ef30fd36f97de87f31aec20642773dbe",
+        "source_manifest_sha256": "7564b243bea7fa0cf02f416c1d103f8b78ae2951c86672f1dd8bd061374f302b",
+        "content_index_sha256": "e8cf8188f60637c831567f1f4dbd47d9f0d62f6f49902fe7e0d6f80c1fc17d70",
+        "restored_files": 12746,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-027-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-027-20260917/campaign-results.tar.gz",
+        "version_id": "47X4wF239Rfj.LqO8Qs7wYPZPPdvJ06V",
+        "archive_sha256": "d7a9f571b96efe8504cfbfec5c2f0ada905f9b5ca0de702f9374e2ed4a2270e0",
+        "source_manifest_sha256": "3ceae67bfcbc6c2ba97ece2bea8e0c49651035171a8a06c3ebbfb4d0e8b1a92c",
+        "content_index_sha256": "d648ad020afd6765910c26329f7e289a3351aef8bc29e7dd6e9ee5e3a0d54959",
+        "restored_files": 8935,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-028-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-028-20260917/campaign-results.tar.gz",
+        "version_id": "dlYJpir136aFhG7AR5lvEQA8wDW4cZ3J",
+        "archive_sha256": "6f90722bad03353f9698de1ef7e5efb749bc21c1bd45d0b445c82e6f0918889b",
+        "source_manifest_sha256": "119f7aecb31fd88114625b2edab8720615af3ac39b73e5d83da4a49787a18f53",
+        "content_index_sha256": "b50e9da9d994271c8253ad0b0237b032947d68635421404fd22c52a7a9dd5fab",
+        "restored_files": 13273,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-029-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-029-20260917/campaign-results.tar.gz",
+        "version_id": "MztLz_fZvbXWfDuwDwVqF.0QesEaiKOD",
+        "archive_sha256": "5c1e52a2d81033826814d2706801516576c69045f3a62b6a38556a250c831af7",
+        "source_manifest_sha256": "edcf0f7ff7eed07ad832c355620bce57dcf0163e11fbc72350000033507cfbda",
+        "content_index_sha256": "e2b53dc1c6495ae69d53b08d49d34a37fcae66b4d12805b464ca9160f2738c94",
+        "restored_files": 11021,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-030-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-030-20260917/campaign-results.tar.gz",
+        "version_id": "CbLUHsb30SEyYt5qigZ_M_c8TqWayQnI",
+        "archive_sha256": "c2137fd1a21acb1e6da97c638b387daf13b826aefd6917388f968a4448832805",
+        "source_manifest_sha256": "6486f08546d0e841dfa6a5be7b03114c69458b379b1ea8401411b3f013d14bf1",
+        "content_index_sha256": "3250fbc092c11438b6a929e0e074a02515f4efdfbd388adc2e8c0929a78cb630",
+        "restored_files": 7071,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-031-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-031-20260917/campaign-results.tar.gz",
+        "version_id": "z9i_1QDldtiXDwtS1WDJTxI.QyFqA.5q",
+        "archive_sha256": "192f7ce1f83b7d685b4b4f44ef6de6cb5cf54895c997d2265c955327361d333d",
+        "source_manifest_sha256": "01fd5930a9e9bb12980eab547e994461171e5389d6fdf0a1c6d0a6d9bcbca3ba",
+        "content_index_sha256": "b4d9295956ed865966e9664c9191d887b897d72757aede59b18d07899bbf0510",
+        "restored_files": 8905,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-032-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d83adb6e212033b3218d0c186f835f523f52ec51/measurement-formal-032-20260917/campaign-results.tar.gz",
+        "version_id": "TIzsj9D.U_YZgEg3ov3T_GGIQbUprsXf",
+        "archive_sha256": "432dbca8767223de8b893789848992d440d819b97ed788a890b5abf76a740697",
+        "source_manifest_sha256": "204a25e14375c299b4ac57cebbff538745e9ab069afd38301043c07c5ec0ad0a",
+        "content_index_sha256": "17961563bffab250b4b48c3dbbd800abcc56868f75f377bce601cfe1e879f285",
+        "restored_files": 8417,
+        "collector_commit_at_archive": "d83adb6e212033b3218d0c186f835f523f52ec51"
+      },
+      {
+        "name": "measurement-formal-033-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/29611ad33bb312901b516b53bedc1f84f4df704c/measurement-formal-033-20260917/campaign-results.tar.gz",
+        "version_id": "WzeYOYxvgkCW.uq.QWHKmJLLKZtLCUHP",
+        "archive_sha256": "bdb5e30ed50b75b8d63df983323d0dc448bde08d1a2c3e880dc463d290aa7c17",
+        "source_manifest_sha256": "1b7239b7d189c1ec53b38755e32d8665091fce6755957aed10739c4e09257c87",
+        "content_index_sha256": "3d8ea6a58bb7888102699f1c710df1671cd0bd89733b8fa90d1ff66dc01365de",
+        "restored_files": 9449,
+        "collector_commit_at_archive": "29611ad33bb312901b516b53bedc1f84f4df704c"
+      },
+      {
+        "name": "measurement-formal-034-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/29611ad33bb312901b516b53bedc1f84f4df704c/measurement-formal-034-20260917/campaign-results.tar.gz",
+        "version_id": "qNdnhElEs2Q_Qc28LH7U4Vg6EzyIWYNE",
+        "archive_sha256": "1415d4a5a78d0ab9e19130dadbaab6813a8fc3da777692b7861d302fc575b9f3",
+        "source_manifest_sha256": "7e6f3a395bfc1a8046579a74a7e595da40e7ac228b621ea9fd9e79aa025a1b11",
+        "content_index_sha256": "295b5c326d28bbcb5e458e7384d4db249ac75680e3693861def744872a3d56dd",
+        "restored_files": 14277,
+        "collector_commit_at_archive": "29611ad33bb312901b516b53bedc1f84f4df704c"
+      },
+      {
+        "name": "measurement-formal-035-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/29611ad33bb312901b516b53bedc1f84f4df704c/measurement-formal-035-20260917/campaign-results.tar.gz",
+        "version_id": "sQ_wo0ajGd48jTq1Jw4KOBYlSrk2cKH0",
+        "archive_sha256": "92570c1871a0e1ca5e7c34dc8f5ed201f6feb22ff0c842f52ce2234cf63969fe",
+        "source_manifest_sha256": "92b44bb63e1646ed1ec064ab87edcb9c6180323c489b22a86880582e9e626227",
+        "content_index_sha256": "7920dd71694651a811d4df9d2689c684b25f755d532c871f299e7822a40e1d20",
+        "restored_files": 19242,
+        "collector_commit_at_archive": "29611ad33bb312901b516b53bedc1f84f4df704c"
+      },
+      {
+        "name": "measurement-formal-036-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d450c2b199b4ce3b76c8a09160f6b9427d68ef9f/measurement-formal-036-20260917/campaign-results.tar.gz",
+        "version_id": "1NKFJMlkW63TQnPqW8YmUKkqE3z5JdoS",
+        "archive_sha256": "96fa6148b591d95630757bc41026f5f8bd36d621782984ccc239c6cbf3d1ccf1",
+        "source_manifest_sha256": "f7f454cb3d17f42b7664549645a1943baa1d38e0d65ce9b5c8bf0bfd6a2c4748",
+        "content_index_sha256": "f763ad87b3a7c5bc9f810327b53f92b1d6a1433d08ab3cdcd2c3f8d6a5799c6c",
+        "restored_files": 14997,
+        "collector_commit_at_archive": "d450c2b199b4ce3b76c8a09160f6b9427d68ef9f"
+      },
+      {
+        "name": "measurement-formal-037-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d450c2b199b4ce3b76c8a09160f6b9427d68ef9f/measurement-formal-037-20260917/campaign-results.tar.gz",
+        "version_id": "IshAUpJ1CAqGbMkvIX3IEh7Siaq3hyEW",
+        "archive_sha256": "38ab091da4f23bbdd5a87de5760c7520fc06cf45aa8d2cefe71b93370380b01d",
+        "source_manifest_sha256": "227f9f5593f90ad8731be77d64892b9081751b808173c57645a331f470527ee3",
+        "content_index_sha256": "64dca23ab141491058d436caeda44692b68256a9cf554acee4eca78d962bcc02",
+        "restored_files": 22952,
+        "collector_commit_at_archive": "d450c2b199b4ce3b76c8a09160f6b9427d68ef9f"
+      },
+      {
+        "name": "measurement-formal-038-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d450c2b199b4ce3b76c8a09160f6b9427d68ef9f/measurement-formal-038-20260917/campaign-results.tar.gz",
+        "version_id": "lGk9rf0gkGl3kVtnqXXYBIssjmJk7TJh",
+        "archive_sha256": "0f26937cabedbe7a5f6b8eca8f3606ccc3113ab308d9ae80f86cdd8ada246dfa",
+        "source_manifest_sha256": "64bdca52645a129c502b673c9bd8bbb13fe229e91e657769cd9723426185d3ca",
+        "content_index_sha256": "d0cd80dabb4dfad8f9f5742fdf0349904b03b4d56a6b4a05c840183f0ded084b",
+        "restored_files": 15526,
+        "collector_commit_at_archive": "d450c2b199b4ce3b76c8a09160f6b9427d68ef9f"
+      },
+      {
+        "name": "measurement-formal-039-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/53053b7056517b59e4c70f756e717c93e1c2ce5c/measurement-formal-039-20260917/campaign-results.tar.gz",
+        "version_id": "wrgSbgc6s_AIinUkFvjbx9gH2MkbV7kt",
+        "archive_sha256": "e226a349ecddb0c52b0fb1e1ced3295301f31fa18e82be805c107c2ddcfe38ee",
+        "source_manifest_sha256": "9b63563a9d6b29ab65f0943fdd7c50ec6f2b7c7049e6097e08b92ae59df7c6a8",
+        "content_index_sha256": "eecde93f72cc3f893a09c3025f6a23fe7a203dfe7fc75ca3fd164a0d7922068d",
+        "restored_files": 16214,
+        "collector_commit_at_archive": "53053b7056517b59e4c70f756e717c93e1c2ce5c"
+      },
+      {
+        "name": "measurement-formal-040-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/53053b7056517b59e4c70f756e717c93e1c2ce5c/measurement-formal-040-20260917/campaign-results.tar.gz",
+        "version_id": "NzMzgvqKYoOvghoZR0u1vesdaflE_kF3",
+        "archive_sha256": "545fd28d9d6fcde537a5ae67e19e5b73bacbf8731d0631c164ed6a8cb7e3e217",
+        "source_manifest_sha256": "64788a350a486c2c1e49898cc32fa26a700278eefc35ed1ce92942ab45ffdc69",
+        "content_index_sha256": "52028657b31bda2a923a902cd2a22dfd7e13b0cb7967da09bb7f007d4be9df78",
+        "restored_files": 14246,
+        "collector_commit_at_archive": "53053b7056517b59e4c70f756e717c93e1c2ce5c"
+      },
+      {
+        "name": "measurement-formal-041-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/53053b7056517b59e4c70f756e717c93e1c2ce5c/measurement-formal-041-20260917/campaign-results.tar.gz",
+        "version_id": "Ya8tStgJlmRYSiByJnn_E7hYb1wggFqQ",
+        "archive_sha256": "a8c96e63302f4babe9297681ea4768162c556d78e24e78d2da0d84f2145d46d9",
+        "source_manifest_sha256": "9b33a544bae2d478a84137e731b1fabdd57cde7210d0f5af8cb8d825809c0055",
+        "content_index_sha256": "50917263549777d9b52a7a3b2f7e0076f91efa41bae743b8a1f63bc4e1c1aaa4",
+        "restored_files": 15355,
+        "collector_commit_at_archive": "53053b7056517b59e4c70f756e717c93e1c2ce5c"
+      },
+      {
+        "name": "measurement-formal-042-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/53053b7056517b59e4c70f756e717c93e1c2ce5c/measurement-formal-042-20260917/campaign-results.tar.gz",
+        "version_id": "HcYIF.Z3ucCxec.e0DRjboZ_tF7hD6Hp",
+        "archive_sha256": "25638c0047010d29bc1ca611e1aeb624a7765b93bc8cff66a32c564e978e2c38",
+        "source_manifest_sha256": "64407b6b51807ef966419c592a1552e4d2dd9124050146c074c698023ff77825",
+        "content_index_sha256": "e6845efb2cf1a43b879db7e76341810dea4b381159d0682778db42541db8987e",
+        "restored_files": 13332,
+        "collector_commit_at_archive": "53053b7056517b59e4c70f756e717c93e1c2ce5c"
+      },
+      {
+        "name": "measurement-formal-043-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/a33ed6cc5121273d88b01ab1afb8895da20dd67d/measurement-formal-043-20260917/campaign-results.tar.gz",
+        "version_id": "kbXvIWwUKIG.neQD2GXOdABdRlhKqthq",
+        "archive_sha256": "280ea9103aa8c9e8bd8274d3c164e6e4cb0c1659effe6dfe776ff6d5aaadd4bf",
+        "source_manifest_sha256": "5c4a27847e6e08342e11b15df81d2ff6409be3ac789b302310525715dfdeaed2",
+        "content_index_sha256": "6624129dc90251cc29a5fb5d6ec5f79a2b7c88c9fc7613644392d204b9af39b1",
+        "restored_files": 18451,
+        "collector_commit_at_archive": "a33ed6cc5121273d88b01ab1afb8895da20dd67d"
+      },
+      {
+        "name": "measurement-formal-044-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/a33ed6cc5121273d88b01ab1afb8895da20dd67d/measurement-formal-044-20260917/campaign-results.tar.gz",
+        "version_id": "._s3x.AltryVgk.3UiT.f2yNjn5eUbpu",
+        "archive_sha256": "ef21181331488194246533593792e4e36f2889119802915035a155f0c96770ec",
+        "source_manifest_sha256": "5c13486922e0a0ca3f5ca88546f3a7fdcc9c4504e5e90749d1f488651b42ac22",
+        "content_index_sha256": "45b07764530a351d791990e7165153cb91b1f682c7b4828a7e8833fc069b4ff7",
+        "restored_files": 12346,
+        "collector_commit_at_archive": "a33ed6cc5121273d88b01ab1afb8895da20dd67d"
+      },
+      {
+        "name": "measurement-formal-045-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/a33ed6cc5121273d88b01ab1afb8895da20dd67d/measurement-formal-045-20260917/campaign-results.tar.gz",
+        "version_id": "3CYWWest9WlEUGNA.83_H7OTB.JgpMgp",
+        "archive_sha256": "c1053d6f9d1118660a21727940ccf334748194123a95caad2e7b5200c98e217b",
+        "source_manifest_sha256": "40c0f2e87e2ae6febdc1ceecc29906b1600209150cd92668a3cf0ed5eaec4dd1",
+        "content_index_sha256": "362aaedb9dc989c7c5670140e1ade1317f4a602f40d7e80730be91e6f563ada2",
+        "restored_files": 17210,
+        "collector_commit_at_archive": "a33ed6cc5121273d88b01ab1afb8895da20dd67d"
+      },
+      {
+        "name": "measurement-formal-046-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/5f4d7b0f648cee0485f4b64229290b0b1826f1c1/measurement-formal-046-20260917/campaign-results.tar.gz",
+        "version_id": "g2yBpBfrOfzV1RuYmvkVbMIsTqP4cVpl",
+        "archive_sha256": "e85460b3a2bc45771279f08e2972d4151a6d31f8ff5c4db97e21a35dbc50ea3c",
+        "source_manifest_sha256": "abf5ec889f56e3fe8360983c7dab006fe841927dbade4fade55d9bbce05ea880",
+        "content_index_sha256": "e4ff773296e954723d050ca568cf527be3bb2af1b6efe1f865b8e0e869392bb3",
+        "restored_files": 16658,
+        "collector_commit_at_archive": "5f4d7b0f648cee0485f4b64229290b0b1826f1c1"
+      },
+      {
+        "name": "measurement-formal-047-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/5f4d7b0f648cee0485f4b64229290b0b1826f1c1/measurement-formal-047-20260917/campaign-results.tar.gz",
+        "version_id": "HidFi27EQXdZVTl.Om9NHtyJKfqN9de1",
+        "archive_sha256": "ce34dea323e2bbefdc9b5e47daff66b5666e6d161f0de41ab5d6388bf17e298a",
+        "source_manifest_sha256": "8093a15b37840b81c0b47418b3b0e95281c389ff0ef4ecc3ec6067620c76c277",
+        "content_index_sha256": "40f267f18f8f6c28b55cd08f717a0c20639bba21b9850670eca7bd10272fbc77",
+        "restored_files": 103,
+        "collector_commit_at_archive": "5f4d7b0f648cee0485f4b64229290b0b1826f1c1"
+      },
+      {
+        "name": "measurement-frozen-history-29611ad-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/29611ad33bb312901b516b53bedc1f84f4df704c/measurement-frozen-history-29611ad-20260917/campaign-results.tar.gz",
+        "version_id": "26jUE_i5HUkjpu0nTKNO8N3NHFXg259f",
+        "archive_sha256": "2e9679d53dc4eb6b5d5934a48d3ab0a04b5a08949463e20212cab629f086b84c",
+        "source_manifest_sha256": "486b93e44c5832ef758f6afa053a288a0ead63ec8be69defe98489291b9c9841",
+        "content_index_sha256": "56d838de078ce0fba50243959b821c5b836cbeeea8f9b2f9ea294be0c7880c73",
+        "restored_files": 2,
+        "collector_commit_at_archive": "29611ad33bb312901b516b53bedc1f84f4df704c"
+      },
+      {
+        "name": "measurement-frozen-history-53053b7-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/53053b7056517b59e4c70f756e717c93e1c2ce5c/measurement-frozen-history-53053b7-20260917/campaign-results.tar.gz",
+        "version_id": "Hz6FnVG0EWJwPuJNmJpW3knTsbuobGOi",
+        "archive_sha256": "2b2b611c7a7d35ad94ba60b70421443aa3bdf34bc954c0f18c12fcc5d795d5f8",
+        "source_manifest_sha256": "19e05469f505d1bfe6398b5a1e3fbc7931bddfc2ced2b2d547b5d19bb8a1264a",
+        "content_index_sha256": "15f060d66b7bce9b6da7e8571efe22c5e55bf718f97bbe72d4d2202f4def4232",
+        "restored_files": 7,
+        "collector_commit_at_archive": "53053b7056517b59e4c70f756e717c93e1c2ce5c"
+      },
+      {
+        "name": "measurement-frozen-history-5f4d7b0-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/5f4d7b0f648cee0485f4b64229290b0b1826f1c1/measurement-frozen-history-5f4d7b0-20260917/campaign-results.tar.gz",
+        "version_id": "eSLu4LL_HrwZHfIFZwNaqfDsSgILglek",
+        "archive_sha256": "4e88eb0f9d0e417f30116136e5f439a5aea0296090aed08a8bad06207f8f192d",
+        "source_manifest_sha256": "8be1869ca2460ba85f4809e9792b1dfb33eee3d9a0bdc247a9507e740b43d3b4",
+        "content_index_sha256": "80c8275c57754238e24d76a52950cdc4f3425c63832b13d48549a120b630f3ea",
+        "restored_files": 21,
+        "collector_commit_at_archive": "5f4d7b0f648cee0485f4b64229290b0b1826f1c1"
+      },
+      {
+        "name": "measurement-frozen-history-a33ed6c-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/a33ed6cc5121273d88b01ab1afb8895da20dd67d/measurement-frozen-history-a33ed6c-20260917/campaign-results.tar.gz",
+        "version_id": "WXvCO7fRMizUJTu0ta_qb_7VImXahgpf",
+        "archive_sha256": "f6523f76401f2aa8827ee055ac397f018d34e7b416f6d7cdc65fb8f2f9cdfe81",
+        "source_manifest_sha256": "fe4b9279e8f142244c0f848c90f0b088396d9de919feb18f44fb0b9e41c4b059",
+        "content_index_sha256": "c6e571be2becc01220408243932bc0d7f291fb37a9c30145d0dd1dfebf9e4487",
+        "restored_files": 22,
+        "collector_commit_at_archive": "a33ed6cc5121273d88b01ab1afb8895da20dd67d"
+      },
+      {
+        "name": "measurement-frozen-history-b45c851-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/b45c851895c48e299fc17fdc1dc4e0c74102bb41/measurement-frozen-history-b45c851-20260917/campaign-results.tar.gz",
+        "version_id": "WF4ibtkJQy9.l.g_EmgTPKFApz8mz0ub",
+        "archive_sha256": "42f365328fac9f9a363840678598932f4552fdb2fb58e662f228a929fa90e8b4",
+        "source_manifest_sha256": "261bf0ba44290b031361ffece1eef6f0864ee31b417e81e199fdb24d2ed3d410",
+        "content_index_sha256": "6422a05b336f551338894199595155cead5409b8a6de062cf8848721c2e82197",
+        "restored_files": 2,
+        "collector_commit_at_archive": "b45c851895c48e299fc17fdc1dc4e0c74102bb41"
+      },
+      {
+        "name": "measurement-frozen-history-d450c2b-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d450c2b199b4ce3b76c8a09160f6b9427d68ef9f/measurement-frozen-history-d450c2b-20260917/campaign-results.tar.gz",
+        "version_id": "14_HML3FnNqHiciMWXMQJPov1c3kdqBN",
+        "archive_sha256": "f6036959cdde2426d5abc51ddb32329bfc4101b47ba09b0a544bb50fe90d5c69",
+        "source_manifest_sha256": "2531e637bf92c06448c3e57cfd06e4efa98fb3385ffe5fccb7451654ff1b991f",
+        "content_index_sha256": "f7f55b0af84da8013d7e76d23f1f627f85ef29d2da9bce9668fc8f4e9fb7d747",
+        "restored_files": 5,
+        "collector_commit_at_archive": "d450c2b199b4ce3b76c8a09160f6b9427d68ef9f"
+      },
+      {
+        "name": "measurement-lifecycle-large-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f/measurement-lifecycle-large-20260917/campaign-results.tar.gz",
+        "version_id": "lwE.FymCCO31qwWOjRld3ylcbRTYNhAf",
+        "archive_sha256": "c54d4b5b8d8521420367f844a17d7e06c45b6d7238343a417598d8d056e65311",
+        "source_manifest_sha256": "4f517a2a58d516d557900a124eb793f21162a0c4b5dd9d8b06b2d461fc54d807",
+        "content_index_sha256": "8e544d21c64d257faaa7df6b21865609970c321386533ce104a1824bc3857f71",
+        "restored_files": 652,
+        "collector_commit_at_archive": "ee991a6f2f5be74cbeffc12d18d8523ffbe1d75f"
+      },
+      {
+        "name": "measurement-memory-diagnostics-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/403952547fe728c04c5da31c007f7c6704d21440/measurement-memory-diagnostics-20260917/campaign-results.tar.gz",
+        "version_id": "S_ainC1_cc0xzCtkGLiTWFXFGi_2le6U",
+        "archive_sha256": "b241348b63e7c2b4c85b81f4d3f9cc75bbf34a1227a071de9a46db583e799839",
+        "source_manifest_sha256": "98f179cab7923aba8f9e8467e5f094c07cd2974ec6bb34f1e855c3372164d252",
+        "content_index_sha256": "f101a4249059dafe1751ace2c9f4dece16239412b60766ab28828b9b8ab1bd86",
+        "restored_files": 3636,
+        "collector_commit_at_archive": "403952547fe728c04c5da31c007f7c6704d21440"
+      },
+      {
+        "name": "measurement-nomatch-temporal-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/53053b7056517b59e4c70f756e717c93e1c2ce5c/measurement-nomatch-temporal-20260917/campaign-results.tar.gz",
+        "version_id": "1X5Y52whdTQ508UINjRvPmOgWlW3u9fy",
+        "archive_sha256": "106b1c7942709e23071e5b5c2df52985a9c2b51a8e15cf0b21144d0bf18df85f",
+        "source_manifest_sha256": "3135f4382801ae1d3b8da25174532f5ab10c917bcc6355c582b6ff66e6ca50ac",
+        "content_index_sha256": "e0c8ef924235cf132a12b7f835cdd368ea157497908f96a0189e72d331e55a4f",
+        "restored_files": 836,
+        "collector_commit_at_archive": "53053b7056517b59e4c70f756e717c93e1c2ce5c"
+      },
+      {
+        "name": "measurement-search-window-initial-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/6ec0ce96c9d8e63bade8923735c63455057a4657/measurement-search-window-initial-20260917/campaign-results.tar.gz",
+        "version_id": "wbZcREIDMWi5n6Jhe09qTVjCNYXr0xuQ",
+        "archive_sha256": "14707d021991c4f12b3bb15fc59f866dd489213fc9875b177b8beb5f1423080b",
+        "source_manifest_sha256": "c31b0bf861c1f272c9131297da8a34bfa6ff9401451ad0d35384043b4cbc5ad1",
+        "content_index_sha256": "e9c6d5d14568488d30d9b548955a32c606a7f4719e120610997087e530a07abf",
+        "restored_files": 1864,
+        "collector_commit_at_archive": "6ec0ce96c9d8e63bade8923735c63455057a4657"
+      },
+      {
+        "name": "measurement-slow-bulk-complete-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/d450c2b199b4ce3b76c8a09160f6b9427d68ef9f/measurement-slow-bulk-complete-20260917/campaign-results.tar.gz",
+        "version_id": "MRzbu0cl9aoQF2Ewk9.WasH1434Wts8m",
+        "archive_sha256": "5382bfa3b5b141f8cc4a8a3361d53f21e11dda1a0b4d2e1e954d84dd96a5f20e",
+        "source_manifest_sha256": "c1a63e5bd3bf637550e12578bff42b443573c0473f1cf0769bf2e33fe42d8559",
+        "content_index_sha256": "1d6503858608505a30d1a07831320938f895e2b23802016a46ed97e147138a01",
+        "restored_files": 819,
+        "collector_commit_at_archive": "d450c2b199b4ce3b76c8a09160f6b9427d68ef9f"
+      },
+      {
+        "name": "measurement-superseded-baseline-01-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/a696122e77a8ebc670bf3db0419da2de2bde4ddd/measurement-superseded-baseline-01-20260917/campaign-results.tar.gz",
+        "version_id": "VPq.0WlyXGV5X1K_16UFck3Ex8Mjm89C",
+        "archive_sha256": "82825cec30ef9a01d3304ef14e78782c0648c81bc7ef2b1e35616a532ffc6880",
+        "source_manifest_sha256": "38fe8ce4931fa01423cfef8d7bf5e0d0a8afa33cef40ef58091b1d229d93af50",
+        "content_index_sha256": "35c3019243bafbfc311e9e0ccaf7847a6a6bd6cbcfd27f4f7d84554623828e73",
+        "restored_files": 5598,
+        "collector_commit_at_archive": "a696122e77a8ebc670bf3db0419da2de2bde4ddd"
+      },
+      {
+        "name": "measurement-superseded-baseline-02-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/6ec0ce96c9d8e63bade8923735c63455057a4657/measurement-superseded-baseline-02-20260917/campaign-results.tar.gz",
+        "version_id": "hFp3Bw6fMEIMSawHwXO5BlKCEk62s3zq",
+        "archive_sha256": "0b33f565b8a2c2591d231bf5be4616f9108724e8e542e238059568e2dec3ad22",
+        "source_manifest_sha256": "c4355d59cb203c46789406e17784e47d87eb7fdee2ec8a9df4aa9fba228b1ca0",
+        "content_index_sha256": "667439c644acdb4459b31cbd6d077085131b208b3050a3a48d6d21d40ded8bde",
+        "restored_files": 73004,
+        "collector_commit_at_archive": "6ec0ce96c9d8e63bade8923735c63455057a4657"
+      },
+      {
+        "name": "measurement-superseded-baseline-03-20260917",
+        "s3_uri": "s3://airlift-regulator-baseline-938463256137-us-west-2/pre-review-baseline/6ec0ce96c9d8e63bade8923735c63455057a4657/measurement-superseded-baseline-03-20260917/campaign-results.tar.gz",
+        "version_id": ".C.bC0B19P5XNMj21e7gc8t.YkrtbBnU",
+        "archive_sha256": "1735352b7b3d01eb810dccc14892a67d7fd09792cb47b5cc3cf01d308271871a",
+        "source_manifest_sha256": "1d2a237d8a2412ce7505d68f82a50424e1279c4022684272cbf1de2c852c9452",
+        "content_index_sha256": "dc3cfdaaa927e3b62ccce951977915fe0eb349e71b292d635ea7b6eef5b4e2c5",
+        "restored_files": 46,
+        "collector_commit_at_archive": "6ec0ce96c9d8e63bade8923735c63455057a4657"
+      }
+    ],
+    "format": "Each archive contains campaign-results/evidence_store.py, index.json, and checksummed zstd objects. Verify the outer archive SHA-256 before extraction, then run the included restore utility into a separate empty destination. Original campaigns above retain their original format."
+  }
+}

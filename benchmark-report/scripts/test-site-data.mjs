@@ -17,11 +17,28 @@ const inputRoot = process.env.REPORT_DATA_DIRECTORY
   : new URL("../data/", import.meta.url);
 const inputManifest = JSON.parse(await readFile(new URL("manifest.json", inputRoot), "utf8"));
 const original = JSON.parse((await readData(new URL(inputManifest.current, inputRoot))).toString("utf8"));
-const complete = JSON.parse(gunzipSync(await readFile(new URL(manifest.fullResultsUrl, site))));
+const scope = original.publicationScope;
+assert.equal(scope?.policy, "user-facing-release-v1");
+const workloadEntry = inputManifest.releases.find(entry => entry.candidate === scope?.workloadSourceCandidate);
+assert.ok(workloadEntry, "Publication workload source remains versioned");
+const published = workloadEntry
+  ? JSON.parse(await readData(new URL(workloadEntry.file, inputRoot))) : null;
+const download = JSON.parse(gunzipSync(await readFile(new URL(manifest.fullResultsUrl, site))));
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-assert.equal(digest(complete), digest(report.downloadData(original)), "Full download is the complete annotated dataset");
+assert.equal(digest(download), digest(report.downloadData(original)), "Public download is the annotated publication dataset");
+assert.equal(original.rows.length, scope.publishedRows);
+assert.equal(scope.completeCampaignRows - scope.excludedCampaignRows, scope.publishedRows);
+assert.ok(original.rows.every(row => !("reportVisible" in row)));
+assert.doesNotMatch(JSON.stringify(original), /[†‡]/, "Public data uses only measurement-level uncertainty markers");
 assert.equal(Object.keys(manifest.pages).length, 24);
-assert.equal((await readdir(new URL("data/", site))).filter(name => name.endsWith(".json")).length, 25);
+const builtDataFiles = (await readdir(new URL("data/", site))).sort();
+assert.equal(builtDataFiles.filter(name => name.endsWith(".json")).length, 25);
+assert.deepEqual(builtDataFiles.filter(name => name.endsWith(".json.gz")).sort(), [
+  inputManifest.current.replace(/\.gz$/, "") + ".gz",
+  ...inputManifest.releases.map(entry => entry.file.replace(/\.gz$/, "") + ".gz"),
+  manifest.fullResultsUrl.split("/").at(-1),
+].filter((name, index, names) => names.indexOf(name) === index).sort(),
+"Pages data contains only publication captures, compact pages and the public download");
 assert.ok(Buffer.byteLength(JSON.stringify(manifest)) < 10_000);
 const sizes = [];
 for (const [key, filename] of Object.entries(manifest.pages)) {
@@ -34,6 +51,8 @@ for (const [key, filename] of Object.entries(manifest.pages)) {
   assert.deepEqual(page.rows.map(row => row.id), expected.map(row => row.id));
   for (const [index, row] of page.rows.entries()) {
     const source = expected[index];
+    // Exercise every real fold-down, including rows without pattern metadata.
+    assert.doesNotThrow(() => renderToStaticMarkup(React.createElement(report.RowEvidence, { row, comparator: "Comparator" })));
     assert.deepEqual(report.workloadCommentary(row), report.workloadCommentary(source));
     assert.deepEqual(report.comparisonIssue(row), report.comparisonIssue(source));
     assert.equal(report.outcomeLabel(row.result, "Comparator"), report.outcomeLabel(source.result, "Comparator"));
@@ -61,13 +80,54 @@ for (const [key, filename] of Object.entries(manifest.pages)) {
   const render = data => renderToStaticMarkup(React.createElement(report.LanguageReport, { data, selection: page.selection }));
   assert.equal(render(page).split("<footer")[0], render(original).split("<footer")[0]);
   assert.doesNotMatch(render(page), /row-evidence-body/);
-  assert.match(render(page), /Download full results \(JSON.gz\)/);
-  // The complete released campaign has up to 621 rows per selection, including
-  // fourth-host confirmations. Mean-cost intervals add about 72 KB compressed
-  // to the largest page. Keep a bounded page without dropping evidence.
+  assert.match(render(page), /Download report data \(JSON.gz\)/);
+  // Mean-cost intervals and per-host evidence make the public pages substantial.
+  // Keep each page bounded without dropping publication evidence.
   assert.ok(bytes.length < 1_100_000, `${key} uncompressed size budget`);
   assert.ok(gzipSync(bytes).length < 210_000, `${key} compressed size budget`);
   sizes.push([key, bytes.length, gzipSync(bytes).length]);
+}
+
+if (published) {
+  const identity = row => [row.caseId, row.operation, row.language,
+    row.platform.replace(/^c/, "r"), row.memoryMode].join("|");
+  assert.deepEqual(original.rows.map(identity), published.rows.map(identity), "Publication workload inventory is frozen");
+  assert.equal(download.rows.length, 5004, "The public download contains the frozen publication inventory");
+  assert.equal(download.rows.length, original.rows.length, "The public download contains only publication rows");
+  const workloadDetails = workload => Object.fromEntries(
+    Object.entries(workload ?? {}).filter(([field]) => field !== "performanceContext"));
+  for (const [index, row] of original.rows.entries()) {
+    const before = published.rows[index];
+    assert.deepEqual(workloadDetails(row.workload), workloadDetails(before.workload),
+      `${identity(row)} preserves published workload details`);
+  }
+  for (const [key, filename] of Object.entries(manifest.pages)) {
+    const page = JSON.parse(await readFile(new URL(`data/${filename}`, site)));
+    const {language, cpu, memory} = page.selection;
+    const previousRows = published.rows.filter(row => row.language === language
+      && row.platform === cpu.replace(/^r/, "c") && row.memoryMode === memory
+      && report.workloadSection(row) !== "diagnostic-only");
+    assert.deepEqual(page.rows.map(identity), previousRows.map(identity), `${key}: published workload order`);
+    assert.equal(new Set(page.rows.map(identity)).size, page.rows.length, `${key}: no duplicate logical workloads`);
+    const previous = compactReport({ ...published, rows: previousRows }, report).rows;
+    for (const [index, row] of page.rows.entries()) {
+      const before = previous[index];
+      for (const field of ["name", "caseId", "operation", "model", "inputBytes"]) {
+        assert.equal(row[field], before[field], `${key}/${row.id}/${field}`);
+      }
+      for (const field of ["pattern", "description", "inputDescription", "inputs", "flags"]) {
+        assert.deepEqual(row.workload?.[field], before.workload?.[field], `${key}/${row.id}/${field}`);
+      }
+      assert.deepEqual(report.workloadCommentary(row), report.workloadCommentary(before));
+    }
+    const eligible = page.rows.filter(row => !report.comparisonIssue(row));
+    for (const pair of report.lifecycleRows(eligible)) {
+      assert.doesNotThrow(() => renderToStaticMarkup(React.createElement(report.RowEvidence,
+        { row: pair.single ?? pair.reused, reused: pair.single ? pair.reused : undefined, comparator: "Comparator" })));
+    }
+    const shown = report.displayedMeasurements(eligible);
+    assert.equal(shown.length, {java: 188, re2: 188, trino: 292, like: 28}[language], `${key}: published display count`);
+  }
 }
 
 // Mapping-only captures already contain previews, not the full regex text.
@@ -86,6 +146,7 @@ assert.deepEqual(contextProjection.workload, contextOnly.workload,
   "A mapping preview must not become an apparent complete workload pattern");
 assert.equal(contextProjection.patternSummary.fullPatternAvailable, false);
 const evidence = row => renderToStaticMarkup(React.createElement(report.RowEvidence, { row, comparator: "Comparator" }));
+assert.doesNotThrow(() => evidence({ ...mappingOnly, mapping: undefined, workload: { performanceContext: "Context only" } }));
 assert.match(evidence(projected), /Only a short preview is shown/);
 assert.ok(evidence(projected).includes(sourceUrl));
 assert.doesNotMatch(evidence(projected), /full pattern is also included/);
@@ -102,7 +163,7 @@ const boundaryPattern = bytes => compactReport({ ...original, rows: [{ ...mappin
 assert.equal(boundaryPattern(4096).patternSummary, undefined);
 assert.equal(boundaryPattern(4097).patternSummary.bytes, 4097);
 
-// The website projection must retain the allocation displayed in expanded rows.
+// Preserve allocation evidence in page data without displaying a raw measurement block.
 // A fixture exercises the path even while the current historical capture lacks it.
 const allocationFixture = { ...mappingOnly, mapping: undefined, workload: undefined,
   result: { state: "compared", estimator: "mean", warnings: [], candidateNs: 100, comparatorNs: 200,
@@ -113,7 +174,8 @@ const allocationFixture = { ...mappingOnly, mapping: undefined, workload: undefi
       candidateIntervalNs: [99, 101], comparatorIntervalNs: [199, 201],
       forkMeanRangeNs: { candidate: [98, 102], comparator: [198, 202] } } } };
 const allocationPageRow = compactReport({ ...original, rows: [allocationFixture] }, report).rows[0];
-assert.match(evidence(allocationPageRow), /EC2 allocation: r9g\.2xlarge/);
+assert.equal(allocationPageRow.result.hosts[0].instanceType, "r9g.2xlarge");
+assert.doesNotMatch(evidence(allocationPageRow), /EC2 allocation|Observed process means|Approximate 95% intervals/);
 
 // The real loader fetches one selected page, shares in-flight requests, caches
 // visited selections, and evicts failed requests so Retry can actually retry.
@@ -219,6 +281,6 @@ for (const invalidate of invalidMetadata) {
       { data: { ...recovered, rows: [] }, selection })));
   }
 }
-console.log("All 24 compact pages preserve table markup, results and commentary; full gzip download preserves all evidence.");
+console.log("All 24 compact pages preserve table markup, results and commentary; the gzip download preserves the public evidence.");
 console.log("Loader selection, in-flight deduplication, cache, failure/retry and payload validation passed.");
 console.log("Page sizes [selection, JSON bytes, gzip bytes]:", sizes);

@@ -53,12 +53,12 @@ export type Row = {
   hardware?: { instanceType: string; allocatedVcpus: number };
   measurementWarnings?: string[];
   workContract?: string;
-  workload?: { pattern: string; description?: string; performanceContext?: string; inputDescription?: string; flags?: string[]; inputs?: Array<{ text: string; bytes: number }> };
+  workload?: { pattern?: string; description?: string; performanceContext?: string; inputDescription?: string; flags?: string[]; inputs?: Array<{ text: string; bytes: number }> };
   patternSummary?: { bytes: number; sourceUrl?: string; fullPatternAvailable: boolean };
 };
 export type ReportData = {
   schemaVersion: 2;
-  sources: { currentLabel: string; currentCandidate: string; engineTree: string; jdk: string };
+  sources: { currentLabel: string; currentCandidate: string; engineTree: string; jdk: string; releaseVersion?: string };
   platforms: Record<string, string>;
   memoryModes: Record<string, string>;
   languages: Record<string, { label: string; comparator: string }>;
@@ -150,10 +150,10 @@ export function workloadCommentary(row: Row) {
     note.cases?.includes(row.caseId) || note.prefixes?.some(prefix => row.caseId.startsWith(prefix));
   return {
     description: descriptions.find(matches)?.text,
-    performance: row.result.state === "not-compatible" ? undefined : row.workload?.performanceContext ?? performanceNotes.find(note => matches(note)
+    performance: row.result.state === "not-compatible" ? undefined : (row.workload?.performanceContext ?? performanceNotes.find(note => matches(note)
       && (!note.languages || note.languages.includes(row.language))
       && note.operations.includes(row.operation)
-      && (!note.qualifiedOnly || row.measurementSource?.cohort != null))?.text,
+      && (!note.qualifiedOnly || row.measurementSource?.cohort != null))?.text) || undefined,
   };
 }
 
@@ -246,14 +246,112 @@ function evidence(result: Result): string {
   ].join(" ");
 }
 
-function Ratio({ result, comparator }: { result?: Result; comparator: string }) {
+function Ratio({ result, comparator, children }: { result?: Result; comparator: string; children?: React.ReactNode }) {
   if (!result) return null;
   return <span className={`scan-result ${tone(result)}`} title={evidence(result)}>
-    {result.state === "compared" ? comparisonText(result) : outcomeLabel(result, comparator)}
-    {result.state === "compared" && result.uncertainty && <small className="ratio-interval">
-      {numberFormat.format(result.ratio!)}× · 95% {result.uncertainty.ratioInterval.map(value => numberFormat.format(value)).join(" to ")}×
-    </small>}
+    {result.state === "compared" ? comparisonText(result) : outcomeLabel(result, comparator)}{children}
   </span>;
+}
+
+type TimingSide = "candidate" | "comparator";
+
+export function timingUncertainty(result: Result, side: TimingSide): number | null {
+  const cost = side === "candidate" ? result.candidateNs : result.comparatorNs;
+  if (result.state !== "compared" || !result.uncertainty || !cost || cost <= 0) return null;
+  const [low, high] = result.uncertainty[side === "candidate" ? "candidateIntervalNs" : "comparatorIntervalNs"];
+  return (high - low) / (2 * cost);
+}
+
+function QualityMarker({ symbol, target, label }: { symbol: string; target: string; label: string }) {
+  return <sup><button type="button" className="quality-marker" title={label} aria-label={label} onClick={() => {
+    const note = document.getElementById(target);
+    note?.scrollIntoView({ block: "center" });
+    note?.focus({ preventScroll: true });
+  }}>{symbol}</button></sup>;
+}
+
+function TimingFlags({ row, side, comparator }: { row: Row; side: TimingSide; comparator: string }) {
+  const uncertainty = timingUncertainty(row.result, side);
+  const engine = side === "candidate" ? "Regulator" : comparator;
+  return uncertainty !== null && uncertainty > .05 ? <QualityMarker symbol="*" target="quality-high"
+    label={`${engine} timing uncertainty: ${percentFormat.format(100 * uncertainty)}%. Exceeds 5%.`} /> : null;
+}
+
+function LifecycleFlags({ row, comparator }: { row?: Row; comparator: string }) {
+  if (!row) return null;
+  const sides = (["candidate", "comparator"] as const).filter(side => (timingUncertainty(row.result, side) ?? 0) > .05);
+  return sides.length > 0 ? <QualityMarker symbol="*" target="quality-high" label={sides.map(side =>
+    `${side === "candidate" ? "Regulator" : comparator} timing uncertainty: ${percentFormat.format(100 * timingUncertainty(row.result, side)!)}%`).join("; ")} /> : null;
+}
+
+export function displayedMeasurements(rows: Row[]): Row[] {
+  const eligible = rows.filter(row => workloadSection(row) !== "diagnostic-only" && !comparisonIssue(row));
+  const displayed = eligible.filter(row => (row.population === "ordinary-scalar" && row.operation.startsWith("reused"))
+    || row.population === "trino-operations"
+    || ["bulk-text", "diagnostics-and-stress", "synthetic-stress"].includes(workloadSection(row)));
+  for (const pair of lifecycleRows(eligible)) {
+    if (pair.single) displayed.push(pair.single);
+    displayed.push(pair.reused);
+  }
+  return [...new Map(displayed.map(row => [row.id, row])).values()];
+}
+
+export function qualityDistribution(rows: Row[], side: TimingSide) {
+  const values = rows.map(row => timingUncertainty(row.result, side)).filter((value): value is number => value !== null).sort((a, b) => a - b);
+  if (!values.length) return null;
+  const quantile = (fraction: number) => {
+    const index = (values.length - 1) * fraction;
+    const low = Math.floor(index);
+    return values[low] + (values[Math.min(low + 1, values.length - 1)] - values[low]) * (index - low);
+  };
+  return { count: values.length, median: quantile(.5), p90: quantile(.9), aboveFive: values.filter(value => value > .05).length };
+}
+
+function MeasurementQuality({ rows, comparator, platform, memory, cpu }: { rows: Row[]; comparator: string; platform: string; memory: string; cpu: string }) {
+  const candidate = qualityDistribution(rows, "candidate");
+  const control = qualityDistribution(rows, "comparator");
+  if (!candidate || !control) return null;
+  const percent = (value: number) => `${numberFormat.format(value * 100)}%`;
+  return <details className="measurement-quality" aria-label="Measurement quality">
+    <summary>Median timing uncertainty: Regulator {percent(candidate.median)} · {comparator} {percent(control.median)} <span className="quality-details-label">Details</span></summary>
+    <div className="quality-details">
+    <p>{platform} · {memory}</p>
+    <p>{candidate.count} distinct numeric comparisons on this page, including the expandable stress and diagnostic groups. Measurements repeated in multiple tables count once.</p>
+    <div className="table-scroll"><table className="quality-summary"><thead><tr><th>Timing uncertainty</th><th>Regulator</th><th>{comparator}</th></tr></thead>
+      <tbody><tr><th>Median</th><td>{percent(candidate.median)}</td><td>{percent(control.median)}</td></tr>
+      <tr><th>90th percentile</th><td>{percent(candidate.p90)}</td><td>{percent(control.p90)}</td></tr>
+      <tr><th>Above 5%</th><td>{candidate.aboveFive} of {candidate.count}</td><td>{control.aboveFive} of {control.count}</td></tr></tbody></table></div>
+    <p>Percentages are half the approximate 95% interval width divided by mean execution time. For 90% of measurements, uncertainty is at or below the 90th-percentile value.</p>
+    <p>Java timings use JMH. Costs average iterations, then independent processes, then hosts equally. Individual JVM executions can vary more than the uncertainty in their average. Expand a flagged workload for its measurement note. Full intervals and process measurements remain in the results download.</p>
+    <details className="quality-methodology"><summary>Measurement methodology</summary>
+      <p>Intervals resample paired hosts and whole processes. Native RE2 uses Google Benchmark; repetitions within one native process remain together. “No clear difference” means the ratio interval includes parity, regardless of the 5% annotation threshold.</p>
+      <p>The measurement follow-up replaced affected collections with isolated JMH forks, longer qualified timing windows and separate allocation profiling. Other results retain their original samples. The Regulator 1.0 implementation did not change.</p>
+      <p>Intervals describe the sampled hosts and processes. They do not guarantee repeatability across future collections. The full assessment also covers independent-run differences and distinct process timing levels in diagnostic workloads.</p>
+      <p><a href="./measurement-quality.txt" target="_blank" rel="noreferrer">Full measurement-quality assessment</a></p>
+    </details>
+    <PlatformMeasurements cpu={cpu} />
+    </div>
+  </details>;
+}
+
+function PlatformMeasurements({ cpu }: { cpu: string }) {
+  // Fixed 256 KiB C++ control observations from the completed follow-up.
+  const controls = ({ r8g: ["0.06%", "0.03%"], r9g: ["0.44%", "0.24%"], r8i: ["1.03%", "0.41%"] } as Record<string, string[]>)[cpu];
+  return <>
+    {controls && <details className="quality-methodology"><summary>Platform measurements: native controls</summary>
+      <p>Across 270 instances of this CPU family, fixed 256 KiB native RE2 controls had host-to-host coefficients of variation of {controls[0]} for Easy0 and {controls[1]} for Easy2. These are standard deviations relative to mean cost, not confidence intervals or minimum-to-maximum ranges.</p>
+      <p>These controls describe those workloads under the follow-up collection conditions, not inherent machine variability. Large native working sets can vary substantially more.</p>
+    </details>}
+  </>;
+}
+
+function MeasurementNotes({ rows }: { rows: Row[] }) {
+  if (!rows.some(row => row.result.uncertainty)) return null;
+  const high = rows.some(row => (["candidate", "comparator"] as const).some(side => (timingUncertainty(row.result, side) ?? 0) > .05));
+  if (!high) return null;
+  return <section className="measurement-notes" aria-label="Measurement notes"><h2>Measurement notes</h2>
+    {high && <p id="quality-high" tabIndex={-1}><strong>* Higher uncertainty.</strong> The approximate 95% interval half-width exceeds 5% of that engine’s mean time. In lifecycle tables, the marker applies to either engine; expand the row to see which. This is an uncertainty annotation, not a failed measurement.</p>}
+  </section>;
 }
 
 function Header({ label, column, sort, setSort, title }: {
@@ -314,7 +412,7 @@ export function RowEvidence({ row, reused, comparator, missingSingle = false }: 
       {(commentary.description || row.workload?.description) && <><h4>What this tests</h4><p>{commentary.description ?? row.workload?.description}</p></>}
       {singleUseCommentary && singleUseCommentary !== commentary.performance && <><h4>Single-use performance context</h4><p>{singleUseCommentary}</p></>}
       {commentary.performance && <><h4>{reused && singleUseCommentary !== commentary.performance ? "Multi-use performance context" : "Performance context"}</h4><p>{commentary.performance}</p></>}
-      {(row.workload || row.mapping) && <><h4>Pattern</h4><pre>{row.workload?.pattern ?? row.mapping!.patternPreview}</pre></>}
+      {(row.workload?.pattern !== undefined || row.mapping?.patternPreview !== undefined) && <><h4>Pattern</h4><pre>{row.workload?.pattern ?? row.mapping?.patternPreview}</pre></>}
       {row.patternSummary && <p>This pattern contains {numberFormat.format(row.patternSummary.bytes / 1000)} KB of regex text. Only a short preview is shown.
         {row.patternSummary.sourceUrl && <> See the <a href={row.patternSummary.sourceUrl}>benchmark definition and pattern source</a>.</>}
         {row.patternSummary.fullPatternAvailable && <> The full pattern is also included in the full results download.</>}</p>}
@@ -323,27 +421,25 @@ export function RowEvidence({ row, reused, comparator, missingSingle = false }: 
       {row.inputBytes != null && <p>{new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(row.inputBytes)} input bytes per operation{!Number.isInteger(row.inputBytes) && " on average"}.</p>}
       {row.workload?.inputDescription && <p>{row.workload.inputDescription}</p>}
       {row.workload?.inputs && <><h4>Rotating inputs</h4>{row.workload.inputs.map((input, index) => <pre key={index}>{input.text}</pre>)}</>}
-      {row.result.uncertainty && <><h4>{reused ? "Single-use measurements" : "Measurements"}</h4><MeasurementEvidence result={row.result} comparator={comparator} /></>}
-      {reused?.result.uncertainty && <><h4>Multi-use measurements</h4><MeasurementEvidence result={reused.result} comparator={comparator} /></>}
-      {row.measurementWarnings?.length ? <><h4>{reused ? "Single-use measurement variation" : "Measurement variation"}</h4><p>{row.measurementWarnings.join(". ")}.</p></> : null}
-      {reused?.measurementWarnings?.length ? <><h4>Multi-use measurement variation</h4><p>{reused.measurementWarnings.join(". ")}.</p></> : null}
+      <MeasurementAnnotations row={row} comparator={comparator} phase={reused ? "Single use" : undefined} />
+      {reused && <MeasurementAnnotations row={reused} comparator={comparator} phase="Multi-use" />}
+      {!row.result.uncertainty && row.measurementWarnings?.length ? <><h4>{reused ? "Single-use measurement variation" : "Measurement variation"}</h4><p>{row.measurementWarnings.join(". ")}.</p></> : null}
+      {reused && !reused.result.uncertainty && reused.measurementWarnings?.length ? <><h4>Multi-use measurement variation</h4><p>{reused.measurementWarnings.join(". ")}.</p></> : null}
       {row.mapping && !row.result.reason && !["identical", "direct"].includes(row.mapping.status) && <p>{row.mapping.reason}</p>}
     </div>;
 }
 
-function MeasurementEvidence({ result, comparator }: { result: Result; comparator: string }) {
-  const interval = (values: [number, number]) => values.map(value => duration(value)).join(" to ");
-  const measured = result.uncertainty!;
-  const allocations = [...new Set(result.hosts.map(host => host.instanceType).filter(Boolean))];
-  return <>
-    <p>Mean operation cost: Regulator {duration(result.candidateNs)}; {comparator} {duration(result.comparatorNs)}.
-      Approximate 95% intervals: Regulator {interval(measured.candidateIntervalNs)}; {comparator} {interval(measured.comparatorIntervalNs)}.</p>
-    <p>{result.hosts.length} independent hosts. {evidence(result)}</p>
-    {allocations.length > 0 && <p>EC2 allocation: {allocations.join(", ")}. CPU allowance and JVM settings are recorded separately in the measurement protocol.</p>}
-    {measured.forkMeanRangeNs.candidate && measured.forkMeanRangeNs.comparator && <p>
-      Observed process means: Regulator {interval(measured.forkMeanRangeNs.candidate)}; {comparator} {interval(measured.forkMeanRangeNs.comparator)}.
-      These ranges describe process variation, not uncertainty in the mean.</p>}
-  </>;
+function MeasurementAnnotations({ row, comparator, phase }: { row: Row; comparator: string; phase?: string }) {
+  const notes: string[] = [];
+  for (const side of ["candidate", "comparator"] as const) {
+    const uncertainty = timingUncertainty(row.result, side);
+    if (uncertainty !== null && uncertainty > .05) {
+      notes.push(`* ${side === "candidate" ? "Regulator" : comparator} timing uncertainty: ${percentFormat.format(100 * uncertainty)}%, above the 5% annotation threshold.`);
+    }
+  }
+  if (!notes.length) return null;
+  return <><h4>{phase ? `${phase} measurement notes` : "Measurement notes"}</h4>
+    {notes.map(note => <p key={note}>{note}</p>)}</>;
 }
 
 function operationName(operation: string): string {
@@ -367,7 +463,7 @@ function ResultsTable({ rows, comparator }: { rows: Row[]; comparator: string })
     </tr></thead>
     <tbody>{ordered.map(row => <tr key={row.id} className={`comparison-row ${comparisonIssue(row) ? "na" : tone(row.result)}`}>
       <td><Name row={row} comparator={comparator} /></td>
-      {numeric && <><td className="measurement">{duration(row.result.candidateNs)}</td><td className="measurement">{duration(row.result.comparatorNs)}</td></>}
+      {numeric && <><td className="measurement">{duration(row.result.candidateNs)}<TimingFlags row={row} side="candidate" comparator={comparator} /></td><td className="measurement">{duration(row.result.comparatorNs)}<TimingFlags row={row} side="comparator" comparator={comparator} /></td></>}
       <td className="measurement">{comparisonIssue(row) ? <span>{comparisonIssue(row)!.label}</span> : <Ratio result={row.result} comparator={comparator} />}</td>
       {numeric && comparable && <td className="measurement delta">{!comparisonIssue(row) && duration(row.result.deltaNs, true)}</td>}
       {bytes && <td className="measurement delta" title={row.result.deltaNsPerByte != null ? `${row.result.deltaNsPerByte} ns per input byte` : ""}>
@@ -452,9 +548,9 @@ function LifecycleTable({ rows, like, comparator }: { rows: Row[]; like: boolean
     {[[like ? "Pattern" : "Pattern / operation", "name"], ["Single use", "single"], ["Single-use Δ", "singleDelta"], ["Multi-use", "reused"], ["Per-use Δ", "reusedDelta"], ...(bytes ? [["Δ ns / byte", "reusedBytes"]] : []), ...(!like ? [["Break-even uses", "breakEven"]] : [])].map(([label, column]) => <Header key={column} label={label} column={column} sort={sort} setSort={setSort} title={column === "reusedBytes" ? "Multi-use time difference per input byte" : undefined} />)}
   </tr></thead><tbody>{ordered.map(row => <tr key={row.id}>
     <td><Name row={{ ...(row.single ?? row.reused), name: row.name }} reused={row.single ? row.reused : undefined} comparator={comparator} hideOperation={like} missingSingle={!row.single} /></td>
-    <td className="measurement"><Ratio result={row.single?.result} comparator={comparator} /></td>
+    <td className="measurement"><Ratio result={row.single?.result} comparator={comparator}><LifecycleFlags row={row.single} comparator={comparator} /></Ratio></td>
     <td className={`measurement delta ${row.single ? tone(row.single.result) : ""}`}>{duration(row.single?.result.deltaNs, true)}</td>
-    <td className="measurement"><Ratio result={row.reused.result} comparator={comparator} /></td>
+    <td className="measurement"><Ratio result={row.reused.result} comparator={comparator}><LifecycleFlags row={row.reused} comparator={comparator} /></Ratio></td>
     <td className={`measurement delta ${tone(row.reused.result)}`}>{duration(row.reused.result.deltaNs, true)}</td>
     {bytes && <td className={`measurement delta ${tone(row.reused.result)}`} title={row.reused.result.deltaNsPerByte != null ? `${row.reused.result.deltaNsPerByte} ns per input byte` : ""}>
       {row.reused.result.deltaNsPerByte != null && `${row.reused.result.deltaNsPerByte < 0 ? "−" : row.reused.result.deltaNsPerByte > 0 ? "+" : ""}${numberFormat.format(Math.abs(row.reused.result.deltaNsPerByte))}`}
@@ -500,10 +596,14 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
   const lifecycle = rows;
   const hasLifecycle = lifecycle.some(row => row.operation.startsWith("singleUse"));
   const groupNames = [...new Set(diagnostic.map(row => row.family))].sort();
+  const qualityRows = displayedMeasurements(rows);
   const section = (title: string, explanation: React.ReactNode, contents: React.ReactNode) => <section className="scan-section"><div className="scan-title"><h2>{title}</h2></div><p className="section-note">{explanation}</p>{contents}</section>;
   return <main className="scan-page language-page">
-    <header className="scan-header"><div><span className="snapshot-badge">{data.sources.currentLabel}</span><h1>Regulator benchmarks</h1>
-      <p className="source-line">{!preview && !preliminary && `Engine ${data.sources.currentCandidate.slice(0, 12)} · `}{data.sources.jdk}</p>
+    <header className="scan-header"><div>{!data.sources.releaseVersion && <span className="snapshot-badge">{data.sources.currentLabel}</span>}
+      <h1 className={data.sources.releaseVersion ? "release-title" : undefined}>Regulator{data.sources.releaseVersion && ` ${data.sources.releaseVersion}`} benchmarks</h1>
+      <p className="source-line">{data.sources.releaseVersion
+        ? ""
+        : !preview && !preliminary ? `Engine ${data.sources.currentCandidate.slice(0, 12)} · ` : ""}{data.sources.jdk}</p>
       {preliminary && <p className="source-line">{data.publication!.note}</p>}</div>
       <div className="benchmark-controls"><div className="platform-switch">{cpuOrder(data).map(platform => <button key={platform} className={cpu === platform ? "active" : ""} onClick={() => select({ cpu: platform })}>{data.platforms[platform]}</button>)}</div>
         <label className="safe-toggle"><input type="checkbox" checked={memory === "safe"} onChange={event => select({ memory: event.target.checked ? "safe" : "native" })} /> Pure Java · no native memory</label>
@@ -516,21 +616,22 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
       {language === "trino" && <><p>Regulator receives prepared UTF-8 input in Slice.</p><p>Trino's Joni library receives the same UTF-8 bytes.</p></>}
       {language === "like" && <><p>Regulator receives UTF-8 input and patterns in Slice.</p><p>Trino LikeMatcher receives UTF-8 input bytes and patterns as Java strings.</p></>}
     </div>
-    {rows.some(row => row.result.uncertainty) && <p className="section-note">Timings are mean operation costs. Each comparison shows its ratio and approximate 95% interval; below 1× favors Regulator. "No clear difference" means the interval includes 1×. Intervals resample independent hosts and processes, not individual iterations. Expand a row for absolute timing intervals and process ranges.</p>}
+    <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} />
     {pending.length > 0 && <p className="section-note">{pending.length} measurements are separated below because they need remeasurement or use different API work. Their recorded times remain available, but they are not included in speed comparisons.</p>}
     {ordinary.length > 0 && section("Everyday regex operations", "Compiled patterns over rotating inputs. Contains and count are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
     {hasLifecycle && section(language === "like" ? "LIKE pattern lifecycle" : "Regex pattern lifecycle", <>Single use includes compilation and the first operation. Multi-use measures each operation with a warmed compiled pattern.{language !== "like" && " Break-even is an estimate, not a measured execution count."}
       {language === "like" && <><br />Trino's DFA optimization applies only to some patterns. Those patterns have separate enabled and disabled rows.</>}</>, <LifecycleTable rows={lifecycle} like={language === "like"} comparator={comparator} />)}
     {operations.length > 0 && section("Trino regex operations", "Complete public operations using compiled patterns on rotating Slice values, compared with pinned Joni.", <ResultsTable rows={operations} comparator={comparator} />)}
     {bulk.length > 0 && section("Text processing workloads", "Document searches, tokenization, log parsing and capture workloads using compiled patterns. Expand a row for its pattern, operation and input details.", <ResultsTable rows={bulk} comparator={comparator} />)}
-    {(diagnostic.length > 0 || stress.length > 0) && section(preview || preliminary ? "Adversarial and stress workloads" : "Adversarial, stress and diagnostic workloads", "Pathological inputs and synthetic stress tests. These are not representative of typical application performance; interpret them individually.", <div className="adversarial-groups">
+    {(diagnostic.length > 0 || stress.length > 0) && section("Adversarial and stress workloads", "Pathological inputs and synthetic stress tests. These are not representative of typical application performance; interpret them individually.", <div className="adversarial-groups">
       {groupNames.map(family => <details className="diagnostic-group" key={family}><summary>{family}<span>{diagnostic.filter(row => row.family === family).length} rows</span></summary><ResultsTable rows={diagnostic.filter(row => row.family === family)} comparator={diagnostic.find(row => row.family === family)?.comparator || comparator} /></details>)}
       {stress.length > 0 && <details className="diagnostic-group"><summary>Synthetic stress<span>{stress.length} rows</span></summary><ResultsTable rows={stress} comparator={comparator} /></details>}
     </div>)}
     {pending.length > 0 && section("Measurements awaiting alignment", "Historical evidence, not equivalent-work speed comparisons. The reason is shown beside each measurement. No timings have been corrected or estimated.", <ResultsTable rows={pending} comparator={comparator} />)}
     {loading ? <p role="status">Loading benchmark results…</p> : error ? <p role="alert">Unable to load results: {error} <button onClick={onRetry}>Retry</button></p> : selectedRows.length === 0 && <p>No measurements are available for this selection.</p>}
+    <MeasurementNotes rows={qualityRows} />
     <footer className="scan-footer">
-      {data.fullResultsUrl ? <a href={data.fullResultsUrl} download>Download full results (JSON.gz)</a> : <button type="button" onClick={() => {
+      {data.fullResultsUrl ? <a href={data.fullResultsUrl} download>Download report data (JSON.gz)</a> : <button type="button" onClick={() => {
         const url = URL.createObjectURL(new Blob([JSON.stringify(downloadData(data))], { type: "application/json" }));
         const link = document.createElement("a");
         link.href = url;
@@ -552,6 +653,7 @@ export const selectionKey = ({ language, cpu, memory }: Selection) => `${languag
 function validateDisplayMetadata(data: Omit<ReportData, "rows">) {
   const text = (value: unknown) => typeof value === "string" && value.trim().length > 0;
   if (!["currentLabel", "currentCandidate", "jdk"].every(key => text(data?.sources?.[key as keyof ReportData["sources"]]))
+      || (data?.sources?.releaseVersion !== undefined && !text(data.sources.releaseVersion))
       || cpuOrder(data).length !== 3 || Object.keys(data?.platforms || {}).length !== 3
       || !cpuOrder(data).every(cpu => text(data?.platforms?.[cpu]))
       || !languageOrder.every(language => text(data?.languages?.[language]?.label) && text(data?.languages?.[language]?.comparator))

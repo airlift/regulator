@@ -17,26 +17,48 @@ decisions require the pinned R8i, R8g, and R9g hosts in `baseline/platforms.tsv`
 
 A machine-hour means one entire EC2 instance running for one hour, not one
 vCPU-hour. Parallel workers shorten elapsed time; they do not reduce total
-machine-hours. Estimate the campaign from its frozen job inventory and full
-smoke timings, including retries, startup, and result recovery. Record the
-machine-hour and dollar ceilings in the campaign policy. Initial estimates are not limits for future collections.
+machine-hours. Estimate each frozen cohort from complete pilot-job durations,
+including startup, verification, result recovery and retries. Record limits
+in the campaign policy and account for other users' capacity reservations.
+
+The [1.0 cost ledger](../../../docs/benchmarks/RESULTS_1.0.md#cost-and-reproduction-budget)
+separates the initial campaign, measurement-quality follow-up, and successful
+replacement-collection floor. The initial campaign recorded 1,983.84 wrapper
+machine-hours and an estimated $165 including its ancillary reserve. Its
+roughly 2,000-hour / $200 planning example applies to that original protocol.
+It does not price the longer follow-up protocols or the combined work.
+
+Estimate a fresh run by summing `hours[type] * spot_price[type]` across instance
+types. Add storage, public IPv4, transfer and interruption allowances. For
+example, 2,000 hours at a runtime-weighted $0.075 per instance-hour is $150 in
+compute, but the required hours and mix must come from the selected protocol.
+An eight-vCPU `.2xlarge` hour costs differently from a two-vCPU `.large` hour.
+A successful-job floor excludes failed attempts and qualification diagnostics;
+it is not a complete campaign budget or a guaranteed maximum.
 
 Ordinary workers are `r8i.large`, `r8g.large`, and `r9g.large`, each with two
 vCPUs and 16 GiB RAM. Preserve the 8 GiB measured heap, use a 64–256 MiB
-launcher for forked JMH, and use 40 GiB gp3 roots after disk validation in
-smoke. The `lifecycle-shared-cold` multicore shard uses the same generations'
-8-vCPU `.2xlarge` workers. Count their actual vCPUs in admission.
+launcher for forked JMH, and use 40 GiB gp3 roots after disk validation.
+The original `lifecycle-shared-cold` shard uses eight-vCPU `.2xlarge` workers.
+The measurement-quality follow-up also uses `r9g.2xlarge` for Trino, lifecycle
+and selected traditional/LIKE cohorts, based on exact production integrations
+and allocation controls. Other language work, including slow dictionary
+measurements, stays on `.large`. Count actual allocated vCPUs in admission;
+measured JVM CPU affinity is a separate protocol setting.
 
 The September 14 sizing survey observed ordinary Oregon Spot rates of
-$0.0338–0.0593 per hour across these types and zones. Refresh prices before
-freezing per-type ceilings. These observations exclude storage, public IPv4,
-transfer, and larger concurrency workers. The shared ledger uses conservative
-elapsed wrapper lifetimes and frozen total hourly rates, including failures.
-Reconcile these estimates with billable instance lifetimes afterward.
+$0.0338–0.0593 per hour across the small types and zones. Refresh prices before
+planning. The follow-up cost estimate combines observed instance state,
+CloudTrail launch/shutdown events and verified cleanup. Wrapper lifetimes
+include local preparation and recovery; they are not exact billed running
+time. Saved price estimates are not a reconciled AWS invoice.
 
 Use `--spot-only` to prohibit On-Demand workers and fallback. Preserve
 interrupted attempts and retry on fresh Spot hosts within the frozen retry
 limits. Other users' running and pending Spot work still consumes quota.
+Keep one owner for each mutable capacity limit. Transfer reservations only
+after cleanup or a complete finite-inventory bound proves they are available.
+A temporary gap between worker launches is not free reserved capacity.
 
 ## Shared fleet budget
 

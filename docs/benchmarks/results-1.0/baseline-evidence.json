@@ -1,0 +1,803 @@
+{
+  "scope": "Complete final baseline reduction, all flags and outliers, independent-host ledgers, workload/platform/comparator manifests and release provenance. The public report download contains only the frozen publication inventory. Complete language and diagnostic results are in the private archives indexed by raw-archives.json. Raw evidence retrieval is documented in the final report.",
+  "archive": "baseline-tables.tar.gz",
+  "archive_sha256": "7a95722b41475b1d2bf293f655d7ba56c1689097ea714c46c1bc4f5fe75bc03c",
+  "archive_size": 9252863,
+  "summary": {
+    "campaign_artifact": {},
+    "campaign_id": "final-1-0-baseline-v6-20260914",
+    "comparison_aggregates": 7719,
+    "confirmation_jobs": 0,
+    "confirmation_sessions": 99,
+    "events": 249,
+    "host_rows": 64260,
+    "manifest_rows": 5475,
+    "manifest_sha256": "88a56c7f4dc8851b48bde25c08429bce513df237eb00128ff733f60c52f4065a",
+    "platforms": [
+      "r8i",
+      "r8g",
+      "r9g"
+    ],
+    "primary_sessions": 396,
+    "ratio_definition": "normalized Java cost divided by comparator cost; below 1 is faster",
+    "rebar_outcomes": 81,
+    "same_host_ratios": 30014,
+    "schema_version": 1,
+    "serious_outliers": 3573,
+    "shards": [
+      "accepted-routes",
+      "compile-public",
+      "expression-plans-a",
+      "expression-plans-b",
+      "lifecycle",
+      "lifecycle-shared-cold",
+      "like-compile",
+      "like-dfa-single-use",
+      "like-single-use",
+      "rebar-a",
+      "rebar-b",
+      "rebar-c",
+      "rebar-d",
+      "rebar-e",
+      "rebar-f",
+      "rebar-g",
+      "rebar-h",
+      "rebar-i",
+      "rebar-j",
+      "rebar-k",
+      "rebar-l",
+      "rebar-m",
+      "rebar-n",
+      "rebar-o",
+      "rebar-p",
+      "rebar-q",
+      "rebar-r",
+      "rebar-s",
+      "rebar-t",
+      "retained-memory",
+      "traditional-capture",
+      "traditional-extra-alt-engines",
+      "traditional-extra-alt-match",
+      "traditional-extra-big-fixed",
+      "traditional-extra-easy2",
+      "traditional-extra-fanout",
+      "traditional-extra-success",
+      "traditional-extra-success-engines",
+      "traditional-extra-success1",
+      "traditional-search",
+      "trino-final-line",
+      "trino-like",
+      "trino-operations",
+      "trino-search-edges"
+    ],
+    "unresolved_comparisons": 1535,
+    "unresolved_rows": 6670
+  },
+  "files": [
+    {
+      "path": "confirmation/accepted-sessions.tsv",
+      "size": 58610,
+      "sha256": "a177a4f347381886daa49085ca3bdea44aa02ab68d8ca5a2ce6218152a76a000"
+    },
+    {
+      "path": "confirmation/jobs.sha256",
+      "size": 75,
+      "sha256": "7e96a611d0c2456ac7a1bbbedff3d9bc082f2df51936bc646fe07492f7f17c9e"
+    },
+    {
+      "path": "confirmation/jobs.tsv",
+      "size": 4921,
+      "sha256": "c92d8bb9c0fe47245ce74d4469271f7cbe656c3038becac4e38c0ae814f991de"
+    },
+    {
+      "path": "manifests/comparators.tsv",
+      "size": 722,
+      "sha256": "5eeaead5b7fb1b41c57143e2c19ce27de9b9bc1d1af962d9b280ec17031c4987"
+    },
+    {
+      "path": "manifests/platforms.tsv",
+      "size": 1462,
+      "sha256": "5439d337086d2d0bae3a61d6533001d5362e898ffdba1d99011e4fc036d5b0c7"
+    },
+    {
+      "path": "manifests/protocol-representatives.tsv",
+      "size": 19039,
+      "sha256": "f20771cf8cb03a4b38fa61f60044a2d2c95fff1b215eb33c4031ed03b19d2cb9"
+    },
+    {
+      "path": "manifests/rebar-exclusions.tsv",
+      "size": 5462,
+      "sha256": "3437afd7cfa577db9e7243f81361a21e32703acd53789391a4e5a7fd43d5af41"
+    },
+    {
+      "path": "manifests/rebar-joni-applicability.tsv",
+      "size": 13738,
+      "sha256": "979a11db9a6a683b5ae7211a69cb9075089c8e388a162f5b44608b6000eb5ad7"
+    },
+    {
+      "path": "manifests/releases/1.0.json",
+      "size": 312,
+      "sha256": "acf0cbbed395162418ddbc64c1e44c8cf744f3be92132efd79097eb7af3cda9c"
+    },
+    {
+      "path": "manifests/rows.sha256",
+      "size": 75,
+      "sha256": "ff921b14ee140c1747abb7ffbbe1c4976964ca17b0e02e4ff7d367a9c95e0808"
+    },
+    {
+      "path": "manifests/rows.tsv",
+      "size": 1762969,
+      "sha256": "88a56c7f4dc8851b48bde25c08429bce513df237eb00128ff733f60c52f4065a"
+    },
+    {
+      "path": "manifests/shard-dispatch.tsv",
+      "size": 6280,
+      "sha256": "912e07f90f66ddc3560f1ad5919e8de7e2d669c06d25ec47b09b01200a257993"
+    },
+    {
+      "path": "manifests/shards.tsv",
+      "size": 4056,
+      "sha256": "7dc8f1b96240c627d1052375a73c30dab7a916813371327553e447766db3e7d5"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-joni/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-joni/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-joni/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-joni/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-regulator-native-access/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-regulator-native-access/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-regulator-native-access/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-regulator-native-access/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-regulator-object-row/memory-census.csv",
+      "size": 15576,
+      "sha256": "dd6962b978daaf8123ab40ba01588cfad4382346437e0e402e115ed6080bb064"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-regulator-object-row/memory-comparison.csv",
+      "size": 9893,
+      "sha256": "920d556d0ab4d054c1790d7f8186a4896a78bbf04f2eb4a3c21be1214100c629"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-regulator-object-row/memory-summary.json",
+      "size": 475,
+      "sha256": "9542f2bb0a07a2a7b3b8b65bbcfba261f084d11e3c64b3dc5b28b57e2413dac7"
+    },
+    {
+      "path": "memory-census/r8g/replica-1/memory-census-regulator-object-row/memory-summary.md",
+      "size": 1430,
+      "sha256": "a955ecc0a1a94fb755769938187d79ce0235ea454514926849b88f037318178f"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-joni/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-joni/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-joni/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-joni/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-regulator-native-access/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-regulator-native-access/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-regulator-native-access/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-regulator-native-access/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-regulator-object-row/memory-census.csv",
+      "size": 15576,
+      "sha256": "dd6962b978daaf8123ab40ba01588cfad4382346437e0e402e115ed6080bb064"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-regulator-object-row/memory-comparison.csv",
+      "size": 9893,
+      "sha256": "920d556d0ab4d054c1790d7f8186a4896a78bbf04f2eb4a3c21be1214100c629"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-regulator-object-row/memory-summary.json",
+      "size": 475,
+      "sha256": "9542f2bb0a07a2a7b3b8b65bbcfba261f084d11e3c64b3dc5b28b57e2413dac7"
+    },
+    {
+      "path": "memory-census/r8g/replica-2/memory-census-regulator-object-row/memory-summary.md",
+      "size": 1430,
+      "sha256": "a955ecc0a1a94fb755769938187d79ce0235ea454514926849b88f037318178f"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-joni/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-joni/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-joni/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-joni/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-regulator-native-access/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-regulator-native-access/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-regulator-native-access/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-regulator-native-access/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-regulator-object-row/memory-census.csv",
+      "size": 15576,
+      "sha256": "dd6962b978daaf8123ab40ba01588cfad4382346437e0e402e115ed6080bb064"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-regulator-object-row/memory-comparison.csv",
+      "size": 9893,
+      "sha256": "920d556d0ab4d054c1790d7f8186a4896a78bbf04f2eb4a3c21be1214100c629"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-regulator-object-row/memory-summary.json",
+      "size": 475,
+      "sha256": "9542f2bb0a07a2a7b3b8b65bbcfba261f084d11e3c64b3dc5b28b57e2413dac7"
+    },
+    {
+      "path": "memory-census/r8g/replica-3/memory-census-regulator-object-row/memory-summary.md",
+      "size": 1430,
+      "sha256": "a955ecc0a1a94fb755769938187d79ce0235ea454514926849b88f037318178f"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-joni/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-joni/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-joni/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-joni/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-regulator-native-access/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-regulator-native-access/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-regulator-native-access/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-regulator-native-access/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-regulator-object-row/memory-census.csv",
+      "size": 15576,
+      "sha256": "dd6962b978daaf8123ab40ba01588cfad4382346437e0e402e115ed6080bb064"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-regulator-object-row/memory-comparison.csv",
+      "size": 9893,
+      "sha256": "920d556d0ab4d054c1790d7f8186a4896a78bbf04f2eb4a3c21be1214100c629"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-regulator-object-row/memory-summary.json",
+      "size": 475,
+      "sha256": "9542f2bb0a07a2a7b3b8b65bbcfba261f084d11e3c64b3dc5b28b57e2413dac7"
+    },
+    {
+      "path": "memory-census/r8i/replica-1/memory-census-regulator-object-row/memory-summary.md",
+      "size": 1430,
+      "sha256": "a955ecc0a1a94fb755769938187d79ce0235ea454514926849b88f037318178f"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-joni/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-joni/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-joni/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-joni/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-regulator-native-access/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-regulator-native-access/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-regulator-native-access/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-regulator-native-access/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-regulator-object-row/memory-census.csv",
+      "size": 15576,
+      "sha256": "dd6962b978daaf8123ab40ba01588cfad4382346437e0e402e115ed6080bb064"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-regulator-object-row/memory-comparison.csv",
+      "size": 9893,
+      "sha256": "920d556d0ab4d054c1790d7f8186a4896a78bbf04f2eb4a3c21be1214100c629"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-regulator-object-row/memory-summary.json",
+      "size": 475,
+      "sha256": "9542f2bb0a07a2a7b3b8b65bbcfba261f084d11e3c64b3dc5b28b57e2413dac7"
+    },
+    {
+      "path": "memory-census/r8i/replica-2/memory-census-regulator-object-row/memory-summary.md",
+      "size": 1430,
+      "sha256": "a955ecc0a1a94fb755769938187d79ce0235ea454514926849b88f037318178f"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-joni/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-joni/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-joni/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-joni/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-regulator-native-access/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-regulator-native-access/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-regulator-native-access/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-regulator-native-access/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-regulator-object-row/memory-census.csv",
+      "size": 15576,
+      "sha256": "dd6962b978daaf8123ab40ba01588cfad4382346437e0e402e115ed6080bb064"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-regulator-object-row/memory-comparison.csv",
+      "size": 9893,
+      "sha256": "920d556d0ab4d054c1790d7f8186a4896a78bbf04f2eb4a3c21be1214100c629"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-regulator-object-row/memory-summary.json",
+      "size": 475,
+      "sha256": "9542f2bb0a07a2a7b3b8b65bbcfba261f084d11e3c64b3dc5b28b57e2413dac7"
+    },
+    {
+      "path": "memory-census/r8i/replica-3/memory-census-regulator-object-row/memory-summary.md",
+      "size": 1430,
+      "sha256": "a955ecc0a1a94fb755769938187d79ce0235ea454514926849b88f037318178f"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-joni/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-joni/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-joni/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-joni/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-regulator-native-access/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-regulator-native-access/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-regulator-native-access/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-regulator-native-access/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-regulator-object-row/memory-census.csv",
+      "size": 15576,
+      "sha256": "dd6962b978daaf8123ab40ba01588cfad4382346437e0e402e115ed6080bb064"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-regulator-object-row/memory-comparison.csv",
+      "size": 9893,
+      "sha256": "920d556d0ab4d054c1790d7f8186a4896a78bbf04f2eb4a3c21be1214100c629"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-regulator-object-row/memory-summary.json",
+      "size": 475,
+      "sha256": "9542f2bb0a07a2a7b3b8b65bbcfba261f084d11e3c64b3dc5b28b57e2413dac7"
+    },
+    {
+      "path": "memory-census/r9g/replica-1/memory-census-regulator-object-row/memory-summary.md",
+      "size": 1430,
+      "sha256": "a955ecc0a1a94fb755769938187d79ce0235ea454514926849b88f037318178f"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-joni/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-joni/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-joni/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-joni/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-regulator-native-access/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-regulator-native-access/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-regulator-native-access/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-regulator-native-access/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-regulator-object-row/memory-census.csv",
+      "size": 15576,
+      "sha256": "dd6962b978daaf8123ab40ba01588cfad4382346437e0e402e115ed6080bb064"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-regulator-object-row/memory-comparison.csv",
+      "size": 9893,
+      "sha256": "920d556d0ab4d054c1790d7f8186a4896a78bbf04f2eb4a3c21be1214100c629"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-regulator-object-row/memory-summary.json",
+      "size": 475,
+      "sha256": "9542f2bb0a07a2a7b3b8b65bbcfba261f084d11e3c64b3dc5b28b57e2413dac7"
+    },
+    {
+      "path": "memory-census/r9g/replica-2/memory-census-regulator-object-row/memory-summary.md",
+      "size": 1430,
+      "sha256": "a955ecc0a1a94fb755769938187d79ce0235ea454514926849b88f037318178f"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-joni/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-joni/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-joni/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-joni/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-regulator-native-access/memory-census.csv",
+      "size": 15584,
+      "sha256": "0cbc52f619341d1e1254cd68d11b6284219880885be8e3d980e6aeefc0ec6466"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-regulator-native-access/memory-comparison.csv",
+      "size": 9903,
+      "sha256": "cf2461867adbc065eaedf226e2f34e9a1415163ba8ec0f43fbb24db9d96c1161"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-regulator-native-access/memory-summary.json",
+      "size": 474,
+      "sha256": "f96a317ba387462a02e996ef7f13863b381e359742d3f204319777369375e839"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-regulator-native-access/memory-summary.md",
+      "size": 1443,
+      "sha256": "88b5c1ed4cb48ea99370d5d3916c5feb49dec4710ab8a91361d36d5e400edbd0"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-regulator-object-row/memory-census.csv",
+      "size": 15576,
+      "sha256": "dd6962b978daaf8123ab40ba01588cfad4382346437e0e402e115ed6080bb064"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-regulator-object-row/memory-comparison.csv",
+      "size": 9893,
+      "sha256": "920d556d0ab4d054c1790d7f8186a4896a78bbf04f2eb4a3c21be1214100c629"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-regulator-object-row/memory-summary.json",
+      "size": 475,
+      "sha256": "9542f2bb0a07a2a7b3b8b65bbcfba261f084d11e3c64b3dc5b28b57e2413dac7"
+    },
+    {
+      "path": "memory-census/r9g/replica-3/memory-census-regulator-object-row/memory-summary.md",
+      "size": 1430,
+      "sha256": "a955ecc0a1a94fb755769938187d79ce0235ea454514926849b88f037318178f"
+    },
+    {
+      "path": "primary/accepted-sessions.tsv",
+      "size": 233392,
+      "sha256": "b8de2600da1cd7173f87c7cc304aabb627161196c372eb5cc6eae483e68a9500"
+    },
+    {
+      "path": "primary/jobs.sha256",
+      "size": 75,
+      "sha256": "ef4ea15ecfcc18aafd90f9c27bc881f03f814aef1234a3fb7adb006cb452f1a4"
+    },
+    {
+      "path": "primary/jobs.tsv",
+      "size": 19684,
+      "sha256": "80c3c2cb165a2c9c39287ace1de07ffec64652a867041749ee8e00189f564720"
+    },
+    {
+      "path": "provenance/aggregate_results.py",
+      "size": 88297,
+      "sha256": "7134c278cf60bbd6b69ce3348f42b60826ead52f2e400253901dbdcb9917b07f"
+    },
+    {
+      "path": "provenance/candidate-v4-provenance.tsv",
+      "size": 844,
+      "sha256": "b2b76f60a65b0192041ad555210f05205e2fe1a105c64119f4785f7391cc4fbc"
+    },
+    {
+      "path": "provenance/candidate-v6-provenance.tsv",
+      "size": 844,
+      "sha256": "425726f130897104576fbd82906caed685fbeb757119050b6d036cda653afdb0"
+    },
+    {
+      "path": "provenance/language-complete-analysis-v6.json",
+      "size": 883,
+      "sha256": "c3a1ecbc54a7f803503623208526fc6087847e3acaa8798a643107d7889e46ee"
+    },
+    {
+      "path": "provenance/like-reduction-repair-v6.json",
+      "size": 791,
+      "sha256": "c64c1078bd45c59fb4bf1723656aa58dce52d2103c9c9bf9f6e4ca05e42713f8"
+    },
+    {
+      "path": "reduction/artifact-inventory.tsv",
+      "size": 39849747,
+      "sha256": "ef4f7a138be4c07e1003670ea650974297adcb27d7a9284733c1291a520d79a3"
+    },
+    {
+      "path": "reduction/capacity.tsv",
+      "size": 91025,
+      "sha256": "ddd1b1b235bae93be7ce493a18a799dac4b73e3f0bacf330768501395f1e0553"
+    },
+    {
+      "path": "reduction/comparison-aggregates.tsv",
+      "size": 3372317,
+      "sha256": "a9e6fc9d040be28eb16cddc853c48b3c6f78e4a18d9482e7ca76c8becd7b0446"
+    },
+    {
+      "path": "reduction/confirmation-jobs.tsv",
+      "size": 18,
+      "sha256": "d724e15b515b2e35c8ac9117ddd4f2a00226c1d6691a9172dc5f896b4940efdf"
+    },
+    {
+      "path": "reduction/events.tsv",
+      "size": 139707,
+      "sha256": "026cdcbaf879181e57094eed6fb57ff46aedbd154aa13aaaf578fc0e6c4c83fe"
+    },
+    {
+      "path": "reduction/gap-ledger.tsv",
+      "size": 4152626,
+      "sha256": "0690d9bfd2c87530403c9bd83765a04fcbe2397c82af7ec01280a5d49733ec2d"
+    },
+    {
+      "path": "reduction/general-classes.tsv",
+      "size": 7203,
+      "sha256": "e3b823c9c2f3c1db46499d951ea8d86c215c2a889ac9169110b6611c80b5d6e2"
+    },
+    {
+      "path": "reduction/host-comparator-ratios.tsv",
+      "size": 15393109,
+      "sha256": "dc7b5d14ce2f45eeb385791d60bb08a9db0814bcd08d50a1f3c9cd4763727742"
+    },
+    {
+      "path": "reduction/host-rows.tsv",
+      "size": 62578184,
+      "sha256": "111815369fbb0c4e7a09061e7105a6b4a99401aec1c4a45b8a206adc2332ca5a"
+    },
+    {
+      "path": "reduction/metadata.tsv",
+      "size": 8826351,
+      "sha256": "b2248b19676f7d69f653f4307fbcd4fb3a8245b5ade154cfff592d3b604ae319"
+    },
+    {
+      "path": "reduction/output-checksums.tsv",
+      "size": 1373,
+      "sha256": "2fa1a52c7d53693f3179d982ed6662278ac8b34b5fc75edc2957a05df924254d"
+    },
+    {
+      "path": "reduction/rebar-outcomes.tsv",
+      "size": 20788,
+      "sha256": "4b1ba17e7b359815cc7d28f7dc50a1f6ef9eac1f27b0eaaaf2163aaab21cb692"
+    },
+    {
+      "path": "reduction/row-aggregates.tsv",
+      "size": 8202090,
+      "sha256": "a574aaf202fbbc3c7e1e6fbb0244febd34bb2cea4743aa5769a6870a3c32e0ec"
+    },
+    {
+      "path": "reduction/scaling.tsv",
+      "size": 1330965,
+      "sha256": "34bdd3fb5081af030a34b8749b8ba2211c9a391621616a57a139f12d6bc5c210"
+    },
+    {
+      "path": "reduction/serious-outliers.tsv",
+      "size": 1506563,
+      "sha256": "a80e1030bc8f968a3c4b34956f4ebbae1b17f225898a6807ed87fdf1e0e9972a"
+    },
+    {
+      "path": "reduction/summary.json",
+      "size": 1639,
+      "sha256": "f465b49bae49a1d9fd8db171e3507321314f437b8b7bcd3ea5c70f5de1eebfee"
+    }
+  ]
+}
