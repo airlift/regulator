@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "purpose": "Exact allocating lifecycle case: ordered windows, one versus two CPU allowance, and instance allocation controls; diagnostic only",
+  "forks": 3,
+  "warmup_iterations": 60,
+  "measurement_iterations": 120,
+  "cases": [
+    {
+      "id": "literal-single-use",
+      "original_case_id": "everyday/trinoLiteral",
+      "input_format": "lifecycle",
+      "input_sha256": "c9e5f573355f0d4230b5e80927ec266ca626708dd87dfb91acbf4d819912035f",
+      "benchmark": "io.airlift.regulator.BenchmarkLanguageComparison.singleUseContains",
+      "parameters": {
+        "engine": "re2"
+      },
+      "routes": [
+        "native-access",
+        "object-row"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "classpath": "regulator",
+  "durations": [
+    "1s"
+  ],
+  "primary_cpu_allowances": [
+    "0",
+    "0,1"
+  ],
+  "instrumented_cases": [
+    "literal-single-use"
+  ],
+  "instrumented_cpu_allowances": [
+    "0",
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 1,
+    "warmup_iterations": 30,
+    "measurement_iterations": 60
+  },
+  "native_filter": "^Search_Easy0_CachedDFA/262144/threads:1$",
+  "native_names": [
+    "Search_Easy0_CachedDFA/262144/threads:1"
+  ],
+  "native_measurement_seconds": 1
+}

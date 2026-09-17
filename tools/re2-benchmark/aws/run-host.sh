@@ -313,6 +313,14 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         "${session_command[@]}"
     host_session_status=$?
     set -e
+    if [[ ${host_session_status} -eq 0 && -n "${BENCHMARK_DIAGNOSTIC_PLAN:-}" ]]; then
+        set +e
+        python3 "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/run.py" \
+            --plan "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/${BENCHMARK_DIAGNOSTIC_PLAN}.json" \
+            --session "${RESULT_DIR}"
+        host_session_status=$?
+        set -e
+    fi
     memory_available_after_bytes=$(awk '/^MemAvailable:/ {print $2 * 1024; exit}' /proc/meminfo)
     swap_free_after_bytes=$(awk '/^SwapFree:/ {print $2 * 1024; exit}' /proc/meminfo)
     oom_kills_after=$(awk '$1 == "oom_kill" {print $2; exit}' /proc/vmstat)

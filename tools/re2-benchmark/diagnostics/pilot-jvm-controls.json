@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "purpose": "Factorial control separating GC selection, available CPUs, and JVM processor ergonomics",
+  "forks": 5,
+  "warmup_iterations": 10,
+  "measurement_iterations": 10,
+  "cases": [
+    {
+      "id": "easy2-default",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchEasy2DfaBoolean",
+      "parameters": {
+        "textSize": "262144"
+      },
+      "routes": [
+        "native-access"
+      ]
+    },
+    {
+      "id": "easy2-g1",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchEasy2DfaBoolean",
+      "parameters": {
+        "textSize": "262144"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "easy2-serial",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchEasy2DfaBoolean",
+      "parameters": {
+        "textSize": "262144"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "serial"
+    },
+    {
+      "id": "easy2-g1-active1",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchEasy2DfaBoolean",
+      "parameters": {
+        "textSize": "262144"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1",
+      "active_processors": 1
+    },
+    {
+      "id": "easy0-g1-control",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2Search.searchEasy0DfaBoolean",
+      "parameters": {
+        "textSize": "262144"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "native_filter": "^Search_Easy[02]_CachedDFA/262144/threads:1$",
+  "classpath": "regulator",
+  "durations": [
+    "1s"
+  ],
+  "instrumented_cases": [
+    "easy2-g1",
+    "easy2-serial",
+    "easy2-g1-active1"
+  ],
+  "instrumented_cpu_allowances": [
+    "0",
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 3,
+    "warmup_iterations": 10,
+    "measurement_iterations": 10
+  }
+}

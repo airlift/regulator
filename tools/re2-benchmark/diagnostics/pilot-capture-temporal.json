@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "purpose": "Resolve complete three-host R8g split-bit-state temporal drift using the exact operation, longer ordered windows and matched native brackets; diagnostic only",
+  "forks": 3,
+  "warmup_iterations": 60,
+  "measurement_iterations": 80,
+  "cases": [
+    {
+      "id": "split-bitstate",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2Parse.parse1SplitBitState",
+      "parameters": {},
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "classpath": "regulator",
+  "durations": [
+    "1s"
+  ],
+  "primary_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumented_cases": [
+    "split-bitstate"
+  ],
+  "instrumented_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 1,
+    "warmup_iterations": 60,
+    "measurement_iterations": 80
+  },
+  "native_filter": "^(Search_Easy0_CachedDFA/262144/threads:1|Parse_CachedSplit_BitState/threads:1)$",
+  "native_names": [
+    "Search_Easy0_CachedDFA/262144/threads:1",
+    "Parse_CachedSplit_BitState/threads:1"
+  ],
+  "native_measurement_seconds": 1
+}

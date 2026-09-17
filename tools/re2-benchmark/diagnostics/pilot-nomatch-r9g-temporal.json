@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "purpose": "Test the complete final R9g 32 KiB no-match replacement and callback window shifts with fixed extended controls; preserve every host and window",
+  "forks": 3,
+  "warmup_iterations": 20,
+  "measurement_iterations": 80,
+  "durations": [
+    "1s"
+  ],
+  "primary_cpu_allowances": [
+    "0,1"
+  ],
+  "cases": [
+    {
+      "id": "nomatch-regulator-object-row",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceRegulator",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "characterClassNoMatch"
+      },
+      "routes": [
+        "object-row"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "nomatch-regulator-native-access",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceRegulator",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "characterClassNoMatch"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "nomatch-joni",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceJoni",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "characterClassNoMatch"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "callback-regulator-object-row",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceLambdaRegulator",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "characterClassNoMatch"
+      },
+      "routes": [
+        "object-row"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "callback-regulator-native-access",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceLambdaRegulator",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "characterClassNoMatch"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "callback-joni",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceLambdaJoni",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "characterClassNoMatch"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "instrumented_cases": [
+    "nomatch-regulator-object-row",
+    "nomatch-regulator-native-access",
+    "callback-regulator-object-row",
+    "callback-regulator-native-access"
+  ],
+  "instrumented_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 1,
+    "warmup_iterations": 20,
+    "measurement_iterations": 80
+  },
+  "native_filter": "^Search_Easy[02]_CachedDFA/262144/threads:1$"
+}

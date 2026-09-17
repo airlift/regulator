@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "purpose": "Bounded continuation of the search temporal diagnostic; unchanged primary timings, separate one-fork instrumentation per route",
+  "forks": 5,
+  "warmup_iterations": 60,
+  "measurement_iterations": 60,
+  "cases": [
+    {
+      "id": "fanout-native",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchFanoutRe2",
+      "parameters": {
+        "textSize": "16777216"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "fanout-safe",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchFanoutRe2",
+      "parameters": {
+        "textSize": "16777216"
+      },
+      "routes": [
+        "object-row"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "classpath": "regulator",
+  "durations": [
+    "1s"
+  ],
+  "primary_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumented_cases": [
+    "fanout-native",
+    "fanout-safe"
+  ],
+  "instrumented_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 1,
+    "warmup_iterations": 60,
+    "measurement_iterations": 60
+  },
+  "native_filter": "^(Search_Easy0_CachedDFA/262144/threads:1|Search_Fanout_CachedRE2/16777216/threads:1)$",
+  "native_names": [
+    "Search_Easy0_CachedDFA/262144/threads:1",
+    "Search_Fanout_CachedRE2/16777216/threads:1"
+  ],
+  "native_measurement_seconds": 20
+}

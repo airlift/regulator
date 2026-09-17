@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "purpose": "Review the newly observed late Intel whitespace-compilation timing changes using all fixed hosts, forks and four ordered windows; diagnostic only",
+  "forks": 3,
+  "warmup_iterations": 30,
+  "measurement_iterations": 80,
+  "cases": [
+    {
+      "id": "whitespace-compile-java-object-row",
+      "original_case_id": "everyday/whitespace",
+      "input_format": "lifecycle",
+      "input_sha256": "bd01bb69b5a69e14a1e6c7e3e1767ad38a9d5d745cf2fe4d35543531edddc795",
+      "benchmark": "io.airlift.regulator.BenchmarkLanguageComparison.compile",
+      "parameters": {
+        "engine": "java"
+      },
+      "routes": [
+        "object-row"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "whitespace-compile-java-native-access",
+      "original_case_id": "everyday/whitespace",
+      "input_format": "lifecycle",
+      "input_sha256": "bd01bb69b5a69e14a1e6c7e3e1767ad38a9d5d745cf2fe4d35543531edddc795",
+      "benchmark": "io.airlift.regulator.BenchmarkLanguageComparison.compile",
+      "parameters": {
+        "engine": "java"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "whitespace-compile-jdk",
+      "original_case_id": "everyday/whitespace",
+      "input_format": "lifecycle",
+      "input_sha256": "bd01bb69b5a69e14a1e6c7e3e1767ad38a9d5d745cf2fe4d35543531edddc795",
+      "benchmark": "io.airlift.regulator.BenchmarkLanguageComparison.compile",
+      "parameters": {
+        "engine": "jdk"
+      },
+      "routes": [
+        "object-row"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "classpath": "regulator",
+  "durations": [
+    "1s"
+  ],
+  "primary_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumented_cases": [
+    "whitespace-compile-java-object-row",
+    "whitespace-compile-java-native-access",
+    "whitespace-compile-jdk"
+  ],
+  "instrumented_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 1,
+    "warmup_iterations": 30,
+    "measurement_iterations": 80
+  },
+  "native_filter": "^Search_Easy[02]_CachedDFA/262144/threads:1$"
+}

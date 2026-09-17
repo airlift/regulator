@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "purpose": "Measurement protocol diagnosis; never a qualification replacement",
+  "forks": 5,
+  "warmup_iterations": 10,
+  "measurement_iterations": 10,
+  "cases": [
+    {"id": "capture-split", "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.splitRegulator", "parameters": {"workload": "captureLongMatch", "sourceLength": "32768"}, "routes": ["object-row", "native-access"]},
+    {"id": "capture-split-joni", "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.splitJoni", "parameters": {"workload": "captureLongMatch", "sourceLength": "32768"}, "routes": ["native-access"]},
+    {"id": "easy2-dfa", "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchEasy2DfaBoolean", "parameters": {"textSize": "262144"}, "routes": ["native-access"]},
+    {"id": "easy0-control", "benchmark": "io.airlift.regulator.BenchmarkRe2Search.searchEasy0DfaBoolean", "parameters": {"textSize": "262144"}, "routes": ["native-access"]},
+    {"id": "literal-control", "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.splitRegulator", "parameters": {"workload": "literalNoMatch", "sourceLength": "32768"}, "routes": ["native-access"]}
+  ],
+  "native_filter": "^Search_Easy[02]_CachedDFA/262144/threads:1$"
+}

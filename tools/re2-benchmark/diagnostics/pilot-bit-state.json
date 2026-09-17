@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "purpose": "Test retained bit-state window variation with isolated long runs and matched native controls",
+  "forks": 5,
+  "warmup_iterations": 30,
+  "measurement_iterations": 20,
+  "cases": [
+    {
+      "id": "bit-state-32768",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchAltMatchBitState",
+      "parameters": {
+        "textSize": "32768"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "bit-state-262144",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchAltMatchBitState",
+      "parameters": {
+        "textSize": "262144"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "bit-state-2097152",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchAltMatchBitState",
+      "parameters": {
+        "textSize": "2097152"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "bit-state-16777216",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchAltMatchBitState",
+      "parameters": {
+        "textSize": "16777216"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "native_filter": "^(Search_Easy0_CachedDFA/262144|Search_AltMatch_CachedBitState/(32768|262144|2097152|16777216))/threads:1$",
+  "classpath": "regulator",
+  "durations": [
+    "1s"
+  ],
+  "instrumented_cases": [
+    "bit-state-16777216"
+  ],
+  "instrumented_cpu_allowances": [
+    "0",
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 3,
+    "warmup_iterations": 30,
+    "measurement_iterations": 40
+  },
+  "native_names": [
+    "Search_Easy0_CachedDFA/262144/threads:1",
+    "Search_AltMatch_CachedBitState/32768/threads:1",
+    "Search_AltMatch_CachedBitState/262144/threads:1",
+    "Search_AltMatch_CachedBitState/2097152/threads:1",
+    "Search_AltMatch_CachedBitState/16777216/threads:1"
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "purpose": "Test bit-state temporal variation with sixty-second windows on eight-vCPU hosts",
+  "forks": 5,
+  "warmup_iterations": 60,
+  "measurement_iterations": 60,
+  "cases": [
+    {
+      "id": "bit-state-32768",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchAltMatchBitState",
+      "parameters": {
+        "textSize": "32768"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1",
+      "active_processors": 2
+    },
+    {
+      "id": "bit-state-16777216",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchAltMatchBitState",
+      "parameters": {
+        "textSize": "16777216"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1",
+      "active_processors": 2
+    }
+  ],
+  "native_filter": "^(Search_Easy0_CachedDFA/262144|Search_AltMatch_CachedBitState/(32768|16777216))/threads:1$",
+  "classpath": "regulator",
+  "durations": [
+    "1s"
+  ],
+  "instrumented_cases": [
+    "bit-state-16777216"
+  ],
+  "instrumented_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 2,
+    "warmup_iterations": 60,
+    "measurement_iterations": 60
+  },
+  "native_names": [
+    "Search_Easy0_CachedDFA/262144/threads:1",
+    "Search_AltMatch_CachedBitState/32768/threads:1",
+    "Search_AltMatch_CachedBitState/16777216/threads:1"
+  ],
+  "primary_cpu_allowances": [
+    "0,1"
+  ],
+  "native_measurement_seconds": 20
+}
