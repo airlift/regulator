@@ -5,6 +5,15 @@ import { descriptions, performance as performanceNotes } from "./workload-notes.
 export type Result = {
   state: "compared" | "not-compatible" | "did-not-finish";
   reason?: string;
+  estimator?: "median" | "mean";
+  uncertainty?: {
+    method: string;
+    level: number;
+    ratioInterval: [number, number];
+    candidateIntervalNs: [number, number];
+    comparatorIntervalNs: [number, number];
+    forkMeanRangeNs: { candidate: [number, number] | null; comparator: [number, number] | null };
+  };
   candidateNs?: number;
   comparatorNs?: number;
   ratio?: number;
@@ -15,6 +24,8 @@ export type Result = {
   warnings: string[];
   hosts: Array<{
     instanceId?: string;
+    instanceType?: string;
+    allocatedVcpus?: number;
     replica?: number;
     candidate: { medianNs?: number; meanNs?: number; epochMeansNs?: number[]; state: string; reason?: string };
     comparator: { medianNs?: number; meanNs?: number; epochMeansNs?: number[]; state: string; reason?: string };
@@ -39,6 +50,7 @@ export type Row = {
   originalResult?: Result;
   originalResultLabel?: string;
   measurementSource?: Record<string, unknown>;
+  hardware?: { instanceType: string; allocatedVcpus: number };
   measurementWarnings?: string[];
   workContract?: string;
   workload?: { pattern: string; description?: string; performanceContext?: string; inputDescription?: string; flags?: string[]; inputs?: Array<{ text: string; bytes: number }> };
@@ -62,7 +74,10 @@ export type ReportData = {
 type Sort = { key: string; descending: boolean } | null;
 type SortValue = string | number | null | undefined;
 type Selection = { language: string; cpu: string; memory: string };
-const cpuOrder = ["c9g", "c8g", "c8i"];
+const cpuOrders = [["r9g", "r8g", "r8i"], ["c9g", "c8g", "c8i"]];
+export function cpuOrder(data: Pick<ReportData, "platforms">): string[] {
+  return cpuOrders.find(order => order.every(cpu => Object.hasOwn(data?.platforms || {}, cpu))) || [];
+}
 const languageOrder = ["re2", "java", "trino", "like"];
 const numberFormat = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const percentFormat = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
@@ -118,7 +133,7 @@ export function summaryRatios(data: ReportData) {
   return Object.fromEntries(languageOrder.map(language => {
     // Host disagreement describes variability, not invalid measurements. Keep
     // those row estimates in this summary; individual rows retain their warnings.
-    const rows = data.rows.filter(row => row.language === language && row.platform === "c9g"
+    const rows = data.rows.filter(row => row.language === language && row.platform === cpuOrder(data)[0]
       && row.memoryMode === "native" && row.result.state === "compared" && !comparisonIssue(row)
       && Number.isFinite(row.result.ratio) && row.result.ratio! > 0);
     return [language, {
@@ -195,10 +210,14 @@ export function duration(ns: number | null | undefined, signed = false): string 
 export function comparisonText(result: Result): string {
   if (result.state === "not-compatible") return "not compatible";
   if (result.state === "did-not-finish") return "did not finish";
-  if (result.warnings?.some(warning => warning.includes("disagree"))) return "no consistent winner";
-  if (result.warnings?.length) return "timing variable";
+  if (result.uncertainty) {
+    const [low, high] = result.uncertainty.ratioInterval;
+    if (low <= 1 && high >= 1) return "no clear difference";
+  }
+  if (!result.uncertainty && result.warnings?.some(warning => warning.includes("disagree"))) return "no consistent winner";
+  if (!result.uncertainty && result.warnings?.length) return "timing variable";
   const ratio = result.ratio!;
-  if (ratio > .98 && ratio < 1.02) return "< 2% difference";
+  if (!result.uncertainty && ratio > .98 && ratio < 1.02) return "< 2% difference";
   const factor = ratio < 1 ? 1 / ratio : ratio;
   const change = ratio < 1 ? "faster" : "slower";
   return factor < 1.1 ? `${percentFormat.format((factor - 1) * 100)}% ${change}`
@@ -207,6 +226,10 @@ export function comparisonText(result: Result): string {
 
 export function tone(result: Result): string {
   if (result.state !== "compared") return result.state === "not-compatible" ? "na" : "timeout";
+  if (result.uncertainty) {
+    const [low, high] = result.uncertainty.ratioInterval;
+    return low <= 1 && high >= 1 ? "tie" : result.ratio! < 1 ? "win" : "loss";
+  }
   if (result.warnings.length > 0) return "na";
   if (result.ratio! > .98 && result.ratio! < 1.02) return "tie";
   return result.ratio! < 1 ? "win" : "loss";
@@ -216,7 +239,8 @@ function evidence(result: Result): string {
   if (result.state !== "compared") return result.reason || result.state;
   return [
     `Regulator ${duration(result.candidateNs)}; comparator ${duration(result.comparatorNs)}.`,
-    `Same-host ratio median ${result.ratio!.toFixed(4)}×; range ${result.minimumRatio!.toFixed(4)}–${result.maximumRatio!.toFixed(4)}×.`,
+    `${result.estimator === "mean" ? "Ratio of mean costs" : "Same-host ratio median"} ${result.ratio!.toFixed(4)}×; host ratio range ${result.minimumRatio!.toFixed(4)}–${result.maximumRatio!.toFixed(4)}×.`,
+    ...(result.uncertainty ? [`Approximate 95% ratio interval ${result.uncertainty.ratioInterval.map(value => value.toFixed(4)).join(" to ")}×.`] : []),
     `${result.hosts.length} independent hosts; the observed range is not a confidence interval.`,
     ...result.warnings,
   ].join(" ");
@@ -226,6 +250,9 @@ function Ratio({ result, comparator }: { result?: Result; comparator: string }) 
   if (!result) return null;
   return <span className={`scan-result ${tone(result)}`} title={evidence(result)}>
     {result.state === "compared" ? comparisonText(result) : outcomeLabel(result, comparator)}
+    {result.state === "compared" && result.uncertainty && <small className="ratio-interval">
+      {numberFormat.format(result.ratio!)}× · 95% {result.uncertainty.ratioInterval.map(value => numberFormat.format(value)).join(" to ")}×
+    </small>}
   </span>;
 }
 
@@ -296,10 +323,27 @@ export function RowEvidence({ row, reused, comparator, missingSingle = false }: 
       {row.inputBytes != null && <p>{new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(row.inputBytes)} input bytes per operation{!Number.isInteger(row.inputBytes) && " on average"}.</p>}
       {row.workload?.inputDescription && <p>{row.workload.inputDescription}</p>}
       {row.workload?.inputs && <><h4>Rotating inputs</h4>{row.workload.inputs.map((input, index) => <pre key={index}>{input.text}</pre>)}</>}
+      {row.result.uncertainty && <><h4>{reused ? "Single-use measurements" : "Measurements"}</h4><MeasurementEvidence result={row.result} comparator={comparator} /></>}
+      {reused?.result.uncertainty && <><h4>Multi-use measurements</h4><MeasurementEvidence result={reused.result} comparator={comparator} /></>}
       {row.measurementWarnings?.length ? <><h4>{reused ? "Single-use measurement variation" : "Measurement variation"}</h4><p>{row.measurementWarnings.join(". ")}.</p></> : null}
       {reused?.measurementWarnings?.length ? <><h4>Multi-use measurement variation</h4><p>{reused.measurementWarnings.join(". ")}.</p></> : null}
       {row.mapping && !row.result.reason && !["identical", "direct"].includes(row.mapping.status) && <p>{row.mapping.reason}</p>}
     </div>;
+}
+
+function MeasurementEvidence({ result, comparator }: { result: Result; comparator: string }) {
+  const interval = (values: [number, number]) => values.map(value => duration(value)).join(" to ");
+  const measured = result.uncertainty!;
+  const allocations = [...new Set(result.hosts.map(host => host.instanceType).filter(Boolean))];
+  return <>
+    <p>Mean operation cost: Regulator {duration(result.candidateNs)}; {comparator} {duration(result.comparatorNs)}.
+      Approximate 95% intervals: Regulator {interval(measured.candidateIntervalNs)}; {comparator} {interval(measured.comparatorIntervalNs)}.</p>
+    <p>{result.hosts.length} independent hosts. {evidence(result)}</p>
+    {allocations.length > 0 && <p>EC2 allocation: {allocations.join(", ")}. CPU allowance and JVM settings are recorded separately in the measurement protocol.</p>}
+    {measured.forkMeanRangeNs.candidate && measured.forkMeanRangeNs.comparator && <p>
+      Observed process means: Regulator {interval(measured.forkMeanRangeNs.candidate)}; {comparator} {interval(measured.forkMeanRangeNs.comparator)}.
+      These ranges describe process variation, not uncertainty in the mean.</p>}
+  </>;
 }
 
 function operationName(operation: string): string {
@@ -353,7 +397,9 @@ export function lifecycleRows(rows: Row[]): Lifecycle[] {
     const reused = byKey.get(`${single.caseId}/${reusedName}`);
     if (!reused) throw new Error(`Missing reused lifecycle partner for ${single.id}`);
     const bothCompared = single.result.state === "compared" && reused.result.state === "compared";
-    const unresolved = comparisonIssue(single) || comparisonIssue(reused) || single.result.warnings.length > 0 || reused.result.warnings.length > 0;
+    const unresolved = comparisonIssue(single) || comparisonIssue(reused)
+      || (single.result.uncertainty ? tone(single.result) === "tie" : single.result.warnings.length > 0)
+      || (reused.result.uncertainty ? tone(reused.result) === "tie" : reused.result.warnings.length > 0);
     const deficit = single.result.deltaNs!;
     const saving = -reused.result.deltaNs!;
     // One single-use operation already includes the first execution. Each
@@ -417,14 +463,15 @@ function LifecycleTable({ rows, like, comparator }: { rows: Row[]; like: boolean
   </tr>)}</tbody></table></div>;
 }
 
-function selectionFromUrl(): Selection {
+function selectionFromUrl(data?: Pick<ReportData, "platforms">): Selection {
   const parameters = new URLSearchParams(typeof window === "undefined" ? "" : window.location.hash.slice(1));
+  const available = data ? cpuOrder(data) : cpuOrders.flat();
   return { language: languageOrder.includes(parameters.get("language") || "") ? parameters.get("language")! : "re2",
-    cpu: cpuOrder.includes(parameters.get("cpu") || "") ? parameters.get("cpu")! : "c9g",
+    cpu: available.includes(parameters.get("cpu") || "") ? parameters.get("cpu")! : data ? available[0] : "c9g",
     memory: parameters.get("memory") === "safe" ? "safe" : "native" };
 }
 
-export function LanguageReport({ data, selection = selectionFromUrl(), onSelect, loading, error, onRetry }: {
+export function LanguageReport({ data, selection = selectionFromUrl(data), onSelect, loading, error, onRetry }: {
   data: ReportData; selection?: Selection; onSelect?: (selection: Selection) => void;
   loading?: boolean; error?: string | null; onRetry?: () => void;
 }) {
@@ -458,7 +505,7 @@ export function LanguageReport({ data, selection = selectionFromUrl(), onSelect,
     <header className="scan-header"><div><span className="snapshot-badge">{data.sources.currentLabel}</span><h1>Regulator benchmarks</h1>
       <p className="source-line">{!preview && !preliminary && `Engine ${data.sources.currentCandidate.slice(0, 12)} · `}{data.sources.jdk}</p>
       {preliminary && <p className="source-line">{data.publication!.note}</p>}</div>
-      <div className="benchmark-controls"><div className="platform-switch">{cpuOrder.map(platform => <button key={platform} className={cpu === platform ? "active" : ""} onClick={() => select({ cpu: platform })}>{data.platforms[platform]}</button>)}</div>
+      <div className="benchmark-controls"><div className="platform-switch">{cpuOrder(data).map(platform => <button key={platform} className={cpu === platform ? "active" : ""} onClick={() => select({ cpu: platform })}>{data.platforms[platform]}</button>)}</div>
         <label className="safe-toggle"><input type="checkbox" checked={memory === "safe"} onChange={event => select({ memory: event.target.checked ? "safe" : "native" })} /> Pure Java · no native memory</label>
       </div></header>
     <nav className="language-tabs" aria-label="Pattern API">{languageOrder.map(id => <button key={id} className={id === language ? "active" : ""} onClick={() => select({ language: id })}>{data.languages[id].label}</button>)}</nav>
@@ -469,6 +516,7 @@ export function LanguageReport({ data, selection = selectionFromUrl(), onSelect,
       {language === "trino" && <><p>Regulator receives prepared UTF-8 input in Slice.</p><p>Trino's Joni library receives the same UTF-8 bytes.</p></>}
       {language === "like" && <><p>Regulator receives UTF-8 input and patterns in Slice.</p><p>Trino LikeMatcher receives UTF-8 input bytes and patterns as Java strings.</p></>}
     </div>
+    {rows.some(row => row.result.uncertainty) && <p className="section-note">Timings are mean operation costs. Each comparison shows its ratio and approximate 95% interval; below 1× favors Regulator. "No clear difference" means the interval includes 1×. Intervals resample independent hosts and processes, not individual iterations. Expand a row for absolute timing intervals and process ranges.</p>}
     {pending.length > 0 && <p className="section-note">{pending.length} measurements are separated below because they need remeasurement or use different API work. Their recorded times remain available, but they are not included in speed comparisons.</p>}
     {ordinary.length > 0 && section("Everyday regex operations", "Compiled patterns over rotating inputs. Contains and count are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
     {hasLifecycle && section(language === "like" ? "LIKE pattern lifecycle" : "Regex pattern lifecycle", <>Single use includes compilation and the first operation. Multi-use measures each operation with a warmed compiled pattern.{language !== "like" && " Break-even is an estimate, not a measured execution count."}
@@ -504,7 +552,8 @@ export const selectionKey = ({ language, cpu, memory }: Selection) => `${languag
 function validateDisplayMetadata(data: Omit<ReportData, "rows">) {
   const text = (value: unknown) => typeof value === "string" && value.trim().length > 0;
   if (!["currentLabel", "currentCandidate", "jdk"].every(key => text(data?.sources?.[key as keyof ReportData["sources"]]))
-      || !cpuOrder.every(cpu => text(data?.platforms?.[cpu]))
+      || cpuOrder(data).length !== 3 || Object.keys(data?.platforms || {}).length !== 3
+      || !cpuOrder(data).every(cpu => text(data?.platforms?.[cpu]))
       || !languageOrder.every(language => text(data?.languages?.[language]?.label) && text(data?.languages?.[language]?.comparator))
       || (data?.publication !== undefined && !text(data.publication?.note))) {
     throw new Error("Invalid report display metadata");
@@ -557,17 +606,17 @@ export function createReportLoader(request: typeof fetch) {
 
 function App() {
   const embedded = window.__REGULATOR_REPORT__;
-  const [selection, setSelection] = useState(selectionFromUrl);
+  const [selection, setSelection] = useState(() => selectionFromUrl(embedded));
   const [loader] = useState(() => createReportLoader(fetch));
   const [manifest, setManifest] = useState<SiteManifest | null>(null);
   const [loaded, setLoaded] = useState<ReportData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    const onChange = () => setSelection(selectionFromUrl());
+    const onChange = () => setSelection(selectionFromUrl(embedded || manifest || undefined));
     window.addEventListener("hashchange", onChange);
     return () => window.removeEventListener("hashchange", onChange);
-  }, []);
+  }, [embedded, manifest]);
   useEffect(() => {
     if (embedded) return;
     let cancelled = false;
@@ -575,6 +624,11 @@ function App() {
     void loader.manifest().then(async manifest => {
       if (cancelled) return;
       setManifest(manifest);
+      if (!Object.hasOwn(manifest.platforms, selection.cpu)) {
+        const order = cpuOrder(manifest);
+        setSelection({ ...selection, cpu: order.find(cpu => cpu.slice(1) === selection.cpu.slice(1)) || order[0] });
+        return;
+      }
       const data = await loader.page(selection, manifest);
       if (!cancelled) setLoaded(data);
     }).catch(failure => { if (!cancelled) setError(String(failure)); });

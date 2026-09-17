@@ -220,7 +220,8 @@ def summary_markdown(data: dict) -> str:
     source += (". Development builds with targeted updates; per-row sources are in the report"
                if data.get('publication', {}).get('status') == 'preliminary'
                else f" `{data['sources']['currentCandidate']}`")
-    lines.extend(("", f"_Source: {source}. C9g with native access enabled and compiled patterns reused. "
+    platform = next(cpu for cpu in data['platforms'] if cpu in ('r9g', 'c9g')).capitalize()
+    lines.extend(("", f"_Source: {source}. {platform} with native access enabled and compiled patterns reused. "
                   "Geometric mean of per-workload time ratios; input conversion excluded._", SUMMARY_END))
     return "\n".join(lines)
 

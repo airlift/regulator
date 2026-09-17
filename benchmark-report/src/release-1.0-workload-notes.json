@@ -1,0 +1,491 @@
+{
+  "sourceCommit": "68e42b7d2a104798524189aac7e2a008b49c3d4a",
+  "scope": "Released 1.0 implementation context. Numerical results and CPU-specific conclusions come from the final campaign, not earlier measurements.",
+  "performance": [
+    {
+      "cases": [
+        "curated/05-lexer-veryl/single"
+      ],
+      "languages": [
+        "java"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "This lexer produces many tokens and requests captures identifying the chosen alternative. Released Regulator uses tagged-alternation handling. Separate diagnostic profiles on R8i, R8g and R9g, in both memory modes, attribute its sampled engine allocations to NoSubmatchNfaImpl construction in Nfa.searchTagged. Execution samples concentrate in NFA thread-queue processing and boundary/context checks. These profiles identify work behind the allocation and timing results; their elapsed times are not benchmark measurements."
+    },
+    {
+      "cases": [
+        "grep/long-words-ascii"
+      ],
+      "languages": [
+        "java"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "The operation searches each prepared input line for a sufficiently long word. Regulator's Java find path runs BitState without a reusable workspace here. Its constructor allocates a job array, individual Job objects, a visited bitmap and capture storage for each search. Separate R8i, R8g and R9g profiles in both memory modes show those allocations, with execution samples in BitState search and character-context checks. The JDK matcher is reused across input lines. Input conversion and line splitting occur before measurement."
+    },
+    {
+      "cases": [
+        "trino-like/ANY_ASCII",
+        "trino-like/ANY_MULTIBYTE"
+      ],
+      "languages": [
+        "like"
+      ],
+      "operations": [
+        "singleUse"
+      ],
+      "text": "This measures construction plus one match of the one-character wildcard with Trino's DFA optimization disabled. Neither engine builds a DFA. Regulator constructs a literal-plus-gap plan; Trino uses its general LIKE parser and NFA matcher. The result includes construction and first-call setup on a one-character input."
+    },
+    {
+      "cases": [
+        "trino-like/EXACT_MATCH",
+        "trino-like/PREFIX_LARGE",
+        "trino-like/SUFFIX_LARGE"
+      ],
+      "languages": [
+        "like"
+      ],
+      "operations": [
+        "matches"
+      ],
+      "text": "Both engines compare only six literal bytes. Released Regulator 1.0 precomputes two overlapping four-byte words and compares them with Slice.getInt. Trino uses a direct byte loop. Input checks, dispatch and these short comparisons determine the fixed cost. This case does not measure scanning the full 32 KiB input or comparing a long literal."
+    },
+    {
+      "cases": [
+        "trino-like/EXACT_MATCH",
+        "trino-like/PREFIX_LARGE",
+        "trino-like/SUFFIX_LARGE"
+      ],
+      "languages": [
+        "like"
+      ],
+      "operations": [
+        "singleUse"
+      ],
+      "text": "Regulator recognizes these simple ASCII literal forms directly and constructs a compact equality, prefix, or suffix plan with precomputed words. Trino uses its general LIKE parser. Construction plus first use includes different setup work from the warmed six-byte comparison; assess the two operations separately."
+    },
+    {
+      "cases": [
+        "trino-like/ORDERED_DENSE_FALSE"
+      ],
+      "languages": [
+        "like"
+      ],
+      "operations": [
+        "matches",
+        "singleUse"
+      ],
+      "text": "Regulator's literal scanner encounters positions with the right first and last bytes for bba but the wrong middle byte. After a bounded amount of failed comparison work, it switches to linear-time KMP scanning. Trino's FJS search combines skip tables with KMP. This synthetic input stresses candidate rejection in the two search loops. Both retain linear scanning and bounded matching memory."
+    },
+    {
+      "cases": [
+        "trino-like/CONTAINS_ABSENT",
+        "trino-like/CONTAINS_LATE"
+      ],
+      "languages": [
+        "like"
+      ],
+      "operations": [
+        "matches",
+        "singleUse"
+      ],
+      "text": "Regulator reduces this pattern to Slice.indexOf. Trino uses FJS literal search. The mostly uniform input has few plausible matches, with the literal either absent or late. It measures those search loops on this specific distribution; the ratio need not hold for arbitrary text."
+    },
+    {
+      "cases": [
+        "trino-like/ORDERED_LATE"
+      ],
+      "languages": [
+        "like"
+      ],
+      "operations": [
+        "matches",
+        "singleUse"
+      ],
+      "text": "Regulator uses its ordered-literal kernel to search for each literal in sequence. Its scanner checks eight candidate positions at a time using the literal's first and last bytes. Trino uses FJS searches for the same literals. Compare this sparse-candidate input with ORDERED_DENSE_FALSE to assess rejection cost as candidate density changes."
+    },
+    {
+      "cases": [
+        "trino-like/MIXED_ABSENT",
+        "trino-like/MIXED_LATE",
+        "trino-like/WILDCARD_CHAIN"
+      ],
+      "languages": [
+        "like"
+      ],
+      "operations": [
+        "matches",
+        "singleUse"
+      ],
+      "text": "Regulator recognizes literals separated by fixed one-character gaps. Its literal-plus-gap kernel searches for a literal, then checks the gap and following literals at candidate positions. Trino routes these patterns through its NFA because an underscore follows a percent wildcard, even with DFA optimization enabled. The engines therefore perform different scanning work while implementing the same LIKE operation."
+    },
+    {
+      "cases": [
+        "trino-like/ANY_ASCII/optimized",
+        "trino-like/ANY_MULTIBYTE/optimized"
+      ],
+      "languages": [
+        "like"
+      ],
+      "operations": [
+        "matches"
+      ],
+      "text": "Trino has already built a DFA for this one-character pattern, so matching uses byte-table transitions. Regulator uses its literal-plus-gap matcher without DFA construction. Both operations are short; report the absolute time difference alongside the ratio and distinguish ASCII from multibyte input."
+    },
+    {
+      "cases": [
+        "trino-like/ANY_ASCII/optimized",
+        "trino-like/ANY_MULTIBYTE/optimized"
+      ],
+      "languages": [
+        "like"
+      ],
+      "operations": [
+        "singleUse"
+      ],
+      "text": "This includes compilation and the first match. Trino constructs a dense DFA for the one-character pattern; Regulator constructs a literal-plus-gap plan. A single-use advantage can come from avoiding DFA construction. The multi-use row separately measures calls after that construction cost has been paid."
+    },
+    {
+      "cases": [
+        "everyday/trinoLiteral"
+      ],
+      "languages": [
+        "java"
+      ],
+      "operations": [
+        "reusedCount"
+      ],
+      "text": "Regulator counts non-overlapping literal hits with the same accelerated prefix scanner used by boolean literal search, without running the DFA for each hit."
+    },
+    {
+      "cases": [
+        "everyday/delimiter"
+      ],
+      "languages": [
+        "java"
+      ],
+      "operations": [
+        "reusedContains",
+        "reusedCount"
+      ],
+      "text": "These short inputs use Regulator's shared byte-class scanner for contains and count, avoiding general-engine setup. Larger inputs keep the DFA's accelerated scanning path."
+    },
+    {
+      "cases": [
+        "everyday/whitespace"
+      ],
+      "languages": [
+        "java"
+      ],
+      "operations": [
+        "reusedContains"
+      ],
+      "text": "Contains currently uses the DFA even though finding one ASCII whitespace character is enough. Fixed matcher setup and the selected scan path are relevant to this short-input case. The count operation uses a different path."
+    },
+    {
+      "cases": [
+        "everyday/whitespace"
+      ],
+      "languages": [
+        "java"
+      ],
+      "operations": [
+        "reusedCount"
+      ],
+      "text": "Count uses a specialized character-run counter that supports general Unicode classes and decodes UTF-8. The default Java whitespace pattern here has ASCII semantics. Character decoding and counter setup are plausible costs to investigate if the final measurements show a gap."
+    },
+    {
+      "prefixes": [
+        "curated/01-literal/"
+      ],
+      "languages": [
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "This measures counting every non-overlapping literal occurrence. Regulator's Trino exact-literal specialization repeatedly calls Slice.indexOf to obtain match spans. Its Java-language count method uses Regulator's prefix scanner instead, so the two Regulator language routes need not have the same cost. The pinned Joni compiler selects Boyer-Moore search for the Russian and Chinese Sherlock literals. Match density and these search strategies are concrete differences to assess against the final timings."
+    },
+    {
+      "cases": [
+        "curated/05-lexer-veryl/single"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "This lexer produces many tokens and requests captures identifying the chosen alternative. Regulator uses specialized tagged-capture handling for eligible alternatives; capture bookkeeping remains part of each token operation. Backtracking engines can record captures while following a successful token path. These mechanisms identify costs to investigate in the final tokenization results."
+    },
+    {
+      "cases": [
+        "curated/05-lexer-veryl/single"
+      ],
+      "languages": [
+        "re2"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "Regulator's extended one-pass capture support handles larger capture programs than upstream RE2's compact one-pass representation. An eligible combined lexer can therefore use different capture engines. Confirming the timing cause would require route and generated-code evidence beyond the end-to-end comparison."
+    },
+    {
+      "cases": [
+        "wild/bibleref/short",
+        "wild/caddy/caddy"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "On a short matching input, capture handling and engine setup can dominate scanning. JDK Pattern and Joni record captures during backtracking; Regulator uses its selected capture path and bookkeeping. Compare absolute costs here with the long-document variants before drawing throughput conclusions."
+    },
+    {
+      "cases": [
+        "imported/sherlock/everything-greedy",
+        "imported/sherlock/everything-greedy-nl",
+        "unicode/codepoints/any-all"
+      ],
+      "languages": [
+        "java"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "The JDK processes already-prepared UTF-16 input and has loops for greedy character runs. Regulator preserves UTF-8 character and match-iteration behavior. Dot-all removes newline restrictions, but the full operation still includes normal iteration and any terminal empty match. This comparison excludes input conversion."
+    },
+    {
+      "cases": [
+        "grep/long-words-ascii",
+        "imported/sherlock/word-ending-n",
+        "imported/leipzig/word-ending-nn",
+        "unicode/word/around-holmes-english"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "These patterns combine word runs with boundaries, minimum lengths, context or suffix checks. Regulator's simple whole-word shortcut does not cover every such shape. More general matching work may contribute to a timing difference; a fast bare-word scan does not establish the route for the full expression."
+    },
+    {
+      "cases": [
+        "unicode/word/boundary-any-english",
+        "curated/08-words/all-english"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "Regulator's specialized route scans word runs directly instead of resolving each simple word through the general matching machinery. This reduces per-word work, particularly when the input contains many short words."
+    },
+    {
+      "prefixes": [
+        "curated/12-dictionary/",
+        "dictionary/search/"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "A large literal alternation lets compiled automata share matching work across alternatives. A backtracking engine may try multiple dictionary branches at candidate positions. That difference is a plausible explanation to assess against the dictionary size, input and final timings."
+    },
+    {
+      "prefixes": [
+        "wild/url/"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "This expression combines alternatives with repeated URL components. Regulator can share work through compiled automata and candidate-search shortcuts. A backtracking engine may revisit alternatives and positions. The corpus and match density determine how often those paths execute."
+    },
+    {
+      "cases": [
+        "imported/leipzig/bounded-strings-ending-z",
+        "imported/sherlock/holmes-coword-watson"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "The repeated pieces can divide the same text in many ways. Backtracking may revisit those combinations, especially when the required ending is absent. Regulator's automata avoid enumerating the same backtracking choices. Reproduced comparator timeouts remain explicit rather than becoming numerical speed ratios."
+    },
+    {
+      "cases": [
+        "wild/bibleref/long",
+        "wild/bibleref/line"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "Much of this document does not match. Regulator can search for match boundaries and recover captures for successful matches. Comparing these long inputs with the short version helps separate scanning cost from capture setup and per-match work."
+    },
+    {
+      "cases": [
+        "unicode/codepoints/letters-one",
+        "curated/10-bounded-repeat/letters-ru"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "Regulator has a compact character-class run counter for eligible bounded repetitions. It counts runs without executing the large general automaton that repeated Unicode classes can otherwise require. Counter eligibility and the requested operation matter when interpreting these cases."
+    },
+    {
+      "cases": [
+        "reported/i13-subset-regex/original-ascii",
+        "reported/i13-subset-regex/big-ascii",
+        "reported/i13-subset-regex/huge-ascii",
+        "reported/i13-subset-regex/huge-unicode"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "Regulator's specialized route searches for the required ending x first, then checks the fixed-length prefix backward. Sparse ending characters let it skip most of the corpus and avoid the DFA state-growth problem. Dense candidate endings can make this strategy less favorable."
+    },
+    {
+      "prefixes": [
+        "curated/06-cloud-flare-redos/"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "The input is designed to make a backtracking engine revisit many choices before rejecting a match. Regulator uses finite-automaton algorithms rather than exploring those backtracking combinations. A comparator timeout here is a property of this stress case, not a general application speed ratio."
+    },
+    {
+      "cases": [
+        "imported/rsc/no-exponential"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "This nested-repetition pattern has no match in a 25-byte input. The pinned Joni compiler uses a required-character map for the final b-z class; none of those bytes appears, so it can reject the input before exploring the repeated alternatives. Regulator uses its general matcher for this span operation. JDK Pattern and Joni need not pay the same backtracking cost, and this tiny rejection does not establish how arbitrary larger inputs scale."
+    },
+    {
+      "cases": [
+        "opt/fixed-length/go33484-1",
+        "opt/fixed-length/go33484-2"
+      ],
+      "languages": [
+        "java"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "These anchored patterns reject a 10,000-byte string of a characters. Java's dollar anchor permits a final line terminator, so released Regulator compiles a text-dependent assertion. Published-JAR route inspection confirms that the optimized count path declines these patterns and count creates a matcher. Their programs permit BitState but not OnePass execution. The JDK benchmark reuses its matcher. The large ratios concern short rejection costs, not scanning throughput over all 10,000 bytes."
+    },
+    {
+      "cases": [
+        "opt/fixed-length/go33484-3"
+      ],
+      "languages": [
+        "java",
+        "trino"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "This anchored pattern requires 249 characters and rejects a 1,000-byte string of a characters. Published-JAR route inspection finds a text-dependent dollar assertion in both frontends, which disables DFA counting. Neither compiled program permits OnePass or BitState, leaving the NFA fallback. Java's broader set of excluded line terminators expands the repeated dot to 5,979 instructions, versus 1,995 for Trino. These are verified route and program-size differences; the benchmark does not separately measure each contributor to the timing gap."
+    },
+    {
+      "cases": [
+        "imported/rsc/medium-32",
+        "opt/fixed-length/too-big-ascii",
+        "opt/reverse-anchored/word-end"
+      ],
+      "languages": [
+        "java"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "Java's dollar anchor can match before a final line terminator. Regulator preserves this with a text-dependent assertion, which prevents the ordinary DFA path and strict end-anchored reverse search. Untimed checks of the exact frozen workloads confirm that word-end initializes an NFA workspace on its 1,000,001-byte input. The two small cases instead measure short span-search or rejection costs. Their ratios and absolute costs describe different operations and input sizes."
+    },
+    {
+      "prefixes": [
+        "imported/rsc/reallyreallyhard0-",
+        "imported/rsc/reallyreallyreallyhard0-"
+      ],
+      "languages": [
+        "re2"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "These patterns return spans for word runs around Holmes. Exact-workload route checks show that the smallest variants complete through Regulator's bounded candidate-start cursor. The larger variants exhaust that attempt and fall back; the 1 MiB variants also trigger a scan-productivity rejection. The variants change both input length and matched spans. Compare their individual times instead of extrapolating the 1 KiB ratio; these route observations do not apportion the timing cost between the search paths."
+    },
+    {
+      "cases": [
+        "reported/i13-subset-regex/huge-unicode-nosuffixlit"
+      ],
+      "operations": [
+        "execute"
+      ],
+      "text": "The ending is a character class containing x and accented characters, rather than one required ASCII literal. It therefore cannot use the specialized suffix-first counter used by the x-ending variants. The repeated class also overlaps some possible endings. Published-JAR inspection confirms that the exact Java workload uses a 648-instruction program without the disjoint-suffix specialization. The reported time measures general matching over this 16 MB stress input, not the sparse-literal shortcut."
+    },
+    {
+      "cases": [
+        "unicode/compile/one-letter"
+      ],
+      "operations": [
+        "compile"
+      ],
+      "text": "This measures pattern construction only. Released Regulator expands the Unicode letter class into a UTF-8 byte program and prepares matching metadata. An untimed check of the exact workload against the published JAR produces 1,235 instructions and enables OnePass in each API dialect. The short source pattern therefore requires substantial compiler work. Program size describes that work but does not by itself explain the full timing ratio."
+    },
+    {
+      "cases": [
+        "curated/10-bounded-repeat/compile-capitals",
+        "curated/10-bounded-repeat/compile-context",
+        "reported/i1095-word-repetition/ascii-compile",
+        "unicode/compile/fifty-letters-ascii"
+      ],
+      "operations": [
+        "compile"
+      ],
+      "text": "Regulator simplifies counted repetitions into concatenated and optional program fragments before compiling them. These construction benchmarks pay for that expansion and subsequent program analysis. Untimed checks of the published JAR produce 772 instructions for the 256-character ASCII word repetition and 54 for the 50-letter ASCII repetition. Pattern structure and dialect also change program size, so repeat count alone does not predict compilation cost. These timings exclude matching."
+    },
+    {
+      "cases": [
+        "curated/12-dictionary/compile-single"
+      ],
+      "operations": [
+        "compile"
+      ],
+      "text": "This measures construction of a large dictionary alternation. The released compiler parses and simplifies the alternatives, builds their byte program and prepares matching metadata. An untimed check of the exact workload against the published JAR produces 22,865 instructions in each API dialect. This construction cost is separate from the benefit of sharing work across alternatives during repeated searches; assess the compilation and reused-search rows separately."
+    }
+  ]
+}

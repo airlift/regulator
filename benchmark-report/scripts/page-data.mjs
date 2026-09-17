@@ -2,7 +2,7 @@
 const rowFields = ["id", "caseId", "name", "operation", "model", "population", "family",
   "language", "platform", "memoryMode", "inputBytes", "source", "comparator", "workContract"];
 const resultFields = ["state", "reason", "candidateNs", "comparatorNs", "ratio", "minimumRatio",
-  "maximumRatio", "deltaNs", "deltaNsPerByte", "warnings"];
+  "maximumRatio", "deltaNs", "deltaNsPerByte", "warnings", "estimator"];
 const pick = (value, fields) => Object.fromEntries(fields.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
 
 export function compactReport(data, report, sourceLinks = {}) {
@@ -12,10 +12,13 @@ export function compactReport(data, report, sourceLinks = {}) {
     rows: data.rows.filter(row => report.workloadSection(row) !== "diagnostic-only").map(row => {
       const compact = { ...pick(row, rowFields),
         result: { ...pick(row.result, resultFields), hosts: row.result.hosts.map(host => ({
+          ...pick(host, ["instanceType"]),
           candidate: pick(host.candidate, ["state", "medianNs"]),
           comparator: pick(host.comparator, ["state", "medianNs"]),
         })) },
       };
+      if (row.result.uncertainty) compact.result.uncertainty = pick(row.result.uncertainty,
+        ["method", "level", "ratioInterval", "candidateIntervalNs", "comparatorIntervalNs", "forkMeanRangeNs"]);
       // Presence and cohort gate existing compatibility checks and qualified commentary.
       if (row.measurementSource) compact.measurementSource = pick(row.measurementSource, ["cohort"]);
       if (row.mapping) compact.mapping = pick(row.mapping, ["status", "reason", "patternPreview", "patternBytes"]);
@@ -25,7 +28,7 @@ export function compactReport(data, report, sourceLinks = {}) {
       const patternBytes = fullPatternAvailable ? Buffer.byteLength(pattern) : row.mapping?.patternBytes;
       if (pattern !== undefined && patternBytes > 4096) {
         const preview = fullPatternAvailable ? [...pattern].slice(0, 240).join("") + "…" : pattern;
-        if (compact.workload) compact.workload.pattern = preview;
+        if (fullPatternAvailable) compact.workload.pattern = preview;
         if (compact.mapping) compact.mapping.patternPreview = preview;
         compact.patternSummary = { bytes: patternBytes, sourceUrl: sourceLinks[row.caseId], fullPatternAvailable };
       }

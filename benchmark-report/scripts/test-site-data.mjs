@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readData } from "./read-data.mjs";
@@ -11,7 +12,9 @@ import { compactReport } from "./page-data.mjs";
 const site = new URL("../../target/benchmark-report/benchmarks/", import.meta.url);
 const { report } = await loadReportModule();
 const manifest = JSON.parse(await readFile(new URL("data/manifest.json", site), "utf8"));
-const inputRoot = new URL("../data/", import.meta.url);
+const inputRoot = process.env.REPORT_DATA_DIRECTORY
+  ? pathToFileURL(`${process.env.REPORT_DATA_DIRECTORY}/`)
+  : new URL("../data/", import.meta.url);
 const inputManifest = JSON.parse(await readFile(new URL("manifest.json", inputRoot), "utf8"));
 const original = JSON.parse((await readData(new URL(inputManifest.current, inputRoot))).toString("utf8"));
 const complete = JSON.parse(gunzipSync(await readFile(new URL(manifest.fullResultsUrl, site))));
@@ -34,8 +37,13 @@ for (const [key, filename] of Object.entries(manifest.pages)) {
     assert.deepEqual(report.workloadCommentary(row), report.workloadCommentary(source));
     assert.deepEqual(report.comparisonIssue(row), report.comparisonIssue(source));
     assert.equal(report.outcomeLabel(row.result, "Comparator"), report.outcomeLabel(source.result, "Comparator"));
-    for (const field of ["state", "candidateNs", "comparatorNs", "ratio", "minimumRatio", "maximumRatio", "deltaNs", "deltaNsPerByte", "warnings", "reason"]) {
+    for (const field of ["state", "candidateNs", "comparatorNs", "ratio", "minimumRatio", "maximumRatio", "deltaNs", "deltaNsPerByte", "warnings", "reason", "estimator"]) {
       assert.deepEqual(report.displayResult(row.result)[field], report.displayResult(source.result)[field], `${row.id}/${field}`);
+    }
+    if (source.result.uncertainty) {
+      for (const field of ["method", "level", "ratioInterval", "candidateIntervalNs", "comparatorIntervalNs", "forkMeanRangeNs"]) {
+        assert.deepEqual(row.result.uncertainty[field], source.result.uncertainty[field], `${row.id}/${field}`);
+      }
     }
     assert.ok(!row.previousMeasurements && !row.originalResult);
     const pattern = source.workload?.pattern ?? source.mapping?.patternPreview;
@@ -54,8 +62,11 @@ for (const [key, filename] of Object.entries(manifest.pages)) {
   assert.equal(render(page).split("<footer")[0], render(original).split("<footer")[0]);
   assert.doesNotMatch(render(page), /row-evidence-body/);
   assert.match(render(page), /Download full results \(JSON.gz\)/);
-  assert.ok(bytes.length < 600_000, `${key} uncompressed size budget`);
-  assert.ok(gzipSync(bytes).length < 65_000, `${key} compressed size budget`);
+  // The complete released campaign has up to 621 rows per selection, including
+  // fourth-host confirmations. Mean-cost intervals add about 72 KB compressed
+  // to the largest page. Keep a bounded page without dropping evidence.
+  assert.ok(bytes.length < 1_100_000, `${key} uncompressed size budget`);
+  assert.ok(gzipSync(bytes).length < 210_000, `${key} compressed size budget`);
   sizes.push([key, bytes.length, gzipSync(bytes).length]);
 }
 
@@ -69,11 +80,19 @@ const projected = compactReport({ ...original, rows: [mappingOnly] }, report,
 assert.equal(projected.patternSummary?.bytes, mappedRow.mapping.patternBytes);
 assert.equal(projected.patternSummary.sourceUrl, sourceUrl);
 assert.equal(projected.mapping.patternPreview, mappedRow.mapping.patternPreview);
+const contextOnly = { ...mappingOnly, workload: { performanceContext: "Released compiler path." } };
+const contextProjection = compactReport({ ...original, rows: [contextOnly] }, report).rows[0];
+assert.deepEqual(contextProjection.workload, contextOnly.workload,
+  "A mapping preview must not become an apparent complete workload pattern");
+assert.equal(contextProjection.patternSummary.fullPatternAvailable, false);
 const evidence = row => renderToStaticMarkup(React.createElement(report.RowEvidence, { row, comparator: "Comparator" }));
 assert.match(evidence(projected), /Only a short preview is shown/);
 assert.ok(evidence(projected).includes(sourceUrl));
 assert.doesNotMatch(evidence(projected), /full pattern is also included/);
-const fullPattern = compactReport({ ...original, rows: [mappedRow] }, report).rows[0];
+// Released captures may carry only mapping previews. Exercise full-pattern
+// disclosure with an explicit fixture rather than assuming a capture shape.
+const fullPattern = compactReport({ ...original, rows: [{ ...mappedRow,
+  workload: { pattern: "a".repeat(5000) } }] }, report).rows[0];
 assert.match(evidence(fullPattern), /full pattern is also included/);
 // The actual UTF-8 pattern wins over a mapping's declared source size.
 const shortPattern = compactReport({ ...original, rows: [{ ...mappedRow, workload: { pattern: "é" } }] }, report).rows[0];
@@ -82,6 +101,19 @@ const boundaryPattern = bytes => compactReport({ ...original, rows: [{ ...mappin
   mapping: { ...mappingOnly.mapping, patternBytes: bytes } }] }, report).rows[0];
 assert.equal(boundaryPattern(4096).patternSummary, undefined);
 assert.equal(boundaryPattern(4097).patternSummary.bytes, 4097);
+
+// The website projection must retain the allocation displayed in expanded rows.
+// A fixture exercises the path even while the current historical capture lacks it.
+const allocationFixture = { ...mappingOnly, mapping: undefined, workload: undefined,
+  result: { state: "compared", estimator: "mean", warnings: [], candidateNs: 100, comparatorNs: 200,
+    ratio: .5, minimumRatio: .49, maximumRatio: .51, deltaNs: -100,
+    hosts: Array.from({ length: 3 }, () => ({ instanceType: "r9g.2xlarge",
+      candidate: { state: "compared", medianNs: 100 }, comparator: { state: "compared", medianNs: 200 } })),
+    uncertainty: { method: "hierarchical-bootstrap-v1", level: .95, ratioInterval: [.49, .51],
+      candidateIntervalNs: [99, 101], comparatorIntervalNs: [199, 201],
+      forkMeanRangeNs: { candidate: [98, 102], comparator: [198, 202] } } } };
+const allocationPageRow = compactReport({ ...original, rows: [allocationFixture] }, report).rows[0];
+assert.match(evidence(allocationPageRow), /EC2 allocation: r9g\.2xlarge/);
 
 // The real loader fetches one selected page, shares in-flight requests, caches
 // visited selections, and evicts failed requests so Retry can actually retry.
@@ -102,7 +134,8 @@ await assert.rejects(loader.manifest(), /503/);
 const liveManifest = await loader.manifest();
 await loader.manifest();
 assert.equal(requests.length, 2);
-const selection = { language: "re2", cpu: "c9g", memory: "native" };
+const cpus = report.cpuOrder(original);
+const selection = { language: "re2", cpu: cpus[0], memory: "native" };
 const first = await Promise.all([loader.page(selection, liveManifest), loader.page(selection, liveManifest)]);
 assert.equal(first[0], first[1]);
 assert.equal(requests.length, 3);
@@ -166,8 +199,8 @@ const invalidMetadata = [
   value => { value.sources.currentLabel = {}; },
   value => { value.sources.jdk = null; },
   value => { delete value.platforms; },
-  value => { delete value.platforms.c8i; },
-  value => { value.platforms.c9g = []; },
+  value => { delete value.platforms[cpus[2]]; },
+  value => { value.platforms[cpus[0]] = []; },
   value => { value.publication = { status: "preliminary", note: {} }; },
 ];
 for (const invalidate of invalidMetadata) {

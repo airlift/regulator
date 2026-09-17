@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-from language_data import LANGUAGES, MEMORY_MODES, PLATFORMS, language_rows, outcome, reduce_hosts, timing, validate_language_report
+from language_data import LANGUAGES, MEMORY_MODES, PLATFORMS, RELEASE_PLATFORMS, language_rows, outcome, reduce_hosts, timing, validate_language_report
 
 
 def host(replica, candidate, comparator):
@@ -34,6 +34,37 @@ def report_fixture():
 
 
 class TestLanguageData(unittest.TestCase):
+    def test_release_report_supports_r_family_and_integrated_like_lifecycle(self):
+        data = report_fixture()
+        data['provenance']['releasedArtifact'] = {'version': '1.0'}
+        data['platforms'] = RELEASE_PLATFORMS
+        for row in data['rows']:
+            row['platform'] = 'r' + row['platform'][1:]
+            if row['source'] == 'like-supplement':
+                row['source'] = 'baseline'
+        validate_language_report(data)
+        data['rows'][0]['platform'] = 'c9g'
+        with self.assertRaises(ValueError):
+            validate_language_report(data)
+
+    def test_like_coverage_requires_the_capture_format_source_pairs(self):
+        historical = report_fixture()
+        compile_row = next(row for row in historical['rows']
+                           if row['language'] == 'like' and row['operation'] == 'compile')
+        compile_row['source'] = 'baseline'
+        with self.assertRaisesRegex(ValueError, 'incomplete language/lifecycle'):
+            validate_language_report(historical)
+
+        released = report_fixture()
+        released['provenance']['releasedArtifact'] = {'version': '1.0'}
+        for row in released['rows']:
+            if row['language'] == 'like':
+                row['source'] = 'baseline'
+        validate_language_report(released)
+        next(row for row in released['rows']
+             if row['language'] == 'like' and row['operation'] == 'singleUse')['source'] = 'like-supplement'
+        with self.assertRaisesRegex(ValueError, 'incomplete language/lifecycle'):
+            validate_language_report(released)
     def test_host_call_contracts_must_agree_and_survive_reduction(self):
         languages = ('re2', 'java', 'trino')
         case = {'id': 'fixture', 'model': 'count', 'population': 'bulk-text', 'family': 'test', 'pattern_bytes': 1,
