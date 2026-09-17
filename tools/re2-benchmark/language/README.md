@@ -173,6 +173,44 @@ It refuses non-Linux hosts, a dirty source tree, changed runner binaries, the
 wrong pinned JDK, or a mismatched EC2 instance identity. Verification must be
 performed on that host with those binaries first.
 
+The opt-in `steady-state-v1` manifest profile uses five forks, thirty
+one-second warmups for lifecycle cases or sixty for bulk cases, followed by
+twenty one-second measured iterations. Timing runs without a profiler. A
+separate one-fork, three-warmup, three-measurement pass records allocation;
+its timing samples never enter the timing result. Both raw files and their
+hashes are revalidated during export. The original CPU affinity, G1 collector,
+heap and operation contracts remain unchanged. This profile is for prospectively
+planned recollection after warmup diagnostics, not relabeling old results.
+Batch estimates must include its longer duration before launching a fleet.
+
+`steady-lifecycle-v2` keeps that lifecycle protocol and extends warmup to sixty
+one-second iterations. The 1.0 follow-up uses it uniformly for R9g lifecycle
+comparisons on `r9g.2xlarge`, with the original one-CPU allowance and 8 GiB heap.
+Longer warmup and larger allocation were qualified before the production run;
+their combined timing change is not proof of a particular JVM or kernel cause.
+The fleet plan records the instance type and allocated vCPU count for every
+suite and platform. Dispatch, admission and acceptance all use that saved
+allocation.
+
+`steady-slow-bulk-v2` preserves the bulk timing settings and changes only the
+aggregate measurement-process deadline to 12,600 seconds. A corpus pass can
+take longer than a nominal one-second JMH iteration. Five forks with sixty
+warmups and twenty measured iterations can therefore exceed the ordinary
+3,600-second process limit even when every operation passes its 30-second
+verification limit. Do not shorten or discard iterations to fit that deadline.
+The frozen slow profile applies to one complete comparison per host. Transport
+derives the host deadline from the checksummed manifest: each observation and
+operation receives its full 12,600-second process budget, each JVM observation
+receives another allocation-process budget, and the host receives 5,400
+seconds for setup and verification. The current Java and Trino slow batches
+therefore use `TIMEOUT_SECONDS=81000`; a native-RE2 comparison uses 68,400
+seconds. Transport rejects a different deadline, auxiliary diagnostic work, or
+multiple comparisons in a slow batch. Ordinary batches retain the
+5,400-second host deadline. The general campaign controller still plans
+90-minute jobs; the slow profile requires direct wrapper scheduling with its
+recorded deadline, as in the archived follow-up controller.
+
+The original profile remains supported for reproducing earlier campaigns.
 JMH uses five forks, ten one-second warmups, ten one-second measurement
 iterations, an 8 GiB heap, G1, and the GC profiler. Native RE2 uses five Google
 Benchmark repetitions with a ten-second warmup and at least one second of

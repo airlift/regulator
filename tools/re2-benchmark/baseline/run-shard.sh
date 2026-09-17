@@ -20,6 +20,12 @@ FULL_PROTOCOL_BENCHMARKS="${SCRIPT_DIR}/full-protocol-benchmarks.tsv"
 PLAN_ONLY=${BASELINE_PLAN_ONLY:-false}
 DEFER_ACCEPTANCE=${BASELINE_DEFER_ACCEPTANCE:-false}
 PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
+VERIFICATION_ONLY=${BASELINE_VERIFICATION_ONLY:-false}
+case "${VERIFICATION_ONLY}" in true | false) ;; *) exit 1 ;; esac
+if [[ "${VERIFICATION_ONLY}" == true && ( "${PROTOCOL}" != smoke || "${PROTOCOL_QUALIFICATION}" != false ) ]]; then
+    echo "Semantic preparation requires smoke settings with timing qualification disabled" >&2
+    exit 1
+fi
 SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${ROOT}/target/baseline-shared}
 JONI_COMPARATOR_ORDER=${JONI_COMPARATOR_ORDER:-forward}
 CAMPAIGN_REPLICA_ID=${RE2_CAMPAIGN_REPLICA_ID:-1}
@@ -1080,6 +1086,13 @@ semantic_result_digest=$(sha256sum "${RESULT_DIR}/semantic-evidence.tsv" | awk '
     printf 'route\ttests\toutcome\tsemantic_result_digest\n'
     printf '%s\t%s\taccepted\t%s\n' "${ROUTE}" "${semantic_tests}" "${semantic_result_digest}"
 } > "${RESULT_DIR}/semantic-gate.tsv"
+
+if [[ "${VERIFICATION_ONLY}" == true ]]; then
+    [[ "$(source_hash)" == "${source_hash_before}" ]] || exit 1
+    printf 'verification_only=true\n' >> "${RESULT_DIR}/run-metadata.txt"
+    echo "Completed semantic preparation ${SHARD_ID} ${ROUTE}"
+    exit 0
+fi
 
 run_calibration_jmh_with_classpath()
 {

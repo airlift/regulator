@@ -16,6 +16,19 @@ SPEC.loader.exec_module(collection)
 
 
 class TestCollection(unittest.TestCase):
+    def test_selected_lifecycle_operations_preserve_frozen_universe(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["selected_operations"] = ["compile", "singleUseContains"]
+        collection.validate_manifest(manifest, self.directory)
+        self.assertEqual(collection.case_operations(manifest, manifest["cases"][0]),
+                         ("compile", "singleUseContains"))
+        self.assertEqual(manifest["operations"], collection.OPERATIONS)
+        for invalid in ([], ["compile", "compile"], ["execute"], ["singleUseContains", "compile"]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "selected operations"):
+                collection.validate_manifest({**manifest, "selected_operations": invalid}, self.directory)
+        with self.assertRaisesRegex(ValueError, "unexpected operation coverage"):
+            collection.validate_manifest({**manifest, "operations": ["compile"]}, self.directory)
+
     def test_jmh_launcher_heap_is_separate_from_measured_forks(self):
         for mode in collection.MODES:
             command = collection.jmh_command("java", "fixture.classpath", mode)
@@ -190,6 +203,59 @@ class TestCollection(unittest.TestCase):
         self.assertEqual(receipt["phase"], "measurement")
         self.assertEqual(receipt["limit_seconds"], limit)
         terminate.assert_called_once_with(launch.return_value)
+
+    def test_steady_protocols_preserve_the_original_and_bind_suite(self):
+        original = {"suite": "language-lifecycle", "protocol": collection.PROTOCOL}
+        self.assertEqual(collection.protocol_for(original)["warmup_iterations"], 10)
+        for suite, warmup in (("language-lifecycle", 30), ("language-bulk", 60)):
+            protocol = collection.STEADY_PROTOCOLS[suite]
+            self.assertEqual(collection.protocol_for({"suite": suite, "protocol": protocol})["warmup_iterations"], warmup)
+            with self.assertRaises(ValueError):
+                collection.protocol_for({"suite": suite, "protocol": {**protocol, "forks": 1}})
+        with self.assertRaises(ValueError):
+            collection.protocol_for({"suite": "language-lifecycle", "protocol": collection.STEADY_PROTOCOLS["language-bulk"]})
+
+    def test_extended_lifecycle_profile_is_exact_and_suite_specific(self):
+        protocol = {**collection.STEADY_PROTOCOLS["language-lifecycle"],
+                    "measurement_profile": "steady-lifecycle-v2", "warmup_iterations": 60}
+        self.assertEqual(collection.protocol_for({"suite": "language-lifecycle", "protocol": protocol}), protocol)
+        for suite, changes in (("language-bulk", {}), ("language-lifecycle", {"warmup_iterations": 59}),
+                               ("language-lifecycle", {"measurement_iterations": 19}),
+                               ("language-lifecycle", {"forks": 3})):
+            with self.subTest(suite=suite, changes=changes), self.assertRaises(ValueError):
+                collection.protocol_for({"suite": suite, "protocol": {**protocol, **changes}})
+
+    def test_separate_allocation_cannot_change_primary_timing(self):
+        original = collection.STEADY_PROTOCOLS["language-lifecycle"]
+        extended = {**original, "measurement_profile": "steady-lifecycle-v2", "warmup_iterations": 60}
+        for protocol in (original, extended):
+            primary = {"benchmark": collection.CLASS + ".compile", "params": {"engine": "jdk", "workloadFile": "input.tsv"},
+                       "forks": 5, "warmupIterations": protocol["warmup_iterations"], "measurementIterations": 20,
+                       "warmupTime": "1 s", "measurementTime": "1 s", "threads": 1, "mode": "avgt",
+                       "primaryMetric": {"scoreUnit": "ns/op", "rawData": [[10, 20] * 10 for _ in range(5)]},
+                       "secondaryMetrics": {}}
+            allocation = {**primary, "forks": 1, "warmupIterations": 3, "measurementIterations": 3,
+                          "primaryMetric": {"scoreUnit": "ns/op", "rawData": [[999, 999, 999]]},
+                          "secondaryMetrics": {"gc.alloc.rate.norm": {"scoreUnit": "B/op", "score": 64, "rawData": [[64, 64, 64]]}}}
+            timing_path, allocation_path = self.root / "primary.json", self.root / "allocation.json"
+            timing_path.write_text(json.dumps([primary]))
+            allocation_path.write_text(json.dumps([allocation]))
+            observed = collection.raw_samples(timing_path, "jdk", "compile", protocol=protocol, allocation_path=allocation_path)
+            self.assertEqual(observed["samples_ns"], primary["primaryMetric"]["rawData"])
+            self.assertEqual(observed["allocation"]["score"], 64)
+            self.assertEqual(observed["allocation_raw_sha256"], collection.digest(allocation_path.read_bytes()))
+            with self.assertRaisesRegex(ValueError, "separate allocation"):
+                collection.raw_samples(timing_path, "jdk", "compile", protocol=protocol)
+            primary["secondaryMetrics"] = allocation["secondaryMetrics"]
+            timing_path.write_text(json.dumps([primary]))
+            with self.assertRaisesRegex(ValueError, "separate allocation"):
+                collection.raw_samples(timing_path, "jdk", "compile", protocol=protocol, allocation_path=allocation_path)
+            primary["secondaryMetrics"] = {}
+            timing_path.write_text(json.dumps([primary]))
+            allocation["params"] = {"engine": "trino", "workloadFile": "input.tsv"}
+            allocation_path.write_text(json.dumps([allocation]))
+            with self.assertRaisesRegex(ValueError, "different engine"):
+                collection.raw_samples(timing_path, "jdk", "compile", protocol=protocol, allocation_path=allocation_path)
 
     def test_jmh_samples_and_allocation_retained_without_flattening(self):
         data = [{"benchmark": collection.CLASS + ".compile",

@@ -93,7 +93,9 @@ def validate(directory):
             environment["benchmark_mode"] != "language-batch" or
             environment["platform"] != assignment["platform"] or
             environment["shard"] != assignment["shard"] or
-            environment["replica"] != str(assignment["replica"])):
+            environment["replica"] != str(assignment["replica"]) or
+            environment["instance_type"] != assignment["instance_type"] or
+            environment["logical_cpu_count"] != str(assignment["vcpus"])):
         raise ValueError("language batch does not match its host assignment")
     if environment["benchmark_heap_size"] != collection.PROTOCOL["heap"]:
         raise ValueError("language host heap differs from the measurement protocol")

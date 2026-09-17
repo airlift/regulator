@@ -1,0 +1,20 @@
+{
+  "failures": [],
+  "interpretation": "Qualification establishes complete uninstrumented timing and bounded window drift for these controls. It does not assert one-percent precision for JVM-state mixtures or substitute diagnostics for formal results.",
+  "kind": "replacement-protocol-qualification",
+  "precision_evidence_sha256": "477ed9bcd7876a9b7eb5b46cbf639e2e8d1137755dacbe2d4fdbf45020f28d02",
+  "protocol_summary": {
+    "baseline": {
+      "hosts": 9,
+      "primary_commands": 54
+    },
+    "language": {
+      "hosts": 9,
+      "primary_commands": 72
+    }
+  },
+  "qualified": true,
+  "schema_version": 1,
+  "source_decision_sha256": "ea513fa9d5c0763afdbec0ce35c1e1252912722fc10ab75446e0db6ec7beea27",
+  "window_screen_review_sha256": "3d7fcc13ebd4a37c44289b9bd6d70e9a3aaa67b9de185bc0dbe197ff399ba74e"
+}

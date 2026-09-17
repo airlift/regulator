@@ -44,7 +44,8 @@ class TestBatchAcceptance(unittest.TestCase):
         self.environment = {
             "verification_status": "verified", "benchmark_mode": "language-batch", "platform": "r9g",
             "shard": self.batch["shard"], "replica": "1", "benchmark_heap_size": "8g",
-            "instance_id": "i-0", "instance_type": "r9g.xlarge", "regulator_commit": "commit",
+            "instance_id": "i-0", "instance_type": self.batch["instance_type"],
+            "logical_cpu_count": str(self.batch["vcpus"]), "regulator_commit": "commit",
             "baseline_campaign": "test", "host_epoch": "1", "campaign_architecture": "arm",
             "regulator_archive_sha256": "archive", "comparator_manifest_sha256": "pins",
             "java_runtime_version": "25.0.4+7-LTS"}
@@ -85,7 +86,7 @@ class TestBatchAcceptance(unittest.TestCase):
 
     def test_rejects_host_candidate_protocol_and_assignment_changes(self):
         original = copy.deepcopy(self.environment)
-        for field in ("instance_id", "instance_type", "regulator_commit", "platform", "shard", "replica",
+        for field in ("instance_id", "instance_type", "logical_cpu_count", "regulator_commit", "platform", "shard", "replica",
                       "benchmark_heap_size", "comparator_manifest_sha256", "java_runtime_version"):
             with self.subTest(field=field):
                 self.environment = {**original, field: "changed"}

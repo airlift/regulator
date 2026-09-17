@@ -31,6 +31,11 @@ class TestFleet(unittest.TestCase):
         plan = fleet.prepare(self.source, self.directory)
         self.assertEqual(len(plan["partitions"]), 39)
         self.assertEqual(len(plan["jobs"]), 351)
+        self.assertEqual(plan["platform_allocations"], {
+            "r9g": {"instance_type": "r9g.2xlarge", "vcpus": 8},
+            "r8g": {"instance_type": "r8g.large", "vcpus": 2},
+            "r8i": {"instance_type": "r8i.large", "vcpus": 2},
+        })
         self.assertEqual(fleet.validate(self.directory), plan)
         self.assertFalse((self.directory / "source/unrelated.txt").exists())
         for partition in plan["partitions"]:
@@ -42,6 +47,44 @@ class TestFleet(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             fleet.prepare(self.source, self.directory)
 
+    def test_steady_profile_survives_partition_and_batch_transport(self):
+        import campaign
+        import transport
+        manifest = collection.load(self.source / "manifest.json")
+        manifest["protocol"] = collection.STEADY_PROTOCOLS["language-lifecycle"]
+        collection.save(self.source / "manifest.json", manifest)
+        plan = fleet.prepare(self.source, self.directory, selection=[("everyday/logLevel", "java")])
+        controller = campaign.LanguageCampaign([self.directory], "primary")
+        batch = plan["host_batches"][0]
+        archive = self.root / "batch.tar.gz"
+        checksum = controller.package(batch["id"], archive)
+        destination = self.root / "unpacked"
+        package = transport.unpack(archive, destination, checksum, batch["platform"], batch["shard"], batch["replica"])
+        for entry in package["packages"]:
+            actual = collection.load(destination / entry["directory"] / "manifest.json")
+            self.assertEqual(collection.protocol_for(actual), manifest["protocol"])
+
+    def test_operation_partition_keeps_full_comparison_on_one_host(self):
+        import campaign
+        import transport
+        manifest = collection.load(self.source / "manifest.json")
+        manifest["protocol"] = collection.STEADY_PROTOCOLS["language-lifecycle"]
+        manifest["selected_operations"] = ["reusedContains", "reusedCount"]
+        collection.save(self.source / "manifest.json", manifest)
+        plan = fleet.prepare(self.source, self.directory, selection=[("everyday/logLevel", "java")])
+        controller = campaign.LanguageCampaign([self.directory], "primary")
+        batch = plan["host_batches"][0]
+        archive = self.root / "batch.tar.gz"
+        checksum = controller.package(batch["id"], archive)
+        destination = self.root / "unpacked"
+        package = transport.unpack(archive, destination, checksum, batch["platform"], batch["shard"], batch["replica"])
+        self.assertEqual(len(package["packages"]), 1)
+        actual = collection.load(destination / package["packages"][0]["directory"] / "manifest.json")
+        self.assertEqual(collection.case_operations(actual, actual["cases"][0]), ("reusedContains", "reusedCount"))
+        observations = list(collection.observations(actual))
+        self.assertEqual([(row[3], row[4]) for row in observations],
+                         [("java", "native"), ("java", "safe"), ("jdk", "safe")])
+
     def test_plan_concurrency_is_configurable(self):
         with patch.object(sys, "argv", ["fleet.py", "prepare", "--manifest-directory", str(self.source),
                                        "--output-directory", str(self.directory), "--max-concurrent-hosts", "512"]):
@@ -50,6 +93,19 @@ class TestFleet(unittest.TestCase):
         for value in (0, -1, True, 1.5):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "positive integer"):
                 fleet.prepare(self.source, self.root / "invalid", max_concurrent_hosts=value)
+
+    def test_archive_validation_preserves_schema_two_evidence(self):
+        plan = self.prepare_small_plan()
+        plan["schema_version"] = 2
+        del plan["platform_allocations"]
+        for assignment in plan["jobs"] + plan["host_batches"]:
+            del assignment["instance_type"]
+            del assignment["vcpus"]
+        collection.save(self.directory / "plan.json", plan)
+
+        with self.assertRaisesRegex(ValueError, "fleet protocol"):
+            fleet.validate(self.directory)
+        self.assertEqual(fleet.validate_archive(self.directory), plan)
 
     def test_reject_incomplete_duplicate_or_changed_plan(self):
         original = self.prepare_small_plan()
@@ -188,7 +244,7 @@ class TestFleet(unittest.TestCase):
                 "manifest_sha256": manifest_hash, "runners_sha256": runners_hash,
                 "source_commit": "commit", "source_tree": "tree", "comparators_sha256": "pins", "jdk": "JDK25",
                 "platform": job["platform"], "instance_identity": {
-                    "instanceType": job["platform"] + ".xlarge", "instanceId": f"i-{index}"},
+                    "instanceType": job["instance_type"], "instanceId": f"i-{index}"},
                 "jvm_build": {"source_tree": "tree", "jvm": runners}})
             collection.save(result / "observations.json", observations)
             collection.export(partition, result)

@@ -35,7 +35,35 @@ PROTOCOL = {
     "native_repetitions": 5, "native_min_time_seconds": 1,
     "native_warmup_seconds": 10,
 }
+STEADY_PROTOCOLS = {
+    suite: {**PROTOCOL, "measurement_profile": "steady-state-v1", "warmup_iterations": warmup,
+            "measurement_iterations": 20, "allocation_forks": 1, "allocation_warmup_iterations": 3,
+            "allocation_measurement_iterations": 3}
+    for suite, warmup in (("language-lifecycle", 30), ("language-bulk", 60))
+}
+EXTENDED_LIFECYCLE_PROTOCOL = {
+    **STEADY_PROTOCOLS["language-lifecycle"], "measurement_profile": "steady-lifecycle-v2", "warmup_iterations": 60,
+}
+SLOW_BULK_PROTOCOL = {
+    **STEADY_PROTOCOLS["language-bulk"], "measurement_profile": "steady-slow-bulk-v2",
+    "measurement_timeout_seconds": 12600,
+}
+SEPARATE_ALLOCATION_PROFILES = {"steady-state-v1", "steady-lifecycle-v2", "steady-slow-bulk-v2"}
 CLASS = "io.airlift.regulator.BenchmarkLanguageComparison"
+
+
+def protocol_for(manifest):
+    protocol = manifest["protocol"]
+    accepted = [PROTOCOL]
+    if manifest.get("suite") in STEADY_PROTOCOLS:
+        accepted.append(STEADY_PROTOCOLS[manifest["suite"]])
+    if manifest.get("suite") == "language-lifecycle":
+        accepted.append(EXTENDED_LIFECYCLE_PROTOCOL)
+    if manifest.get("suite") == "language-bulk":
+        accepted.append(SLOW_BULK_PROTOCOL)
+    if protocol not in accepted:
+        raise ValueError("unrecognized measurement protocol")
+    return protocol
 
 
 def digest(data):
@@ -118,12 +146,16 @@ def validate_manifest(manifest, directory):
     if manifest.get("suite") == "language-bulk":
         import bulk
         return bulk.validate_manifest(manifest, directory)
-    if manifest["schema_version"] != 2 or manifest["protocol"] != PROTOCOL:
+    if manifest["schema_version"] != 2 or not protocol_for(manifest):
         raise ValueError("unrecognized schema or unfrozen protocol")
     if encode(manifest["languages"]) != encode(ENGINES) or encode(manifest["memory_modes"]) != encode(MODES):
         raise ValueError("incomplete language or memory-mode coverage")
     if manifest["operations"] != list(OPERATIONS) and manifest["operations"] != OPERATIONS:
         raise ValueError("unexpected operation coverage")
+    selected_operations = manifest.get("selected_operations", list(OPERATIONS))
+    if (not isinstance(selected_operations, (list, tuple)) or not selected_operations or
+            list(selected_operations) != [operation for operation in OPERATIONS if operation in selected_operations]):
+        raise ValueError("invalid selected operations")
     selected = manifest.get("selected_languages", list(ENGINES))
     if not selected or len(selected) != len(set(selected)) or not set(selected) <= set(ENGINES):
         raise ValueError("invalid selected languages")
@@ -178,8 +210,12 @@ def validate_manifest(manifest, directory):
                 raise ValueError(f"unrecorded translation: {case['id']}/{language}")
 
 
-def run_process(command, prefix, *, measuring=False):
+def run_process(command, prefix, *, measuring=False, measurement_timeout_seconds=None):
     """Kill the whole process group, including JMH forks, on a frozen deadline."""
+    if measurement_timeout_seconds is not None and (
+            not measuring or type(measurement_timeout_seconds) is not int or
+            measurement_timeout_seconds not in (3600, 12600)):
+        raise ValueError("unrecognized measurement process budget")
     started = time.monotonic()
     phase = "measurement" if measuring else "startup"
     phase_started = started
@@ -196,7 +232,7 @@ def run_process(command, prefix, *, measuring=False):
                     if markers and markers[-1] != phase:
                         phase = markers[-1]
                         phase_started = time.monotonic()
-                limit = PROTOCOL[f"{phase}_timeout_seconds"]
+                limit = measurement_timeout_seconds if measuring and measurement_timeout_seconds is not None else PROTOCOL[f"{phase}_timeout_seconds"]
                 if time.monotonic() - phase_started > limit:
                     terminate_process_group(process)
                     return {"outcome": "did-not-finish", "phase": phase, "limit_seconds": limit,
@@ -418,11 +454,12 @@ def validate_operation_receipt(case, language, operation, receipt):
 
 
 def raw_samples(path, engine, operation, workload=None, benchmark_class=CLASS, expected_result=None,
-                expected_jvm_arguments=None):
+                expected_jvm_arguments=None, protocol=None, allocation_path=None):
+    protocol = PROTOCOL if protocol is None else protocol
     data = load(path)
     if engine == "native-re2":
         rows = [row for row in data["benchmarks"] if row.get("run_type") == "iteration"]
-        if len(rows) != PROTOCOL["native_repetitions"] or any(row.get("error_occurred") for row in rows):
+        if len(rows) != protocol["native_repetitions"] or any(row.get("error_occurred") for row in rows):
             raise ValueError("incomplete native repetitions")
         if any(row["time_unit"] != "ns" or row["run_name"].split("/")[0] != operation for row in rows):
             raise ValueError("unexpected native measurement")
@@ -439,19 +476,32 @@ def raw_samples(path, engine, operation, workload=None, benchmark_class=CLASS, e
         if benchmark_class.endswith("BenchmarkLanguageBulk") and (
                 expected_result is None or row["params"].get("expectedResult") != str(expected_result)):
             raise ValueError("JMH bulk expected result differs from verified workload")
-        if (row["forks"] != PROTOCOL["forks"] or row["warmupIterations"] != PROTOCOL["warmup_iterations"] or
-                row["measurementIterations"] != PROTOCOL["measurement_iterations"] or
+        if (row["forks"] != protocol["forks"] or row["warmupIterations"] != protocol["warmup_iterations"] or
+                row["measurementIterations"] != protocol["measurement_iterations"] or
                 row["warmupTime"] != "1 s" or row["measurementTime"] != "1 s" or
                 row["threads"] != 1 or row["mode"] != "avgt"):
             raise ValueError("JMH measurement protocol changed")
         if row["primaryMetric"]["scoreUnit"] != "ns/op":
             raise ValueError("unexpected JMH units")
         samples = row["primaryMetric"]["rawData"]
-        if len(samples) != PROTOCOL["forks"] or any(len(fork) != PROTOCOL["measurement_iterations"] for fork in samples):
+        if len(samples) != protocol["forks"] or any(len(fork) != protocol["measurement_iterations"] for fork in samples):
             raise ValueError("missing per-fork/per-iteration samples")
+        if protocol.get("measurement_profile") in SEPARATE_ALLOCATION_PROFILES:
+            if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+                   for fork in samples for value in fork):
+                raise ValueError("invalid raw measurement")
+            if allocation_path is None or row.get("secondaryMetrics"):
+                raise ValueError("steady-state timing requires separate allocation evidence")
+            allocation_protocol = {**PROTOCOL, "forks": protocol["allocation_forks"],
+                                   "warmup_iterations": protocol["allocation_warmup_iterations"],
+                                   "measurement_iterations": protocol["allocation_measurement_iterations"]}
+            allocated = raw_samples(allocation_path, engine, operation, workload, benchmark_class,
+                                    expected_result, expected_jvm_arguments, allocation_protocol)
+            return {"samples_ns": samples, "allocation": allocated["allocation"],
+                    "raw_sha256": digest(path.read_bytes()), "allocation_raw_sha256": allocated["raw_sha256"]}
         allocation = row["secondaryMetrics"]["gc.alloc.rate.norm"]
-        if allocation["scoreUnit"] != "B/op" or len(allocation["rawData"]) != PROTOCOL["forks"] or any(
-                len(fork) != PROTOCOL["measurement_iterations"] or any(
+        if allocation["scoreUnit"] != "B/op" or len(allocation["rawData"]) != protocol["forks"] or any(
+                len(fork) != protocol["measurement_iterations"] or any(
                     type(value) not in (float, int) or not math.isfinite(value) or value < 0 for value in fork)
                 for fork in allocation["rawData"]):
             raise ValueError("missing or invalid allocation samples")
@@ -464,7 +514,7 @@ def raw_samples(path, engine, operation, workload=None, benchmark_class=CLASS, e
 def case_operations(manifest, case):
     if manifest.get("suite") == "language-bulk":
         return ("compile",) if case["model"] == "compile" else ("execute",)
-    return OPERATIONS
+    return tuple(manifest.get("selected_operations", OPERATIONS))
 
 
 def benchmark_class(manifest):
@@ -495,6 +545,7 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
             mapping["verifier"] != "bulk-result-boundaries-and-bytes-v2"
             for case in manifest["cases"] for mapping in case["mappings"].values()):
         raise ValueError("new bulk measurements require boundary-and-byte verification")
+    protocol = protocol_for(manifest)
     evidence = load(results / "verification.json")
     if evidence["manifest_sha256"] != digest((directory / "manifest.json").read_bytes()):
         raise ValueError("manifest changed after verification")
@@ -554,16 +605,37 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
             else:
                 command = jmh_command(java, classpath, mode) + ["^" + benchmark_class(manifest) + r"\." + operation + "$",
                            "-p", f"engine={engine}", "-p", f"workloadFile={workload}",
-                           "-f", "5", "-wi", "10", "-i", "10", "-w", "1s", "-r", "1s",
-                           "-prof", "gc", "-rf", "json", "-rff", str(raw), "-foe", "true"]
+                           "-f", str(protocol["forks"]), "-wi", str(protocol["warmup_iterations"]),
+                           "-i", str(protocol["measurement_iterations"]), "-w", "1s", "-r", "1s",
+                           "-rf", "json", "-rff", str(raw), "-foe", "true"]
+                if protocol.get("measurement_profile") not in SEPARATE_ALLOCATION_PROFILES:
+                    command += ["-prof", "gc"]
                 if manifest.get("suite") == "language-bulk":
                     command += ["-p", f"expectedResult={case['expected_result']}"]
-            receipt = run_process(command, raw.parent / "measurement", measuring=True)
+            budget = ({"measurement_timeout_seconds": protocol["measurement_timeout_seconds"]}
+                      if protocol == SLOW_BULK_PROTOCOL else {})
+            receipt = run_process(command, raw.parent / "measurement", measuring=True, **budget)
             if receipt["outcome"] != "completed":
                 # Aggregate fork timeout is a collection failure, not proof that one regex call timed out.
                 raise ValueError(f"measurement process exceeded protocol budget: {row_id}")
-            observations_data[row_id] = {"outcome": "compared", **raw_samples(raw, engine, operation, workload, benchmark_class(manifest), case.get("expected_result"), measured_jvm_arguments(mode)),
-                                         "raw_file": str(raw.relative_to(results)), "command": command}
+            allocation_raw = None
+            allocation_evidence = {}
+            if engine != "native-re2" and protocol.get("measurement_profile") in SEPARATE_ALLOCATION_PROFILES:
+                allocation_raw = raw.with_name("allocation.json")
+                allocation_command = list(command)
+                for flag, value in (("-f", protocol["allocation_forks"]), ("-wi", protocol["allocation_warmup_iterations"]),
+                                    ("-i", protocol["allocation_measurement_iterations"]), ("-rff", allocation_raw)):
+                    allocation_command[allocation_command.index(flag) + 1] = str(value)
+                allocation_command += ["-prof", "gc"]
+                allocated = run_process(allocation_command, raw.parent / "allocation", measuring=True, **budget)
+                if allocated["outcome"] != "completed":
+                    raise ValueError(f"allocation process exceeded protocol budget: {row_id}")
+                allocation_evidence = {"allocation_raw_file": str(allocation_raw.relative_to(results)),
+                                       "allocation_command": allocation_command}
+            observations_data[row_id] = {"outcome": "compared", **raw_samples(raw, engine, operation, workload,
+                                         benchmark_class(manifest), case.get("expected_result"), measured_jvm_arguments(mode),
+                                         protocol, allocation_raw), "raw_file": str(raw.relative_to(results)),
+                                         "command": command, **allocation_evidence}
             save(results / "observations.partial.json", observations_data)
     save(results / "observations.json", observations_data)
     export(directory, results)
@@ -602,7 +674,9 @@ def export(directory, results, *, write=True):
                             verified_workload = evidence["receipts"][identity.rsplit("/", 1)[0]]["command"][-1]
                             measured_mode = mode if engine == candidate else "safe"
                             expected_arguments = provenance.get("measured_jvm_arguments", {}).get(measured_mode)
-                            observed = raw_samples(results / row["raw_file"], engine, operation, verified_workload, benchmark_class(manifest), case.get("expected_result"), expected_arguments)
+                            observed = raw_samples(results / row["raw_file"], engine, operation, verified_workload,
+                                                   benchmark_class(manifest), case.get("expected_result"), expected_arguments,
+                                                   protocol_for(manifest), results / row["allocation_raw_file"] if "allocation_raw_file" in row else None)
                             if any(row[key] != observed[key] for key in observed):
                                 raise ValueError("raw samples changed since reduction")
                         elif row["outcome"] not in {"not-compatible", "did-not-finish"}:
