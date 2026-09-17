@@ -228,6 +228,9 @@ class TestBulkEvidence(unittest.TestCase):
     def test_bulk_hosts_isolate_complete_language_comparisons(self):
         directory = self.root / "isolated-fleet"
         plan = fleet.prepare(self.directory, directory, replicas=2)
+        self.assertEqual(plan["platform_allocations"]["r9g"], {
+            "instance_type": "r9g.large", "vcpus": 2,
+        })
         self.assertEqual(len(plan["host_batches"]), len(plan["jobs"]))
         for index, batch in enumerate(plan["host_batches"]):
             self.assertEqual(len(batch["jobs"]), 1)
@@ -238,6 +241,21 @@ class TestBulkEvidence(unittest.TestCase):
             self.assertEqual(manifest["memory_modes"], ["native", "safe"])
             self.assertEqual(manifest["protocol"], collection.PROTOCOL)
             self.assertEqual(manifest["cases"], collection.load(self.directory / "manifest.json")["cases"])
+
+    def test_slow_bulk_duration_plan_keeps_each_comparison_on_its_own_host(self):
+        manifest = collection.load(self.directory / "manifest.json")
+        manifest["protocol"] = collection.SLOW_BULK_PROTOCOL
+        collection.save(self.directory / "manifest.json", manifest)
+        estimates = {case["id"] + "/" + language: 300
+                     for case in manifest["cases"] for language in collection.ENGINES}
+        policy = {"schema_version": 1, "source_sha256": "a" * 64, "partition_seconds": estimates,
+                  "isolated_pairs": [], "max_batch_seconds": 4200, "bootstrap_seconds": 600}
+
+        directory = self.root / "slow-fleet"
+        plan = fleet.prepare(self.directory, directory, replicas=1, operation_budget=10, duration_policy=policy)
+
+        self.assertEqual(len(plan["host_batches"]), len(plan["jobs"]))
+        self.assertTrue(all(len(batch["jobs"]) == 1 for batch in plan["host_batches"]))
 
     @patch.object(fleet, "BATCH_OPERATION_BUDGET", 4)
     def test_batch_worker_builds_once_and_runs_each_language_partition(self):

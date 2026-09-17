@@ -154,6 +154,20 @@ class TestShardResults(unittest.TestCase):
         self.assertIn("BASELINE_PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}", script)
         self.assertIn("export BASELINE_PROTOCOL_QUALIFICATION='${BASELINE_PROTOCOL_QUALIFICATION}'", script)
 
+    def testAwsWrapperDerivesReplacementAllocationFromTheFrozenProtocol(self):
+        script = (SOURCE.parents[1] / "aws" / "run-campaign.sh").read_text(encoding="utf-8")
+
+        self.assertIn('--print-allocation "${CAMPAIGN_PLATFORM}"', script)
+        self.assertIn("BENCHMARK_EXPECTED_VCPUS=${replacement_vcpus}", script)
+
+    def testAwsHostDisablesProtocolQualificationForVerificationOnlyPreparation(self):
+        script = (SOURCE.parents[1] / "aws" / "run-host.sh").read_text(encoding="utf-8")
+        start = script.index('if [[ -n "${BENCHMARK_REMEASUREMENT_PARTITION:-}${BENCHMARK_DIAGNOSTIC_PLAN:-}" ]]')
+        block = script[start:script.index("    fi", start)]
+
+        self.assertIn("export BASELINE_VERIFICATION_ONLY=true", block)
+        self.assertIn("export BASELINE_PROTOCOL_QUALIFICATION=false", block)
+
     def testRebarJoniRoutesRequirePinnedTrinoProvenance(self):
         campaign = (SOURCE.parents[1] / "aws" / "run-campaign.sh").read_text(encoding="utf-8")
         host = (SOURCE.parents[1] / "aws" / "run-host.sh").read_text(encoding="utf-8")

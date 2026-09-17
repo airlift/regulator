@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "qualified_by_pilot": true,
+  "original_row_manifest_sha256": "88a56c7f4dc8851b48bde25c08429bce513df237eb00128ff733f60c52f4065a",
+  "operations_per_partition": 4,
+  "forks": 5,
+  "warmup_iterations": 20,
+  "measurement_iterations": 20,
+  "iteration_seconds": 1,
+  "gc": "G1",
+  "cpu_allowance": "0,1",
+  "heap": "8g",
+  "allocations": {
+    "r8i": {"instance_type": "r8i.large", "vcpus": 2},
+    "r8g": {"instance_type": "r8g.large", "vcpus": 2},
+    "r9g": {"instance_type": "r9g.2xlarge", "vcpus": 8}
+  },
+  "estimator": "equal-weight iteration means, then fork means, then host means",
+  "pilot_qualification_sha256": "ea513fa9d5c0763afdbec0ce35c1e1252912722fc10ab75446e0db6ec7beea27",
+  "qualification_attestation_sha256": "0b8cbdd06e371eff2537541ddaf59d433c03b0a0bfe22604b9578f23b29395e5"
+}

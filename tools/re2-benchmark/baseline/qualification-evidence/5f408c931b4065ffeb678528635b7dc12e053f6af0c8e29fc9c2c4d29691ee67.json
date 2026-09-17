@@ -1,0 +1,20 @@
+{
+  "allocations": {
+    "r8g": "r8g.large",
+    "r8i": "r8i.large",
+    "r9g": "r9g.2xlarge"
+  },
+  "exact_identity": "traditional-extra-easy2/failed-search/easy2/dfa/262144",
+  "jobs": 9,
+  "kind": "easy2-correction-decision",
+  "pilot_analysis_sha256": "46d1b85cb3aa7a49efa12272f468934b39d428d9a1c0f365fb09c0be86ec6843",
+  "pilot_summary_sha256": "b5366c61ace067d61eaf954368e68f517b5040876bfc9e9446ea79aa6942ec94",
+  "primary_jvm_hours": 8,
+  "protocol": "Reuse qualified retained protocol: 60 warmup/20 measured seconds, five independent forks, G1, CPUs 0 and 1, 8 GiB heap, separate allocation and native brackets.",
+  "readiness": "Review complete exact outputs before acceptance. No substitution of pilot or favorable windows.",
+  "reason": "Original scope selected temporal drift but omitted the explicitly identified easy2 DFA process-state defect. The exact isolated pilot and factorial controls show stable two-CPU measurements, so original variability cannot be declared unavoidable.",
+  "schema_version": 1,
+  "scope": "Three fresh hosts per CPU family; both access modes. Existing 32 KiB public easy2 control shares the partition and is uniformly superseded across all three CPU families. Preserve all prior data.",
+  "source_decision_sha256": "1e6052d94170a9938467c29e454e7a54abd3a4256f2c21148a31afa4e2cd5e00",
+  "stopping_rule": "One complete fixed cohort, infrastructure retries only; further measurements only if a concrete validity defect remains."
+}

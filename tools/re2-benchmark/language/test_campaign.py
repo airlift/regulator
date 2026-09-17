@@ -29,6 +29,8 @@ class TestLanguageCampaign(unittest.TestCase):
         self.assertEqual(len(smoke.batches), 9)
         self.assertEqual(len(primary.batches), 27)
         self.assertTrue(all(batch["replica"] == 1 for _, batch in smoke.batches.values()))
+        self.assertTrue(all(batch["instance_type"] == "r9g.2xlarge" and batch["vcpus"] == 8
+                            for _, batch in primary.batches.values() if batch["platform"] == "r9g"))
         self.assertEqual(primary.deadline_seconds(64, 5400), 10800)
         self.assertEqual(primary.deadline_seconds(9, 5400, 1), 54000)
 

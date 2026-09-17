@@ -25,8 +25,9 @@ Use the existing AWS runner with `BENCHMARK_DIAGNOSTIC_PLAN=pilot-core`,
 `CAMPAIGN_SHARD_ID=trino-final-line`, `BASELINE_PROTOCOL=smoke`, and
 `REGULATOR_RELEASE_VERSION=1.0`, plus the usual frozen source, platform and
 Spot-only settings. The plan is part of the checksummed source archive.
-At this point the runner completes the original smoke before running diagnostics.
-The smoke is preparatory evidence and does not replace the isolated timings. The runner's
+The current runner uses the smoke configuration to prepare and verify every
+semantic route, without collecting ordinary smoke timings. It saves a
+`semantic-preparation.json` receipt before starting diagnostics. The runner's
 90-minute deadline, result recovery and cleanup apply to the entire host.
 
 Artifacts are under `diagnostics/` in the host result. `complete.json` exists

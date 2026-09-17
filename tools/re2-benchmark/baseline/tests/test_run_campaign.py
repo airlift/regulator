@@ -149,6 +149,21 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual(environment["BENCHMARK_EXPECTED_VCPUS"], str(expected_vcpus))
             self.assertEqual(environment["BENCHMARK_CPU_LIST"], "0-7" if expected_vcpus == 8 else "0")
 
+    def test_language_jobs_use_the_allocation_frozen_in_the_plan(self):
+        platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
+        language = SimpleNamespace(phase="primary", batches={
+            "job": ("language-lifecycle", {
+                "platform": "r9g", "instance_type": "r9g.2xlarge", "vcpus": 8,
+                "shard": "language-lifecycle-0000", "replica": 1,
+            }),
+        })
+
+        jobs = RUN_CAMPAIGN.build_language_jobs(language, platforms)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].platform.instance_type, "r9g.2xlarge")
+        self.assertEqual(jobs[0].platform.vcpus, 8)
+
     def test_spot_only_replacements_never_fall_back(self):
         for attempt in (1, 2):
             for classification, detail in (

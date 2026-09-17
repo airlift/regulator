@@ -197,7 +197,8 @@ def phase_timeout(arguments):
 
 def build_language_jobs(language, platforms):
     by_name = {platform.name: platform for platform in platforms}
-    return [Job(by_name[batch["platform"]], batch["shard"], batch["replica"], epoch, 1, "spot", "language-batch")
+    return [Job(allocated_platform(by_name[batch["platform"]], batch["instance_type"], batch["vcpus"]),
+                batch["shard"], batch["replica"], epoch, 1, "spot", "language-batch")
             for epoch, (_, batch) in enumerate(language.batches.values(),
                                                start=PHASE_HOST_EPOCH_START[language.phase])]
 
@@ -281,8 +282,18 @@ def build_jobs(phase, platforms, shards, confirmation_jobs):
 
 def concurrency_platform(platform, shard):
     if shard in CONCURRENCY_SHARDS and platform.concurrency_instance_type:
-        return replace(platform, instance_type=platform.concurrency_instance_type, vcpus=platform.concurrency_vcpus)
+        return allocated_platform(platform, platform.concurrency_instance_type, platform.concurrency_vcpus)
     return platform
+
+
+def allocated_platform(platform, instance_type, vcpus):
+    allowed = {
+        (platform.instance_type, platform.vcpus),
+        (platform.concurrency_instance_type, platform.concurrency_vcpus),
+    }
+    if (instance_type, vcpus) not in allowed:
+        raise ValueError("planned worker allocation is not available for the platform")
+    return replace(platform, instance_type=instance_type, vcpus=vcpus)
 
 
 def platform_has_capacity(candidate, running, arguments):

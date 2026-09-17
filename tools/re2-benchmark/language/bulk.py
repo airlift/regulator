@@ -78,7 +78,7 @@ def encode_klv(fields):
 
 def validate_manifest(manifest, directory):
     if (manifest["schema_version"] != 3 or manifest["suite"] != "language-bulk" or
-            manifest["protocol"] != collection.PROTOCOL or
+            not collection.protocol_for(manifest) or
             manifest.get("operations") != ["compile", "execute"] or
             collection.encode(manifest["languages"]) != collection.encode(collection.ENGINES) or
             collection.encode(manifest["memory_modes"]) != collection.encode(collection.MODES)):

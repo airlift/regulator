@@ -43,6 +43,25 @@ CAMPAIGN_HOST_EPOCH=${CAMPAIGN_HOST_EPOCH:-1}
 CAMPAIGN_ATTEMPT=${CAMPAIGN_ATTEMPT:-1}
 BASELINE_PROTOCOL=${BASELINE_PROTOCOL:-qualification}
 BENCHMARK_DIAGNOSTIC_PLAN=${BENCHMARK_DIAGNOSTIC_PLAN:-}
+BENCHMARK_REMEASUREMENT_PARTITION=${BENCHMARK_REMEASUREMENT_PARTITION:-}
+if [[ -n "${BENCHMARK_REMEASUREMENT_PARTITION}" ]]; then
+    if [[ ! "${BENCHMARK_REMEASUREMENT_PARTITION}" =~ ^[0-9]+$ ||
+            -n "${BENCHMARK_DIAGNOSTIC_PLAN}" || "${BASELINE_PROTOCOL}" != smoke ||
+            "${CAMPAIGN_MODE}" != baseline-shard || "${REGULATOR_RELEASE_VERSION}" != 1.0 ||
+            -n "${BASELINE_SELECTED_ROUTE:-}" ]]; then
+        echo "Replacement requires a frozen partition, release 1.0, and a complete smoke" >&2
+        exit 1
+    fi
+    IFS=$'\t' read -r replacement_instance_type replacement_vcpus < <(
+        python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/remeasure.py" \
+            --shard "${CAMPAIGN_SHARD_ID}" --partition "${BENCHMARK_REMEASUREMENT_PARTITION}" \
+            --print-allocation "${CAMPAIGN_PLATFORM}")
+    case "${CAMPAIGN_PLATFORM}" in
+        r8i) INTEL_INSTANCE_TYPE=${replacement_instance_type} ;;
+        r8g | r9g) ARM_INSTANCE_TYPE=${replacement_instance_type} ;;
+    esac
+    BENCHMARK_EXPECTED_VCPUS=${replacement_vcpus}
+fi
 BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE=${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE:-}
 BENCHMARK_DIAGNOSTIC_INPUT_SHA256=${BENCHMARK_DIAGNOSTIC_INPUT_SHA256:-}
 if [[ -n "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}" ]] &&
@@ -136,8 +155,10 @@ if [[ "${CAMPAIGN_MODE}" != baseline-shard && "${CAMPAIGN_MODE}" != language-bat
     echo "RE2 benchmark campaign mode must be baseline-shard or language-batch" >&2
     exit 1
 fi
-if [[ "${TIMEOUT_SECONDS}" != 5400 ]]; then
-    echo "Formal baseline jobs require TIMEOUT_SECONDS=5400, found ${TIMEOUT_SECONDS}" >&2
+if [[ ( "${CAMPAIGN_MODE}" == baseline-shard && "${TIMEOUT_SECONDS}" != 5400 ) ||
+        ( "${CAMPAIGN_MODE}" == language-batch && "${TIMEOUT_SECONDS}" != 5400 &&
+          "${TIMEOUT_SECONDS}" != 68400 && "${TIMEOUT_SECONDS}" != 81000 ) ]]; then
+    echo "Formal baseline jobs require TIMEOUT_SECONDS=5400; isolated slow language jobs require their computed 68400- or 81000-second budget, found ${TIMEOUT_SECONDS}" >&2
     exit 1
 fi
 if [[ "${CAMPAIGN_PROVENANCE}" != qualification ]]; then
@@ -1072,6 +1093,7 @@ export RE2_CAMPAIGN_SHARD_ID='${CAMPAIGN_SHARD_ID}'
 export RE2_CAMPAIGN_REPLICA_ID='${CAMPAIGN_REPLICA_ID}'
 export RE2_CAMPAIGN_HOST_EPOCH='${CAMPAIGN_HOST_EPOCH}'
 export BENCHMARK_DIAGNOSTIC_PLAN='${BENCHMARK_DIAGNOSTIC_PLAN}'
+export BENCHMARK_REMEASUREMENT_PARTITION='${BENCHMARK_REMEASUREMENT_PARTITION}'
 export BENCHMARK_PARTIAL_RESULT_URI='s3://${BUCKET}/${RESULT_PREFIX}/partial-${label}.tar.gz'
 if [[ '${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}' != '' ]]; then
     download_input 's3://${BUCKET}/${INPUT_PREFIX}/diagnostic-inputs.tar.gz' /tmp/diagnostic-inputs.tar.gz
@@ -1240,7 +1262,8 @@ if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
     fi
     PYTHONDONTWRITEBYTECODE=1 python3 "${REGULATOR_DIR}/tools/re2-benchmark/language/transport.py" \
         "${SESSION_DIR}/language-batch.tar.gz" --sha256 "${LANGUAGE_BATCH_ARCHIVE_SHA256}" \
-        --platform "${CAMPAIGN_PLATFORM}" --shard "${CAMPAIGN_SHARD_ID}" --replica "${CAMPAIGN_REPLICA_ID}"
+        --platform "${CAMPAIGN_PLATFORM}" --shard "${CAMPAIGN_SHARD_ID}" --replica "${CAMPAIGN_REPLICA_ID}" \
+        --host-timeout "${TIMEOUT_SECONDS}"
 fi
 if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"

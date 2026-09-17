@@ -307,6 +307,10 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/run-host-session.sh"
             "${RE2_CAMPAIGN_SHARD_ID}" "${BASELINE_PROTOCOL}" "${RESULT_DIR}")
     fi
+    if [[ -n "${BENCHMARK_REMEASUREMENT_PARTITION:-}${BENCHMARK_DIAGNOSTIC_PLAN:-}" ]]; then
+        export BASELINE_VERIFICATION_ONLY=true
+        export BASELINE_PROTOCOL_QUALIFICATION=false
+    fi
     set +e
     /usr/bin/time --append --output="${capacity_file}" \
         --format='wall_seconds=%e\nmaximum_resident_kibibytes=%M\nexit_status=%x' \
@@ -317,6 +321,14 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         set +e
         python3 "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/run.py" \
             --plan "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/${BENCHMARK_DIAGNOSTIC_PLAN}.json" \
+            --session "${RESULT_DIR}"
+        host_session_status=$?
+        set -e
+    fi
+    if [[ ${host_session_status} -eq 0 && -n "${BENCHMARK_REMEASUREMENT_PARTITION:-}" ]]; then
+        set +e
+        python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/remeasure.py" \
+            --shard "${RE2_CAMPAIGN_SHARD_ID}" --partition "${BENCHMARK_REMEASUREMENT_PARTITION}" \
             --session "${RESULT_DIR}"
         host_session_status=$?
         set -e

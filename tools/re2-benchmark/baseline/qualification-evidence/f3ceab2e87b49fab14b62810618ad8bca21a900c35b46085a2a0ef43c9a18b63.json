@@ -1,0 +1,22 @@
+{
+  "allocations": {
+    "r8g": "r8g.large",
+    "r8i": "r8i.large",
+    "r9g": "r9g.2xlarge"
+  },
+  "control_hashes": {
+    "long-window-analysis.json": "86ec777c415dad16f480041a3bb6875890cd0b487dc77a0833773ce79bc2e755",
+    "long-window-stability.json": "c40fc76bd12c20131d81371ff64a70d6420bc31459499c2384348a3140e8aca4",
+    "retained-baseline-audit.json": "c8ada4bcfdfe2e52b7897a5d4cd761df6387cba561b3c7e450a580e2b5768c6d"
+  },
+  "integration_jobs": 18,
+  "kind": "retained-protocol-qualification",
+  "precision_limit": "No universal one-percent precision claim. R8g large bit-state retains Java/native host CV 19.50/9.55 percent versus 8.56/18.58 percent on small hosts. Correlated native/Java host changes support an environment-sensitive component but do not identify a kernel mechanism. Retain all observations and show uncertainty and execution ranges.",
+  "qualified_for_production_integration": true,
+  "reason": "Keep small R8g/R8i allocations: larger R8g does not remove shared native/Java host variation, and larger Intel has worse within-run temporal sensitivity. Larger R9g improves measured runtime overhead and repeated search controls. Freeze five forks with long warmup, separate allocation profiling, and full 300-second warmup/measurement for selected bit-state cases.",
+  "required_jobs": 180,
+  "schema_version": 1,
+  "select_by_timing": false,
+  "source_decision_sha256": "c2f481c572393cc63f5967b2dd04a96aeaa7cd7025cc1cff6e0751ea0446176f",
+  "stopping_rule": "The fixed allocation/window controls are complete. No more tuning rounds solely to reach one percent. Review exact integration for correctness, provenance, completeness and material systematic transients before full expansion."
+}
