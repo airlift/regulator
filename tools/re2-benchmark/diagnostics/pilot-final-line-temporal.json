@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "purpose": "Determine whether repeated R8g replacement-operation shifts during seconds 20-40 settle or recur over seconds 40-100",
+  "forks": 3,
+  "warmup_iterations": 20,
+  "measurement_iterations": 80,
+  "durations": [
+    "1s"
+  ],
+  "primary_cpu_allowances": [
+    "0,1"
+  ],
+  "cases": [
+    {
+      "id": "replace-0-regulator",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceRegulator",
+      "parameters": {
+        "sourceLength": "1024",
+        "workload": "alternationLateMatch"
+      },
+      "routes": [
+        "object-row"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "replace-0-joni",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceJoni",
+      "parameters": {
+        "sourceLength": "1024",
+        "workload": "alternationLateMatch"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "replace-1-regulator",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceRegulator",
+      "parameters": {
+        "sourceLength": "1024",
+        "workload": "captureLateMatch"
+      },
+      "routes": [
+        "object-row"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "replace-1-joni",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceJoni",
+      "parameters": {
+        "sourceLength": "1024",
+        "workload": "captureLateMatch"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "replace-2-regulator",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceRegulator",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "captureLateMatch"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "replace-2-joni",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.replaceJoni",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "captureLateMatch"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "instrumented_cases": [
+    "replace-0-regulator",
+    "replace-1-regulator",
+    "replace-2-regulator"
+  ],
+  "instrumented_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 1,
+    "warmup_iterations": 20,
+    "measurement_iterations": 80
+  },
+  "native_filter": "^Search_Easy[02]_CachedDFA/262144/threads:1$"
+}

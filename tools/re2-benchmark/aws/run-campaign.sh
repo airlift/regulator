@@ -42,6 +42,29 @@ CAMPAIGN_REPLICA_ID=${CAMPAIGN_REPLICA_ID:-1}
 CAMPAIGN_HOST_EPOCH=${CAMPAIGN_HOST_EPOCH:-1}
 CAMPAIGN_ATTEMPT=${CAMPAIGN_ATTEMPT:-1}
 BASELINE_PROTOCOL=${BASELINE_PROTOCOL:-qualification}
+BENCHMARK_DIAGNOSTIC_PLAN=${BENCHMARK_DIAGNOSTIC_PLAN:-}
+BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE=${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE:-}
+BENCHMARK_DIAGNOSTIC_INPUT_SHA256=${BENCHMARK_DIAGNOSTIC_INPUT_SHA256:-}
+if [[ -n "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}" ]] &&
+        { [[ -z "${BENCHMARK_DIAGNOSTIC_PLAN}" || ! -f "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}" ]] ||
+          [[ ! "${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}" =~ ^[0-9a-f]{64}$ ]]; }; then
+    echo "Diagnostic input requires a plan, archive and SHA-256" >&2
+    exit 1
+fi
+if [[ -n "${BENCHMARK_DIAGNOSTIC_PLAN}" ]]; then
+    if [[ ! "${BENCHMARK_DIAGNOSTIC_PLAN}" =~ ^[a-z0-9-]+$ ||
+            ! -f "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/${BENCHMARK_DIAGNOSTIC_PLAN}.json" ||
+            "${BASELINE_PROTOCOL}" != smoke || "${CAMPAIGN_MODE}" != baseline-shard ||
+            ( "${CAMPAIGN_SHARD_ID}" != trino-final-line && "${CAMPAIGN_SHARD_ID}" != traditional-extra-easy2 ) ||
+            -z "${REGULATOR_RELEASE_VERSION}" ||
+            -n "${BASELINE_SELECTED_ROUTE:-}" ]]; then
+        echo "Diagnostics require a checked-in plan, release identity, and a supported complete smoke" >&2
+        exit 1
+    fi
+    python3 "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/run.py" \
+        --plan "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/${BENCHMARK_DIAGNOSTIC_PLAN}.json" \
+        --check-only --shard "${CAMPAIGN_SHARD_ID}"
+fi
 BASELINE_PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
 BASELINE_CANDIDATE_ARCHIVE=${BASELINE_CANDIDATE_ARCHIVE:-}
 BASELINE_CANDIDATE_ARCHIVE_SHA256=${BASELINE_CANDIDATE_ARCHIVE_SHA256:-}
@@ -808,6 +831,25 @@ package_rebar_commit()
         | gzip -n > "${output}"
 }
 
+candidate_commit()
+{
+    local reference
+    # Git archives identify their commit in the global PAX header. Resolve that
+    # immutable object so another local commit cannot change a frozen campaign.
+    reference=$(python3 - "${BASELINE_CANDIDATE_ARCHIVE}" <<'PYTHON'
+import sys
+import tarfile
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    print(archive.pax_headers.get("comment", ""))
+PYTHON
+    ) || return 1
+    if [[ ! "${reference}" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "Frozen candidate archive must identify a full Git commit" >&2
+        return 1
+    fi
+    git -C "${REGULATOR_DIR}" rev-parse --verify "${reference}^{commit}"
+}
+
 require_clean_worktree()
 {
     local worktree=$1
@@ -1029,6 +1071,14 @@ export RE2_CAMPAIGN_PLATFORM='${CAMPAIGN_PLATFORM}'
 export RE2_CAMPAIGN_SHARD_ID='${CAMPAIGN_SHARD_ID}'
 export RE2_CAMPAIGN_REPLICA_ID='${CAMPAIGN_REPLICA_ID}'
 export RE2_CAMPAIGN_HOST_EPOCH='${CAMPAIGN_HOST_EPOCH}'
+export BENCHMARK_DIAGNOSTIC_PLAN='${BENCHMARK_DIAGNOSTIC_PLAN}'
+export BENCHMARK_PARTIAL_RESULT_URI='s3://${BUCKET}/${RESULT_PREFIX}/partial-${label}.tar.gz'
+if [[ '${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}' != '' ]]; then
+    download_input 's3://${BUCKET}/${INPUT_PREFIX}/diagnostic-inputs.tar.gz' /tmp/diagnostic-inputs.tar.gz
+    printf '%s  %s\n' '${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}' /tmp/diagnostic-inputs.tar.gz | sha256sum --check -
+    export BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE=/tmp/diagnostic-inputs.tar.gz
+    export BENCHMARK_DIAGNOSTIC_INPUT_SHA256='${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}'
+fi
 export BASELINE_PROTOCOL='${BASELINE_PROTOCOL}'
 export BASELINE_PROTOCOL_QUALIFICATION='${BASELINE_PROTOCOL_QUALIFICATION}'
 export BASELINE_EXPECTED_ENGINE_TREE='${BASELINE_EXPECTED_ENGINE_TREE}'
@@ -1150,7 +1200,7 @@ launch_instance()
     return 1
 }
 
-REGULATOR_COMMIT=$(git -C "${REGULATOR_DIR}" rev-parse HEAD)
+REGULATOR_COMMIT=$(candidate_commit)
 TRINO_COMMIT=none
 if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     TRINO_COMMIT=$(git -C "${TRINO_DIR}" rev-parse "${TRINO_REVISION:-HEAD}^{commit}")
@@ -1168,11 +1218,11 @@ if [[ $(sha256 "${SESSION_DIR}/regulator.tar.gz") != "${BASELINE_CANDIDATE_ARCHI
     exit 1
 fi
 if [[ $(commit_archive_sha256 "${REGULATOR_DIR}" "${REGULATOR_COMMIT}") != "${BASELINE_CANDIDATE_ARCHIVE_SHA256}" ]]; then
-    echo "Frozen candidate archive does not reproduce the current Regulator commit" >&2
+    echo "Frozen candidate archive does not reproduce the selected Regulator commit" >&2
     exit 1
 fi
-if [[ $(git -C "${REGULATOR_DIR}" rev-parse HEAD:src/main) != "${BASELINE_EXPECTED_ENGINE_TREE}" ]]; then
-    echo "Current Regulator production tree does not match BASELINE_EXPECTED_ENGINE_TREE" >&2
+if [[ $(git -C "${REGULATOR_DIR}" rev-parse "${REGULATOR_COMMIT}:src/main") != "${BASELINE_EXPECTED_ENGINE_TREE}" ]]; then
+    echo "Selected Regulator production tree does not match BASELINE_EXPECTED_ENGINE_TREE" >&2
     exit 1
 fi
 if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
@@ -1256,6 +1306,13 @@ else
 fi
 
 aws_cli s3 cp "${SESSION_DIR}/regulator.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/regulator.tar.gz" --only-show-errors
+if [[ -n "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}" ]]; then
+    if [[ $(sha256 "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}") != "${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}" ]]; then
+        echo "Diagnostic input archive checksum mismatch" >&2
+        exit 1
+    fi
+    aws_cli s3 cp "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}" "s3://${BUCKET}/${INPUT_PREFIX}/diagnostic-inputs.tar.gz" --only-show-errors
+fi
 if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
     aws_cli s3 cp "${SESSION_DIR}/language-batch.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/language-batch.tar.gz" --only-show-errors
     aws_cli s3 cp "${SESSION_DIR}/candidate-provenance.tsv" "s3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv" --only-show-errors

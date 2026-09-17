@@ -476,6 +476,20 @@ class TestRunCampaign(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("require TIMEOUT_SECONDS=5400", result.stderr)
 
+    def test_diagnostic_input_archive_and_checksum_are_required_together(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = Path(temporary) / "inputs.tar.gz"
+            archive.write_bytes(b"fixture")
+            for environment in (
+                    {"BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE": str(archive)},
+                    {"BENCHMARK_DIAGNOSTIC_INPUT_SHA256": "0" * 64}):
+                result = subprocess.run(
+                    [str(AWS_RUNNER)], capture_output=True, text=True,
+                    env={**os.environ, **environment})
+                with self.subTest(environment=environment):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Diagnostic input requires a plan, archive and SHA-256", result.stderr)
+
     def test_native_re2_execution_requires_native_manifest_rows(self):
         source = (SCRIPT.parent / "run-shard.sh").read_text()
         guard = '[[ "${ROUTE}" == native-access && ${native_system_row_count} -gt 0 ]]'

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "purpose": "Check retained capture measurements for startup transients and persistent process states",
+  "forks": 5,
+  "warmup_iterations": 60,
+  "measurement_iterations": 20,
+  "cases": [
+    {
+      "id": "splitbig1",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2Parse.parseSplitBig1Re2",
+      "parameters": {},
+      "routes": [
+        "native-access",
+        "object-row"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "dot-star-dollar",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2FullMatch.matchesDotStarDollarLatin1",
+      "parameters": {
+        "textSize": "4096"
+      },
+      "routes": [
+        "native-access",
+        "object-row"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "easy1-dfa",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2Search.searchEasy1DfaBoolean",
+      "parameters": {
+        "textSize": "512"
+      },
+      "routes": [
+        "native-access",
+        "object-row"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "classpath": "regulator",
+  "durations": [
+    "1s"
+  ],
+  "primary_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumented_cases": [
+    "splitbig1"
+  ],
+  "instrumented_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 3,
+    "warmup_iterations": 60,
+    "measurement_iterations": 40
+  },
+  "native_filter": "^(Search_Easy0_CachedDFA/262144/threads:1|Parse_CachedSplitBig1_RE2/threads:1|FullMatch_DotStarDollar_CachedRE2/4096|Search_Easy1_CachedDFA/512/threads:1)$",
+  "native_names": [
+    "Search_Easy0_CachedDFA/262144/threads:1",
+    "Parse_CachedSplitBig1_RE2/threads:1",
+    "FullMatch_DotStarDollar_CachedRE2/4096",
+    "Search_Easy1_CachedDFA/512/threads:1"
+  ]
+}

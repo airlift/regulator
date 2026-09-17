@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "purpose": "Measurement protocol diagnosis; never a qualification replacement",
+  "forks": 5,
+  "warmup_iterations": 10,
+  "measurement_iterations": 10,
+  "cases": [
+    {
+      "id": "empty-lambda",
+      "benchmark": "io.airlift.regulator.BenchmarkTrinoRegexp.replaceLambda",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "emptyMatches"
+      },
+      "routes": [
+        "object-row",
+        "native-access"
+      ]
+    },
+    {
+      "id": "empty-lambda-joni",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoJoniComparator.replaceLambdaJoni",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "emptyMatches"
+      },
+      "routes": [
+        "native-access"
+      ]
+    },
+    {
+      "id": "hard-jdk",
+      "original_case_id": "imported/rsc/hard-32k",
+      "input_sha256": "d7925a796c7d4827000ca81e17a6bf181c962ea1a6ac2c736ef9620e3099cc34",
+      "benchmark": "io.airlift.regulator.BenchmarkLanguageBulk.execute",
+      "parameters": {
+        "engine": "jdk",
+        "expectedResult": "27"
+      },
+      "routes": [
+        "object-row"
+      ]
+    },
+    {
+      "id": "hard-java",
+      "original_case_id": "imported/rsc/hard-32k",
+      "input_sha256": "d7925a796c7d4827000ca81e17a6bf181c962ea1a6ac2c736ef9620e3099cc34",
+      "benchmark": "io.airlift.regulator.BenchmarkLanguageBulk.execute",
+      "parameters": {
+        "engine": "java",
+        "expectedResult": "27"
+      },
+      "routes": [
+        "object-row"
+      ]
+    },
+    {
+      "id": "twain-trino",
+      "original_case_id": "imported/leipzig/twain",
+      "input_sha256": "a80440ae542a0d935472d4c87c5138f0fd6c5d49ae433827ec67324a947d6ecd",
+      "benchmark": "io.airlift.regulator.BenchmarkLanguageBulk.execute",
+      "parameters": {
+        "engine": "trino",
+        "expectedResult": "811"
+      },
+      "routes": [
+        "object-row"
+      ]
+    },
+    {
+      "id": "twain-joni",
+      "original_case_id": "imported/leipzig/twain",
+      "input_sha256": "a80440ae542a0d935472d4c87c5138f0fd6c5d49ae433827ec67324a947d6ecd",
+      "benchmark": "io.airlift.regulator.BenchmarkLanguageBulk.execute",
+      "parameters": {
+        "engine": "joni",
+        "expectedResult": "811"
+      },
+      "routes": [
+        "object-row"
+      ]
+    }
+  ],
+  "native_filter": "^Search_Easy[02]_CachedDFA/262144/threads:1$",
+  "instrumented_cases": [
+    "empty-lambda",
+    "hard-jdk",
+    "twain-trino"
+  ],
+  "original_language_manifest_sha256": "503ecf229ebe304d15627c58d5863f20fa37185935c4a506950be1eed05068f3",
+  "instrumentation_protocol": {
+    "forks": 3,
+    "warmup_iterations": 10,
+    "measurement_iterations": 40
+  },
+  "instrumented_cpus": "0"
+}

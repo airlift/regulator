@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "purpose": "Validate the frozen baseline replacement protocol on both transient families",
+  "forks": 5,
+  "warmup_iterations": 20,
+  "measurement_iterations": 20,
+  "durations": [
+    "1s"
+  ],
+  "primary_cpu_allowances": [
+    "0,1"
+  ],
+  "cases": [
+    {
+      "id": "capture-split",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.splitRegulator",
+      "parameters": {
+        "workload": "captureLongMatch",
+        "sourceLength": "32768"
+      },
+      "routes": [
+        "object-row",
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "capture-split-joni",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoFinalLine.splitJoni",
+      "parameters": {
+        "workload": "captureLongMatch",
+        "sourceLength": "32768"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "empty-lambda",
+      "benchmark": "io.airlift.regulator.BenchmarkTrinoRegexp.replaceLambda",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "emptyMatches"
+      },
+      "routes": [
+        "object-row",
+        "native-access"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "empty-lambda-joni",
+      "benchmark": "io.trino.operator.scalar.BenchmarkTrinoJoniComparator.replaceLambdaJoni",
+      "parameters": {
+        "sourceLength": "32768",
+        "workload": "emptyMatches"
+      },
+      "routes": [
+        "native-access"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "instrumented_cases": [],
+  "native_filter": "^Search_Easy[02]_CachedDFA/262144/threads:1$"
+}

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "purpose": "Check retained search measurements for startup transients and persistent process states",
+  "forks": 5,
+  "warmup_iterations": 60,
+  "measurement_iterations": 20,
+  "cases": [
+    {
+      "id": "hard-dfa",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2Search.searchHardDfaBoolean",
+      "parameters": {
+        "textSize": "8"
+      },
+      "routes": [
+        "native-access",
+        "object-row"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "fanout",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchFanoutRe2",
+      "parameters": {
+        "textSize": "16777216"
+      },
+      "routes": [
+        "native-access",
+        "object-row"
+      ],
+      "gc": "g1"
+    },
+    {
+      "id": "big-fixed",
+      "benchmark": "io.airlift.regulator.BenchmarkRe2SearchExtra.searchBigFixedDfaBoolean",
+      "parameters": {
+        "textSize": "1048576"
+      },
+      "routes": [
+        "native-access",
+        "object-row"
+      ],
+      "gc": "g1"
+    }
+  ],
+  "classpath": "regulator",
+  "durations": [
+    "1s"
+  ],
+  "primary_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumented_cases": [
+    "hard-dfa"
+  ],
+  "instrumented_cpu_allowances": [
+    "0,1"
+  ],
+  "instrumentation_protocol": {
+    "forks": 3,
+    "warmup_iterations": 60,
+    "measurement_iterations": 40
+  },
+  "native_filter": "^(Search_Easy0_CachedDFA/262144/threads:1|Search_Hard_CachedDFA/8/threads:1|Search_Fanout_CachedRE2/16777216/threads:1|Search_BigFixed_CachedDFA/1048576/threads:1)$",
+  "native_names": [
+    "Search_Easy0_CachedDFA/262144/threads:1",
+    "Search_Hard_CachedDFA/8/threads:1",
+    "Search_Fanout_CachedRE2/16777216/threads:1",
+    "Search_BigFixed_CachedDFA/1048576/threads:1"
+  ]
+}
