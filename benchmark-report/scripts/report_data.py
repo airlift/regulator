@@ -15,6 +15,9 @@ from pathlib import Path
 
 REPORT_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = REPORT_ROOT.parent
+sys.path.insert(0, str(REPOSITORY_ROOT / 'tools/re2-benchmark/language'))
+import released_artifact
+from language_data import RELEASE_PLATFORMS
 DATA_DIRECTORY = REPORT_ROOT / "data"
 MANIFEST_FILE = DATA_DIRECTORY / "manifest.json"
 README_FILE = REPOSITORY_ROOT / "README.md"
@@ -166,10 +169,107 @@ def data_digest(path: Path) -> str:
     return hashlib.sha256(read_data_bytes(path)).hexdigest()[:16]
 
 
+def file_sha256(path: Path) -> str:
+    with path.open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
 def validate_data_filename(path: Path) -> None:
     digest = data_digest(path)
     if digest not in path.name:
         raise ValueError(f"data filename does not contain its content hash {digest}")
+
+
+def publication_key(row: dict) -> tuple:
+    platform = row['platform']
+    if platform.startswith('c'):
+        platform = 'r' + platform[1:]
+    return row['caseId'], row['operation'], row['language'], platform, row['memoryMode']
+
+
+def released_publication_id(previous: dict) -> str:
+    if (previous['language'] == 'like'
+            and previous['operation'] in {'compile', 'singleUse'}
+            and previous['caseId'].startswith('trino-like/')):
+        scenario = previous['caseId'].removeprefix('trino-like/')
+        if previous['id'] == f"like-lifecycle/{scenario}/{previous['operation']}":
+            if previous['operation'] == 'compile':
+                shard = 'like-compile'
+            elif scenario.endswith('/optimized'):
+                shard = 'like-dfa-single-use'
+            else:
+                shard = 'like-single-use'
+            return f'baseline/{shard}/{scenario}'
+    return previous['id']
+
+
+def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict]]) -> None:
+    artifact = data.get('provenance', {}).get('releasedArtifact')
+    scope = data.get('publicationScope')
+    if artifact is None:
+        if scope is not None:
+            raise ValueError('publication scope requires released-artifact provenance')
+        return
+    scope = require_object(scope, 'report.publicationScope')
+    if scope.get('policy') != 'user-facing-release-v1':
+        raise ValueError('released report requires user-facing publication scope')
+    version = artifact.get('version')
+    if not isinstance(version, str) or not version:
+        raise ValueError('released report artifact version is missing')
+    expected_artifact = released_artifact.manifest(REPOSITORY_ROOT, version)
+    if artifact != expected_artifact:
+        raise ValueError('released report artifact identity does not match the frozen release manifest')
+    if set(data.get('platforms', {})) != set(RELEASE_PLATFORMS):
+        raise ValueError('released report platform set does not match the release platforms')
+    expected_sources = {
+        'currentCandidate': expected_artifact['source_commit'],
+        'engineTree': expected_artifact['engine_tree'],
+        'releaseVersion': expected_artifact['version'],
+    }
+    for field, expected in expected_sources.items():
+        if data['sources'].get(field) != expected:
+            raise ValueError(f'released report sources.{field} does not match artifact provenance')
+    if any('reportVisible' in row for row in data['rows']):
+        raise ValueError('publication rows must not contain internal visibility flags')
+    for index, row in enumerate(data['rows']):
+        result = row['result']
+        interval = result.get('uncertainty')
+        if (result['state'] == 'compared'
+                and (result.get('estimator') != 'mean'
+                     or not isinstance(interval, dict)
+                     or interval.get('method') != 'hierarchical-bootstrap-v1'
+                     or interval.get('level') != .95)):
+            raise ValueError(f'published comparison must use mean with uncertainty at row {index}')
+    if (scope.get('publishedRows') != len(data['rows'])
+            or scope.get('workloadSourceRows') != len(data['rows'])
+            or scope.get('completeCampaignRows', -1) < len(data['rows'])
+            or scope.get('excludedCampaignRows') != scope['completeCampaignRows'] - len(data['rows'])):
+        raise ValueError('publication scope row counts do not reconcile')
+    candidates = [(entry, path, report) for entry, path, report in releases
+                  if entry.get('candidate') == scope.get('workloadSourceCandidate')
+                  and file_sha256(path) == scope.get('workloadSourceSha256')]
+    if len(candidates) != 1:
+        raise ValueError('publication workload source is missing or ambiguous')
+    source = candidates[0][2]
+    if len(source['rows']) != len(data['rows']):
+        raise ValueError('publication workload count changed')
+    for index, (row, previous) in enumerate(zip(data['rows'], source['rows'])):
+        if publication_key(row) != publication_key(previous):
+            raise ValueError(f'publication workload identity changed at row {index}')
+        if row['id'] != released_publication_id(previous):
+            raise ValueError(f'publication workload id changed at row {index}')
+        for field in ('name', 'caseId', 'operation', 'model', 'inputBytes', 'population', 'family'):
+            if row[field] != previous[field]:
+                raise ValueError(f'publication workload {field} changed at row {index}')
+        current_workload = {key: value for key, value in row.get('workload', {}).items()
+                            if key != 'performanceContext'}
+        source_workload = {key: value for key, value in previous.get('workload', {}).items()
+                           if key != 'performanceContext'}
+        if current_workload != source_workload:
+            raise ValueError(f'publication workload details changed at row {index}')
+        for field in ('status', 'reason', 'patternPreview', 'patternBytes'):
+            if row.get('mapping', {}).get(field) != previous.get('mapping', {}).get(field):
+                raise ValueError(f'publication pattern mapping changed at row {index}')
 
 
 def validate_published_data() -> tuple[dict, Path, dict]:
@@ -182,14 +282,16 @@ def validate_published_data() -> tuple[dict, Path, dict]:
     current_data = load_json(current_path)
     validate_report(current_data)
 
-    validated_reports = {manifest["current"]}
+    reports = {}
     for release in manifest["releases"]:
-        if release["file"] in validated_reports:
-            continue
         release_path = report_file(release["file"])
-        validate_data_filename(release_path)
-        validate_report(load_json(release_path))
-        validated_reports.add(release["file"])
+        if release["file"] not in reports:
+            validate_data_filename(release_path)
+            report = load_json(release_path)
+            validate_report(report)
+            reports[release["file"]] = (release_path, report)
+    releases = [(release, *reports[release['file']]) for release in manifest['releases']]
+    validate_publication_scope(current_data, releases)
     return manifest, current_path, current_data
 
 
@@ -265,10 +367,16 @@ def import_data(source: Path) -> None:
         releases = [
             release
             for release in previous_manifest["releases"]
-            if release["file"].removesuffix(".gz") != filename.removesuffix(".gz")
+            if (release["candidate"] != candidate
+                and release["file"].removesuffix(".gz") != filename.removesuffix(".gz"))
         ]
     elif DATA_DIRECTORY.exists() and any(DATA_DIRECTORY.iterdir()):
         raise ValueError("report data directory contains files but no valid manifest")
+    publication_sources = []
+    for release in releases:
+        path = report_file(release['file'])
+        publication_sources.append((release, path, load_json(path)))
+    validate_publication_scope(data, publication_sources)
     releases.insert(0, {
         "schemaVersion": schema_version,
         "candidate": candidate,

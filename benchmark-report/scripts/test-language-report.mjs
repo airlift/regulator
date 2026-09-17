@@ -58,6 +58,13 @@ const releaseHtml = renderToStaticMarkup(React.createElement(LanguageReport, { d
 assert.match(releaseHtml, /R9g/);
 assert.match(releaseHtml, /R8i/);
 assert.doesNotMatch(releaseHtml, />C9g</);
+const publishedReleaseHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: {
+  ...releaseData, sources: { ...releaseData.sources, currentLabel: "Regulator 1.0 results", releaseVersion: "1.0" },
+} }));
+assert.match(publishedReleaseHtml, /<h1 class="release-title">Regulator 1.0 benchmarks<\/h1>/);
+assert.match(publishedReleaseHtml, /class="source-line">JDK 25/);
+assert.doesNotMatch(publishedReleaseHtml, /snapshot-badge|Regulator 1.0 results/);
+assert.doesNotMatch(publishedReleaseHtml, /Engine abcdef/);
 assert.equal(exports.summaryRatios(releaseData).re2.everyday, exports.summaryRatios(data).re2.everyday);
 
 // README columns give each eligible row equal weight and use the same
@@ -170,9 +177,9 @@ const groupedData = { ...data, rows: [...data.rows, ...groupingRows,
 const groupedHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: groupedData }));
 const headings = [...groupedHtml.matchAll(/<h2>(.*?)<\/h2>/g)].map(match => match[1]);
 assert.deepEqual(headings, ['Everyday regex operations', 'Regex pattern lifecycle', 'Trino regex operations',
-  'Text processing workloads', 'Adversarial, stress and diagnostic workloads']);
+  'Text processing workloads', 'Adversarial and stress workloads']);
 const textSection = groupedHtml.split('<h2>Text processing workloads</h2>')[1].split('</section>')[0];
-const stressSection = groupedHtml.split('<h2>Adversarial, stress and diagnostic workloads</h2>')[1].split('</section>')[0];
+const stressSection = groupedHtml.split('<h2>Adversarial and stress workloads</h2>')[1].split('</section>')[0];
 for (const [caseId, , expected] of groupingCases) {
   assert.equal(textSection.includes(caseId), expected === 'bulk-text', caseId);
   assert.equal(stressSection.includes(caseId), ['synthetic-stress', 'diagnostics-and-stress'].includes(expected), caseId);
@@ -318,7 +325,7 @@ assert.equal(comparisonText({ ...result, warnings: ['Hosts disagree about which 
 const variableHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [{ ...reused, result: { ...result, warnings: ['sample precision exceeds 5%'] } }] } }));
 assert.match(variableHtml, /comparison-row na/);
 assert.match(variableHtml, /timing variable/);
-assert.doesNotMatch(variableHtml, /†|5.00× slower/);
+assert.doesNotMatch(variableHtml, /5.00× slower/);
 assert.match(variableHtml, /Download raw results/);
 const preliminaryPublication = { status: 'preliminary', sourcePolicy: 'mixed-development-revisions', note: 'Development builds with targeted updates.' };
 const preliminaryData = { ...data, publication: preliminaryPublication, rows: [{ ...reused, result: { ...result, warnings: ['sample precision exceeds 5%'] } }] };
@@ -511,7 +518,36 @@ const meanRow = { id: "mean-test", caseId: "mean-test", name: "mean-test", opera
   model: "count", population: "bulk-text", family: "test", language: "java", platform: "r9g",
   memoryMode: "native", inputBytes: 100, source: "language", result: meanEstimate };
 const meanHtml = detailsHtml(meanRow);
-assert.match(meanHtml, /Approximate 95% intervals/);
-assert.match(meanHtml, /Observed process means/);
-assert.match(meanHtml, /Ratio of mean costs/);
-assert.doesNotMatch(meanHtml, /Same-host ratio median/);
+assert.doesNotMatch(meanHtml, /Measurement notes|Approximate 95% intervals|Observed process means|Ratio of mean costs|independent hosts|EC2 allocation/);
+
+// Quality annotations describe each engine, not the uncertainty of their ratio.
+const qualityResult = { ...result, estimator: 'mean', uncertainty: {
+  method: 'hierarchical-bootstrap-v1', level: .95, ratioInterval: [.9, 1.1],
+  candidateIntervalNs: [95, 105], comparatorIntervalNs: [18, 22],
+  forkMeanRangeNs: { candidate: [95, 105], comparator: [18, 22] },
+} };
+assert.equal(exports.timingUncertainty(qualityResult, 'candidate'), .05);
+assert.equal(exports.timingUncertainty(qualityResult, 'comparator'), .10);
+assert.equal(exports.timingUncertainty(result, 'candidate'), null);
+const qualityRow = { ...row, result: qualityResult };
+const qualityReused = { ...reused, result: qualityResult };
+const qualityRows = exports.displayedMeasurements([qualityRow, qualityReused,
+  { ...row, id: 'compile', operation: 'compile', result: qualityResult }]);
+assert.equal(qualityRows.length, 2); // Reused appears in two tables, but counts once.
+assert.equal(exports.qualityDistribution(qualityRows, 'candidate').aboveFive, 0);
+assert.equal(exports.qualityDistribution(qualityRows, 'comparator').aboveFive, 2);
+assert.equal(exports.qualityDistribution([], 'candidate'), null);
+const qualityHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [qualityRow, qualityReused] } }));
+assert.match(qualityHtml, /2 distinct numeric comparisons/);
+assert.match(qualityHtml, /Median/);
+assert.match(qualityHtml, /native RE2 timing uncertainty: 10.0%/);
+assert.doesNotMatch(qualityHtml, /Regulator timing uncertainty: 5.0%/);
+assert.doesNotMatch(qualityHtml, /ratio-interval/);
+assert.match(qualityHtml, /No clear difference/i);
+assert.match(qualityHtml, /<span class="scan-result tie"[^>]*>no clear difference<sup><button[^>]*>\*<\/button><\/sup><\/span>/);
+assert.match(qualityHtml, /id="quality-high"/);
+// Expanded rows explain only applicable markers; unflagged measurements stay quiet.
+const flaggedDetails = detailsHtml(qualityRow);
+assert.match(flaggedDetails, /\* native RE2 timing uncertainty: 10.0%/);
+assert.doesNotMatch(flaggedDetails, /Regulator timing uncertainty|Approximate 95% intervals|Observed process means|independent hosts|EC2 allocation/);
+assert.match(detailsHtml(qualityRow, qualityReused), /Multi-use measurement notes/);

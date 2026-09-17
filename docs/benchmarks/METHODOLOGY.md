@@ -22,7 +22,7 @@ or generated-code level. "JVM overhead" is not an explanation.
 6. Read the pinned C++ implementation before claiming a Java-specific limit.
 7. Measure the complete public operation before retaining an isolated win.
 8. Include source-identical controls and important unaffected paths.
-9. Run all performance measurements on the designated AWS C8i, C8g, and C9g hosts.
+9. Run all performance measurements on the designated AWS R8i, R8g, and R9g hosts.
    Do not use developer Macs for screening, directionality, profiling, generated-code
    conclusions, or retained evidence. Local execution is limited to build and correctness
    checks because Apple Silicon, macOS, and its JVM code generation are not representative
@@ -50,6 +50,30 @@ or generated-code level. "JVM overhead" is not an explanation.
     maintainers should be able to identify the extra instruction, dependent
     load, allocation, code-size effect, or algorithmic work and should not need
     to repeat a rejected experiment merely to understand the decision.
+
+## Publication boundary
+
+Freeze the user-facing publication inventory before the release campaign. It
+contains public API workloads that help users make a performance decision,
+including a limited set of relevant adversarial cases. Select and order those
+workloads without using their measured results.
+
+Keep these evidence tiers separate:
+
+- The public report and its download contain exactly the frozen publication
+  inventory with final measurements and provenance.
+- Measurement-quality studies test specific claims about uncertainty,
+  repeatability, process state, or platform controls. They may use targeted
+  diagnostics, but those rows do not become release workloads.
+- The private archive retains the complete captured campaign, raw observations,
+  route and scaling probes, profiles, failed attempts, and superseded cohorts.
+
+Do not routinely collect internal diagnostics during a release run. Add a
+separate diagnostic campaign only when a qualification gate fails or a stated
+measurement-quality question requires it. Freeze its inventory and budget
+separately. The report generator projects the complete accepted measurements
+onto the publication inventory and rejects missing, extra, reordered, or
+changed public workloads before import.
 
 ## Comparison contracts
 
@@ -218,7 +242,7 @@ Final runs require:
 - candidate and control measurements on the same host
 
 Exploratory measurements and comparisons of alternative implementations must
-also run on C8i, C8g, and C9g. Do not use local timings to accept or reject a
+also run on R8i, R8g, and R9g. Do not use local timings to accept or reject a
 candidate, or to decide whether it deserves a target-host run.
 
 Independent shards may use separate host pairs in parallel. Results from
@@ -271,7 +295,7 @@ objects.
 
 ### Java
 
-The [baseline dispatch protocol](../../tools/re2-benchmark/baseline/SHARD_DISPATCH.md#jmh-protocol)
+The original [baseline dispatch protocol](../../tools/re2-benchmark/baseline/SHARD_DISPATCH.md#jmh-protocol)
 is authoritative for baseline shards. It defines the bounded Regulator process
 sets, Joni fork policy, full-protocol exceptions, allocation collection, and
 per-host equivalence checks. Do not replace it with a blanket five-fork or
@@ -279,6 +303,13 @@ one-second setting.
 
 The [language collector](../../tools/re2-benchmark/language/README.md#target-host-measurement-and-saved-data)
 uses its own frozen protocol and receipts, including for source brackets.
+The 1.0 measurement-quality follow-up uses separately frozen
+[replacement protocols](../../tools/re2-benchmark/baseline/REMEASUREMENT.md)
+and the language profiles described in that collector guide. They preserve
+workload identities and release identity while replacing selected measurements
+with isolated forks and separate allocation profiling. These are qualified
+exceptions to the original protocol, not changes to archived observations.
+
 Record process/fork boundaries, warmup, iteration duration, heap, suite order,
 and allocation settings. Shorter measurements are valid only under the relevant
 protocol's qualification gates, not as an ad hoc way to reduce cost.
@@ -293,18 +324,39 @@ flags. Consume match ranges or output checksums to prevent elimination.
 
 ### Statistics
 
-Report medians, observed host ranges, coefficients of variation, allocation,
-and throughput or elapsed time as appropriate. The baseline policy does not
-report confidence intervals from only three or four hosts. Do not label a range
-as a confidence interval or count iterations as independent hosts.
+The final 1.0 public comparisons estimate mean operation cost. Average measured
+iteration costs within a process, independent processes within a host, and
+hosts with equal weights. Divide the candidate mean by the comparator mean.
+Allocation profiling runs separately from replacement primary timings.
+Historical median estimates remain available in the original captures and
+baseline diagnostic tables; never relabel an old aggregate as a new measurement.
+
+The public report shows approximate 95% percentile intervals from 4,000
+reproducible hierarchical bootstrap draws. Resample paired hosts together,
+then whole JVM forks within each host. Native repetitions within one invocation
+are one process, not independent forks. Before/after native invocations form
+two process observations. The [analysis instructions](../../benchmark-report/analysis/README.md)
+provide the exact estimator, limitations and independent replay command.
+
+Three or four hosts cannot establish a distribution-free precision guarantee
+or rule out unobserved machine or compiler states. Show observed host and process
+ranges separately from intervals around a mean. An interval crossing parity
+means that this sample does not establish a winner; it is not a failed job or
+proof of equivalence. Never count individual iterations as independent hosts.
+A precise one-percent difference can establish a direction; there is no blanket
+five-percent tolerance for declaring a winner. Coefficients of variation describe
+execution variability and are not error bars on the estimated mean.
+A native control can identify shared changes, but different algorithms can
+respond differently to the same hardware. Native brackets do not measure the
+machine simultaneously with Java and cannot remove all environmental variation.
 
 Show baseline and candidate times and their absolute difference alongside each
 ratio. Compare how costs grow with input size. A large percentage on a
 few-nanosecond operation may be a negligible fixed cost; a small percentage on
 a large input may reveal an important scaling regression. Account for the
 complete operation, generated-code complexity, and whether the benchmark's
-branch distribution represents the workload. Leave a result unresolved when
-host variation overlaps the claimed difference.
+branch distribution represents the workload. Avoid a winner claim when
+measurement uncertainty overlaps the claimed difference.
 
 Investigate when:
 
@@ -312,7 +364,7 @@ Investigate when:
 - an expected constant-time path scales with input
 - an expected linear path appears constant
 - the ratio changes materially with input size
-- coefficient of variation exceeds 5%
+- coefficient of variation exceeds 5%, a review screen rather than an acceptance cutoff
 - allocation appears in an allocation-free contract
 
 ## Bounded investigations

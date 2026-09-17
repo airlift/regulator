@@ -14,16 +14,18 @@ text-processing workloads:
 | Compared with | Everyday expressions | Text processing |
 |---|---:|---:|
 | Native RE2 | 2.4× faster | 1.7× faster |
-| Java regex | 2.1× faster | 6.5× faster |
-| Trino regex (Joni) | 3.9× faster | 4.0× faster |
+| Java regex | 2.1× faster | 6.6× faster |
+| Trino regex (Joni) | 3.8× faster | 4.0× faster |
 | Trino LIKE | 5.5× faster | — |
 
-_Source: 1.0 preliminary results. Development builds with targeted updates; per-row sources are in the report. C9g with native access enabled and compiled patterns reused. Geometric mean of per-workload time ratios; input conversion excluded._
+_Source: Regulator 1.0 results `68e42b7d2a104798524189aac7e2a008b49c3d4a`. R9g with native access enabled and compiled patterns reused. Geometric mean of per-workload time ratios; input conversion excluded._
 <!-- benchmark-summary:end -->
 
 See the [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
 for individual workloads, Intel and Graviton results, absolute time differences,
-and pure-Java comparisons.
+and pure-Java comparisons. The [1.0 release results](docs/benchmarks/RESULTS_1.0.md)
+cover compiler cost, memory, concurrency, unresolved findings, and evidence
+retrieval.
 
 Results depend on the pattern, input, pattern reuse, CPU architecture, and native
 memory access. Comparisons measure corresponding public operations using each
@@ -87,10 +89,12 @@ including short-term-support releases.
 <dependency>
     <groupId>io.airlift</groupId>
     <artifactId>regulator</artifactId>
-    <version>${regulator.version}</version>
+    <version>1.0</version>
 </dependency>
 ```
 
+See the [1.0 release](https://github.com/airlift/regulator/releases/tag/1.0) and
+[API documentation](https://javadoc.io/doc/io.airlift/regulator/1.0).
 Slice is Regulator's only runtime dependency.
 
 ## Runtime acceleration
@@ -116,13 +120,13 @@ the API never exposes native pointers. Patterns, inputs, captures, and results
 remain Java and Slice data. Without these flags, Regulator uses scalar scanners
 and the pure-Java DFA.
 
-The DFA is sensitive to even one extra instruction per transition. Native memory
-avoids following Java object references for table rows and decoding compressed
-references, also known as compressed oops. In the current C9g measurements, the
-pure-Java route is about 7% slower for the median Trino operation. Many
-reused-pattern operations and all LIKE-only routes are effectively unchanged.
-Most applications should use the pure-Java default. Native access is worth
-considering when regex execution is a substantial part of the workload.
+Native memory avoids following Java object references for DFA table rows and
+decoding compressed references, also known as compressed oops. Its effect depends
+on the pattern, input, and matching engine; LIKE-only routes do not use the DFA.
+Start with the pure-Java default and compare both modes on your workload when
+regex execution is a substantial part of its cost. The
+[benchmark report](https://airlift.github.io/regulator/benchmarks/) includes
+separate native-access and pure-Java results.
 
 ## Documentation
 

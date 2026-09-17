@@ -6,14 +6,15 @@ one extra instruction can affect performance.
 
 ## Current phase
 
-The implementation and API are frozen for version 1.0. After the final build
-and correctness checks, release with a clearly labeled preliminary report using
-the existing measurements and targeted updates. Then run the
-[full qualification](benchmarks/QUALIFICATION_PLAN.md) against the released
-artifact and replace the preliminary results.
+Version 1.0 is published as `io.airlift:regulator:1.0`. The
+[release benchmark report](benchmarks/RESULTS_1.0.md) records measured coverage,
+findings, and remaining limitations. Preserve released API compatibility. Any
+production repair belongs to a subsequent version and a separately identified
+measurement campaign. Record collector revisions separately from the library
+artifact and tagged production source.
 
-Do not start speculative optimization work before that campaign. A new
-optimization requires either a material final-campaign gap or representative
+Do not start speculative optimization work. A new optimization requires
+either a material final-campaign gap or representative
 production evidence.
 
 ## Protected areas
@@ -82,7 +83,7 @@ Required:
 - a deterministic route or representation test
 - affected semantic and allocation tests
 - the exact affected benchmark and important protected controls
-- focused before/after AWS measurements on C9g, C8g, and C8i
+- focused before/after AWS measurements on R9g, R8g, and R8i
 
 ### T3: Protected execution loop
 
@@ -95,7 +96,7 @@ Required:
 - direct-engine and public-path benchmarks
 - scaling and dense/sparse controls
 - generated-code inspection when the mechanism depends on JIT shape
-- AWS confirmation on C9g, C8g, and C8i
+- AWS confirmation on R9g, R8g, and R8i
 
 ## Correctness gate
 
@@ -122,7 +123,7 @@ Use focused measurements during development:
 4. include important unaffected and fallback paths as protected controls
 5. check allocation and retained memory where relevant
 6. inspect scaling, not only one input size
-7. confirm a retained T2 or T3 change on C9g, C8g, and C8i
+7. confirm a retained T2 or T3 change on R9g, R8g, and R8i
 
 A 2% change calls for investigation, not automatic acceptance or rejection.
 Weigh these together for every material difference:
@@ -166,7 +167,7 @@ is a separate decision, not the default development loop.
    changed path, including fallback and nonzero Slice-offset cases.
 2. Include the exact motivating case, representative
    affected workloads, and unchanged controls. Cover both memory modes and
-   C8i, C8g, and C9g for routing or hot-loop changes. Set a round limit and
+   R8i, R8g, and R9g for routing or hot-loop changes. Set a round limit and
    machine-hour budget before execution. Use the cost guidance in the
    [AWS guide](../tools/re2-benchmark/aws/README.md#machine-hours-and-cost).
 3. Add the deterministic path or behavior test and
@@ -216,28 +217,34 @@ A new code change starts a new candidate and invalidates its affected results.
 
 ## Final qualification
 
-Run the complete campaign only after:
+Run the complete frozen publication campaign only after:
 
 - source, API, tests, and documentation are frozen
 - the full correctness matrix passes
 - the worktree is clean
 - comparator revisions and workload manifests are pinned
+- the user-facing publication inventory is frozen independently of results
 - no additional cleanup is planned
 
-For 1.0, run the complete C9g, C8g, and C8i campaign after release, using the
-published artifact for public-API measurements and recording its checksum and
-release tag. Internal-engine diagnostics must build from the same tagged source.
-Measure both native-memory and pure-Java routes. A later change invalidates at least
-the affected shards; a broad or hard-to-isolate change invalidates the complete
-campaign.
+For 1.0, run the R9g, R8g, and R8i publication campaign after release, using
+the published artifact for public-API measurements and recording its checksum
+and release tag. Measure both native-memory and pure-Java routes. Run internal
+diagnostics only when a qualification failure or explicit measurement-quality
+question requires them; use the same tagged source and give them a separate
+inventory, budget, and private archive. A later change invalidates at least the
+affected publication shards; a broad or hard-to-isolate change invalidates the
+complete publication campaign.
 
-Commit one final report containing the exact candidate commit, hosts, JDK,
-compiler flags, comparator revisions, workload identities, complete result
-tables, aggregation rules, and separately listed outliers. If the candidate
-changes afterward, its affected results are no longer final. Preliminary results
-may combine development revisions and targeted single-host follow-ups, provided
-the report says so and preserves each row's actual source, host coverage, and
-uncertainty. They do not satisfy the final campaign's replication requirements.
+Commit one final public report and download containing the exact candidate
+commit, hosts, JDK, compiler flags, comparator revisions, frozen public workload
+identities, final measurements, aggregation rules, and separately listed
+limitations. Index the private complete campaign, diagnostics, failed attempts,
+and superseded cohorts without adding them to the public download. If the
+candidate changes afterward, its affected results are no longer final.
+Preliminary results may combine development revisions and targeted single-host
+follow-ups, provided the report says so and preserves each row's actual source,
+host coverage, and uncertainty. They do not satisfy the final campaign's
+replication requirements.
 
 ## Release checklist
 
@@ -262,18 +269,22 @@ uncertainty. They do not satisfy the final campaign's replication requirements.
    If the workflow fails after staging or publication, inspect its logs, Njord
    state, repository tags, and Central before choosing a recovery step. Do not
    blindly rerun a potentially completed publication.
-5. Run the full qualification against the released artifact and tagged source
-   following [final qualification](#final-qualification). Record the artifact
-   checksum. Import the accepted report data and regenerate the README using
-   the [report instructions](../benchmark-report/README.md), then run
-   `npm run check`. Verify the deployed Pages report after those changes are
-   merged. Its refresh is separate from publishing the library artifact.
+5. Run the publication qualification against the released artifact and tagged
+   source following [final qualification](#final-qualification). Record the
+   artifact checksum. Project the accepted measurements onto the frozen public
+   workload source, write the complete capture to the private archive, and
+   import only the curated public output using the
+   [report instructions](../benchmark-report/README.md). Regenerate the README
+   and run `npm run check`. Verify the deployed Pages report and public download
+   after those changes are merged. Its refresh is separate from publishing the
+   library artifact.
 
 ## Benchmark reproduction
 
-The repository keeps benchmark source, frozen workload inputs, native build
-scripts, AWS orchestration, and summary tools. It does not keep exploratory
-outputs.
+The repository keeps benchmark source, frozen public workload inputs, native
+build scripts, AWS orchestration, the public release data, and summary tools.
+It indexes the private archive that holds exploratory outputs and the complete
+campaign evidence.
 
 A benchmark change must preserve:
 
@@ -282,7 +293,8 @@ A benchmark change must preserve:
 - architecture and JDK identity
 - native compiler optimization flags
 - clean-source and checksum checks
-- clear separation between diagnostic and final runs
+- exact public workload-source identity and checksum
+- clear separation between publication, measurement-quality, and diagnostic runs
 
 ## Trino adoption evidence
 

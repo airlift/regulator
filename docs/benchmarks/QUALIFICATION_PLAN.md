@@ -1,19 +1,22 @@
 # Regulator performance qualification plan
 
-Run this campaign after version 1.0 is released. The release requires the final
-build and correctness checks and ships with clearly labeled preliminary
-results from existing measurements and targeted updates. This campaign
-replaces those results with measurements of the released artifact.
+Version 1.0 is released. This plan records the qualification requirements for
+measurements of the published `io.airlift:regulator:1.0` artifact. The
+[release results](RESULTS_1.0.md) report the completed campaign and its
+[measurement-quality follow-up](MEASUREMENT_QUALITY.md). The preliminary
+development measurements remain a separate historical capture.
 
-Record the artifact checksum and release tag. Measure public APIs with that
-artifact and build internal-engine diagnostics from the same tag. Trino
-operations are part of the comparison; integration into Trino is a separate
-project.
+Record the artifact checksum and release tag. Measure the frozen user-facing
+workload inventory through public APIs with that artifact. Trino operations are
+part of the comparison; integration into Trino is a separate project. Run
+internal-engine diagnostics from the same tag only when a qualification result
+or explicit measurement-quality question requires them.
 
 For machine-hour and dollar planning, see the
 [AWS cost guide](../../tools/re2-benchmark/aws/README.md#machine-hours-and-cost).
-Prefer Spot instances and review the complete baseline and language job plans
-before authorizing collection.
+The 1.0 campaign uses Oregon Spot only, with no On-Demand fallback. Freeze the
+publication job plans and shared admission budget before collection. Give any
+conditional diagnostic campaign its own inventory, budget, and archive.
 
 During development, use the focused checks in the
 [maintenance guide](../MAINTAINING_REGULATOR.md). Repeating the full matrix
@@ -22,18 +25,22 @@ invalidate.
 
 ## Objectives
 
-The campaign must answer five separate questions:
+The release campaign must answer four user-facing questions:
 
-1. Does the Java engine scale like native RE2 for every
-   supported algorithm and input size?
-2. What overhead do the Slice API and Trino-compatible repeated
-   operations add?
-3. Is Regulator faster than Joni for the common syntax and
-   operations Trino actually performs?
-4. How does it compare across Rebar's complete applicable curated
-   corpus?
-5. Are throughput, allocation, retained memory, and concurrency behavior stable
-   on both modern Intel and Arm Graviton systems?
+1. How do reused public Slice operations compare with native RE2, JDK Pattern,
+   Joni, and Trino LIKE?
+2. What overhead do compilation, first use, and repeated use add?
+3. How do the Trino-compatible extraction, split, and replacement operations
+   compare with Joni?
+4. How does Regulator behave on the selected user-relevant adversarial cases
+   across modern Intel and Arm Graviton systems?
+
+The supporting qualification must also establish equivalent work, correctness,
+independent-host coverage, measurement uncertainty, and both the native-access
+and pure-Java memory routes. It does not need to answer every internal scaling,
+compiler, allocation, retained-memory, concurrency, or route-selection question
+on every release. Open a separate diagnostic investigation when the public
+evidence fails a gate or cannot support a claimed explanation.
 
 Explain each material difference in terms of algorithms, memory access,
 allocation, dispatch, or generated code. A ratio alone does not answer these
@@ -65,17 +72,21 @@ for changed code cannot qualify the new candidate without a rerun.
 
 ## Comparators
 
-Build and record exact revisions for:
+Build and record exact revisions for the comparators used by the frozen public
+inventory:
 
 1. pinned native RE2 at `972a15cedd008d846f1a39b2e88ce48d7f166cbd`
-2. Regulator through direct engine entry points used only for diagnosis
-3. Regulator through the public Slice API
-4. Regulator through `TrinoRegexp`
-5. the Joni version used by the selected Trino revision
-6. Regulator through `JavaRegexp`, compared with the pinned JDK's
+2. Regulator through the public Slice API
+3. Regulator through `TrinoRegexp`
+4. the Joni version used by the selected Trino revision
+5. Regulator through `JavaRegexp`, compared with the pinned JDK's
    `java.util.regex.Pattern`
-7. Regulator through `TrinoLikePattern`, compared with Trino's actual SQL LIKE
+6. Regulator through `TrinoLikePattern`, compared with Trino's actual SQL LIKE
    route
+
+Direct engine entry points belong to conditional diagnostics. Pin and record
+them when such a diagnostic is required; do not add them to the routine public
+release inventory.
 
 Native and Java benchmarks must use identical pattern bytes, input bytes,
 search windows, anchors, expected results, and deterministic random seeds. The
@@ -87,10 +98,11 @@ The language matrix and representation rules in
 [`LANGUAGE_COMPARISON_PLAN.md`](LANGUAGE_COMPARISON_PLAN.md) also apply. In
 particular, the JDK comparator receives precomputed `String` values representing
 the same logical Unicode text; decoding is not included in its engine timing.
-Retain the full collection independently of the final page layout, including
-unsupported mappings, reproducible timeout receipts, raw per-fork/per-iteration
-measurements, and normalization denominators. Verification failures block
-publication.
+Retain the full public collection independently of the final page layout,
+including unsupported mappings, reproducible timeout receipts, raw
+per-fork/per-iteration measurements, and normalization denominators.
+Verification failures block publication. Preserve campaign-only diagnostics in
+the private archive rather than the public download.
 
 The shared everyday and lifecycle collector is documented in
 [`tools/re2-benchmark/language`](../../tools/re2-benchmark/language/README.md).
@@ -98,7 +110,9 @@ It includes explicit bulk language mappings, original-source result and byte
 trace verification, raw-evidence export, same-host batch planning, and
 archive-based worker builds. The shared controller schedules these suites with
 `--language-plan`; its existing baseline shards remain a separate required
-campaign. Both campaigns must measure the same frozen candidate. Local
+campaign. Both campaigns must measure the same released library artifact and
+production source. Record and freeze each suite's collector revision separately;
+a collector repair does not change the measured release identity. Local
 verification and controller tests establish collection readiness, not completed
 AWS qualification or measured performance.
 
@@ -106,12 +120,19 @@ AWS qualification or measured performance.
 
 Use dedicated, non-burstable AWS instances with local execution on:
 
-- one current-generation Intel server instance
-- one Graviton5 C9g instance as the primary current Arm target
-- one Graviton4 C8g instance as the production and generational Arm baseline
+- one Intel R8i instance
+- one Graviton5 R9g instance as the primary current Arm target
+- one Graviton4 R8g instance as the production and generational Arm baseline
 
 The exact instance types, AMIs, and JDKs are pinned in
 [`platforms.tsv`](../../tools/re2-benchmark/baseline/platforms.tsv).
+Ordinary workers use `r8i.large`, `r8g.large`, and `r9g.large`, each with two
+vCPUs and 16 GiB RAM. The `lifecycle-shared-cold` shard uses the corresponding
+8-vCPU `.2xlarge` type and affinity `0-7`; ordinary work uses affinity `0`.
+The measured heap is 8 GiB. Forked JMH launchers use 64–256 MiB, with the
+full heap and memory-mode options explicitly passed to the measured fork.
+Nonforked measurements retain the full heap in the running JVM.
+
 Review those pins before freezing a new campaign; changing hardware requires
 updating the manifest and validating it, not overriding a worker silently.
 Prefer equivalent vCPU and memory sizes, avoid burstable families, and use one
@@ -138,7 +159,7 @@ Joni's Rebar verification and measurement remain bounded by their existing
 If verification classifies every Joni row, no Joni measurement process runs.
 Malformed output, unknown errors, and unexpected process failures remain fatal.
 
-Report C8g and C9g independently; do not combine them into one Arm aggregate.
+Report R8g and R9g independently; do not combine them into one Arm aggregate.
 Record the reported CPU frequency, cache topology, memory generation, and
 available vector instruction capabilities so differences between Graviton
 generations can be attributed rather than treated as run-to-run noise.
@@ -148,7 +169,7 @@ uses its sibling thread. Disable unrelated agents and scheduled work. Use a
 fixed CPU power policy where the platform permits it. Reboot or replace the
 instance between independent host sessions.
 
-Run three independent host sessions for Intel, C8g, and C9g. A session is a
+Run three independent host sessions for Intel, R8g, and R9g. A session is a
 fresh instance or reboot followed by the complete randomized benchmark order.
 
 ## Workload manifest
@@ -272,7 +293,7 @@ match ranges or output checksums.
 
 ### Statistics
 
-Report each system's median, observed host range, coefficient of variation,
+For the original baseline capture, report each system's median, observed host range, coefficient of variation,
 throughput or time, bytes per second where meaningful, and allocation per
 operation. The [reducer's statistics policy](../../tools/re2-benchmark/baseline/REPORTING.md#aggregation)
 does not report confidence intervals from only three or four hosts, and
@@ -342,6 +363,9 @@ Keep one immutable working directory per candidate commit containing:
 - a gap ledger with status, root cause, evidence, and disposition
 - a final report separating engine, Slice API, and Trino-operation conclusions
 
+Keep any conditional diagnostic campaign in a separate directory with its own
+inventory and budget. Do not merge its rows into the publication inventory.
+
 Commit the final decision-focused report, normalized machine-readable tables,
 environment manifests, workload checksum, and comparator revisions. Large raw
 profiles and benchmark output may be stored externally when the report records
@@ -358,10 +382,35 @@ not a reproducible campaign.
 2. Add or update benchmark harnesses and run local smoke tests only.
 3. Provision Intel and Graviton hosts and capture environment manifests.
 4. Run correctness preflight on both architectures.
-5. Run three independent randomized qualification sessions per architecture.
+5. Run three independent randomized publication sessions per architecture.
 6. Normalize results and open a gap ledger before changing code.
 7. Investigate and fix gaps one at a time with both correctness and benchmark
    gates.
 8. If the candidate changed, recollect the invalidated coverage according to
    the entry gate; otherwise retain the completed qualification.
-9. Commit the decision-focused final report and required reproduction metadata.
+9. Project the accepted measurements onto the frozen publication inventory,
+   archive the complete campaign privately, and commit the decision-focused
+   report and required reproduction metadata.
+
+## Measurement-quality follow-up
+
+The original job inventory above remains the reproduction contract for its
+archived capture. The final public report applies the mean-cost estimator and
+approximate interval rules in [the methodology](METHODOLOGY.md#statistics).
+Selected new measurements use the [isolated baseline collector](../../tools/re2-benchmark/baseline/REMEASUREMENT.md)
+and frozen language `steady-state-v1` profiles. Keep original, diagnostic and
+replacement evidence separately identified.
+
+Before expanding a replacement fleet, require a complete representative
+integration cohort across all target CPUs, independently validated source and
+release identities, exact workload coverage, all process samples, memory and
+CPU bounds, recovery and verified cleanup. Inspect temporal traces as well as
+aggregate drift. Opposing slow periods can cancel in a median signed shift.
+Native controls must match the affected workload when testing an environmental
+hypothesis. Stable tiny controls do not establish stability for large memory
+working sets.
+
+Do not classify a noisy valid result as an infrastructure failure or retry it
+until its interval narrows. Longer windows, more independent starts or different
+host configurations must answer a recorded measurement question. Preserve all
+attempts and test the changed protocol before accepting replacement evidence.

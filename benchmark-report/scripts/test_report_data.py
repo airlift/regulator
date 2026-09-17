@@ -12,6 +12,8 @@ from pathlib import Path
 
 
 from test_language_data import report_fixture
+from build_capture_data import write_report
+from language_data import RELEASE_PLATFORMS
 
 
 MODULE_PATH = Path(__file__).with_name("report_data.py")
@@ -20,7 +22,38 @@ report_data = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(report_data)
 
 
+def use_release_platforms(report):
+    report['platforms'] = RELEASE_PLATFORMS
+    for row in report['rows']:
+        row['platform'] = 'r' + row['platform'][1:]
+        result = row['result']
+        if result['state'] != 'compared':
+            continue
+        result['estimator'] = 'mean'
+        result['uncertainty'] = {
+            'method': 'hierarchical-bootstrap-v1', 'level': .95, 'replicates': 4000,
+            'hostCount': len(result['hosts']),
+            'ratioInterval': [result['ratio'], result['ratio']],
+            'candidateIntervalNs': [result['candidateNs'], result['candidateNs']],
+            'comparatorIntervalNs': [result['comparatorNs'], result['comparatorNs']],
+            'processCounts': {
+                side: [len(host[side]['epochMeansNs']) for host in result['hosts']]
+                for side in ('candidate', 'comparator')
+            },
+        }
+    return report
+
+
 class TestReportData(unittest.TestCase):
+    def test_complete_output_is_validated_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'complete.json'
+            report = report_fixture()
+            report['rows'][0]['result']['uncertainty'] = {}
+            with self.assertRaisesRegex(ValueError, 'uncertainty'):
+                write_report(report, output)
+            self.assertFalse(output.exists())
+
     def test_import_rejects_unsupported_or_missing_report_version_before_writing(self):
         for version in (1, 3, True, 2**53, None):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
@@ -175,6 +208,89 @@ class TestReportData(unittest.TestCase):
         report['diagnostics'] = {'nestedMeasurement': math.nan}
         with self.assertRaisesRegex(ValueError, 'report data contains a nonfinite number'):
             report_data.validate_report(report)
+
+    def test_released_publication_freezes_artifact_sources_and_grouping(self):
+        release = {
+            'schema_version': 1, 'group_id': 'io.airlift', 'artifact_id': 'regulator',
+            'version': '1.0', 'source_commit': 'a' * 40, 'engine_tree': 'b' * 40,
+            'jar_sha256': 'c' * 64,
+        }
+        source = report_fixture()
+        source['rows'][0].update(population='ordinary-scalar', family='fixture')
+        current = use_release_platforms(copy.deepcopy(source))
+        current['sources'].update(currentCandidate=release['source_commit'],
+                                  engineTree=release['engine_tree'], releaseVersion='1.0')
+        current['provenance']['releasedArtifact'] = copy.deepcopy(release)
+        current['publicationScope'] = {
+            'policy': 'user-facing-release-v1', 'workloadSourceCandidate': 'source',
+            'workloadSourceRows': len(current['rows']), 'completeCampaignRows': len(current['rows']),
+            'publishedRows': len(current['rows']), 'excludedCampaignRows': 0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / 'source.json'
+            source_path.write_text(report_data.encode_json(source))
+            current['publicationScope']['workloadSourceSha256'] = report_data.file_sha256(source_path)
+            releases = [({'candidate': 'source'}, source_path, source)]
+            with patch.object(report_data.released_artifact, 'manifest', return_value=release):
+                report_data.validate_publication_scope(current, releases)
+                legacy_result = copy.deepcopy(current)
+                legacy_result['rows'][0]['originalResult'] = copy.deepcopy(source['rows'][0]['result'])
+                report_data.validate_publication_scope(legacy_result, releases)
+                for estimator, uncertainty in (
+                        (None, None), ('median', {}), ('mean', None),
+                        ('mean', {'method': 'other', 'level': .95}),
+                        ('mean', {'method': 'hierarchical-bootstrap-v1', 'level': .90})):
+                    changed = copy.deepcopy(current)
+                    result = changed['rows'][0]['result']
+                    if estimator is None:
+                        result.pop('estimator')
+                    else:
+                        result['estimator'] = estimator
+                    if uncertainty is None:
+                        result.pop('uncertainty')
+                    else:
+                        result['uncertainty'] = uncertainty
+                    with self.subTest(estimator=estimator, uncertainty=uncertainty), \
+                            self.assertRaisesRegex(ValueError, 'mean with uncertainty'):
+                        report_data.validate_publication_scope(changed, releases)
+                legacy = copy.deepcopy(current)
+                legacy['platforms'] = source['platforms']
+                for row in legacy['rows']:
+                    row['platform'] = 'c' + row['platform'][1:]
+                with self.assertRaisesRegex(ValueError, 'platform set'):
+                    report_data.validate_publication_scope(legacy, releases)
+                for field, value in (
+                        ('id', 'changed'), ('population', 'changed'), ('family', 'changed'),
+                        ('artifact.version', '1.1'), ('artifact.source_commit', 'd' * 40),
+                        ('artifact.engine_tree', 'd' * 40), ('artifact.jar_sha256', 'd' * 64),
+                        ('sources.currentCandidate', 'd' * 40),
+                        ('sources.engineTree', 'd' * 40), ('sources.releaseVersion', '1.1')):
+                    changed = copy.deepcopy(current)
+                    if field.startswith('artifact.'):
+                        changed['provenance']['releasedArtifact'][field.split('.', 1)[1]] = value
+                    elif field.startswith('sources.'):
+                        changed['sources'][field.split('.', 1)[1]] = value
+                    else:
+                        changed['rows'][0][field] = value
+                    with self.subTest(field=field), self.assertRaises(ValueError):
+                        report_data.validate_publication_scope(changed, releases)
+
+                migrated = copy.deepcopy(current)
+                previous = source['rows'][0]
+                previous.update(id='like-lifecycle/ANY_ASCII/compile', language='like',
+                                operation='compile', caseId='trino-like/ANY_ASCII')
+                migrated['rows'][0].update(id='baseline/like-compile/ANY_ASCII', language='like',
+                                           operation='compile', caseId='trino-like/ANY_ASCII')
+                report_data.validate_publication_scope(migrated, releases)
+                migrated['rows'][0]['id'] = 'baseline/like-compile/changed'
+                with self.assertRaisesRegex(ValueError, 'id changed'):
+                    report_data.validate_publication_scope(migrated, releases)
+
+                previous.update(id='like-lifecycle/ANY_ASCII/optimized/singleUse',
+                                operation='singleUse', caseId='trino-like/ANY_ASCII/optimized')
+                migrated['rows'][0].update(id='baseline/like-dfa-single-use/ANY_ASCII/optimized',
+                                           operation='singleUse', caseId='trino-like/ANY_ASCII/optimized')
+                report_data.validate_publication_scope(migrated, releases)
 
     def test_report_serialization_rejects_nonfinite_number(self):
         with self.assertRaises(ValueError):
@@ -370,6 +486,100 @@ class TestReportData(unittest.TestCase):
                 report_data.import_data(source)
                 imported = report_data.load_json(report_data.current_data_file())
             self.assertEqual({"nullable": None, "value": 42}, imported["producerExtension"])
+
+    def test_released_publication_is_pinned_to_user_facing_workloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workloads = report_fixture()
+            workloads['sources'].update(currentCandidate='workloads', currentLabel='Preliminary workloads')
+            source_name = self.write_report(root, workloads, 'workloads')
+            source_path = root / source_name
+            report = use_release_platforms(copy.deepcopy(workloads))
+            release = report_data.released_artifact.manifest(report_data.REPOSITORY_ROOT, '1.0')
+            report['sources'].update(currentCandidate=release['source_commit'], engineTree=release['engine_tree'],
+                                     currentLabel='Regulator 1.0 results', releaseVersion='1.0')
+            report['provenance']['releasedArtifact'] = release
+            report['publicationScope'] = {
+                'policy': 'user-facing-release-v1',
+                'workloadSourceCandidate': 'workloads',
+                'workloadSourceSha256': report_data.file_sha256(source_path),
+                'workloadSourceRows': len(workloads['rows']),
+                'completeCampaignRows': len(workloads['rows']) + 10,
+                'publishedRows': len(workloads['rows']),
+                'excludedCampaignRows': 10,
+                'internalEvidence': 'private archive',
+            }
+            releases = [({'candidate': 'workloads'}, source_path, workloads)]
+            report_data.validate_publication_scope(report, releases)
+            report['rows'].append(copy.deepcopy(report['rows'][0]))
+            with self.assertRaisesRegex(ValueError, 'row counts'):
+                report_data.validate_publication_scope(report, releases)
+
+    def test_released_publication_rejects_extra_or_changed_workloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workloads = report_fixture()
+            workloads['sources'].update(currentCandidate='workloads', currentLabel='Preliminary workloads')
+            source_name = self.write_report(root, workloads, 'workloads')
+            source_path = root / source_name
+            report = use_release_platforms(copy.deepcopy(workloads))
+            release = report_data.released_artifact.manifest(report_data.REPOSITORY_ROOT, '1.0')
+            report['sources'].update(currentCandidate=release['source_commit'], engineTree=release['engine_tree'],
+                                     currentLabel='Regulator 1.0 results', releaseVersion='1.0')
+            report['provenance']['releasedArtifact'] = release
+
+            def scope(rows):
+                return {
+                    'policy': 'user-facing-release-v1',
+                    'workloadSourceCandidate': 'workloads',
+                    'workloadSourceSha256': report_data.file_sha256(source_path),
+                    'workloadSourceRows': len(workloads['rows']),
+                    'completeCampaignRows': rows + 10,
+                    'publishedRows': rows,
+                    'excludedCampaignRows': 10,
+                    'internalEvidence': 'private archive',
+                }
+
+            releases = [({'candidate': 'workloads'}, source_path, workloads)]
+            valid_rows = copy.deepcopy(report['rows'])
+            report['rows'].append(copy.deepcopy(report['rows'][0]))
+            report['publicationScope'] = scope(len(report['rows']))
+            with self.assertRaisesRegex(ValueError, 'row counts'):
+                report_data.validate_publication_scope(report, releases)
+
+            report['rows'] = valid_rows
+            report['publicationScope'] = scope(len(report['rows']))
+            report['rows'][0]['name'] = 'changed public workload'
+            with self.assertRaisesRegex(ValueError, 'name changed'):
+                report_data.validate_publication_scope(report, releases)
+
+    def test_released_publication_rejects_missing_or_wrong_source_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workloads = report_fixture()
+            workloads['sources'].update(currentCandidate='workloads', currentLabel='Preliminary workloads')
+            source_name = self.write_report(root, workloads, 'workloads')
+            source_path = root / source_name
+            report = use_release_platforms(copy.deepcopy(workloads))
+            release = report_data.released_artifact.manifest(report_data.REPOSITORY_ROOT, '1.0')
+            report['sources'].update(currentCandidate=release['source_commit'], engineTree=release['engine_tree'],
+                                     currentLabel='Regulator 1.0 results', releaseVersion='1.0')
+            report['provenance']['releasedArtifact'] = release
+            report['publicationScope'] = {
+                'policy': 'user-facing-release-v1',
+                'workloadSourceCandidate': 'workloads',
+                'workloadSourceSha256': '0' * 64,
+                'workloadSourceRows': len(workloads['rows']),
+                'completeCampaignRows': len(workloads['rows']),
+                'publishedRows': len(workloads['rows']),
+                'excludedCampaignRows': 0,
+                'internalEvidence': 'private archive',
+            }
+            with self.assertRaisesRegex(ValueError, 'source is missing'):
+                report_data.validate_publication_scope(report, [])
+            with self.assertRaisesRegex(ValueError, 'source is missing'):
+                report_data.validate_publication_scope(
+                    report, [({'candidate': 'workloads'}, source_path, workloads)])
 
 
 if __name__ == "__main__":

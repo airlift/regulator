@@ -3,6 +3,8 @@
 import argparse
 from collections import defaultdict
 import csv
+import gzip
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -11,6 +13,7 @@ import sys
 
 from baseline_data import LIKE_INPUT_BYTES, baseline_rows, read_rows
 from language_data import LANGUAGES, MEMORY_MODES, PLATFORMS, digest, language_rows, outcome, reduce_hosts
+from publication_data import publication_data
 from report_data import validate_report
 
 
@@ -20,6 +23,57 @@ ENGINE_TREE = 'fae35d9229c443e10b894ccdc105ef9c0b03c031'
 def load(path):
     with Path(path).open() as source:
         return json.load(source)
+
+
+def write_report(report, path):
+    validate_report(report)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(
+        report, allow_nan=False, ensure_ascii=False, separators=(',', ':')) + '\n')
+
+
+def validate_released_campaign_paths(arguments):
+    inputs = {
+        '--released-campaign': arguments.released_campaign,
+        '--publication-workloads': arguments.publication_workloads,
+        '--measurement-followup': arguments.measurement_followup,
+        '--analysis-inputs': arguments.analysis_inputs,
+    }
+    if arguments.released_campaign.exists():
+        plan = load(arguments.released_campaign)
+        if plan.get('candidate_provenance'):
+            inputs['campaign candidate provenance'] = Path(plan['candidate_provenance'])
+        for index, item in enumerate(plan.get('language', [])):
+            for field in ('plan', 'export', 'candidate_provenance'):
+                if item.get(field):
+                    inputs[f'language[{index}].{field}'] = Path(item[field])
+            if item.get('export'):
+                inputs[f'language[{index}] acceptance ledger'] = (
+                    Path(item['export']).parent / 'accepted-language-sessions.json')
+        baseline = plan.get('baseline', {})
+        for field in ('primary', 'confirmation', 'reduction', 'candidate_provenance'):
+            if baseline.get(field):
+                inputs[f'baseline.{field}'] = Path(baseline[field])
+    outputs = {
+        '--output': arguments.output,
+        '--complete-output': arguments.complete_output,
+        '--publication-analysis-output': arguments.publication_analysis_output,
+    }
+
+    def aliases(first, second):
+        first_resolved = first.resolve()
+        second_resolved = second.resolve()
+        if first_resolved == second_resolved:
+            return True
+        if second.is_dir() and first_resolved.is_relative_to(second_resolved):
+            return True
+        return first.exists() and second.exists() and first.samefile(second)
+
+    items = list(outputs.items())
+    for index, (name, path) in enumerate(items):
+        for other_name, other_path in items[index + 1:] + list(inputs.items()):
+            if aliases(path, other_path):
+                raise ValueError(f'{name} must differ from {other_name}')
 
 
 def validate_reduction(directory):
@@ -165,16 +219,59 @@ def main():
     for name in ('language', 'baseline', 'lifecycle-manifest', 'bulk-manifest', 'like-capture', 'like-manifest', 'output'):
         parser.add_argument('--' + name, type=Path, required=name == 'output')
     parser.add_argument('--released-campaign', type=Path, help='complete release campaign paths and pinned artifact version')
+    parser.add_argument('--publication-workloads', type=Path,
+                        help='frozen user-facing workload report required for a released campaign')
+    parser.add_argument('--complete-output', type=Path,
+                        help='complete campaign capture required for the private evidence archive')
+    parser.add_argument('--measurement-followup', type=Path,
+                        help='frozen complete-campaign follow-up report with approved replacement estimates')
+    parser.add_argument('--analysis-inputs', type=Path,
+                        help='normalized inputs identified by the measurement-follow-up provenance')
+    parser.add_argument('--publication-analysis-output', type=Path,
+                        help='deterministic public-input projection for independent replay')
     arguments = parser.parse_args()
     if arguments.released_campaign:
         from release_capture import build as build_release
-        report = build_release(arguments.released_campaign)
+        if any(value is None for value in (
+                arguments.publication_workloads, arguments.complete_output,
+                arguments.measurement_followup, arguments.analysis_inputs,
+                arguments.publication_analysis_output)):
+            parser.error('released campaign requires --publication-workloads, --complete-output, '
+                         '--measurement-followup, --analysis-inputs and --publication-analysis-output')
+        try:
+            validate_released_campaign_paths(arguments)
+        except ValueError as error:
+            parser.error(str(error))
+        complete = build_release(arguments.released_campaign)
+        from measurement_followup import apply as apply_measurement_followup, load as load_followup
+        complete = apply_measurement_followup(
+            complete, load_followup(arguments.measurement_followup), arguments.analysis_inputs)
+        write_report(complete, arguments.complete_output)
+        content = arguments.publication_workloads.read_bytes()
+        published = json.loads(gzip.decompress(content) if arguments.publication_workloads.suffix == '.gz' else content)
+        report = publication_data(complete, published, hashlib.sha256(content).hexdigest())
+        from measurement_followup import project_analysis_inputs, row_identity
+        public_identities = {
+            row_identity(row) for row in report['rows'] if row['result']['state'] == 'compared'
+        }
+        public_hash, public_count = project_analysis_inputs(
+            arguments.analysis_inputs, public_identities, arguments.publication_analysis_output)
+        followup = report['provenance']['measurementFollowup']
+        followup['completeAnalysisInputSha256'] = followup['analysisInputSha256']
+        followup['completeAnalysisInputRows'] = followup['analysisInputRows']
+        followup['analysisInputSha256'] = public_hash
+        followup['analysisInputRows'] = public_count
+        followup['analysisInputScope'] = 'published-comparisons'
     else:
+        if any((arguments.publication_workloads, arguments.complete_output,
+                arguments.measurement_followup, arguments.analysis_inputs,
+                arguments.publication_analysis_output)):
+            parser.error('--publication-workloads, --complete-output, --measurement-followup, '
+                         '--analysis-inputs and --publication-analysis-output require --released-campaign')
         if any(getattr(arguments, name) is None for name in ('language', 'baseline', 'lifecycle_manifest', 'bulk_manifest', 'like_capture', 'like_manifest')):
             parser.error('legacy capture requires all language, baseline, manifest, and LIKE inputs')
         report = build(arguments)
-    arguments.output.parent.mkdir(parents=True, exist_ok=True)
-    arguments.output.write_text(json.dumps(report, allow_nan=False, ensure_ascii=False, separators=(',', ':')) + '\n')
+    write_report(report, arguments.output)
     print(f"Built {len(report['rows'])} report rows from verified captures: {arguments.output}")
 
 

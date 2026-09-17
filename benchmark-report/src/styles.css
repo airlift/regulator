@@ -114,6 +114,7 @@ code { font-family: var(--font-geist-mono, monospace); }
   line-height: 1;
   letter-spacing: -.05em;
 }
+.scan-header h1.release-title { margin-top: 0; }
 .source-line { margin: 0; color: var(--muted); font-size: 11px; }
 .benchmark-controls { display: flex; flex-direction: column; gap: 9px; align-items: flex-end; }
 .platform-switch, .memory-switch { display: flex; gap: 5px; }
@@ -362,4 +363,23 @@ code { font-family: var(--font-geist-mono, monospace); }
   .adversarial-groups summary > span:nth-of-type(3) { display: none; }
 }
 
-.ratio-interval { display: block; font-size: 10px; font-weight: 400; margin-top: 3px; }
+
+
+.measurement-quality { margin: 12px 0 20px; font-size: 12px; color: var(--muted); }
+.measurement-quality > summary { cursor: pointer; line-height: 1.6; }
+.quality-details-label { margin-left: 10px; text-decoration: underline; text-underline-offset: 2px; }
+.quality-details { margin-top: 12px; padding: 4px 16px 12px; border-left: 2px solid var(--line); color: var(--ink); }
+.measurement-notes h2 { margin: 0 0 10px; font-size: 16px; }
+.measurement-quality p, .measurement-notes p { font-size: 12px; line-height: 1.6; max-width: 1000px; }
+.quality-summary { width: min(100%, 580px); margin: 16px 0; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.quality-summary th, .quality-summary td { padding: 7px 12px; border-bottom: 1px solid var(--line); text-align: right; }
+.quality-summary th:first-child { text-align: left; padding-left: 0; }
+.quality-summary tbody th { font-weight: 400; }
+.quality-marker { border: 0; background: transparent; color: #855317; font: inherit; font-weight: 750; padding: 0 3px; cursor: pointer; }
+.scan-result .quality-marker { color: inherit; margin-left: 1px; padding: 0; }
+.quality-marker:hover { text-decoration: underline; }
+.quality-marker:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.quality-methodology { margin-top: 12px; font-size: 12px; }
+.quality-methodology > summary { cursor: pointer; color: var(--muted); }
+.measurement-notes { margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--line); }
+.measurement-notes p:focus { outline: 2px solid #b5a57a; outline-offset: 5px; }

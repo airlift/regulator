@@ -3,9 +3,10 @@
 The report groups results by pattern language, comparing each Regulator API
 with the library a developer would normally use for that language.
 
-Collection and reporting are implemented. Existing measurements supply the
-preliminary 1.0 report; the [qualification plan](QUALIFICATION_PLAN.md) schedules
-the full released-artifact campaign. This document does not authorize a run.
+Collection and reporting are implemented. The
+[qualification plan](QUALIFICATION_PLAN.md) defines the full released-artifact
+campaign; [the release results](RESULTS_1.0.md) record its coverage and findings.
+This document does not authorize a run.
 
 Follow [workload organization](WORKLOAD_ORGANIZATION.md) for classification
 and weighting. Within each language, keep ordinary execution, lifecycle,
@@ -192,9 +193,9 @@ disagreement blocks collection; it is not classified as incompatibility.
 The tools support same-host batches, archive-based worker builds, AWS dispatch,
 validated restarts, and aggregation from raw evidence. Language suites run
 separately from the baseline shards, Trino operations, and LIKE coverage; all
-are required. Final qualification still requires the released-artifact campaign.
-The preliminary report keeps each measurement's actual source identity, and
-page-layout changes must preserve raw samples and workload IDs.
+are required. Final qualification requires the complete released-artifact
+campaign. Historical preliminary reports keep each measurement's actual source
+identity. Page-layout changes must preserve raw samples and workload IDs.
 
 ## Completion criteria
 

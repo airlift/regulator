@@ -50,8 +50,10 @@ await build({
 });
 
 await cp(resolve(reportRoot, "src/styles.css"), resolve(outputRoot, "styles.css"));
+await cp(resolve(reportRoot, "../docs/benchmarks/MEASUREMENT_QUALITY.md"), resolve(outputRoot, "measurement-quality.txt"));
 await mkdir(resolve(outputRoot, "data"));
-// Keep the original publication files recoverable, independent of UI projections.
+// Retain only versioned public captures in the site artifact. Complete campaign
+// diagnostics live in the separately indexed private evidence archive.
 for (const file of dataFiles) {
   await writeFile(resolve(outputRoot, "data", file.replace(/\.gz$/, "") + ".gz"), gzipSync(await readData(resolve(dataRoot, file))));
 }

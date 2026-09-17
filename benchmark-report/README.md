@@ -5,8 +5,9 @@ benchmark report. The build writes a Pages-ready site to
 `target/benchmark-report/benchmarks/`.
 
 Each language page compares its Regulator API with the corresponding library:
-native RE2, JDK `Pattern`, Joni, or Trino's SQL LIKE route. The default is C9g
-with native memory. The URL fragment stores the language, CPU, and memory
+native RE2, JDK `Pattern`, Joni, or Trino's SQL LIKE route. The default uses
+native memory on R9g for released-artifact captures or C9g for historical
+captures. The URL fragment stores the language, CPU, and memory
 selection, even when opening a local file.
 
 Local checks require Node.js 22 or newer and Python 3.11 or newer on `PATH`.
@@ -18,7 +19,7 @@ needs no further download. Previously visited selections are cached in memory.
 After a page request fails, the next attempt revalidates the manifest so an open
 tab can recover when a deployment replaces the page files. Cached pages are
 identified by selection and immutable filename, not selection alone.
-To update results without changing page code:
+To import an already curated result without changing page code:
 
 ```bash
 npm ci --prefix benchmark-report
@@ -32,22 +33,27 @@ README generation invokes the report's TypeScript summary through Node.js, so
 install the report dependencies before running `update-readme` or `check`.
 The summary uses the same workload classification and equivalent-work checks
 as the dashboard. It has separate everyday and text-processing columns, each
-using C9g native-access measurements and a geometric mean of the eligible row
-time ratios, with each row weighted equally. Each row retains its existing
+using R9g native-access measurements for released-artifact captures or C9g for
+historical captures. It takes a geometric mean of the eligible row time ratios,
+with each row weighted equally. Each row retains its existing
 aggregation of paired-host measurements; raw repetitions are not pooled.
 Everyday regex results use reused contains/count operations. LIKE uses warmed
 matches, excludes `ORDERED_DENSE_FALSE`, and includes both measured DFA settings
 where applicable. Text processing follows the visible text-processing section;
 LIKE has no separate text-processing summary. Non-comparable, incompatible,
 unfinished, compilation, and synthetic-stress results do not enter either column.
-Valid rows with timing-variation or host-disagreement warnings remain in the
-summary. These warnings describe variability, not incorrect results or unequal
-API work. The dashboard preserves them when displaying individual rows.
+All valid numeric rows contribute to the summary, including uncertain near
+ties. Current results use mean operation costs and approximate 95% intervals
+from paired hosts and whole processes. Historical captures retain their
+original estimators and warning labels. See
+[measurement quality](../docs/benchmarks/MEASUREMENT_QUALITY.md) and the
+[statistical replay](analysis/README.md) for definitions and reproduction.
 
-Import checks platform and memory-mode coverage, stores the data as deterministic
-gzip with a hash of the uncompressed JSON, and updates the manifest. Both JSON
-and `.json.gz` inputs are supported. It preserves previous entries; choosing
-which reports to publish is a separate decision.
+Import checks platform and memory-mode coverage, publication scope, and the
+pinned workload-source checksum. It stores the data as deterministic gzip with
+a hash of the uncompressed JSON and updates the manifest. Both JSON and
+`.json.gz` inputs are supported. It preserves previous publication entries;
+choosing which reports to publish is a separate decision.
 
 Compression keeps the checked-in data below GitHub's large-file warning. Import
 and CI reject stored files of 50 MiB or larger. The site build derives compact
@@ -55,11 +61,29 @@ page files from that evidence without changing the input data. GitHub Pages
 compresses JSON responses over HTTP; browsers decompress them automatically.
 No client-side compression library is needed.
 
-The footer links directly to a complete `.json.gz` download, including every
-configuration, all supplied patterns, per-host measurements, previous results,
-provenance, report classifications and commentary. Browsing never fetches that
-file. Original publication files are also retained as gzip in the site artifact.
-The generated page files are not substitutes for the evidence download.
+The footer links directly to a public `.json.gz` download containing the frozen
+publication inventory with every configuration, supplied pattern, per-host
+measurement, provenance, report classification, and commentary. Browsing never
+fetches that file. Original publication captures are also retained as gzip in
+the site artifact. Generated page files are not substitutes for the public
+evidence download.
+
+For a released artifact, `scripts/build_capture_data.py` first builds the
+complete accepted campaign for the private archive. `scripts/publication_data.py`
+then matches the frozen public workload source by case, operation, language,
+CPU family, and memory mode. The projection preserves the source order, workload
+content, and published explanations while taking measurements, uncertainty, and
+provenance from the final campaign. It records the source candidate and exact
+file checksum in `publicationScope`. Import validation rejects missing, extra,
+reordered, or changed public workloads.
+
+Campaign-only observations do not enter the release manifest, Pages artifact,
+standalone report, or public download. Preserve them through
+`docs/benchmarks/results-1.0/raw-archives.json` with raw diagnostics, failed and
+superseded attempts, and the complete captured campaign. The compact measurement
+summary and applicable timing flags are added to the public layout. The all-page
+checks compare the frozen workload order and details, render every fold-down,
+and verify that public measurement evidence is unchanged.
 
 Patterns larger than 4,096 UTF-8 bytes have a 240-codepoint preview in the UI,
 their full byte size, and a pinned benchmark-source link where available.
@@ -70,8 +94,9 @@ rendered only while expanded. The largest example is `dictionary/search/english-
 text processing table.
 
 `npm run check` compares all 24 compact tables with the original data, verifies
-the complete download, and checks selection caching and retry behavior. Current
-page files must stay below 600 KB uncompressed and 65 KB gzipped. These limits
+the public download and Pages file inventory, and checks selection caching and
+retry behavior. Current
+page files must stay below 1,100 KB uncompressed and 210 KB gzipped. These limits
 apply to each page's data, not the shared JavaScript and stylesheet.
 
 Keep released-version reports when historical comparisons are useful.
@@ -85,9 +110,9 @@ old measurement datasets.
 
 For language-organized data, the build also produces
 `target/benchmark-report/benchmarks/regulator-benchmarks.html`. Open that file
-directly in a browser. Its script, styles and complete report data are embedded;
+directly in a browser. Its script, styles and public report data are embedded;
 it does not need a local server or network access. This offline artifact remains
-large by design, and its download button exports the full JSON locally. Normal
+large by design, and its download button exports the public JSON locally. Normal
 site browsing uses the small per-selection files instead.
 
 `npm run check` validates the language-organized data and retained releases,
@@ -109,10 +134,10 @@ show point estimates without precision annotations; the raw download preserves
 warnings, predecessor results, and mixed-source provenance. This preview is not
 a new full run or release qualification.
 
-## Preliminary 1.0 results
+## Historical preliminary 1.0 results
 
-The preliminary snapshot combines existing campaign results with targeted
-follow-ups. The page header and README label it using a `publication` object
+The preliminary snapshot combined existing campaign results with targeted
+follow-ups. Its page header and README label used a `publication` object
 with `status: "preliminary"`, `sourcePolicy: "mixed-development-revisions"`, and
 a short `note`. It does not use the private `reviewPreview` presentation.
 
@@ -127,16 +152,53 @@ data, incompatible work, and verification failures do not become comparisons.
 
 Preliminary tables show median estimates with variation in the expandable row
 details and raw download. When hosts disagree about the winner, the comparison
-says so rather than assigning a faster/slower claim. The full released-artifact
-campaign replaces this snapshot without changing the library release.
+says so rather than assigning a faster/slower claim. Released-artifact results
+form a separate versioned capture of the same library release. Keep the
+preliminary capture's original identity and label.
 
 ## Capture requirements
 
 `scripts/build_capture_data.py` builds the language report from the complete
 verified language export, baseline reduction and LIKE lifecycle supplement.
-It checks immutable source identities, manifest and receipt checksums, raw
-LIKE timings, independent-host coverage and lifecycle pairing. It rejects
-missing rows and verification failures. Timeouts and incompatibilities remain
+The legacy input path reproduces preliminary captures. For a released campaign,
+provide both the frozen publication workload source and a separate private
+complete-capture destination:
+
+```bash
+python3 benchmark-report/scripts/build_capture_data.py \
+  --released-campaign campaign-paths.json \
+  --publication-workloads benchmark-report/data/frozen-publication.json.gz \
+  --measurement-followup /private/archive/replacement-report.json.gz \
+  --analysis-inputs /private/archive/publication-analysis-inputs.jsonl.gz \
+  --publication-analysis-output /private/archive/publication-analysis-inputs-public.jsonl.gz \
+  --complete-output /private/archive/complete-campaign.json \
+  --output /tmp/publication.json
+python3 benchmark-report/scripts/report_data.py import /tmp/publication.json
+```
+
+The public and complete outputs must differ. The complete output is evidence to
+archive and index; it is never an input to `report_data.py import`. The release
+build first reconstructs the complete original campaign, then applies the saved
+complete-campaign measurement follow-up. It verifies unchanged row identity and
+workload structure, exact released-artifact identity, complete normalized-input
+coverage, and the recorded analysis-input SHA-256 before copying the approved
+mean estimates, uncertainty, predecessor results, hardware, and provenance.
+The analysis output is a deterministic projection onto the published numeric
+rows. The report records both its hash and the source complete-campaign input
+hash, so the public replay rejects missing, extra, or substituted comparisons.
+The paths file identifies `release_version`, `candidate_provenance`, both
+`language` plan/export pairs, and `baseline` primary, optional confirmation,
+reduction, and campaign ID. LIKE lifecycle comes from accepted baseline shards.
+Each language entry and the baseline entry may specify its own
+`candidate_provenance`, overriding the common collector pin. This permits a
+baseline-only protocol repair to retain unaffected language collection. Every
+component still requires one exact collector commit and archive, the same
+released production tree and JAR, and its complete independent-host matrix.
+The report records collector identities by suite.
+The importer checks published-JAR receipts separately from collector identity,
+R-family topology, manifest and receipt checksums, independent-host coverage,
+and lifecycle pairing. Historical C-family datasets retain their labels.
+It rejects missing rows and verification failures. Timeouts and incompatibilities remain
 distinct nonnumeric results.
 
 The report preserves host ranges and timing-precision warnings. A range is not
@@ -148,8 +210,9 @@ remain in the separately preserved complete baseline evidence.
 Every API page combines single-use and multi-use timings in its pattern
 lifecycle table. The page order is everyday operations, pattern lifecycle,
 Trino-specific operations where available, text processing, then collapsed
-adversarial and synthetic stress groups. Compile-only measurements remain in
-the raw JSON download, without a separate construction or compiler-stress table.
+adversarial and synthetic stress groups. Compile-only measurements retained by
+the frozen publication inventory remain in the public JSON download, without a
+separate construction or compiler-stress table.
 
 LIKE's default row order starts with prefix, suffix, exact and contains checks,
 then ordered literals and fixed-character gaps, then one-character wildcards.
@@ -165,7 +228,7 @@ exceptions without changing the recorded population or measurements:
 - Unicode codepoint and overlapping-word probes belong in synthetic stress.
 - Imported Leipzig/Sherlock I13 variants belong with reported regressions.
 - Contiguous-letter captures, empty-pattern line iteration, redundant
-  whole-input captures and the experimental I787 rewrite are download-only.
+  whole-input captures and the experimental I787 rewrite are public-download-only.
 
 The download includes each row's `reportSection` alongside its original
 classification. Production-derived tokenization, log parsing, dictionary,
@@ -185,6 +248,13 @@ appear on older results. Lifecycle rows label runtime explanations as multi-use
 context. Unsupported cases get descriptions but no performance claims. The raw
 download includes the selected notes. Review them whenever the measured
 implementation or workload mappings change.
+
+The released 1.0 import uses `src/release-1.0-workload-notes.json`, pinned to
+the release source commit, and embeds its explanations in each applicable row.
+These describe the released engine paths without carrying forward timing claims
+from older machines. Historical captures keep their original commentary. Review
+the final ratios, absolute differences and uncertainty alongside these source
+explanations; an implementation difference alone does not prove a timing cause.
 
 `scripts/qualify_capture_data.py` applies the separately collected Trino/Joni
 precision follow-up. It requires three distinct paired hosts per CPU, suite
