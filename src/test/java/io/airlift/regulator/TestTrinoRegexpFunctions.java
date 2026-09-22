@@ -91,6 +91,43 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
+    public void testMultilineBeginLineOperations()
+    {
+        Slice source = utf8("!a\n?").slice(1, 2);
+        TrinoRegexp beginLine = TrinoRegexp.compile(utf8("(?m)^"));
+
+        assertThat(beginLine.contains(source)).isTrue();
+        assertThat(beginLine.count(source)).isEqualTo(1);
+        assertThat(beginLine.position(source, 1, 2)).isEqualTo(-1);
+        assertThat(beginLine.extract(source)).isEqualTo(utf8(""));
+        assertThat(beginLine.extractAll(source)).containsExactly(utf8(""));
+        assertThat(strings(beginLine.split(source))).containsExactly("", "a\n");
+        assertThat(beginLine.replace(source, utf8("_"))).isEqualTo(utf8("_a\n"));
+        assertThat(beginLine.replace(source, _ -> utf8("_"))).isEqualTo(utf8("_a\n"));
+
+        assertThat(TrinoRegexp.compile(utf8("(?m)^$")).contains(source)).isFalse();
+        assertThat(TrinoRegexp.compile(utf8("(?m)a\n^")).contains(source)).isFalse();
+    }
+
+    @Test
+    public void testMultilineBeginLineReverseOperations()
+    {
+        Slice source = utf8("!abc?").slice(1, 3);
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8("(?m)^[a-z]+"));
+
+        assertThat(regexp.contains(source)).isTrue();
+        assertThat(regexp.count(source)).isEqualTo(1);
+        assertThat(regexp.position(source)).isEqualTo(1);
+        assertThat(regexp.extract(source)).isEqualTo(utf8("abc"));
+        assertThat(regexp.extractAll(source)).containsExactly(utf8("abc"));
+        assertThat(strings(regexp.split(source))).containsExactly("", "");
+        assertThat(regexp.replace(source, utf8("_"))).isEqualTo(utf8("_"));
+        assertThat(regexp.replace(source, _ -> utf8("_"))).isEqualTo(utf8("_"));
+
+        assertThat(TrinoRegexp.compile(utf8("(?m)^\\z")).contains(source)).isFalse();
+    }
+
+    @Test
     public void testExactLiteralOperationsUseDirectNativeBoundaries()
     {
         Slice backing = utf8("!zabcabc?");
@@ -684,6 +721,38 @@ public class TestTrinoRegexpFunctions
 
         Re2 nullable = TrinoRegexp.compile(utf8("x*")).pattern();
         assertThat(nullable.countMatches(utf8("xxx"))).isEqualTo(-1);
+    }
+
+    @Test
+    public void testTrinoBeginLineCountUsesDfa()
+    {
+        Re2 pattern = TrinoRegexp.compile(utf8("(?m)^[a-z]+")).pattern();
+        Prog program = pattern.forwardProgramForDiagnostics();
+        Slice input = utf8("one\ntwo\n");
+
+        assertThat(program.hasTextDependentAssertions()).isTrue();
+        assertThat(program.hasDfaUnsupportedAssertions()).isFalse();
+        assertThat(program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+
+        assertThat(pattern.countMatches(input)).isEqualTo(2);
+        assertThat(program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNotNull();
+    }
+
+    @Test
+    public void testTrinoBeginLineCountPlan()
+    {
+        TrinoRegexp pattern = TrinoRegexp.compile(utf8("(?m)^"));
+        assertThat(pattern.usesTrinoBeginLineCountForDiagnostics()).isTrue();
+        assertThat(TrinoRegexp.compile(utf8("(?m)^a")).usesTrinoBeginLineCountForDiagnostics()).isFalse();
+
+        assertThat(pattern.count(utf8(""))).isEqualTo(1);
+        assertThat(pattern.count(utf8("\n"))).isEqualTo(1);
+        assertThat(pattern.count(utf8("a\n"))).isEqualTo(1);
+        assertThat(pattern.count(utf8("a\nb"))).isEqualTo(2);
+        assertThat(pattern.count(utf8("a\n\n"))).isEqualTo(2);
+
+        byte[] bytes = utf8("xxa\nbxx").getBytes();
+        assertThat(pattern.count(Slices.wrappedBuffer(bytes, 2, 3))).isEqualTo(2);
     }
 
     @Test

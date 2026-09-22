@@ -525,6 +525,12 @@ final class Prog
         return textDependentAssertions != 0;
     }
 
+    public boolean hasDfaUnsupportedAssertions()
+    {
+        int dfaSupported = EmptyOp.EMPTY_TRINO_BEGIN_LINE | EmptyOp.EMPTY_TRINO_END_LINE;
+        return (textDependentAssertions & ~dfaSupported) != 0;
+    }
+
     public int textDependentAssertions()
     {
         return textDependentAssertions;
@@ -1877,7 +1883,10 @@ final class Prog
                 if ((empty & EmptyOp.TEXT_DEPENDENT) != 0) {
                     textDependentAssertions |= empty & EmptyOp.TEXT_DEPENDENT;
                 }
-                if ((empty & (EmptyOp.EMPTY_BEGIN_LINE | EmptyOp.EMPTY_END_LINE)) != 0 && !markedLineBoundaries) {
+                if ((empty & (EmptyOp.EMPTY_BEGIN_LINE |
+                        EmptyOp.EMPTY_END_LINE |
+                        EmptyOp.EMPTY_TRINO_BEGIN_LINE |
+                        EmptyOp.EMPTY_TRINO_END_LINE)) != 0 && !markedLineBoundaries) {
                     builder.mark('\n', '\n');
                     builder.merge();
                     markedLineBoundaries = true;

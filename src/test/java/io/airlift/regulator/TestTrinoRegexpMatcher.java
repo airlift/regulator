@@ -52,6 +52,9 @@ public class TestTrinoRegexpMatcher
                 "",
                 "^|$",
                 "a$",
+                "(?m)^",
+                "(?m)^$",
+                "(?m)a\\n^",
                 "(?m)^a$",
                 "(?<word>a+)(b)?")) {
             Slice pattern = utf8Slice(expression);

@@ -662,7 +662,7 @@ final class TrinoRegexpParser
             }
             if (nextByte == '^') {
                 consumeByte('^');
-                return ((flags & Regexp.ONE_LINE) != 0) ? Regexp.beginText(flags) : Regexp.beginLine(flags);
+                return ((flags & Regexp.ONE_LINE) != 0) ? Regexp.beginText(flags) : Regexp.beginLine(flags | Regexp.TRINO_LINE);
             }
             if (nextByte == '$') {
                 consumeByte('$');

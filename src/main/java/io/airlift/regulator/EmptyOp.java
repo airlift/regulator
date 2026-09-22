@@ -25,16 +25,19 @@ final class EmptyOp
     public static final int EMPTY_END_TEXT = 1 << 3;
     public static final int EMPTY_WORD_BOUNDARY = 1 << 4;
     public static final int EMPTY_NO_WORD_BOUNDARY = 1 << 5;
-    public static final int EMPTY_END_TEXT_OR_FINAL_NEWLINE = 1 << 6;
-    public static final int EMPTY_UNICODE_WORD_BOUNDARY = 1 << 7;
-    public static final int EMPTY_NO_UNICODE_WORD_BOUNDARY = 1 << 8;
-    public static final int EMPTY_JAVA_BEGIN_LINE = 1 << 9;
-    public static final int EMPTY_JAVA_END_LINE = 1 << 10;
-    public static final int EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR = 1 << 11;
-    public static final int EMPTY_JAVA_WORD_BOUNDARY = 1 << 12;
-    public static final int EMPTY_JAVA_NO_WORD_BOUNDARY = 1 << 13;
-    public static final int EMPTY_JAVA_UNICODE_WORD_BOUNDARY = 1 << 14;
-    public static final int EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY = 1 << 15;
+    // DFA-supported empty-width assertions must fit in one byte; these use the last two bits.
+    public static final int EMPTY_TRINO_BEGIN_LINE = 1 << 6;
+    public static final int EMPTY_TRINO_END_LINE = 1 << 7;
+    public static final int EMPTY_END_TEXT_OR_FINAL_NEWLINE = 1 << 8;
+    public static final int EMPTY_UNICODE_WORD_BOUNDARY = 1 << 9;
+    public static final int EMPTY_NO_UNICODE_WORD_BOUNDARY = 1 << 10;
+    public static final int EMPTY_JAVA_BEGIN_LINE = 1 << 11;
+    public static final int EMPTY_JAVA_END_LINE = 1 << 12;
+    public static final int EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR = 1 << 13;
+    public static final int EMPTY_JAVA_WORD_BOUNDARY = 1 << 14;
+    public static final int EMPTY_JAVA_NO_WORD_BOUNDARY = 1 << 15;
+    public static final int EMPTY_JAVA_UNICODE_WORD_BOUNDARY = 1 << 16;
+    public static final int EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY = 1 << 17;
 
     public static final int TEXT_DEPENDENT =
             EMPTY_END_TEXT_OR_FINAL_NEWLINE |
@@ -46,7 +49,9 @@ final class EmptyOp
                     EMPTY_JAVA_WORD_BOUNDARY |
                     EMPTY_JAVA_NO_WORD_BOUNDARY |
                     EMPTY_JAVA_UNICODE_WORD_BOUNDARY |
-                    EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY;
+                    EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY |
+                    EMPTY_TRINO_BEGIN_LINE |
+                    EMPTY_TRINO_END_LINE;
 
     private EmptyOp() {}
 
@@ -88,6 +93,16 @@ final class EmptyOp
         if ((textDependentAssertions & EMPTY_JAVA_END_LINE) != 0 &&
                 isJavaEndLine(bytes, begin, end, position)) {
             flags |= EMPTY_JAVA_END_LINE;
+        }
+
+        if ((textDependentAssertions & EMPTY_TRINO_BEGIN_LINE) != 0 &&
+                isTrinoBeginLine(bytes, begin, end, position)) {
+            flags |= EMPTY_TRINO_BEGIN_LINE;
+        }
+
+        if ((textDependentAssertions & EMPTY_TRINO_END_LINE) != 0 &&
+                isTrinoEndLine(bytes, begin, end, position)) {
+            flags |= EMPTY_TRINO_END_LINE;
         }
 
         if ((textDependentAssertions & EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR) != 0 &&
@@ -140,6 +155,16 @@ final class EmptyOp
             return false;
         }
         return previousCodePoint != '\r' || nextCodePoint(bytes, end, position) != '\n';
+    }
+
+    private static boolean isTrinoBeginLine(byte[] bytes, int begin, int end, int position)
+    {
+        return position == begin || (position < end && bytes[position - 1] == '\n');
+    }
+
+    private static boolean isTrinoEndLine(byte[] bytes, int begin, int end, int position)
+    {
+        return position == end || (position > begin && bytes[position] == '\n');
     }
 
     private static boolean isJavaEndLine(byte[] bytes, int begin, int end, int position)

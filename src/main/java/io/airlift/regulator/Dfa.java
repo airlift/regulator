@@ -3479,6 +3479,7 @@ final class Dfa
             long stateDataArrayBytes,
             long stateReferenceArrayBytes,
             long selfLoopExitByteSetBytes,
+            long trinoStartStateCacheBytes,
             long stateReferenceRowBytes,
             long instructionBytes,
             long stateMetadataBytes,
@@ -4033,6 +4034,7 @@ final class Dfa
         private final int startByteScanSet;
         private final byte[] startByteNibbleTables;
         private final boolean nullableStartByteCandidates;
+        private final int trinoLineFlag;
         private volatile Prog.FixedDistanceByteCandidates fixedDistanceByteCandidates;
         private volatile int fixedDistanceSmallByteSet;
         private long fixedDistanceByteCandidateMemory;
@@ -4098,6 +4100,7 @@ final class Dfa
         // Start state caches
         private final StateData[][] startBeginText = new StateData[2][2];
         private final StateData[][] startBeginLine = new StateData[2][2];
+        private final StateData[][] startTrinoLine;
         private final StateData[][] startAfterWord = new StateData[2][2];
         private final StateData[][] startAfterNonWord = new StateData[2][2];
 
@@ -4121,6 +4124,10 @@ final class Dfa
             this.kind = requireNonNull(kind, "kind is null");
             this.nextSize = prog.bytemapRange() + 1;
             int nmark = (kind == Kind.LONGEST_MATCH) ? prog.size() : 0;
+            this.trinoLineFlag = prog.reversed()
+                    ? prog.textDependentAssertions() & EmptyOp.EMPTY_TRINO_END_LINE
+                    : prog.textDependentAssertions() & EmptyOp.EMPTY_TRINO_BEGIN_LINE;
+            this.startTrinoLine = trinoLineFlag == 0 || prog.reversed() ? null : new StateData[2][2];
 
             this.q0 = new WorkQueue(prog.size(), nmark);
             this.q1 = new WorkQueue(prog.size(), nmark);
@@ -4417,6 +4424,7 @@ final class Dfa
 
             int populatedStartStates = countPopulatedStartStates(startBeginText) +
                     countPopulatedStartStates(startBeginLine) +
+                    (startTrinoLine == null ? 0 : countPopulatedStartStates(startTrinoLine)) +
                     countPopulatedStartStates(startAfterWord) +
                     countPopulatedStartStates(startAfterNonWord);
 
@@ -4443,6 +4451,7 @@ final class Dfa
             long stateDataArrayBytes = sizeOfObjectArray(stateData.length);
             long stateReferenceArrayBytes = sizeOfObjectArray(stateRefArrays.length);
             long selfLoopExitByteSetBytes = sizeOfIntArray(selfLoopExitByteSets.length);
+            long trinoStartStateCacheBytes = trinoStartStateCacheMemory();
             long stateReferenceRowBytes = 0;
             long instructionBytes = 0;
             int stateLimit = Math.min(nextFreeOffset / nextSize, stateData.length);
@@ -4463,6 +4472,7 @@ final class Dfa
                     stateDataArrayBytes +
                     stateReferenceArrayBytes +
                     selfLoopExitByteSetBytes +
+                    trinoStartStateCacheBytes +
                     stateReferenceRowBytes +
                     instructionBytes +
                     stateMetadataBytes +
@@ -4473,6 +4483,7 @@ final class Dfa
                     stateDataArrayBytes,
                     stateReferenceArrayBytes,
                     selfLoopExitByteSetBytes,
+                    trinoStartStateCacheBytes,
                     stateReferenceRowBytes,
                     instructionBytes,
                     stateMetadataBytes,
@@ -5144,6 +5155,9 @@ final class Dfa
 
             selectedCount = selectCachedStartRows(selected, startBeginText[1], maximumRows, selectedCount);
             selectedCount = selectCachedStartRows(selected, startBeginLine[1], maximumRows, selectedCount);
+            if (startTrinoLine != null) {
+                selectedCount = selectCachedStartRows(selected, startTrinoLine[1], maximumRows, selectedCount);
+            }
             selectedCount = selectCachedStartRows(selected, startAfterWord[1], maximumRows, selectedCount);
             selectedCount = selectCachedStartRows(selected, startAfterNonWord[1], maximumRows, selectedCount);
 
@@ -5237,12 +5251,18 @@ final class Dfa
             StateData[] startCache;
             if (runForward) {
                 if (textBegin == ctxBegin) {
-                    flags = EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE;
+                    flags = EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE | trinoLineFlag;
                     startCache = startBeginText[dirIndex];
                 }
                 else if (bytes[textBegin - 1] == '\n') {
                     flags = EmptyOp.EMPTY_BEGIN_LINE;
-                    startCache = startBeginLine[dirIndex];
+                    if (textBegin < ctxEnd && trinoLineFlag != 0) {
+                        flags |= trinoLineFlag;
+                        startCache = startTrinoLine[dirIndex];
+                    }
+                    else {
+                        startCache = startBeginLine[dirIndex];
+                    }
                 }
                 else if (isWordChar(bytes[textBegin - 1] & 0xFF)) {
                     flags = FLAG_LAST_WORD;
@@ -5334,12 +5354,28 @@ final class Dfa
             int oldbeforeflag = beforeflag;
             int afterflag = 0;
 
+            // A forward line boundary becomes a Trino multiline boundary only when another byte
+            // exists. This excludes the boundary after a terminal LF.
+            if (!prog.reversed() && c != BYTE_END_TEXT && trinoLineFlag != 0 &&
+                    (beforeflag & EmptyOp.EMPTY_BEGIN_LINE) != 0) {
+                beforeflag |= trinoLineFlag;
+            }
+
+            // In a reversed program the Trino end-line assertion represents the original ^.
+            // Crossing LF establishes it except at the original context end, where the LF is
+            // terminal. Reaching reversed end-of-text establishes the original context beginning.
             if (c == '\n') {
                 beforeflag |= EmptyOp.EMPTY_END_LINE;
+                if (prog.reversed() && (beforeflag & EmptyOp.EMPTY_BEGIN_TEXT) == 0) {
+                    beforeflag |= trinoLineFlag;
+                }
                 afterflag |= EmptyOp.EMPTY_BEGIN_LINE;
             }
             if (c == BYTE_END_TEXT) {
                 beforeflag |= EmptyOp.EMPTY_END_LINE | EmptyOp.EMPTY_END_TEXT;
+                if (prog.reversed()) {
+                    beforeflag |= trinoLineFlag;
+                }
             }
 
             boolean isLastWord = (state.flag() & FLAG_LAST_WORD) != 0;
@@ -5753,8 +5789,21 @@ final class Dfa
                     sizeOfObjectArray(stateData.length) +
                     sizeOfObjectArray(stateRefArrays.length) +
                     sizeOfIntArray(selfLoopExitByteSets.length) +
+                    trinoStartStateCacheMemory() +
                     STATE_CACHE_BYTES +
                     cache.tableBytes();
+        }
+
+        private long trinoStartStateCacheMemory()
+        {
+            if (startTrinoLine == null) {
+                return 0;
+            }
+            long memory = sizeOfObjectArray(startTrinoLine.length);
+            for (StateData[] row : startTrinoLine) {
+                memory += sizeOfObjectArray(row.length);
+            }
+            return memory;
         }
 
         private void resetCache()
@@ -5768,6 +5817,9 @@ final class Dfa
                 for (int j = 0; j < 2; j++) {
                     startBeginText[i][j] = null;
                     startBeginLine[i][j] = null;
+                    if (startTrinoLine != null) {
+                        startTrinoLine[i][j] = null;
+                    }
                     startAfterWord[i][j] = null;
                     startAfterNonWord[i][j] = null;
                 }

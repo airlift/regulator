@@ -36,7 +36,8 @@ import static java.util.Objects.requireNonNull;
  * {@code docs/integrations/REGEXP_LANGUAGES.md}; unsupported constructs are rejected during compilation.
  */
 public sealed class TrinoRegexp
-        permits TrinoRegexp.CharacterClassTrinoRegexp,
+        permits TrinoRegexp.BeginLineTrinoRegexp,
+                TrinoRegexp.CharacterClassTrinoRegexp,
                 TrinoRegexp.DotStarLiteralTrinoRegexp,
                 TrinoRegexp.ExactLiteralTrinoRegexp,
                 TrinoRegexp.LiteralAlternationTrinoRegexp,
@@ -111,6 +112,10 @@ public sealed class TrinoRegexp
             return new LiteralAlternationTrinoRegexp(literalAlternationMatcher);
         }
         Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, Regexp.LIKE_PERL, options.maxMemory());
+        if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
+                (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
+            return new BeginLineTrinoRegexp(compiledPattern);
+        }
         OrderedLiteralMatcher orderedLiteralMatcher = compiledPattern.createOrderedLiteralMatcher();
         if (orderedLiteralMatcher != null && compiledPattern.tryReserveForwardDfaMemory(orderedLiteralMatcher.estimatedRetainedSize())) {
             return new OrderedLiteralTrinoRegexp(compiledPattern, orderedLiteralMatcher);
@@ -182,6 +187,11 @@ public sealed class TrinoRegexp
         return false;
     }
 
+    boolean usesTrinoBeginLineCountForDiagnostics()
+    {
+        return false;
+    }
+
     long orderedLiteralMatcherRetainedSizeForDiagnostics()
     {
         return 0;
@@ -220,6 +230,37 @@ public sealed class TrinoRegexp
     {
         requireNonNull(source, "source is null");
         return pattern.find(source);
+    }
+
+    private static final class BeginLineTrinoRegexp
+            extends TrinoRegexp
+    {
+        private BeginLineTrinoRegexp(Re2 pattern)
+        {
+            super(pattern);
+        }
+
+        @Override
+        boolean usesTrinoBeginLineCountForDiagnostics()
+        {
+            return true;
+        }
+
+        @Override
+        public long count(Slice source)
+        {
+            requireNonNull(source, "source is null");
+            byte[] bytes = source.byteArray();
+            int start = source.byteArrayOffset();
+            int scanEnd = start + source.length() - 1;
+            long count = 1;
+            for (int position = start; position < scanEnd; position++) {
+                if (bytes[position] == '\n') {
+                    count++;
+                }
+            }
+            return count;
+        }
     }
 
     private static final class OrderedLiteralTrinoRegexp

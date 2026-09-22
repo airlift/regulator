@@ -75,6 +75,7 @@ public class TestRegexpAst
         assertEqualWithEqualHash(Regexp.anyByte(0), Regexp.anyByte(Regexp.PERL_EXTENSIONS));
         assertEqualWithEqualHash(Regexp.beginLine(0), Regexp.beginLine(Regexp.PERL_EXTENSIONS));
         assertEqualWithEqualHash(Regexp.beginLine(0), Regexp.beginLine(Regexp.JAVA_UNIX_LINES));
+        assertThat(Regexp.beginLine(0)).isNotEqualTo(Regexp.beginLine(Regexp.TRINO_LINE));
         assertThat(Regexp.beginLine(Regexp.JAVA_LINE))
                 .isNotEqualTo(Regexp.beginLine(Regexp.JAVA_LINE | Regexp.JAVA_UNIX_LINES));
         assertEqualWithEqualHash(Regexp.endLine(0), Regexp.endLine(Regexp.PERL_EXTENSIONS));

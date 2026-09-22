@@ -56,6 +56,8 @@ those changes and conversion costs.
 The Trino frontend implements these SQL-visible behaviors:
 
 - Joni-compatible final-LF `$`
+- Joni-compatible multiline `^`, including empty input but excluding the
+  position after a terminal LF
 - Unicode word boundaries
 - JVM-derived multi-code-point case folding
 - Trino replacement references such as `$1` and `${name}`
