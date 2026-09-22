@@ -575,6 +575,9 @@ final class Compiler
         private static int beginLineAssertion(Regexp regexp, boolean reversed)
         {
             int line = reversed ? EmptyOp.EMPTY_END_LINE : EmptyOp.EMPTY_BEGIN_LINE;
+            if ((regexp.parseFlags() & Regexp.TRINO_LINE) != 0) {
+                return reversed ? EmptyOp.EMPTY_TRINO_END_LINE : EmptyOp.EMPTY_TRINO_BEGIN_LINE;
+            }
             if ((regexp.parseFlags() & Regexp.JAVA_LINE) == 0) {
                 return line;
             }

@@ -45,8 +45,10 @@ the matcher's `start()` returns byte offset `4`.
 
 Repetition counts are limited to 1,000. The default `$` assertion matches at
 the end of input or before one final LF, and multiline mode recognizes LF as
-the line terminator. Case-insensitive matching includes JVM-derived
-multi-code-point folds such as `ß` and `SS`.
+the line terminator. Multiline `^` matches at the start of input and after an
+internal LF, but not after a terminal LF; it also matches at the start of empty
+input. Case-insensitive matching includes JVM-derived multi-code-point folds
+such as `ß` and `SS`.
 
 ### Unicode data and case folding
 

@@ -58,11 +58,12 @@ final class Regexp
     static final int JAVA_FINAL_END = 1 << 23;
     static final int JAVA_LINE = 1 << 24;
     static final int JAVA_WORD_BOUNDARY = 1 << 25;
+    static final int TRINO_LINE = 1 << 26;
 
     // Composite flag groups and masks.
     static final int MATCH_NEWLINE = CLASS_NEWLINE | DOT_MATCHES_NEWLINE;
     static final int LIKE_PERL = CLASS_NEWLINE | ONE_LINE | PERL_CLASSES | PERL_WORD_BOUNDARY | PERL_EXTENSIONS | UNICODE_GROUPS;
-    static final int ALL_PARSE_FLAGS = (1 << 26) - 1;
+    static final int ALL_PARSE_FLAGS = (1 << 27) - 1;
 
     // util/utf.h Runemax
     static final int RUNEMAX = 0x10FFFF;
@@ -646,7 +647,15 @@ final class Regexp
     private int equalityFlags()
     {
         return switch (op) {
-            case BEGIN_LINE -> (parseFlags & JAVA_LINE) == 0 ? 0 : parseFlags & (JAVA_LINE | JAVA_UNIX_LINES);
+            case BEGIN_LINE -> {
+                if ((parseFlags & TRINO_LINE) != 0) {
+                    yield TRINO_LINE;
+                }
+                if ((parseFlags & JAVA_LINE) == 0) {
+                    yield 0;
+                }
+                yield parseFlags & (JAVA_LINE | JAVA_UNIX_LINES);
+            }
             case END_LINE -> parseFlags & JAVA_LINE;
             case END_TEXT -> parseFlags & (WAS_DOLLAR | FINAL_LINE_END | JAVA_FINAL_END);
             case WORD_BOUNDARY, NO_WORD_BOUNDARY -> parseFlags &

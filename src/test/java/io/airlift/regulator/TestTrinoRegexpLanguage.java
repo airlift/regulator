@@ -443,6 +443,120 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
+    public void testMultilineBeginLineMatchesJoni()
+    {
+        assertMultilineMatches("(?m)^", "", List.of(new MatchBoundary(0, 0)));
+        assertMultilineMatches("(?m)^", "\n", List.of(new MatchBoundary(0, 0)));
+        assertMultilineMatches("(?m)^", "a\n", List.of(new MatchBoundary(0, 0)));
+        assertMultilineMatches("(?m)^", "a\nb", List.of(new MatchBoundary(0, 0), new MatchBoundary(2, 2)));
+        assertMultilineMatches("(?m)^", "a\n\n", List.of(new MatchBoundary(0, 0), new MatchBoundary(2, 2)));
+        assertMultilineMatches("(?m)^", "a\rb", List.of(new MatchBoundary(0, 0)));
+        assertMultilineMatches("(?m)^", "a\r\nb", List.of(new MatchBoundary(0, 0), new MatchBoundary(3, 3)));
+        assertMultilineMatches("(?m)^$", "a\n", List.of());
+        assertMultilineMatches("(?m)a\n^", "a\n", List.of());
+        assertMultilineMatches("(?m)^[a-z]+", "abc", List.of(new MatchBoundary(0, 3)));
+        assertMultilineMatches("(?m)^a*", "a\naa\n", List.of(new MatchBoundary(0, 1), new MatchBoundary(2, 4)));
+        assertMultilineMatches("(?m)^a*", "a\n", List.of(new MatchBoundary(0, 1)));
+        assertMultilineMatches("(?m)^\\z", "", List.of(new MatchBoundary(0, 0)));
+        assertMultilineMatches("(?m)^\\z", "abc", List.of());
+        assertMultilineMatches("(?m)^a*\\z", "aaa", List.of(new MatchBoundary(0, 3)));
+        assertMultilineMatches("(?m)^a*\\z", "a\n", List.of());
+        assertMultilineMatches("(?m)^\\n\\z", "\n", List.of(new MatchBoundary(0, 1)));
+        assertMultilineMatches("(?m)^\\n\\z", "a\n", List.of());
+    }
+
+    @Test
+    public void testMultilineBeginLineCompilesForBothDirections()
+    {
+        ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("(?m)^"), Regexp.LIKE_PERL);
+        Regexp regexp = Simplifier.simplify(parsed.regexp());
+
+        assertThat(regexp.parseFlags() & Regexp.TRINO_LINE).isEqualTo(Regexp.TRINO_LINE);
+        assertThat(emptyWidthAssertions(Compiler.compileNormalized(regexp, false, 1 << 20, Compiler.Dialect.TRINO)))
+                .containsExactly(EmptyOp.EMPTY_TRINO_BEGIN_LINE);
+        assertThat(emptyWidthAssertions(Compiler.compileNormalized(regexp, true, 1 << 20, Compiler.Dialect.TRINO)))
+                .containsExactly(EmptyOp.EMPTY_TRINO_END_LINE);
+
+        Slice context = utf8Slice("!\na\n?").slice(1, 3);
+        assertThat(assertionMatches(context, 0, EmptyOp.EMPTY_TRINO_BEGIN_LINE)).isTrue();
+        assertThat(assertionMatches(context, 1, EmptyOp.EMPTY_TRINO_BEGIN_LINE)).isTrue();
+        assertThat(assertionMatches(context, 2, EmptyOp.EMPTY_TRINO_BEGIN_LINE)).isFalse();
+        assertThat(assertionMatches(context, 3, EmptyOp.EMPTY_TRINO_BEGIN_LINE)).isFalse();
+        assertThat(assertionMatches(context, 0, EmptyOp.EMPTY_TRINO_END_LINE)).isFalse();
+        assertThat(assertionMatches(context, 1, EmptyOp.EMPTY_TRINO_END_LINE)).isFalse();
+        assertThat(assertionMatches(context, 2, EmptyOp.EMPTY_TRINO_END_LINE)).isTrue();
+        assertThat(assertionMatches(context, 3, EmptyOp.EMPTY_TRINO_END_LINE)).isTrue();
+    }
+
+    @Test
+    public void testMultilineBeginLineReverseMatchesJoniExhaustively()
+    {
+        List<String> inputs = new ArrayList<>();
+        addInputs(inputs, new StringBuilder(), 4);
+
+        for (String pattern : List.of("(?m)^[ab]+", "(?m)^a*", "(?m)^a*\\z", "(?m)^\\n\\z")) {
+            for (String input : inputs) {
+                assertMultilineMatchesJoni(pattern, input);
+            }
+        }
+    }
+
+    @Test
+    public void testMultilineBeginLineUsesForwardAndReverseDfa()
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("(?m)^[a-z]+"));
+        Re2 pattern = regexp.pattern();
+
+        assertThat(regexp.extract(utf8Slice("!abc?").slice(1, 3))).isEqualTo(utf8Slice("abc"));
+        assertThat(regexp.extract(utf8Slice("123\nneedle\n456"))).isEqualTo(utf8Slice("needle"));
+        assertThat(Dfa.DfaInstance.Kind.values())
+                .anySatisfy(kind -> assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(kind)).isNotNull());
+        assertThat(pattern.reverseProgramIfComputedForDiagnostics()).isNotNull();
+        assertThat(Dfa.DfaInstance.Kind.values())
+                .anySatisfy(kind -> assertThat(pattern.reverseProgramIfComputedForDiagnostics().cachedDfaIfPresent(kind)).isNotNull());
+    }
+
+    @Test
+    public void testMultilineBeginLineReverseDfaRanges()
+    {
+        Prog reverseBeginLine = compileTrinoProgram("(?m)^", true);
+        Slice context = utf8Slice("!a\nb\n?").slice(1, 4);
+
+        assertThat(Dfa.search(reverseBeginLine, context, 0, 4, 0, 0, true, Prog.MatchKind.LONGEST_MATCH, true)).isZero();
+        assertThat(Dfa.search(reverseBeginLine, context, 0, 4, 1, 1, true, Prog.MatchKind.LONGEST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(Dfa.search(reverseBeginLine, context, 0, 4, 2, 2, true, Prog.MatchKind.LONGEST_MATCH, true)).isZero();
+        assertThat(Dfa.search(reverseBeginLine, context, 0, 4, 4, 4, true, Prog.MatchKind.LONGEST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(Dfa.search(reverseBeginLine, context, 1, 4, 1, 1, true, Prog.MatchKind.LONGEST_MATCH, true)).isZero();
+        assertThat(Dfa.search(reverseBeginLine, utf8Slice("!?").slice(1, 0), 0, 0, true, Prog.MatchKind.LONGEST_MATCH, true)).isZero();
+
+        Slice crlf = utf8Slice("!a\r\nb?").slice(1, 4);
+        assertThat(Dfa.search(reverseBeginLine, crlf, 0, 4, 2, 2, true, Prog.MatchKind.LONGEST_MATCH, true)).isEqualTo(Dfa.SEARCH_NO_MATCH);
+        assertThat(Dfa.search(reverseBeginLine, crlf, 0, 4, 3, 3, true, Prog.MatchKind.LONGEST_MATCH, true)).isZero();
+
+        Prog reverseWord = compileTrinoProgram("(?m)^[a-z]+", true);
+        Slice words = utf8Slice("!a\nabc\n?").slice(1, 6);
+        assertThat(Dfa.search(reverseWord, words, 0, 6, 0, 1, true, Prog.MatchKind.LONGEST_MATCH, true)).isZero();
+        assertThat(Dfa.search(reverseWord, words, 0, 6, 2, 5, true, Prog.MatchKind.LONGEST_MATCH, true)).isZero();
+
+        Prog reverseTerminalNewline = compileTrinoProgram("(?m)^\\n\\z", true);
+        assertThat(Dfa.search(reverseTerminalNewline, utf8Slice("a\n"), 0, 2, true, Prog.MatchKind.LONGEST_MATCH, true))
+                .isEqualTo(Dfa.SEARCH_NO_MATCH);
+    }
+
+    @Test
+    public void testMultilineBeginLineDfaStartStatesDoNotAlias()
+    {
+        Re2 pattern = TrinoRegexp.compile(utf8Slice("(?m)^")).pattern();
+
+        assertThat(matchBoundaries(pattern.matcher(utf8Slice("a\nb"))))
+                .containsExactly(new MatchBoundary(0, 0), new MatchBoundary(2, 2));
+        assertThat(matchBoundaries(pattern.matcher(utf8Slice("a\n"))))
+                .containsExactly(new MatchBoundary(0, 0));
+        assertThat(matchBoundaries(pattern.matcher(utf8Slice(""))))
+                .containsExactly(new MatchBoundary(0, 0));
+    }
+
+    @Test
     public void testFinalLineBooleanOperationsMatchJoniExhaustively()
     {
         List<String> inputs = new ArrayList<>();
@@ -912,6 +1026,52 @@ public class TestTrinoRegexpLanguage
             boundaries.add(new MatchBoundary(matcher.start(), matcher.end()));
         }
         return boundaries;
+    }
+
+    private static List<Integer> emptyWidthAssertions(Prog program)
+    {
+        return program.insts().stream()
+                .filter(instruction -> instruction.opcode() == InstOp.EMPTY_WIDTH)
+                .map(Prog.Inst::empty)
+                .toList();
+    }
+
+    private static boolean assertionMatches(Slice context, int position, int assertion)
+    {
+        int absolutePosition = context.byteArrayOffset() + position;
+        return (EmptyOp.contextFlags(context, absolutePosition, assertion) & assertion) != 0;
+    }
+
+    private static Prog compileTrinoProgram(String pattern, boolean reversed)
+    {
+        Regexp regexp = Simplifier.simplify(
+                TrinoRegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp());
+        return Compiler.compileNormalized(regexp, reversed, 1 << 20, Compiler.Dialect.TRINO);
+    }
+
+    private static void assertMultilineMatches(String patternText, String inputText, List<MatchBoundary> expected)
+    {
+        Slice pattern = utf8Slice(patternText);
+        Slice inputBytes = utf8Slice(inputText);
+        Slice input = utf8Slice("!" + inputText + "?").slice(1, inputBytes.length());
+
+        assertThat(matchBoundaries(TrinoRegexp.compile(pattern).pattern().matcher(input)))
+                .as("Regulator %s against %s", patternText, inputText)
+                .isEqualTo(expected);
+        assertThat(joniMatchBoundaries(joniPattern(pattern), input))
+                .as("Joni %s against %s", patternText, inputText)
+                .isEqualTo(expected);
+    }
+
+    private static void assertMultilineMatchesJoni(String patternText, String inputText)
+    {
+        Slice pattern = utf8Slice(patternText);
+        Slice inputBytes = utf8Slice(inputText);
+        Slice input = utf8Slice("!" + inputText + "?").slice(1, inputBytes.length());
+
+        assertThat(matchBoundaries(TrinoRegexp.compile(pattern).pattern().matcher(input)))
+                .as("%s against %s", patternText, inputText)
+                .isEqualTo(joniMatchBoundaries(joniPattern(pattern), input));
     }
 
     private static List<MatchBoundary> joniMatchBoundaries(Regex pattern, Slice input)

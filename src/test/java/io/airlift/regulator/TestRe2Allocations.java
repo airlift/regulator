@@ -148,6 +148,35 @@ public class TestRe2Allocations
         assertThat(allocatedBytes).isZero();
     }
 
+    @Test
+    public void testTrinoBeginLineCountDoesNotAllocate()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice("(?m)^[a-z]+"));
+        TrinoRegexp emptyPattern = TrinoRegexp.compile(Slices.utf8Slice("(?m)^"));
+        Slice source = Slices.utf8Slice("one\ntwo\n");
+
+        for (int iteration = 0; iteration < 20_000; iteration++) {
+            assertThat(pattern.count(source)).isEqualTo(2);
+            assertThat(emptyPattern.count(source)).isEqualTo(2);
+        }
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        long matchCount = 0;
+        for (int iteration = 0; iteration < 10_000; iteration++) {
+            matchCount += pattern.count(source);
+            matchCount += emptyPattern.count(source);
+        }
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(matchCount).isEqualTo(40_000);
+        assertThat(allocatedBytes).isZero();
+    }
+
     private static int runFinalLineBooleanOperations(TrinoRegexp pattern, Slice absent, Slice matched, Slice anchored)
     {
         int matchCount = 0;

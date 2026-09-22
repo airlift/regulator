@@ -649,15 +649,33 @@ the same externally observable behavior as pinned upstream RE2.
 
 ## Trino Text-Dependent Assertions And Full Case Folding
 
-`TrinoRegexp` implements Joni's final-LF `$`, Unicode `\b` and `\B`, and
-multi-code-point case folding. These are frontend semantics and do not change
-the RE2 language accepted by `Re2.compile`.
+`TrinoRegexp` implements Joni's final-LF `$`, multiline `^`, Unicode `\b` and
+`\B`, and multi-code-point case folding. These are frontend semantics and do
+not change the RE2 language accepted by `Re2.compile`. Joni's multiline `^`
+matches at the start of empty input and after an internal LF, but not at the
+position after a terminal LF.
 
-Final-line and Unicode-boundary assertions require surrounding input context
-that is not represented by the ordinary RE2 empty-width flags. The semantic
-program retains these assertions and remains authoritative whenever explicit
-captures are observable or the lowered form cannot preserve group-zero
-boundaries.
+Final-line, multiline begin-line, and Unicode-boundary assertions require
+surrounding input context that is not represented by the ordinary RE2
+empty-width flags. The semantic program retains these assertions and remains
+authoritative whenever explicit captures are observable or the lowered form
+cannot preserve group-zero boundaries.
+
+Trino multiline begin-line uses the two spare DFA empty-width bits. A forward
+state after LF keeps the ordinary begin-line bit pending; transition
+construction supplies the Trino bit only when the next symbol is not
+end-of-text. The reversed program supplies the corresponding end-line bit when
+it crosses an internal LF or reaches the original input beginning, while
+suppressing it before a terminal LF. Start-state caches distinguish internal LF
+boundaries from a terminal LF, including nonzero Slice offsets. Other
+text-dependent assertions remain ineligible for DFA execution, and OnePass
+remains disabled for all of them.
+
+Non-nullable counts containing only the Trino line assertions use the same DFA
+route and do not allocate a matcher. The exact multiline begin-line expression
+uses a count-only plan that returns one for the input start plus the number of
+LF bytes before the final byte. Other operations retain the semantic program,
+and other nullable expressions retain ordinary matcher iteration.
 
 Boolean `find` and `lookingAt` operations use operation-specific plans:
 
@@ -682,8 +700,9 @@ references use the direct boundary route when eligible. The eligibility value
 shares the existing boolean-strategy byte. Ordinary boolean `find` retains its
 direct strategy load; the separate single-byte matcher cache accounts for the
 current 96-byte `Re2` layout. The two forward programs and the lowered
-program's DFA share the original forward memory budget. No protected DFA
-transition loop contains a frontend-specific branch.
+program's DFA share the original forward memory budget. No warm DFA search loop
+contains a frontend-specific branch; the Trino check runs only while an
+uncached transition is constructed.
 
 Boolean OnePass execution uses a dedicated primitive loop without capture
 scratch arrays. Keeping it separate prevents mixed capture and non-capture call

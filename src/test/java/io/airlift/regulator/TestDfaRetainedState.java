@@ -18,6 +18,7 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import static io.airlift.regulator.Dfa.DfaInstance.Kind.LONGEST_MATCH;
+import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestDfaRetainedState
@@ -88,6 +89,43 @@ public class TestDfaRetainedState
         assertThat(rebuilt.cacheEntries()).isEqualTo(warm.cacheEntries());
     }
 
+    @Test
+    public void testTrinoStartStateCacheIsCharged()
+    {
+        assertTrinoStartStateCacheIsCharged(false, true);
+        assertTrinoStartStateCacheIsCharged(true, false);
+    }
+
+    private static void assertTrinoStartStateCacheIsCharged(boolean reversed, boolean hasTrinoStartStateCache)
+    {
+        long memoryBudget = 1 << 20;
+        Prog re2Program = compileProgram("(?m)^[a-z]+", reversed, memoryBudget);
+        Prog trinoProgram = compileTrinoProgram("(?m)^[a-z]+", reversed, memoryBudget);
+        Dfa.DfaInstance re2Dfa = re2Program.getCachedDfa(LONGEST_MATCH);
+        Dfa.DfaInstance trinoDfa = trinoProgram.getCachedDfa(LONGEST_MATCH);
+        long expectedTrinoCacheBytes = hasTrinoStartStateCache ? 3 * sizeOfObjectArray(2) : 0;
+
+        assertThat(trinoDfa.retainedStateMemory() - re2Dfa.retainedStateMemory())
+                .isEqualTo(expectedTrinoCacheBytes);
+        assertThat(trinoDfa.stateMemorySnapshot().totalBytes() - re2Dfa.stateMemorySnapshot().totalBytes())
+                .isEqualTo(expectedTrinoCacheBytes);
+        assertThat(trinoDfa.stateMemorySnapshot().trinoStartStateCacheBytes())
+                .isEqualTo(expectedTrinoCacheBytes);
+
+        Dfa.CacheSnapshot cold = trinoDfa.cacheSnapshot();
+        assertThat(cold.stateBudget() - cold.availableStateMemory())
+                .isEqualTo(trinoDfa.stateMemorySnapshot().totalBytes());
+
+        assertThat(Dfa.search(trinoProgram, Slices.utf8Slice("abc"), true, Prog.MatchKind.LONGEST_MATCH, true))
+                .isNotEqualTo(Dfa.SEARCH_FAILED);
+        trinoDfa.resetCacheExternal();
+
+        assertThat(trinoDfa.retainedStateMemory())
+                .isEqualTo(trinoDfa.stateMemorySnapshot().totalBytes());
+        assertThat(trinoDfa.cacheSnapshot().stateBudget() - trinoDfa.cacheSnapshot().availableStateMemory())
+                .isEqualTo(trinoDfa.stateMemorySnapshot().totalBytes());
+    }
+
     private static Dfa.DfaInstance compileDfa(String expression, long memoryBudget)
     {
         return compileProgram(expression, memoryBudget).getCachedDfa(LONGEST_MATCH);
@@ -95,9 +133,21 @@ public class TestDfaRetainedState
 
     private static Prog compileProgram(String expression, long memoryBudget)
     {
+        return compileProgram(expression, false, memoryBudget);
+    }
+
+    private static Prog compileProgram(String expression, boolean reversed, long memoryBudget)
+    {
         return Compiler.compile(
                 RegexpParser.parse(Slices.utf8Slice(expression), Regexp.LIKE_PERL).regexp(),
-                false,
+                reversed,
                 memoryBudget);
+    }
+
+    private static Prog compileTrinoProgram(String expression, boolean reversed, long memoryBudget)
+    {
+        Regexp regexp = Simplifier.simplify(
+                TrinoRegexpParser.parse(Slices.utf8Slice(expression), Regexp.LIKE_PERL).regexp());
+        return Compiler.compileNormalized(regexp, reversed, memoryBudget, Compiler.Dialect.TRINO);
     }
 }

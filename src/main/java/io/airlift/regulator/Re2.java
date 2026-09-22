@@ -1614,7 +1614,7 @@ public final class Re2
         if (booleanFindStrategy == BOOLEAN_FIND_SINGLE_BYTE && text.length() <= MAX_DIRECT_BYTE_SCAN_BYTES) {
             return sharedSingleByteMatcher().count(text);
         }
-        if (canMatchEmpty() || partialProg.hasTextDependentAssertions()) {
+        if (canMatchEmpty() || partialProg.hasDfaUnsupportedAssertions()) {
             return -1;
         }
 
@@ -2173,7 +2173,7 @@ public final class Re2
 
         // ===== Phase 1-2: DFA Forward + Reverse Search (Unanchored) =====
         // Use two-phase DFA to find match boundaries without extracting submatches.
-        boolean dfaSearchSkippedOrFailed = prog.hasTextDependentAssertions() ||
+        boolean dfaSearchSkippedOrFailed = prog.hasDfaUnsupportedAssertions() ||
                 (captureCount == 1 && Dfa.countSearchBailedWhenSlow(prog, matchKind));
         int matchStart = -1;
         int matchEnd = -1;
@@ -2808,7 +2808,7 @@ public final class Re2
         Prog loweredProgram = booleanPlans.loweredProgram();
         Prog forwardProgram = loweredProgram == null ? partialProg : loweredProgram;
         if (normalizedReverseRegexp == null ||
-                forwardProgram.hasTextDependentAssertions() ||
+                forwardProgram.hasDfaUnsupportedAssertions() ||
                 forwardProgram.hasFullCaseFold()) {
             return null;
         }
