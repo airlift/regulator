@@ -620,11 +620,17 @@ public final class Re2
         return build(pattern, parsed, flags, maxMemory, longestMatch);
     }
 
+    /**
+     * The caller passes a private snapshot that it never mutates.
+     */
     static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags)
     {
         return compileParsed(pattern, parsed, flags, Options.DEFAULT_MAX_MEMORY);
     }
 
+    /**
+     * The caller passes a private snapshot that it never mutates.
+     */
     static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory)
     {
         requireNonNull(pattern, "pattern is null");
@@ -632,9 +638,12 @@ public final class Re2
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(pattern.copy(), parsed, flags, maxMemory, false);
+        return build(pattern, parsed, flags, maxMemory, false);
     }
 
+    /**
+     * The caller passes a private snapshot that it never mutates.
+     */
     static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory)
     {
         requireNonNull(pattern, "pattern is null");
@@ -660,7 +669,7 @@ public final class Re2
                         maxMemory,
                         Compiler.Dialect.TRINO,
                         false,
-                        pattern.copy(),
+                        pattern,
                         entireRegexp,
                         expressionAnalysis,
                         fixedWidthMatcher,
@@ -677,7 +686,7 @@ public final class Re2
                         null);
             }
         }
-        return build(pattern.copy(), parsed, flags, maxMemory, false, Compiler.Dialect.TRINO);
+        return build(pattern, parsed, flags, maxMemory, false, Compiler.Dialect.TRINO);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)
@@ -982,6 +991,11 @@ public final class Re2
     ExpressionAnalysis expressionAnalysisForDiagnostics()
     {
         return expressionAnalysis;
+    }
+
+    boolean retainsPatternForDiagnostics(Slice expectedPattern)
+    {
+        return pattern == expectedPattern;
     }
 
     int programSize()
