@@ -988,7 +988,6 @@ final class Compiler
             Fragment[] suffixes = new Fragment[foldedRunes.length + 1];
             suffixes[foldedRunes.length] = terminal;
 
-            List<UnicodeFullCaseFold.FoldToken> multiCharacterTokens = UnicodeFullCaseFold.multiCharacterTokens();
             for (int index = foldedRunes.length - 1; index >= 0; index--) {
                 List<Integer> branchStarts = new ArrayList<>();
                 addFullCaseFoldBranch(
@@ -996,7 +995,7 @@ final class Compiler
                         UnicodeFullCaseFold.simpleFoldClass(foldedRunes[index]),
                         suffixes[index + 1]);
 
-                for (UnicodeFullCaseFold.FoldToken token : multiCharacterTokens) {
+                for (UnicodeFullCaseFold.FoldToken token : UnicodeFullCaseFold.multiCharacterTokensStartingWith(foldedRunes[index])) {
                     if (token.matches(foldedRunes, index)) {
                         addFullCaseFoldBranch(
                                 branchStarts,

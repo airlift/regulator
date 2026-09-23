@@ -54,20 +54,24 @@ final class UnicodeFullCaseFold
 
     static int[] fold(int[] runes)
     {
+        Data data = DataHolder.DATA;
         int[] folded = new int[Math.max(4, runes.length)];
         int size = 0;
         for (int rune : runes) {
-            int[] mapping = DataHolder.DATA.mappingByRune().get(rune);
+            int[] mapping = data.mapping(rune);
+            int length = mapping == null ? 1 : mapping.length;
+            if (size + length > folded.length) {
+                folded = Arrays.copyOf(folded, Math.max(folded.length * 2, size + length));
+            }
             if (mapping == null) {
-                mapping = new int[] {canonicalSimpleFold(rune)};
+                folded[size] = canonicalSimpleFold(rune);
             }
-            if (size + mapping.length > folded.length) {
-                folded = Arrays.copyOf(folded, Math.max(folded.length * 2, size + mapping.length));
+            else {
+                System.arraycopy(mapping, 0, folded, size, length);
             }
-            System.arraycopy(mapping, 0, folded, size, mapping.length);
-            size += mapping.length;
+            size += length;
         }
-        return Arrays.copyOf(folded, size);
+        return size == folded.length ? folded : Arrays.copyOf(folded, size);
     }
 
     static CharClass simpleFoldClass(int rune)
@@ -86,14 +90,26 @@ final class UnicodeFullCaseFold
 
     static List<FoldToken> multiCharacterTokens()
     {
-        return DataHolder.DATA.multiCharacterTokens();
+        return DataHolder.DATA.multiCharacterTokens;
+    }
+
+    /**
+     * Returns the tokens whose folded sequence begins with {@code foldedRune}, in the order of
+     * {@link #multiCharacterTokens()}.
+     */
+    static List<FoldToken> multiCharacterTokensStartingWith(int foldedRune)
+    {
+        Data data = DataHolder.DATA;
+        int start = data.firstTokenIndex(foldedRune);
+        int end = data.tokenEndIndex(foldedRune, start);
+        return data.multiCharacterTokens.subList(start, end);
     }
 
     static boolean requiresFullCaseFold(int[] runes)
     {
         int[] folded = fold(runes);
         for (int index = 0; index < folded.length; index++) {
-            for (FoldToken token : DataHolder.DATA.multiCharacterTokens()) {
+            for (FoldToken token : multiCharacterTokensStartingWith(folded[index])) {
                 if (token.matches(folded, index)) {
                     return true;
                 }
@@ -105,7 +121,7 @@ final class UnicodeFullCaseFold
     static List<FoldToken> multiCharacterTokens(CharClass characterClass)
     {
         List<FoldToken> result = new ArrayList<>();
-        for (FoldToken token : DataHolder.DATA.multiCharacterTokens()) {
+        for (FoldToken token : DataHolder.DATA.multiCharacterTokens) {
             if (intersects(characterClass, token.sourceRunes())) {
                 result.add(token);
             }
@@ -115,20 +131,38 @@ final class UnicodeFullCaseFold
 
     static ByteLength byteLength(int[] runes)
     {
+        Data data = DataHolder.DATA;
         int[] folded = fold(runes);
         int[] minimum = new int[folded.length + 1];
         int[] maximum = new int[folded.length + 1];
         for (int index = folded.length - 1; index >= 0; index--) {
-            CharClass simpleClass = simpleFoldClass(folded[index]);
-            minimum[index] = minimumUtf8Length(simpleClass) + minimum[index + 1];
-            maximum[index] = maximumUtf8Length(simpleClass) + maximum[index + 1];
-            for (FoldToken token : DataHolder.DATA.multiCharacterTokens()) {
+            int rune = folded[index];
+            // Equivalent to the UTF-8 length bounds of simpleFoldClass(rune), without building the class.
+            int simpleMinimum = Integer.MAX_VALUE;
+            int simpleMaximum = 0;
+            int current = rune;
+            do {
+                if (current < Character.MIN_SURROGATE || current > Character.MAX_SURROGATE) {
+                    int length = utf8Length(current);
+                    simpleMinimum = Math.min(simpleMinimum, length);
+                    simpleMaximum = Math.max(simpleMaximum, length);
+                }
+                current = UnicodeCaseFold.cycleFoldRune(current);
+            }
+            while (current != rune);
+            minimum[index] = simpleMinimum + minimum[index + 1];
+            maximum[index] = simpleMaximum + maximum[index + 1];
+
+            int start = data.firstTokenIndex(rune);
+            int end = data.tokenEndIndex(rune, start);
+            for (int tokenIndex = start; tokenIndex < end; tokenIndex++) {
+                FoldToken token = data.tokens[tokenIndex];
                 if (!token.matches(folded, index)) {
                     continue;
                 }
                 int next = index + token.foldedRunes().length;
-                minimum[index] = Math.min(minimum[index], minimumUtf8Length(token.sourceRunes()) + minimum[next]);
-                maximum[index] = Math.max(maximum[index], maximumUtf8Length(token.sourceRunes()) + maximum[next]);
+                minimum[index] = Math.min(minimum[index], data.tokenMinimumLengths[tokenIndex] + minimum[next]);
+                maximum[index] = Math.max(maximum[index], data.tokenMaximumLengths[tokenIndex] + maximum[next]);
             }
         }
         return new ByteLength(minimum[0], maximum[0]);
@@ -231,6 +265,9 @@ final class UnicodeFullCaseFold
 
     private static int canonicalSimpleFold(int rune)
     {
+        if (rune < 0x80) {
+            return rune >= 'A' && rune <= 'Z' ? rune + ('a' - 'A') : rune;
+        }
         return Character.toLowerCase(Character.toUpperCase(rune));
     }
 
@@ -246,7 +283,73 @@ final class UnicodeFullCaseFold
         return Integer.compare(left.length, right.length);
     }
 
-    private record Data(Map<Integer, int[]> mappingByRune, List<FoldToken> multiCharacterTokens) {}
+    /**
+     * Mappings and tokens with primitive lookup tables. Mapped runes are sorted for binary search.
+     * Tokens are sorted by folded sequence, so tokens sharing a first rune are contiguous.
+     */
+    private static final class Data
+    {
+        private final List<FoldToken> multiCharacterTokens;
+        private final int[] mappedRunes;
+        private final int[][] mappings;
+        private final FoldToken[] tokens;
+        private final int[] tokenFirstRunes;
+        private final int[] tokenMinimumLengths;
+        private final int[] tokenMaximumLengths;
+
+        private Data(Map<Integer, int[]> mappingByRune, List<FoldToken> multiCharacterTokens)
+        {
+            this.multiCharacterTokens = multiCharacterTokens;
+            mappedRunes = mappingByRune.keySet().stream().mapToInt(Integer::intValue).sorted().toArray();
+            mappings = new int[mappedRunes.length][];
+            for (int index = 0; index < mappedRunes.length; index++) {
+                mappings[index] = mappingByRune.get(mappedRunes[index]);
+            }
+            tokens = multiCharacterTokens.toArray(FoldToken[]::new);
+            tokenFirstRunes = new int[tokens.length];
+            tokenMinimumLengths = new int[tokens.length];
+            tokenMaximumLengths = new int[tokens.length];
+            for (int index = 0; index < tokens.length; index++) {
+                tokenFirstRunes[index] = tokens[index].foldedRunes()[0];
+                tokenMinimumLengths[index] = minimumUtf8Length(tokens[index].sourceRunes());
+                tokenMaximumLengths[index] = maximumUtf8Length(tokens[index].sourceRunes());
+            }
+        }
+
+        private int[] mapping(int rune)
+        {
+            if (rune < mappedRunes[0]) {
+                return null;
+            }
+            int index = Arrays.binarySearch(mappedRunes, rune);
+            return index < 0 ? null : mappings[index];
+        }
+
+        private int firstTokenIndex(int foldedRune)
+        {
+            int low = 0;
+            int high = tokenFirstRunes.length;
+            while (low < high) {
+                int middle = (low + high) >>> 1;
+                if (tokenFirstRunes[middle] < foldedRune) {
+                    low = middle + 1;
+                }
+                else {
+                    high = middle;
+                }
+            }
+            return low;
+        }
+
+        private int tokenEndIndex(int foldedRune, int start)
+        {
+            int end = start;
+            while (end < tokenFirstRunes.length && tokenFirstRunes[end] == foldedRune) {
+                end++;
+            }
+            return end;
+        }
+    }
 
     private static final class DataHolder
     {
