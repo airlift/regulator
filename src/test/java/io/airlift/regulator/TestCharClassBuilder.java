@@ -15,9 +15,14 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.BitSet;
+import java.util.List;
+import java.util.Random;
+
 import static io.airlift.regulator.CharClass.RUNEMAX;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestCharClassBuilder
 {
@@ -99,5 +104,131 @@ public class TestCharClassBuilder
                 Regexp.CLASS_NEWLINE | Regexp.ASCII_FOLD_CASE);
         assertThat(caseFoldBuilder.contains('A')).isTrue();
         assertThat(caseFoldBuilder.contains('a')).isTrue();
+    }
+
+    @Test
+    public void testAddRangeInsertsBeforeAndBetweenExistingRanges()
+    {
+        CharClassBuilder builder = new CharClassBuilder();
+        builder.addRange(100, 110);
+        builder.addRange(200, 210);
+        builder.addRange(300, 310);
+        builder.addRange(50, 60);
+        builder.addRange(150, 160);
+        builder.addRange(320, 330);
+        builder.addRange(111, 149);
+
+        assertThat(builder.rangeCount()).isEqualTo(5);
+        assertThat(builder.range(0)).isEqualTo(new RuneRange(50, 60));
+        assertThat(builder.range(1)).isEqualTo(new RuneRange(100, 160));
+        assertThat(builder.range(2)).isEqualTo(new RuneRange(200, 210));
+        assertThat(builder.range(3)).isEqualTo(new RuneRange(300, 310));
+        assertThat(builder.range(4)).isEqualTo(new RuneRange(320, 330));
+        assertThat(builder.runeCount()).isEqualTo(11 + 61 + 11 + 11 + 11);
+
+        builder.addRange(0, RUNEMAX);
+        assertThat(builder.rangeCount()).isEqualTo(1);
+        assertThat(builder.runeCount()).isEqualTo(RUNEMAX + 1);
+    }
+
+    @Test
+    public void testAddCharClassMergesLargeClasses()
+    {
+        CharClass upper = UnicodeGroups.lookup("Lu");
+        CharClass lower = UnicodeGroups.lookup("Ll");
+
+        CharClassBuilder merged = new CharClassBuilder();
+        merged.addCharClass(upper, Regexp.LIKE_PERL);
+        merged.addCharClass(lower, Regexp.LIKE_PERL);
+
+        CharClassBuilder expected = new CharClassBuilder();
+        for (RuneRange range : lower.ranges()) {
+            expected.addRange(range.low(), range.high());
+        }
+        for (RuneRange range : upper.ranges()) {
+            expected.addRange(range.low(), range.high());
+        }
+        assertThat(merged.toCharClass()).isEqualTo(expected.toCharClass());
+        assertThat(merged.runeCount()).isEqualTo(upper.runeCount() + lower.runeCount());
+        assertThat(merged.foldsAscii()).isTrue();
+
+        CharClassBuilder fromBuilder = new CharClassBuilder();
+        fromBuilder.addRange('a', 'c');
+        fromBuilder.addCharClass(merged);
+        assertThat(fromBuilder.toCharClass()).isEqualTo(merged.toCharClass());
+    }
+
+    @Test
+    public void testAddCharClassMatchesBitSetModelForRandomClasses()
+    {
+        Random random = new Random(42);
+        for (int iteration = 0; iteration < 200; iteration++) {
+            CharClassBuilder existing = randomBuilder(random, 1 + random.nextInt(40));
+            CharClassBuilder source = randomBuilder(random, 1 + random.nextInt(40));
+
+            BitSet model = new BitSet();
+            for (int index = 0; index < existing.rangeCount(); index++) {
+                model.set(existing.range(index).low(), existing.range(index).high() + 1);
+            }
+            for (int index = 0; index < source.rangeCount(); index++) {
+                model.set(source.range(index).low(), source.range(index).high() + 1);
+            }
+
+            CharClassBuilder viaBuilder = existing.copy();
+            viaBuilder.addCharClass(source);
+            CharClassBuilder viaClass = existing.copy();
+            viaClass.addCharClass(source.toCharClass(), Regexp.CLASS_NEWLINE);
+
+            for (CharClassBuilder builder : new CharClassBuilder[] {viaBuilder, viaClass}) {
+                assertThat(builder.runeCount()).as("iteration %s", iteration).isEqualTo(model.cardinality());
+                int expectedRanges = 0;
+                for (int bit = model.nextSetBit(0); bit >= 0; bit = model.nextSetBit(model.nextClearBit(bit))) {
+                    assertThat(builder.range(expectedRanges)).as("iteration %s", iteration).isEqualTo(new RuneRange(bit, model.nextClearBit(bit) - 1));
+                    expectedRanges++;
+                }
+                assertThat(builder.rangeCount()).as("iteration %s", iteration).isEqualTo(expectedRanges);
+            }
+        }
+    }
+
+    @Test
+    public void testAddCharClassExcludesNewlineFromMergedClass()
+    {
+        // Twenty ranges exceed the merge threshold of eight, so the class takes the linear merge.
+        CharClassBuilder source = new CharClassBuilder();
+        for (int base = 0; base < 20; base++) {
+            source.addRange(base * 10, base * 10 + 3);
+        }
+        assertThat(source.contains('\n')).isTrue();
+
+        CharClassBuilder builder = new CharClassBuilder();
+        builder.addRange(1000, 1000);
+        builder.addCharClass(source.toCharClass(), 0);
+        assertThat(builder.contains('\n')).isFalse();
+        assertThat(builder.contains(11)).isTrue();
+        assertThat(builder.contains(13)).isTrue();
+        assertThat(builder.contains(1000)).isTrue();
+        assertThat(builder.rangeCount()).isEqualTo(source.rangeCount() + 1);
+        assertThat(builder.runeCount()).isEqualTo(source.runeCount());
+    }
+
+    @Test
+    public void testRangeViewIsUnmodifiable()
+    {
+        CharClass characterClass = new CharClass(false, 4, new RuneRange[] {new RuneRange('a', 'b'), new RuneRange('x', 'y')});
+        List<RuneRange> view = characterClass.rangeView();
+        assertThat(view).containsExactly(new RuneRange('a', 'b'), new RuneRange('x', 'y'));
+        assertThatThrownBy(() -> view.set(0, new RuneRange('a', 'z'))).isInstanceOf(UnsupportedOperationException.class);
+        assertThat(characterClass.range(0)).isEqualTo(new RuneRange('a', 'b'));
+    }
+
+    private static CharClassBuilder randomBuilder(Random random, int rangeCount)
+    {
+        CharClassBuilder builder = new CharClassBuilder();
+        for (int index = 0; index < rangeCount; index++) {
+            int low = random.nextInt(400);
+            builder.addRange(low, low + random.nextInt(6));
+        }
+        return builder;
     }
 }
