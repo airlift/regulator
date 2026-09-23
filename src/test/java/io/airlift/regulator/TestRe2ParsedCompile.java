@@ -55,15 +55,23 @@ public class TestRe2ParsedCompile
     }
 
     @Test
-    public void testPatternIsCopied()
+    public void testCompiledPatternRetainsCallerSnapshot()
     {
-        Slice pattern = utf8Slice("original");
-        ParseResult parsed = RegexpParser.parse(pattern, Regexp.LIKE_PERL);
+        Slice javaPattern = utf8Slice("[a-z]+-[0-9]+");
+        ParseResult javaParsed = JavaRegexpParser.parse(javaPattern, Regexp.LIKE_PERL);
+        Re2 java = Re2.compileParsed(javaPattern, javaParsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY);
 
-        Re2 compiled = Re2.compileParsed(pattern, parsed, Regexp.LIKE_PERL);
-        pattern.setByte(0, 'X');
+        // [a-z]{3} takes the Trino fixed-width route and ([a-z]+)-([0-9]+) the general route.
+        Slice trinoPattern = utf8Slice("[a-z]{3}");
+        ParseResult trinoParsed = TrinoRegexpParser.parse(trinoPattern, Regexp.LIKE_PERL);
+        Re2 trino = Re2.compileParsedForTrino(trinoPattern, trinoParsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY);
+        Slice generalTrinoPattern = utf8Slice("([a-z]+)-([0-9]+)");
+        ParseResult generalTrinoParsed = TrinoRegexpParser.parse(generalTrinoPattern, Regexp.LIKE_PERL);
+        Re2 generalTrino = Re2.compileParsedForTrino(generalTrinoPattern, generalTrinoParsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY);
 
-        assertThat(compiled.pattern()).isEqualTo(utf8Slice("original"));
+        assertThat(java.retainsPatternForDiagnostics(javaPattern)).isTrue();
+        assertThat(trino.retainsPatternForDiagnostics(trinoPattern)).isTrue();
+        assertThat(generalTrino.retainsPatternForDiagnostics(generalTrinoPattern)).isTrue();
     }
 
     @Test
