@@ -86,14 +86,17 @@ final class Simplifier
                 yield regexp;
             }
 
-            case CAPTURE -> Regexp.capture(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), regexp.captureIndex(), regexp.name());
-            case STAR -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), UnaryOp.STAR);
-            case PLUS -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), UnaryOp.PLUS);
-            case QUEST -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), UnaryOp.QUEST);
+            case CAPTURE -> {
+                Regexp child = simplifyRecursive(regexp.child(0), mode, depth + 1);
+                yield child == regexp.child(0) ? regexp : Regexp.capture(flags, child, regexp.captureIndex(), regexp.name());
+            }
+            case STAR -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), UnaryOp.STAR, regexp);
+            case PLUS -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), UnaryOp.PLUS, regexp);
+            case QUEST -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), UnaryOp.QUEST, regexp);
             case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifyRecursive(regexp.child(0), mode, depth + 1));
             case CONCAT -> simplifyConcatRecursive(mode, flags, regexp, depth);
             case ALTERNATE -> simplifyAlternateRecursive(mode, flags, regexp, depth);
-            case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass());
+            case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
         };
     }
 
@@ -146,14 +149,17 @@ final class Simplifier
                     yield regexp;
                 }
 
-                case CAPTURE -> Regexp.capture(flags, simplifiedChildren.getFirst(), regexp.captureIndex(), regexp.name());
-                case STAR -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.STAR);
-                case PLUS -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.PLUS);
-                case QUEST -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.QUEST);
+                case CAPTURE -> {
+                    Regexp child = simplifiedChildren.getFirst();
+                    yield child == regexp.child(0) ? regexp : Regexp.capture(flags, child, regexp.captureIndex(), regexp.name());
+                }
+                case STAR -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.STAR, regexp);
+                case PLUS -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.PLUS, regexp);
+                case QUEST -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.QUEST, regexp);
                 case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifiedChildren.getFirst());
-                case CONCAT -> simplifyConcat(flags, simplifiedChildren);
+                case CONCAT -> simplifyConcat(flags, regexp, simplifiedChildren);
                 case ALTERNATE -> simplifyAlternate(mode, flags, simplifiedChildren);
-                case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass());
+                case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
             };
         }
     }
@@ -163,7 +169,11 @@ final class Simplifier
         STAR, PLUS, QUEST
     }
 
-    private static Regexp simplifyUnary(int flags, Regexp childRegexp, UnaryOp operator)
+    /**
+     * Simplifies a unary operator over an already simplified child. Returns {@code original}, a node
+     * with this operator and these flags, when rebuilding would produce an equal node.
+     */
+    private static Regexp simplifyUnary(int flags, Regexp childRegexp, UnaryOp operator, Regexp original)
     {
         // Simplify repetition over known-empty / known-impossible expressions.
         if (childRegexp.op() == RegexpOp.EMPTY_MATCH) {
@@ -183,6 +193,9 @@ final class Simplifier
             return childRegexp;
         }
 
+        if (childRegexp == original.child(0)) {
+            return original;
+        }
         return switch (operator) {
             case STAR -> Regexp.rawUnary(RegexpOp.STAR, flags, childRegexp);
             case PLUS -> Regexp.rawUnary(RegexpOp.PLUS, flags, childRegexp);
@@ -197,7 +210,7 @@ final class Simplifier
 
         if (mode == Mode.PARSE) {
             // Preserve counted repeats in parse results (upstream parse_test.cc expects rep{...}).
-            return Regexp.repeat(flags, childRegexp, min, max);
+            return childRegexp == regexp.child(0) ? regexp : Regexp.repeat(flags, childRegexp, min, max);
         }
         // and SimplifyWalker::SimplifyRepeat().
         if (childRegexp.op() == RegexpOp.EMPTY_MATCH) {
@@ -287,7 +300,7 @@ final class Simplifier
         return true;
     }
 
-    private static Regexp simplifyConcat(int flags, List<Regexp> children)
+    private static Regexp simplifyConcat(int flags, Regexp regexp, List<Regexp> children)
     {
         List<Regexp> simplifiedChildren = new ArrayList<>();
         for (Regexp simplifiedChild : children) {
@@ -319,6 +332,9 @@ final class Simplifier
         }
         if (simplifiedChildren.size() == 1) {
             return simplifiedChildren.getFirst();
+        }
+        if (sameChildren(regexp, simplifiedChildren)) {
+            return regexp;
         }
         return Regexp.concat(flags, simplifiedChildren);
     }
@@ -353,7 +369,23 @@ final class Simplifier
         if (simplifiedChildren.size() == 1) {
             return simplifiedChildren.getFirst();
         }
+        if (sameChildren(regexp, simplifiedChildren)) {
+            return regexp;
+        }
         return Regexp.concat(flags, simplifiedChildren);
+    }
+
+    private static boolean sameChildren(Regexp regexp, List<Regexp> children)
+    {
+        if (children.size() != regexp.childCount()) {
+            return false;
+        }
+        for (int childIndex = 0; childIndex < children.size(); childIndex++) {
+            if (children.get(childIndex) != regexp.child(childIndex)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean isLiteralOrLiteralString(Regexp regexp)
@@ -474,7 +506,11 @@ final class Simplifier
         return simplifyAlternatives(mode, flags, simplifiedAlternatives);
     }
 
-    private static Regexp simplifyCharClass(Mode mode, int flags, CharClass charClass)
+    /**
+     * Simplifies a character class. Returns {@code original} when it is a node with these flags and
+     * this class and rebuilding would produce an equal node; {@code original} may be null.
+     */
+    private static Regexp simplifyCharClass(Mode mode, int flags, CharClass charClass, Regexp original)
     {
         if (charClass.isEmpty()) {
             return Regexp.noMatch(flags);
@@ -525,7 +561,7 @@ final class Simplifier
                 return Regexp.literal(flags, runeRange.low());
             }
         }
-        return Regexp.charClass(flags, charClass);
+        return original != null ? original : Regexp.charClass(flags, charClass);
     }
 
     private static List<Regexp> mergeAlternateCharClassesWherePossible(Mode mode, int flags, List<Regexp> alternatives)
@@ -566,7 +602,7 @@ final class Simplifier
 
             if (count >= 2) {
                 mergedClassBuilder.removeAbove(Regexp.maxRune(flags));
-                mergedAlternatives.add(simplifyCharClass(mode, flags, mergedClassBuilder.toCharClass()));
+                mergedAlternatives.add(simplifyCharClass(mode, flags, mergedClassBuilder.toCharClass(), null));
             }
             else {
                 mergedAlternatives.add(alternative);
