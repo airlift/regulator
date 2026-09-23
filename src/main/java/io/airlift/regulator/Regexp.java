@@ -17,6 +17,7 @@ import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
+import java.util.AbstractList;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Deque;
@@ -24,6 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.RandomAccess;
 
 import static java.util.Objects.requireNonNull;
 
@@ -68,9 +70,12 @@ final class Regexp
     // util/utf.h Runemax
     static final int RUNEMAX = 0x10FFFF;
 
+    private static final Regexp[] NO_CHILDREN = new Regexp[0];
+
     private final RegexpOp op;
     private final int parseFlags;
-    private final List<Regexp> children;
+    // Never mutated, and shared with the nodes built from this node's children() view.
+    private final Regexp[] children;
 
     // Op-specific payload
     private final int rune;              // LITERAL
@@ -101,7 +106,7 @@ final class Regexp
     {
         this.op = requireNonNull(op, "op is null");
         this.parseFlags = parseFlags;
-        this.children = List.copyOf(requireNonNull(children, "children is null"));
+        this.children = childArray(requireNonNull(children, "children is null"));
         this.rune = rune;
         this.runes = runes;
         this.charClass = charClass;
@@ -139,14 +144,14 @@ final class Regexp
         }
 
         int childIndex = 0;
-        while (childIndex < children.size() && children.get(childIndex).op == RegexpOp.BEGIN_TEXT) {
+        while (childIndex < children.length && children[childIndex].op == RegexpOp.BEGIN_TEXT) {
             childIndex++;
         }
-        if (childIndex == 0 || childIndex >= children.size()) {
+        if (childIndex == 0 || childIndex >= children.length) {
             return null;
         }
 
-        Regexp regexp = children.get(childIndex);
+        Regexp regexp = children[childIndex];
         if (regexp.op != RegexpOp.LITERAL && regexp.op != RegexpOp.LITERAL_STRING) {
             return null;
         }
@@ -156,13 +161,12 @@ final class Regexp
         childIndex++;
 
         Regexp suffix;
-        if (childIndex < children.size()) {
-            List<Regexp> suffixSubs = children.subList(childIndex, children.size());
-            if (suffixSubs.size() == 1) {
-                suffix = suffixSubs.getFirst();
+        if (childIndex < children.length) {
+            if (childIndex == children.length - 1) {
+                suffix = children[childIndex];
             }
             else {
-                suffix = Regexp.concat(parseFlags, suffixSubs);
+                suffix = Regexp.concat(parseFlags, children().subList(childIndex, children.length));
             }
         }
         else {
@@ -183,11 +187,11 @@ final class Regexp
     RequiredPrefixForAccelResult requiredPrefixForAccel()
     {
         // The regexp must either begin with or be a literal char or string.
-        Regexp regexp = (op == RegexpOp.CONCAT && !children.isEmpty()) ? children.getFirst() : this;
+        Regexp regexp = (op == RegexpOp.CONCAT && children.length != 0) ? children[0] : this;
         while (regexp.op == RegexpOp.CAPTURE) {
-            regexp = regexp.children.getFirst();
-            if (regexp.op == RegexpOp.CONCAT && !regexp.children.isEmpty()) {
-                regexp = regexp.children.getFirst();
+            regexp = regexp.children[0];
+            if (regexp.op == RegexpOp.CONCAT && regexp.children.length != 0) {
+                regexp = regexp.children[0];
             }
         }
         if (regexp.op != RegexpOp.LITERAL && regexp.op != RegexpOp.LITERAL_STRING) {
@@ -234,8 +238,8 @@ final class Regexp
             Regexp regexp = stack.removeLast();
             switch (regexp.op) {
                 case EMPTY_MATCH -> {}
-                case CAPTURE -> stack.addLast(regexp.children.getFirst());
-                case CONCAT -> stack.addAll(regexp.children.reversed());
+                case CAPTURE -> stack.addLast(regexp.children[0]);
+                case CONCAT -> pushChildrenReversed(stack, regexp);
                 case LITERAL -> {
                     if ((regexp.parseFlags & FOLD_CASE) != 0) {
                         return null;
@@ -278,8 +282,7 @@ final class Regexp
                 namedCaptures.putIfAbsent(regexp.name.toStringUtf8(), regexp.captureIndex);
             }
 
-            // Push children in reverse so stack pop order visits them left-to-right.
-            stack.addAll(regexp.children.reversed());
+            pushChildrenReversed(stack, regexp);
         }
 
         return (namedCaptures == null) ? Map.of() : Map.copyOf(namedCaptures);
@@ -303,8 +306,7 @@ final class Regexp
                 captureNames.put(regexp.captureIndex, regexp.name.toStringUtf8());
             }
 
-            // Push children in reverse so stack pop order visits them left-to-right.
-            stack.addAll(regexp.children.reversed());
+            pushChildrenReversed(stack, regexp);
         }
 
         return (captureNames == null) ? Map.of() : Map.copyOf(captureNames);
@@ -336,17 +338,27 @@ final class Regexp
 
     int childCount()
     {
-        return children.size();
+        return children.length;
     }
 
     Regexp child(int childIndex)
     {
-        return children.get(childIndex);
+        return children[childIndex];
     }
 
+    // Allocates a view per call; the array is never mutated, so the view is always current.
     List<Regexp> children()
     {
-        return children;
+        return new ChildList(children);
+    }
+
+    // Pushes the children in reverse so stack pop order visits them left to right.
+    private static void pushChildrenReversed(Deque<Regexp> stack, Regexp regexp)
+    {
+        Regexp[] children = regexp.children;
+        for (int childIndex = children.length - 1; childIndex >= 0; childIndex--) {
+            stack.addLast(children[childIndex]);
+        }
     }
 
     int rune()
@@ -614,7 +626,7 @@ final class Regexp
             case REPEAT -> min == right.min && max == right.max && Objects.equals(child(0), right.child(0));
             case HAVE_MATCH -> matchId == right.matchId;
             case STAR, PLUS, QUEST -> Objects.equals(child(0), right.child(0));
-            case CONCAT, ALTERNATE -> children.equals(right.children);
+            case CONCAT, ALTERNATE -> Arrays.equals(children, right.children);
         };
     }
 
@@ -640,7 +652,7 @@ final class Regexp
             }
             case HAVE_MATCH -> 31 * result + matchId;
             case STAR, PLUS, QUEST -> 31 * result + Objects.hashCode(child(0));
-            case CONCAT, ALTERNATE -> 31 * result + children.hashCode();
+            case CONCAT, ALTERNATE -> 31 * result + Arrays.hashCode(children);
         };
     }
 
@@ -664,5 +676,48 @@ final class Regexp
             case STAR, PLUS, QUEST, REPEAT -> parseFlags & NON_GREEDY;
             default -> 0;
         };
+    }
+
+    private static Regexp[] childArray(List<Regexp> children)
+    {
+        if (children instanceof ChildList existing) {
+            return existing.values;
+        }
+        if (children.isEmpty()) {
+            return NO_CHILDREN;
+        }
+        Regexp[] values = children.toArray(new Regexp[0]);
+        for (Regexp value : values) {
+            requireNonNull(value, "child is null");
+        }
+        return values;
+    }
+
+    /**
+     * Read-only list view of a node's children. Nodes keep the bare array so the view costs
+     * nothing when retained; building a node from another node's view reuses the array.
+     */
+    private static final class ChildList
+            extends AbstractList<Regexp>
+            implements RandomAccess
+    {
+        private final Regexp[] values;
+
+        private ChildList(Regexp[] values)
+        {
+            this.values = values;
+        }
+
+        @Override
+        public Regexp get(int index)
+        {
+            return values[index];
+        }
+
+        @Override
+        public int size()
+        {
+            return values.length;
+        }
     }
 }

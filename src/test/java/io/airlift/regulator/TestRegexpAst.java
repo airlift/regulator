@@ -67,6 +67,25 @@ public class TestRegexpAst
     }
 
     @Test
+    public void testChildrenViewIsReadOnlyAndReusable()
+    {
+        Regexp concat = Regexp.concat(0, List.of(Regexp.literal(0, 'a'), Regexp.literal(0, 'b'), Regexp.literal(0, 'c')));
+        List<Regexp> children = concat.children();
+        assertThat(children).containsExactly(concat.child(0), concat.child(1), concat.child(2));
+        assertThatThrownBy(() -> children.set(0, Regexp.literal(0, 'x'))).isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> children.add(Regexp.literal(0, 'x'))).isInstanceOf(UnsupportedOperationException.class);
+
+        // A node built from another node's view is equal to one built from a fresh list.
+        Regexp fromView = Regexp.alternate(0, children);
+        Regexp fromList = Regexp.alternate(0, List.of(Regexp.literal(0, 'a'), Regexp.literal(0, 'b'), Regexp.literal(0, 'c')));
+        assertThat(fromView).isEqualTo(fromList);
+        assertThat(fromView.hashCode()).isEqualTo(fromList.hashCode());
+        assertThat(fromView.children().subList(1, 3)).containsExactly(concat.child(1), concat.child(2));
+        assertThat(Regexp.concat(0, children.subList(1, 3))).isEqualTo(Regexp.concat(0, List.of(Regexp.literal(0, 'b'), Regexp.literal(0, 'c'))));
+        assertThat(concat.child(0)).isSameAs(fromView.child(0));
+    }
+
+    @Test
     public void testEqualsUsesOnlyOperationRelevantFlags()
     {
         assertEqualWithEqualHash(Regexp.noMatch(0), Regexp.noMatch(Regexp.PERL_EXTENSIONS));
