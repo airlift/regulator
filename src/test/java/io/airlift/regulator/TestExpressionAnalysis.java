@@ -16,8 +16,18 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.function.Supplier;
 
 import static io.airlift.regulator.ExpressionAnalysis.Gap.NONE;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ONE_BYTE;
@@ -66,21 +76,90 @@ public class TestExpressionAnalysis
         ExpressionAnalysis expandedFold = analyze("(?i:k)");
         assertThat(expandedFold.hasFoldCaseLiteral()).isFalse();
         assertThat(expandedFold.literalSequence()).isNull();
-        assertThat(expandedFold.length()).isEqualTo(new ExpressionAnalysis.Length(1, 3, true));
+        assertBounds(expandedFold.length(), 1, 3);
 
         ExpressionAnalysis latin1 = Re2.compile(wrappedBuffer(new byte[] {(byte) 0xE9}), Re2.Options.latin1()).expressionAnalysisForDiagnostics();
         assertThat(latin1.latin1()).isTrue();
-        assertThat(latin1.length()).isEqualTo(new ExpressionAnalysis.Length(1, 1, true));
+        assertBounds(latin1.length(), 1, 1);
         assertThat(latin1.literalSequence().exactLiteral()).isEqualTo(wrappedBuffer(new byte[] {(byte) 0xE9}));
 
         ExpressionAnalysis latin1Wildcard = Re2.compile(utf8Slice("."), Re2.Options.latin1()).expressionAnalysisForDiagnostics();
-        assertThat(latin1Wildcard.length()).isEqualTo(new ExpressionAnalysis.Length(1, 1, true));
+        assertBounds(latin1Wildcard.length(), 1, 1);
         assertThat(latin1Wildcard.literalSequence().leadingGap()).isEqualTo(ONE_NON_NEWLINE_CODE_POINT);
 
         ExpressionAnalysis latin1Fold = Re2.compile(utf8Slice("a"), Re2.Options.latin1().setCaseSensitive(false)).expressionAnalysisForDiagnostics();
-        assertThat(latin1Fold.length()).isEqualTo(new ExpressionAnalysis.Length(1, 1, true));
+        assertBounds(latin1Fold.length(), 1, 1);
         assertThat(latin1Fold.hasFoldCaseLiteral()).isTrue();
         assertThat(latin1Fold.literalSequence()).isNull();
+    }
+
+    @Test
+    public void testNormalizedEncodedLengthMatchesRawAnalysisOverCorpora()
+    {
+        // The compiler stores the encoded match length of the simplified expression, so
+        // simplification must preserve every length bound that the raw analysis computes,
+        // including the multi-character bounds of Trino full case folding.
+        Set<String> upstreamPatterns = new LinkedHashSet<>(readPatterns("io/airlift/regulator/prog/upstream_compile_dump_patterns.txt"));
+        Set<String> everydayPatterns = new LinkedHashSet<>();
+        for (String workloadId : TestingEverydayTrinoRegexpBenchmarkInputs.workloadIds()) {
+            everydayPatterns.add(TestingEverydayTrinoRegexpBenchmarkInputs.create(workloadId).pattern().toStringUtf8());
+        }
+        Set<String> sharedPatterns = new LinkedHashSet<>(BenchmarkCompileCorpus.SHARED_REGEXP_CORPUS);
+        assertThat(upstreamPatterns).hasSizeGreaterThanOrEqualTo(22);
+        assertThat(everydayPatterns).hasSizeGreaterThanOrEqualTo(12);
+        assertThat(sharedPatterns).hasSizeGreaterThanOrEqualTo(42);
+
+        Set<String> patterns = new LinkedHashSet<>();
+        patterns.addAll(upstreamPatterns);
+        patterns.addAll(everydayPatterns);
+        patterns.addAll(sharedPatterns);
+        for (String pattern : patterns) {
+            Slice slice = utf8Slice(pattern);
+            for (Regexp regexp : Arrays.asList(
+                    parseOrNull(() -> RegexpParser.parse(slice, Regexp.LIKE_PERL)),
+                    parseOrNull(() -> RegexpParser.parse(slice, Regexp.LIKE_PERL | Regexp.LATIN1)),
+                    parseOrNull(() -> RegexpParser.parse(slice, Regexp.LIKE_PERL | Regexp.FOLD_CASE)),
+                    parseOrNull(() -> JavaRegexpParser.parse(slice, Regexp.LIKE_PERL)),
+                    parseOrNull(() -> JavaRegexpParser.parse(slice, Regexp.LIKE_PERL | Regexp.FOLD_CASE)),
+                    parseOrNull(() -> TrinoRegexpParser.parse(slice, Regexp.LIKE_PERL)),
+                    parseOrNull(() -> TrinoRegexpParser.parse(slice, Regexp.LIKE_PERL | Regexp.FOLD_CASE)))) {
+                if (regexp == null) {
+                    continue;
+                }
+                int raw = MatchLength.analyze(regexp).encoded();
+                int normalized = ExpressionAnalysis.analyzeNormalized(Simplifier.simplify(regexp)).length().encoded();
+                assertThat(normalized).as("encoded length: %s", pattern).isEqualTo(raw);
+            }
+        }
+    }
+
+    @Test
+    public void testEncodedMatchLength()
+    {
+        for (String pattern : List.of(
+                "",
+                "abc",
+                "a|💰",
+                "a*",
+                "[a💰]",
+                "(?i:K)")) {
+            Regexp regexp = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
+            Regexp normalized = Simplifier.simplify(regexp);
+            assertThat(ExpressionAnalysis.analyzeNormalized(normalized).length().encoded())
+                    .as("encoded length: %s", pattern)
+                    .isEqualTo(MatchLength.analyze(regexp).encoded());
+        }
+
+        Regexp noMatch = Regexp.noMatch(Regexp.LIKE_PERL);
+        assertThat(ExpressionAnalysis.analyzeNormalized(noMatch).length().encoded())
+                .isEqualTo(MatchLength.analyze(noMatch).encoded());
+
+        Regexp literal = Regexp.literal(Regexp.LIKE_PERL, 0x1F4B0);
+        Regexp saturated = Regexp.repeat(Regexp.LIKE_PERL, literal, Integer.MAX_VALUE, Integer.MAX_VALUE);
+        ExpressionAnalysis.Length saturatedLength = ExpressionAnalysis.analyzeNormalized(saturated).length();
+        assertThat(saturatedLength.encoded())
+                .isEqualTo(MatchLength.analyze(saturated).encoded());
+        assertThat(saturatedLength.fixed()).isEqualTo(-1);
     }
 
     @Test
@@ -289,8 +368,15 @@ public class TestExpressionAnalysis
     private static void assertLength(String pattern, int minimum, int maximum, boolean canMatchEmpty)
     {
         ExpressionAnalysis analysis = analyze(pattern);
-        assertThat(analysis.length()).isEqualTo(new ExpressionAnalysis.Length(minimum, maximum, true));
+        assertBounds(analysis.length(), minimum, maximum);
         assertThat(analysis.canMatchEmpty()).isEqualTo(canMatchEmpty);
+    }
+
+    private static void assertBounds(ExpressionAnalysis.Length length, int minimum, int maximum)
+    {
+        assertThat(length.minimum()).isEqualTo(minimum);
+        assertThat(length.maximum()).isEqualTo(maximum);
+        assertThat(length.canMatch()).isTrue();
     }
 
     private static void assertSequence(
@@ -346,5 +432,39 @@ public class TestExpressionAnalysis
         for (Prefilter child : prefilter.children()) {
             collectAtoms(child, atoms);
         }
+    }
+
+    private static Regexp parseOrNull(Supplier<ParseResult> parser)
+    {
+        try {
+            return parser.get().regexp();
+        }
+        catch (RegexpParseException e) {
+            // Patterns that a frontend rejects have no analysis to compare.
+            return null;
+        }
+    }
+
+    // Reads the upstream pattern list the way TestUpstreamCompileDump does: comments are skipped
+    // and the empty pattern is kept.
+    private static List<String> readPatterns(String resourcePath)
+    {
+        InputStream stream = TestExpressionAnalysis.class.getClassLoader().getResourceAsStream(resourcePath);
+        assertThat(stream).as(resourcePath).isNotNull();
+
+        List<String> patterns = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (!line.isEmpty() && line.charAt(0) == '#') {
+                    continue;
+                }
+                patterns.add(line);
+            }
+        }
+        catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return patterns;
     }
 }
