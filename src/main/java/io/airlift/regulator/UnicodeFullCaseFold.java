@@ -76,6 +76,16 @@ final class UnicodeFullCaseFold
 
     static CharClass simpleFoldClass(int rune)
     {
+        // ASCII literals dominate Trino (?i) patterns, and the compiler asks for their classes
+        // once per rune per literal.
+        if (rune >= 0 && rune < AsciiSimpleFoldClasses.CLASSES.length) {
+            return AsciiSimpleFoldClasses.CLASSES[rune];
+        }
+        return buildSimpleFoldClass(rune);
+    }
+
+    private static CharClass buildSimpleFoldClass(int rune)
+    {
         CharClassBuilder builder = new CharClassBuilder();
         int current = rune;
         do {
@@ -120,13 +130,19 @@ final class UnicodeFullCaseFold
 
     static List<FoldToken> multiCharacterTokens(CharClass characterClass)
     {
+        Data data = DataHolder.DATA;
+        // Most classes contain no rune with a multi-character fold, so one intersection test
+        // against the union of all token sources answers for every token.
+        if (!intersects(characterClass, data.allSourceRunes)) {
+            return List.of();
+        }
         List<FoldToken> result = new ArrayList<>();
-        for (FoldToken token : DataHolder.DATA.multiCharacterTokens) {
+        for (FoldToken token : data.multiCharacterTokens) {
             if (intersects(characterClass, token.sourceRunes())) {
                 result.add(token);
             }
         }
-        return result;
+        return List.copyOf(result);
     }
 
     static ByteLength byteLength(int[] runes)
@@ -296,6 +312,7 @@ final class UnicodeFullCaseFold
         private final int[] tokenFirstRunes;
         private final int[] tokenMinimumLengths;
         private final int[] tokenMaximumLengths;
+        private final CharClass allSourceRunes;
 
         private Data(Map<Integer, int[]> mappingByRune, List<FoldToken> multiCharacterTokens)
         {
@@ -314,6 +331,11 @@ final class UnicodeFullCaseFold
                 tokenMinimumLengths[index] = minimumUtf8Length(tokens[index].sourceRunes());
                 tokenMaximumLengths[index] = maximumUtf8Length(tokens[index].sourceRunes());
             }
+            CharClassBuilder sources = new CharClassBuilder();
+            for (FoldToken token : tokens) {
+                sources.addCharClass(token.sourceRunes(), Regexp.CLASS_NEWLINE);
+            }
+            allSourceRunes = sources.toCharClass();
         }
 
         private int[] mapping(int rune)
@@ -348,6 +370,20 @@ final class UnicodeFullCaseFold
                 end++;
             }
             return end;
+        }
+    }
+
+    private static final class AsciiSimpleFoldClasses
+    {
+        private static final CharClass[] CLASSES = build();
+
+        private static CharClass[] build()
+        {
+            CharClass[] classes = new CharClass[0x80];
+            for (int rune = 0; rune < classes.length; rune++) {
+                classes[rune] = buildSimpleFoldClass(rune);
+            }
+            return classes;
         }
     }
 
