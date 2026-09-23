@@ -15,6 +15,9 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
+import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestProgFlatten
@@ -78,5 +81,87 @@ public class TestProgFlatten
         assertThat(prog.getInstCount(InstOp.BYTE_RANGE)).isGreaterThanOrEqualTo(2);
         assertThat(prog.getInstCount(InstOp.MATCH)).isGreaterThanOrEqualTo(1);
         assertThat(prog.getInstCount(InstOp.FAIL)).isGreaterThanOrEqualTo(1);
+    }
+
+    @Test
+    public void testByteRangeHintsMatchReference()
+    {
+        List<String> patterns = List.of(
+                "abc",
+                "a|b|c",
+                "[a-c]|[b-d]x|z",
+                "x*[ab]|[bc]|[cd]|q",
+                "(?i)abc|ABD",
+                "(?i)[a-k]|[j-z]",
+                "(?i)[a-c]|[b-d]x|z",
+                "(?i)k",
+                "(?i)(?:ss|st)ra",
+                "[^a]",
+                "\\pL",
+                "[0-9]+-[a-f]{2}",
+                "(?s).*foo",
+                "\\d{4}-\\d{2}-\\d{2}");
+        int hints = 0;
+        int foldCaseHints = 0;
+        for (String pattern : patterns) {
+            Prog program = Re2.compile(utf8Slice(pattern)).forwardProgramForDiagnostics();
+            for (int id = 0; id < program.size(); id++) {
+                Prog.Inst instruction = program.inst(id);
+                if (instruction.opcode() != InstOp.BYTE_RANGE) {
+                    continue;
+                }
+                assertThat(instruction.hint()).as("%s instruction %s", pattern, id).isEqualTo(referenceHint(program, id));
+                if (instruction.hint() != 0) {
+                    hints++;
+                    if (instruction.foldCase()) {
+                        foldCaseHints++;
+                    }
+                }
+            }
+        }
+        // Zero hints everywhere would also match a broken reference, so require real ones.
+        assertThat(hints).isPositive();
+        assertThat(foldCaseHints).isPositive();
+    }
+
+    // A byte range's hint is the distance to the nearest later byte range in the same run of
+    // consecutive byte ranges that can match a byte this one matches, or to the instruction
+    // following the run, capped at 32767. There is no hint when that instruction would be the end
+    // of the list.
+    private static int referenceHint(Prog program, int id)
+    {
+        int end = id;
+        while (!program.inst(end).last()) {
+            end++;
+        }
+        end++;
+        int runEnd = id + 1;
+        while (runEnd < end && program.inst(runEnd).opcode() == InstOp.BYTE_RANGE) {
+            runEnd++;
+        }
+        int first = end;
+        for (int value = 0; value < 256; value++) {
+            if (!matchesByte(program.inst(id), value)) {
+                continue;
+            }
+            int next = id + 1;
+            while (next < runEnd && !matchesByte(program.inst(next), value)) {
+                next++;
+            }
+            first = Math.min(first, next);
+        }
+        return first == end ? 0 : Math.min(first - id, 32767);
+    }
+
+    private static boolean matchesByte(Prog.Inst instruction, int value)
+    {
+        if (instruction.lo() <= value && value <= instruction.hi()) {
+            return true;
+        }
+        if (instruction.foldCase() && value >= 'A' && value <= 'Z') {
+            int lower = value + ('a' - 'A');
+            return instruction.lo() <= lower && lower <= instruction.hi();
+        }
+        return false;
     }
 }
