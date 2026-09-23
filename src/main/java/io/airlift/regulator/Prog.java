@@ -3141,21 +3141,50 @@ final class Prog
             Bitmap256 splits,
             int[] colors)
     {
-        splits.clear();
-
-        boolean dirty = false;
-        for (int id = end; id >= begin; id--) {
-            if (id == end || flattenedInstructions.get(id).opcode() != InstOp.BYTE_RANGE) {
-                if (dirty) {
-                    dirty = false;
-                    splits.clear();
-                }
-                splits.set(255);
-                colors[255] = id;
+        // A hint is the distance from a byte range to the nearest later byte range in its run of
+        // consecutive BYTE_RANGE instructions that can match a byte it matches, or else to the
+        // instruction after the run; a run that ends the list yields no hint. Hints are computed
+        // per run, scanning from the end of the list. A run of one byte range needs no byte-class
+        // bookkeeping: its hint is always one, the following instruction. Runs of two or more byte
+        // ranges use the split bitmap below.
+        int id = end - 1;
+        while (id >= begin) {
+            if (flattenedInstructions.get(id).opcode() != InstOp.BYTE_RANGE) {
+                id--;
                 continue;
             }
-            dirty = true;
+            int runEnd = id + 1;
+            int runBegin = id;
+            while (runBegin > begin && flattenedInstructions.get(runBegin - 1).opcode() == InstOp.BYTE_RANGE) {
+                runBegin--;
+            }
+            if (runBegin == id) {
+                if (runEnd != end) {
+                    setHint(flattenedInstructions.get(id), 1);
+                }
+            }
+            else {
+                computeRunHints(flattenedInstructions, runBegin, runEnd, end, splits, colors);
+            }
+            id = runBegin - 1;
+        }
+    }
 
+    private static void computeRunHints(
+            InstList flattenedInstructions,
+            int runBegin,
+            int runEnd,
+            int end,
+            Bitmap256 splits,
+            int[] colors)
+    {
+        // This is upstream's hint loop restricted to one run: seeding all 256 bytes with the color
+        // runEnd bounds each hint by the instruction after the run, and a run that ends the list
+        // (runEnd == end) gets none.
+        splits.clear();
+        splits.set(255);
+        colors[255] = runEnd;
+        for (int id = runEnd - 1; id >= runBegin; id--) {
             int first = end;
 
             Inst instruction = flattenedInstructions.get(id);
@@ -3179,10 +3208,15 @@ final class Prog
             }
 
             if (first != end) {
-                int hint = Math.min(first - id, 32767);
-                instruction.hintFoldCase |= hint << 1;
+                setHint(instruction, first - id);
             }
         }
+    }
+
+    // Hints are stored above the fold-case bit and saturate at the largest encodable distance.
+    private static void setHint(Inst instruction, int distance)
+    {
+        instruction.hintFoldCase |= Math.min(distance, 32767) << 1;
     }
 
     private static int recolorHints(Bitmap256 splits, int[] colors, int id, int lo, int hi, int first)
