@@ -19,6 +19,7 @@ import io.airlift.slice.Slices;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
@@ -237,8 +238,11 @@ final class TrinoRegexpParser
             private int concatenationFlags;
             private final List<Regexp> alternatives = new ArrayList<>();
             private final List<Regexp> concatenation = new ArrayList<>();
-            private final List<Integer> literalRunes = new ArrayList<>();
-            private Integer literalFlags;
+            // Pending literal runes, flushed into one literal string node. Kept as a plain
+            // array so accumulating a long literal does not box each rune.
+            private int[] literalRunes = new int[16];
+            private int literalRuneCount;
+            private int literalFlags;
 
             ExpressionBuilder(int flags)
             {
@@ -249,13 +253,16 @@ final class TrinoRegexpParser
             void add(Regexp atom)
             {
                 if (atom.op() == RegexpOp.LITERAL) {
-                    if (literalFlags != null && literalFlags != atom.parseFlags()) {
+                    if (literalRuneCount > 0 && literalFlags != atom.parseFlags()) {
                         flushLiterals();
                     }
-                    if (literalFlags == null) {
+                    if (literalRuneCount == 0) {
                         literalFlags = atom.parseFlags();
                     }
-                    literalRunes.add(atom.rune());
+                    if (literalRuneCount == literalRunes.length) {
+                        literalRunes = Arrays.copyOf(literalRunes, literalRuneCount * 2);
+                    }
+                    literalRunes[literalRuneCount++] = atom.rune();
                     return;
                 }
 
@@ -297,12 +304,11 @@ final class TrinoRegexpParser
 
             private void flushLiterals()
             {
-                if (literalRunes.isEmpty()) {
+                if (literalRuneCount == 0) {
                     return;
                 }
-                concatenation.add(makeLiteralString(literalFlags == null ? concatenationFlags : literalFlags, literalRunes));
-                literalRunes.clear();
-                literalFlags = null;
+                concatenation.add(makeLiteralString(literalFlags, literalRunes, literalRuneCount));
+                literalRuneCount = 0;
             }
         }
 

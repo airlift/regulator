@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
@@ -71,6 +72,39 @@ public class TestRegexpParser
 
         assertThat(failure.get()).isNull();
         assertThat(result.get().capturingGroupCount()).isEqualTo(captureCount);
+    }
+
+    @Test
+    public void testLongLiteralsAccumulateInEveryFrontend()
+    {
+        // Longer than the parsers' initial pending-rune buffer, so accumulation has to grow it.
+        String literal = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        int[] expected = literal.codePoints().toArray();
+        Slice pattern = Slices.wrappedBuffer(literal.getBytes(StandardCharsets.UTF_8));
+
+        for (Regexp regexp : List.of(
+                RegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp(),
+                JavaRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp(),
+                TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp())) {
+            assertThat(regexp.op()).isEqualTo(RegexpOp.LITERAL_STRING);
+            assertThat(regexp.runes()).containsExactly(expected);
+        }
+
+        // A literal that is interrupted flushes exactly the runes seen so far, and the buffer
+        // starts over for the literal that follows.
+        Slice interrupted = Slices.wrappedBuffer("abc(d)ef".getBytes(StandardCharsets.UTF_8));
+        for (Regexp regexp : List.of(
+                RegexpParser.parse(interrupted, Regexp.LIKE_PERL).regexp(),
+                JavaRegexpParser.parse(interrupted, Regexp.LIKE_PERL).regexp(),
+                TrinoRegexpParser.parse(interrupted, Regexp.LIKE_PERL).regexp())) {
+            assertThat(regexp.op()).isEqualTo(RegexpOp.CONCAT);
+            assertThat(regexp.childCount()).isEqualTo(3);
+            assertThat(regexp.child(0).op()).isEqualTo(RegexpOp.LITERAL_STRING);
+            assertThat(regexp.child(0).runes()).containsExactly('a', 'b', 'c');
+            assertThat(regexp.child(1).op()).isEqualTo(RegexpOp.CAPTURE);
+            assertThat(regexp.child(2).op()).isEqualTo(RegexpOp.LITERAL_STRING);
+            assertThat(regexp.child(2).runes()).containsExactly('e', 'f');
+        }
     }
 
     @Test
