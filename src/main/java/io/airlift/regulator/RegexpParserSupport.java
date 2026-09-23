@@ -14,8 +14,8 @@
 package io.airlift.regulator;
 
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Deque;
-import java.util.List;
 
 import static io.airlift.regulator.Regexp.MAX_REPEAT;
 
@@ -27,16 +27,13 @@ final class RegexpParserSupport
 {
     private RegexpParserSupport() {}
 
-    static Regexp makeLiteralString(int flags, List<Integer> runes)
+    // Copies runes[0, count); callers reuse the buffer after this returns.
+    static Regexp makeLiteralString(int flags, int[] runes, int count)
     {
-        if (runes.size() == 1) {
-            return Regexp.literal(flags, runes.getFirst());
+        if (count == 1) {
+            return Regexp.literal(flags, runes[0]);
         }
-        int[] literalRunes = new int[runes.size()];
-        for (int i = 0; i < runes.size(); i++) {
-            literalRunes[i] = runes.get(i);
-        }
-        return Regexp.literalString(flags, literalRunes);
+        return Regexp.literalString(flags, Arrays.copyOf(runes, count));
     }
 
     static boolean wouldExceedRepeatLimit(Regexp atom, int min, int max)
