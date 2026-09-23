@@ -47,8 +47,22 @@ final class ExpressionAnalysis
         REQUIRES_GENERAL_ENGINE,
     }
 
-    record Length(int minimum, int maximum, boolean canMatch)
+    /**
+     * @param encoded the length in the {@link MatchLength} encoding, from which the minimum and
+     *         the fixed length are derived
+     */
+    record Length(int maximum, int encoded)
     {
+        int minimum()
+        {
+            return MatchLength.minimum(encoded);
+        }
+
+        boolean canMatch()
+        {
+            return maximum != IMPOSSIBLE;
+        }
+
         boolean isUnbounded()
         {
             return maximum == UNBOUNDED;
@@ -56,7 +70,7 @@ final class ExpressionAnalysis
 
         int fixed()
         {
-            return canMatch && maximum == minimum ? minimum : -1;
+            return MatchLength.fixed(encoded);
         }
     }
 
@@ -175,11 +189,7 @@ final class ExpressionAnalysis
 
     private ExpressionAnalysis(Regexp regexp, Node node)
     {
-        boolean canMatch = node.maximumLength != IMPOSSIBLE;
-        this.length = new Length(
-                MatchLength.minimum(node.encodedLength),
-                node.maximumLength,
-                canMatch);
+        this.length = new Length(node.maximumLength, node.encodedLength);
         this.latin1 = (regexp.parseFlags() & LATIN1) != 0;
         this.hasCaptures = node.hasCaptures;
         this.hasFoldCaseLiteral = node.hasFoldCaseLiteral;

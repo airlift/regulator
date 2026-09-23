@@ -676,7 +676,7 @@ public final class Re2
                         null,
                         null,
                         false,
-                        MatchLength.analyze(entireRegexp).encoded(),
+                        expressionAnalysis.length().encoded(),
                         -1,
                         placeholderProgram,
                         booleanPlans,
@@ -757,7 +757,7 @@ public final class Re2
                     null,
                     null,
                     false,
-                    MatchLength.analyze(entireRegexp).encoded(),
+                    expressionAnalysis.length().encoded(),
                     -1,
                     partialProgram,
                     booleanPlans,
@@ -773,6 +773,7 @@ public final class Re2
         // For "^literal...", compile only the suffix and check the required prefix before matching.
         // Retain the suffix AST so reverse-program construction also avoids the stripped literal.
         Regexp suffixRegexp;
+        int encodedMatchLength;
         byte[] requiredPrefix = null;
         boolean prefixFoldCase = false;
         Regexp.RequiredPrefixResult prefixResult = entireRegexp.requiredPrefix();
@@ -780,15 +781,18 @@ public final class Re2
             requiredPrefix = prefixResult.prefix().getBytes();
             prefixFoldCase = prefixResult.foldCase();
             suffixRegexp = prefixResult.suffix();
+            // The whole-expression analysis describes the entire expression, so the split-off
+            // suffix needs its own length.
+            encodedMatchLength = MatchLength.analyze(suffixRegexp).encoded();
         }
         else {
             suffixRegexp = entireRegexp;
+            encodedMatchLength = expressionAnalysis.length().encoded();
         }
         Regexp normalizedSuffixRegexp = suffixRegexp == entireRegexp ? normalizedRegexp : Simplifier.simplify(suffixRegexp);
 
         // Compute captures from the entire regexp (named groups come from the full pattern).
         Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect);
-        MatchLength.Analysis matchLength = MatchLength.analyze(suffixRegexp);
         ExpressionAnalysis.LiteralSequence literalSequence = expressionAnalysis.literalSequence();
         Slice exactLiteral = literalSequence == null || literalSequence.anchoredAtStart() || literalSequence.anchoredAtEnd()
                 ? null
@@ -848,7 +852,7 @@ public final class Re2
                 loweredBooleanProgram == null ? normalizedSuffixRegexp : loweredBooleanProgram.normalizedRegexp(),
                 requiredPrefix,
                 prefixFoldCase,
-                matchLength.encoded(),
+                encodedMatchLength,
                 exactLiteral == null ? -1 : exactLiteral.length(),
                 semanticProgram,
                 booleanPlans,
