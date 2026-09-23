@@ -17,7 +17,6 @@ import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
-import java.util.List;
 
 import static io.airlift.regulator.InstOp.CAPTURE;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
@@ -45,7 +44,6 @@ public class TestBitStateCaptureInstructionWords
     }
 
     @Test
-    @SuppressWarnings("unchecked")
     public void testPackedInstructionsOwnCaptureUndoExecution()
             throws ReflectiveOperationException
     {
@@ -54,11 +52,11 @@ public class TestBitStateCaptureInstructionWords
 
         Field instructionsField = Prog.class.getDeclaredField("insts");
         instructionsField.setAccessible(true);
-        List<Prog.Inst> instructions = (List<Prog.Inst>) instructionsField.get(program);
-        for (int instructionId = 0; instructionId < instructions.size(); instructionId++) {
-            Prog.Inst instruction = instructions.get(instructionId);
+        Prog.Inst[] instructions = (Prog.Inst[]) instructionsField.get(program);
+        for (int instructionId = 0; instructionId < program.size(); instructionId++) {
+            Prog.Inst instruction = instructions[instructionId];
             if (instruction.opcode() == CAPTURE) {
-                instructions.set(instructionId, null);
+                instructions[instructionId] = null;
             }
         }
 

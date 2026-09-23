@@ -20,7 +20,6 @@ import io.airlift.slice.Slices;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -305,7 +304,8 @@ final class Prog
         }
     }
 
-    private List<Inst> insts = new ArrayList<>();
+    private Inst[] insts = new Inst[16];
+    private int instructionCount;
 
     private boolean didFlatten;
     private int start;
@@ -394,7 +394,7 @@ final class Prog
 
     public int size()
     {
-        return insts.size();
+        return instructionCount;
     }
 
     /**
@@ -463,11 +463,12 @@ final class Prog
      */
     public void removeLastInst(int expectedId)
     {
-        int last = insts.size() - 1;
+        int last = instructionCount - 1;
         if (expectedId != last) {
             throw new IllegalArgumentException("expected last id " + last + " but got " + expectedId);
         }
-        insts.remove(last);
+        insts[last] = null;
+        instructionCount = last;
     }
 
     public int start()
@@ -1781,22 +1782,25 @@ final class Prog
 
     public int add(Inst instruction)
     {
-        int instructionId = insts.size();
-        insts.add(requireNonNull(instruction, "instruction is null"));
-        return instructionId;
+        requireNonNull(instruction, "instruction is null");
+        if (instructionCount == insts.length) {
+            insts = Arrays.copyOf(insts, insts.length * 2);
+        }
+        insts[instructionCount] = instruction;
+        return instructionCount++;
     }
 
     public Inst inst(int instructionId)
     {
-        if (instructionId < 0 || instructionId >= insts.size()) {
+        if (instructionId < 0 || instructionId >= instructionCount) {
             throw new IllegalArgumentException("instructionId out of range: " + instructionId);
         }
-        return insts.get(instructionId);
+        return insts[instructionId];
     }
 
     public List<Inst> insts()
     {
-        return List.copyOf(insts);
+        return List.of(Arrays.copyOf(insts, instructionCount));
     }
 
     public String dump()
@@ -2544,7 +2548,7 @@ final class Prog
         int finalRootCount = rootIdsByInstruction.size();
         // Third pass: emit lists and map each root to its flattened instruction index.
         int[] flattenedIndexesByRoot = new int[rootIdsByInstruction.size()];
-        List<Inst> flattenedInstructions = new ArrayList<>(size());
+        InstList flattenedInstructions = new InstList(size());
         for (int rootIndex = 0; rootIndex < rootIdsByInstruction.size(); rootIndex++) {
             int rootInstructionId = rootIdsByInstruction.denseIndexAt(rootIndex);
             int rootId = rootIdsByInstruction.denseValueAt(rootIndex);
@@ -2584,15 +2588,16 @@ final class Prog
         }
 
         // Replace old instructions with flattened ones.
-        insts = flattenedInstructions;
+        insts = flattenedInstructions.instructions;
+        instructionCount = flattenedInstructions.size();
 
         // Populate the list-head mapping used by the BitState engine.
         // Upstream limits this to <= 512 instructions to keep the bitmap small.
         listCount = rootIdsByInstruction.size();
         listHeads = null;
         bitStateTextMaxSize = 0;
-        if (insts.size() <= 512) {
-            short[] heads = new short[insts.size()];
+        if (instructionCount <= 512) {
+            short[] heads = new short[instructionCount];
             Arrays.fill(heads, (short) -1);
             for (int i = 0; i < listCount; i++) {
                 int headInstructionIndex = flattenedIndexesByRoot[i];
@@ -3049,7 +3054,7 @@ final class Prog
     private void emitList(
             int rootInstructionId,
             SparseIntArray rootIdsByInstruction,
-            List<Inst> flattenedInstructions,
+            InstList flattenedInstructions,
             SparseSet reachable,
             IntStack stack)
     {
@@ -3109,7 +3114,7 @@ final class Prog
     }
 
     private static void computeHints(
-            List<Inst> flattenedInstructions,
+            InstList flattenedInstructions,
             int begin,
             int end,
             Bitmap256 splits,
@@ -3398,6 +3403,41 @@ final class Prog
             colorRemap[newColor] = newColor;
             colorRemapGeneration[newColor] = remapGeneration;
             return newColor;
+        }
+    }
+
+    // Growable instruction array used while emitting flattened lists.
+    private static final class InstList
+    {
+        private Inst[] instructions;
+        private int size;
+
+        InstList(int capacity)
+        {
+            instructions = new Inst[Math.max(1, capacity)];
+        }
+
+        void add(Inst instruction)
+        {
+            if (size == instructions.length) {
+                instructions = Arrays.copyOf(instructions, size * 2);
+            }
+            instructions[size++] = instruction;
+        }
+
+        Inst get(int index)
+        {
+            return instructions[index];
+        }
+
+        Inst getLast()
+        {
+            return instructions[size - 1];
+        }
+
+        int size()
+        {
+            return size;
         }
     }
 
