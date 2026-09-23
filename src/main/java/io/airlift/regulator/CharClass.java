@@ -14,6 +14,8 @@
 package io.airlift.regulator;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 import static java.util.Objects.requireNonNull;
 
@@ -27,6 +29,7 @@ record CharClass(boolean foldsAscii, int runeCount, RuneRange[] ranges)
         ranges = Arrays.copyOf(requireNonNull(ranges, "ranges is null"), ranges.length);
     }
 
+    // Defensive copy; use range(int) or rangeView() to read without copying.
     @Override
     public RuneRange[] ranges()
     {
@@ -36,6 +39,14 @@ record CharClass(boolean foldsAscii, int runeCount, RuneRange[] ranges)
     int rangeCount()
     {
         return ranges.length;
+    }
+
+    /**
+     * Returns an unmodifiable view of the canonical ranges without copying them.
+     */
+    List<RuneRange> rangeView()
+    {
+        return Collections.unmodifiableList(Arrays.asList(ranges));
     }
 
     RuneRange range(int index)
