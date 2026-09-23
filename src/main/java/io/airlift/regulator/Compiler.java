@@ -148,7 +148,7 @@ final class Compiler
         compiler.setAnchorBoth = anchorBoth;
 
         Regexp simplifiedRegexp = Simplifier.simplify(regexp);
-        Fragment compiledFragment = compiler.walkExponential(simplifiedRegexp, new Fragment(), 2 * compiler.maxInstructions);
+        Fragment compiledFragment = compiler.compileTree(simplifiedRegexp, 2 * compiler.maxInstructions);
 
         compiler.program.setAnchorStart(true);
         compiler.program.setAnchorEnd(true);
@@ -204,7 +204,7 @@ final class Compiler
         boolean isAnchorEnd = endStrip.anchored();
 
         // Generate fragment for entire regexp.
-        Fragment compiledFragment = compiler.walkExponential(simplifiedRegexp, new Fragment(), 2 * compiler.maxInstructions);
+        Fragment compiledFragment = compiler.compileTree(simplifiedRegexp, 2 * compiler.maxInstructions);
         boolean canMatchEmpty = compiledFragment.nullable;
 
         // Success: append Match at end and record start.
@@ -470,7 +470,6 @@ final class Compiler
     }
 
     private static final class CompilerState
-            extends RegexpWalker<Fragment>
     {
         final Prog program = new Prog();
         // Rune-range compilation state shared while building one program.
@@ -508,14 +507,56 @@ final class Compiler
             maxInstructions = (int) availableInstructionCount;
         }
 
-        @Override
-        protected PreVisitResult<Fragment> preVisit(Regexp regexp, Fragment parentFragment)
+        /**
+         * Compiles every node after its children, in the same order and with the same visit limit as
+         * {@link RegexpWalker#walkExponential}, without allocating per-node walker state. When a node
+         * is compiled, its children's fragments are the top {@code childCount} entries of the
+         * fragment stack.
+         */
+        private Fragment compileTree(Regexp root, int maxVisits)
         {
-            return new PreVisitResult<>(new Fragment(), false);
+            Regexp[] nodes = new Regexp[16];
+            int[] nextChildIndexes = new int[16];
+            Fragment[] childFragments = new Fragment[16];
+            int depth = 1;
+            int childFragmentCount = 0;
+            int visitCount = 1;
+            nodes[0] = root;
+            while (true) {
+                Regexp node = nodes[depth - 1];
+                int childIndex = nextChildIndexes[depth - 1];
+                if (childIndex < node.childCount()) {
+                    nextChildIndexes[depth - 1] = childIndex + 1;
+                    if (++visitCount > maxVisits) {
+                        throw new RegexpCompileException("regexp compilation exceeded walkExponential limit");
+                    }
+                    if (depth == nodes.length) {
+                        nodes = Arrays.copyOf(nodes, depth * 2);
+                        nextChildIndexes = Arrays.copyOf(nextChildIndexes, depth * 2);
+                    }
+                    nodes[depth] = node.child(childIndex);
+                    nextChildIndexes[depth] = 0;
+                    depth++;
+                    continue;
+                }
+
+                int childCount = node.childCount();
+                int firstChildIndex = childFragmentCount - childCount;
+                Fragment fragment = compileNode(node, childFragments, firstChildIndex, childCount);
+                Arrays.fill(childFragments, firstChildIndex, childFragmentCount, null);
+                childFragmentCount = firstChildIndex;
+                nodes[--depth] = null;
+                if (depth == 0) {
+                    return fragment;
+                }
+                if (childFragmentCount == childFragments.length) {
+                    childFragments = Arrays.copyOf(childFragments, childFragmentCount * 2);
+                }
+                childFragments[childFragmentCount++] = fragment;
+            }
         }
 
-        @Override
-        protected Fragment postVisit(Regexp regexp, Fragment parentFragment, Fragment preFragment, List<Fragment> childFragments)
+        private Fragment compileNode(Regexp regexp, Fragment[] childFragments, int firstChildIndex, int childCount)
         {
             return switch (regexp.op()) {
                 case NO_MATCH -> noMatch();
@@ -528,24 +569,24 @@ final class Compiler
                     yield fragment;
                 }
                 case CONCAT -> {
-                    Fragment fragment = childFragments.getFirst();
-                    for (int childIndex = 1; childIndex < childFragments.size(); childIndex++) {
-                        fragment = concatenate(fragment, childFragments.get(childIndex));
+                    Fragment fragment = childFragments[firstChildIndex];
+                    for (int childIndex = 1; childIndex < childCount; childIndex++) {
+                        fragment = concatenate(fragment, childFragments[firstChildIndex + childIndex]);
                     }
                     yield fragment;
                 }
                 case ALTERNATE -> {
-                    Fragment fragment = childFragments.getFirst();
-                    for (int childIndex = 1; childIndex < childFragments.size(); childIndex++) {
-                        fragment = alternate(fragment, childFragments.get(childIndex));
+                    Fragment fragment = childFragments[firstChildIndex];
+                    for (int childIndex = 1; childIndex < childCount; childIndex++) {
+                        fragment = alternate(fragment, childFragments[firstChildIndex + childIndex]);
                     }
                     yield fragment;
                 }
-                case STAR -> repeatUnbounded(childFragments.getFirst(), (regexp.parseFlags() & Regexp.NON_GREEDY) != 0, true);
-                case PLUS -> repeatUnbounded(childFragments.getFirst(), (regexp.parseFlags() & Regexp.NON_GREEDY) != 0, false);
-                case QUEST -> quest(childFragments.getFirst(), (regexp.parseFlags() & Regexp.NON_GREEDY) != 0);
+                case STAR -> repeatUnbounded(childFragments[firstChildIndex], (regexp.parseFlags() & Regexp.NON_GREEDY) != 0, true);
+                case PLUS -> repeatUnbounded(childFragments[firstChildIndex], (regexp.parseFlags() & Regexp.NON_GREEDY) != 0, false);
+                case QUEST -> quest(childFragments[firstChildIndex], (regexp.parseFlags() & Regexp.NON_GREEDY) != 0);
                 case REPEAT -> throw new RegexpCompileException("REPEAT must be simplified before compilation");
-                case CAPTURE -> capture(childFragments.getFirst(), regexp.captureIndex());
+                case CAPTURE -> capture(childFragments[firstChildIndex], regexp.captureIndex());
                 case LITERAL -> (regexp.parseFlags() & Regexp.FULL_CASE_FOLD) != 0
                         ? fullCaseFoldLiteral(new int[] {regexp.rune()})
                         : literal(
@@ -611,12 +652,6 @@ final class Compiler
                 return negate ? EmptyOp.EMPTY_NO_UNICODE_WORD_BOUNDARY : EmptyOp.EMPTY_UNICODE_WORD_BOUNDARY;
             }
             return negate ? EmptyOp.EMPTY_NO_WORD_BOUNDARY : EmptyOp.EMPTY_WORD_BOUNDARY;
-        }
-
-        @Override
-        protected Fragment shortVisit(Regexp regexp, Fragment parentFragment)
-        {
-            throw new RegexpCompileException("regexp compilation exceeded walkExponential limit");
         }
 
         private Prog finish(CompileStage stage)
