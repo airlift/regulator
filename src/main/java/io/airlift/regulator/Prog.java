@@ -3191,25 +3191,33 @@ final class Prog
     // Builds the equivalence classes used to reduce the DFA alphabet.
     static final class ByteMapBuilder
     {
+        // Small programs rarely repeat a range group, so groups are neither recorded nor looked
+        // up during this many initial merges.
+        private static final int GROUP_DEDUPLICATION_MERGES = 32;
+
         private final Bitmap256 splits = new Bitmap256();
         private final int[] colors = new int[256];
-        private int nextColor = 257;
+        // Colors are numbered densely from 0. build() numbers byte classes with a separate
+        // generation, so the remap tables only need to cover colors actually assigned.
+        private int nextColor = 1;
 
-        private int[] colorRemap = new int[512];
-        private int[] colorRemapGeneration = new int[512];
+        private int[] colorRemap = new int[64];
+        private int[] colorRemapGeneration = new int[64];
         private int remapGeneration = 1;
 
         private int[] rangeLo = new int[16];
         private int[] rangeHi = new int[16];
         private int rangeSize;
 
+        private int mergeCount;
+        // Open-addressing set of packed range groups that have already been merged.
+        private long[] mergedGroups;
+        private int mergedGroupCount;
+
         ByteMapBuilder()
         {
-            // Initial state: the [0-255] range has color 256.
-            // This will avoid problems during the second phase,
-            // in which we assign byte classes numbered from 0.
+            // Initial state: the [0-255] range has color 0.
             splits.set(255);
-            colors[255] = 256;
         }
 
         void mark(int lo, int hi)
@@ -3234,6 +3242,14 @@ final class Prog
 
         void merge()
         {
+            // After a group is merged, every color lies entirely inside or outside it, and later
+            // merges only refine colors. Merging the same group again adds no split and only
+            // renames colors, which build() renumbers by first appearance, so skip it.
+            mergeCount++;
+            if (mergeCount > GROUP_DEDUPLICATION_MERGES && !addMergedGroup(groupKey())) {
+                rangeSize = 0;
+                return;
+            }
             for (int i = 0; i < rangeSize; i++) {
                 int lo = rangeLo[i] - 1;
                 int hi = rangeHi[i];
@@ -3267,6 +3283,63 @@ final class Prog
             rangeSize = 0;
         }
 
+        private long groupKey()
+        {
+            // Packs up to three ranges and their count; larger groups are always merged.
+            if (rangeSize == 0 || rangeSize > 3) {
+                return 0;
+            }
+            long key = rangeSize;
+            for (int i = 0; i < rangeSize; i++) {
+                key = (key << 16) | ((long) rangeLo[i] << 8) | rangeHi[i];
+            }
+            return key;
+        }
+
+        private boolean addMergedGroup(long key)
+        {
+            if (key == 0) {
+                return true;
+            }
+            if (mergedGroups == null) {
+                mergedGroups = new long[64];
+            }
+            if (!addWithoutResize(key)) {
+                return false;
+            }
+            mergedGroupCount++;
+            if (mergedGroupCount * 2 > mergedGroups.length) {
+                long[] oldGroups = mergedGroups;
+                mergedGroups = new long[oldGroups.length * 2];
+                for (long oldKey : oldGroups) {
+                    if (oldKey != 0) {
+                        addWithoutResize(oldKey);
+                    }
+                }
+            }
+            return true;
+        }
+
+        // Returns false when the key was already present.
+        private boolean addWithoutResize(long key)
+        {
+            int mask = mergedGroups.length - 1;
+            int index = slot(key, mask);
+            while (mergedGroups[index] != 0) {
+                if (mergedGroups[index] == key) {
+                    return false;
+                }
+                index = (index + 1) & mask;
+            }
+            mergedGroups[index] = key;
+            return true;
+        }
+
+        private static int slot(long key, int mask)
+        {
+            return (int) ((key * 0x9E3779B97F4A7C15L) >>> 40) & mask;
+        }
+
         void build(byte[] bytemap, int[] bytemapRangeOut)
         {
             requireNonNull(bytemap, "bytemap is null");
@@ -3278,29 +3351,33 @@ final class Prog
                 throw new IllegalArgumentException("bytemapRangeOut must have length 1");
             }
 
-            // Assign byte classes numbered from 0.
-            nextColor = 0;
-
+            // Assign byte classes numbered from 0 in order of first appearance. The current
+            // generation is unused, so every color starts unmapped.
+            int byteClassCount = 0;
             int c = 0;
             while (c < 256) {
                 int next = splits.findNextSetBit(c);
-                int b = recolor(colors[next]);
+                int color = colors[next];
+                int byteClass;
+                if (colorRemapGeneration[color] == remapGeneration) {
+                    byteClass = colorRemap[color];
+                }
+                else {
+                    byteClass = byteClassCount++;
+                    colorRemap[color] = byteClass;
+                    colorRemapGeneration[color] = remapGeneration;
+                }
                 while (c <= next) {
-                    bytemap[c] = (byte) b;
+                    bytemap[c] = (byte) byteClass;
                     c++;
                 }
             }
 
-            bytemapRangeOut[0] = nextColor;
+            bytemapRangeOut[0] = byteClassCount;
         }
 
         private int recolor(int oldColor)
         {
-            if (oldColor >= colorRemap.length) {
-                int newSize = Math.max(colorRemap.length * 2, oldColor + 1);
-                colorRemap = Arrays.copyOf(colorRemap, newSize);
-                colorRemapGeneration = Arrays.copyOf(colorRemapGeneration, newSize);
-            }
             if (colorRemapGeneration[oldColor] == remapGeneration) {
                 return colorRemap[oldColor];
             }
@@ -3309,15 +3386,15 @@ final class Prog
             nextColor++;
 
             if (newColor >= colorRemap.length) {
-                int newSize = Math.max(colorRemap.length * 2, newColor + 1);
+                int newSize = colorRemap.length * 2;
                 colorRemap = Arrays.copyOf(colorRemap, newSize);
                 colorRemapGeneration = Arrays.copyOf(colorRemapGeneration, newSize);
             }
 
             colorRemap[oldColor] = newColor;
             colorRemapGeneration[oldColor] = remapGeneration;
-            // Preserve the old transitive rule where matching the mapped value
-            // also returned that value within the same merge batch.
+            // Map the new color to itself so a later range in the same batch does not recolor an
+            // already recolored segment, as upstream Recolor does.
             colorRemap[newColor] = newColor;
             colorRemapGeneration[newColor] = remapGeneration;
             return newColor;

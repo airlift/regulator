@@ -15,6 +15,13 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 // Ported from upstream RE2: re2/testing/compile_test.cc.
@@ -147,5 +154,72 @@ public class TestProgByteMap
                         "[e0-ef] -> 4\n" +
                         "[f0-f4] -> 5\n" +
                         "[f5-ff] -> 1\n");
+    }
+
+    @Test
+    public void testRepeatedGroupsMatchSignaturePartition()
+    {
+        Random random = new Random(20260922);
+        for (int trial = 0; trial < 300; trial++) {
+            List<int[]> distinctGroups = new ArrayList<>();
+            int distinctGroupCount = 1 + random.nextInt(80);
+            for (int group = 0; group < distinctGroupCount; group++) {
+                int[] ranges = new int[2 * (1 + random.nextInt(5))];
+                for (int range = 0; range < ranges.length; range += 2) {
+                    int low = random.nextBoolean() ? 0x80 + random.nextInt(0x40) : random.nextInt(256);
+                    int high = Math.min(255, low + random.nextInt(random.nextBoolean() ? 4 : 64));
+                    ranges[range] = low;
+                    ranges[range + 1] = high;
+                }
+                distinctGroups.add(ranges);
+            }
+            List<int[]> mergedGroups = new ArrayList<>();
+            for (int merge = 0; merge < 200; merge++) {
+                mergedGroups.add(distinctGroups.get(random.nextInt(distinctGroups.size())));
+            }
+
+            Prog.ByteMapBuilder builder = new Prog.ByteMapBuilder();
+            for (int[] ranges : mergedGroups) {
+                for (int range = 0; range < ranges.length; range += 2) {
+                    builder.mark(ranges[range], ranges[range + 1]);
+                }
+                builder.merge();
+            }
+            byte[] bytemap = new byte[256];
+            int[] bytemapRange = new int[1];
+            builder.build(bytemap, bytemapRange);
+
+            byte[] expected = signaturePartition(mergedGroups);
+            assertThat(bytemap).as("trial %s", trial).isEqualTo(expected);
+            assertThat(bytemapRange[0]).as("trial %s", trial).isEqualTo(Arrays.stream(toInts(expected)).max().orElseThrow() + 1);
+        }
+    }
+
+    // Two bytes share a class exactly when every merged group contains both or neither.
+    private static byte[] signaturePartition(List<int[]> groups)
+    {
+        Map<String, Integer> classes = new HashMap<>();
+        byte[] bytemap = new byte[256];
+        for (int value = 0; value < 256; value++) {
+            StringBuilder signature = new StringBuilder();
+            for (int[] ranges : groups) {
+                boolean inside = false;
+                for (int range = 0; range < ranges.length; range += 2) {
+                    inside |= ranges[range] <= value && value <= ranges[range + 1];
+                }
+                signature.append(inside ? '1' : '0');
+            }
+            bytemap[value] = (byte) (int) classes.computeIfAbsent(signature.toString(), _ -> classes.size());
+        }
+        return bytemap;
+    }
+
+    private static int[] toInts(byte[] bytes)
+    {
+        int[] values = new int[bytes.length];
+        for (int index = 0; index < bytes.length; index++) {
+            values[index] = bytes[index] & 0xFF;
+        }
+        return values;
     }
 }
