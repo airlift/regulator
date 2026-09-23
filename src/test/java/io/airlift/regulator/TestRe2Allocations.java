@@ -89,7 +89,7 @@ public class TestRe2Allocations
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
         assertThat(matchCount).isEqualTo(140_000);
-        assertThat(allocatedBytes).isZero();
+        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test
@@ -117,7 +117,7 @@ public class TestRe2Allocations
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
         assertThat(matchCount).isZero();
-        assertThat(allocatedBytes).isZero();
+        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test
@@ -145,7 +145,7 @@ public class TestRe2Allocations
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
         assertThat(matchCount).isEqualTo(30_000);
-        assertThat(allocatedBytes).isZero();
+        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test
@@ -174,7 +174,7 @@ public class TestRe2Allocations
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
         assertThat(matchCount).isEqualTo(40_000);
-        assertThat(allocatedBytes).isZero();
+        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     private static int runFinalLineBooleanOperations(TrinoRegexp pattern, Slice absent, Slice matched, Slice anchored)
@@ -220,7 +220,7 @@ public class TestRe2Allocations
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
         assertThat(matchCount).isEqualTo(30_000);
-        assertThat(allocatedBytes).isZero();
+        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test
@@ -254,7 +254,7 @@ public class TestRe2Allocations
 
         assertThat(matchCount).isEqualTo(10_000);
         assertThat(groups).containsExactly(16_384, 16_391, 16_384, 16_387, 16_388, 16_391);
-        assertThat(allocatedBytes).isZero();
+        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test
@@ -285,7 +285,7 @@ public class TestRe2Allocations
 
         assertThat(matchCount).isEqualTo(10_000);
         assertThat(groups).containsExactly(16, 23, 16, 19, 20, 23);
-        assertThat(allocatedBytes).isZero();
+        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test

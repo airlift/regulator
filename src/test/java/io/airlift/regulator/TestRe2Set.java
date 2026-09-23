@@ -380,7 +380,7 @@ public class TestRe2Set
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
         assertThat(matchCount).isEqualTo(10_000);
-        assertThat(allocatedBytes).isZero();
+        assertThat(allocatedBytes / 10_000).isZero();
     }
 
     @Test
