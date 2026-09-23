@@ -114,6 +114,50 @@ public class TestUnicodeFullCaseFold
     }
 
     @Test
+    public void testAsciiSimpleFoldClassesAreCachedAndEqualUncached()
+    {
+        for (int rune = 0; rune < 0x80; rune++) {
+            CharClassBuilder expected = new CharClassBuilder();
+            int current = rune;
+            do {
+                expected.addRange(current, current);
+                current = UnicodeCaseFold.cycleFoldRune(current);
+            }
+            while (current != rune);
+            CharClass cached = UnicodeFullCaseFold.simpleFoldClass(rune);
+            assertThat(cached).as("rune %s", rune).isEqualTo(expected.toCharClass());
+            assertThat(UnicodeFullCaseFold.simpleFoldClass(rune)).isSameAs(cached);
+        }
+        assertThat(UnicodeFullCaseFold.simpleFoldClass('k').contains(0x212A)).isTrue();
+        assertThat(UnicodeFullCaseFold.simpleFoldClass(0x212A)).isEqualTo(UnicodeFullCaseFold.simpleFoldClass('k'));
+    }
+
+    @Test
+    public void testClassTokensMatchCompleteScan()
+    {
+        List<UnicodeFullCaseFold.FoldToken> tokens = UnicodeFullCaseFold.multiCharacterTokens();
+        List<CharClass> classes = new ArrayList<>();
+        classes.add(classOf('0', '9'));
+        classes.add(classOf('a', 'z'));
+        classes.add(classOf(0, 0x10FFFF));
+        classes.add(classOf(0x1F600, 0x1F64F));
+        classes.add(classOf(0xDF, 0xDF));
+        for (UnicodeFullCaseFold.FoldToken token : tokens) {
+            RuneRange range = token.sourceRunes().range(0);
+            classes.add(classOf(range.low(), range.low()));
+            classes.add(classOf(range.high() + 1, range.high() + 1));
+        }
+        for (CharClass characterClass : classes) {
+            List<UnicodeFullCaseFold.FoldToken> expected = tokens.stream()
+                    .filter(token -> intersects(token.sourceRunes(), characterClass))
+                    .toList();
+            assertThat(UnicodeFullCaseFold.multiCharacterTokens(characterClass))
+                    .as(characterClass.toString())
+                    .containsExactlyElementsOf(expected);
+        }
+    }
+
+    @Test
     public void testIndexedLookupsMatchCompleteTokenScan()
     {
         List<UnicodeFullCaseFold.FoldToken> tokens = UnicodeFullCaseFold.multiCharacterTokens();
@@ -242,5 +286,25 @@ public class TestUnicodeFullCaseFold
     private static int canonicalSimpleFold(int rune)
     {
         return Character.toLowerCase(Character.toUpperCase(rune));
+    }
+
+    private static CharClass classOf(int low, int high)
+    {
+        CharClassBuilder builder = new CharClassBuilder();
+        builder.addRange(low, high);
+        return builder.toCharClass();
+    }
+
+    private static boolean intersects(CharClass left, CharClass right)
+    {
+        for (int index = 0; index < left.rangeCount(); index++) {
+            RuneRange range = left.range(index);
+            for (int rune = range.low(); rune <= range.high(); rune++) {
+                if (right.contains(rune)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }
