@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.OptionalInt;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -179,6 +180,89 @@ public class TestTrinoLikeCorpus
         assertThat(denseSingleBytePrefix.usesSharedLiteralGapSearchForDiagnostics()).isFalse();
         assertThat(denseSingleBytePrefix.matches(Slices.utf8Slice("aaa"))).isFalse();
         assertThat(denseSingleBytePrefix.matches(Slices.utf8Slice("aaab"))).isTrue();
+    }
+
+    @Test
+    public void testAsciiWildcardParserUsesCopiedLiterals()
+    {
+        Slice source = Slices.utf8Slice("xx%alpha_omega%yy");
+        Slice pattern = source.slice(2, source.length() - 4);
+        List<TrinoLikeParser.Element> parsed = TrinoLikeParser.parseAsciiNoEscape(pattern);
+        assertThat(parsed).containsExactly(
+                TrinoLikeParser.ZeroOrMore.INSTANCE,
+                new TrinoLikeParser.Literal(Slices.utf8Slice("alpha")),
+                new TrinoLikeParser.Any(1),
+                new TrinoLikeParser.Literal(Slices.utf8Slice("omega")),
+                TrinoLikeParser.ZeroOrMore.INSTANCE);
+        assertThat(TrinoLikeParser.parse(pattern, OptionalInt.empty())).isEqualTo(parsed);
+        assertThat(TrinoLikeParser.parseAsciiNoEscape(Slices.utf8Slice("\u03C0%"))).isNull();
+        assertThat(TrinoLikeParser.parse(Slices.utf8Slice("a\u03C0%"), OptionalInt.empty()))
+                .containsExactly(new TrinoLikeParser.Literal(Slices.utf8Slice("a\u03C0")), TrinoLikeParser.ZeroOrMore.INSTANCE);
+        for (String ascii : List.of("", "%", "_", "__%", "abc", "prefix%", "%suffix", "%alpha_omega%", "a%%b", "a__b%")) {
+            assertThat(TrinoLikeParser.parseAsciiNoEscape(Slices.utf8Slice(ascii)))
+                    .as(ascii)
+                    .isEqualTo(TrinoLikeParser.parse(Slices.utf8Slice(ascii), OptionalInt.of('\\')));
+        }
+
+        source.fill((byte) 'x');
+        assertThat(literalText(parsed.get(1))).isEqualTo("alpha");
+    }
+
+    @Test
+    public void testAsciiFastPathMatchesGeneralParser()
+    {
+        // The general parser runs whenever an escape is supplied. An escape code point that no
+        // pattern contains makes it the reference for the no-escape fast path, over patterns that
+        // mix wildcards, escapes, multibyte runes and malformed bytes at non-zero slice offsets.
+        byte[][] atoms = {
+                {'a'}, {'b'}, {'%'}, {'_'}, {'\\'}, {'!'},
+                {(byte) 0xCF, (byte) 0x80},
+                {(byte) 0xE2, (byte) 0x82, (byte) 0xAC},
+                {(byte) 0xEF, (byte) 0xBF, (byte) 0xBD},
+                {(byte) 0xF0, (byte) 0x9F, (byte) 0x98, (byte) 0x80},
+                {(byte) 0xFF}, {(byte) 0x80}, {(byte) 0xC3},
+                {(byte) 0xE2, (byte) 0x82},
+                {(byte) 0xC0, (byte) 0x80},
+                {(byte) 0xED, (byte) 0xA0, (byte) 0x80},
+                {(byte) 0xF4, (byte) 0x90, (byte) 0x80, (byte) 0x80},
+        };
+        OptionalInt absentEscape = OptionalInt.of(0x2603);
+        Random random = new Random(20260923);
+        int fastPathPatterns = 0;
+        for (int iteration = 0; iteration < 20_000; iteration++) {
+            int atomCount = random.nextInt(9);
+            byte[] body = new byte[0];
+            for (int atom = 0; atom < atomCount; atom++) {
+                byte[] next = atoms[random.nextInt(atoms.length)];
+                body = Arrays.copyOf(body, body.length + next.length);
+                System.arraycopy(next, 0, body, body.length - next.length, next.length);
+            }
+            int prefix = random.nextInt(4);
+            byte[] backing = new byte[prefix + body.length + random.nextInt(4)];
+            Arrays.fill(backing, (byte) 0xFF);
+            System.arraycopy(body, 0, backing, prefix, body.length);
+            Slice pattern = Slices.wrappedBuffer(backing, prefix, body.length);
+            String description = "pattern " + Arrays.toString(body) + " at offset " + prefix;
+
+            List<TrinoLikeParser.Element> reference = TrinoLikeParser.parse(pattern, absentEscape);
+            List<TrinoLikeParser.Element> parsed = TrinoLikeParser.parse(pattern, OptionalInt.empty());
+            assertThat(parsed).as(description).isEqualTo(reference);
+
+            List<TrinoLikeParser.Element> fast = TrinoLikeParser.parseAsciiNoEscape(pattern);
+            boolean ascii = true;
+            for (byte value : body) {
+                ascii &= value >= 0;
+            }
+            if (ascii) {
+                fastPathPatterns++;
+                assertThat(fast).as(description).isEqualTo(reference);
+            }
+            else {
+                assertThat(fast).as(description).isNull();
+            }
+            assertLiteralsCopied(parsed, backing);
+        }
+        assertThat(fastPathPatterns).isGreaterThan(1_000);
     }
 
     @Test

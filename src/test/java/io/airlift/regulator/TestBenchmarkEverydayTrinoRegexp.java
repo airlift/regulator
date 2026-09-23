@@ -138,6 +138,12 @@ public class TestBenchmarkEverydayTrinoRegexp
 
         assertThat(benchmark.constructLikeWildcardChain(data).planForDiagnostics())
                 .isEqualTo(TrinoLikePattern.Plan.LITERAL_GAPS);
+        assertThat(benchmark.constructLikeUnicodeWildcardChain(data).planForDiagnostics())
+                .isEqualTo(TrinoLikePattern.Plan.LITERAL_GAPS);
+        // The escaped underscore is a literal, so the escaped control keeps the plan shape of the
+        // chain it controls for: three literals separated by two single-character gaps.
+        assertThat(benchmark.constructLikeEscapedWildcardChain(data).planForDiagnostics())
+                .isEqualTo(TrinoLikePattern.Plan.LITERAL_GAPS);
     }
 
     @Test

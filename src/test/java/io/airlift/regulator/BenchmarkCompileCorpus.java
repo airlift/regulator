@@ -38,7 +38,8 @@ import java.util.concurrent.TimeUnit;
  * Measures the complete setup cost (parse, simplify, analyze, compile, and plan
  * selection) of one pass over a fixed mixed corpus for each pattern language.
  * One operation compiles every pattern in the corpus once. The LIKE corpus always
- * supplies an escape character.
+ * supplies an escape character, so it measures the general LIKE parser; the no-escape parser
+ * fast path has its own case and two bypass controls in {@link BenchmarkEverydayTrinoRegexp}.
  */
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
