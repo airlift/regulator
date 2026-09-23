@@ -35,6 +35,21 @@ public class TestUpstreamCompileMemoryBudget
     }
 
     @Test
+    public void testVisitLimitAppliesBeforeInstructionBudget()
+    {
+        // maxMemory 520 leaves one instruction and therefore a visit limit of two nodes, which four
+        // nested captures exceed before emitting anything. A larger budget reaches the instruction
+        // limit instead, so the walk limit is checked first.
+        assertThatThrownBy(() -> Compiler.compile(parse("((((a))))"), false, 520))
+                .isInstanceOf(RegexpCompileException.class)
+                .hasMessage("regexp compilation exceeded walkExponential limit");
+        assertThatThrownBy(() -> Compiler.compile(parse("((((a))))"), false, 536))
+                .isInstanceOf(RegexpCompileMemoryLimitException.class);
+        assertThatThrownBy(() -> Compiler.compile(parse("ab"), false, 520))
+                .isInstanceOf(RegexpCompileMemoryLimitException.class);
+    }
+
+    @Test
     public void testInsufficientMemoryFailsInsteadOfNoMatch()
     {
         // From upstream re2/testing/compile_test.cc TestCompile.InsufficientMemory.
@@ -91,5 +106,10 @@ public class TestUpstreamCompileMemoryBudget
         long onePassMemory = (long) program.onePassStateCount() *
                 (Integer.BYTES + ((long) program.bytemapRange() * Integer.BYTES));
         assertThat(program.dfaMemory()).isEqualTo((1 << 20) - onePassMemory);
+    }
+
+    private static Regexp parse(String pattern)
+    {
+        return RegexpParser.parse(Slices.wrappedBuffer(pattern.getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL).regexp();
     }
 }
