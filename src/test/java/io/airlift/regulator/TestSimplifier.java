@@ -108,6 +108,17 @@ public class TestSimplifier
         }
     }
 
+    @Test
+    public void testSimplifyReturnsUnchangedNodes()
+    {
+        for (String pattern : List.of("(a+)x*[b-d]", "(?:ab)?[0-9]+z", "(x[a-f]+)+")) {
+            Regexp parsed = parse(pattern);
+            assertThat(Simplifier.simplify(parsed)).as(pattern).isSameAs(parsed);
+        }
+        Regexp repeated = parse("(a{2})b");
+        assertThat(Simplifier.simplify(repeated)).isNotSameAs(repeated);
+    }
+
     private static Regexp parse(String pattern)
     {
         return RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
