@@ -43,6 +43,8 @@ import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 public class BenchmarkEverydayTrinoRegexp
 {
     private static final Slice LIKE_WILDCARD_CHAIN_PATTERN = Slices.utf8Slice("%alpha_bravo_charlie%");
+    private static final Slice LIKE_UNICODE_WILDCARD_CHAIN_PATTERN = Slices.utf8Slice("%alpha_\u03C0_omega%");
+    private static final Slice LIKE_ESCAPED_WILDCARD_CHAIN_PATTERN = Slices.utf8Slice("%alpha!__bravo_charlie%");
 
     @State(Scope.Thread)
     public static class BenchmarkData
@@ -152,6 +154,18 @@ public class BenchmarkEverydayTrinoRegexp
     public TrinoLikePattern constructLikeWildcardChain(BenchmarkData data)
     {
         return TrinoLikePattern.compile(LIKE_WILDCARD_CHAIN_PATTERN);
+    }
+
+    @Benchmark
+    public TrinoLikePattern constructLikeUnicodeWildcardChain(BenchmarkData data)
+    {
+        return TrinoLikePattern.compile(LIKE_UNICODE_WILDCARD_CHAIN_PATTERN);
+    }
+
+    @Benchmark
+    public TrinoLikePattern constructLikeEscapedWildcardChain(BenchmarkData data)
+    {
+        return TrinoLikePattern.compile(LIKE_ESCAPED_WILDCARD_CHAIN_PATTERN, '!');
     }
 
     public static void main(String[] args)

@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
+import io.airlift.slice.SliceUtf8;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,6 +32,12 @@ final class TrinoLikeParser
         requireNonNull(pattern, "pattern is null");
         if (escapeCodePoint.isPresent() && !Character.isValidCodePoint(escapeCodePoint.orElseThrow())) {
             throw new IllegalArgumentException("escape must be one code point");
+        }
+        if (escapeCodePoint.isEmpty()) {
+            List<Element> ascii = parseAsciiNoEscape(pattern);
+            if (ascii != null) {
+                return ascii;
+            }
         }
 
         List<Element> result = new ArrayList<>();
@@ -85,6 +92,55 @@ final class TrinoLikeParser
             throw syntaxException(escapeByteOffset);
         }
         literal.addTo(result);
+        addWildcards(result, anyCount, hasZeroOrMore);
+        return List.copyOf(result);
+    }
+
+    /**
+     * Parses a pattern without an escape character when every byte is ASCII, so no code point
+     * decoding or malformed-byte replacement is needed. Returns null for other patterns. For the
+     * patterns it accepts, the result must equal what {@link #parse} produces without an escape.
+     */
+    static List<Element> parseAsciiNoEscape(Slice pattern)
+    {
+        requireNonNull(pattern, "pattern is null");
+        if (!SliceUtf8.isAscii(pattern)) {
+            return null;
+        }
+
+        byte[] bytes = pattern.byteArray();
+        int start = pattern.byteArrayOffset();
+        int end = start + pattern.length();
+        List<Element> result = new ArrayList<>();
+        int literalStart = start;
+        int anyCount = 0;
+        boolean hasZeroOrMore = false;
+
+        for (int position = start; position < end; position++) {
+            byte value = bytes[position];
+            if (value != '%' && value != '_') {
+                continue;
+            }
+            if (literalStart < position) {
+                addWildcards(result, anyCount, hasZeroOrMore);
+                anyCount = 0;
+                hasZeroOrMore = false;
+                result.add(new Literal(pattern.copy(literalStart - start, position - literalStart)));
+            }
+            if (value == '%') {
+                hasZeroOrMore = true;
+            }
+            else {
+                anyCount++;
+            }
+            literalStart = position + 1;
+        }
+        if (literalStart < end) {
+            addWildcards(result, anyCount, hasZeroOrMore);
+            anyCount = 0;
+            hasZeroOrMore = false;
+            result.add(new Literal(pattern.copy(literalStart - start, end - literalStart)));
+        }
         addWildcards(result, anyCount, hasZeroOrMore);
         return List.copyOf(result);
     }
