@@ -207,6 +207,25 @@ public class TestTrinoLikeCorpus
     }
 
     @Test
+    public void testLiteralGapCountsFillTheGapArray()
+    {
+        // Elements: %, literal, then (any, literal) pairs; a gap is recorded for every pair, so the
+        // array sized from the element count is exactly full when every element is used.
+        List<TrinoLikeParser.Element> elements = TrinoLikeParser.parse(Slices.utf8Slice("%ab_cd__ef___gh"), OptionalInt.empty());
+        assertThat(elements).hasSize(8);
+        LiteralGapMatcher matcher = LiteralGapMatcher.analyze(elements, 0, elements.size() - 1, false);
+        assertThat(matcher).isNotNull();
+        assertThat(matcher.codePointGapsForDiagnostics()).containsExactly(1, 2, 3);
+        assertThat(matches(matcher, "xabycdzzefzzzghx")).isTrue();
+        assertThat(matches(matcher, "xabycdzzefzzghx")).isFalse();
+
+        // A shorter element range records only the gaps inside it.
+        LiteralGapMatcher shorter = LiteralGapMatcher.analyze(elements, 0, 5, false);
+        assertThat(shorter).isNotNull();
+        assertThat(shorter.codePointGapsForDiagnostics()).containsExactly(1, 2);
+    }
+
+    @Test
     public void testEscapedLiteralsDoNotAliasThePattern()
     {
         // An escape forces the buffered literal path; the compiled pattern must not observe later
@@ -346,5 +365,11 @@ public class TestTrinoLikeCorpus
                 assertThat(literal.bytes().byteArray()).isNotSameAs(callerArray);
             }
         }
+    }
+
+    private static boolean matches(LiteralGapMatcher matcher, String input)
+    {
+        Slice slice = Slices.utf8Slice(input);
+        return matcher.matches(slice, 0, slice.length());
     }
 }
