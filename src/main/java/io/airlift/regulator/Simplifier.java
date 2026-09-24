@@ -893,13 +893,40 @@ final class Simplifier
         };
     }
 
-    private static final class Coalescer
+    static final class Coalescer
     {
         private Coalescer() {}
 
         public static Regexp coalesce(Regexp regexp)
         {
+            // Without an adjacent coalescible pair in any concatenation, every node's children are
+            // unchanged, so the walk would return the input without rebuilding anything.
+            if (!mayCoalesce(regexp, 0)) {
+                return regexp;
+            }
             return new CoalesceWalker().walk(regexp, null);
+        }
+
+        private static boolean mayCoalesce(Regexp regexp, int depth)
+        {
+            // The scan recurses only as deep as simplification does, so it stays within the small
+            // thread stacks that compilation supports. Deeper trees are handed to the iterative walk.
+            if (depth == MAX_RECURSIVE_DEPTH) {
+                return true;
+            }
+            int childCount = regexp.childCount();
+            for (int childIndex = 0; childIndex < childCount; childIndex++) {
+                Regexp child = regexp.child(childIndex);
+                if (regexp.op() == RegexpOp.CONCAT &&
+                        childIndex + 1 < childCount &&
+                        CoalesceWalker.canCoalesce(child, regexp.child(childIndex + 1))) {
+                    return true;
+                }
+                if (mayCoalesce(child, depth + 1)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static final class CoalesceWalker
