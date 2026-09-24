@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -206,6 +207,47 @@ public class TestTrinoLikeCorpus
     }
 
     @Test
+    public void testEscapedLiteralsDoNotAliasThePattern()
+    {
+        // An escape forces the buffered literal path; the compiled pattern must not observe later
+        // writes to the caller's bytes, including bytes outside the pattern's slice.
+        byte[] backing = "xxa\\%b_cyy".getBytes(StandardCharsets.UTF_8);
+        Slice pattern = Slices.wrappedBuffer(backing, 2, backing.length - 4);
+        TrinoLikePattern compiled = TrinoLikePattern.compile(pattern, '\\');
+        assertThat(compiled.matches(Slices.utf8Slice("a%bxc"))).isTrue();
+        assertThat(compiled.matches(Slices.utf8Slice("a%b\u00E9c"))).isTrue();
+        assertThat(compiled.matches(Slices.utf8Slice("aXbxc"))).isFalse();
+        assertThat(compiled.matches(Slices.utf8Slice("a%bc"))).isFalse();
+
+        Arrays.fill(backing, (byte) 'z');
+        assertThat(compiled.matches(Slices.utf8Slice("a%bxc"))).isTrue();
+        assertThat(compiled.matches(Slices.utf8Slice("a%b\u00E9c"))).isTrue();
+        assertThat(compiled.matches(Slices.utf8Slice("aXbxc"))).isFalse();
+        assertThat(compiled.matches(Slices.utf8Slice("zzzzz"))).isFalse();
+    }
+
+    @Test
+    public void testParsedLiteralsDecodeEscapesAndMalformedBytes()
+    {
+        byte[] storage = "xxab%c_d\\%e\\\\f".getBytes(StandardCharsets.UTF_8);
+        Slice pattern = Slices.wrappedBuffer(storage, 2, storage.length - 2);
+        List<TrinoLikeParser.Element> elements = TrinoLikeParser.parse(pattern, OptionalInt.of('\\'));
+        assertThat(elements).hasSize(5);
+        assertThat(literalText(elements.get(0))).isEqualTo("ab");
+        assertThat(elements.get(1)).isEqualTo(TrinoLikeParser.ZeroOrMore.INSTANCE);
+        assertThat(literalText(elements.get(2))).isEqualTo("c");
+        assertThat(elements.get(3)).isEqualTo(new TrinoLikeParser.Any(1));
+        assertThat(literalText(elements.get(4))).isEqualTo("d%e\\f");
+        assertLiteralsCopied(elements, storage);
+
+        Slice malformed = Slices.wrappedBuffer(new byte[] {'a', (byte) 0xFF, 'b', '%', (byte) 0xC3, (byte) 0xA9});
+        List<TrinoLikeParser.Element> malformedElements = TrinoLikeParser.parse(malformed, OptionalInt.empty());
+        assertThat(malformedElements).hasSize(3);
+        assertThat(literalText(malformedElements.get(0))).isEqualTo("a\uFFFDb");
+        assertThat(literalText(malformedElements.get(2))).isEqualTo("\u00E9");
+    }
+
+    @Test
     public void testEscapeErrors()
     {
         assertThatThrownBy(() -> TrinoLikePattern.compile(Slices.utf8Slice("abc\\"), '\\'))
@@ -289,5 +331,20 @@ public class TestTrinoLikeCorpus
             return TrinoLikePattern.compile(pattern, testCase.escapeCodePoint().orElseThrow());
         }
         return TrinoLikePattern.compile(pattern);
+    }
+
+    private static String literalText(TrinoLikeParser.Element element)
+    {
+        return ((TrinoLikeParser.Literal) element).bytes().toStringUtf8();
+    }
+
+    // Every literal must be a copy, so later writes to the caller's array cannot reach it.
+    private static void assertLiteralsCopied(List<TrinoLikeParser.Element> elements, byte[] callerArray)
+    {
+        for (TrinoLikeParser.Element element : elements) {
+            if (element instanceof TrinoLikeParser.Literal literal) {
+                assertThat(literal.bytes().byteArray()).isNotSameAs(callerArray);
+            }
+        }
     }
 }
