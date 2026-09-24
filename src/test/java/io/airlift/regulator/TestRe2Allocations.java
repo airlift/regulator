@@ -172,6 +172,103 @@ public class TestRe2Allocations
     }
 
     @Test
+    public void testTrinoReplaceWithoutMatchAllocatesNoTemplate()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice("qqq"));
+        Slice source = Slices.utf8Slice("The quick brown fox jumps over the lazy dog");
+        Slice replacement = Slices.utf8Slice("<$0>");
+        Slice malformedReplacement = Slices.utf8Slice("<$");
+
+        for (int iteration = 0; iteration < 20_000; iteration++) {
+            assertThat(pattern.replace(source, replacement)).isSameAs(source);
+            assertThat(pattern.replace(source, malformedReplacement)).isSameAs(source);
+        }
+
+        long allocatedBytes = minimumAllocatedBytes(20_000, () -> {
+            int unchangedCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                unchangedCount += pattern.replace(source, replacement) == source ? 1 : 0;
+                unchangedCount += pattern.replace(source, malformedReplacement) == source ? 1 : 0;
+            }
+            return unchangedCount;
+        });
+
+        assertThat(allocatedBytes / 20_000).isLessThanOrEqualTo(128);
+    }
+
+    @Test
+    public void testTrinoReplaceReusesParsedTemplate()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice("[,;]"));
+        Slice source = Slices.utf8Slice("alpha,beta");
+        Slice replacement = Slices.utf8Slice("-".repeat(TrinoReplacementPlan.MAXIMUM_CACHED_REPLACEMENT_LENGTH));
+        long outputLength = pattern.replace(source, replacement).length();
+        for (int iteration = 0; iteration < 20_000; iteration++) {
+            assertThat(pattern.replace(source, replacement).length()).isEqualTo(outputLength);
+        }
+        assertThat(pattern.cachesReplacementForDiagnostics(replacement)).isTrue();
+
+        long allocatedBytes = minimumAllocatedBytes(outputLength * 10_000, () -> {
+            long totalLength = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                totalLength += pattern.replace(source, replacement).length();
+            }
+            return totalLength;
+        });
+
+        // A cached template without group references writes each match straight to the output,
+        // leaving the result and a few fixed-size plan objects, well under one replacement length
+        // beyond the result. A reparse also copies the replacement's literal bytes, allocates parse
+        // metadata, and builds a new template, which measures above two replacement lengths beyond
+        // the result.
+        assertThat(allocatedBytes / 10_000).isLessThan(outputLength + 2L * replacement.length());
+    }
+
+    @Test
+    public void testTrinoDenseReplaceBoundsMatchRecords()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        Slice source = Slices.utf8Slice("a".repeat(1 << 18));
+        long sourceLength = source.length();
+        // Geometric output growth allocates under four times the result plus the bounded records.
+        // Recording every match would allocate at least eight bytes per match on top of the output.
+        long recordBytes = 64 * 1024;
+        assertThat(allocatedBytesPerReplace("a", source, "b")).isLessThan(sourceLength * 4 + recordBytes);
+        assertThat(allocatedBytesPerReplace("a", source, "")).isLessThan(recordBytes);
+        assertThat(allocatedBytesPerReplace("(a)", source, "$1$1")).isLessThan(sourceLength * 2 * 4 + recordBytes);
+        assertThat(allocatedBytesPerReplace("", source, "-")).isLessThan((sourceLength * 2 + 1) * 4 + recordBytes);
+    }
+
+    @Test
+    public void testTrinoDenseReplaceOutputFollowsResultLength()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        // Each match in the dense prefix is written straight to the output buffer; the final match
+        // then deletes the long tail, so the result is only the prefix's unmatched bytes.
+        Slice source = Slices.utf8Slice("xa".repeat(2049) + "b".repeat(1 << 20));
+        TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice("a|b+"));
+        long resultLength = pattern.replace(source, Slices.EMPTY_SLICE).length();
+        assertThat(resultLength).isEqualTo(2049);
+
+        // Projecting the result from the source consumed so far would allocate about half the tail.
+        assertThat(allocatedBytesPerReplace("a|b+", source, "")).isLessThan(resultLength * 4 + 64 * 1024);
+    }
+
+    @Test
     public void testTrinoScanPlansDoNotAllocate()
     {
         ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
@@ -249,6 +346,26 @@ public class TestRe2Allocations
             matchCount += handoff.matchInto(link, Re2.Anchor.UNANCHORED, groups) ? 1 : 0;
         }
         return matchCount;
+    }
+
+    private static long allocatedBytesPerReplace(String expression, Slice source, String replacementText)
+    {
+        TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice(expression));
+        Slice replacement = Slices.utf8Slice(replacementText);
+        long outputLength = pattern.replace(source, replacement).length();
+        for (int iteration = 0; iteration < 20; iteration++) {
+            assertThat(pattern.replace(source, replacement).length()).isEqualTo(outputLength);
+        }
+
+        long allocatedBytes = minimumAllocatedBytes(outputLength * 10, () -> {
+            long totalLength = 0;
+            for (int iteration = 0; iteration < 10; iteration++) {
+                totalLength += pattern.replace(source, replacement).length();
+            }
+            return totalLength;
+        });
+
+        return allocatedBytes / 10;
     }
 
     /**

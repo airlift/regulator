@@ -660,6 +660,40 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
+    public void testReplacementUsesExactOutputStorage()
+    {
+        assertExactReplacementStorage("(a)(?<suffix>b)?", "ab a", "[$1${suffix}]", "[ab] [a]");
+    }
+
+    @Test
+    public void testReplacementUsesExactOutputStorageAcrossDirectRoutes()
+    {
+        assertExactReplacementStorage("a", "aba", "[$0]", "[a]b[a]");
+        assertExactReplacementStorage("[0-9]{2}", "12 34", "<$0>", "<12> <34>");
+        assertExactReplacementStorage("cat|dog", "cat dog", "<$0>", "<cat> <dog>");
+        assertExactReplacementStorage("\\p{L}{2,4}", "ab 12 cd", "_", "_ 12 _");
+        assertExactReplacementStorage(".*x.*", "axb", "<$0>", "<axb>");
+    }
+
+    @Test
+    public void testReplacementPlanHandlesEmptyMatchesAndReplacementGrammar()
+    {
+        assertExactReplacementStorage("", "a💰", "<$0>", "<>a<>💰<>");
+        assertExactReplacementStorage("(a)(b)", "ab", "\\$1:$01:$10:$2", "$1:a:a0:b");
+        assertExactReplacementStorage("a", "a", "", "");
+    }
+
+    private static void assertExactReplacementStorage(String expression, String input, String replacement, String expected)
+    {
+        Slice backing = utf8("!" + input + "?");
+        Slice source = backing.slice(1, backing.length() - 2);
+        Slice result = TrinoRegexp.compile(utf8(expression)).replace(source, utf8(replacement));
+        assertThat(result).isEqualTo(utf8(expected));
+        assertThat(result.byteArrayOffset()).isZero();
+        assertThat(result.byteArray()).hasSize(result.length());
+    }
+
+    @Test
     public void testUnknownNamedReplacementOffsetAcrossRoutes()
     {
         Slice source = utf8("a");
@@ -679,14 +713,191 @@ public class TestTrinoRegexpFunctions
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8("(?<name>x)"));
 
-        assertThat(regexp.replacementNeedsCapturingGroups(utf8("_"))).isFalse();
-        assertThat(regexp.replacementNeedsCapturingGroups(utf8("$0"))).isFalse();
-        assertThat(regexp.replacementNeedsCapturingGroups(utf8("$00"))).isFalse();
-        assertThat(regexp.replacementNeedsCapturingGroups(utf8("\\$1"))).isFalse();
-        assertThat(regexp.replacementNeedsCapturingGroups(utf8("$1"))).isTrue();
-        assertThat(regexp.replacementNeedsCapturingGroups(utf8("$01"))).isTrue();
-        assertThat(regexp.replacementNeedsCapturingGroups(utf8("${name}"))).isTrue();
-        assertThat(regexp.replacementNeedsCapturingGroups(utf8("$"))).isTrue();
+        assertRetainedReplacementGroups(regexp, "_", 0);
+        assertRetainedReplacementGroups(regexp, "$0", 0);
+        assertRetainedReplacementGroups(regexp, "$00", 0);
+        assertRetainedReplacementGroups(regexp, "\\$1", 0);
+        assertRetainedReplacementGroups(regexp, "$1", 1);
+        assertRetainedReplacementGroups(regexp, "$01", 1);
+        assertRetainedReplacementGroups(regexp, "${name}", 1);
+        assertRetainedReplacementGroups(regexp, "$05", 0);
+        // Malformed replacements take the group-zero route and fail on the first match.
+        assertRetainedReplacementGroups(regexp, "$", 0);
+        assertRetainedReplacementGroups(regexp, "$9", 0);
+        assertRetainedReplacementGroups(TrinoRegexp.compile(utf8("x")), "${name}", 0);
+    }
+
+    @Test
+    public void testReplacementRetainsOnlyReferencedGroups()
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)"));
+        assertRetainedReplacementGroups(regexp, "_", 0);
+        assertRetainedReplacementGroups(regexp, "$0", 0);
+        assertRetainedReplacementGroups(regexp, "$00", 0);
+        assertRetainedReplacementGroups(regexp, "\\$9", 0);
+        assertRetainedReplacementGroups(regexp, "$01", 1);
+        assertRetainedReplacementGroups(regexp, "$1", 1);
+        assertRetainedReplacementGroups(regexp, "$05", 5);
+        assertRetainedReplacementGroups(regexp, "$10", 10);
+        assertRetainedReplacementGroups(regexp, "$12", 12);
+        assertRetainedReplacementGroups(regexp, "$123", 12);
+        assertRetainedReplacementGroups(regexp, "$13", 1);
+        assertRetainedReplacementGroups(regexp, "$99", 9);
+        assertRetainedReplacementGroups(regexp, "$2$11", 11);
+        // Malformed replacements take the group-zero route and fail on the first match.
+        assertRetainedReplacementGroups(regexp, "$", 0);
+        assertRetainedReplacementGroups(regexp, "$12\\", 0);
+        assertThat(regexp.replace(utf8("abcdefghijkl"), utf8("$123|$13|$05|$99")))
+                .isEqualTo(utf8("l3|a3|e|i9"));
+
+        TrinoRegexp oneGroup = TrinoRegexp.compile(utf8("(a)"));
+        assertRetainedReplacementGroups(oneGroup, "$05", 0);
+        assertRetainedReplacementGroups(oneGroup, "$9", 0);
+        assertThat(oneGroup.replace(utf8("a"), utf8("$05$01$11"))).isEqualTo(utf8("a5aa1"));
+
+        // Named references retain every group rather than resolving the name before a match.
+        TrinoRegexp named = TrinoRegexp.compile(utf8("(?<first>a)(b)(?<third>c)?"));
+        assertRetainedReplacementGroups(named, "${first}", 3);
+        assertRetainedReplacementGroups(named, "${missing}", 3);
+        assertRetainedReplacementGroups(named, "$2", 2);
+        assertRetainedReplacementGroups(named, "${", 0);
+        assertThat(named.replace(utf8("abab"), utf8("[${first}${third}]"))).isEqualTo(utf8("[a][a]"));
+        assertRetainedReplacementGroups(TrinoRegexp.compile(utf8("x")), "${name}", 0);
+    }
+
+    @Test
+    public void testMalformedReplacementReturnsNonmatchingSource()
+    {
+        Slice source = utf8("---");
+        for (String expression : List.of("a", "(a)", "(?<name>a)", "a+", "(a)|(b)", "[a-c]", "cat|dog", "[0-9]{2}:", "\\d+", ".*x.*")) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8(expression));
+            for (String replacement : List.of("\\", "$", "$x", "${", "${}", "${name", "$9", "${missing}", "$0\\", "$1$")) {
+                assertThat(regexp.replace(source, utf8(replacement)))
+                        .as("%s with %s", expression, replacement)
+                        .isSameAs(source);
+            }
+        }
+    }
+
+    @Test
+    public void testMalformedReplacementFailsOnFirstMatch()
+    {
+        List<ReplacementRoute> routes = List.of(
+                new ReplacementRoute("a", "-a-"),
+                new ReplacementRoute("(a)", "-a-"),
+                new ReplacementRoute("(?<name>a)", "-a-"),
+                new ReplacementRoute("a+", "-aa-"),
+                new ReplacementRoute("x*", ""),
+                new ReplacementRoute("(a)|(b)", "-b-"),
+                new ReplacementRoute("[a-c]", "-b-"),
+                new ReplacementRoute("cat|dog", "-dog-"),
+                new ReplacementRoute("[0-9]{2}:", "-12:-"),
+                new ReplacementRoute("\\d+", "-12-"),
+                new ReplacementRoute(".*x.*", "-x-"));
+        for (ReplacementRoute route : routes) {
+            String regexp = route.expression();
+            String source = route.source();
+            assertReplacementFailure(regexp, source, "ab\\", "backslash cannot be last in replacement", 2);
+            assertReplacementFailure(regexp, source, "$0\\", "backslash cannot be last in replacement", 2);
+            assertReplacementFailure(regexp, source, "x$", "dollar sign cannot be last in replacement", 1);
+            assertReplacementFailure(regexp, source, "$0$", "dollar sign cannot be last in replacement", 2);
+            assertReplacementFailure(regexp, source, "$x", "dollar sign must be followed by a digit or group name", 0);
+            assertReplacementFailure(regexp, source, "é${", "invalid named group in replacement", 2);
+            assertReplacementFailure(regexp, source, "${}", "invalid named group in replacement", 0);
+            assertReplacementFailure(regexp, source, "_$9", "unknown group: 9", 1);
+            assertReplacementFailure(regexp, source, "_${missing}", "unknown named group: missing", 1);
+        }
+    }
+
+    @Test
+    public void testReplacementTemplateCache()
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8("(?<key>[a-z]+)=(?<value>[0-9]+)"));
+        Slice source = utf8("a=1 bb=22 ccc=333");
+        Slice named = utf8("${value}:${key}");
+        assertThat(regexp.cachesReplacementForDiagnostics(named)).isFalse();
+        assertThat(regexp.replace(source, named)).isEqualTo(utf8("1:a 22:bb 333:ccc"));
+        assertThat(regexp.cachesReplacementForDiagnostics(named)).isTrue();
+        // A hit reuses the template together with its retained groups and record size.
+        assertThat(regexp.newReplacementPlan(source, named).maximumCapturingGroup()).isEqualTo(2);
+        assertThat(regexp.replace(source, named)).isEqualTo(utf8("1:a 22:bb 333:ccc"));
+
+        // Replacements of the same length are told apart by content.
+        Slice forward = utf8("<$1|$2>");
+        Slice reversed = utf8("<$2|$1>");
+        for (int iteration = 0; iteration < 3; iteration++) {
+            assertThat(regexp.replace(source, forward)).isEqualTo(utf8("<a|1> <bb|22> <ccc|333>"));
+            assertThat(regexp.replace(source, reversed)).isEqualTo(utf8("<1|a> <22|bb> <333|ccc>"));
+        }
+
+        // The cache keeps its own copy, so reusing the caller's array for other content misses.
+        byte[] reused = forward.getBytes();
+        Slice reusedReplacement = Slices.wrappedBuffer(reused);
+        assertThat(regexp.replace(source, reusedReplacement)).isEqualTo(utf8("<a|1> <bb|22> <ccc|333>"));
+        System.arraycopy(reversed.getBytes(), 0, reused, 0, reused.length);
+        assertThat(regexp.replace(source, reusedReplacement)).isEqualTo(utf8("<1|a> <22|bb> <333|ccc>"));
+
+        // Views compare their own bytes, not the start of the backing array.
+        byte[] backing = utf8("<$1|$2><$2|$1>").getBytes();
+        Slice first = Slices.wrappedBuffer(backing, 0, forward.length());
+        Slice second = Slices.wrappedBuffer(backing, forward.length(), reversed.length());
+        assertThat(regexp.replace(source, first)).isEqualTo(utf8("<a|1> <bb|22> <ccc|333>"));
+        assertThat(regexp.replace(source, second)).isEqualTo(utf8("<1|a> <22|bb> <333|ccc>"));
+        assertThat(regexp.cachesReplacementForDiagnostics(reversed)).isTrue();
+        assertThat(regexp.cachesReplacementForDiagnostics(first)).isFalse();
+
+        // A long replacement is parsed on every call and leaves the cached entry in place.
+        String padding = "-".repeat(TrinoReplacementPlan.MAXIMUM_CACHED_REPLACEMENT_LENGTH);
+        Slice longReplacement = utf8("$1" + padding);
+        for (int iteration = 0; iteration < 2; iteration++) {
+            assertThat(regexp.replace(source, longReplacement)).isEqualTo(utf8("a%s bb%s ccc%s".formatted(padding, padding, padding)));
+            assertThat(regexp.cachesReplacementForDiagnostics(longReplacement)).isFalse();
+            assertThat(regexp.cachesReplacementForDiagnostics(reversed)).isTrue();
+        }
+        Slice longestCached = utf8("$1" + padding.substring(2));
+        assertThat(regexp.replace(source, longestCached)).isEqualTo(utf8("a%s bb%s ccc%s".formatted(padding.substring(2), padding.substring(2), padding.substring(2))));
+        assertThat(regexp.cachesReplacementForDiagnostics(longestCached)).isTrue();
+    }
+
+    @Test
+    public void testMalformedReplacementIsNotCached()
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8("(a)"));
+        Slice source = utf8("-a-");
+        Slice nonmatching = utf8("---");
+        Slice cached = utf8("[$1]");
+        assertThat(regexp.replace(source, cached)).isEqualTo(utf8("-[a]-"));
+        for (String replacement : List.of("[$9]", "${missing}", "[\\", "$")) {
+            Slice malformed = utf8(replacement);
+            for (int iteration = 0; iteration < 2; iteration++) {
+                assertThat(regexp.replace(nonmatching, malformed)).as(replacement).isSameAs(nonmatching);
+                assertThatThrownBy(() -> regexp.replace(source, malformed))
+                        .as(replacement)
+                        .isInstanceOf(TrinoRegexpReplacementException.class);
+                assertThat(regexp.cachesReplacementForDiagnostics(malformed)).as(replacement).isFalse();
+            }
+            assertThat(regexp.cachesReplacementForDiagnostics(cached)).as(replacement).isTrue();
+        }
+        // A cached replacement still returns a nonmatching source unchanged.
+        assertThat(regexp.replace(nonmatching, cached)).isSameAs(nonmatching);
+    }
+
+    private static void assertRetainedReplacementGroups(TrinoRegexp regexp, String replacement, int expected)
+    {
+        assertThat(regexp.newReplacementPlan(Slices.EMPTY_SLICE, utf8(replacement)).maximumCapturingGroup())
+                .as(replacement)
+                .isEqualTo(expected);
+    }
+
+    private static void assertReplacementFailure(String expression, String source, String replacement, String message, int byteOffset)
+    {
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8(expression));
+        assertThatThrownBy(() -> regexp.replace(utf8(source), utf8(replacement)))
+                .as("%s with %s", expression, replacement)
+                .isInstanceOfSatisfying(TrinoRegexpReplacementException.class, exception -> {
+                    assertThat(exception).hasMessage(message + " at byte offset " + byteOffset);
+                    assertThat(exception.byteOffset()).isEqualTo(byteOffset);
+                });
     }
 
     @Test
@@ -955,4 +1166,6 @@ public class TestTrinoRegexpFunctions
     private record FunctionCase(Operation operation, String pattern, String source, String argument, String expected) {}
 
     private record MatchBoundary(int start, int end) {}
+
+    private record ReplacementRoute(String expression, String source) {}
 }

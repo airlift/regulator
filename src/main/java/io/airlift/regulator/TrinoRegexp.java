@@ -76,6 +76,7 @@ public sealed class TrinoRegexp
     private final Re2 pattern;
     private final boolean mayHaveSingleByteRepeatMatcher;
     private volatile SingleByteRepeatMatcher singleByteRepeatMatcher;
+    private volatile TrinoReplacementPlan.CachedTemplate replacementTemplate;
 
     private TrinoRegexp()
     {
@@ -498,85 +499,61 @@ public sealed class TrinoRegexp
         requireNonNull(source, "source is null");
         requireNonNull(replacement, "replacement is null");
 
-        boolean needsCapturingGroups = replacementNeedsCapturingGroups(replacement);
-        SingleByteRepeatMatcher.Cursor repeatCursor = newSingleByteRepeatCursor(source, needsCapturingGroups);
+        TrinoReplacementPlan replacementPlan = newReplacementPlan(source, replacement);
+        int maximumCapturingGroup = replacementPlan.maximumCapturingGroup();
+        SingleByteRepeatMatcher.Cursor repeatCursor = newSingleByteRepeatCursor(source, maximumCapturingGroup != 0);
         if (repeatCursor != null) {
-            DynamicSliceOutput output = new DynamicSliceOutput(source.length() + replacement.length());
-            int previousEnd = 0;
             while (repeatCursor.find()) {
-                output.writeBytes(source, previousEnd, repeatCursor.start() - previousEnd);
-                appendReplacement(output, replacement, source, repeatCursor.start(), repeatCursor.end());
-                previousEnd = repeatCursor.end();
+                replacementPlan.addMatch(repeatCursor.start(), repeatCursor.end());
             }
-            output.writeBytes(source, previousEnd, source.length() - previousEnd);
-            return output.slice();
+            return replacementPlan.build();
         }
 
-        Re2Matcher matcher = needsCapturingGroups ? newMatcher(source) : newGroupZeroMatcher(source);
-        DynamicSliceOutput output = new DynamicSliceOutput(source.length() + replacement.length());
-        int previousEnd = 0;
-        boolean matched = false;
+        // The loop is written out rather than calling replaceWithMatcher, so C2 compiles it into
+        // this method instead of reaching it through a call it declines to inline.
+        Re2Matcher matcher = maximumCapturingGroup == 0
+                ? newGroupZeroMatcher(source)
+                : pattern.matcher(source, maximumCapturingGroup);
         while (matcher.find()) {
-            matched = true;
-            output.writeBytes(source, previousEnd, matcher.start() - previousEnd);
-            appendReplacement(output, replacement, matcher);
-            previousEnd = matcher.end();
+            replacementPlan.addMatch(matcher);
         }
-        if (!matched) {
-            return source;
-        }
-        output.writeBytes(source, previousEnd, source.length() - previousEnd);
-        return output.slice();
+        return replacementPlan.build();
     }
 
-    boolean replacementNeedsCapturingGroups(Slice replacement)
+    final TrinoReplacementPlan newReplacementPlan(Slice source, Slice replacement)
     {
-        return replacementNeedsCapturingGroups(replacement, pattern.capturingGroupCount());
+        return new TrinoReplacementPlan(source, replacement, this);
     }
 
-    private static boolean replacementNeedsCapturingGroups(Slice replacement, int capturingGroupCount)
+    /**
+     * Returns the most recently parsed well-formed replacement, or {@code null}.
+     */
+    final TrinoReplacementPlan.CachedTemplate cachedReplacementTemplate()
     {
-        for (int index = 0; index < replacement.length(); index++) {
-            int current = replacement.getUnsignedByte(index);
-            if (current == '\\') {
-                if (++index == replacement.length()) {
-                    return true;
-                }
-                continue;
-            }
-            if (current != '$') {
-                continue;
-            }
-            if (++index == replacement.length()) {
-                return true;
-            }
+        return replacementTemplate;
+    }
 
-            int next = replacement.getUnsignedByte(index);
-            if (next == '{' || next < '0' || next > '9') {
-                return true;
-            }
+    final void cacheReplacementTemplate(TrinoReplacementPlan.CachedTemplate template)
+    {
+        replacementTemplate = template;
+    }
 
-            int group = next - '0';
-            if (group > 0) {
-                return true;
-            }
-            while (index + 1 < replacement.length()) {
-                int digit = replacement.getUnsignedByte(index + 1) - '0';
-                if (digit < 0 || digit > 9) {
-                    break;
-                }
-                int candidate = group * 10 + digit;
-                if (candidate > capturingGroupCount) {
-                    break;
-                }
-                if (candidate > 0) {
-                    return true;
-                }
-                group = candidate;
-                index++;
-            }
+    boolean cachesReplacementForDiagnostics(Slice replacement)
+    {
+        TrinoReplacementPlan.CachedTemplate template = replacementTemplate;
+        return template != null && template.matches(replacement);
+    }
+
+    final Slice replaceWithMatcher(Slice source, TrinoReplacementPlan replacementPlan)
+    {
+        int maximumCapturingGroup = replacementPlan.maximumCapturingGroup();
+        Re2Matcher matcher = maximumCapturingGroup == 0
+                ? newGroupZeroMatcher(source)
+                : pattern.matcher(source, maximumCapturingGroup);
+        while (matcher.find()) {
+            replacementPlan.addMatch(matcher);
         }
-        return false;
+        return replacementPlan.build();
     }
 
     /**
@@ -629,87 +606,6 @@ public sealed class TrinoRegexp
         }
         output.writeBytes(source, previousEnd, source.length() - previousEnd);
         return output.slice();
-    }
-
-    private void appendReplacement(DynamicSliceOutput output, Slice replacement, Re2Matcher matcher)
-    {
-        appendReplacement(output, replacement, matcher, null, 0, 0);
-    }
-
-    final void appendReplacement(DynamicSliceOutput output, Slice replacement, Slice source, int matchStart, int matchEnd)
-    {
-        appendReplacement(output, replacement, null, source, matchStart, matchEnd);
-    }
-
-    private void appendReplacement(DynamicSliceOutput output, Slice replacement, Re2Matcher matcher, Slice source, int matchStart, int matchEnd)
-    {
-        for (int index = 0; index < replacement.length(); index++) {
-            int current = replacement.getUnsignedByte(index);
-            if (current == '\\') {
-                int escapeOffset = index;
-                if (++index == replacement.length()) {
-                    throw new TrinoRegexpReplacementException("backslash cannot be last in replacement", escapeOffset);
-                }
-                output.writeByte(replacement.getUnsignedByte(index));
-                continue;
-            }
-            if (current != '$') {
-                output.writeByte(current);
-                continue;
-            }
-
-            int referenceOffset = index;
-            if (++index == replacement.length()) {
-                throw new TrinoRegexpReplacementException("dollar sign cannot be last in replacement", referenceOffset);
-            }
-            int next = replacement.getUnsignedByte(index);
-            if (next == '{') {
-                int nameStart = ++index;
-                while (index < replacement.length() && replacement.getUnsignedByte(index) != '}') {
-                    index++;
-                }
-                if (index == replacement.length() || index == nameStart) {
-                    throw new TrinoRegexpReplacementException("invalid named group in replacement", referenceOffset);
-                }
-                String groupName = replacement.slice(nameStart, index - nameStart).toStringUtf8();
-                Integer groupIndex = namedCapturingGroups().get(groupName);
-                if (matcher == null || groupIndex == null) {
-                    throw new TrinoRegexpReplacementException("unknown named group: " + groupName, referenceOffset);
-                }
-                Slice group = matcher.group(groupIndex);
-                if (group != null) {
-                    output.appendBytes(group);
-                }
-                continue;
-            }
-
-            if (next < '0' || next > '9') {
-                throw new TrinoRegexpReplacementException(
-                        "dollar sign must be followed by a digit or group name",
-                        referenceOffset);
-            }
-            int group = next - '0';
-            int groupCount = matcher == null ? 0 : matcher.groupCount();
-            if (group > groupCount) {
-                throw new TrinoRegexpReplacementException("unknown group: " + group, referenceOffset);
-            }
-            while (index + 1 < replacement.length()) {
-                int digit = replacement.getUnsignedByte(index + 1) - '0';
-                if (digit < 0 || digit > 9) {
-                    break;
-                }
-                int candidate = group * 10 + digit;
-                if (candidate > groupCount) {
-                    break;
-                }
-                group = candidate;
-                index++;
-            }
-            Slice groupValue = matcher == null ? source.slice(matchStart, matchEnd - matchStart) : matcher.group(group);
-            if (groupValue != null) {
-                output.appendBytes(groupValue);
-            }
-        }
     }
 
     final void validateGroup(int group)
@@ -842,32 +738,25 @@ public sealed class TrinoRegexp
             if (spanMatcher == null) {
                 return super.replace(source, replacement);
             }
-            if (replacementNeedsCapturingGroups(replacement)) {
-                return super.replace(source, replacement);
+
+            TrinoReplacementPlan replacementPlan = newReplacementPlan(source, replacement);
+            if (replacementPlan.maximumCapturingGroup() != 0) {
+                return replaceWithMatcher(source, replacementPlan);
             }
 
-            DynamicSliceOutput output = new DynamicSliceOutput(source.length() + replacement.length());
-            int previousEnd = 0;
+            TrinoReplacementPlan.GroupFreeReplacer replacer = replacementPlan.groupFreeReplacer();
             int searchStart = 0;
-            boolean matched = false;
             while (searchStart < source.length()) {
                 long span = spanMatcher.findSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
-                matched = true;
                 int matchStart = spanStart(span);
                 int matchEnd = spanEnd(span);
-                output.writeBytes(source, previousEnd, matchStart - previousEnd);
-                appendReplacement(output, replacement, source, matchStart, matchEnd);
-                previousEnd = matchEnd;
+                replacer.addMatch(matchStart, matchEnd);
                 searchStart = matchEnd;
             }
-            if (!matched) {
-                return source;
-            }
-            output.writeBytes(source, previousEnd, source.length() - previousEnd);
-            return output.slice();
+            return replacer.build();
         }
 
         @Override
@@ -1032,50 +921,25 @@ public sealed class TrinoRegexp
         {
             requireNonNull(source, "source is null");
             requireNonNull(replacement, "replacement is null");
-            if (replacementNeedsCapturingGroups(replacement)) {
-                return replaceWithCapturingGroups(source, replacement);
+
+            TrinoReplacementPlan replacementPlan = newReplacementPlan(source, replacement);
+            if (replacementPlan.maximumCapturingGroup() != 0) {
+                return replaceWithMatcher(source, replacementPlan);
             }
 
-            DynamicSliceOutput output = new DynamicSliceOutput(source.length() + replacement.length());
-            int previousEnd = 0;
+            TrinoReplacementPlan.GroupFreeReplacer replacer = replacementPlan.groupFreeReplacer();
             int searchStart = 0;
-            boolean matched = false;
             while (searchStart < source.length()) {
                 long span = spanMatcher.findSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
-                matched = true;
                 int matchStart = spanStart(span);
                 int matchEnd = spanEnd(span);
-                output.writeBytes(source, previousEnd, matchStart - previousEnd);
-                appendReplacement(output, replacement, source, matchStart, matchEnd);
-                previousEnd = matchEnd;
+                replacer.addMatch(matchStart, matchEnd);
                 searchStart = matchEnd;
             }
-            if (!matched) {
-                return source;
-            }
-            output.writeBytes(source, previousEnd, source.length() - previousEnd);
-            return output.slice();
-        }
-
-        private Slice replaceWithCapturingGroups(Slice source, Slice replacement)
-        {
-            if (!pattern().hasRetainedFixedWidthByteSpanMatcher()) {
-                return super.replace(source, replacement);
-            }
-            long span = spanMatcher.findSpan(source, 0);
-            if (span < 0) {
-                return source;
-            }
-            appendReplacement(
-                    new DynamicSliceOutput(replacement.length()),
-                    replacement,
-                    source,
-                    spanStart(span),
-                    spanEnd(span));
-            throw new AssertionError("replacement requiring captures was accepted without captures");
+            return replacer.build();
         }
 
         @Override
@@ -1248,47 +1112,20 @@ public sealed class TrinoRegexp
         {
             requireNonNull(source, "source is null");
             requireNonNull(replacement, "replacement is null");
-            if (TrinoRegexp.replacementNeedsCapturingGroups(replacement, 0)) {
-                return replaceWithCapturingGroups(source, replacement);
-            }
 
-            DynamicSliceOutput output = new DynamicSliceOutput(source.length() + replacement.length());
-            int previousEnd = 0;
+            TrinoReplacementPlan.GroupFreeReplacer replacer = newReplacementPlan(source, replacement).groupFreeReplacer();
             int searchStart = 0;
-            boolean matched = false;
             while (searchStart < source.length()) {
                 long span = spanMatcher.findSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
-                matched = true;
                 int matchStart = spanStart(span);
                 int matchEnd = spanEnd(span);
-                output.writeBytes(source, previousEnd, matchStart - previousEnd);
-                appendReplacement(output, replacement, source, matchStart, matchEnd);
-                previousEnd = matchEnd;
+                replacer.addMatch(matchStart, matchEnd);
                 searchStart = matchEnd;
             }
-            if (!matched) {
-                return source;
-            }
-            output.writeBytes(source, previousEnd, source.length() - previousEnd);
-            return output.slice();
-        }
-
-        private Slice replaceWithCapturingGroups(Slice source, Slice replacement)
-        {
-            long span = spanMatcher.findSpan(source, 0);
-            if (span < 0) {
-                return source;
-            }
-            appendReplacement(
-                    new DynamicSliceOutput(replacement.length()),
-                    replacement,
-                    source,
-                    spanStart(span),
-                    spanEnd(span));
-            throw new AssertionError("replacement requiring captures was accepted without captures");
+            return replacer.build();
         }
 
         @Override
@@ -1450,32 +1287,25 @@ public sealed class TrinoRegexp
         {
             requireNonNull(source, "source is null");
             requireNonNull(replacement, "replacement is null");
-            if (replacementNeedsCapturingGroups(replacement)) {
-                return super.replace(source, replacement);
+
+            TrinoReplacementPlan replacementPlan = newReplacementPlan(source, replacement);
+            if (replacementPlan.maximumCapturingGroup() != 0) {
+                return replaceWithMatcher(source, replacementPlan);
             }
 
-            DynamicSliceOutput output = new DynamicSliceOutput(source.length() + replacement.length());
-            int previousEnd = 0;
+            TrinoReplacementPlan.GroupFreeReplacer replacer = replacementPlan.groupFreeReplacer();
             int searchStart = 0;
-            boolean matched = false;
             while (searchStart <= source.length()) {
                 long span = pattern().findExactLiteralSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
-                matched = true;
                 int matchStart = spanStart(span);
                 int matchEnd = spanEnd(span);
-                output.writeBytes(source, previousEnd, matchStart - previousEnd);
-                appendReplacement(output, replacement, source, matchStart, matchEnd);
-                previousEnd = matchEnd;
+                replacer.addMatch(matchStart, matchEnd);
                 searchStart = nextExactLiteralSearchStart(source, span);
             }
-            if (!matched) {
-                return source;
-            }
-            output.writeBytes(source, previousEnd, source.length() - previousEnd);
-            return output.slice();
+            return replacer.build();
         }
 
         @Override
@@ -1614,32 +1444,25 @@ public sealed class TrinoRegexp
         {
             requireNonNull(source, "source is null");
             requireNonNull(replacement, "replacement is null");
-            if (replacementNeedsCapturingGroups(replacement)) {
-                return super.replace(source, replacement);
+
+            TrinoReplacementPlan replacementPlan = newReplacementPlan(source, replacement);
+            if (replacementPlan.maximumCapturingGroup() != 0) {
+                return replaceWithMatcher(source, replacementPlan);
             }
 
-            DynamicSliceOutput output = new DynamicSliceOutput(source.length() + replacement.length());
-            int previousEnd = 0;
+            TrinoReplacementPlan.GroupFreeReplacer replacer = replacementPlan.groupFreeReplacer();
             int searchStart = 0;
-            boolean matched = false;
             while (searchStart < source.length()) {
                 long span = pattern().findCharacterClassSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
-                matched = true;
                 int matchStart = spanStart(span);
                 int matchEnd = spanEnd(span);
-                output.writeBytes(source, previousEnd, matchStart - previousEnd);
-                appendReplacement(output, replacement, source, matchStart, matchEnd);
-                previousEnd = matchEnd;
+                replacer.addMatch(matchStart, matchEnd);
                 searchStart = matchEnd;
             }
-            if (!matched) {
-                return source;
-            }
-            output.writeBytes(source, previousEnd, source.length() - previousEnd);
-            return output.slice();
+            return replacer.build();
         }
 
         @Override
