@@ -15,7 +15,9 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
+import java.util.Random;
 import java.util.regex.Pattern;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -74,6 +76,64 @@ public class TestTrinoScanPlanRun
             }
             for (int value = 0; value < 256; value++) {
                 assertThat(run.isComplementOf((byte) value)).as("%s byte %s", set, value).isEqualTo(nonMembers == 1 && value == excluded);
+            }
+        }
+    }
+
+    @Test
+    public void testRunCandidateScanMatchesScalarReference()
+    {
+        // Covers each candidate scan: one to three bytes, a contiguous range, a nibble-table
+        // set, and larger sets and complements that keep the table scan.
+        for (String set : List.of("[a]", "[?&]", "[abz]", "[0-9]", "[0-9a]", "[a-z@]", "\\w", "[\\x00-\\x3F]", "[\\x00-\\x7F]", "[^=]", "[^/:?#]", "[^\\x00-\\x7F]", ".")) {
+            ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("(?s)" + set + "+"), Regexp.LIKE_PERL);
+            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp()), set);
+            Pattern reference = Pattern.compile("(?s)" + set);
+            boolean[] members = new boolean[256];
+            int filler = -1;
+            for (int value = 0; value < 256; value++) {
+                // Every non-ASCII byte shares the membership of non-ASCII code points.
+                String character = value < 0x80 ? String.valueOf((char) value) : "é";
+                members[value] = reference.matcher(character).matches();
+                if (!members[value] && filler < 0) {
+                    filler = value;
+                }
+            }
+            byte[] bytes = new byte[200];
+            for (int value = 0; value < 256; value++) {
+                for (int cursor : new int[] {0, 1, 7, 15, 16, 17, 31, 32, 33}) {
+                    for (int length : new int[] {0, 1, 2, 3, 15, 16, 17, 31, 32, 33, 63, 64, 65, 129}) {
+                        for (int position = Math.max(0, cursor - 1); position <= cursor + length && position < bytes.length; position++) {
+                            Arrays.fill(bytes, (byte) (filler < 0 ? 0 : filler));
+                            bytes[position] = (byte) value;
+                            int end = cursor + length;
+                            if (filler < 0 && length == 0) {
+                                // Callers never scan an empty range; a set of every byte answers the cursor.
+                                continue;
+                            }
+                            int expected = filler < 0 ? cursor : (members[value] && position >= cursor && position < end ? position : -1);
+                            assertThat(run.findCandidate(bytes, cursor, end))
+                                    .as("%s byte %s cursor %s length %s position %s", set, value, cursor, length, position)
+                                    .isEqualTo(expected);
+                        }
+                    }
+                }
+            }
+            Random random = new Random(set.hashCode());
+            for (int iteration = 0; iteration < 2000; iteration++) {
+                for (int index = 0; index < bytes.length; index++) {
+                    bytes[index] = (byte) (random.nextInt(4) == 0 ? random.nextInt(256) : (filler < 0 ? 0 : filler));
+                }
+                int cursor = random.nextInt(bytes.length);
+                int end = cursor + 1 + random.nextInt(bytes.length - cursor);
+                int expected = -1;
+                for (int index = cursor; index < end; index++) {
+                    if (members[bytes[index] & 0xFF]) {
+                        expected = index;
+                        break;
+                    }
+                }
+                assertThat(run.findCandidate(bytes, cursor, end)).as("%s random %s", set, iteration).isEqualTo(expected);
             }
         }
     }

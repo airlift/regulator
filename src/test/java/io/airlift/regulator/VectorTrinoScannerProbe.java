@@ -15,7 +15,10 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 
+import java.util.Arrays;
+
 import static io.airlift.slice.Slices.utf8Slice;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 public final class VectorTrinoScannerProbe
 {
@@ -32,12 +35,14 @@ public final class VectorTrinoScannerProbe
         // Anchored runs of one-byte sets stop with the run scan.
         verify("^abc(?:(x+))?y*$",
                 "LITERAL,FORK,SAVE,RUN,SAVE,RUN,END",
+                null,
                 false,
                 "abc" + "x".repeat(64) + FILLER,
                 "x".repeat(64),
                 1);
         verify("^([^/]{2,})/$",
                 "RUN,LITERAL,END",
+                null,
                 false,
                 "h".repeat(64) + "/",
                 "h".repeat(64),
@@ -45,13 +50,60 @@ public final class VectorTrinoScannerProbe
         // A literal-leading unanchored search finds its first byte.
         verify("https?://([^/]+)/",
                 "LITERAL,OPTIONAL,LITERAL,SAVE,RUN,SAVE,LITERAL",
+                null,
                 false,
                 FILLER + "https://" + "h".repeat(64) + "/" + FILLER,
                 "h".repeat(64),
                 1);
+        // A complement run's candidate scan skips its one non-member byte.
+        verify("([^/]+)/",
+                "SAVE,RUN,SAVE,LITERAL",
+                "/",
+                false,
+                "/".repeat(64) + "host/",
+                "host",
+                1);
+        // The byte-set candidate scans: a small set, a range, and a nibble table.
+        verify("[?&]([^=]+)=",
+                "RUN,SAVE,RUN,SAVE,LITERAL",
+                "=",
+                false,
+                FILLER + "?key=" + FILLER + "&other=",
+                "key",
+                2);
+        verify("[a-e](\\d+)",
+                "RUN,SAVE,RUN,SAVE",
+                null,
+                false,
+                "x".repeat(64) + "c12" + "x".repeat(64),
+                "12",
+                1);
+        verify("[aceg](\\d+)",
+                "RUN,SAVE,RUN,SAVE",
+                null,
+                false,
+                "x".repeat(64) + "e12" + "x".repeat(64),
+                "12",
+                1);
+        // After the first failed attempt, a run-leading search checks for its required literal.
+        verify("([^:]+):([0-9]+)",
+                "SAVE,RUN,SAVE,LITERAL,SAVE,RUN,SAVE",
+                ":",
+                false,
+                "abc:x" + FILLER + ":12",
+                "x" + FILLER,
+                1);
+        verify("([^:]+):([0-9]+)",
+                "SAVE,RUN,SAVE,LITERAL,SAVE,RUN,SAVE",
+                ":",
+                false,
+                "abc:x" + FILLER,
+                null,
+                0);
         // The ASCII-folded executor finds a folded leading letter in either case.
         verify("(?i)content-type:([^;]+);",
                 "ASCII_FOLDED_LITERAL,SAVE,RUN,SAVE,LITERAL",
+                null,
                 true,
                 FILLER + "CONTENT-TYPE:text;" + FILLER + "content-type:html;",
                 "text",
@@ -60,7 +112,7 @@ public final class VectorTrinoScannerProbe
         System.out.printf("OK %s%n", expectedVectorApiAvailable ? "vector" : "scalar");
     }
 
-    private static void verify(String expression, String operations, boolean asciiFolded, String text, String group, int count)
+    private static void verify(String expression, String operations, String requiredLiteral, boolean asciiFolded, String text, String group, int count)
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
         check(regexp.pattern().usesTrinoScanPlanForDiagnostics(), expression + ": no scan plan");
@@ -69,6 +121,8 @@ public final class VectorTrinoScannerProbe
         TrinoScanPlan plan = TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false);
         check(plan != null, expression + ": no plan");
         check(plan.operationsForDiagnostics().equals(operations), expression + ": unexpected operations " + plan.operationsForDiagnostics());
+        byte[] required = plan.requiredLiteralForDiagnostics();
+        check(requiredLiteral == null ? required == null : Arrays.equals(required, requiredLiteral.getBytes(UTF_8)), expression + ": unexpected required literal");
 
         Slice source = utf8Slice(text);
         check(regexp.contains(source) == (group != null), expression + ": contains failed");

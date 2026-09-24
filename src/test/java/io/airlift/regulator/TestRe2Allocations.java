@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
 import java.util.Arrays;
+import java.util.List;
 import java.util.function.LongSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -171,6 +172,38 @@ public class TestRe2Allocations
     }
 
     @Test
+    public void testTrinoScanPlansDoNotAllocate()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        Re2 anchored = TrinoRegexp.compile(Slices.utf8Slice("^https?://(?:www\\.)?([^/]+)/.*$")).pattern();
+        Re2 folded = TrinoRegexp.compile(Slices.utf8Slice("(?i)^content-type: ([^;]+);.*$")).pattern();
+        Re2 unanchored = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/")).pattern();
+        // Every unanchored search on this plan continues on the ordinary engine.
+        Re2 handoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(Slices.utf8Slice("https?://([^/]+)/")).pattern();
+        for (Re2 pattern : List.of(anchored, folded, unanchored, handoff)) {
+            assertThat(pattern.usesTrinoScanPlanForDiagnostics()).as(pattern.pattern().toStringUtf8()).isTrue();
+        }
+        assertThat(folded.usesAsciiFoldedTrinoScanExecutorForDiagnostics()).isTrue();
+
+        Slice url = Slices.utf8Slice("https://www.example.com/index.html");
+        Slice header = Slices.utf8Slice("Content-Type: text/html; charset=utf-8");
+        Slice link = Slices.utf8Slice("see http://example.com/ for details");
+        int[] groups = new int[4];
+
+        for (int iteration = 0; iteration < 5; iteration++) {
+            assertThat(runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups)).isEqualTo(120_000);
+        }
+
+        long allocatedBytes = minimumAllocatedBytes(120_000, () -> runScanPlanOperations(anchored, folded, unanchored, handoff, url, header, link, groups));
+
+        assertThat(groups).containsExactly(4, 23, 11, 22);
+        assertThat(allocatedBytes / 10_000).isZero();
+    }
+
+    @Test
     public void testTrinoUnanchoredScanCountAllocatesOnlySearchResult()
     {
         ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
@@ -196,6 +229,26 @@ public class TestRe2Allocations
         assertThat(allocatedBytes / 10_000)
                 .as("each count allocates only its int[2] search result, 24 bytes with compressed class pointers")
                 .isLessThanOrEqualTo(24);
+    }
+
+    private static int runScanPlanOperations(Re2 anchored, Re2 folded, Re2 unanchored, Re2 handoff, Slice url, Slice header, Slice link, int[] groups)
+    {
+        int matchCount = 0;
+        for (int iteration = 0; iteration < 10_000; iteration++) {
+            matchCount += anchored.find(url) ? 1 : 0;
+            matchCount += anchored.matches(url) ? 1 : 0;
+            matchCount += anchored.matchInto(url, Re2.Anchor.UNANCHORED, groups) ? 1 : 0;
+            matchCount += folded.find(header) ? 1 : 0;
+            matchCount += folded.matches(header) ? 1 : 0;
+            matchCount += folded.matchInto(header, Re2.Anchor.UNANCHORED, groups) ? 1 : 0;
+            matchCount += unanchored.find(link) ? 1 : 0;
+            matchCount += !unanchored.matches(link) ? 1 : 0;
+            matchCount += unanchored.matchInto(link, Re2.Anchor.UNANCHORED, groups) ? 1 : 0;
+            matchCount += handoff.find(link) ? 1 : 0;
+            matchCount += !handoff.matches(link) ? 1 : 0;
+            matchCount += handoff.matchInto(link, Re2.Anchor.UNANCHORED, groups) ? 1 : 0;
+        }
+        return matchCount;
     }
 
     /**

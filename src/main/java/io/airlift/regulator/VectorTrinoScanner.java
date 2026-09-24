@@ -58,6 +58,62 @@ final class VectorTrinoScanner
         return end;
     }
 
+    /**
+     * Returns the first byte at or after {@code cursor} in {@code members}, or {@code -1} when
+     * none remains. {@code needles} is as for {@link #findRunStop}.
+     */
+    static int findRunCandidate(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
+    {
+        ByteVector first = ByteVector.broadcast(SPECIES, needles[0]);
+        for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
+            ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
+            VectorMask<Byte> matches = bytes.compare(VectorOperators.EQ, first);
+            for (int index = 1; index < needles.length; index++) {
+                matches = matches.or(bytes.compare(VectorOperators.EQ, needles[index]));
+            }
+            VectorMask<Byte> candidates = inverted ? matches.not() : matches;
+            if (candidates.anyTrue()) {
+                return cursor + candidates.firstTrue();
+            }
+        }
+        for (; cursor < end; cursor++) {
+            if (members[input[cursor] & 0xFF]) {
+                return cursor;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Returns whether the {@code literal} step occurs in {@code [cursor, end)}.
+     */
+    static boolean containsLiteral(byte[] bytes, int cursor, int end, TrinoScanPlan.Step literal)
+    {
+        int lastOffset = literal.literal.length - 1;
+        int lastStart = end - literal.literal.length;
+        // Filter on the first and last literal bytes together so a frequent first byte does
+        // not restart the scan at each occurrence.
+        ByteVector first = ByteVector.broadcast(SPECIES, literal.literal[0]);
+        ByteVector last = ByteVector.broadcast(SPECIES, literal.literal[lastOffset]);
+        for (; cursor <= lastStart - SPECIES.length() + 1; cursor += SPECIES.length()) {
+            VectorMask<Byte> matches = ByteVector.fromArray(SPECIES, bytes, cursor).compare(VectorOperators.EQ, first)
+                    .and(ByteVector.fromArray(SPECIES, bytes, cursor + lastOffset).compare(VectorOperators.EQ, last));
+            long bits = matches.toLong();
+            while (bits != 0) {
+                if (literal.matches(bytes, cursor + Long.numberOfTrailingZeros(bits), end)) {
+                    return true;
+                }
+                bits &= bits - 1;
+            }
+        }
+        for (; cursor <= lastStart; cursor++) {
+            if (literal.matches(bytes, cursor, end)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static int findByte(byte[] bytes, int cursor, int end, byte target)
     {
         ByteVector wanted = ByteVector.broadcast(SPECIES, target);
