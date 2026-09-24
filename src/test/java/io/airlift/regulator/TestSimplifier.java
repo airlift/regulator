@@ -75,4 +75,41 @@ public class TestSimplifier
         Regexp re = Regexp.star(0, Regexp.noMatch(0));
         assertThat(Simplifier.simplify(re).op()).isEqualTo(RegexpOp.EMPTY_MATCH);
     }
+
+    @Test
+    public void testCoalesceReturnsInputWithoutCoalescingPair()
+    {
+        for (String pattern : List.of("abc", "(a|b)*c", "[a-z]+-[0-9]+", "(?:x+y)+z", "a*b*", "a+(a)")) {
+            Regexp parsed = parse(pattern);
+            assertThat(Simplifier.Coalescer.coalesce(parsed)).as(pattern).isSameAs(parsed);
+        }
+        for (String pattern : List.of("a*a+", "x(?:a+a)y", "(b|c*c)", "[0-9]+[0-9]{2}")) {
+            Regexp parsed = parse(pattern);
+            assertThat(Simplifier.Coalescer.coalesce(parsed)).as(pattern).isNotSameAs(parsed);
+        }
+    }
+
+    @Test
+    public void testCoalesceFindsPairsBeyondScanDepthBound()
+    {
+        // Below the recursion bound the scan finds the pair itself; beyond it the walk does. Either
+        // way an expression without a coalescing pair is returned unchanged.
+        for (int depth : new int[] {200, 300, 2_000}) {
+            String coalescing = "(".repeat(depth) + "a*a+" + ")".repeat(depth);
+            Regexp parsed = parse(coalescing);
+            Regexp coalesced = Simplifier.Coalescer.coalesce(parsed);
+            assertThat(coalesced).as("depth %s", depth).isNotSameAs(parsed);
+            Regexp expected = parse("(".repeat(depth) + "a+" + ")".repeat(depth));
+            assertThat(Simplifier.simplify(coalesced)).as("depth %s", depth).isEqualTo(Simplifier.simplify(expected));
+
+            String unchanged = "(".repeat(depth) + "a*b+" + ")".repeat(depth);
+            parsed = parse(unchanged);
+            assertThat(Simplifier.Coalescer.coalesce(parsed)).as("depth %s", depth).isSameAs(parsed);
+        }
+    }
+
+    private static Regexp parse(String pattern)
+    {
+        return RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
+    }
 }
