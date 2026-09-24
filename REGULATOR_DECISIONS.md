@@ -782,9 +782,9 @@ Plans may require the logical input start or perform unanchored search. An
 unanchored plan must begin, after capture saves, with a literal or an unbounded
 run of every byte except the one-byte case-sensitive literal that follows it,
 and must contain a capture and a variable run. A capture-free plan must contain
-a character run. These rules keep capture-free, fixed-width, and literal-only
-patterns on their direct routes. A lowered final-line plan takes precedence
-over a run-leading scan.
+a character run or a variable literal repeat. These rules keep capture-free,
+fixed-width, and literal-only patterns on their direct routes. A lowered
+final-line plan takes precedence over a run-leading scan.
 
 Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, `(\w+)@(\w+)`, and
 `([a-z]+)-([0-9]+)`, keep the ordinary engine, plain or ASCII-folded, as do
@@ -800,8 +800,10 @@ Character sets must be ASCII-only or have uniform non-ASCII membership.
 Variable repetition requires a continuation disjoint from the repeated set
 across both arms of optional groups, so a run never gives characters back;
 exact counts need no such proof. Finite bounds count characters, not bytes.
-Repeated captures, nested repetitions, repeated multi-operation bodies, and
-whole-pattern nullable expressions keep the ordinary engine.
+Exact and finite repetitions of a fixed literal sequence are admitted.
+Repeated captures, unbounded literal sequences, nested repetitions, other
+repeated multi-operation bodies, and whole-pattern nullable expressions keep
+the ordinary engine.
 
 Fixed budgets bound each plan's retained memory and each attempt's retries,
 and keep each search linear in its input:
@@ -809,13 +811,15 @@ and keep each search linear in its input:
 - The complete plan and its literal storage are charged against the forward
   DFA memory budget. A plan that does not fit keeps the ordinary route, so a
   pattern's retained memory stays within the bound already applied to its DFA.
-- Optional literals and optional forks share four retry checkpoints, as in
-  ClickHouse, so an attempt explores at most sixteen combinations and its retry
-  state fits in two longs and an int without allocation.
+- Optional literals, optional forks, and literal-repeat copies share four retry
+  checkpoints, as in ClickHouse, so an attempt explores at most sixteen
+  combinations and its retry state fits in two longs and an int without
+  allocation.
 - A plan has at most 32 operations plus one terminal operation, so operation
   indices fit the retry stack's six-bit fields. Nesting depth is limited to
-  sixteen and explicit repeat counts to 1000, matching ClickHouse. A literal is
-  limited to 256 bytes.
+  sixteen and explicit repeat counts to 1000, matching ClickHouse. A literal,
+  including a repeated literal sequence's mandatory copies, is limited to 256
+  bytes.
 - Every unanchored search continues on the ordinary engine, from the plan's
   resume position and with the same context, once the bytes its failed
   attempts examined exceed 2048 plus four times the distance the search has
@@ -842,6 +846,9 @@ Eligible scan plans intentionally add bounded cold compilation work and retained
 state. Accept that cost only while warm public operations materially improve on
 all target architectures and protected routes remain stable. Short-lived pattern
 workloads must keep compilation visible when deciding whether to extend coverage.
+Bounded literal repeats meet this bar. On all three target hosts, focused
+before/after measurements improved every `LITERAL_REPEATS` operation; the
+protected controls stayed stable.
 
 Rejected development alternatives are recorded to prevent repeating them
 without new evidence:
