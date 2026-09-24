@@ -21,6 +21,7 @@ import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -61,7 +62,8 @@ final class LiteralGapMatcher
         }
 
         List<Slice> literals = new ArrayList<>();
-        List<Integer> codePointGaps = new ArrayList<>();
+        int[] codePointGaps = new int[(end - start) / 2];
+        int gapCount = 0;
         int elementIndex = start + 1;
         if (!(pattern.get(elementIndex) instanceof Literal firstLiteral)) {
             return null;
@@ -78,14 +80,19 @@ final class LiteralGapMatcher
                     !(pattern.get(elementIndex + 1) instanceof Literal literal)) {
                 return null;
             }
-            codePointGaps.add(any.count());
+            codePointGaps[gapCount++] = any.count();
             literals.add(literal.bytes());
             elementIndex += 2;
         }
         if (literals.size() < 2) {
             return null;
         }
-        return new LiteralGapMatcher(literals, codePointGaps.stream().mapToInt(Integer::intValue).toArray(), false);
+        return new LiteralGapMatcher(literals, Arrays.copyOf(codePointGaps, gapCount), false);
+    }
+
+    int[] codePointGapsForDiagnostics()
+    {
+        return codePointGaps.clone();
     }
 
     long estimatedRetainedSize()
