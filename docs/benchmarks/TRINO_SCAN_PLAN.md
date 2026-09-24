@@ -16,11 +16,11 @@ contract, not importing RE2 syntax or changing Trino semantics.
 | Feature | Coverage |
 |---|---|
 | Case-sensitive UTF-8 literals | 1–256 bytes per literal |
-| Greedy optional fixed literals | Up to four, sharing one budget with optional forks |
+| Greedy optional fixed literals | Up to four, sharing one budget with optional forks and literal-repeat copies |
 | Character runs | ASCII sets and their complements; variable counts require disjoint continuation through captures and optional branches |
 | Captures | Capture-free plans plus mandatory, nested, and optional captures; named groups also work; up to 16 subject to the operation limit |
 | Optional bodies | Literals, runs, captures, and nested optionals; at most four forks, sharing the optional budget |
-| Repetitions | Greedy single-character `?`, `*`, `+`, exact and bounded counts up to 1000; unbounded minimum counts |
+| Repetitions | Greedy single-character `?`, `*`, `+`, exact and bounded counts up to 1000; unbounded minimum counts; exact and finite capture-free literal-sequence repeats |
 | Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal or unbounded run of every byte except the one-byte literal after it |
 | End assertions | Optional; strict end and Trino final-LF `$` are supported when present |
 | Terminal behavior | Partial-match success, dot-all `.*`, LF-excluding `.*`, and supported character-set runs |
@@ -43,7 +43,8 @@ Anchored partial-match coverage includes these ClickHouse performance cases:
 - `^https?://(?:www\.)?([^/]+)/`
 
 Unanchored coverage includes the URL family and a delimiter-complement run
-family such as `([^/]+)/`. Any extension must preserve the Trino language
+family such as `([^/]+)/`. Fixed literal-sequence repeats are also admitted
+within the bounded limits below. Any extension must preserve the Trino language
 contract. Unsupported optimization shapes use the ordinary Regulator engine;
 this is not fallback to another regex language or to Joni.
 
@@ -61,8 +62,8 @@ rescans the rest of it, so their cost depends on the input, and every measured
 search strategy for them made some workloads slower than the ordinary engine. A
 delimiter-complement run stops only at its delimiter, which the literal then
 matches, and it measured no loss. End assertions and captures are optional for
-anchored plans. Capture-free plans must contain a character run, so literal-only
-expressions retain the direct prefix and
+anchored plans. Capture-free plans must contain a character run or a variable
+literal repeat, so literal-only expressions retain the direct prefix and
 equality routes. The single-delimiter operation consumes its delimiter directly.
 General runs leave the following literal to its own operation. One builder
 handles both linear and richer optional and capture structure. After
@@ -84,8 +85,15 @@ possible-first-byte set in four 64-bit words; run scanning at execution time
 uses the run's own membership table. This admits a hostname followed
 by an optional port or a required slash when the hostname set excludes both
 colon and slash. It excludes runs that might need to give characters back.
-An exact count has only one endpoint and can precede overlapping text. Nested
-repetitions and repeated multi-operation bodies remain unsupported.
+An exact count has only one endpoint and can precede overlapping text. Exact
+and finite repetitions of a fixed literal sequence lower to a literal holding
+the minimum number of copies, omitted when the minimum is zero, followed by
+greedy optional copies. Optional copies draw on the same four-checkpoint budget
+as optional literals and forks, and the mandatory literal is limited to 256
+bytes. Capture-free variable literal repetitions may select the plan, while
+exact literal-only expressions retain their direct routes. Repeated captures,
+unbounded literal sequences, nested repetitions, and other repeated
+multi-operation bodies remain unsupported.
 
 Finite bounds count characters. ASCII runs can count bytes; runs admitting
 non-ASCII characters use the shared UTF-8 decoder. An unbounded minimum such
@@ -154,7 +162,7 @@ optional character. Each fork records its skip target and a mask of captures in
 its body. Skipping the body clears those captures. Every later capture on a
 successful path is visited again, and enclosing captures keep their start.
 Because captures cannot appear inside repeated bodies, capture snapshots are
-unnecessary. Optional literals and forks share one
+unnecessary. Optional literals, forks, and literal-repeat copies share one
 budget of four retry checkpoints, so an attempt explores at most sixteen
 combinations, independent of input length. The builder also limits nesting depth
 to sixteen and operations to thirty-two plus one terminal operation. Failed
@@ -227,9 +235,15 @@ run can reach the input end, so `contains` and `count` measure the boolean exit
 after the run's minimum. `UNANCHORED_TAIL_4096` runs `abc(.*)` over 4 KiB inputs
 with no newline. Its `contains` measures the kept literal kernel, and its
 `count` measures the plan's own count, which needs match boundaries. `SETS`
-exercises a small complemented set and a larger ASCII table.
+exercises a small complemented set and a larger ASCII table. `LITERAL_REPEATS`
+covers exact, intermediate, and maximum bounded literal-sequence counts, plus
+too few copies, an excess copy, and an empty following capture.
 `LITERAL_CONTROLS` protects the direct `^foo` prefix and `^foo$`
-equality routes. `FOLDED_ANCHORED`, `FOLDED_OPTIONAL`,
+equality routes. `DEEP_REJECTIONS` compiles three patterns that pass the shallow
+start check and are rejected only after the builder has emitted a prefix: a
+folded `K`, an over-limit literal repeat, and a run whose continuation overlaps
+the following literal. Its compile row measures that analysis before the
+ordinary route is kept. `FOLDED_ANCHORED`, `FOLDED_OPTIONAL`,
 `FOLDED_UNANCHORED`, and `FOLDED_MIXED` select the ASCII-folded executors with
 folded literals, a folded optional literal, an unanchored folded header name,
 and a twelve-plan mix. `FOLDED_RUN` folds only a character class, which becomes

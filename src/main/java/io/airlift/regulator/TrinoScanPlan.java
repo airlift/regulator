@@ -1427,6 +1427,7 @@ final class TrinoScanPlan
         private final List<Step> steps = new ArrayList<>();
         private int captures;
         private int optionals;
+        private boolean hasVariableLiteralRepeat;
 
         private static TrinoScanPlan analyze(Regexp expression, int captureCount, int workBudgetBytes)
         {
@@ -1451,7 +1452,7 @@ final class TrinoScanPlan
                 }
             }
             // Literal-only expressions already have cheaper direct prefix and equality routes.
-            if (captureCount == 0 && !builder.hasRun()) {
+            if (captureCount == 0 && !builder.hasRun() && !builder.hasVariableLiteralRepeat) {
                 return null;
             }
             if (builder.captures != (1 << captureCount) - 1) {
@@ -1587,7 +1588,7 @@ final class TrinoScanPlan
                             return false;
                         }
                     }
-                    else if (!emitRun(expression)) {
+                    else if (!emitRun(expression) && !emitFixedLiteralRepeat(expression)) {
                         return false;
                     }
                 }
@@ -1688,6 +1689,49 @@ final class TrinoScanPlan
             }
             steps.add(Step.run(0, run));
             return true;
+        }
+
+        private boolean emitFixedLiteralRepeat(Regexp expression)
+        {
+            if (expression.max() < 0) {
+                return false;
+            }
+            Regexp body = expression.child(0);
+            byte[] literal = literalBytes(body);
+            if (literal == null || literal.length <= 1) {
+                return false;
+            }
+
+            int optionalCount = expression.max() - expression.min();
+            if (optionalCount > MAX_OPTIONALS - optionals) {
+                return false;
+            }
+            boolean asciiFolded = isAsciiFoldedLiteral(body);
+            if (expression.min() > 0) {
+                byte[] required = repeatLiteral(literal, expression.min());
+                if (required == null) {
+                    return false;
+                }
+                steps.add(asciiFolded ? Step.asciiFoldedLiteral(required) : Step.literal(required));
+            }
+            for (int optional = 0; optional < optionalCount; optional++) {
+                steps.add(asciiFolded ? Step.asciiFoldedOptional(literal) : Step.optionalLiteral(literal));
+            }
+            optionals += optionalCount;
+            hasVariableLiteralRepeat |= optionalCount != 0;
+            return true;
+        }
+
+        private static byte[] repeatLiteral(byte[] literal, int count)
+        {
+            if (count > MAX_LITERAL_BYTES / literal.length) {
+                return null;
+            }
+            byte[] result = new byte[literal.length * count];
+            for (int repetition = 0; repetition < count; repetition++) {
+                System.arraycopy(literal, 0, result, repetition * literal.length, literal.length);
+            }
+            return result;
         }
 
         private boolean emitOptional(Regexp expression, int depth)

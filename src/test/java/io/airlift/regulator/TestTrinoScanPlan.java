@@ -87,6 +87,8 @@ public class TestTrinoScanPlan
         }
     }
 
+    private record ExpressionInputs(String expression, List<String> inputs) {}
+
     private record ExpressionInput(String expression, String input) {}
 
     private record ExpressionTemplates(String expression, List<String> templates) {}
@@ -313,7 +315,8 @@ public class TestTrinoScanPlan
                 "");
         for (String expression : List.of(
                 "(?i)^ABC([a-h]+)",
-                "(?i)^colou?r:([a-h]+)")) {
+                "(?i)^colou?r:([a-h]+)",
+                "(?i)^(?:ab){1,3}([c-h]+)")) {
             Re2 pattern = TrinoRegexp.compile(utf8Slice(expression)).pattern();
             assertThat(pattern.usesPartialTrinoScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(pattern.usesAsciiFoldedTrinoScanExecutorForDiagnostics()).as(expression).isTrue();
@@ -333,6 +336,42 @@ public class TestTrinoScanPlan
         assertThat(regexp.pattern().matches(utf8Slice("abcbag"))).isTrue();
         assertThat(regexp.pattern().matches(source)).isFalse();
         assertThat(regexp.pattern().lookingAt(source)).isTrue();
+    }
+
+    @Test
+    public void testBoundedLiteralSequenceRepetition()
+    {
+        List<ExpressionInputs> cases = List.of(
+                new ExpressionInputs("^(?:ab){2}([^/]+)/$", List.of("ababhost/", "abhost/", "abab/", "abababhost/")),
+                new ExpressionInputs("^(?:ab){2,4}([^/]+)/$", List.of("ababhost/", "abababhost/", "ababababhost/", "abhost/")),
+                new ExpressionInputs("^(?:ab){0,2}c$", List.of("c", "abc", "ababc", "abababc")),
+                new ExpressionInputs("^(?:ab){1,2}ab$", List.of("ab", "abab", "ababab")),
+                new ExpressionInputs("^(?:é😀){1,3}([^/]+)/$", List.of("é😀host/", "é😀é😀例/", "é😀é😀é😀host/", "éhost/")),
+                new ExpressionInputs("(?i)^(?:ab){2,4}([c-h]+):$", List.of("ABabChef:", "abababDEAF:", "abBag:", "ababI:")));
+        for (ExpressionInputs entry : cases) {
+            String expression = entry.expression();
+            assertThat(TrinoRegexp.compile(utf8Slice(expression)).pattern().usesTrinoScanPlanForDiagnostics())
+                    .as(expression)
+                    .isTrue();
+            verifyAgainstJoni(expression, entry.inputs());
+        }
+
+        assertThat(scanOperations("^(?:ab){2}([^/]+)/$"))
+                .isEqualTo("LITERAL,DELIMITED_CAPTURE,END");
+        assertThat(scanOperations("^(?:ab){2,4}([^/]+)/$"))
+                .isEqualTo("LITERAL,OPTIONAL,OPTIONAL,DELIMITED_CAPTURE,END");
+        assertThat(scanOperations("(?i)^(?:ab){2,4}([c-h]+):$"))
+                .isEqualTo("ASCII_FOLDED_LITERAL,ASCII_FOLDED_OPTIONAL,ASCII_FOLDED_OPTIONAL,RUN,LITERAL,END");
+
+        for (String expression : List.of(
+                "^(?:(a)b){2}([^/]+)/$",
+                "^(?:ab)+([^/]+)/$",
+                "^(?:ab){1,6}([^/]+)/$",
+                "^(?:ab){129}([^/]+)/$")) {
+            assertThat(TrinoRegexp.compile(utf8Slice(expression)).pattern().usesTrinoScanPlanForDiagnostics())
+                    .as(expression)
+                    .isFalse();
+        }
     }
 
     private static String scanOperations(String expression)
@@ -2192,7 +2231,7 @@ public class TestTrinoScanPlan
         for (String workload : BenchmarkTrinoScanPlan.workloads()) {
             // The UNANCHORED_RUN workloads lead with a run longer than one character.
             boolean scanPlan = !workload.endsWith("FALLBACK") && !workload.equals("LITERAL_CONTROLS") && !workload.equals("DEEP_REJECTIONS") &&
-                    !workload.contains("UNANCHORED_RUN") && !workload.equals("LITERAL_REPEATS") && !workload.equals("UNANCHORED_SET");
+                    !workload.contains("UNANCHORED_RUN") && !workload.equals("UNANCHORED_SET");
             for (boolean dotAll : new boolean[] {false, true}) {
                 BenchmarkTrinoScanPlan.BenchmarkData data = new BenchmarkTrinoScanPlan.BenchmarkData();
                 data.workload = workload;
