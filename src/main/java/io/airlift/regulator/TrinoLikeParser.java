@@ -34,7 +34,7 @@ final class TrinoLikeParser
         }
 
         List<Element> result = new ArrayList<>();
-        DynamicSliceOutput literal = new DynamicSliceOutput(pattern.length());
+        LiteralBuilder literal = new LiteralBuilder(pattern);
         int anyCount = 0;
         boolean hasZeroOrMore = false;
         boolean inEscape = false;
@@ -53,7 +53,7 @@ final class TrinoLikeParser
                 if (codePoint != '%' && codePoint != '_' && codePoint != escape) {
                     throw syntaxException(byteOffset);
                 }
-                appendCodePoint(literal, pattern, byteOffset, width, codePoint);
+                literal.append(byteOffset, width, codePoint);
                 inEscape = false;
             }
             else if (escapeCodePoint.isPresent() && codePoint == escape) {
@@ -64,7 +64,7 @@ final class TrinoLikeParser
                 escapeByteOffset = byteOffset;
             }
             else if (codePoint == '%' || codePoint == '_') {
-                addLiteral(result, literal);
+                literal.addTo(result);
                 if (codePoint == '%') {
                     hasZeroOrMore = true;
                 }
@@ -76,7 +76,7 @@ final class TrinoLikeParser
                 addWildcards(result, anyCount, hasZeroOrMore);
                 anyCount = 0;
                 hasZeroOrMore = false;
-                appendCodePoint(literal, pattern, byteOffset, width, codePoint);
+                literal.append(byteOffset, width, codePoint);
             }
             position += width;
         }
@@ -84,18 +84,9 @@ final class TrinoLikeParser
         if (inEscape) {
             throw syntaxException(escapeByteOffset);
         }
-        addLiteral(result, literal);
+        literal.addTo(result);
         addWildcards(result, anyCount, hasZeroOrMore);
         return List.copyOf(result);
-    }
-
-    private static void addLiteral(List<Element> result, DynamicSliceOutput literal)
-    {
-        if (literal.size() == 0) {
-            return;
-        }
-        result.add(new Literal(literal.copySlice()));
-        literal.reset();
     }
 
     private static void addWildcards(List<Element> result, int anyCount, boolean hasZeroOrMore)
@@ -108,13 +99,63 @@ final class TrinoLikeParser
         }
     }
 
-    private static void appendCodePoint(DynamicSliceOutput literal, Slice pattern, int byteOffset, int width, int codePoint)
+    /**
+     * Accumulates one literal. A literal is usually one contiguous run of pattern bytes, which is
+     * copied once; escapes and replaced malformed bytes fall back to an output buffer. Once the
+     * buffer exists, every later literal is built in it.
+     */
+    private static final class LiteralBuilder
     {
-        if (codePoint == Utf8.RUNE_ERROR && width == 1) {
-            Utf8.encode(literal, Utf8.RUNE_ERROR);
-            return;
+        private final Slice pattern;
+        private int runStart = -1;
+        private int runEnd;
+        private DynamicSliceOutput buffer;
+
+        private LiteralBuilder(Slice pattern)
+        {
+            this.pattern = pattern;
         }
-        literal.writeBytes(pattern, byteOffset, width);
+
+        void append(int byteOffset, int width, int codePoint)
+        {
+            boolean replaced = codePoint == Utf8.RUNE_ERROR && width == 1;
+            if (buffer == null && !replaced) {
+                if (runStart < 0) {
+                    runStart = byteOffset;
+                    runEnd = byteOffset + width;
+                    return;
+                }
+                if (runEnd == byteOffset) {
+                    runEnd += width;
+                    return;
+                }
+            }
+            if (buffer == null) {
+                buffer = new DynamicSliceOutput(pattern.length());
+            }
+            if (runStart >= 0) {
+                buffer.writeBytes(pattern, runStart, runEnd - runStart);
+                runStart = -1;
+            }
+            if (replaced) {
+                Utf8.encode(buffer, Utf8.RUNE_ERROR);
+            }
+            else {
+                buffer.writeBytes(pattern, byteOffset, width);
+            }
+        }
+
+        void addTo(List<Element> result)
+        {
+            if (runStart >= 0) {
+                result.add(new Literal(pattern.copy(runStart, runEnd - runStart)));
+                runStart = -1;
+            }
+            else if (buffer != null && buffer.size() != 0) {
+                result.add(new Literal(buffer.copySlice()));
+                buffer.reset();
+            }
+        }
     }
 
     private static TrinoLikePatternSyntaxException syntaxException(int byteOffset)
