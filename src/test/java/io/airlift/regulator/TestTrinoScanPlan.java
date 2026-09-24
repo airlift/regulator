@@ -60,7 +60,8 @@ public class TestTrinoScanPlan
             new QuadraticSearch("id=([^&]+)&x", "id=a", "&y", "id=b&xid=c&x"),
             new QuadraticSearch("x([^z]+)zq", "xa", "zr", "xbzqxczq"),
             new QuadraticSearch("(?i)x([^z]+)zq", "Xa", "zr", "xbZqXcZQ"),
-            new QuadraticSearch("([^/]+)/([^!]+)!x", "a/", "!y!x", "/b/c!xd/e!x"));
+            new QuadraticSearch("([^/]+)/([^!]+)!x", "a/", "!y!x", "/b/c!xd/e!x"),
+            new QuadraticSearch("([ab]a*)c", "a", "bc", "bac"));
 
     // Lone continuation bytes, truncated sequences, and a byte that never occurs in UTF-8.
     private static final List<byte[]> MALFORMED_SEQUENCES = List.of(
@@ -93,7 +94,13 @@ public class TestTrinoScanPlan
 
     private record ExpressionTemplates(String expression, List<String> templates) {}
 
+    private record ExpressionAttempts(String expression, int attempts) {}
+
     private record PlanAdmission(String expression, boolean admitted) {}
+
+    private record BooleanSearchRoute(String expression, boolean ordinarySearch) {}
+
+    private record RequiredLiteral(String expression, String literal) {}
 
     private record BooleanTailShape(String expression, String text, int attemptEnd) {}
 
@@ -516,6 +523,30 @@ public class TestTrinoScanPlan
     }
 
     @Test
+    public void testUnanchoredSingleByteSetSearchPlan()
+    {
+        String expression = "[?&]([^=]+)=";
+        verifyAgainstJoni(expression, List.of(
+                "?key=value",
+                "path?first=1&second",
+                "prefix &é😀=value suffix",
+                "?=empty",
+                "?first=1&second=2&third",
+                "&=?key=",
+                "missing",
+                "？wide=1"));
+
+        assertThat(scanOperations(expression)).isEqualTo("RUN,SAVE,RUN,SAVE,LITERAL");
+        TrinoRegexpMatcher matcher = TrinoRegexp.compile(utf8Slice(expression)).matcher(utf8Slice("path?first=1&second=2"));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.group(1)).isEqualTo(utf8Slice("first"));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.group(1)).isEqualTo(utf8Slice("second"));
+        assertThat(matcher.find()).isFalse();
+        verifyAgainstJoni("[^\\x00-\\x7F]([^=]+)=", List.of("ékey=value", "xékey=value"), false);
+    }
+
+    @Test
     public void testRunLeadingUnanchoredAdmission()
     {
         // An unanchored plan led by a run longer than one character is admitted only when the
@@ -542,6 +573,7 @@ public class TestTrinoScanPlan
                 new PlanAdmission("([^:]+):([0-9]+)", true),
                 new PlanAdmission("([^,]{2,}),", true),
                 new PlanAdmission("(?i)([^/]+)/(x)", true),
+                new PlanAdmission("[?&]([^=]+)=", true),
                 new PlanAdmission("https?://(?:www\\.)?([^/]+)/", true),
                 new PlanAdmission("(?i)content-type:([^;]+);", true),
                 new PlanAdmission("^(\\d+)zz", true));
@@ -606,6 +638,31 @@ public class TestTrinoScanPlan
                 new PlanAdmission("(?i)([^/]{2,})/a", false));
         for (PlanAdmission admission : admissions) {
             verifyAgainstJoni(admission.expression(), List.of("€a", "😀a", "1€a", "é€a", "1é€a", "/€a", "//😀/a", "é/A", "1/例え/a"), admission.admitted());
+        }
+    }
+
+    @Test
+    public void testRunLeadingSearchSkipsToCandidateBytes()
+    {
+        // Candidate selection skips every non-member byte. The leading set selects only the
+        // five a, b, and c bytes, which no digit follows, and the complement run is selected
+        // once, reaching the end without its delimiter.
+        Slice input = utf8Slice("The quick brown fox jumps over the lazy dog 12345 again ok");
+        List<ExpressionAttempts> cases = List.of(
+                new ExpressionAttempts("[a-c](\\d+)", 5),
+                new ExpressionAttempts("(?i)[a-c](\\d+)zz", 5),
+                new ExpressionAttempts("([^/]+)/", 1));
+        for (ExpressionAttempts attempts : cases) {
+            String expression = attempts.expression();
+            Re2 pattern = TrinoRegexp.compile(utf8Slice(expression)).pattern();
+            assertThat(pattern.usesTrinoScanPlanForDiagnostics()).as(expression).isTrue();
+            assertThat(pattern.usesAsciiFoldedTrinoScanExecutorForDiagnostics()).as(expression).isEqualTo(expression.startsWith("(?i)"));
+            TrinoScanPlan plan = requireNonNull(analyze(expression));
+            assertThat(plan.candidateAttemptsForDiagnostics(input)).as("%s candidate attempts", expression).isEqualTo(attempts.attempts());
+        }
+        // Longer leading runs keep the ordinary engine.
+        for (String expression : List.of("(\\d+)zz", "([0-9]+)a", "([a-c]{2,}):", "(?i)(\\d+)zz")) {
+            assertThat(analyze(expression)).as(expression).isNull();
         }
     }
 
@@ -795,6 +852,88 @@ public class TestTrinoScanPlan
         }
         // Arbitrary non-ASCII sets have no byte-set run and keep the ordinary engine.
         verifyAgainstJoni("([é-ü]+)x", inputs, false);
+    }
+
+    @Test
+    public void testFailedAttemptResumesAfterFollowingRun()
+    {
+        // A single-character leading run followed by an unbounded run of a superset: candidate
+        // selection resumes after the second run of a failed attempt, so each identifier is one
+        // candidate rather than one per byte. Each key-value input fails once before a match or the end.
+        String keyValue = "([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)";
+        assertThat(candidateAttempts(keyValue, "standalone")).isEqualTo(1);
+        assertThat(candidateAttempts(keyValue, "request id=abc-123")).isEqualTo(2);
+        assertThat(candidateAttempts(keyValue, "completed elapsed_ms=42")).isEqualTo(2);
+        // Zero-width saves may separate the runs, and the ASCII-folded executor resumes the same way.
+        assertThat(candidateAttempts("([a-z])([a-z]*)=", "abcdefgh abcdefgh")).isEqualTo(2);
+        assertThat(candidateAttempts("(?i)([a-h][a-h0-9]*)=v", "abcdefgh abcdefgh")).isEqualTo(2);
+    }
+
+    @Test
+    public void testFailedAttemptResumeRequiresAdjacentUnboundedSuperset()
+    {
+        // In each shape an attempt that starts inside the second run can reach a different
+        // state, so a failed attempt resumes after the leading run alone: one attempt per
+        // member byte. The inputs place a match inside a failed attempt's second run.
+        List<ExpressionInputs> shapes = List.of(
+                new ExpressionInputs("([a-z]-[a-z]*)=", List.of("a-b-c=", "x-y-z-w=", "ab-c=", "a-bcd a-bcd")),
+                new ExpressionInputs("([a-z]-?[a-z]*)=", List.of("a-b-c=", "ab-cd-e=", "a-bcd a-bcd")),
+                new ExpressionInputs("([a-z][a-z]{0,3})=", List.of("abcdefg=", "abcdef= ghijklmn=", "ab=", "abcdefgh abcdefgh")),
+                new ExpressionInputs("([a-z][a-z]+)=", List.of("abcd=", "a= ab=", "abc a=", "abcdefgh abcdefgh")),
+                new ExpressionInputs("([a-z][a-c]*)=", List.of("xabcd=", "zab=c=", "abcdefg abc=", "d=", "abcdefgh abcdefgh")));
+        for (ExpressionInputs shape : shapes) {
+            verifyAgainstJoni(shape.expression(), shape.inputs());
+        }
+        // A leading run longer than one character keeps the ordinary engine.
+        verifyAgainstJoni("([a-z]+[0-9]*)=", List.of("ab12cd34=", "a1b2 c3=", "abc1 d2e="), false);
+        // Candidate selection resumes after the leading run alone, so every member byte is a candidate.
+        assertThat(candidateAttempts("([a-z]-[a-z]*)=", "a-bcd a-bcd")).isEqualTo(8);
+        assertThat(candidateAttempts("([a-z]-?[a-z]*)=", "a-bcd a-bcd")).isEqualTo(8);
+        assertThat(candidateAttempts("([a-z][a-z]{0,3})=", "abcdefgh abcdefgh")).isEqualTo(16);
+        assertThat(candidateAttempts("([a-z][a-z]+)=", "abcdefgh abcdefgh")).isEqualTo(16);
+        assertThat(candidateAttempts("([a-z][a-c]*)=", "abcdefgh abcdefgh")).isEqualTo(16);
+    }
+
+    @Test
+    public void testFailedAttemptResumeAgainstJoni()
+    {
+        // Shapes that resume after the second run, the shapes that must not, and pattern-list
+        // shapes the plan does not admit, on valid multibyte text and malformed bytes.
+        List<PlanAdmission> admissions = List.of(
+                new PlanAdmission("([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)", true),
+                new PlanAdmission("(\\w[\\w]*)=(\\S+)", true),
+                new PlanAdmission("([a-z][a-z0-9]*)=", true),
+                new PlanAdmission("([a-z][a-z]*)@", true),
+                new PlanAdmission("([a-z][^=]*)=", true),
+                new PlanAdmission("([a-z])([a-z]*)=", true),
+                new PlanAdmission("([a-z][a-z]*)=([^ ]+)", true),
+                new PlanAdmission("(?i)([a-h][a-h0-9]*)=v", true),
+                new PlanAdmission("([a-z]-[a-z]*)=", true),
+                new PlanAdmission("([a-z]-?[a-z]*)=", true),
+                new PlanAdmission("([a-z][a-z]{0,3})=", true),
+                new PlanAdmission("([a-z][a-z]+)=", true),
+                new PlanAdmission("([a-z][a-c]*)=", true),
+                new PlanAdmission("([a-z]+[0-9]*)=", false),
+                new PlanAdmission("([ab][^ ]*)=", false),
+                new PlanAdmission("([^ ][^ ]*)!", false),
+                new PlanAdmission("([a-z][a-z]+)x", false),
+                new PlanAdmission("([a-z][a-z]{2,})x", false),
+                new PlanAdmission("([a-z][a-z]*)(x|yz)", false),
+                new PlanAdmission("([a-z][a-z]*)x?=", false),
+                new PlanAdmission("(?i)([a-z][a-z0-9]*)=v", false),
+                new PlanAdmission("([a-z][a-z]*)=([a-z]*)$", false));
+        List<Slice> sources = randomSources(
+                191,
+                List.of("a", "b", "c", "h", "x", "yz", "v", "V", "A", "_", "0", "7", "=", "@", "!", "-", " ", "é", "😀", "例"),
+                MALFORMED_SEQUENCES);
+        List<Slice> validSources = sources.stream()
+                .filter(source -> Utf8.firstInvalidOffset(source) < 0)
+                .toList();
+        assertThat(validSources).hasSizeBetween(50, 350);
+        for (PlanAdmission admission : admissions) {
+            // The ordinary engine promises no malformed-input result, so it sees valid text only.
+            verifySourcesAgainstJoni(admission.expression(), admission.admitted() ? sources : validSources, admission.admitted());
+        }
     }
 
     private static int candidateAttempts(String expression, String input)
@@ -1335,6 +1474,7 @@ public class TestTrinoScanPlan
                 "https?://(?:www\\.)?([^/]+)/.*$",
                 "(?i)^ABC([^:]+):",
                 "(?i)^ABC([^:]+):DEF$",
+                "[0-9]([0-9]*)a",
                 "^abc(x)?")) {
             assertThat(booleanTails(expression)).as(expression).isEmpty();
         }
@@ -1794,6 +1934,8 @@ public class TestTrinoScanPlan
         }
         views.addAll(List.of(
                 new MalformedView("(?s)" + URL, "https://www.%s/path", true),
+                new MalformedView("[0-9]([0-9]*)a", "x99%s1a", true),
+                new MalformedView("[?&]([^=]+)=", "?k%s=v", true),
                 // A leading run longer than one character keeps the ordinary engine, checked the same way.
                 new MalformedView("([0-9]+)a", "x99%s1a", false)));
         byte[][] tails = {
@@ -1886,6 +2028,137 @@ public class TestTrinoScanPlan
     }
 
     @Test
+    public void testOrdinaryUnanchoredBooleanSearchRoutes()
+    {
+        // Boolean searches may continue on the ordinary engine only when the plan is led by a
+        // run and consumes ASCII bytes alone. Full-Slice find still starts on the plan.
+        List<BooleanSearchRoute> routes = List.of(
+                new BooleanSearchRoute("\\d(\\d*)zz", true),
+                new BooleanSearchRoute("[0-9]([0-9]*)a", true),
+                new BooleanSearchRoute("\\w(\\w*)@(\\w+)", true),
+                new BooleanSearchRoute("[a-c]([a-c]+):", true),
+                new BooleanSearchRoute("(?i)\\d(\\d*)zz", true),
+                new BooleanSearchRoute("\\d(\\d*)(?:abc)?z", true),
+                new BooleanSearchRoute("[?&]([^=]+)=", false),
+                new BooleanSearchRoute("([^/]+)/", false),
+                new BooleanSearchRoute("\\d(\\d*)é", false),
+                new BooleanSearchRoute("\\d(\\d*)zz(é)", false),
+                new BooleanSearchRoute("x(\\d+)zz", false),
+                new BooleanSearchRoute("https?://([^/]+)/", false),
+                new BooleanSearchRoute("(?i)content-type:([^;]+);", false),
+                new BooleanSearchRoute("^(\\d+)zz", false));
+        for (BooleanSearchRoute route : routes) {
+            Re2 pattern = TrinoRegexp.compile(utf8Slice(route.expression())).pattern();
+            assertThat(pattern.usesTrinoScanPlanForDiagnostics()).as(route.expression()).isTrue();
+            assertThat(pattern.usesOrdinaryUnanchoredBooleanSearchForDiagnostics()).as(route.expression()).isEqualTo(route.ordinarySearch());
+            if (route.ordinarySearch()) {
+                assertThat(pattern.usesTrinoScanPlanForFindForDiagnostics()).as(route.expression()).isTrue();
+            }
+        }
+        // Longer leading runs keep the ordinary engine for every call.
+        for (String expression : List.of("(\\d+)zz", "([0-9]+)a", "(\\w+)@(\\w+)", "([a-c]{2,}):", "(?i)(\\d+)zz", "(\\d+)(?:abc)?z", "(\\d+)é", "(\\d+)zz(é)")) {
+            assertThat(TrinoRegexp.compile(utf8Slice(expression)).pattern().usesTrinoScanPlanForDiagnostics()).as(expression).isFalse();
+        }
+    }
+
+    @Test
+    public void testOrdinaryHandoffAfterDenseFailures()
+    {
+        // Full-Slice find hands off after each group of eight failed attempts that average fewer
+        // than 32 bytes apart when at least 256 bytes remain, and otherwise keeps the plan. No
+        // match starts before the handoff offset, which is relative to a Slice view at a nonzero
+        // offset.
+        String expression = "\\d(\\d*)zz";
+        TrinoScanPlan plan = requireNonNull(analyze(expression));
+        String padding = " ".repeat(256);
+        String dense = "1 2 3 4 5 6 7 8 9zz" + padding;
+        Slice denseInput = view(dense);
+        assertThat(plan.searchBeforeHandoff(denseInput, 0, denseInput.length(), 0, false)).isEqualTo(dense.indexOf('8') + 1);
+        Slice shortInput = view("1 2 3 4 5 6 7 8 9zz");
+        assertThat(plan.searchBeforeHandoff(shortInput, 0, shortInput.length(), 0, false)).isEqualTo(TrinoScanPlan.SEARCH_MATCHED);
+        String sparse = String.join(" ".repeat(40), "1", "2", "3", "4", "5", "6", "7", "8", "9zz") + padding;
+        Slice sparseInput = view(sparse);
+        assertThat(plan.searchBeforeHandoff(sparseInput, 0, sparseInput.length(), 0, false)).isEqualTo(TrinoScanPlan.SEARCH_MATCHED);
+        Slice missingLiteral = view("1 2 3 4 5 6 7 8 9z" + padding);
+        assertThat(plan.searchBeforeHandoff(missingLiteral, 0, missingLiteral.length(), 0, false)).isEqualTo(TrinoScanPlan.NO_MATCH);
+
+        Regex oracle = joniPattern(expression);
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
+        TrinoRegexp folded = TrinoRegexp.compile(utf8Slice("(?i)\\d(\\d*)zz"));
+        // A leading run longer than one character keeps the ordinary engine.
+        TrinoRegexp withoutPlan = TrinoRegexp.compile(utf8Slice("(\\d+)zz"));
+        assertThat(withoutPlan.pattern().usesTrinoScanPlanForDiagnostics()).isFalse();
+        StringBuilder text = new StringBuilder();
+        for (int length = 0; length < 120; length++) {
+            for (String tail : List.of("", "zz", "1zz", " 1zz", "1z", "z1zz", "é1zz")) {
+                String value = text + tail + padding;
+                Slice input = view(value);
+                boolean expected = !joniMatches(oracle, input).isEmpty();
+                assertThat(regexp.contains(input)).as(value).isEqualTo(expected);
+                assertThat(folded.contains(input)).as(value).isEqualTo(expected);
+                assertThat(withoutPlan.contains(input)).as(value).isEqualTo(expected);
+            }
+            text.append(length % 3 == 2 ? ' ' : (char) ('0' + length % 10));
+        }
+    }
+
+    @Test
+    public void testOrdinaryUnanchoredBooleanSearchAgreesOnMalformedInput()
+    {
+        // No malformed-input result is promised, but every call must give the same answer.
+        // Plans that admit malformed bytes must keep their own boolean search: the ordinary
+        // engine rejects the byte before '/' in "%s/", which the plan's [^/] run accepts.
+        List<ExpressionTemplates> cases = List.of(
+                new ExpressionTemplates("\\d(\\d*)zz", List.of("%s12zz", "1%s2zz", "12%szz", "12z%sz", "%szz 7zz%s", "1%s")),
+                new ExpressionTemplates("[0-9]([0-9]*)a", List.of("%s9a", "9%sa", "x99%s1a", "99a%s")),
+                new ExpressionTemplates("\\w(\\w*)@(\\w+)", List.of("%sa@b", "a%s@b", "a@%sb", "ab@cd%s ef@%s", "%s@%s")),
+                new ExpressionTemplates("(?i)\\d(\\d*)zz", List.of("%s1ZZ", "1%sZz", "12z%sz")),
+                new ExpressionTemplates("([^/]+)/", List.of("%s/", "a%s/b/")),
+                new ExpressionTemplates("[?&]([^=]+)=", List.of("?%s=", "&k%s=v")),
+                // Longer leading runs keep the ordinary engine, which is checked the same way.
+                new ExpressionTemplates("(\\d+)zz", List.of("%s12zz", "1%s2zz", "12%szz", "12z%sz", "%szz 7zz%s", "1%s")),
+                new ExpressionTemplates("([0-9]+)a", List.of("%s9a", "9%sa", "x99%s1a", "99a%s")),
+                new ExpressionTemplates("(\\w+)@(\\w+)", List.of("%sa@b", "a%s@b", "a@%sb", "ab@cd%s ef@%s", "%s@%s")),
+                new ExpressionTemplates("(?i)(\\d+)zz", List.of("%s1ZZ", "1%sZz", "12z%sz")));
+        List<String> withoutPlan = List.of("(\\d+)zz", "([0-9]+)a", "(\\w+)@(\\w+)", "(?i)(\\d+)zz");
+        // Enough dense failures before each template, and enough input after it, that full-Slice
+        // find hands off to the ordinary engine before reaching the malformed bytes.
+        List<String> contexts = List.of("%s", "1 2 3 4 5 6 7 8 9 %s" + " ".repeat(256));
+        List<byte[]> malformed = new ArrayList<>();
+        for (int value = 0x80; value <= 0xFF; value++) {
+            malformed.add(new byte[] {(byte) value});
+        }
+        malformed.add(new byte[] {(byte) 0xE2, (byte) 0x82});
+        malformed.add(new byte[] {(byte) 0xF0, (byte) 0x9F, (byte) 0x98});
+        for (ExpressionTemplates entry : cases) {
+            String expression = entry.expression();
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
+            Re2 pattern = regexp.pattern();
+            assertThat(pattern.usesTrinoScanPlanForDiagnostics()).as(expression).isEqualTo(!withoutPlan.contains(expression));
+            for (String template : entry.templates().stream().flatMap(template -> contexts.stream().map(context -> context.replace("%s", template))).toList()) {
+                for (byte[] bytes : malformed) {
+                    Slice input = malformedText(template, bytes);
+                    String description = expression + " on " + HexFormat.of().formatHex(input.getBytes());
+                    TrinoRegexpMatcher matcher = regexp.matcher(input);
+                    boolean found = matcher.find();
+                    assertThat(regexp.contains(input)).as(description).isEqualTo(found);
+                    assertThat(pattern.find(input, 0, input.length())).as(description).isEqualTo(found);
+                    assertThat(regexp.position(input) > 0).as(description).isEqualTo(found);
+                    assertThat(regexp.extract(input, 0)).as(description).isEqualTo(found ? matcher.group(0) : null);
+                    assertThat(regexp.extract(input, 1)).as(description).isEqualTo(found ? matcher.group(1) : null);
+                    long matches = found ? 1 : 0;
+                    while (matcher.find()) {
+                        matches++;
+                    }
+                    assertThat(regexp.count(input)).as(description).isEqualTo(matches);
+                    assertThat(regexp.extractAll(input, 1)).as(description).hasSize((int) matches);
+                    assertThat(regexp.split(input)).as(description).hasSize((int) matches + 1);
+                }
+            }
+        }
+    }
+
+    @Test
     public void testWorkBudgetHandsOffQuadraticSearches()
     {
         // The first attempt reads the whole repeated prefix and fails, and every later candidate
@@ -1906,6 +2179,7 @@ public class TestTrinoScanPlan
                 assertThat(resume).as(expression).isEqualTo(1);
             }
             assertThat(groups).as(expression).containsOnly(-1);
+            assertThat(plan.searchBeforeHandoff(input, 0, input.length(), 0, folded)).as(expression).isEqualTo(1);
             // An anchored search makes one attempt and never hands off.
             int anchored = folded
                     ? plan.searchAsciiFolded(input, 0, input.length(), 0, true, false, groups)
@@ -1929,15 +2203,18 @@ public class TestTrinoScanPlan
     {
         // Dense matches and short or sparse failed attempts stay within the budget: with an
         // ordinary engine that cannot match, every operation still reports Joni's matches.
+        StringBuilder query = new StringBuilder();
         StringBuilder urls = new StringBuilder();
         StringBuilder paths = new StringBuilder();
         StringBuilder headers = new StringBuilder();
         for (int index = 0; index < 1000; index++) {
+            query.append(index == 0 ? '?' : '&').append("key").append(index).append("=value").append(index);
             urls.append("see https://host").append(index).append(".example.com/path ");
             paths.append("segment").append(index).append('/');
             headers.append("Content-Type:text/plain; ");
         }
         List<ExpressionInput> rows = List.of(
+                new ExpressionInput("[?&]([^=]+)=", query.toString()),
                 new ExpressionInput("https?://([^/]+)/", urls.toString()),
                 new ExpressionInput("([^/]+)/", paths.toString()),
                 new ExpressionInput("(?i)content-type:([^;]+);", headers.toString()),
@@ -2038,6 +2315,7 @@ public class TestTrinoScanPlan
         for (ExpressionTemplates entry : cases) {
             String expression = entry.expression();
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
+            assertThat(regexp.pattern().usesOrdinaryUnanchoredBooleanSearchForDiagnostics()).as(expression).isFalse();
             assertThat(regexp.pattern().usesAsciiFoldedTrinoScanExecutorForDiagnostics()).as(expression).isEqualTo(expression.startsWith("(?i)"));
             for (String template : entry.templates()) {
                 for (byte[] bytes : MALFORMED_SEQUENCES) {
@@ -2057,7 +2335,7 @@ public class TestTrinoScanPlan
         // its first attempt, so an ordinary engine that cannot match finds nothing. Anchored
         // plans never hand off.
         Slice input = utf8Slice("x https://host/ Content-Type:text; 12zz");
-        for (String expression : List.of("https?://([^/]+)/", "([^/]+)/", "(?i)content-type:([^;]+);")) {
+        for (String expression : List.of("https?://([^/]+)/", "([^/]+)/", "(?i)content-type:([^;]+);", "\\d(\\d*)zz")) {
             TrinoRegexp handoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(utf8Slice(expression));
             assertThat(handoff.pattern().usesTrinoScanPlanForDiagnostics()).as(expression).isTrue();
             assertThat(handoff.contains(input)).as(expression).isTrue();
@@ -2156,6 +2434,96 @@ public class TestTrinoScanPlan
         return matches;
     }
 
+    @Test
+    public void testRequiredLiteralRejectionOperations()
+    {
+        // The required literal is a plan literal every match consumes after a leading run.
+        List<RequiredLiteral> literals = List.of(
+                new RequiredLiteral("\\d(\\d*)zz", "zz"),
+                new RequiredLiteral("\\w(\\w*)@(\\w+)", "@"),
+                new RequiredLiteral("[?&]([^=]+)=", "="),
+                new RequiredLiteral("([^/]+)/", "/"),
+                new RequiredLiteral("\\d(\\d*)ab(\\d+)cde", "cde"),
+                // An optional literal or group can be skipped, so only the literal after it is required.
+                new RequiredLiteral("\\d(\\d*)(?:abc)?z", "z"),
+                new RequiredLiteral("\\d(\\d*)(?:abc\\d)?z", "z"),
+                new RequiredLiteral("\\d(\\d*)é", "é"),
+                // Literal-led plans scan for their leading literal and never check a later one.
+                new RequiredLiteral("x(\\d+)zz", null),
+                new RequiredLiteral("https?://(?:www\\.)?([^/]+)/", null),
+                new RequiredLiteral("(?i)content-type:([^;]+);", null),
+                new RequiredLiteral("zz(\\d+)", null),
+                new RequiredLiteral("(?i)\\d(\\d*)zz", null),
+                new RequiredLiteral("\\d(\\d*)(?:abc)?", null),
+                new RequiredLiteral("^(\\d+)zz", null));
+        for (RequiredLiteral entry : literals) {
+            String expression = entry.expression();
+            TrinoScanPlan plan = requireNonNull(analyze(expression));
+            byte[] literal = plan.requiredLiteralForDiagnostics();
+            assertThat(literal == null ? null : new String(literal, UTF_8)).as(expression).isEqualTo(entry.literal());
+            Slice empty = utf8Slice("no candidate here");
+            assertThat(plan.lacksRequiredLiteralForDiagnostics(empty, 0, empty.length())).as(expression).isEqualTo(entry.literal() != null);
+        }
+        verifyAgainstJoni("\\d(\\d*)(?:abc)?z", List.of("12z", "12abcz", "12abc", "12ab z 3z", "abcz", "1abcz9z"));
+        verifyAgainstJoni("\\d(\\d*)(?:abc\\d)?z", List.of("12z", "12abc3z", "12abc3", "1abc z", "abc3z", "1abcz9z"));
+        verifyAgainstJoni("\\d(\\d*)ab(\\d+)cde", List.of("1ab2cde", "1ab2cd", "1ab2cd 3ab4cde", "cde1ab2", "1ab2cdcde"));
+        // Longer leading runs keep the ordinary engine.
+        for (String expression : List.of("(\\d+)zz", "(\\w+)@(\\w+)", "(\\d+)ab(\\d+)cde", "(\\d+)(?:abc)?z", "(\\d+)(?:abc\\d)?z", "(\\d+)é", "(?i)(\\d+)zz", "(\\d+)(?:abc)?")) {
+            assertThat(analyze(expression)).as(expression).isNull();
+        }
+        verifyAgainstJoni("(\\d+)(?:abc)?z", List.of("12z", "12abcz", "12abc", "12ab z 3z", "abcz", "1abcz9z"), false);
+        verifyAgainstJoni("(\\d+)(?:abc\\d)?z", List.of("12z", "12abc3z", "12abc3", "1abc z", "abc3z", "1abcz9z"), false);
+        verifyAgainstJoni("(\\d+)ab(\\d+)cde", List.of("1ab2cde", "1ab2cd", "1ab2cd 3ab4cde", "cde1ab2", "1ab2cdcde"), false);
+    }
+
+    @Test
+    public void testRequiredLiteralRejectionKeepsRegionResults()
+    {
+        // The literal must lie inside the searched range. Place it inside, only outside, across
+        // the range end, and flush with each range boundary, and search at a nonzero array offset.
+        // Literal-led plans have no required literal and keep the same results. Longer leading
+        // runs have no plan, and the ordinary engine's results are compared the same way.
+        List<ExpressionInputs> cases = List.of(
+                new ExpressionInputs("\\d(\\d*)zz", List.of("[12zz]", "zz[12]zz", "[12z]z", "[12]zz", "[zz12zz]", "[1 2zz 3zz]")),
+                new ExpressionInputs("\\w(\\w*)@(\\w+)", List.of("[a@b]", "@[ab]@", "[ab]@c", "a@[b]", "[@a@b@]")),
+                new ExpressionInputs("(\\d+)zz", List.of("[12zz]", "zz[12]zz", "[12z]z", "[12]zz", "[zz12zz]", "[1 2zz 3zz]")),
+                new ExpressionInputs("(\\w+)@(\\w+)", List.of("[a@b]", "@[ab]@", "[ab]@c", "a@[b]", "[@a@b@]")),
+                new ExpressionInputs("[?&]([^=]+)=", List.of("[?k=v]", "=[?k]=", "[?k]=v", "[=?k=]")),
+                new ExpressionInputs("x(\\d+)zz", List.of("[x12zz]", "[x12z]z", "x12[zz]", "[x1zz]")),
+                new ExpressionInputs("https?://(?:www\\.)?([^/]+)/", List.of("[http://h/]", "[http:/]/h/", "http[://h/]", "[https://h/]")),
+                new ExpressionInputs("(?i)content-type:([^;]+);", List.of("[Content-Type:a;]", "[content-type:a];", "[CONTENT-TYPE:a;;]")));
+        for (ExpressionInputs entry : cases) {
+            String expression = entry.expression();
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
+            Re2 re2 = regexp.pattern();
+            TrinoScanPlan plan = analyze(expression);
+            assertThat(re2.usesTrinoScanPlanForDiagnostics()).as(expression).isEqualTo(plan != null);
+            byte[] required = plan == null ? null : plan.requiredLiteralForDiagnostics();
+            String literal = required == null ? null : new String(required, UTF_8);
+            Regex oracle = joniPattern(expression);
+            for (String shape : entry.inputs()) {
+                String text = shape.replace("[", "").replace("]", "");
+                String inside = text.substring(shape.indexOf('['), shape.indexOf(']') - 1);
+                Slice input = utf8Slice("é!" + text + "?");
+                int byteStart = utf8Slice("é!" + text.substring(0, shape.indexOf('['))).length();
+                int byteEnd = byteStart + utf8Slice(inside).length();
+                String description = expression + " on " + shape;
+                if (plan != null) {
+                    assertThat(plan.lacksRequiredLiteralForDiagnostics(input, byteStart, byteEnd)).as(description).isEqualTo(literal != null && !inside.contains(literal));
+                }
+
+                Slice region = input.slice(byteStart, byteEnd - byteStart);
+                List<int[]> matches = joniMatches(oracle, region);
+                verifyRegionAgainstJoni(oracle, re2.matcher(input), input, byteStart, byteEnd, description);
+                assertThat(re2.find(input, byteStart, byteEnd)).as(description).isEqualTo(!matches.isEmpty());
+                assertThat(regexp.contains(region)).as(description).isEqualTo(!matches.isEmpty());
+                assertThat(regexp.count(region)).as(description).isEqualTo(matches.size());
+                assertThat(regexp.extract(region, 0)).as(description).isEqualTo(matches.isEmpty() ? null : group(region, matches.getFirst(), 0));
+                assertThat(regexp.extractAll(region, 1)).as(description).hasSize(matches.size());
+            }
+        }
+    }
+
     private static Slice view(String value)
     {
         byte[] text = value.getBytes(UTF_8);
@@ -2231,7 +2599,7 @@ public class TestTrinoScanPlan
         for (String workload : BenchmarkTrinoScanPlan.workloads()) {
             // The UNANCHORED_RUN workloads lead with a run longer than one character.
             boolean scanPlan = !workload.endsWith("FALLBACK") && !workload.equals("LITERAL_CONTROLS") && !workload.equals("DEEP_REJECTIONS") &&
-                    !workload.contains("UNANCHORED_RUN") && !workload.equals("UNANCHORED_SET");
+                    !workload.contains("UNANCHORED_RUN");
             for (boolean dotAll : new boolean[] {false, true}) {
                 BenchmarkTrinoScanPlan.BenchmarkData data = new BenchmarkTrinoScanPlan.BenchmarkData();
                 data.workload = workload;

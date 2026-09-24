@@ -37,6 +37,7 @@ public class TestOptionalVectorTrinoScanner
                 .contains("io.airlift.regulator.TrinoScanPlan source:")
                 .contains("io.airlift.regulator.TrinoScanPlanRun source:")
                 .doesNotContain("io.airlift.regulator.VectorTrinoScanner source:")
+                .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:")
                 .doesNotContain("jdk.incubator.vector.");
 
         ProbeResult enabled = runProbe(true);
@@ -44,6 +45,7 @@ public class TestOptionalVectorTrinoScanner
         assertThat(enabled.output()).contains("OK vector");
         assertThat(enabled.classLoadLog())
                 .contains("io.airlift.regulator.VectorTrinoScanner source:")
+                .contains("io.airlift.regulator.VectorByteSetScanner source:")
                 .contains("jdk.incubator.vector.ByteVector");
     }
 

@@ -779,12 +779,13 @@ candidate selection, resume rules, the executors, and optional-capture
 execution.
 
 Plans may require the logical input start or perform unanchored search. An
-unanchored plan must begin, after capture saves, with a literal or an unbounded
-run of every byte except the one-byte case-sensitive literal that follows it,
-and must contain a capture and a variable run. A capture-free plan must contain
-a character run or a variable literal repeat. These rules keep capture-free,
-fixed-width, and literal-only patterns on their direct routes. A lowered
-final-line plan takes precedence over a run-leading scan.
+unanchored plan must begin, after capture saves, with a literal, an exact
+one-byte ASCII set, or an unbounded run of every byte except the one-byte
+case-sensitive literal that follows it, and must contain a capture and a
+variable run. A capture-free plan must contain a character run or a variable
+literal repeat. These rules keep capture-free, fixed-width, and literal-only
+patterns on their direct routes. A lowered final-line plan takes precedence
+over a run-leading scan.
 
 Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, `(\w+)@(\w+)`, and
 `([a-z]+)-([0-9]+)`, keep the ordinary engine, plain or ASCII-folded, as do
@@ -826,11 +827,19 @@ and keep each search linear in its input:
   advanced. Without this budget, inputs such as `x([^z]+)zq` over repeated `xa`
   rescan the same run from every candidate, which is quadratic in one search.
   The budget belongs to one search, so plans stay immutable.
+- Full-Slice boolean `find` on a run-leading plan whose consuming operations
+  accept only ASCII bytes hands off once to the ordinary engine after a group
+  of eight failed attempts that average fewer than 32 bytes apart, when at
+  least 256 bytes remain. Both engines make the same existence decision for
+  such a plan on any input. The plan answers sparse and early matches without
+  DFA setup, and the ordinary engine avoids trying each dense candidate.
 
 On malformed input, a search that hands off may report the ordinary engine's
 match instead of the plan's. Every operation applies the same budget from the
-same search positions, so `find`, `count`, `extract`, `position`,
-`extractAll`, replacement, and split report one match sequence.
+same search positions, and the density handoff and ranged boolean `find` use
+the ordinary engine only where both engines agree, so `find`, `count`,
+`extract`, `position`, `extractAll`, replacement, and split report one match
+sequence.
 
 Retain restricted ASCII case folding when every Unicode fold cycle remains in
 ASCII and requires no full multi-character fold. Folded plans use separate
@@ -846,9 +855,14 @@ Eligible scan plans intentionally add bounded cold compilation work and retained
 state. Accept that cost only while warm public operations materially improve on
 all target architectures and protected routes remain stable. Short-lived pattern
 workloads must keep compilation visible when deciding whether to extend coverage.
-Bounded literal repeats meet this bar. On all three target hosts, focused
-before/after measurements improved every `LITERAL_REPEATS` operation; the
-protected controls stayed stable.
+Bounded literal repeats and unanchored byte-set scans meet this bar. On all three
+target hosts, focused before/after measurements improved every `LITERAL_REPEATS`
+operation, and every `UNANCHORED_SET` operation except `count`, which was
+unchanged. The protected controls stayed stable except for one accepted cost:
+unanchored byte-set plans make short key-value `contains` calls, such as
+`([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)` over `status=200`, take 1.08 to 1.16 times
+the ordinary engine's time on R9g and R8i. This is accepted because those calls
+remain about ten times faster than Joni.
 
 Rejected development alternatives are recorded to prevent repeating them
 without new evidence:
@@ -866,6 +880,15 @@ without new evidence:
   Keep those representations unchanged until measured as a separate optimization.
 - A byte opcode removed a native dependent load but regressed core URL operations;
   retain enum dispatch until a measured alternative justifies changing it.
+- Routing every eligible unanchored boolean call to the ordinary engine
+  regressed dense inputs whose first candidates match; the plan answers those
+  without DFA setup.
+- Handing off after the first failed attempt regressed sparse and miss-heavy
+  inputs, and handing off with little input remaining regressed short inputs.
+- Counting eligible plans with the DFA regressed dense counts, and the
+  required-literal check already ends counts over inputs without the literal.
+- Checking a required literal for literal-leading plans regressed sparse URL
+  and header workloads, because the candidate scan already finds the literal.
 
 Other protected controls retain unresolved differences. These are not accepted
 release trade-offs and require qualification before broad adoption. The

@@ -21,7 +21,7 @@ contract, not importing RE2 syntax or changing Trino semantics.
 | Captures | Capture-free plans plus mandatory, nested, and optional captures; named groups also work; up to 16 subject to the operation limit |
 | Optional bodies | Literals, runs, captures, and nested optionals; at most four forks, sharing the optional budget |
 | Repetitions | Greedy single-character `?`, `*`, `+`, exact and bounded counts up to 1000; unbounded minimum counts; exact and finite capture-free literal-sequence repeats |
-| Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal or unbounded run of every byte except the one-byte literal after it |
+| Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal, exact one-byte ASCII set, or unbounded run of every byte except the one-byte literal after it |
 | End assertions | Optional; strict end and Trino final-LF `$` are supported when present |
 | Terminal behavior | Partial-match success, dot-all `.*`, LF-excluding `.*`, and supported character-set runs |
 | Case folding | Restricted ASCII literal and run folds proven safe against the Unicode fold tables; separate folded executors; general Unicode folding uses the ordinary engine |
@@ -42,18 +42,19 @@ Anchored partial-match coverage includes these ClickHouse performance cases:
 - `^https?://([^/]+)`
 - `^https?://(?:www\.)?([^/]+)/`
 
-Unanchored coverage includes the URL family and a delimiter-complement run
-family such as `([^/]+)/`. Fixed literal-sequence repeats are also admitted
-within the bounded limits below. Any extension must preserve the Trino language
-contract. Unsupported optimization shapes use the ordinary Regulator engine;
-this is not fallback to another regex language or to Joni.
+Unanchored coverage includes the URL family, a delimiter-complement run family
+such as `([^/]+)/`, and ClickHouse's `[?&]([^=]+)=` query-key shape.
+Fixed literal-sequence repeats are also admitted within the bounded limits
+below. Any extension must preserve the Trino language contract. Unsupported
+optimization shapes use the ordinary Regulator engine; this is not fallback to
+another regex language or to Joni.
 
 ## Integration
 
 `TrinoScanPlan.analyze` reads the parsed expression before required-prefix
 stripping. It requires proof that a successful match consumes input. An
-unanchored plan must begin, after capture saves, with a literal or an unbounded
-run of every byte except the one-byte
+unanchored plan must begin, after capture saves, with a literal, an exact
+one-byte ASCII set, or an unbounded run of every byte except the one-byte
 case-sensitive literal that follows it, such as `([^/]+)/`. It must also contain
 a capture and a variable run so the capture-free and fixed-width routes
 retain precedence. Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, and
@@ -119,7 +120,24 @@ plans count with a loop over the plan's search that resumes at each match end,
 not the DFA count, so `count` agrees with `extract`, `position`, and
 `extractAll` on malformed bytes.
 
-Every unanchored plan search has a work budget. A failed attempt
+Boolean unanchored search may continue on the ordinary engine when the plan
+does not begin with a literal and every consuming operation accepts only ASCII
+bytes. No match of such a plan in either engine can include a byte at or above
+`0x80`, so those bytes, valid or malformed, only separate the ASCII segments in
+which both engines search. The two engines therefore make the same existence
+decision on any byte sequence. Their agreement on valid UTF-8 is covered by the
+Joni differential tests. Full-Slice `find` starts on the plan, which answers
+sparse and early matches without DFA setup. After each group of eight failed
+attempts, it hands off once if those failures average fewer than 32 bytes apart
+and at least 256 bytes remain. The ordinary engine then continues from the
+position where the plan would resume, with the complete Slice as context,
+reaching a match without trying each dense candidate. No match starts before
+that position, because the plan rejected every earlier candidate. Ranged boolean
+`find` uses the ordinary engine directly. Calls that return boundaries or
+captures, and `count`, do not use this density handoff. Literal-leading plans
+also skip it, because their candidate scan already skips to the literal.
+
+Every unanchored search of any plan also has a work budget. A failed attempt
 reports the furthest byte any of its unbounded scans reached, and the search
 adds that byte's distance from the attempt's start; literal and bounded checks,
 whose length the pattern limits, are not counted. Once the sum exceeds 2048
@@ -133,11 +151,22 @@ search, including each step of a find loop and of `count`, starts with a fresh
 budget. The engines agree on valid UTF-8. On malformed input, a search that
 hands off may report the ordinary engine's match rather than the plan's.
 Boolean, boundary, capture, and count calls apply the same budget from the same
-search positions, so all calls still report one match
+search positions, and the density handoff and ranged boolean `find` apply only
+to plans on which both engines agree, so all calls still report one match
 sequence. As with the ordinary engine and upstream RE2, iterating over every
 match can still take quadratic time when each successful search reads far past
 the start of its match.
 
+A run-leading unanchored plan records the longest case-sensitive literal that
+every match must consume: a literal after the leading run and after the skip
+target of every optional fork. ASCII-folded literals are not recorded. After the
+first failed attempt, the search checks once whether that literal occurs between
+the resume position and the logical end, and stops when it does not. Every later
+match lies in that range and consumes the literal, so the check never changes a
+result, including in regions. Checking after the first failure keeps the scan
+off calls whose first candidate matches, such as each step of a dense match
+loop. Literal-leading plans record no required literal. The check filters on the
+first and last literal bytes with 128-bit vectors before verifying the literal.
 A shallow leading-operation check rejects clearly unsupported unanchored shapes
 before allocating the builder, and known nullable expressions do not enter scan
 analysis. Matcher and function code own reset, retained groups, failure state,
@@ -185,22 +214,48 @@ garbage-in, garbage-out contract; no UTF-8 validation pass or exact agreement on
 malformed bytes is promised. RE2's UTF-8 contract and Java's current execution
 remain unchanged.
 
-For unanchored literal-leading plans, the executor scans for the literal's first
-byte and verifies the complete attempt only at those candidates. A valid UTF-8
-continuation byte cannot equal the first byte of a UTF-8 literal. For a
-case-sensitive leading literal of two or more bytes, the first-byte scan is
-followed by a scalar check of the remaining literal bytes before each attempt.
-An occurrence of the first byte alone starts no attempt, the scan resumes after
-it, and a literal that does not fit before the logical end is never a candidate.
-ASCII-folded leading literals use the first-byte scan alone. For a leading
-unbounded run, a failed attempt resumes at the run end. Every interior start
-would reach the same greedy endpoint and has a subset of the already rejected
-continuation choices. When the run consumes nothing, the next candidate advances
-by one decoded code point so a valid multibyte character is never retried from a
-continuation byte. Optional-leading plans, and plans led by any run other than a
-delimiter complement, remain on the ordinary engine. A lowered final-line plan
-retains precedence for a run-leading expression; a literal-leading scan keeps
-its candidate-byte route.
+For unanchored plans that begin with a literal or with a run whose minimum is at
+least one, the executor scans for a byte that can start the leading operation
+and verifies the complete attempt only at those positions. An attempt at any
+skipped byte would fail on its first character. For a case-sensitive leading
+literal of two or more bytes, the first-byte scan is followed by a scalar check
+of the remaining literal bytes before each attempt. An occurrence of the first
+byte alone starts no attempt, the scan resumes after it, and a literal that does
+not fit before the logical end is never a candidate. ASCII-folded leading
+literals use the first-byte scan alone. A literal or ASCII-only set
+cannot match a valid UTF-8 continuation byte. A run set that admits non-ASCII
+characters admits every non-ASCII byte, so from a character boundary its first
+candidate is an ASCII byte or a lead byte. On malformed input the scan makes the
+same attempts as trying each position, because a failed position advances only
+over bytes that cannot start the run. Candidate scans first test one byte, or
+sixteen bytes for sets scanned with nibble tables, because dense inputs and
+large sets such as word characters usually have a candidate within a few bytes
+of the cursor. They then reuse the DFA's start-byte scanners when the Vector API
+is available. Sets of one to three bytes compare each byte for equality.
+Contiguous ranges of four to 64 bytes use a range comparison. Other sets of at
+most 64 bytes use nibble lookup tables, which are charged to the plan's retained
+size. Larger sets and sets that admit non-ASCII bytes use the plan's own scan:
+complements of small sets use vector equality, and other sets use the byte
+table. A leading run whose minimum is zero can match anywhere, so every position
+is attempted. For a leading unbounded run, a failed attempt resumes at the run
+end. Every interior start would reach the same greedy endpoint and has a subset
+of the already rejected continuation choices. When the run fails or consumes
+nothing, the next candidate advances by one decoded code point so a valid
+multibyte character is never retried from a continuation byte. A leading single
+character, such as `[A-Za-z_]` in `([A-Za-z_][A-Za-z0-9_]*)=`, resumes instead
+at the end of a following unbounded run whose minimum is zero, whose set
+contains the leading set, and which only capture saves separate from the leading
+character. Runs never give characters back, and each byte that run consumed is a
+member of its set, so an attempt from any of those bytes either fails on its
+first character or consumes one leading character and then reaches the same run
+end in the same state. A run set holds every non-ASCII byte if it holds one, and
+a decoded character never spans an ASCII byte, so this also holds on malformed
+input. Other operations between the runs, a bounded or positive-minimum
+following run, or a following set that omits a leading member keep the
+one-character resume. Optional-leading plans, and plans led by any run other
+than a single character or a delimiter complement, remain on the ordinary
+engine. A lowered final-line plan retains precedence for a run-leading
+expression; a literal-leading scan keeps its candidate-byte route.
 
 ## Correctness and measurement
 
@@ -209,8 +264,11 @@ retry, final LF, strict end, replacement versus extraction, multibyte input,
 NUL, bounded reads on malformed input, regions, memory fallback, and concurrent
 use of one compiled plan. Seeded unanchored cases also cover repeated `find`,
 valid UTF-8 candidate boundaries, and leading-run skips. An attempt-count
-diagnostic confirms that literal-leading searches attempt only at complete
-occurrences of the leading literal. Trino function and matcher tests also apply.
+diagnostic confirms that run-leading searches, including the ASCII-folded
+executor, attempt only at candidate bytes, that literal-leading searches
+attempt only at complete occurrences of the leading literal, and that a failed
+single-character attempt resumes after an eligible following run and nowhere
+else. Trino function and matcher tests also apply.
 
 A deterministic Java 25 allocation guard measures optional-leading and
 run-leading final-line rejections before the builder is entered. Deeper
@@ -265,7 +323,9 @@ failures, `LONG_UNANCHORED_RUN` uses 4 KiB digit runs, and
 `UNANCHORED_RUN_LEADING` interleaves `(\d+)zz`, `([0-9]+)a`, and `(\w+)@(\w+)`
 over prose with scattered short digit runs where one row in eight matches.
 These three leading-run workloads select no plan and measure the ordinary
-engine on the shapes the plan excludes. `UNANCHORED_MIXED` interleaves twelve
+engine on the shapes the plan excludes. `UNANCHORED_SET`
+covers ClickHouse's `[?&]([^=]+)=` query-key shape with varied candidate
+distances, matches, and misses. `UNANCHORED_MIXED` interleaves twelve
 literal-leading plans. Compilation is separate from warm operation methods;
 there is no cache lookup or SQL grouping/aggregation in this benchmark.
 
@@ -305,10 +365,12 @@ alternatives are recorded in
 
 ## Execution width and safeguards
 
-The scanners use 128-bit vectors on all hosts. This matches the Graviton vector
-width and uses the same scan width on Intel. Wider Intel vectors may help long
-scans, but have not been selected or shown to improve these integrated
-workloads. Treat preferred-width selection as a separate measured change.
+The plan's own scanners use 128-bit vectors on all hosts. This matches the
+Graviton vector width and uses the same scan width on Intel. Candidate scans
+that reuse the DFA's start-byte scanners use those scanners' preferred species.
+Wider Intel vectors may help long scans, but have not been selected or shown to
+improve these integrated workloads. Treat preferred-width selection as a
+separate measured change.
 
 Named operation factories define each operation's step layout. Retry-stack
 limits are checked at class initialization against the two position longs and
