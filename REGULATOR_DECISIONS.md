@@ -118,6 +118,11 @@ UTF-16 code-unit offsets.
   replacement behavior remain separate from native RE2 rewrite syntax.
   Malformed references throw `TrinoRegexpReplacementException` with the failing
   replacement byte offset.
+- String replacement parses its template at the first match, so a nonmatch
+  returns the original `Slice` even when the replacement is malformed. It
+  retains only referenced captures, bounds match-record storage, sizes output
+  to the result, and caches each pattern's last template of at most 256 bytes.
+  Callback replacement streams because its results are unknown before matching.
 - `TrinoRegexpParser` compiles the supported Trino/Joni regular subset directly
   rather than routing syntax through the RE2 parser or a dialect enum.
   Unsupported constructs and same-text/different-meaning collisions are
