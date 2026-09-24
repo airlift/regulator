@@ -2636,6 +2636,14 @@ final class Prog
 
     private static final int ONEPASS_MATCH_WINS = 1 << ONEPASS_EMPTY_SHIFT;
     private static final int ONEPASS_IMPOSSIBLE = EmptyOp.EMPTY_WORD_BOUNDARY | EmptyOp.EMPTY_NO_WORD_BOUNDARY;
+    // Action entries allocated before one-pass analysis starts growing node storage.
+    private static final int ONEPASS_INITIAL_ACTIONS = 8192;
+
+    // The initial tables hold ONEPASS_INITIAL_ACTIONS actions, or 16 nodes, whichever holds more nodes.
+    static int onePassInitialNodeCapacity(int byteClassCount)
+    {
+        return Math.max(16, ONEPASS_INITIAL_ACTIONS / byteClassCount);
+    }
 
     private boolean computeOnePass()
     {
@@ -2693,11 +2701,15 @@ final class Prog
         int[] nodeById = new int[size()];
         Arrays.fill(nodeById, -1);
 
+        // Like upstream, grow node storage as nodes are allocated when the bound is large; such
+        // programs usually need far fewer nodes or stop being one-pass after a few. Small tables
+        // are allocated at their bound, because growing them costs more than zeroing them.
         int byteClassCount = bytemapRange();
-        int[] nodeMatchCondition = new int[maximumNodeCount];
-        int[] nodeAction = new int[maximumNodeCount * byteClassCount];
-        long[] nodeMatchCapture = hasExtendedCaptures ? new long[maximumNodeCount] : null;
-        long[] nodeActionCapture = hasExtendedCaptures ? new long[maximumNodeCount * byteClassCount] : null;
+        int nodeCapacity = Math.min(maximumNodeCount, onePassInitialNodeCapacity(byteClassCount));
+        int[] nodeMatchCondition = new int[nodeCapacity];
+        int[] nodeAction = new int[nodeCapacity * byteClassCount];
+        long[] nodeMatchCapture = hasExtendedCaptures ? new long[nodeCapacity] : null;
+        long[] nodeActionCapture = hasExtendedCaptures ? new long[nodeCapacity * byteClassCount] : null;
 
         SparseSet toVisit = new SparseSet(size());
         SparseSet workQueue = new SparseSet(size());
@@ -2753,6 +2765,15 @@ final class Prog
                             if (nextIndex == -1) {
                                 if (allocatedNodeCount >= maximumNodeCount) {
                                     return false;
+                                }
+                                if (allocatedNodeCount == nodeCapacity) {
+                                    nodeCapacity = Math.min(maximumNodeCount, nodeCapacity * 2);
+                                    nodeMatchCondition = Arrays.copyOf(nodeMatchCondition, nodeCapacity);
+                                    nodeAction = Arrays.copyOf(nodeAction, nodeCapacity * byteClassCount);
+                                    if (hasExtendedCaptures) {
+                                        nodeMatchCapture = Arrays.copyOf(nodeMatchCapture, nodeCapacity);
+                                        nodeActionCapture = Arrays.copyOf(nodeActionCapture, nodeCapacity * byteClassCount);
+                                    }
                                 }
                                 nextIndex = allocatedNodeCount++;
                                 addOnePassQueue(toVisit, nextInstructionId);
