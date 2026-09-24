@@ -501,6 +501,11 @@ final class Compiler
             }
 
             long availableInstructionCount = (maxMemory - CPP_PROG_OVERHEAD_BYTES) / CPP_INSTRUCTION_BYTES;
+            if (availableInstructionCount <= 0) {
+                // Upstream leaves max_ninst_ at zero here and every allocation fails, which surfaces
+                // as a compile failure rather than an argument error.
+                throw new RegexpCompileMemoryLimitException(maxMemory);
+            }
             if (availableInstructionCount >= MAX_INSTRUCTIONS) {
                 availableInstructionCount = MAX_INSTRUCTIONS;
             }
@@ -528,6 +533,10 @@ final class Compiler
                 if (childIndex < node.childCount()) {
                     nextChildIndexes[depth - 1] = childIndex + 1;
                     if (++visitCount > maxVisits) {
+                        // A finite budget bounds the visit limit, so exceeding it is a budget failure.
+                        if (maxMemory > 0) {
+                            throw new RegexpCompileMemoryLimitException(maxMemory);
+                        }
                         throw new RegexpCompileException("regexp compilation exceeded walkExponential limit");
                     }
                     if (depth == nodes.length) {

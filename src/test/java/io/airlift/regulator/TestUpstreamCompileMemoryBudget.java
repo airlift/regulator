@@ -35,18 +35,48 @@ public class TestUpstreamCompileMemoryBudget
     }
 
     @Test
+    public void testBudgetWithNoRoomForInstructionsIsMemoryLimit()
+    {
+        // Budgets above the fixed overhead but below one instruction leave zero instructions.
+        for (long maxMemory = 513; maxMemory < 520; maxMemory++) {
+            long budget = maxMemory;
+            assertThatThrownBy(() -> Compiler.compile(parse("a"), false, budget))
+                    .as("budget %s", budget)
+                    .isInstanceOf(RegexpCompileMemoryLimitException.class);
+        }
+        // The public option keeps two thirds of the budget for the forward program, so 768 through
+        // 778 reach the overhead-only and zero-instruction windows.
+        for (long maxMemory = 768; maxMemory <= 778; maxMemory++) {
+            long budget = maxMemory;
+            assertThatThrownBy(() -> Re2.compile(Slices.utf8Slice("a"), Re2.Options.defaults().setMaxMemory(budget)))
+                    .as("public budget %s", budget)
+                    .isInstanceOf(RegexpCompileMemoryLimitException.class);
+        }
+    }
+
+    @Test
     public void testVisitLimitAppliesBeforeInstructionBudget()
     {
         // maxMemory 520 leaves one instruction and therefore a visit limit of two nodes, which four
         // nested captures exceed before emitting anything. A larger budget reaches the instruction
-        // limit instead, so the walk limit is checked first.
+        // limit instead, so the walk limit is checked first. Both are budget failures.
         assertThatThrownBy(() -> Compiler.compile(parse("((((a))))"), false, 520))
-                .isInstanceOf(RegexpCompileException.class)
-                .hasMessage("regexp compilation exceeded walkExponential limit");
+                .isInstanceOf(RegexpCompileMemoryLimitException.class);
         assertThatThrownBy(() -> Compiler.compile(parse("((((a))))"), false, 536))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
         assertThatThrownBy(() -> Compiler.compile(parse("ab"), false, 520))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
+
+        // Without a budget the visit limit is the upstream walk limit, not a memory limit.
+        Regexp deeplyNested = Regexp.literal(Regexp.LIKE_PERL, 'a');
+        for (int depth = 0; depth <= 200_000; depth++) {
+            deeplyNested = Regexp.capture(Regexp.LIKE_PERL, deeplyNested, depth + 1, null);
+        }
+        Regexp unbounded = deeplyNested;
+        assertThatThrownBy(() -> Compiler.compile(unbounded, false, 0))
+                .isInstanceOf(RegexpCompileException.class)
+                .isNotInstanceOf(RegexpCompileMemoryLimitException.class)
+                .hasMessage("regexp compilation exceeded walkExponential limit");
     }
 
     @Test
