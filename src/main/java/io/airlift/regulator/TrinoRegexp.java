@@ -100,6 +100,20 @@ public sealed class TrinoRegexp
      */
     public static TrinoRegexp compile(Slice pattern, Options options)
     {
+        return compile(pattern, options, false);
+    }
+
+    /**
+     * Compiles {@code pattern} so that every unanchored scan-plan search continues on the
+     * ordinary engine before its first attempt, exercising that continuation on every input.
+     */
+    static TrinoRegexp compileForcingScanPlanHandoffForTesting(Slice pattern)
+    {
+        return compile(pattern, Options.defaults(), true);
+    }
+
+    private static TrinoRegexp compile(Slice pattern, Options options, boolean forceScanPlanHandoff)
+    {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
@@ -111,7 +125,7 @@ public sealed class TrinoRegexp
         if (literalAlternationMatcher != null && literalAlternationMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralAlternationTrinoRegexp(literalAlternationMatcher);
         }
-        Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, Regexp.LIKE_PERL, options.maxMemory());
+        Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, Regexp.LIKE_PERL, options.maxMemory(), forceScanPlanHandoff);
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
             return new BeginLineTrinoRegexp(compiledPattern);

@@ -17,6 +17,7 @@ import com.sun.management.ThreadMXBean;
 import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
+import java.util.List;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,18 +76,46 @@ public class TestCompilerAllocations
                 utf8Slice("^((a)?(b)?(c)?(d)?)abcd([^/]+)/$"),
                 Regexp.LIKE_PERL);
         for (int iteration = 0; iteration < 10_000; iteration++) {
-            assertThat(TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount())).isNotNull();
+            assertThat(TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false)).isNotNull();
         }
 
         long threadId = Thread.currentThread().threadId();
         long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         int iterations = 10_000;
         for (int iteration = 0; iteration < iterations; iteration++) {
-            TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount());
+            TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false);
         }
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
         assertThat(allocatedBytes / iterations).isLessThan(8_000);
+    }
+
+    @Test
+    public void testTrinoScanRejectsUnsupportedUnanchoredStartBeforeAllocation()
+    {
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        List<ParseResult> expressions = List.of(
+                TrinoRegexpParser.parse(utf8Slice("(?:www\\.)?([^/]+)/"), Regexp.LIKE_PERL),
+                TrinoRegexpParser.parse(utf8Slice("([a-z]+)$"), Regexp.LIKE_PERL));
+        for (int iteration = 0; iteration < 10_000; iteration++) {
+            for (ParseResult expression : expressions) {
+                assertThat(TrinoScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false))
+                        .as(RegexpToString.toString(expression.regexp()))
+                        .isNull();
+            }
+        }
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        int iterations = 10_000;
+        for (int iteration = 0; iteration < iterations; iteration++) {
+            for (ParseResult expression : expressions) {
+                TrinoScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false);
+            }
+        }
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(allocatedBytes / (iterations * (long) expressions.size())).isLessThan(128);
     }
 
     private static ThreadMXBean allocatedMemoryBean()

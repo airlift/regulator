@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.regex.Pattern;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -49,5 +50,31 @@ public class TestTrinoScanPlanRun
         byte[] input = "xabc".getBytes(UTF_8);
         assertThat(run.matchMinimum(input, 1, 3)).isEqualTo(-1);
         assertThat(run.matchMinimum(input, 0, 3)).isEqualTo(3);
+    }
+
+    @Test
+    public void testRunComplementMatchesMemberSet()
+    {
+        // A run is the complement of a byte only when that byte is its single non-member. The
+        // negated classes hold line feeds and every non-ASCII byte without dotAll.
+        for (String set : List.of("[^/]", "[^:]", "[^,]", "[^\\n]", "[^/x]", "[^=]", "[^\\x00-\\x7F]", "\\w", "[a]", "[\\x00-\\x7F]", ".", "(?s).")) {
+            ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(set + "+"), Regexp.LIKE_PERL);
+            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp()), set);
+            // Only a line feed ends a line in this dialect.
+            Pattern reference = Pattern.compile(set, Pattern.UNIX_LINES);
+            int excluded = -1;
+            int nonMembers = 0;
+            for (int value = 0; value < 256; value++) {
+                // Every non-ASCII byte shares the membership of non-ASCII code points.
+                String character = value < 0x80 ? String.valueOf((char) value) : "é";
+                if (!reference.matcher(character).matches()) {
+                    excluded = value;
+                    nonMembers++;
+                }
+            }
+            for (int value = 0; value < 256; value++) {
+                assertThat(run.isComplementOf((byte) value)).as("%s byte %s", set, value).isEqualTo(nonMembers == 1 && value == excluded);
+            }
+        }
     }
 }

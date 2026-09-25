@@ -64,10 +64,10 @@ public class TestRe2ParsedCompile
         // [a-z]{3} takes the Trino fixed-width route and ([a-z]+)-([0-9]+) the general route.
         Slice trinoPattern = utf8Slice("[a-z]{3}");
         ParseResult trinoParsed = TrinoRegexpParser.parse(trinoPattern, Regexp.LIKE_PERL);
-        Re2 trino = Re2.compileParsedForTrino(trinoPattern, trinoParsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY);
+        Re2 trino = Re2.compileParsedForTrino(trinoPattern, trinoParsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY, false);
         Slice generalTrinoPattern = utf8Slice("([a-z]+)-([0-9]+)");
         ParseResult generalTrinoParsed = TrinoRegexpParser.parse(generalTrinoPattern, Regexp.LIKE_PERL);
-        Re2 generalTrino = Re2.compileParsedForTrino(generalTrinoPattern, generalTrinoParsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY);
+        Re2 generalTrino = Re2.compileParsedForTrino(generalTrinoPattern, generalTrinoParsed, Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY, false);
 
         assertThat(java.retainsPatternForDiagnostics(javaPattern)).isTrue();
         assertThat(trino.retainsPatternForDiagnostics(trinoPattern)).isTrue();

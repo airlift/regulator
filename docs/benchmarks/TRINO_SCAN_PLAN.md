@@ -21,7 +21,7 @@ contract, not importing RE2 syntax or changing Trino semantics.
 | Captures | Capture-free plans plus mandatory, nested, and optional captures; named groups also work; up to 16 subject to the operation limit |
 | Optional bodies | Literals, runs, captures, and nested optionals; at most four forks, sharing the optional budget |
 | Repetitions | Greedy single-character `?`, `*`, `+`, exact and bounded counts up to 1000; unbounded minimum counts |
-| Start behavior | Logical input start |
+| Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal or unbounded run of every byte except the one-byte literal after it |
 | End assertions | Optional; strict end and Trino final-LF `$` are supported when present |
 | Terminal behavior | Partial-match success, dot-all `.*`, LF-excluding `.*`, and supported character-set runs |
 | Case folding | Ordinary engine |
@@ -42,22 +42,32 @@ Anchored partial-match coverage includes these ClickHouse performance cases:
 - `^https?://([^/]+)`
 - `^https?://(?:www\.)?([^/]+)/`
 
-Any extension must preserve the Trino language
+Unanchored coverage includes the URL family and a delimiter-complement run
+family such as `([^/]+)/`. Any extension must preserve the Trino language
 contract. Unsupported optimization shapes use the ordinary Regulator engine;
 this is not fallback to another regex language or to Joni.
 
 ## Integration
 
 `TrinoScanPlan.analyze` reads the parsed expression before required-prefix
-stripping. It requires an input-start assertion and proof that a successful
-match consumes input. End assertions and captures are optional. Capture-free
-plans must contain a character run, so literal-only
+stripping. It requires proof that a successful match consumes input. An
+unanchored plan must begin, after capture saves, with a literal or an unbounded
+run of every byte except the one-byte
+case-sensitive literal that follows it, such as `([^/]+)/`. It must also contain
+a capture and a variable run so the capture-free and fixed-width routes
+retain precedence. Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, and
+`(\w+)@(\w+)`, keep the ordinary engine: each failed candidate inside a run
+rescans the rest of it, so their cost depends on the input, and every measured
+search strategy for them made some workloads slower than the ordinary engine. A
+delimiter-complement run stops only at its delimiter, which the literal then
+matches, and it measured no loss. End assertions and captures are optional for
+anchored plans. Capture-free plans must contain a character run, so literal-only
 expressions retain the direct prefix and
 equality routes. The single-delimiter operation consumes its delimiter directly.
 General runs leave the following literal to its own operation. One builder
 handles both linear and richer optional and capture structure. After
-continuation verification, a peephole pass compacts linear plans
-into delimiter-capture and terminal-tail operations. Plans
+continuation verification, a peephole pass compacts linear anchored-start plans
+into delimiter-capture and terminal-tail operations. Unanchored plans and plans
 with general forks, nested capture boundaries, or more than three captures keep
 the general representation with explicit capture saves.
 
@@ -96,15 +106,37 @@ plan before required-prefix stripping. Full-Slice boolean `find` keeps the
 literal `CONTAINS`, `STARTS_WITH`, `EQUALS`, and `EQUALS_FINAL_LINE` kernels
 when a plan also exists, because they answer without reading past the literal.
 Any other boolean strategy is replaced by the plan. Boundary, capture, range,
-and count calls reach the plan through its own strategy either way.
+and count calls reach the plan through its own strategy either way. Unanchored
+plans count with a loop over the plan's search that resumes at each match end,
+not the DFA count, so `count` agrees with `extract`, `position`, and
+`extractAll` on malformed bytes.
 
-Compiler selection reuses the start-anchor proof to reject unanchored
-expressions before allocating temporary analysis storage. Matcher and function
-code own reset, retained groups, failure state,
+Every unanchored plan search has a work budget. A failed attempt
+reports the furthest byte any of its unbounded scans reached, and the search
+adds that byte's distance from the attempt's start; literal and bounded checks,
+whose length the pattern limits, are not counted. Once the sum exceeds 2048
+bytes plus four times the distance the search has advanced, the search stops
+where the plan would resume and continues on the ordinary engine with the same
+logical context, anchor, and capture offsets. No match starts before that
+position. This bounds inputs where every candidate rescans the same long run,
+such as `id=([^&]+)&x` over repeated `id=a`, so the work of each search is
+linear in its input. Anchored searches make one attempt and never hand off. Each
+search, including each step of a find loop and of `count`, starts with a fresh
+budget. The engines agree on valid UTF-8. On malformed input, a search that
+hands off may report the ordinary engine's match rather than the plan's.
+Boolean, boundary, capture, and count calls apply the same budget from the same
+search positions, so all calls still report one match
+sequence. As with the ordinary engine and upstream RE2, iterating over every
+match can still take quadratic time when each successful search reads far past
+the start of its match.
+
+A shallow leading-operation check rejects clearly unsupported unanchored shapes
+before allocating the builder, and known nullable expressions do not enter scan
+analysis. Matcher and function code own reset, retained groups, failure state,
 Slice-relative offsets, zero-copy extraction, replacement parsing, and output
 construction.
 
-End-anchored and partial plans use separate Java executor
+End-anchored, anchored partial, and unanchored plans use separate Java executor
 methods over the same operations. This keeps their completion and retry profiles
 out of the end-anchored loop. Literals of up to 16 bytes use precomputed
 first/last word comparisons. Longer literals use `Arrays.mismatch`.
@@ -113,7 +145,7 @@ checkpoints fit in local primitive values; no retry array or boolean workspace
 is allocated.
 
 The richer builder emits capture-boundary saves and forward optional forks. The
-linear-only compaction pass folds a
+linear-only compaction pass runs only for anchored-start plans. It folds a
 supported top-level captured run into one capture-aware operation, preserving
 the compact URL plan. Richer plans keep their explicit capture saves. Optional
 character bodies keep their forks so later failures can retry without the
@@ -130,7 +162,7 @@ excludes whole-pattern empty matching.
 
 An expression without an end assertion omits the end operation. The partial
 executor reports its cursor after the last operation for `find` and `lookingAt`;
-`matches` accepts it only at the logical input end. Partial plans
+`matches` accepts it only at the logical input end. Partial and unanchored plans
 mark each run whose continuation is nullable, meaning some path through the
 remaining operations succeeds on every suffix. A boolean call that requests
 neither boundaries nor captures, and is not a full match, returns success once
@@ -144,12 +176,36 @@ garbage-in, garbage-out contract; no UTF-8 validation pass or exact agreement on
 malformed bytes is promised. RE2's UTF-8 contract and Java's current execution
 remain unchanged.
 
+For unanchored literal-leading plans, the executor scans for the literal's first
+byte and verifies the complete attempt only at those candidates. A valid UTF-8
+continuation byte cannot equal the first byte of a UTF-8 literal. For a
+case-sensitive leading literal of two or more bytes, the first-byte scan is
+followed by a scalar check of the remaining literal bytes before each attempt.
+An occurrence of the first byte alone starts no attempt, the scan resumes after
+it, and a literal that does not fit before the logical end is never a candidate.
+For a leading unbounded run, a failed attempt resumes at the run end. Every
+interior start would reach the same greedy endpoint and has a subset of the
+already rejected continuation choices. When the run consumes nothing, the next
+candidate advances by one decoded code point so a valid multibyte character is
+never retried from a continuation byte. Optional-leading plans, and plans led by
+any run other than a delimiter complement, remain on the ordinary engine. A
+lowered final-line plan retains precedence for a run-leading expression; a
+literal-leading scan keeps its candidate-byte route.
+
 ## Correctness and measurement
 
 `TestTrinoScanPlan` verifies selection, Joni match/capture agreement, optional
 retry, final LF, strict end, replacement versus extraction, multibyte input,
 NUL, bounded reads on malformed input, regions, memory fallback, and concurrent
-use of one compiled plan. Trino function and matcher tests also apply.
+use of one compiled plan. Seeded unanchored cases also cover repeated `find`,
+valid UTF-8 candidate boundaries, and leading-run skips. An attempt-count
+diagnostic confirms that literal-leading searches attempt only at complete
+occurrences of the leading literal. Trino function and matcher tests also apply.
+
+A deterministic Java 25 allocation guard measures optional-leading and
+run-leading final-line rejections before the builder is entered. Deeper
+candidates still pay for continuation analysis before rejection; target-host
+compile rows remain the evidence for complete compilation cost.
 
 `BenchmarkTrinoScanPlan` rotates 504 Slice inputs. Each nonempty input is a view
 at a nonzero array offset; the 63 empty `LITERAL_CONTROLS` inputs are the shared
@@ -166,7 +222,9 @@ captures. Their input mixes include misses, optional `www.`, missing slashes,
 Unicode, query markers, and newlines. `ANCHORED_HOST_4096` runs the
 `ANCHORED_HOST` pattern over 4 KiB hosts with no path separator. Its trailing
 run can reach the input end, so `contains` and `count` measure the boolean exit
-after the run's minimum. `SETS`
+after the run's minimum. `UNANCHORED_TAIL_4096` runs `abc(.*)` over 4 KiB inputs
+with no newline. Its `contains` measures the kept literal kernel, and its
+`count` measures the plan's own count, which needs match boundaries. `SETS`
 exercises a small complemented set and a larger ASCII table.
 `LITERAL_CONTROLS` protects the direct `^foo` prefix and `^foo$`
 equality routes. `BOUNDED` includes
@@ -181,7 +239,14 @@ interleaves twelve plans across simple and richer bodies. `LONG_OPTIONAL` adds a
 four-optional expression with exact input byte lengths, including a 4 KiB case.
 They cover short-input routing and long-hostname scaling.
 `LOWERED_FALLBACK` protects the lowered unanchored final-LF boolean route.
-Compilation is separate from warm operation methods;
+`UNANCHORED_URL` and `UNANCHORED_END` vary prefix length, URL outcomes, Unicode,
+newline, and end behavior. `UNANCHORED_RUN` covers leading-run matches and
+failures, `LONG_UNANCHORED_RUN` uses 4 KiB digit runs, and
+`UNANCHORED_RUN_LEADING` interleaves `(\d+)zz`, `([0-9]+)a`, and `(\w+)@(\w+)`
+over prose with scattered short digit runs where one row in eight matches.
+These three leading-run workloads select no plan and measure the ordinary
+engine on the shapes the plan excludes. `UNANCHORED_MIXED` interleaves twelve
+literal-leading plans. Compilation is separate from warm operation methods;
 there is no cache lookup or SQL grouping/aggregation in this benchmark.
 
 Compare the unchanged revision with the candidate on the same AWS host using
