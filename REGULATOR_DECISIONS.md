@@ -787,7 +787,7 @@ patterns on their direct routes. A lowered final-line plan takes precedence
 over a run-leading scan.
 
 Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, `(\w+)@(\w+)`, and
-`([a-z]+)-([0-9]+)`, keep the ordinary engine, as do
+`([a-z]+)-([0-9]+)`, keep the ordinary engine, plain or ASCII-folded, as do
 optional-leading shapes. Each candidate inside a run that fails to complete a
 match rescans the rest of that run, so the work depends on the input, and every
 measured search strategy for this family made some workloads slower than the
@@ -827,6 +827,16 @@ On malformed input, a search that hands off may report the ordinary engine's
 match instead of the plan's. Every operation applies the same budget from the
 same search positions, so `find`, `count`, `extract`, `position`,
 `extractAll`, replacement, and split report one match sequence.
+
+Retain restricted ASCII case folding when every Unicode fold cycle remains in
+ASCII and requires no full multi-character fold. Folded plans use separate
+executors and strategy values. On R9g, folded anchored, optional, unanchored,
+run, and mixed workloads take 0.20 to 1.10 times the ordinary engine's time for
+`contains`, extraction, and replacement, with a geometric mean of 0.38. The
+accepted costs are folded optional boolean matching, at about 1.10 times the
+ordinary engine's time, and unanchored folded compilation, at about 1.19 times.
+Ordinary URL and mixed operations remain faster than the ordinary engine on R8i
+and R9g.
 
 Eligible scan plans intentionally add bounded cold compilation work and retained
 state. Accept that cost only while warm public operations materially improve on

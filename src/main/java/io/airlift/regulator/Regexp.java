@@ -209,7 +209,11 @@ final class Regexp
 
     private static boolean supportsAsciiFoldPrefix(Regexp regexp)
     {
-        int[] literalRunes = regexp.op == RegexpOp.LITERAL ? new int[] {regexp.rune} : regexp.runes;
+        return supportsAsciiFold(regexp.op == RegexpOp.LITERAL ? new int[] {regexp.rune} : regexp.runes);
+    }
+
+    static boolean supportsAsciiFold(int[] literalRunes)
+    {
         for (int literalRune : literalRunes) {
             int foldedRune = literalRune;
             do {

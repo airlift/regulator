@@ -24,7 +24,7 @@ contract, not importing RE2 syntax or changing Trino semantics.
 | Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal or unbounded run of every byte except the one-byte literal after it |
 | End assertions | Optional; strict end and Trino final-LF `$` are supported when present |
 | Terminal behavior | Partial-match success, dot-all `.*`, LF-excluding `.*`, and supported character-set runs |
-| Case folding | Ordinary engine |
+| Case folding | Restricted ASCII literal and run folds proven safe against the Unicode fold tables; separate folded executors; general Unicode folding uses the ordinary engine |
 | Empty overall matches | Ordinary engine |
 | Program size | At most 32 operations plus one terminal operation |
 
@@ -139,7 +139,8 @@ construction.
 End-anchored, anchored partial, and unanchored plans use separate Java executor
 methods over the same operations. This keeps their completion and retry profiles
 out of the end-anchored loop. Literals of up to 16 bytes use precomputed
-first/last word comparisons. Longer literals use `Arrays.mismatch`.
+first/last word comparisons, masked for folded literals. Longer case-sensitive
+literals use `Arrays.mismatch`, and longer folded literals use a scalar loop.
 Delimiter/newline scans use 128-bit vectors with a scalar tail. Four optional
 checkpoints fit in local primitive values; no retry array or boolean workspace
 is allocated.
@@ -183,14 +184,15 @@ case-sensitive leading literal of two or more bytes, the first-byte scan is
 followed by a scalar check of the remaining literal bytes before each attempt.
 An occurrence of the first byte alone starts no attempt, the scan resumes after
 it, and a literal that does not fit before the logical end is never a candidate.
-For a leading unbounded run, a failed attempt resumes at the run end. Every
-interior start would reach the same greedy endpoint and has a subset of the
-already rejected continuation choices. When the run consumes nothing, the next
-candidate advances by one decoded code point so a valid multibyte character is
-never retried from a continuation byte. Optional-leading plans, and plans led by
-any run other than a delimiter complement, remain on the ordinary engine. A
-lowered final-line plan retains precedence for a run-leading expression; a
-literal-leading scan keeps its candidate-byte route.
+ASCII-folded leading literals use the first-byte scan alone. For a leading
+unbounded run, a failed attempt resumes at the run end. Every interior start
+would reach the same greedy endpoint and has a subset of the already rejected
+continuation choices. When the run consumes nothing, the next candidate advances
+by one decoded code point so a valid multibyte character is never retried from a
+continuation byte. Optional-leading plans, and plans led by any run other than a
+delimiter complement, remain on the ordinary engine. A lowered final-line plan
+retains precedence for a run-leading expression; a literal-leading scan keeps
+its candidate-byte route.
 
 ## Correctness and measurement
 
@@ -227,7 +229,11 @@ with no newline. Its `contains` measures the kept literal kernel, and its
 `count` measures the plan's own count, which needs match boundaries. `SETS`
 exercises a small complemented set and a larger ASCII table.
 `LITERAL_CONTROLS` protects the direct `^foo` prefix and `^foo$`
-equality routes. `BOUNDED` includes
+equality routes. `FOLDED_ANCHORED`, `FOLDED_OPTIONAL`,
+`FOLDED_UNANCHORED`, and `FOLDED_MIXED` select the ASCII-folded executors with
+folded literals, a folded optional literal, an unanchored folded header name,
+and a twelve-plan mix. `FOLDED_RUN` folds only a character class, which becomes
+an ordinary set, so it selects the case-sensitive executor. `BOUNDED` includes
 character-counted multibyte matches and rejections. `LONG_SET` and `LONG_ASCII`
 separate the vector and table scaling paths. `SET_MIXED` interleaves twelve
 plans across the single-delimiter operation and three general-run shapes.

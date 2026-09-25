@@ -32,7 +32,7 @@ import java.util.List;
 final class TrinoScanPlan
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoScanPlan.class);
-    private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.FOLD_CASE | Regexp.LATIN1;
+    private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.LATIN1;
     private static final int UNSUPPORTED_FLAGS = UNSUPPORTED_ATOM_FLAGS | Regexp.NON_GREEDY;
     private static final int MAX_RECURSIVE_DEPTH = 32;
     private static final int RETRY_OPERATION_BITS = 6;
@@ -52,6 +52,7 @@ final class TrinoScanPlan
     private static final VarHandle SHORT = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.nativeOrder());
     private static final VarHandle INT = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.nativeOrder());
     private static final VarHandle LONG = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
+    private static final boolean LITTLE_ENDIAN = ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN;
 
     static {
         // Saved positions occupy two longs; saved operation indices occupy one int.
@@ -65,7 +66,9 @@ final class TrinoScanPlan
     private enum Kind
     {
         LITERAL,
+        ASCII_FOLDED_LITERAL,
         OPTIONAL,
+        ASCII_FOLDED_OPTIONAL,
         DELIMITED_CAPTURE,
         DOT_ALL_TAIL,
         LINE_TAIL,
@@ -103,6 +106,8 @@ final class TrinoScanPlan
     // Such a search checks the whole literal at each first-byte candidate in its own loop, so
     // the candidate loop of every other plan has no whole-literal check.
     private final boolean wholeLiteralCandidates;
+    // Set when the plan has an ASCII-folded operation, which only the ASCII-folded executors run.
+    private final boolean usesAsciiFoldedExecutor;
     // WORK_BUDGET_BYTES, or a negative value with which every unanchored search hands off
     // before its first attempt. Only tests select the negative value.
     private final int workBudgetBytes;
@@ -117,6 +122,7 @@ final class TrinoScanPlan
         this.leadingOperation = findLeadingOperation(this.steps);
         Step leading = this.steps[leadingOperation];
         this.wholeLiteralCandidates = !anchoredStart && leading.kind == Kind.LITERAL && leading.literal.length > 1;
+        this.usesAsciiFoldedExecutor = hasAsciiFoldedOperation(this.steps);
         this.workBudgetBytes = workBudgetBytes;
     }
 
@@ -143,8 +149,8 @@ final class TrinoScanPlan
         for (int index = steps.length - 1; index >= 0; index--) {
             Step step = steps[index];
             nullable[index] = switch (step.kind) {
-                case LITERAL, DELIMITED_CAPTURE -> false;
-                case SAVE, OPTIONAL -> nullable[index + 1];
+                case LITERAL, ASCII_FOLDED_LITERAL, DELIMITED_CAPTURE -> false;
+                case SAVE, OPTIONAL, ASCII_FOLDED_OPTIONAL -> nullable[index + 1];
                 case RUN -> step.run.minimum() == 0 && nullable[index + 1];
                 case FORK -> nullable[index + 1] || nullable[step.branch.target()];
                 case DOT_ALL_TAIL, LINE_TAIL, END -> throw new IllegalStateException("partial scan contains " + step.kind);
@@ -152,6 +158,16 @@ final class TrinoScanPlan
             booleanTails[index] = step.kind == Kind.RUN && nullable[index + 1];
         }
         return booleanTails;
+    }
+
+    private static boolean hasAsciiFoldedOperation(Step[] steps)
+    {
+        for (Step step : steps) {
+            if (step.kind == Kind.ASCII_FOLDED_LITERAL || step.kind == Kind.ASCII_FOLDED_OPTIONAL) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -232,7 +248,12 @@ final class TrinoScanPlan
 
     boolean isLiteralLeading()
     {
-        return steps[leadingOperation].kind == Kind.LITERAL;
+        return steps[leadingOperation].kind == Kind.LITERAL || steps[leadingOperation].kind == Kind.ASCII_FOLDED_LITERAL;
+    }
+
+    boolean usesAsciiFoldedExecutor()
+    {
+        return usesAsciiFoldedExecutor;
     }
 
     long estimatedRetainedSize()
@@ -240,6 +261,9 @@ final class TrinoScanPlan
         long size = INSTANCE_SIZE + SizeOf.sizeOf(steps) + SizeOf.sizeOf(booleanTails);
         for (Step step : steps) {
             size += Step.INSTANCE_SIZE + SizeOf.sizeOf(step.literal);
+            if (step.asciiFolded != null) {
+                size += AsciiFoldedLiteral.INSTANCE_SIZE;
+            }
             if (step.run != null) {
                 size += step.run.estimatedRetainedSize();
             }
@@ -292,13 +316,17 @@ final class TrinoScanPlan
                 candidate = findLiteral(bytes, candidate, end, leading.literal);
             }
             else {
-                candidate = nextCandidate(bytes, candidate, end, leading);
+                candidate = usesAsciiFoldedExecutor
+                        ? nextAsciiFoldedCandidate(bytes, candidate, end, leading)
+                        : nextCandidate(bytes, candidate, end, leading);
             }
             if (candidate < 0) {
                 break;
             }
             attempts++;
-            long result = matchUnanchoredAt(bytes, base, end, candidate, false, null);
+            long result = usesAsciiFoldedExecutor
+                    ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, false, null)
+                    : matchUnanchoredAt(bytes, base, end, candidate, false, null);
             if (result >= 0) {
                 break;
             }
@@ -315,10 +343,14 @@ final class TrinoScanPlan
     {
         int offset = input.byteArrayOffset();
         int end = offset + input.length();
-        long result = matchUnanchoredAt(input.byteArray(), offset, end, offset + start, false, null);
+        long result = usesAsciiFoldedExecutor
+                ? matchAsciiFoldedUnanchoredAt(input.byteArray(), offset, end, offset + start, false, null)
+                : matchUnanchoredAt(input.byteArray(), offset, end, offset + start, false, null);
         return result < 0 ? -1 : (int) result - offset;
     }
 
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds use separate executors; kept identical to the measured ordinary switch")
+    @SuppressWarnings("MissingCasesInEnumSwitch")
     boolean matchEndAnchored(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
     {
         byte[] bytes = input.byteArray();
@@ -443,7 +475,148 @@ final class TrinoScanPlan
         }
     }
 
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Partial plans have no END or tail, which the constructor checks")
+    boolean matchAsciiFoldedEndAnchored(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
+    {
+        byte[] bytes = input.byteArray();
+        int base = input.byteArrayOffset() + contextStart;
+        int end = input.byteArrayOffset() + contextEnd;
+        int cursor = base;
+        int operation = 0;
+        int retries = 0;
+        // Four optional groups need at most four saved positions and four six-bit operation
+        // indices. Keep them in locals so boolean matching needs no allocated workspace.
+        long retryPositionsLow = 0;
+        long retryPositionsHigh = 0;
+        int retryOperations = 0;
+        while (true) {
+            Step step = steps[operation++];
+            boolean failed = false;
+            switch (step.kind) {
+                case LITERAL -> {
+                    if (step.matches(bytes, cursor, end)) {
+                        cursor += step.literal.length;
+                    }
+                    else {
+                        failed = true;
+                    }
+                }
+                case ASCII_FOLDED_LITERAL -> {
+                    if (step.matchesAsciiFolded(bytes, cursor, end)) {
+                        cursor += step.literal.length;
+                    }
+                    else {
+                        failed = true;
+                    }
+                }
+                case OPTIONAL -> {
+                    if (step.matches(bytes, cursor, end)) {
+                        retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                        retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                        retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                        retries++;
+                        cursor += step.literal.length;
+                    }
+                }
+                case ASCII_FOLDED_OPTIONAL -> {
+                    if (step.matchesAsciiFolded(bytes, cursor, end)) {
+                        retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                        retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                        retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                        retries++;
+                        cursor += step.literal.length;
+                    }
+                }
+                case DELIMITED_CAPTURE -> {
+                    int stop = findByte(bytes, cursor, end, step.delimiter);
+                    if (stop < 0 || stop - cursor < step.minimum) {
+                        failed = true;
+                        break;
+                    }
+                    if (groups != null && step.slot + 1 < groups.length) {
+                        groups[step.slot] = cursor - base;
+                        groups[step.slot + 1] = stop - base;
+                    }
+                    cursor = stop + 1;
+                }
+                case DOT_ALL_TAIL -> {
+                    return success(groups, end - base);
+                }
+                case LINE_TAIL -> {
+                    int newline = findByte(bytes, cursor, end, (byte) '\n');
+                    if (newline < 0) {
+                        return success(groups, end - base);
+                    }
+                    if (finalLineEnd && !fullMatch && newline == end - 1) {
+                        return success(groups, newline - base);
+                    }
+                    failed = true;
+                }
+                case END -> {
+                    if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n')) {
+                        return success(groups, cursor - base);
+                    }
+                    failed = true;
+                }
+                case RUN -> {
+                    int stop = step.run.match(bytes, cursor, end);
+                    if (stop < 0) {
+                        failed = true;
+                        break;
+                    }
+                    if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                        groups[step.slot] = cursor - base;
+                        groups[step.slot + 1] = stop - base;
+                    }
+                    cursor = stop;
+                }
+                case SAVE -> {
+                    if (groups != null && step.slot < groups.length) {
+                        groups[step.slot] = cursor - base;
+                    }
+                }
+                case FORK -> {
+                    retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                    retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                    retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                    retries++;
+                }
+            }
+            if (failed) {
+                if (retries == 0) {
+                    if (groups != null) {
+                        Arrays.fill(groups, -1);
+                    }
+                    return false;
+                }
+                // Captures inside a skipped optional are cleared. Every later capture on a
+                // successful path is visited again; enclosing captures retain their start.
+                // No group is revisited by repetition, so capture snapshots are unnecessary.
+                retries--;
+                cursor = (int) retryPositionsLow;
+                retryPositionsLow = (retryPositionsLow >>> 32) | (retryPositionsHigh << 32);
+                retryPositionsHigh >>>= 32;
+                operation = retryOperations & RETRY_OPERATION_MASK;
+                retryOperations >>>= RETRY_OPERATION_BITS;
+                Branch branch = steps[operation - 1].branch;
+                if (branch != null) {
+                    operation = branch.target();
+                    if (groups != null) {
+                        int mask = branch.captureMask();
+                        while (mask != 0) {
+                            int slot = 2 * (Integer.numberOfTrailingZeros(mask) + 1);
+                            if (slot + 1 < groups.length) {
+                                groups[slot] = -1;
+                                groups[slot + 1] = -1;
+                            }
+                            mask &= mask - 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds run only in the ASCII-folded executor; partial plans have no END or tail, which the constructor checks")
     @SuppressWarnings("MissingCasesInEnumSwitch")
     boolean matchPartial(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
     {
@@ -566,6 +739,146 @@ final class TrinoScanPlan
         }
     }
 
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Partial plans have no END or tail, which the constructor checks")
+    @SuppressWarnings("MissingCasesInEnumSwitch")
+    boolean matchAsciiFoldedPartial(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
+    {
+        byte[] bytes = input.byteArray();
+        int base = input.byteArrayOffset() + contextStart;
+        int end = input.byteArrayOffset() + contextEnd;
+        int cursor = base;
+        int operation = 0;
+        int retries = 0;
+        // Four optional groups need at most four saved positions and four six-bit operation
+        // indices. Keep them in locals so boolean matching needs no allocated workspace.
+        long retryPositionsLow = 0;
+        long retryPositionsHigh = 0;
+        int retryOperations = 0;
+        while (true) {
+            boolean failed = false;
+            if (operation == steps.length) {
+                if (!fullMatch || cursor == end) {
+                    return success(groups, cursor - base);
+                }
+                failed = true;
+            }
+            else {
+                Step step = steps[operation++];
+                switch (step.kind) {
+                    case LITERAL -> {
+                        if (step.matches(bytes, cursor, end)) {
+                            cursor += step.literal.length;
+                        }
+                        else {
+                            failed = true;
+                        }
+                    }
+                    case ASCII_FOLDED_LITERAL -> {
+                        if (step.matchesAsciiFolded(bytes, cursor, end)) {
+                            cursor += step.literal.length;
+                        }
+                        else {
+                            failed = true;
+                        }
+                    }
+                    case OPTIONAL -> {
+                        if (step.matches(bytes, cursor, end)) {
+                            retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                            retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                            retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                            retries++;
+                            cursor += step.literal.length;
+                        }
+                    }
+                    case ASCII_FOLDED_OPTIONAL -> {
+                        if (step.matchesAsciiFolded(bytes, cursor, end)) {
+                            retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                            retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                            retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                            retries++;
+                            cursor += step.literal.length;
+                        }
+                    }
+                    case DELIMITED_CAPTURE -> {
+                        int stop = findByte(bytes, cursor, end, step.delimiter);
+                        if (stop < 0 || stop - cursor < step.minimum) {
+                            failed = true;
+                            break;
+                        }
+                        if (groups != null && step.slot + 1 < groups.length) {
+                            groups[step.slot] = cursor - base;
+                            groups[step.slot + 1] = stop - base;
+                        }
+                        cursor = stop + 1;
+                    }
+                    case RUN -> {
+                        if (groups == null && !fullMatch && booleanTails[operation - 1]) {
+                            // The continuation cannot fail, so the run's minimum decides this path.
+                            if (step.run.matchMinimum(bytes, cursor, end) >= 0) {
+                                return true;
+                            }
+                            failed = true;
+                            break;
+                        }
+                        int stop = step.run.match(bytes, cursor, end);
+                        if (stop < 0) {
+                            failed = true;
+                            break;
+                        }
+                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                            groups[step.slot] = cursor - base;
+                            groups[step.slot + 1] = stop - base;
+                        }
+                        cursor = stop;
+                    }
+                    case SAVE -> {
+                        if (groups != null && step.slot < groups.length) {
+                            groups[step.slot] = cursor - base;
+                        }
+                    }
+                    case FORK -> {
+                        retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                        retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                        retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                        retries++;
+                    }
+                }
+            }
+            if (failed) {
+                if (retries == 0) {
+                    if (groups != null) {
+                        Arrays.fill(groups, -1);
+                    }
+                    return false;
+                }
+                // Captures inside a skipped optional are cleared. Every later capture on a
+                // successful path is visited again; enclosing captures retain their start.
+                // No group is revisited by repetition, so capture snapshots are unnecessary.
+                retries--;
+                cursor = (int) retryPositionsLow;
+                retryPositionsLow = (retryPositionsLow >>> 32) | (retryPositionsHigh << 32);
+                retryPositionsHigh >>>= 32;
+                operation = retryOperations & RETRY_OPERATION_MASK;
+                retryOperations >>>= RETRY_OPERATION_BITS;
+                Branch branch = steps[operation - 1].branch;
+                if (branch != null) {
+                    operation = branch.target();
+                    if (groups != null) {
+                        int mask = branch.captureMask();
+                        while (mask != 0) {
+                            int slot = 2 * (Integer.numberOfTrailingZeros(mask) + 1);
+                            if (slot + 1 < groups.length) {
+                                groups[slot] = -1;
+                                groups[slot + 1] = -1;
+                            }
+                            mask &= mask - 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Searches for a match that starts in {@code [start, contextEnd)}, or only at {@code start}
      * when {@code anchored}. Returns {@link #SEARCH_MATCHED}, {@link #NO_MATCH}, or the
@@ -577,7 +890,7 @@ final class TrinoScanPlan
     int search(Slice input, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
     {
         if (wholeLiteralCandidates && !anchored) {
-            return searchWholeLiteralCandidates(input, contextStart, contextEnd, start, fullMatch, groups);
+            return searchWholeLiteralCandidates(input, contextStart, contextEnd, start, false, fullMatch, groups);
         }
         byte[] bytes = input.byteArray();
         int offset = input.byteArrayOffset();
@@ -617,12 +930,60 @@ final class TrinoScanPlan
     }
 
     /**
-     * The unanchored search of {@link #search} for a plan led by a case-sensitive literal of two
-     * or more bytes. Each first-byte candidate is checked for the rest of the literal before an
-     * attempt, so an attempt starts only where the whole literal occurs. The loop is separate so that the candidate loop of every other plan has no
+     * The {@link #search} of a plan that uses the ASCII-folded executor, with the same results.
+     * It is a separate copy rather than a flag on search: separate hot loops keep each
+     * C2-compiled shape simple.
+     */
+    int searchAsciiFolded(Slice input, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
+    {
+        if (wholeLiteralCandidates && !anchored) {
+            return searchWholeLiteralCandidates(input, contextStart, contextEnd, start, true, fullMatch, groups);
+        }
+        byte[] bytes = input.byteArray();
+        int offset = input.byteArrayOffset();
+        int base = offset + contextStart;
+        int end = offset + contextEnd;
+        int searchStart = offset + start;
+        int candidate = searchStart;
+        Step leading = steps[leadingOperation];
+        // An anchored search makes one attempt and never hands off.
+        long workLimit = anchored ? Long.MAX_VALUE : workBudgetBytes;
+        long failedWork = 0;
+        while (candidate < end) {
+            if (failedWork - WORK_BUDGET_FACTOR * (long) (candidate - searchStart) > workLimit) {
+                return handOff(groups, candidate - offset);
+            }
+            if (!anchored) {
+                candidate = nextAsciiFoldedCandidate(bytes, candidate, end, leading);
+                if (candidate < 0) {
+                    break;
+                }
+            }
+            long result = matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
+            if (result >= 0) {
+                return SEARCH_MATCHED;
+            }
+            if (anchored) {
+                break;
+            }
+            long failure = ~result;
+            failedWork += (int) (failure >>> 32) - candidate;
+            candidate = resumeAfterFailedAttempt(bytes, candidate, end, (int) failure, leading);
+        }
+        if (groups != null) {
+            Arrays.fill(groups, -1);
+        }
+        return NO_MATCH;
+    }
+
+    /**
+     * The unanchored search of {@link #search} and {@link #searchAsciiFolded} for a plan led by a
+     * case-sensitive literal of two or more bytes. Each first-byte candidate is checked for the
+     * rest of the literal before an attempt, so an attempt starts only where the whole literal
+     * occurs. The loop is separate so that the candidate loop of every other plan has no
      * whole-literal check. A literal-led plan has no separate required literal.
      */
-    private int searchWholeLiteralCandidates(Slice input, int contextStart, int contextEnd, int start, boolean fullMatch, int[] groups)
+    private int searchWholeLiteralCandidates(Slice input, int contextStart, int contextEnd, int start, boolean asciiFolded, boolean fullMatch, int[] groups)
     {
         byte[] bytes = input.byteArray();
         int offset = input.byteArrayOffset();
@@ -640,7 +1001,9 @@ final class TrinoScanPlan
             if (candidate < 0) {
                 break;
             }
-            long result = matchUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
+            long result = asciiFolded
+                    ? matchAsciiFoldedUnanchoredAt(bytes, base, end, candidate, fullMatch, groups)
+                    : matchUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
             if (result >= 0) {
                 return SEARCH_MATCHED;
             }
@@ -673,6 +1036,17 @@ final class TrinoScanPlan
     private static int nextCandidate(byte[] bytes, int candidate, int end, Step leading)
     {
         if (leading.kind == Kind.LITERAL) {
+            return findByte(bytes, candidate, end, leading.literal[0]);
+        }
+        return candidate;
+    }
+
+    private static int nextAsciiFoldedCandidate(byte[] bytes, int candidate, int end, Step leading)
+    {
+        if (leading.kind == Kind.ASCII_FOLDED_LITERAL && isLowercaseAsciiLetter(leading.literal[0])) {
+            return findAsciiFoldedByte(bytes, candidate, end, leading.literal[0]);
+        }
+        if (leading.kind == Kind.LITERAL || leading.kind == Kind.ASCII_FOLDED_LITERAL) {
             return findByte(bytes, candidate, end, leading.literal[0]);
         }
         return candidate;
@@ -715,7 +1089,7 @@ final class TrinoScanPlan
 
     // The unanchored executors run only plans without a start anchor, which compaction never
     // rewrites into delimited captures or tails.
-    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Delimited captures and tails occur only in start-anchored plans")
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds run only in the ASCII-folded executor; delimited captures and tails occur only in start-anchored plans")
     @SuppressWarnings("MissingCasesInEnumSwitch")
     private long matchUnanchoredAt(byte[] bytes, int base, int end, int matchStart, boolean fullMatch, int[] groups)
     {
@@ -754,6 +1128,144 @@ final class TrinoScanPlan
                     }
                     case OPTIONAL -> {
                         if (step.matches(bytes, cursor, end)) {
+                            retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                            retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                            retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                            retries++;
+                            cursor += step.literal.length;
+                        }
+                    }
+                    case END -> {
+                        if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n')) {
+                            success(groups, matchStart - base, cursor - base);
+                            return cursor;
+                        }
+                        failed = true;
+                    }
+                    case RUN -> {
+                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                            // The continuation cannot fail, so the run's minimum decides this path.
+                            // Boolean callers observe only a nonnegative result, not its end.
+                            int stop = step.run.matchMinimum(bytes, cursor, end);
+                            if (stop >= 0) {
+                                return stop;
+                            }
+                            failed = true;
+                            break;
+                        }
+                        int stop = step.run.match(bytes, cursor, end);
+                        if (stop < 0) {
+                            failed = true;
+                            break;
+                        }
+                        scanned = Math.max(scanned, stop);
+                        if (stepIndex == leadingOperation) {
+                            leadingRunEnd = stop;
+                        }
+                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                            groups[step.slot] = cursor - base;
+                            groups[step.slot + 1] = stop - base;
+                        }
+                        cursor = stop;
+                    }
+                    case SAVE -> {
+                        if (groups != null && step.slot < groups.length) {
+                            groups[step.slot] = cursor - base;
+                        }
+                    }
+                    case FORK -> {
+                        retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                        retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                        retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                        retries++;
+                    }
+                }
+            }
+            if (failed) {
+                if (retries == 0) {
+                    return failedAttempt(leadingRunEnd, scanned);
+                }
+                retries--;
+                cursor = (int) retryPositionsLow;
+                retryPositionsLow = (retryPositionsLow >>> 32) | (retryPositionsHigh << 32);
+                retryPositionsHigh >>>= 32;
+                operation = retryOperations & RETRY_OPERATION_MASK;
+                retryOperations >>>= RETRY_OPERATION_BITS;
+                Branch branch = steps[operation - 1].branch;
+                if (branch != null) {
+                    operation = branch.target();
+                    if (groups != null) {
+                        int mask = branch.captureMask();
+                        while (mask != 0) {
+                            int slot = 2 * (Integer.numberOfTrailingZeros(mask) + 1);
+                            if (slot + 1 < groups.length) {
+                                groups[slot] = -1;
+                                groups[slot + 1] = -1;
+                            }
+                            mask &= mask - 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Delimited captures and tails occur only in start-anchored plans")
+    @SuppressWarnings("MissingCasesInEnumSwitch")
+    private long matchAsciiFoldedUnanchoredAt(byte[] bytes, int base, int end, int matchStart, boolean fullMatch, int[] groups)
+    {
+        if (groups != null) {
+            Arrays.fill(groups, -1);
+        }
+        int cursor = matchStart;
+        int operation = 0;
+        int retries = 0;
+        int leadingRunEnd = matchStart;
+        // The furthest byte any unbounded scan of this attempt reached, across retries.
+        int scanned = matchStart;
+        long retryPositionsLow = 0;
+        long retryPositionsHigh = 0;
+        int retryOperations = 0;
+        while (true) {
+            boolean failed = false;
+            if (operation == steps.length) {
+                if (partialMatch && (!fullMatch || cursor == end)) {
+                    success(groups, matchStart - base, cursor - base);
+                    return cursor;
+                }
+                failed = true;
+            }
+            else {
+                int stepIndex = operation;
+                Step step = steps[operation++];
+                switch (step.kind) {
+                    case LITERAL -> {
+                        if (step.matches(bytes, cursor, end)) {
+                            cursor += step.literal.length;
+                        }
+                        else {
+                            failed = true;
+                        }
+                    }
+                    case ASCII_FOLDED_LITERAL -> {
+                        if (step.matchesAsciiFolded(bytes, cursor, end)) {
+                            cursor += step.literal.length;
+                        }
+                        else {
+                            failed = true;
+                        }
+                    }
+                    case OPTIONAL -> {
+                        if (step.matches(bytes, cursor, end)) {
+                            retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                            retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                            retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                            retries++;
+                            cursor += step.literal.length;
+                        }
+                    }
+                    case ASCII_FOLDED_OPTIONAL -> {
+                        if (step.matchesAsciiFolded(bytes, cursor, end)) {
                             retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
                             retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
                             retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
@@ -878,6 +1390,24 @@ final class TrinoScanPlan
         return -1;
     }
 
+    private static int findAsciiFoldedByte(byte[] bytes, int cursor, int end, byte folded)
+    {
+        if (VectorSupport.isAvailable()) {
+            return VectorTrinoScanner.findAsciiFoldedByte(bytes, cursor, end, folded);
+        }
+        for (; cursor < end; cursor++) {
+            if ((bytes[cursor] | 0x20) == folded) {
+                return cursor;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isLowercaseAsciiLetter(byte value)
+    {
+        return 'a' <= value && value <= 'z';
+    }
+
     private record Branch(int target, int captureMask)
     {
         private static final int INSTANCE_SIZE = SizeOf.instanceSize(Branch.class);
@@ -988,7 +1518,7 @@ final class TrinoScanPlan
                 if (step.kind == Kind.SAVE) {
                     continue;
                 }
-                if (step.kind == Kind.LITERAL) {
+                if (step.kind == Kind.LITERAL || step.kind == Kind.ASCII_FOLDED_LITERAL) {
                     return true;
                 }
                 if (step.kind != Kind.RUN) {
@@ -1031,7 +1561,7 @@ final class TrinoScanPlan
                     if (literal == null) {
                         return false;
                     }
-                    steps.add(Step.literal(literal));
+                    steps.add(isAsciiFoldedLiteral(expression) ? Step.asciiFoldedLiteral(literal) : Step.literal(literal));
                 }
                 case CAPTURE -> {
                     int group = expression.captureIndex();
@@ -1083,6 +1613,13 @@ final class TrinoScanPlan
             if (runes.length == 0 || runes.length > MAX_LITERAL_BYTES) {
                 return null;
             }
+            boolean foldAscii = (expression.parseFlags() & Regexp.FOLD_CASE) != 0;
+            if (foldAscii && !Regexp.supportsAsciiFold(runes)) {
+                return null;
+            }
+            if (!foldAscii && (expression.parseFlags() & Regexp.FULL_CASE_FOLD) != 0) {
+                return null;
+            }
             int length = 0;
             for (int rune : runes) {
                 if (rune >= 0xD800 && rune <= 0xDFFF) {
@@ -1096,10 +1633,31 @@ final class TrinoScanPlan
             byte[] bytes = new byte[length];
             int offset = 0;
             for (int rune : runes) {
-                Utf8.encode(bytes, offset, rune);
-                offset += Utf8.encodedLength(rune);
+                if (foldAscii && (('A' <= rune && rune <= 'Z') || ('a' <= rune && rune <= 'z'))) {
+                    bytes[offset++] = (byte) (rune | 0x20);
+                }
+                else {
+                    Utf8.encode(bytes, offset, rune);
+                    offset += Utf8.encodedLength(rune);
+                }
             }
             return bytes;
+        }
+
+        private static boolean isAsciiFoldedLiteral(Regexp expression)
+        {
+            if ((expression.parseFlags() & Regexp.FOLD_CASE) == 0) {
+                return false;
+            }
+            if (expression.op() == RegexpOp.LITERAL) {
+                return expression.rune() < 128 && isLowercaseAsciiLetter((byte) (expression.rune() | 0x20));
+            }
+            for (int rune : expression.runes()) {
+                if (rune < 128 && isLowercaseAsciiLetter((byte) (rune | 0x20))) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private boolean hasRun()
@@ -1140,7 +1698,7 @@ final class TrinoScanPlan
                 if (++optionals > MAX_OPTIONALS) {
                     return false;
                 }
-                steps.add(Step.optionalLiteral(literal));
+                steps.add(isAsciiFoldedLiteral(body) ? Step.asciiFoldedOptional(literal) : Step.optionalLiteral(literal));
                 return true;
             }
             // A top-level optional character atom is lowered to one bounded run
@@ -1181,9 +1739,15 @@ final class TrinoScanPlan
                         nullable[index] = nullable[index + 1];
                     }
                     case LITERAL -> add(first, index, step.literal[0] & 0xFF);
+                    case ASCII_FOLDED_LITERAL -> addAsciiFolded(first, index, step.literal[0]);
                     case OPTIONAL -> {
                         merge(first, index, index + 1);
                         add(first, index, step.literal[0] & 0xFF);
+                        nullable[index] = nullable[index + 1];
+                    }
+                    case ASCII_FOLDED_OPTIONAL -> {
+                        merge(first, index, index + 1);
+                        addAsciiFolded(first, index, step.literal[0]);
                         nullable[index] = nullable[index + 1];
                     }
                     case FORK -> {
@@ -1210,6 +1774,14 @@ final class TrinoScanPlan
         private static void add(long[] sets, int set, int value)
         {
             sets[set * FIRST_BYTE_WORDS + (value >>> 6)] |= 1L << (value & 63);
+        }
+
+        private static void addAsciiFolded(long[] sets, int set, byte value)
+        {
+            add(sets, set, value);
+            if (isLowercaseAsciiLetter(value)) {
+                add(sets, set, value - ('a' - 'A'));
+            }
         }
 
         private void compact(int captureCount, boolean anchoredEnd)
@@ -1290,6 +1862,7 @@ final class TrinoScanPlan
         private final int lastOffset;
         private final long first;
         private final long last;
+        private final AsciiFoldedLiteral asciiFolded;
         private final TrinoScanPlanRun run;
         private final Branch branch;
 
@@ -1298,9 +1871,19 @@ final class TrinoScanPlan
             return new Step(Kind.LITERAL, bytes, 0, 0, 0, null, null);
         }
 
+        private static Step asciiFoldedLiteral(byte[] bytes)
+        {
+            return new Step(Kind.ASCII_FOLDED_LITERAL, bytes, 0, 0, 0, null, null);
+        }
+
         private static Step optionalLiteral(byte[] bytes)
         {
             return new Step(Kind.OPTIONAL, bytes, 0, 0, 0, null, null);
+        }
+
+        private static Step asciiFoldedOptional(byte[] bytes)
+        {
+            return new Step(Kind.ASCII_FOLDED_OPTIONAL, bytes, 0, 0, 0, null, null);
         }
 
         private static Step delimitedCapture(int delimiter, int slot, int minimum)
@@ -1351,6 +1934,9 @@ final class TrinoScanPlan
             this.lastOffset = literal == null ? 0 : literal.length - width;
             this.first = literal == null ? 0 : read(literal, 0, width);
             this.last = literal == null ? 0 : read(literal, lastOffset, width);
+            this.asciiFolded = kind == Kind.ASCII_FOLDED_LITERAL || kind == Kind.ASCII_FOLDED_OPTIONAL
+                    ? new AsciiFoldedLiteral(foldMask(literal, 0, width), foldMask(literal, lastOffset, width))
+                    : null;
         }
 
         private boolean matches(byte[] input, int cursor, int end)
@@ -1370,6 +1956,48 @@ final class TrinoScanPlan
             };
         }
 
+        private boolean matchesAsciiFolded(byte[] input, int cursor, int end)
+        {
+            if (literal.length > end - cursor) {
+                return false;
+            }
+            if (literal.length > 2 * Long.BYTES) {
+                for (int index = 0; index < literal.length; index++) {
+                    int actual = input[cursor + index] & 0xFF;
+                    int expected = literal[index] & 0xFF;
+                    if (isLowercaseAsciiLetter(literal[index])) {
+                        actual |= 0x20;
+                    }
+                    if (actual != expected) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            return switch (width) {
+                case 1 -> ((input[cursor] | asciiFolded.firstMask) ^ first) == 0;
+                case 2 -> ((((short) SHORT.get(input, cursor) | asciiFolded.firstMask) ^ first) |
+                        (((short) SHORT.get(input, cursor + lastOffset) | asciiFolded.lastMask) ^ last)) == 0;
+                case 4 -> ((((int) INT.get(input, cursor) | asciiFolded.firstMask) ^ first) |
+                        (((int) INT.get(input, cursor + lastOffset) | asciiFolded.lastMask) ^ last)) == 0;
+                case 8 -> ((((long) LONG.get(input, cursor) | asciiFolded.firstMask) ^ first) |
+                        (((long) LONG.get(input, cursor + lastOffset) | asciiFolded.lastMask) ^ last)) == 0;
+                default -> throw new IllegalStateException("unexpected literal width: " + width);
+            };
+        }
+
+        private static long foldMask(byte[] bytes, int offset, int width)
+        {
+            long mask = 0;
+            for (int index = 0; index < width; index++) {
+                if (isLowercaseAsciiLetter(bytes[offset + index])) {
+                    int shift = Byte.SIZE * (LITTLE_ENDIAN ? index : width - index - 1);
+                    mask |= 0x20L << shift;
+                }
+            }
+            return mask;
+        }
+
         private static long read(byte[] bytes, int offset, int width)
         {
             return switch (width) {
@@ -1380,5 +2008,10 @@ final class TrinoScanPlan
                 default -> throw new IllegalStateException("unexpected literal width: " + width);
             };
         }
+    }
+
+    private record AsciiFoldedLiteral(long firstMask, long lastMask)
+    {
+        private static final int INSTANCE_SIZE = SizeOf.instanceSize(AsciiFoldedLiteral.class);
     }
 }

@@ -32,28 +32,39 @@ public final class VectorTrinoScannerProbe
         // Anchored runs of one-byte sets stop with the run scan.
         verify("^abc(?:(x+))?y*$",
                 "LITERAL,FORK,SAVE,RUN,SAVE,RUN,END",
+                false,
                 "abc" + "x".repeat(64) + FILLER,
                 "x".repeat(64),
                 1);
         verify("^([^/]{2,})/$",
                 "RUN,LITERAL,END",
+                false,
                 "h".repeat(64) + "/",
                 "h".repeat(64),
                 1);
         // A literal-leading unanchored search finds its first byte.
         verify("https?://([^/]+)/",
                 "LITERAL,OPTIONAL,LITERAL,SAVE,RUN,SAVE,LITERAL",
+                false,
                 FILLER + "https://" + "h".repeat(64) + "/" + FILLER,
                 "h".repeat(64),
                 1);
+        // The ASCII-folded executor finds a folded leading letter in either case.
+        verify("(?i)content-type:([^;]+);",
+                "ASCII_FOLDED_LITERAL,SAVE,RUN,SAVE,LITERAL",
+                true,
+                FILLER + "CONTENT-TYPE:text;" + FILLER + "content-type:html;",
+                "text",
+                2);
 
         System.out.printf("OK %s%n", expectedVectorApiAvailable ? "vector" : "scalar");
     }
 
-    private static void verify(String expression, String operations, String text, String group, int count)
+    private static void verify(String expression, String operations, boolean asciiFolded, String text, String group, int count)
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
         check(regexp.pattern().usesTrinoScanPlanForDiagnostics(), expression + ": no scan plan");
+        check(regexp.pattern().usesAsciiFoldedTrinoScanExecutorForDiagnostics() == asciiFolded, expression + ": unexpected executor");
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
         TrinoScanPlan plan = TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false);
         check(plan != null, expression + ": no plan");

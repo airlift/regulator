@@ -25,7 +25,7 @@ final class TrinoScanPlanRun
     static final int MATCHES_EVERY_BYTE = 256;
 
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoScanPlanRun.class);
-    private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.FOLD_CASE | Regexp.LATIN1;
+    private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.LATIN1;
     private static final int UNSUPPORTED_FLAGS = UNSUPPORTED_ATOM_FLAGS | Regexp.NON_GREEDY;
 
     private final boolean[] members;
@@ -106,7 +106,23 @@ final class TrinoScanPlanRun
                 if (atom.rune() >= 128) {
                     return null;
                 }
-                members[atom.rune()] = true;
+                if ((atom.parseFlags() & Regexp.FOLD_CASE) != 0) {
+                    if (!Regexp.supportsAsciiFold(new int[] {atom.rune()})) {
+                        return null;
+                    }
+                    int member = atom.rune();
+                    do {
+                        members[member] = true;
+                        member = UnicodeCaseFold.cycleFoldRune(member);
+                    }
+                    while (member != atom.rune());
+                }
+                else {
+                    if ((atom.parseFlags() & Regexp.FULL_CASE_FOLD) != 0) {
+                        return null;
+                    }
+                    members[atom.rune()] = true;
+                }
             }
             case ANY_CHAR -> {
                 Arrays.fill(members, true);
