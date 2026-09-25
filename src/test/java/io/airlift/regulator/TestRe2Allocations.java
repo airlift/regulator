@@ -170,6 +170,34 @@ public class TestRe2Allocations
         assertThat(allocatedBytes / 10_000).isZero();
     }
 
+    @Test
+    public void testTrinoUnanchoredScanCountAllocatesOnlySearchResult()
+    {
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+
+        TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/"));
+        Slice source = Slices.utf8Slice("see http://one.example/ and https://two.example/ for details");
+        assertThat(pattern.pattern().usesTrinoScanPlanForDiagnostics()).isTrue();
+
+        for (int iteration = 0; iteration < 20_000; iteration++) {
+            assertThat(pattern.count(source)).isEqualTo(2);
+        }
+
+        long allocatedBytes = minimumAllocatedBytes(20_000, () -> {
+            long matchCount = 0;
+            for (int iteration = 0; iteration < 10_000; iteration++) {
+                matchCount += pattern.count(source);
+            }
+            return matchCount;
+        });
+
+        assertThat(allocatedBytes / 10_000)
+                .as("each count allocates only its int[2] search result, 24 bytes with compressed class pointers")
+                .isLessThanOrEqualTo(24);
+    }
+
     /**
      * Runs {@code operations} three times, checks each result, and returns the fewest bytes the
      * current thread allocated in one run. An allocation per operation appears in every run. A

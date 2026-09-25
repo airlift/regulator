@@ -75,6 +75,7 @@ public final class Re2
     private static final byte BOOLEAN_FIND_SINGLE_BYTE = 13;
     private static final byte BOOLEAN_FIND_TRINO_SCAN = 14;
     private static final byte BOOLEAN_FIND_PARTIAL_TRINO_SCAN = 15;
+    private static final byte BOOLEAN_FIND_UNANCHORED_TRINO_SCAN = 16;
 
     // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk.
     private static final int MAX_DIRECT_BYTE_SCAN_BYTES = 64;
@@ -419,10 +420,16 @@ public final class Re2
             singleByteMatcher = SingleByteMatcher.unsupported();
         }
         byte scanStrategy = BOOLEAN_FIND_GENERAL;
-        if (booleanPlans.trinoScanPlan() != null) {
-            scanStrategy = booleanPlans.trinoScanPlan().isPartialMatch()
-                    ? BOOLEAN_FIND_PARTIAL_TRINO_SCAN
-                    : BOOLEAN_FIND_TRINO_SCAN;
+        TrinoScanPlan scanPlan = booleanPlans.trinoScanPlan();
+        if (scanPlan != null) {
+            if (!scanPlan.isAnchoredStart()) {
+                scanStrategy = BOOLEAN_FIND_UNANCHORED_TRINO_SCAN;
+            }
+            else {
+                scanStrategy = scanPlan.isPartialMatch()
+                        ? BOOLEAN_FIND_PARTIAL_TRINO_SCAN
+                        : BOOLEAN_FIND_TRINO_SCAN;
+            }
             // Literal kernels answer existence without reading past the literal; keep them for
             // full-Slice find. Every other strategy that can coexist with a plan is replaced.
             if (findStrategy != BOOLEAN_FIND_CONTAINS &&
@@ -662,9 +669,11 @@ public final class Re2
     }
 
     /**
-     * The caller passes a private snapshot that it never mutates.
+     * The caller passes a private snapshot that it never mutates. A scan plan built with
+     * {@code forceScanPlanHandoff} continues every unanchored search on the ordinary engine
+     * before its first attempt; only tests request it.
      */
-    static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory)
+    static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory, boolean forceScanPlanHandoff)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
@@ -706,7 +715,7 @@ public final class Re2
                         null);
             }
         }
-        return build(pattern, parsed, flags, maxMemory, false, Compiler.Dialect.TRINO);
+        return build(pattern, parsed, flags, maxMemory, false, Compiler.Dialect.TRINO, forceScanPlanHandoff);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)
@@ -722,7 +731,7 @@ public final class Re2
 
     private static Re2 build(Slice pattern, ParseResult parsed, int flags, long maxMemory, boolean longestMatch)
     {
-        return build(pattern, parsed, flags, maxMemory, longestMatch, Compiler.Dialect.RE2);
+        return build(pattern, parsed, flags, maxMemory, longestMatch, Compiler.Dialect.RE2, false);
     }
 
     private static Re2 build(
@@ -731,7 +740,8 @@ public final class Re2
             int flags,
             long maxMemory,
             boolean longestMatch,
-            Compiler.Dialect compilerDialect)
+            Compiler.Dialect compilerDialect,
+            boolean forceScanPlanHandoff)
     {
         long reverseMemory = Math.max(1, maxMemory / 3);
         long forwardMemory = Math.max(1, maxMemory - reverseMemory);
@@ -825,14 +835,14 @@ public final class Re2
                 exactLiteral == null ? -1 : exactLiteral.length(),
                 requiredPrefix,
                 semanticProgram);
-        // Reuse the compiler's anchor proof to reject unanchored patterns without allocating
-        // a temporary scan-plan analysis. A stripped required prefix carries the start anchor.
-        TrinoScanPlan trinoScanPlan = compilerDialect == Compiler.Dialect.TRINO &&
-                (requiredPrefix != null || semanticProgram.anchorStart())
-                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount)
+        TrinoScanPlan trinoScanPlan = compilerDialect == Compiler.Dialect.TRINO && !expressionAnalysis.canMatchEmpty()
+                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount, forceScanPlanHandoff)
                 : null;
+        // Anchored and literal-led plans take precedence over a lowered boolean program. A run-led
+        // unanchored plan yields to one, which keeps the lowered final-line route.
+        boolean scanPlanPrecedesLoweredProgram = trinoScanPlan != null && (trinoScanPlan.isAnchoredStart() || trinoScanPlan.isLiteralLeading());
         long scanPlanSize = trinoScanPlan == null ? 0 : trinoScanPlan.estimatedRetainedSize();
-        if (trinoScanPlan != null && scanPlanSize <= semanticProgram.dfaMemory()) {
+        if (scanPlanPrecedesLoweredProgram && scanPlanSize <= semanticProgram.dfaMemory()) {
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - scanPlanSize);
             booleanPlans = booleanPlans.withTrinoScanPlan(trinoScanPlan);
         }
@@ -847,6 +857,11 @@ public final class Re2
         }
         if (loweredBooleanProgram != null) {
             booleanPlans = selectLoweredBooleanPlans(booleanPlans, loweredBooleanProgram.program());
+        }
+        if (trinoScanPlan != null && !scanPlanPrecedesLoweredProgram &&
+                loweredBooleanProgram == null && scanPlanSize <= semanticProgram.dfaMemory()) {
+            semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - scanPlanSize);
+            booleanPlans = booleanPlans.withTrinoScanPlan(trinoScanPlan);
         }
         TaggedAlternationProgram taggedAlternationProgram = requiredPrefix == null && loweredBooleanProgram == null
                 ? TaggedAlternationProgram.compile(entireRegexp, capturingGroupCount, longestMatch, semanticProgram, compilerDialect)
@@ -1259,8 +1274,8 @@ public final class Re2
         if (strategy != BOOLEAN_FIND_GENERAL) {
             // The single-byte strategy and the scan strategies are the highest values, so one
             // comparison keeps them off the established literal dispatch. A scan strategy appears
-            // here only when it equals trinoScanStrategy; a retained literal kernel keeps its own
-            // value.
+            // here only when it equals trinoScanStrategy; a retained literal kernel or ordinary
+            // strategy keeps its own value.
             if (strategy >= BOOLEAN_FIND_SINGLE_BYTE) {
                 if (strategy != BOOLEAN_FIND_SINGLE_BYTE) {
                     return findWithTrinoScanPlan(input, strategy);
@@ -1290,8 +1305,32 @@ public final class Re2
         return switch (strategy) {
             case BOOLEAN_FIND_TRINO_SCAN -> plan.matchEndAnchored(input, 0, length, false, null);
             case BOOLEAN_FIND_PARTIAL_TRINO_SCAN -> plan.matchPartial(input, 0, length, false, null);
+            case BOOLEAN_FIND_UNANCHORED_TRINO_SCAN -> finishTrinoScanSearch(input, 0, length, plan.search(input, 0, length, 0, false, false, null), Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
             default -> throw new IllegalStateException("not a scan strategy: " + strategy);
         };
+    }
+
+    /**
+     * Returns whether a scan-plan search that returned {@code result} matched. A
+     * {@link TrinoScanPlan#SEARCH_MATCHED} or {@link TrinoScanPlan#NO_MATCH} result is final. Any
+     * other result is the offset where the search handed off; the search then finishes on the
+     * ordinary engine with the context, anchor, and context-relative capture offsets the plan
+     * received. No match starts between the plan's search start and that offset. This route
+     * skips the plan, so the search cannot hand off again.
+     */
+    private boolean finishTrinoScanSearch(
+            Slice text,
+            int contextStart,
+            int contextEnd,
+            int result,
+            Anchor anchor,
+            int[] groupOffsets,
+            MatchWorkspaces workspaces)
+    {
+        if (result < 0) {
+            return result == TrinoScanPlan.SEARCH_MATCHED;
+        }
+        return matchInternal(partialProg, text, contextStart, contextEnd, result, contextEnd, anchor, groupOffsets, workspaces, false);
     }
 
     /**
@@ -1468,6 +1507,7 @@ public final class Re2
     Dfa.CandidateStartCursor createCandidateStartCursor()
     {
         if (booleanPlans.disjointSuffixRepeatMatcher() != null || usesCompactBoundedCharacterClassForDiagnostics() ||
+                booleanPlans.trinoScanPlan() != null ||
                 longestMatch ||
                 requiredPrefix != null ||
                 partialProg.anchorStart() ||
@@ -1487,6 +1527,7 @@ public final class Re2
     Dfa.GroupZeroForwardCursor createGroupZeroForwardCursor()
     {
         if (booleanPlans.disjointSuffixRepeatMatcher() != null || usesCompactBoundedCharacterClassForDiagnostics() ||
+                booleanPlans.trinoScanPlan() != null ||
                 longestMatch ||
                 requiredPrefix != null ||
                 partialProg.anchorStart() ||
@@ -1686,6 +1727,11 @@ public final class Re2
     long countMatches(Slice text)
     {
         requireNonNull(text, "text is null");
+        // An unanchored plan gives malformed UTF-8 bytes the membership find gives them, which
+        // the DFA count would reject. Count through the plan so both agree.
+        if (trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_TRINO_SCAN) {
+            return countUnanchoredTrinoScanMatches(text);
+        }
         if (exactLiteralLength > 0) {
             long count = 0;
             byte[] bytes = text.byteArray();
@@ -1727,6 +1773,30 @@ public final class Re2
 
         Prog.MatchKind matchKind = longestMatch ? Prog.MatchKind.LONGEST_MATCH : Prog.MatchKind.FIRST_MATCH;
         return Dfa.countMatches(partialProg, text, matchKind);
+    }
+
+    /**
+     * Counts the group-zero matches {@link Re2Matcher#find()} would return. A plan never
+     * matches empty, so each search resumes at the previous match end. As in a find loop, each
+     * search starts on the plan with its own work budget, and one that hands off finds its
+     * match on the ordinary engine.
+     */
+    private long countUnanchoredTrinoScanMatches(Slice text)
+    {
+        TrinoScanPlan plan = booleanPlans.trinoScanPlan();
+        int[] groups = new int[2];
+        int length = text.length();
+        long count = 0;
+        int start = 0;
+        while (start < length) {
+            int result = plan.search(text, 0, length, start, false, false, groups);
+            if (!finishTrinoScanSearch(text, 0, length, result, Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES)) {
+                break;
+            }
+            count++;
+            start = groups[1];
+        }
+        return count;
     }
 
     SingleByteMatcher createSingleByteMatcher()
@@ -2154,6 +2224,34 @@ public final class Re2
             int[] groupOffsets,
             MatchWorkspaces workspaces)
     {
+        return matchInternal(
+                prog,
+                text,
+                contextStart,
+                contextEnd,
+                start,
+                end,
+                anchor,
+                groupOffsets,
+                workspaces,
+                true);
+    }
+
+    // scanPlanSearch is false only when continuing an unanchored scan-plan search that handed
+    // off; the unanchored plan strategies then take the ordinary route below. No other plan
+    // strategy hands off, so none is reached with the flag cleared.
+    private boolean matchInternal(
+            Prog prog,
+            Slice text,
+            int contextStart,
+            int contextEnd,
+            int start,
+            int end,
+            Anchor anchor,
+            int[] groupOffsets,
+            MatchWorkspaces workspaces,
+            boolean scanPlanSearch)
+    {
         requireNonNull(text, "text is null");
         if (contextStart < 0 || contextEnd < contextStart || contextEnd > text.length() ||
                 start < contextStart || end < start || end > contextEnd) {
@@ -2172,6 +2270,17 @@ public final class Re2
         if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_PARTIAL_TRINO_SCAN && end == contextEnd) {
             return start == contextStart && booleanPlans.trinoScanPlan().matchPartial(
                     text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
+        }
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_TRINO_SCAN && end == contextEnd && scanPlanSearch) {
+            int result = booleanPlans.trinoScanPlan().search(
+                    text,
+                    contextStart,
+                    contextEnd,
+                    start,
+                    anchorMode != Anchor.UNANCHORED,
+                    anchorMode == Anchor.ANCHOR_BOTH,
+                    groupOffsets);
+            return finishTrinoScanSearch(text, contextStart, contextEnd, result, anchorMode, groupOffsets, workspaces);
         }
         if (prog == partialProg && booleanPlans.disjointSuffixRepeatMatcher() != null) {
             long span = booleanPlans.disjointSuffixRepeatMatcher().search(text, start, end, anchorMode);
@@ -2599,7 +2708,7 @@ public final class Re2
             case BOOLEAN_FIND_ENDS_WITH_FINAL_LINE -> BooleanPartialMatchStrategy.ENDS_WITH_FINAL_LINE;
             case BOOLEAN_FIND_LOWERED_PROGRAM, BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO -> BooleanPartialMatchStrategy.LOWERED_PROGRAM;
             case BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS, BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA, BOOLEAN_FIND_SINGLE_BYTE,
-                 BOOLEAN_FIND_TRINO_SCAN, BOOLEAN_FIND_PARTIAL_TRINO_SCAN -> BooleanPartialMatchStrategy.GENERAL;
+                 BOOLEAN_FIND_TRINO_SCAN, BOOLEAN_FIND_PARTIAL_TRINO_SCAN, BOOLEAN_FIND_UNANCHORED_TRINO_SCAN -> BooleanPartialMatchStrategy.GENERAL;
             default -> throw new IllegalArgumentException("unknown boolean find strategy: " + strategy);
         };
     }

@@ -775,10 +775,26 @@ matcher lifecycle behavior remain required. This does not relax RE2 or Java
 semantics or authorize a public malformed-input opt-in. The plan performs no
 runtime code generation, and the ordinary semantic program remains the
 fallback. The [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md) describes
-the executors and optional-capture execution.
+candidate selection, resume rules, the executors, and optional-capture
+execution.
 
-Plans require the logical input start. A capture-free plan must contain a
-character run. This rule keeps literal-only patterns on their direct routes.
+Plans may require the logical input start or perform unanchored search. An
+unanchored plan must begin, after capture saves, with a literal or an unbounded
+run of every byte except the one-byte case-sensitive literal that follows it,
+and must contain a capture and a variable run. A capture-free plan must contain
+a character run. These rules keep capture-free, fixed-width, and literal-only
+patterns on their direct routes. A lowered final-line plan takes precedence
+over a run-leading scan.
+
+Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, `(\w+)@(\w+)`, and
+`([a-z]+)-([0-9]+)`, keep the ordinary engine, as do
+optional-leading shapes. Each candidate inside a run that fails to complete a
+match rescans the rest of that run, so the work depends on the input, and every
+measured search strategy for this family made some workloads slower than the
+ordinary engine. A run of every byte except the one-byte literal that follows
+it, such as `([^/]+)/`, `([^:]+):([0-9]+)`, or `([^,]{2,}),`, is admitted. Its
+scan stops only at the delimiter, which the literal then matches, and this
+shape measured faster than the ordinary engine with no loss.
 
 Character sets must be ASCII-only or have uniform non-ASCII membership.
 Variable repetition requires a continuation disjoint from the repeated set
@@ -787,7 +803,8 @@ exact counts need no such proof. Finite bounds count characters, not bytes.
 Repeated captures, nested repetitions, repeated multi-operation bodies, and
 whole-pattern nullable expressions keep the ordinary engine.
 
-Fixed budgets bound each plan's retained memory and each attempt's retries:
+Fixed budgets bound each plan's retained memory and each attempt's retries,
+and keep each search linear in its input:
 
 - The complete plan and its literal storage are charged against the forward
   DFA memory budget. A plan that does not fit keeps the ordinary route, so a
@@ -799,6 +816,22 @@ Fixed budgets bound each plan's retained memory and each attempt's retries:
   indices fit the retry stack's six-bit fields. Nesting depth is limited to
   sixteen and explicit repeat counts to 1000, matching ClickHouse. A literal is
   limited to 256 bytes.
+- Every unanchored search continues on the ordinary engine, from the plan's
+  resume position and with the same context, once the bytes its failed
+  attempts examined exceed 2048 plus four times the distance the search has
+  advanced. Without this budget, inputs such as `x([^z]+)zq` over repeated `xa`
+  rescan the same run from every candidate, which is quadratic in one search.
+  The budget belongs to one search, so plans stay immutable.
+
+On malformed input, a search that hands off may report the ordinary engine's
+match instead of the plan's. Every operation applies the same budget from the
+same search positions, so `find`, `count`, `extract`, `position`,
+`extractAll`, replacement, and split report one match sequence.
+
+Eligible scan plans intentionally add bounded cold compilation work and retained
+state. Accept that cost only while warm public operations materially improve on
+all target architectures and protected routes remain stable. Short-lived pattern
+workloads must keep compilation visible when deciding whether to extend coverage.
 
 Rejected development alternatives are recorded to prevent repeating them
 without new evidence:

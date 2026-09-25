@@ -185,6 +185,24 @@ final class TrinoScanPlanRun
         return minimum;
     }
 
+    boolean isUnbounded()
+    {
+        return maximum < 0;
+    }
+
+    /**
+     * Returns whether {@code value} is the only byte that is not a member.
+     */
+    boolean isComplementOf(byte value)
+    {
+        return inverted && needles != null && needles.length == 1 && needles[0] == value;
+    }
+
+    boolean isVariable()
+    {
+        return minimum != maximum;
+    }
+
     long estimatedRetainedSize()
     {
         return INSTANCE_SIZE + SizeOf.sizeOf(members) + SizeOf.sizeOf(needles);

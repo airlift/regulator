@@ -25,7 +25,7 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * An anchored Trino scan over literals, deterministic runs, and bounded optional captures. This byte executor
+ * A Trino scan over literals, deterministic runs, and bounded optional captures. This byte executor
  * preserves valid UTF-8 behavior; malformed input has Trino's garbage-in, garbage-out contract.
  * It must not be selected by the RE2 or Java frontends.
  */
@@ -40,6 +40,15 @@ final class TrinoScanPlan
     private static final int MAX_OPERATIONS = 32;
     private static final int MAX_OPTIONALS = 4;
     private static final int MAX_LITERAL_BYTES = 256;
+    static final int SEARCH_MATCHED = -1;
+    static final int NO_MATCH = -2;
+    // An unanchored search hands off to the ordinary engine once the bytes its failed attempts
+    // examined, each measured from the attempt's start, exceed WORK_BUDGET_BYTES plus
+    // WORK_BUDGET_FACTOR times the distance searched. Each search then stays linear in its input.
+    // Lets ordinary rows absorb a few long failed attempts without paying the ordinary engine's setup.
+    private static final int WORK_BUDGET_BYTES = 2048;
+    // Bounded retries may reexamine bytes, so failed attempts that never overlap stay within budget.
+    private static final int WORK_BUDGET_FACTOR = 4;
     private static final VarHandle SHORT = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.nativeOrder());
     private static final VarHandle INT = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.nativeOrder());
     private static final VarHandle LONG = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
@@ -66,19 +75,59 @@ final class TrinoScanPlan
         FORK,
     }
 
+    private enum StartKind
+    {
+        EMPTY,
+        ANCHORED,
+        LITERAL,
+        UNBOUNDED_RUN,
+        UNSUPPORTED,
+    }
+
+    private enum EndKind
+    {
+        EMPTY,
+        FINAL_LINE,
+        OTHER,
+    }
+
     private final Step[] steps;
     // Indexed by operation. A set entry marks a RUN whose continuation succeeds on every
     // suffix, so a capture-free partial match is proven once the run's minimum is present.
     private final boolean[] booleanTails;
     private final boolean finalLineEnd;
     private final boolean partialMatch;
+    private final boolean anchoredStart;
+    private final int leadingOperation;
+    // Set when an unanchored search starts with a case-sensitive literal of two or more bytes.
+    // Such a search checks the whole literal at each first-byte candidate in its own loop, so
+    // the candidate loop of every other plan has no whole-literal check.
+    private final boolean wholeLiteralCandidates;
+    // WORK_BUDGET_BYTES, or a negative value with which every unanchored search hands off
+    // before its first attempt. Only tests select the negative value.
+    private final int workBudgetBytes;
 
-    private TrinoScanPlan(List<Step> steps, boolean finalLineEnd, boolean partialMatch)
+    private TrinoScanPlan(List<Step> steps, boolean finalLineEnd, boolean partialMatch, boolean anchoredStart, int workBudgetBytes)
     {
         this.steps = steps.toArray(Step[]::new);
         this.booleanTails = partialMatch ? findBooleanTails(this.steps) : new boolean[this.steps.length];
         this.finalLineEnd = finalLineEnd;
         this.partialMatch = partialMatch;
+        this.anchoredStart = anchoredStart;
+        this.leadingOperation = findLeadingOperation(this.steps);
+        Step leading = this.steps[leadingOperation];
+        this.wholeLiteralCandidates = !anchoredStart && leading.kind == Kind.LITERAL && leading.literal.length > 1;
+        this.workBudgetBytes = workBudgetBytes;
+    }
+
+    private static int findLeadingOperation(Step[] steps)
+    {
+        for (int index = 0; index < steps.length; index++) {
+            if (steps[index].kind != Kind.SAVE) {
+                return index;
+            }
+        }
+        throw new IllegalStateException("scan plan has only capture saves");
     }
 
     /**
@@ -105,14 +154,85 @@ final class TrinoScanPlan
         return booleanTails;
     }
 
-    static TrinoScanPlan analyze(Regexp expression, int captureCount)
+    /**
+     * Analyzes {@code expression}. A plan built with {@code forceHandoff} hands every unanchored
+     * search to the ordinary engine before its first attempt, so tests can run the continuation
+     * on every input.
+     */
+    static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff)
     {
-        return Builder.analyze(expression, captureCount);
+        StartKind startKind = startKind(expression, 0);
+        if (startKind != StartKind.ANCHORED && startKind != StartKind.LITERAL && startKind != StartKind.UNBOUNDED_RUN) {
+            return null;
+        }
+        if (startKind == StartKind.UNBOUNDED_RUN && endKind(expression, 0) == EndKind.FINAL_LINE) {
+            return null;
+        }
+        return Builder.analyze(expression, captureCount, forceHandoff ? -1 : WORK_BUDGET_BYTES);
+    }
+
+    private static StartKind startKind(Regexp expression, int depth)
+    {
+        if (depth > MAX_RECURSIVE_DEPTH || (expression.parseFlags() & UNSUPPORTED_FLAGS) != 0) {
+            return StartKind.UNSUPPORTED;
+        }
+        return switch (expression.op()) {
+            case EMPTY_MATCH -> StartKind.EMPTY;
+            case BEGIN_TEXT -> StartKind.ANCHORED;
+            case LITERAL, LITERAL_STRING -> StartKind.LITERAL;
+            case STAR, PLUS -> StartKind.UNBOUNDED_RUN;
+            case REPEAT -> expression.max() < 0 ? StartKind.UNBOUNDED_RUN : StartKind.UNSUPPORTED;
+            case CAPTURE -> startKind(expression.child(0), depth + 1);
+            case CONCAT -> {
+                StartKind result = StartKind.EMPTY;
+                for (Regexp child : expression.children()) {
+                    result = startKind(child, depth + 1);
+                    if (result != StartKind.EMPTY) {
+                        break;
+                    }
+                }
+                yield result;
+            }
+            default -> StartKind.UNSUPPORTED;
+        };
+    }
+
+    private static EndKind endKind(Regexp expression, int depth)
+    {
+        if (depth > MAX_RECURSIVE_DEPTH) {
+            return EndKind.OTHER;
+        }
+        return switch (expression.op()) {
+            case EMPTY_MATCH -> EndKind.EMPTY;
+            case END_TEXT -> (expression.parseFlags() & Regexp.FINAL_LINE_END) != 0 ? EndKind.FINAL_LINE : EndKind.OTHER;
+            case CAPTURE -> endKind(expression.child(0), depth + 1);
+            case CONCAT -> {
+                EndKind result = EndKind.EMPTY;
+                for (int index = expression.childCount() - 1; index >= 0; index--) {
+                    result = endKind(expression.child(index), depth + 1);
+                    if (result != EndKind.EMPTY) {
+                        break;
+                    }
+                }
+                yield result;
+            }
+            default -> EndKind.OTHER;
+        };
     }
 
     boolean isPartialMatch()
     {
         return partialMatch;
+    }
+
+    boolean isAnchoredStart()
+    {
+        return anchoredStart;
+    }
+
+    boolean isLiteralLeading()
+    {
+        return steps[leadingOperation].kind == Kind.LITERAL;
     }
 
     long estimatedRetainedSize()
@@ -151,6 +271,52 @@ final class TrinoScanPlan
             }
         }
         return String.join(",", operations);
+    }
+
+    /**
+     * Returns the number of capture-free attempts at the candidates an unanchored plan selects
+     * over the whole input, resuming after each failed attempt where the searches resume. This
+     * models candidate traversal alone: it applies no work budget or handoff, so a search may make
+     * fewer attempts.
+     */
+    int candidateAttemptsForDiagnostics(Slice input)
+    {
+        byte[] bytes = input.byteArray();
+        int base = input.byteArrayOffset();
+        int end = base + input.length();
+        Step leading = steps[leadingOperation];
+        int attempts = 0;
+        int candidate = base;
+        while (candidate < end) {
+            if (wholeLiteralCandidates) {
+                candidate = findLiteral(bytes, candidate, end, leading.literal);
+            }
+            else {
+                candidate = nextCandidate(bytes, candidate, end, leading);
+            }
+            if (candidate < 0) {
+                break;
+            }
+            attempts++;
+            long result = matchUnanchoredAt(bytes, base, end, candidate, false, null);
+            if (result >= 0) {
+                break;
+            }
+            candidate = resumeAfterFailedAttempt(bytes, candidate, end, (int) ~result, leading);
+        }
+        return attempts;
+    }
+
+    /**
+     * Returns the position at which one capture-free partial attempt at {@code start} stopped
+     * reading, relative to the input, or a negative value when the attempt failed.
+     */
+    int booleanAttemptEndForDiagnostics(Slice input, int start)
+    {
+        int offset = input.byteArrayOffset();
+        int end = offset + input.length();
+        long result = matchUnanchoredAt(input.byteArray(), offset, end, offset + start, false, null);
+        return result < 0 ? -1 : (int) result - offset;
     }
 
     boolean matchEndAnchored(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups)
@@ -400,6 +566,288 @@ final class TrinoScanPlan
         }
     }
 
+    /**
+     * Searches for a match that starts in {@code [start, contextEnd)}, or only at {@code start}
+     * when {@code anchored}. Returns {@link #SEARCH_MATCHED}, {@link #NO_MATCH}, or the
+     * Slice-relative offset where the search must continue on the ordinary engine, with the same
+     * context, because its failed attempts exceeded the work budget. No match starts between
+     * {@code start} and that offset. Groups are relative to {@code contextStart} and are cleared
+     * unless the search matched. The budget belongs to this call, so every search starts afresh.
+     */
+    int search(Slice input, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
+    {
+        if (wholeLiteralCandidates && !anchored) {
+            return searchWholeLiteralCandidates(input, contextStart, contextEnd, start, fullMatch, groups);
+        }
+        byte[] bytes = input.byteArray();
+        int offset = input.byteArrayOffset();
+        int base = offset + contextStart;
+        int end = offset + contextEnd;
+        int searchStart = offset + start;
+        int candidate = searchStart;
+        Step leading = steps[leadingOperation];
+        // An anchored search makes one attempt and never hands off.
+        long workLimit = anchored ? Long.MAX_VALUE : workBudgetBytes;
+        long failedWork = 0;
+        while (candidate < end) {
+            if (failedWork - WORK_BUDGET_FACTOR * (long) (candidate - searchStart) > workLimit) {
+                return handOff(groups, candidate - offset);
+            }
+            if (!anchored) {
+                candidate = nextCandidate(bytes, candidate, end, leading);
+                if (candidate < 0) {
+                    break;
+                }
+            }
+            long result = matchUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
+            if (result >= 0) {
+                return SEARCH_MATCHED;
+            }
+            if (anchored) {
+                break;
+            }
+            long failure = ~result;
+            failedWork += (int) (failure >>> 32) - candidate;
+            candidate = resumeAfterFailedAttempt(bytes, candidate, end, (int) failure, leading);
+        }
+        if (groups != null) {
+            Arrays.fill(groups, -1);
+        }
+        return NO_MATCH;
+    }
+
+    /**
+     * The unanchored search of {@link #search} for a plan led by a case-sensitive literal of two
+     * or more bytes. Each first-byte candidate is checked for the rest of the literal before an
+     * attempt, so an attempt starts only where the whole literal occurs. The loop is separate so that the candidate loop of every other plan has no
+     * whole-literal check. A literal-led plan has no separate required literal.
+     */
+    private int searchWholeLiteralCandidates(Slice input, int contextStart, int contextEnd, int start, boolean fullMatch, int[] groups)
+    {
+        byte[] bytes = input.byteArray();
+        int offset = input.byteArrayOffset();
+        int base = offset + contextStart;
+        int end = offset + contextEnd;
+        int searchStart = offset + start;
+        int candidate = searchStart;
+        Step leading = steps[leadingOperation];
+        long failedWork = 0;
+        while (candidate < end) {
+            if (failedWork - WORK_BUDGET_FACTOR * (long) (candidate - searchStart) > workBudgetBytes) {
+                return handOff(groups, candidate - offset);
+            }
+            candidate = findLiteral(bytes, candidate, end, leading.literal);
+            if (candidate < 0) {
+                break;
+            }
+            long result = matchUnanchoredAt(bytes, base, end, candidate, fullMatch, groups);
+            if (result >= 0) {
+                return SEARCH_MATCHED;
+            }
+            long failure = ~result;
+            failedWork += (int) (failure >>> 32) - candidate;
+            candidate = resumeAfterFailedAttempt(bytes, candidate, end, (int) failure, leading);
+        }
+        if (groups != null) {
+            Arrays.fill(groups, -1);
+        }
+        return NO_MATCH;
+    }
+
+    /**
+     * Ends a search that continues on the ordinary engine at {@code resume}, leaving the groups
+     * as a search without a match does.
+     */
+    private static int handOff(int[] groups, int resume)
+    {
+        if (groups != null) {
+            Arrays.fill(groups, -1);
+        }
+        return resume;
+    }
+
+    /**
+     * Returns the first position at or after {@code candidate} where the leading operation can
+     * match, or {@code -1} when none remains. A leading run is attempted at every position.
+     */
+    private static int nextCandidate(byte[] bytes, int candidate, int end, Step leading)
+    {
+        if (leading.kind == Kind.LITERAL) {
+            return findByte(bytes, candidate, end, leading.literal[0]);
+        }
+        return candidate;
+    }
+
+    /**
+     * Returns the first position at or after {@code candidate} where the whole {@code literal}
+     * occurs, or {@code -1} when none remains. A literal that does not fit before {@code end} is
+     * never a candidate, so no byte at or past {@code end} is read.
+     */
+    private static int findLiteral(byte[] bytes, int candidate, int end, byte[] literal)
+    {
+        // A start after this limit leaves too few bytes for the literal.
+        int limit = end - literal.length + 1;
+        while ((candidate = findByte(bytes, candidate, limit, literal[0])) >= 0) {
+            int index = 1;
+            while (index < literal.length && bytes[candidate + index] == literal[index]) {
+                index++;
+            }
+            if (index == literal.length) {
+                return candidate;
+            }
+            candidate++;
+        }
+        return -1;
+    }
+
+    private static int resumeAfterFailedAttempt(byte[] bytes, int candidate, int end, int failedRunEnd, Step leading)
+    {
+        if (failedRunEnd > candidate) {
+            return failedRunEnd;
+        }
+        if (leading.kind == Kind.RUN) {
+            // A failed minimum-width check must not retry from a continuation byte of
+            // otherwise valid UTF-8. Malformed input retains Trino's unspecified behavior.
+            return candidate + Utf8.decodedWidth(Utf8.decode(bytes, candidate, end));
+        }
+        return candidate + 1;
+    }
+
+    // The unanchored executors run only plans without a start anchor, which compaction never
+    // rewrites into delimited captures or tails.
+    @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Delimited captures and tails occur only in start-anchored plans")
+    @SuppressWarnings("MissingCasesInEnumSwitch")
+    private long matchUnanchoredAt(byte[] bytes, int base, int end, int matchStart, boolean fullMatch, int[] groups)
+    {
+        if (groups != null) {
+            Arrays.fill(groups, -1);
+        }
+        int cursor = matchStart;
+        int operation = 0;
+        int retries = 0;
+        int leadingRunEnd = matchStart;
+        // The furthest byte any unbounded scan of this attempt reached, across retries.
+        int scanned = matchStart;
+        long retryPositionsLow = 0;
+        long retryPositionsHigh = 0;
+        int retryOperations = 0;
+        while (true) {
+            boolean failed = false;
+            if (operation == steps.length) {
+                if (partialMatch && (!fullMatch || cursor == end)) {
+                    success(groups, matchStart - base, cursor - base);
+                    return cursor;
+                }
+                failed = true;
+            }
+            else {
+                int stepIndex = operation;
+                Step step = steps[operation++];
+                switch (step.kind) {
+                    case LITERAL -> {
+                        if (step.matches(bytes, cursor, end)) {
+                            cursor += step.literal.length;
+                        }
+                        else {
+                            failed = true;
+                        }
+                    }
+                    case OPTIONAL -> {
+                        if (step.matches(bytes, cursor, end)) {
+                            retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                            retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                            retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                            retries++;
+                            cursor += step.literal.length;
+                        }
+                    }
+                    case END -> {
+                        if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n')) {
+                            success(groups, matchStart - base, cursor - base);
+                            return cursor;
+                        }
+                        failed = true;
+                    }
+                    case RUN -> {
+                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                            // The continuation cannot fail, so the run's minimum decides this path.
+                            // Boolean callers observe only a nonnegative result, not its end.
+                            int stop = step.run.matchMinimum(bytes, cursor, end);
+                            if (stop >= 0) {
+                                return stop;
+                            }
+                            failed = true;
+                            break;
+                        }
+                        int stop = step.run.match(bytes, cursor, end);
+                        if (stop < 0) {
+                            failed = true;
+                            break;
+                        }
+                        scanned = Math.max(scanned, stop);
+                        if (stepIndex == leadingOperation) {
+                            leadingRunEnd = stop;
+                        }
+                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                            groups[step.slot] = cursor - base;
+                            groups[step.slot + 1] = stop - base;
+                        }
+                        cursor = stop;
+                    }
+                    case SAVE -> {
+                        if (groups != null && step.slot < groups.length) {
+                            groups[step.slot] = cursor - base;
+                        }
+                    }
+                    case FORK -> {
+                        retryPositionsHigh = (retryPositionsHigh << 32) | (retryPositionsLow >>> 32);
+                        retryPositionsLow = (retryPositionsLow << 32) | (cursor & 0xFFFF_FFFFL);
+                        retryOperations = (retryOperations << RETRY_OPERATION_BITS) | operation;
+                        retries++;
+                    }
+                }
+            }
+            if (failed) {
+                if (retries == 0) {
+                    return failedAttempt(leadingRunEnd, scanned);
+                }
+                retries--;
+                cursor = (int) retryPositionsLow;
+                retryPositionsLow = (retryPositionsLow >>> 32) | (retryPositionsHigh << 32);
+                retryPositionsHigh >>>= 32;
+                operation = retryOperations & RETRY_OPERATION_MASK;
+                retryOperations >>>= RETRY_OPERATION_BITS;
+                Branch branch = steps[operation - 1].branch;
+                if (branch != null) {
+                    operation = branch.target();
+                    if (groups != null) {
+                        int mask = branch.captureMask();
+                        while (mask != 0) {
+                            int slot = 2 * (Integer.numberOfTrailingZeros(mask) + 1);
+                            if (slot + 1 < groups.length) {
+                                groups[slot] = -1;
+                                groups[slot + 1] = -1;
+                            }
+                            mask &= mask - 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Encodes a failed unanchored attempt as a negative value: the complement of a long holding
+     * the furthest position any of its unbounded scans reached in the high word and the run end
+     * where the next attempt may start in the low word. A successful attempt returns its
+     * nonnegative end.
+     * The search loop measures its work from the first and resumes from the second.
+     */
+    private static long failedAttempt(int resumeRunEnd, int scanned)
+    {
+        return ~(((long) scanned << 32) | resumeRunEnd);
+    }
+
     private static boolean success(int[] groups, int end)
     {
         if (groups != null) {
@@ -407,6 +855,14 @@ final class TrinoScanPlan
             groups[1] = end;
         }
         return true;
+    }
+
+    private static void success(int[] groups, int start, int end)
+    {
+        if (groups != null) {
+            groups[0] = start;
+            groups[1] = end;
+        }
     }
 
     private static int findByte(byte[] bytes, int cursor, int end, byte target)
@@ -442,19 +898,24 @@ final class TrinoScanPlan
         private int captures;
         private int optionals;
 
-        private static TrinoScanPlan analyze(Regexp expression, int captureCount)
+        private static TrinoScanPlan analyze(Regexp expression, int captureCount, int workBudgetBytes)
         {
             if (captureCount > MAX_GROUPS) {
                 return null;
             }
             List<Regexp> sequence = new ArrayList<>();
-            if (!flatten(expression, sequence, 0) || sequence.size() < 2 || sequence.getFirst().op() != RegexpOp.BEGIN_TEXT) {
+            if (!flatten(expression, sequence, 0) || sequence.isEmpty()) {
                 return null;
             }
+            boolean anchoredStart = sequence.getFirst().op() == RegexpOp.BEGIN_TEXT;
             boolean anchoredEnd = sequence.getLast().op() == RegexpOp.END_TEXT;
+            int bodyStart = anchoredStart ? 1 : 0;
             int bodyEnd = anchoredEnd ? sequence.size() - 1 : sequence.size();
+            if (bodyStart >= bodyEnd) {
+                return null;
+            }
             Builder builder = new Builder();
-            for (int index = 1; index < bodyEnd; index++) {
+            for (int index = bodyStart; index < bodyEnd; index++) {
                 if (!builder.emit(sequence.get(index), 0)) {
                     return null;
                 }
@@ -470,7 +931,9 @@ final class TrinoScanPlan
             if (!builder.verifyContinuations()) {
                 return null;
             }
-            builder.compact(captureCount, anchoredEnd);
+            if (anchoredStart) {
+                builder.compact(captureCount, anchoredEnd);
+            }
             // MAX_OPERATIONS counts executable operations. END may occupy the
             // following slot, which the retry stack explicitly supports.
             if (builder.steps.size() > MAX_OPERATIONS + 1) {
@@ -479,7 +942,15 @@ final class TrinoScanPlan
             if (!anchoredEnd) {
                 builder.steps.removeLast();
             }
-            return new TrinoScanPlan(builder.steps, anchoredEnd && (sequence.getLast().parseFlags() & Regexp.FINAL_LINE_END) != 0, !anchoredEnd);
+            if (!anchoredStart && (captureCount == 0 || !builder.hasVariableRun() || !builder.canSearchUnanchored())) {
+                return null;
+            }
+            return new TrinoScanPlan(
+                    builder.steps,
+                    anchoredEnd && (sequence.getLast().parseFlags() & Regexp.FINAL_LINE_END) != 0,
+                    !anchoredEnd,
+                    anchoredStart,
+                    workBudgetBytes);
         }
 
         private static boolean flatten(Regexp expression, List<Regexp> sequence, int depth)
@@ -499,6 +970,45 @@ final class TrinoScanPlan
                 sequence.add(expression);
             }
             return true;
+        }
+
+        /**
+         * Returns whether an unanchored search may attempt a match at each candidate of the
+         * leading operation, past capture saves. That operation must be a literal. After a
+         * leading run, the number of attempts that fail depends on the input, since each
+         * candidate inside one run rescans the rest of it, so the ordinary engine keeps those
+         * patterns. The exception is an unbounded run of every byte except the one-byte
+         * case-sensitive literal that follows it: the run stops only at that byte, which the
+         * literal then matches.
+         */
+        private boolean canSearchUnanchored()
+        {
+            for (int index = 0; index < steps.size(); index++) {
+                Step step = steps.get(index);
+                if (step.kind == Kind.SAVE) {
+                    continue;
+                }
+                if (step.kind == Kind.LITERAL) {
+                    return true;
+                }
+                if (step.kind != Kind.RUN) {
+                    return false;
+                }
+                return step.run.isUnbounded() && stopsOnlyAtFollowingByte(step.run, index + 1);
+            }
+            return false;
+        }
+
+        private boolean stopsOnlyAtFollowingByte(TrinoScanPlanRun run, int start)
+        {
+            for (int index = start; index < steps.size(); index++) {
+                Step step = steps.get(index);
+                if (step.kind == Kind.SAVE) {
+                    continue;
+                }
+                return step.kind == Kind.LITERAL && step.literal.length == 1 && run.isComplementOf(step.literal[0]);
+            }
+            return false;
         }
 
         private boolean emit(Regexp expression, int depth)
@@ -596,6 +1106,16 @@ final class TrinoScanPlan
         {
             for (Step step : steps) {
                 if (step.kind == Kind.RUN) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private boolean hasVariableRun()
+        {
+            for (Step step : steps) {
+                if (step.kind == Kind.RUN && step.run.isVariable()) {
                     return true;
                 }
             }

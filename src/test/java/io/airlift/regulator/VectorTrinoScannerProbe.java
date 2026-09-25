@@ -40,6 +40,12 @@ public final class VectorTrinoScannerProbe
                 "h".repeat(64) + "/",
                 "h".repeat(64),
                 1);
+        // A literal-leading unanchored search finds its first byte.
+        verify("https?://([^/]+)/",
+                "LITERAL,OPTIONAL,LITERAL,SAVE,RUN,SAVE,LITERAL",
+                FILLER + "https://" + "h".repeat(64) + "/" + FILLER,
+                "h".repeat(64),
+                1);
 
         System.out.printf("OK %s%n", expectedVectorApiAvailable ? "vector" : "scalar");
     }
@@ -49,7 +55,7 @@ public final class VectorTrinoScannerProbe
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
         check(regexp.pattern().usesTrinoScanPlanForDiagnostics(), expression + ": no scan plan");
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-        TrinoScanPlan plan = TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount());
+        TrinoScanPlan plan = TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false);
         check(plan != null, expression + ": no plan");
         check(plan.operationsForDiagnostics().equals(operations), expression + ": unexpected operations " + plan.operationsForDiagnostics());
 
