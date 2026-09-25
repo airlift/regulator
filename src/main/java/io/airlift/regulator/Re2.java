@@ -76,6 +76,9 @@ public final class Re2
     private static final byte BOOLEAN_FIND_TRINO_SCAN = 14;
     private static final byte BOOLEAN_FIND_PARTIAL_TRINO_SCAN = 15;
     private static final byte BOOLEAN_FIND_UNANCHORED_TRINO_SCAN = 16;
+    private static final byte BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN = 17;
+    private static final byte BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN = 18;
+    private static final byte BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_TRINO_SCAN = 19;
 
     // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk.
     private static final int MAX_DIRECT_BYTE_SCAN_BYTES = 64;
@@ -423,12 +426,14 @@ public final class Re2
         TrinoScanPlan scanPlan = booleanPlans.trinoScanPlan();
         if (scanPlan != null) {
             if (!scanPlan.isAnchoredStart()) {
-                scanStrategy = BOOLEAN_FIND_UNANCHORED_TRINO_SCAN;
+                scanStrategy = scanPlan.usesAsciiFoldedExecutor()
+                        ? BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_TRINO_SCAN
+                        : BOOLEAN_FIND_UNANCHORED_TRINO_SCAN;
             }
             else {
                 scanStrategy = scanPlan.isPartialMatch()
-                        ? BOOLEAN_FIND_PARTIAL_TRINO_SCAN
-                        : BOOLEAN_FIND_TRINO_SCAN;
+                        ? (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN : BOOLEAN_FIND_PARTIAL_TRINO_SCAN)
+                        : (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN : BOOLEAN_FIND_TRINO_SCAN);
             }
             // Literal kernels answer existence without reading past the literal; keep them for
             // full-Slice find. Every other strategy that can coexist with a plan is replaced.
@@ -1098,7 +1103,15 @@ public final class Re2
 
     boolean usesPartialTrinoScanPlanForDiagnostics()
     {
-        return trinoScanStrategy == BOOLEAN_FIND_PARTIAL_TRINO_SCAN;
+        return trinoScanStrategy == BOOLEAN_FIND_PARTIAL_TRINO_SCAN ||
+                trinoScanStrategy == BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN;
+    }
+
+    boolean usesAsciiFoldedTrinoScanExecutorForDiagnostics()
+    {
+        return trinoScanStrategy == BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN ||
+                trinoScanStrategy == BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN ||
+                trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_TRINO_SCAN;
     }
 
     /**
@@ -1306,6 +1319,9 @@ public final class Re2
             case BOOLEAN_FIND_TRINO_SCAN -> plan.matchEndAnchored(input, 0, length, false, null);
             case BOOLEAN_FIND_PARTIAL_TRINO_SCAN -> plan.matchPartial(input, 0, length, false, null);
             case BOOLEAN_FIND_UNANCHORED_TRINO_SCAN -> finishTrinoScanSearch(input, 0, length, plan.search(input, 0, length, 0, false, false, null), Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
+            case BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN -> plan.matchAsciiFoldedEndAnchored(input, 0, length, false, null);
+            case BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN -> plan.matchAsciiFoldedPartial(input, 0, length, false, null);
+            case BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_TRINO_SCAN -> finishTrinoScanSearch(input, 0, length, plan.searchAsciiFolded(input, 0, length, 0, false, false, null), Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
             default -> throw new IllegalStateException("not a scan strategy: " + strategy);
         };
     }
@@ -1730,7 +1746,10 @@ public final class Re2
         // An unanchored plan gives malformed UTF-8 bytes the membership find gives them, which
         // the DFA count would reject. Count through the plan so both agree.
         if (trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_TRINO_SCAN) {
-            return countUnanchoredTrinoScanMatches(text);
+            return countUnanchoredTrinoScanMatches(text, false);
+        }
+        if (trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_TRINO_SCAN) {
+            return countUnanchoredTrinoScanMatches(text, true);
         }
         if (exactLiteralLength > 0) {
             long count = 0;
@@ -1781,7 +1800,7 @@ public final class Re2
      * search starts on the plan with its own work budget, and one that hands off finds its
      * match on the ordinary engine.
      */
-    private long countUnanchoredTrinoScanMatches(Slice text)
+    private long countUnanchoredTrinoScanMatches(Slice text, boolean asciiFolded)
     {
         TrinoScanPlan plan = booleanPlans.trinoScanPlan();
         int[] groups = new int[2];
@@ -1789,7 +1808,9 @@ public final class Re2
         long count = 0;
         int start = 0;
         while (start < length) {
-            int result = plan.search(text, 0, length, start, false, false, groups);
+            int result = asciiFolded
+                    ? plan.searchAsciiFolded(text, 0, length, start, false, false, groups)
+                    : plan.search(text, 0, length, start, false, false, groups);
             if (!finishTrinoScanSearch(text, 0, length, result, Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES)) {
                 break;
             }
@@ -2282,6 +2303,25 @@ public final class Re2
                     groupOffsets);
             return finishTrinoScanSearch(text, contextStart, contextEnd, result, anchorMode, groupOffsets, workspaces);
         }
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN && end == contextEnd) {
+            return start == contextStart && booleanPlans.trinoScanPlan().matchAsciiFoldedEndAnchored(
+                    text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
+        }
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN && end == contextEnd) {
+            return start == contextStart && booleanPlans.trinoScanPlan().matchAsciiFoldedPartial(
+                    text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
+        }
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_TRINO_SCAN && end == contextEnd && scanPlanSearch) {
+            int result = booleanPlans.trinoScanPlan().searchAsciiFolded(
+                    text,
+                    contextStart,
+                    contextEnd,
+                    start,
+                    anchorMode != Anchor.UNANCHORED,
+                    anchorMode == Anchor.ANCHOR_BOTH,
+                    groupOffsets);
+            return finishTrinoScanSearch(text, contextStart, contextEnd, result, anchorMode, groupOffsets, workspaces);
+        }
         if (prog == partialProg && booleanPlans.disjointSuffixRepeatMatcher() != null) {
             long span = booleanPlans.disjointSuffixRepeatMatcher().search(text, start, end, anchorMode);
             if (span == Dfa.SEARCH_NO_MATCH) {
@@ -2708,7 +2748,9 @@ public final class Re2
             case BOOLEAN_FIND_ENDS_WITH_FINAL_LINE -> BooleanPartialMatchStrategy.ENDS_WITH_FINAL_LINE;
             case BOOLEAN_FIND_LOWERED_PROGRAM, BOOLEAN_FIND_LOWERED_PROGRAM_DIRECT_GROUP_ZERO -> BooleanPartialMatchStrategy.LOWERED_PROGRAM;
             case BOOLEAN_FIND_COMPACT_BOUNDED_CHARACTER_CLASS, BOOLEAN_FIND_RETAINED_CHARACTER_CLASS_COUNT_DFA, BOOLEAN_FIND_SINGLE_BYTE,
-                 BOOLEAN_FIND_TRINO_SCAN, BOOLEAN_FIND_PARTIAL_TRINO_SCAN, BOOLEAN_FIND_UNANCHORED_TRINO_SCAN -> BooleanPartialMatchStrategy.GENERAL;
+                 BOOLEAN_FIND_TRINO_SCAN, BOOLEAN_FIND_PARTIAL_TRINO_SCAN, BOOLEAN_FIND_UNANCHORED_TRINO_SCAN,
+                 BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN, BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN,
+                 BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_TRINO_SCAN -> BooleanPartialMatchStrategy.GENERAL;
             default -> throw new IllegalArgumentException("unknown boolean find strategy: " + strategy);
         };
     }
