@@ -43,6 +43,20 @@ final class VectorByteSetScanner
         };
     }
 
+    // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
+    // and benchmark evidence. Finds the first byte with its high bit set or equal to
+    // one of the candidates. Candidate count is zero, one, two, or three.
+    static int findHighBitOr(byte[] data, int offset, int length, byte first, byte second, byte third, int candidateCount)
+    {
+        return switch (candidateCount) {
+            case 0 -> findHighBit(data, offset, length);
+            case 1 -> findHighBitOrOne(data, offset, length, first);
+            case 2 -> findHighBitOrTwo(data, offset, length, first, second);
+            case 3 -> findHighBitOrThree(data, offset, length, first, second, third);
+            default -> throw new IllegalArgumentException("candidateCount must be zero, one, two, or three");
+        };
+    }
+
     // PERFORMANCE-SENSITIVE HOT LOOP: unsigned comparisons preserve byte-set
     // ordering across the signed-byte boundary without an extra vector transform.
     static int findRange(byte[] data, int offset, int length, int lowerBound, int upperBound)
@@ -217,6 +231,105 @@ final class VectorByteSetScanner
         for (; position < end; position++) {
             byte value = data[position];
             if (value == first || value == second || value == third) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    private static int findHighBit(byte[] data, int offset, int length)
+    {
+        int vectorEnd = offset + SPECIES.loopBound(length);
+        int position = offset;
+        for (; position < vectorEnd; position += SPECIES.length()) {
+            VectorMask<Byte> matches = ByteVector.fromArray(SPECIES, data, position)
+                    .compare(VectorOperators.LT, (byte) 0);
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+
+        int end = offset + length;
+        for (; position < end; position++) {
+            if (data[position] < 0) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    private static int findHighBitOrOne(byte[] data, int offset, int length, byte candidate)
+    {
+        ByteVector candidateVector = ByteVector.broadcast(SPECIES, candidate);
+        int vectorEnd = offset + SPECIES.loopBound(length);
+        int position = offset;
+        for (; position < vectorEnd; position += SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position);
+            VectorMask<Byte> matches = values.compare(VectorOperators.LT, (byte) 0)
+                    .or(values.compare(VectorOperators.EQ, candidateVector));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+
+        int end = offset + length;
+        for (; position < end; position++) {
+            byte value = data[position];
+            if (value < 0 || value == candidate) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    private static int findHighBitOrTwo(byte[] data, int offset, int length, byte first, byte second)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        int vectorEnd = offset + SPECIES.loopBound(length);
+        int position = offset;
+        for (; position < vectorEnd; position += SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position);
+            VectorMask<Byte> matches = values.compare(VectorOperators.LT, (byte) 0)
+                    .or(values.compare(VectorOperators.EQ, firstVector))
+                    .or(values.compare(VectorOperators.EQ, secondVector));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+
+        int end = offset + length;
+        for (; position < end; position++) {
+            byte value = data[position];
+            if (value < 0 || value == first || value == second) {
+                return position;
+            }
+        }
+        return -1;
+    }
+
+    private static int findHighBitOrThree(byte[] data, int offset, int length, byte first, byte second, byte third)
+    {
+        ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
+        ByteVector secondVector = ByteVector.broadcast(SPECIES, second);
+        ByteVector thirdVector = ByteVector.broadcast(SPECIES, third);
+        int vectorEnd = offset + SPECIES.loopBound(length);
+        int position = offset;
+        for (; position < vectorEnd; position += SPECIES.length()) {
+            ByteVector values = ByteVector.fromArray(SPECIES, data, position);
+            VectorMask<Byte> matches = values.compare(VectorOperators.LT, (byte) 0)
+                    .or(values.compare(VectorOperators.EQ, firstVector))
+                    .or(values.compare(VectorOperators.EQ, secondVector))
+                    .or(values.compare(VectorOperators.EQ, thirdVector));
+            if (matches.anyTrue()) {
+                return position + matches.firstTrue();
+            }
+        }
+
+        int end = offset + length;
+        for (; position < end; position++) {
+            byte value = data[position];
+            if (value < 0 || value == first || value == second || value == third) {
                 return position;
             }
         }

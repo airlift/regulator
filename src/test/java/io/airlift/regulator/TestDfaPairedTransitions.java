@@ -70,6 +70,7 @@ public class TestDfaPairedTransitions
                 dfa,
                 matchingInput.byteArray(),
                 textBegin,
+                textBegin,
                 textEnd,
                 textEnd,
                 start.offset(),

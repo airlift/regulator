@@ -88,6 +88,8 @@ public final class DfaAbsolutePointerProbe
         check(Dfa.countMatches(latin1CountProgram, countInput, Prog.MatchKind.FIRST_MATCH) == 200, "LATIN1 short fused count changed the result");
         Dfa.DfaInstance latin1CountDfa = latin1CountProgram.getCachedDfa(FIRST_MATCH);
 
+        exerciseCountSelfLoopMatchHandOff(expectedNativeAccess);
+        exerciseCountSelfLoopMatchHandOffWithPairedRows();
         exerciseShortSearchesAfterPairedRejection(expectedNativeAccess);
         exerciseOptionalStorageFailureAtomicity(expectedNativeAccess);
         if (expectedNativeAccess) {
@@ -316,6 +318,67 @@ public final class DfaAbsolutePointerProbe
             return;
         }
         throw new AssertionError("expected injected DFA failure");
+    }
+
+    // After the x, two of every three transitions of the two-byte character cycle carry the
+    // match bit, so the count self-loop scan stops with a match pending. The pending match must
+    // continue through the pointer table; requesting paired rows first would prevent the table
+    // from being allocated.
+    private static void exerciseCountSelfLoopMatchHandOff(boolean expectedNativeAccess)
+    {
+        byte[] prefix = "xaaaaaaaa".getBytes(StandardCharsets.UTF_8);
+        byte[] cycle = "\u00e9a".getBytes(StandardCharsets.UTF_8);
+        byte[] bytes = new byte[32_768];
+        System.arraycopy(prefix, 0, bytes, 0, prefix.length);
+        for (int index = prefix.length; index < bytes.length; index++) {
+            bytes[index] = cycle[(index - prefix.length) % cycle.length];
+        }
+        Slice input = wrappedBuffer(bytes);
+        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*(x|y).*"));
+        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
+        int handOffCount = dfa.countSelfLoopMatchHandOffCount();
+        for (int iteration = 0; iteration < 4; iteration++) {
+            check(pattern.count(input) == 1, "count self-loop match hand-off changed the count");
+        }
+        check(dfa.countSelfLoopMatchHandOffCount() > handOffCount, "count self-loop scan did not hand off the pending match");
+        if (expectedNativeAccess) {
+            check(dfa.absolutePointerTransitionsAvailable(), "count self-loop match hand-off did not allocate a pointer sidecar");
+            check(dfa.pairedTransitionMemory() == 0, "count self-loop match hand-off built paired transitions");
+        }
+        else {
+            check(dfa.pairedTransitionMemory() > 0, "count self-loop match hand-off did not build paired transitions");
+        }
+    }
+
+    // Paired rows block pointer-table allocation, so once a count without a pending match has
+    // built them, a pending match continues through the paired after-match loop. Requesting the
+    // pointer table instead would force an exclusive retry on every count and still fall back to
+    // the compact loop.
+    private static void exerciseCountSelfLoopMatchHandOffWithPairedRows()
+    {
+        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*(x|y).*"));
+        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
+        Slice noMatch = utf8Slice("\u00e9a".repeat(200));
+        for (int iteration = 0; iteration < 2; iteration++) {
+            check(pattern.count(noMatch) == 0, "count self-loop paired warm-up changed the count");
+        }
+        check(dfa.pairedTransitionMemory() > 0, "count self-loop paired warm-up did not build paired transitions");
+
+        Slice input = utf8Slice("xaaaaaaaa" + "\u00e9a".repeat(2_000));
+        // The first count computes the states after the x, and its exclusive search builds their
+        // paired rows when it ends.
+        check(pattern.count(input) == 1, "count self-loop paired match hand-off changed the count");
+        long cacheVersion = 0;
+        for (int iteration = 0; iteration < 5; iteration++) {
+            // The last three counts must run without an exclusive retry.
+            if (iteration == 2) {
+                cacheVersion = dfa.cacheVersion();
+            }
+            int handOffCount = dfa.countSelfLoopMatchHandOffCount();
+            check(pattern.count(input) == 1, "count self-loop paired match hand-off changed the count");
+            check(dfa.countSelfLoopMatchHandOffCount() > handOffCount, "count self-loop scan did not hand off the pending match to paired transitions");
+        }
+        check(dfa.cacheVersion() == cacheVersion, "count self-loop paired match hand-off retried exclusively");
     }
 
     // The sixteenth short paired search rejects paired transitions but keeps its result, so the

@@ -309,6 +309,76 @@ public class TestDfaStartByteAcceleration
     }
 
     @Test
+    public void testHighBitOrCandidateVectorScannerMatchesScalarReference()
+    {
+        Random random = new Random(95);
+        for (int iteration = 0; iteration < 1_000; iteration++) {
+            int offset = random.nextInt(8);
+            int length = random.nextInt(4_097);
+            byte[] data = new byte[offset + length + random.nextInt(8)];
+            for (int index = 0; index < data.length; index++) {
+                data[index] = (byte) (random.nextInt(64) == 0 ? random.nextInt(256) : random.nextInt(128));
+            }
+            int candidateCount = random.nextInt(4);
+            byte first = (byte) random.nextInt(128);
+            byte second = (byte) random.nextInt(128);
+            byte third = (byte) random.nextInt(128);
+            assertHighBitOrMatchesScalarReference(data, offset, length, first, second, third, candidateCount);
+        }
+
+        // Long spans without a hit cover every full vector, and a single hit in the last byte is
+        // past SPECIES.loopBound(length): the odd hit lengths leave a scalar tail for every supported
+        // vector width.
+        byte[] hits = {(byte) 0x80, (byte) 0xFF, 'x', 'y', 'z'};
+        for (int candidateCount = 0; candidateCount <= 3; candidateCount++) {
+            for (int length : new int[] {4_096, 4_097}) {
+                for (int offset : new int[] {0, 3}) {
+                    byte[] data = new byte[offset + length + 5];
+                    Arrays.fill(data, (byte) 'a');
+                    Arrays.fill(data, offset + length, data.length, (byte) 'x');
+                    assertThat(VectorByteSetScanner.findHighBitOr(data, offset, length, (byte) 'x', (byte) 'y', (byte) 'z', candidateCount))
+                            .as("offset=%s length=%s candidateCount=%s", offset, length, candidateCount)
+                            .isEqualTo(-1);
+                }
+            }
+            for (int length : new int[] {1, 15, 17, 33, 4_097, 4_111, 4_159}) {
+                for (byte hit : hits) {
+                    byte[] data = new byte[length + 3];
+                    Arrays.fill(data, (byte) 'a');
+                    data[2 + length - 1] = hit;
+                    assertHighBitOrMatchesScalarReference(data, 2, length, (byte) 'x', (byte) 'y', (byte) 'z', candidateCount);
+                }
+            }
+        }
+    }
+
+    private static void assertHighBitOrMatchesScalarReference(
+            byte[] data,
+            int offset,
+            int length,
+            byte first,
+            byte second,
+            byte third,
+            int candidateCount)
+    {
+        int expected = -1;
+        for (int position = offset; position < offset + length; position++) {
+            byte value = data[position];
+            if (value < 0 ||
+                    (candidateCount >= 1 && value == first) ||
+                    (candidateCount >= 2 && value == second) ||
+                    (candidateCount >= 3 && value == third)) {
+                expected = position;
+                break;
+            }
+        }
+
+        assertThat(VectorByteSetScanner.findHighBitOr(data, offset, length, first, second, third, candidateCount))
+                .as("offset=%s length=%s candidateCount=%s", offset, length, candidateCount)
+                .isEqualTo(expected);
+    }
+
+    @Test
     public void testDenseSmallStartByteSetUsesWidthAppropriateScanner()
     {
         Prog program = compile("[xy][0-9]{4}");
