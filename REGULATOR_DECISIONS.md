@@ -235,12 +235,14 @@ another transition representation.
 
 Some eligible expressions produce repeated matches before pairing can amortize
 its entry and terminal handling. After 16 paired searches return within 16
-bytes, the DFA retries under the existing exclusive cache protocol, releases
-the paired table's complete memory charge, and uses only compact transitions
-until the next cache reset. The observation counter is a best-effort performance
-hint shared by concurrent readers; races may change when rejection occurs but
-cannot change matching behavior. A cache reset clears the hint and allows the
-new cache generation to be evaluated again.
+bytes, the DFA rejects the paired table. The search that observes the
+threshold keeps its result; the next search that requests paired transitions
+or a pointer table releases the paired table's complete memory charge under
+the existing exclusive cache protocol, and paired transitions stay disabled
+until the next cache reset. The observation counter is a best-effort
+performance hint shared by concurrent readers; races may change when rejection
+occurs but cannot change matching behavior. A cache reset clears the hint and
+allows the new cache generation to be evaluated again.
 
 ## Bounded Native-Memory DFA Transition Table
 

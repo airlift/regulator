@@ -88,6 +88,7 @@ public final class DfaAbsolutePointerProbe
         check(Dfa.countMatches(latin1CountProgram, countInput, Prog.MatchKind.FIRST_MATCH) == 200, "LATIN1 short fused count changed the result");
         Dfa.DfaInstance latin1CountDfa = latin1CountProgram.getCachedDfa(FIRST_MATCH);
 
+        exerciseShortSearchesAfterPairedRejection(expectedNativeAccess);
         exerciseOptionalStorageFailureAtomicity(expectedNativeAccess);
         if (expectedNativeAccess) {
             exerciseNativeCacheGrowthAtomicity();
@@ -315,6 +316,39 @@ public final class DfaAbsolutePointerProbe
             return;
         }
         throw new AssertionError("expected injected DFA failure");
+    }
+
+    // The sixteenth short paired search rejects paired transitions but keeps its result, so the
+    // rows remain until a later request releases them. Short searches never request paired rows,
+    // and the rows block the pointer table, so the pointer request must release them; otherwise
+    // every later short search retries exclusively and still uses the compact loop.
+    private static void exerciseShortSearchesAfterPairedRejection(boolean expectedNativeAccess)
+    {
+        Prog program = compileProg("^x*(ab|a)");
+        Slice warmingInput = utf8Slice("x".repeat(300) + "abz");
+        Slice pairedInput = utf8Slice("ab" + "z".repeat(300));
+        Slice shortInput = utf8Slice("ab" + "z".repeat(10));
+        check(Dfa.search(program, warmingInput, true, Prog.MatchKind.FIRST_MATCH, true) == 302, "paired rejection warm-up changed the boundary");
+        Dfa.DfaInstance dfa = program.getCachedDfa(FIRST_MATCH);
+        check(dfa.pairedTransitionMemory() > 0, "paired rejection warm-up did not build paired transitions");
+        for (int search = 0; search < 16; search++) {
+            check(Dfa.search(program, pairedInput, true, Prog.MatchKind.FIRST_MATCH, true) == 2, "short paired search changed the boundary");
+        }
+        check(dfa.pairedTransitionMemory() > 0, "rejecting paired search released paired transitions");
+
+        long cacheVersion = 0;
+        for (int search = 0; search < 40; search++) {
+            // The last twenty searches must run without an exclusive retry.
+            if (search == 20) {
+                cacheVersion = dfa.cacheVersion();
+            }
+            check(Dfa.search(program, shortInput, true, Prog.MatchKind.FIRST_MATCH, true) == 2, "short search after paired rejection changed the boundary");
+        }
+        check(dfa.cacheVersion() == cacheVersion, "short searches after paired rejection retried exclusively");
+        if (expectedNativeAccess) {
+            check(dfa.absolutePointerTransitionsAvailable(), "short searches after paired rejection did not allocate a pointer sidecar");
+            check(dfa.pairedTransitionMemory() == 0, "pointer request retained rejected paired transitions");
+        }
     }
 
     private static void exerciseOptionalStorageFailureAtomicity(boolean expectedNativeAccess)

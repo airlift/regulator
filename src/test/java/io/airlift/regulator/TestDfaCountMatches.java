@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
@@ -215,6 +216,39 @@ public class TestDfaCountMatches
         assertThat(dfa.resetCount()).isGreaterThanOrEqualTo(2);
         assertThat(dfa.byteScanFallbackCount()).isZero();
         assertThat(dfa.countSearchBailedWhenSlow()).isFalse();
+    }
+
+    @Test
+    public void testExclusiveCountRejectsPairedTransitions()
+    {
+        String expression = ".*(x|y).*";
+        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
+        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+                .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        Slice warmingInput = utf8Slice("x\n" + "\n".repeat(254));
+        assertThat(pattern.count(warmingInput)).isEqualTo(1);
+        assertThat(pattern.count(warmingInput)).isEqualTo(1);
+        assertThat(dfa.pairedTransitionMemory()).isPositive();
+
+        // The new characters retry the count exclusively. The short lines that follow end paired
+        // searches within 16 bytes until the hint rejects paired transitions, which the next
+        // search releases.
+        Slice input = utf8Slice("\u4e2d\u0400x\n" + "x\n".repeat(40) + "a".repeat(300));
+        assertThat(pattern.count(input))
+                .isEqualTo(trinoMatcherCount(expression, input))
+                .isEqualTo(41);
+        assertThat(dfa.pairedTransitionsDisabled()).isTrue();
+        assertThat(dfa.pairedTransitionMemory()).isZero();
+    }
+
+    private static long trinoMatcherCount(String expression, Slice source)
+    {
+        TrinoRegexpMatcher matcher = TrinoRegexp.compile(utf8Slice(expression)).matcher(source, 0);
+        long count = 0;
+        while (matcher.find()) {
+            count++;
+        }
+        return count;
     }
 
     private static byte[] stateExplosionInput(int length)
