@@ -675,6 +675,157 @@ public class TestDfaCountMatches
         }
     }
 
+    @Test
+    public void testStartByteScanSetSelectedOncePerCount()
+    {
+        TestingTrinoRegexpBenchmarkInputs.Input input = TestingTrinoRegexpBenchmarkInputs.create("captureSparse", 32_768);
+        TrinoRegexp pattern = TrinoRegexp.compile(input.pattern());
+        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+                .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        long expected = trinoMatcherCount(input.pattern().toStringUtf8(), input.source());
+        assertThat(expected).isEqualTo(3);
+
+        // Each of the four spans around the three injected matches uses the range scanner. A
+        // density sample taken at each match boundary would land on the next injected match and
+        // fall back to the scalar scan for the second span.
+        for (int iteration = 0; iteration < 3; iteration++) {
+            int rangeScanCount = dfa.contiguousRangeScanCount();
+            assertThat(pattern.count(input.source())).isEqualTo(expected);
+            assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(4);
+        }
+    }
+
+    @Test
+    public void testStartByteScanSetRejectedForDenseCandidates()
+    {
+        String expression = "([a-z]+)-([0-9]+)";
+        Slice source = utf8Slice("abc-123.".repeat(4_096));
+        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
+        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+                .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+
+        for (int iteration = 0; iteration < 3; iteration++) {
+            assertThat(pattern.count(source))
+                    .isEqualTo(trinoMatcherCount(expression, source))
+                    .isEqualTo(4_096);
+        }
+        assertThat(dfa.contiguousRangeScanCount()).isZero();
+    }
+
+    @Test
+    public void testStartByteScanSetPromotedAfterDensePrefix()
+    {
+        String expression = "([a-z]+)-([0-9]+)";
+        byte[] bytes = new byte[32_768 + 16];
+        Arrays.fill(bytes, (byte) 'a');
+        Arrays.fill(bytes, 7, 7 + 32_768, (byte) '.');
+        System.arraycopy("abcd-1".getBytes(US_ASCII), 0, bytes, 7, 6);
+        Slice[] sources = {Slices.wrappedBuffer(bytes, 7, 32_768), utf8Slice("abcd-1" + ".".repeat(32_762))};
+        for (Slice source : sources) {
+            TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
+            Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+                    .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+
+            // The sample from the text start lands on the candidates of the first match and
+            // selects the scalar scan. The sample after that match sees only filler, so the rest
+            // of the count uses the range scanner.
+            for (int iteration = 0; iteration < 3; iteration++) {
+                int rangeScanCount = dfa.contiguousRangeScanCount();
+                assertThat(pattern.count(source))
+                        .isEqualTo(trinoMatcherCount(expression, source))
+                        .isEqualTo(1);
+                assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
+    public void testStartByteScanSetPromotionThreshold()
+    {
+        String expression = "([a-z]+)-([0-9]+)";
+        // The sample from the text start selects the scalar scan. Resampling after the first
+        // match requires 4 KiB remaining, so only the longer filler promotes the range scanner.
+        for (int fillerLength : new int[] {4_095, 4_096}) {
+            Slice source = utf8Slice("abcd-1" + ".".repeat(fillerLength));
+            TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
+            Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+                    .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+
+            for (int iteration = 0; iteration < 3; iteration++) {
+                int rangeScanCount = dfa.contiguousRangeScanCount();
+                assertThat(pattern.count(source))
+                        .isEqualTo(trinoMatcherCount(expression, source))
+                        .isEqualTo(1);
+                assertThat(dfa.contiguousRangeScanCount() - rangeScanCount)
+                        .as("fillerLength=%s", fillerLength)
+                        .isEqualTo(fillerLength < 4_096 ? 0 : 1);
+            }
+        }
+    }
+
+    @Test
+    public void testStartByteScanSetPromotionRequiresFullSample()
+    {
+        String expression = "([a-z]+)-([0-9]+)";
+        String dense = "abc-123.".repeat(1_024);
+        // Without a full sample the check reports any short span as productive, so a filler
+        // tail shorter than the sample threshold must not promote the range scanner.
+        for (int fillerLength : new int[] {4_000, 4_200}) {
+            Slice source = utf8Slice(dense + ".".repeat(fillerLength));
+            TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
+            Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+                    .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+
+            assertThat(pattern.count(source))
+                    .isEqualTo(trinoMatcherCount(expression, source))
+                    .isEqualTo(1_024);
+            if (fillerLength < 4_096) {
+                assertThat(dfa.contiguousRangeScanCount()).isZero();
+            }
+            else {
+                assertThat(dfa.contiguousRangeScanCount()).isPositive();
+            }
+        }
+    }
+
+    @Test
+    public void testStartByteScanSetNotSampledForFixedDistanceSearches()
+    {
+        String expression = "[a-z]:[0-9]+";
+        // The dense prefix selects the scalar scan. Searches with at least 4 KiB remaining use the
+        // fixed-distance scan for the colon, so they must not sample start-byte density. A sample
+        // after a late prefix match would see only filler and promote the range scanner for the
+        // final span, which is shorter than 4 KiB and reaches the start-byte scan without sampling.
+        Slice source = utf8Slice("a:1.".repeat(64) + ".".repeat(8_000) + "b:2" + ".".repeat(2_000));
+        TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
+        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+                .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+
+        for (int iteration = 0; iteration < 3; iteration++) {
+            assertThat(pattern.count(source))
+                    .isEqualTo(trinoMatcherCount(expression, source))
+                    .isEqualTo(65);
+        }
+        assertThat(dfa.contiguousRangeScanCount()).isZero();
+    }
+
+    @Test
+    public void testStartByteScanSetPromotionSurvivesRetry()
+    {
+        Prog program = compile("([a-z]+)-([0-9]+)");
+        Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(Dfa.countMatches(program, utf8Slice("abcd-1" + ".".repeat(5_000)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(1);
+        int rangeScanCount = dfa.contiguousRangeScanCount();
+
+        // The first match uses only computed transitions, so the count is still shared when the
+        // second search promotes the selection. That search needs a new transition after two
+        // digits and retries exclusively, losing the promotion; the retry samples again, and the
+        // final span keeps the promoted range scanner.
+        Slice source = utf8Slice("abcd-1" + ".".repeat(16_000) + "ab-12" + ".".repeat(16_000));
+        assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH)).isEqualTo(2);
+        assertThat(dfa.contiguousRangeScanCount() - rangeScanCount).isEqualTo(3);
+    }
+
     private static void assertSelfLoopScanCount(String expression, Slice source, long expected, int expectedScanCount)
     {
         assertSelfLoopScanCount(expression, source, expected, scanCount -> assertThat(scanCount)
