@@ -4635,9 +4635,11 @@ final class Dfa
 
             // The hint is intentionally racy: concurrent readers may change when the
             // threshold is reached, but rejection only selects the equivalent compact path.
+            // This search has already completed, and an exclusive search cannot retry, so the
+            // next paired or pointer-table request releases the table under the exclusive
+            // cache protocol.
             pairedTransitionsRejected = true;
             pairedTransitionsRequested = false;
-            throw RETRY_SEARCH;
         }
 
         void requestPairedTransitions()
@@ -4649,10 +4651,7 @@ final class Dfa
                 throw RETRY_SEARCH;
             }
             if (pairedTransitionsRejected) {
-                clearPairedTransitions();
-                pairedTransitionsRejected = false;
-                pairedTransitionsDisabled = true;
-                pairedTransitionsRequested = true;
+                releaseRejectedPairedTransitions();
                 return;
             }
             pairedTransitionsRequested = true;
@@ -4670,7 +4669,20 @@ final class Dfa
             if (!cacheMutationLock.isHeldByCurrentThread()) {
                 throw RETRY_SEARCH;
             }
+            // Rejected paired rows block the pointer table, and short searches never request
+            // paired rows. Keeping them would retry every later short search exclusively.
+            if (pairedTransitionsRejected) {
+                releaseRejectedPairedTransitions();
+            }
             absolutePointerTransitionsRequested = true;
+        }
+
+        private void releaseRejectedPairedTransitions()
+        {
+            clearPairedTransitions();
+            pairedTransitionsRejected = false;
+            pairedTransitionsDisabled = true;
+            pairedTransitionsRequested = true;
         }
 
         boolean shouldUseAbsolutePointersForShortSearch()

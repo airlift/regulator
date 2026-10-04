@@ -93,12 +93,14 @@ public class TestDfaPairedTransitions
         assertThat(Dfa.search(program, warmingInput, true, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(302);
         Dfa.DfaInstance dfa = program.getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(dfa.pairedTransitionMemory()).isPositive();
-        for (int search = 1; search < 16; search++) {
+        // The sixteenth short search rejects paired transitions, and the next search releases them.
+        for (int search = 1; search <= 16; search++) {
             assertThat(Dfa.search(program, input, true, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(2);
             assertThat(dfa.pairedTransitionsDisabled())
                     .as("paired transitions after short search %s", search)
                     .isFalse();
         }
+        assertThat(dfa.pairedTransitionMemory()).isPositive();
 
         long pairedTransitionMemory = dfa.pairedTransitionMemory();
         long absolutePointerMemory = dfa.absolutePointerTransitionMemory();
