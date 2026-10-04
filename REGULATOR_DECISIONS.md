@@ -244,6 +244,78 @@ performance hint shared by concurrent readers; races may change when rejection
 occurs but cannot change matching behavior. A cache reset clears the hint and
 allows the new cache generation to be evaluated again.
 
+## Count Self-Loop Exit-Byte Scan
+
+Fused DFA counting may skip the interior of a self-loop state with a Vector
+byte-set scan instead of stepping the DFA one byte at a time. A state
+qualifies when every byte either returns to the same state, carrying the match
+bit when the state matches, or belongs to a small exit set: at most three
+bytes, optionally combined with every byte from 0x80 through 0xFF. The exit set
+is computed from the complete 256-byte transition row under the existing
+exclusive cache mutation protocol and cached with the state. The scan resumes
+DFA stepping at the first exit byte, so every byte that can change the state or
+its match status is still processed by the DFA in input order. In a matching
+loop, the scan records the match boundary implied by the skipped bytes. Trino
+`regexp_count` with `.*(x|y).*` over long lines is the motivating shape:
+on r9g, counting over 32 KiB of filler fell from 25.8 us to 3.6 us per
+call (0.79 to 0.11 ns per byte) against 21.3 us for Joni, and over 1 KiB
+from 911 ns to 148 ns against 699 ns for Joni; r8g and r8i moved by the
+same or larger factors, and no other benchmark changed outside noise.
+
+The route is limited to the count variant of the forward search. Counting needs
+only each match end, and that variant is already kept separate from the
+group-zero cursor because extra result handling in the cursor's generated code
+measurably regresses short repeated boundary operations. The route runs only
+for searches of at least 256 bytes, the same gate that requests paired
+transitions, and it runs before that request so a qualifying search does not
+build a paired table it will not use. Shorter searches cannot amortize the
+exit-set construction and Vector setup. Unanchored-end, non-matching start
+states and an available Vector API are also required; every other search keeps
+its existing route.
+
+In UTF-8, a dot loop leaves its state on every byte from 0x80 through 0xFF
+because each multibyte character passes through intermediate states. A
+dedicated high-bit flag marks these loops, and `findHighBitOr` finds the first
+byte with its high bit set or equal to one of the low exit bytes. The UTF-8
+start state is not the loop itself, so the route first walks up to five
+ordinary DFA steps to reach a qualifying state. After each exit byte it walks
+up to five steps to return to one. Five steps cover a four-byte character in a
+matching loop, which first lands in an unflagged copy of the loop state because
+match bits are delayed by one byte. When the first walk from the start state
+does not reach a qualifying state, the route does not apply and the ordinary
+search runs from the search start. When a later walk does not reach one, or
+four consecutive scans skip fewer than 16 bytes, the search continues at the
+current state, position, and match boundary; a later walk that reaches a dead
+or full-match state ends the search instead. The paired and pointer hand-offs
+need at least 256 bytes remaining, and a shorter remainder continues through
+the compact loop. Without a pending match the search continues through the
+ordinary paired or compact loop. With a pending first match it continues
+through the absolute-pointer loop when a pointer table exists or can be
+allocated, and through the paired after-match loop when the DFA already holds
+or has requested paired rows or no pointer table can be allocated, such as
+without native access. Paired rows prevent the pointer table from being
+allocated. A requested pointer table is allocated when the exclusive search
+that requests it ends, not during that search, which continues through the
+compact loop. The compact loop leaves its fast path on every match transition,
+and every transition out of a matching loop is one, so a matching dot loop over
+text with a multibyte character every few bytes ran the rest of the text byte
+by byte; on r9g, 32 KiB of `xaaaaaaaa` followed by repeated `éa` took 215 us
+against 58.6 us before the route. Longest match searches keep the compact loop,
+as they do after a paired search's first match. A paired search reached without
+a pending match reports the whole search length to the short-paired-search
+hint, as every other paired search does, so a short tail after a long scan does
+not disable paired transitions. The existing self-loop consumer ignores exit
+sets with the matching or high-bit flags, so its behavior is unchanged.
+
+Searches whose start state never reaches a qualifying loop pay the initial walk
+on every match. After eight consecutive searches in which the route does not
+apply, the route stops attempting for the rest of the count call. A search that
+retries is counted once. The counter is reset at the start of each count, so a
+later text that does reach a qualifying loop still uses the route. As with the
+paired-transition hint, the counter is a best-effort performance hint shared by
+concurrent readers; races may change when the route engages but not the match
+result, because the ordinary route computes the same match end.
+
 ## Bounded Native-Memory DFA Transition Table
 
 Eligible forward one-byte DFA searches may use a private native-memory table of
