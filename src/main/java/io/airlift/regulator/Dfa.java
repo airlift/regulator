@@ -116,6 +116,7 @@ final class Dfa
     static final long COUNT_UNSUPPORTED = -1;
     static final long CANDIDATE_SEARCH_FALLBACK = Long.MIN_VALUE + 1;
     private static final long COUNT_SCAN_REJECTED_MATCH_FLAG = 1L << Integer.SIZE;
+    private static final long COUNT_START_BYTE_SCAN_PROMOTED_FLAG = 1L << (Integer.SIZE + 1);
     private static final long COUNT_MATCH_LENGTH_MASK = COUNT_SCAN_REJECTED_MATCH_FLAG - 1;
     private static final long COUNT_SELF_LOOP_SCAN_NOT_APPLICABLE = Long.MIN_VALUE + 2;
     private static final int COUNT_SELF_LOOP_SHORT_SCAN_BYTES = 16;
@@ -496,6 +497,25 @@ final class Dfa
         Prog.FixedDistanceByteCandidates fixedDistanceCandidates = context.length() >= MIN_SELECTIVE_SCAN_SEARCH_BYTES
                 ? dfa.fixedDistanceByteCandidates()
                 : null;
+        // Sample start-byte density from the context start. A vector choice is kept for the whole
+        // count: samples taken at match boundaries can land on the literals of later matches and
+        // fall back to the scalar scan for the long sparse span that follows. A scalar choice is
+        // sampled again when a later search reaches the start-byte scan, until the vector scan is
+        // selected; searches served by another scan do not sample. Resampling requires at least
+        // 4 KiB remaining; below that the check reports the span as productive without sampling,
+        // which would promote the vector scan for dense input. Prefix acceleration returns before
+        // the start-byte scan, so the selection is made only when it can be read.
+        int startByteScanSet = 0;
+        boolean resampleStartByteScanSet = false;
+        if (dfa.canStartByteAcceleration() && !prog.canPrefixAccel()) {
+            startByteScanSet = selectByteScanSet(
+                    dfa.startByteScanSet,
+                    dfa.startByteCandidates,
+                    bytes,
+                    contextBegin,
+                    contextEnd);
+            resampleStartByteScanSet = startByteScanSet == 0 && dfa.startByteScanSet != 0;
+        }
         // The self-loop cutoff applies to one count call; a new text may reach an eligible loop.
         // The guard skips writing a shared field that is already zero.
         if (dfa.countSelfLoopNotApplicableCount != 0) {
@@ -526,7 +546,9 @@ final class Dfa
                             contextBegin,
                             contextEnd,
                             textBegin,
-                            fixedDistanceCandidates);
+                            fixedDistanceCandidates,
+                            startByteScanSet,
+                            resampleStartByteScanSet);
                     if (matchEnd == SEARCH_FAILED) {
                         dfa.recordCountSearchBailedWhenSlow();
                         return COUNT_UNSUPPORTED;
@@ -538,6 +560,10 @@ final class Dfa
                         return COUNT_UNSUPPORTED;
                     }
                     boolean byteScanRejected = (matchEnd & COUNT_SCAN_REJECTED_MATCH_FLAG) != 0;
+                    if ((matchEnd & COUNT_START_BYTE_SCAN_PROMOTED_FLAG) != 0) {
+                        startByteScanSet = dfa.startByteScanSet;
+                        resampleStartByteScanSet = false;
+                    }
                     matchEnd &= COUNT_MATCH_LENGTH_MASK;
                     if (byteScanRejected && dfa.resetCount() - initialResetCount >= 2) {
                         dfa.recordCountSearchBailedWhenSlow();
@@ -844,9 +870,9 @@ final class Dfa
         return lastMatchBoundary;
     }
 
-    // Keep fused-count routing separate from the group-zero cursor. The count result carries a
-    // private scan-rejection bit, while adding that result handling to the cursor's generated code
-    // measurably regresses short repeated boundary operations.
+    // Keep fused-count routing separate from the group-zero cursor. The count result carries
+    // private scan-rejection and start-byte promotion bits, while adding that result handling to
+    // the cursor's generated code measurably regresses short repeated boundary operations.
     private static long searchForwardForCount(
             DfaInstance dfa,
             Prog prog,
@@ -854,7 +880,9 @@ final class Dfa
             int contextBegin,
             int contextEnd,
             int textBegin,
-            Prog.FixedDistanceByteCandidates fixedDistanceCandidates)
+            Prog.FixedDistanceByteCandidates fixedDistanceCandidates,
+            int startByteScanSet,
+            boolean resampleStartByteScanSet)
     {
         if (prog.anchorStart() && contextBegin != textBegin) {
             return SEARCH_NO_MATCH;
@@ -938,13 +966,19 @@ final class Dfa
                 dfa.byteScanFallbackCount++;
             }
             else {
-                int startByteScanSet = selectByteScanSet(
-                        dfa.startByteScanSet,
-                        dfa.startByteCandidates,
-                        bytes,
-                        textBegin,
-                        contextEnd);
-                return searchForwardScanAcceleration(
+                // A scalar choice is resampled only when a search reaches this scan, so searches
+                // served by the fixed-distance scan do not pay for a density sample.
+                boolean promoted = false;
+                if (resampleStartByteScanSet && contextEnd - textBegin >= MIN_SMALL_BYTE_SET_PRODUCTIVITY_CHECK_BYTES) {
+                    startByteScanSet = selectByteScanSet(
+                            dfa.startByteScanSet,
+                            dfa.startByteCandidates,
+                            bytes,
+                            textBegin,
+                            contextEnd);
+                    promoted = startByteScanSet != 0;
+                }
+                long result = searchForwardScanAcceleration(
                         dfa,
                         prog,
                         bytes,
@@ -958,6 +992,10 @@ final class Dfa
                         dfa.startByteCandidates,
                         startByteScanSet,
                         0);
+                if (promoted && result > 0) {
+                    return result | COUNT_START_BYTE_SCAN_PROMOTED_FLAG;
+                }
+                return result;
             }
         }
         else if (byteScanRejected) {

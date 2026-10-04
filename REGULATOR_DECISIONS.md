@@ -316,6 +316,37 @@ paired-transition hint, the counter is a best-effort performance hint shared by
 concurrent readers; races may change when the route engages but not the match
 result, because the ordinary route computes the same match end.
 
+## Once-Per-Count Start-Byte Scan Selection
+
+Fused DFA counting selects the start-byte scan primitive per count call,
+sampling candidate density from the beginning of the text. The selection only
+moves from the scalar scan to the vector scan. When the first sample selects
+the vector scan, the count keeps it for every match. When it selects the scalar
+scan, a later search that reaches the start-byte scan samples again from its
+start while at least 4 KiB remain, and the count keeps the vector scan from the
+first sample that selects it. Searches served by the fixed-distance scan do not
+sample, so dense input such as `[a-z]:[0-9]+` over repeated `a:1.` does not pay
+a start-byte density sample per match. Below 4 KiB the check reports the span
+as productive without sampling, so resampling there would promote the vector
+scan for uniformly dense input. The per-search productivity check that can
+reject candidate scanning altogether still runs for each match. Retries after
+a cache reset keep the current selection; a promotion made by the search that
+retried is discarded, and the retry samples again. The selected primitive
+changes only how candidates are found, never which candidates the DFA
+processes. Fixed-distance candidate selection still samples at each match.
+
+Sampling at each match boundary made the choice depend on where the previous
+match ended rather than on the input. On sparse capture input with a match
+every 8 KiB, the sample taken just after one match landed on the literals of
+later matches and fell back to the scalar candidate scan for the following
+span. On r9g, counting the three matches in 32 KiB fell from 4.1 us to 1.9 us
+per call, with r8g at 0.43x and r8i at 0.17x of the previous time. A vector
+choice is therefore never demoted. A single sample from the start of the text
+misjudges the opposite shape, where a dense prefix precedes a long sparse
+span, so a scalar choice is checked again when a later search reaches the
+start-byte scan. Dense input rejects every such sample and keeps the scalar
+scan.
+
 ## Bounded Native-Memory DFA Transition Table
 
 Eligible forward one-byte DFA searches may use a private native-memory table of
