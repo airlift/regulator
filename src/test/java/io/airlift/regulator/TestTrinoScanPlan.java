@@ -719,6 +719,112 @@ public class TestTrinoScanPlan
         }
     }
 
+    @Test
+    public void testLeadingLiteralProbeOffset()
+    {
+        // A case-sensitive leading literal scans for its byte chosen by ByteFrequencies, which
+        // moves only to a much rarer letter.
+        assertThat(leadingLiteralProbe("svc1://(?:www\\.)?([^/]+)/")).isEqualTo(1);
+        assertThat(leadingLiteralProbe("svc5://(?:www\\.)?([^/]+)/")).isEqualTo(1);
+        assertThat(leadingLiteralProbe("abc(.*)")).isEqualTo(1);
+        assertThat(leadingLiteralProbe("aab([0-9]+)")).isEqualTo(2);
+        assertThat(leadingLiteralProbe("content-type: ([^;]+)")).isEqualTo(9);
+        assertThat(leadingLiteralProbe("svc1://(?i:www\\.)?([^/]+)/")).isEqualTo(1);
+        // Rarer punctuation never becomes the probe; rare first bytes and one-byte literals
+        // keep the first byte.
+        assertThat(leadingLiteralProbe("https://(?:www\\.)?([^/]+)/")).isZero();
+        assertThat(leadingLiteralProbe("user=(\\w+)")).isZero();
+        assertThat(leadingLiteralProbe("error: ([0-9]+)")).isZero();
+        assertThat(leadingLiteralProbe("https?://(?:www\\.)?([^/]+)/")).isZero();
+        assertThat(leadingLiteralProbe("\"([^\"]*)\"")).isZero();
+        // ASCII-folded literals and run-leading plans keep their own scans.
+        assertThat(leadingLiteralProbe("(?i)content-type:([^;]+);")).isEqualTo(-1);
+        assertThat(leadingLiteralProbe("[?&]([^=]+)=")).isEqualTo(-1);
+    }
+
+    @Test
+    public void testLeadingLiteralProbeSkipsToWholeLiteral()
+    {
+        // Each s and each v outside the literal would otherwise start a scan stop; only whole
+        // occurrences are attempted, and a literal starting before the search is never one.
+        String input = "svc svs vvv svc1:/ svc1://h/";
+        assertThat(candidateAttempts("svc1://(?:www\\.)?([^/]+)/", input)).isEqualTo(1);
+        assertThat(candidateAttempts("svc1://(?:www\\.)?([^/]+)/", "svc1://")).isEqualTo(1);
+        assertThat(candidateAttempts("svc1://(?:www\\.)?([^/]+)/", "vsvc1:/")).isZero();
+        // Overlapping occurrences each start an attempt.
+        assertThat(candidateAttempts("aab([0-9]+)", "aaab aab aaa aa")).isEqualTo(2);
+        assertThat(candidateAttempts("abab([0-9]+)", "ababab1")).isEqualTo(2);
+
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("svc1://([^/]+)/"));
+        assertThat(regexp.pattern().usesTrinoScanPlanForDiagnostics()).isTrue();
+        Slice text = utf8Slice("svc1://a/svc1://b/ xsvc1://c/svc1://");
+        assertThat(regexp.count(text)).isEqualTo(3);
+        assertThat(regexp.extractAll(text, 1)).containsExactly(utf8Slice("a"), utf8Slice("b"), utf8Slice("c"));
+        // The search range starts after the first literal's first byte, which puts its
+        // probe byte inside the range.
+        Re2Matcher matcher = regexp.pattern().matcher(text);
+        matcher.reset(text, 1, text.length());
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(9);
+    }
+
+    @Test
+    public void testLeadingLiteralProbeAgainstJoni()
+    {
+        // Literals whose probe is not the first byte, with partial, overlapping, and adjacent
+        // occurrences, probe bytes outside any occurrence, and every region of each text.
+        List<String> probeExpressions = List.of(
+                "svc1://(?:www\\.)?([^/]+)/",
+                "svc5://([^/]+)/",
+                "content-type: ([^;]+)",
+                "abab([0-9]*)",
+                "aab([0-9]*)",
+                "abc(.*)");
+        for (String expression : probeExpressions) {
+            assertThat(leadingLiteralProbe(expression)).as(expression).isPositive();
+        }
+        // Literals whose probe is the first byte run a separate scan loop.
+        List<String> firstByteExpressions = List.of(
+                "https://(?:www\\.)?([^/]+)/",
+                "user=(\\w*)",
+                "error: ([0-9]+)");
+        for (String expression : firstByteExpressions) {
+            assertThat(leadingLiteralProbe(expression)).as(expression).isZero();
+        }
+        List<String> expressions = new ArrayList<>(probeExpressions);
+        expressions.addAll(firstByteExpressions);
+        List<Slice> sources = new ArrayList<>(randomSources(
+                241,
+                List.of("s", "v", "c", "1", "5", "svc", "svc1://", "svc5://", "://", ":", "/", "www.", "h", "content", "content-type: ", "type", "-", ";", ": ", "y", "t", "0", "9", "a", "b", "ab", "abab", "aab", "abc", "https://", "http", "user=", "u", "=", "error: ", "e", "r", " ", "é"),
+                List.of(new byte[] {(byte) 0x80}, new byte[] {(byte) 0xC3}, new byte[] {(byte) 0xFF})));
+        List<String> texts = List.of(
+                "svc1://h/ xsvc1://www.h/ svc1:/",
+                "svc5://a/svc5://b/ svc55://c/",
+                "content-type: content-type: a; ontent-type: b;",
+                "abababab1 aabab2",
+                "aaab9 abcabc",
+                "https://h/ xhttps://www.h/ https:/ http://h/",
+                "user=al user=user= ser=x error: 12 error 3 error: x");
+        for (String text : texts) {
+            Slice whole = utf8Slice(text);
+            for (int cut = 0; cut <= whole.length(); cut++) {
+                sources.add(whole.slice(0, cut));
+                sources.add(whole.slice(cut, whole.length() - cut));
+            }
+        }
+        for (String expression : expressions) {
+            verifySourcesAgainstJoni(expression, sources, true);
+            for (String text : texts) {
+                verifyRegionsAgainstJoni(expression, utf8Slice(text));
+            }
+        }
+    }
+
+    private static int leadingLiteralProbe(String expression)
+    {
+        return requireNonNull(analyze(expression), expression).leadingLiteralProbeOffsetForDiagnostics();
+    }
+
     /**
      * Compares {@link Re2Matcher#find()} over every region of {@code source} that starts and ends
      * on a character boundary with Joni over the same bytes. Each region is also searched with

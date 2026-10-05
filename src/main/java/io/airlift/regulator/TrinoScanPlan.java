@@ -116,7 +116,7 @@ final class TrinoScanPlan
     // findFailureResumeOperation.
     private final int failureResumeOperation;
     // Set when an unanchored search starts with a case-sensitive literal of two or more bytes.
-    // Such a search checks the whole literal at each first-byte candidate in its own loop, so
+    // Such a search checks the whole literal at each probe-byte candidate in its own loop, so
     // the candidate loop of every other plan has no whole-literal check.
     private final boolean wholeLiteralCandidates;
     // Set when the plan has an ASCII-folded operation, which only the ASCII-folded executors run.
@@ -433,6 +433,16 @@ final class TrinoScanPlan
     }
 
     /**
+     * Returns the offset of the leading literal byte that an unanchored candidate scan probes,
+     * or {@code -1} when the plan does not start with a case-sensitive literal.
+     */
+    int leadingLiteralProbeOffsetForDiagnostics()
+    {
+        Step leading = steps[leadingOperation];
+        return leading.kind == Kind.LITERAL ? leading.probeOffset : -1;
+    }
+
+    /**
      * Returns whether {@code [start, end)} of {@code input} lacks the required literal, so an
      * unanchored search of that range stops after its first failed attempt.
      */
@@ -458,7 +468,7 @@ final class TrinoScanPlan
         int candidate = base;
         while (candidate < end) {
             if (wholeLiteralCandidates) {
-                candidate = findLiteral(bytes, candidate, end, leading.literal);
+                candidate = findLeadingLiteral(bytes, candidate, end, leading);
             }
             else {
                 candidate = usesAsciiFoldedExecutor
@@ -1143,7 +1153,7 @@ final class TrinoScanPlan
 
     /**
      * The unanchored search of {@link #search} and {@link #searchAsciiFolded} for a plan led by a
-     * case-sensitive literal of two or more bytes. Each first-byte candidate is checked for the
+     * case-sensitive literal of two or more bytes. Each probe-byte candidate is checked for the
      * rest of the literal before an attempt, so an attempt starts only where the whole literal
      * occurs. The loop is separate so that the candidate loop of every other plan has no
      * whole-literal check. A literal-led plan has no separate required literal.
@@ -1162,7 +1172,7 @@ final class TrinoScanPlan
             if (failedWork - WORK_BUDGET_FACTOR * (long) (candidate - searchStart) > workBudgetBytes) {
                 return handOff(groups, candidate - offset);
             }
-            candidate = findLiteral(bytes, candidate, end, leading.literal);
+            candidate = findLeadingLiteral(bytes, candidate, end, leading);
             if (candidate < 0) {
                 break;
             }
@@ -1298,6 +1308,22 @@ final class TrinoScanPlan
     }
 
     /**
+     * Returns the first position at or after {@code candidate} where the whole literal of the
+     * case-sensitive {@code leading} step occurs, or {@code -1} when none remains. The result is
+     * the first whole occurrence for any probe, so the attempts of a search, and with them its
+     * work budget, do not depend on it.
+     */
+    private static int findLeadingLiteral(byte[] bytes, int candidate, int end, Step leading)
+    {
+        // A probe moved off the first byte runs its own loop, so a first-byte probe keeps the
+        // first-byte loop.
+        if (leading.probeOffset != 0) {
+            return findLiteralAtProbe(bytes, candidate, end, leading.literal, leading.probeOffset);
+        }
+        return findLiteral(bytes, candidate, end, leading.literal);
+    }
+
+    /**
      * Returns the first position at or after {@code candidate} where the whole {@code literal}
      * occurs, or {@code -1} when none remains. A literal that does not fit before {@code end} is
      * never a candidate, so no byte at or past {@code end} is read.
@@ -1313,6 +1339,43 @@ final class TrinoScanPlan
             }
             if (index == literal.length) {
                 return candidate;
+            }
+            candidate++;
+        }
+        return -1;
+    }
+
+    /**
+     * Returns the first position at or after {@code candidate} where the whole {@code literal}
+     * occurs, or {@code -1} when none remains, scanning for the byte at {@code probeOffset},
+     * which {@link ByteFrequencies} moved off a common first byte. A literal that does not fit
+     * before {@code end} is never a candidate, so no byte at or past {@code end} is read.
+     * <p>
+     * The scan searches a range shifted by the probe offset, so every candidate starts at or
+     * after {@code candidate}.
+     */
+    private static int findLiteralAtProbe(byte[] bytes, int candidate, int end, byte[] literal, int probeOffset)
+    {
+        byte probe = literal[probeOffset];
+        // A start after this limit leaves too few bytes for the literal, and the probe byte of a
+        // start before it lies before end.
+        int limit = end - literal.length + 1;
+        int found;
+        while ((found = findByte(bytes, candidate + probeOffset, limit + probeOffset, probe)) >= 0) {
+            candidate = found - probeOffset;
+            // The scan has already compared the probe byte.
+            int index = 0;
+            while (index < probeOffset && bytes[candidate + index] == literal[index]) {
+                index++;
+            }
+            if (index == probeOffset) {
+                index++;
+                while (index < literal.length && bytes[candidate + index] == literal[index]) {
+                    index++;
+                }
+                if (index == literal.length) {
+                    return candidate;
+                }
             }
             candidate++;
         }
@@ -2144,6 +2207,9 @@ final class TrinoScanPlan
 
         private final Kind kind;
         final byte[] literal;
+        // The offset of the byte a candidate scan for a case-sensitive LITERAL probes. See
+        // findLeadingLiteral.
+        private final int probeOffset;
         private final byte delimiter;
         private final int slot;
         private final int minimum;
@@ -2214,6 +2280,7 @@ final class TrinoScanPlan
         {
             this.kind = kind;
             this.literal = literal;
+            this.probeOffset = kind == Kind.LITERAL && literal.length > 1 ? ByteFrequencies.DEFAULT.probeOffset(literal, literal.length) : 0;
             this.run = run;
             this.branch = branch;
             this.delimiter = (byte) delimiter;

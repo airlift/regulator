@@ -577,6 +577,49 @@ and use the engine without resolving the incubating module. Every surviving
 candidate is compared with the complete prefix. Front/back byte selection
 keeps preprocessing bounded and the integrated scanner compact.
 
+## Literal Probe Byte Selection
+
+Case-sensitive multi-byte prefixes with an ASCII first byte, and multi-byte
+leading literals in Trino scan plans, scan for one probe byte instead of always
+scanning for the first byte. `ByteFrequencies` picks the rarest ASCII letter
+after the first byte, earliest on ties, and uses it only when its estimated
+probability is less than a quarter of the first byte's; otherwise the probe
+remains offset 0. Each probe hit is shifted back to its candidate start and
+confirmed with the complete literal. The RE2 prefix scan checks the farther
+literal end before the full comparison. The Trino scan returns the same first
+whole-literal occurrence as the first-byte scan, so candidate attempts, failed
+work, and the work budget are unchanged. Density hand-off never applies to
+literal-led plans.
+
+Only letters are probed because punctuation and digit frequencies depend on
+the data format, as with `/` in URLs or `=` in key=value logs, and swing by
+orders of magnitude between formats that no static table predicts; letter
+frequencies vary far less. On r9g, probing `/` for `https://` and `http://` ran
+6.7-8.5x slower than the first-byte scan over access-log text, which carries
+about twelve slashes and one `h` per line. In modeled candidate stops over 744
+literal and corpus rows, letters only with factor four cut geometric-mean stops
+1.36x overall and 1.72x on dense rows, made 0.3% of rows worse with a worst
+ratio of 0.41, and lost no access-log rows.
+Factor two, with or without the letter restriction, gained more overall but
+lost up to 300x on an access-log row. These are modeled stop counts, not timings; JMH
+qualification uses `BenchmarkLiteralProbe` with the existing prefix and
+scan-plan benchmarks.
+
+The table orders bytes by memchr's `rarebytes` rank (MIT or Unlicense) and
+assigns magnitudes from byte counts over an equal blend of English prose,
+source code, log, and JSON corpora, so the factor of four compares estimated
+frequencies rather than ranks. The 65 bytes memchr ties at its most common rank
+share one value. Bytes at or above `0x80` are pinned to the most common ASCII
+value, so a literal led by encoded text yields to a rare letter.
+
+Probing punctuation or digits is out of scope; it needs a distribution of the
+searched data, such as a caller-supplied one. Fused first-byte/last-byte
+strategies, paired candidate scans, case-folded prefixes and literals,
+required-literal checks, and single-byte literals keep first-byte scanning.
+This is a performance-only deviation. Randomized tests compare the RE2 site
+with scalar literal searches in UTF-8 and Latin-1, and the Trino site with
+Joni.
+
 ## Small Candidate-Byte Vector Scan
 
 Forward DFA start-byte and fixed-distance candidate sets containing exactly two
