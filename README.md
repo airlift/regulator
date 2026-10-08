@@ -38,6 +38,7 @@ Regulator provides separate compilers for:
 - RE2 syntax
 - Trino regular-expression syntax
 - the regular subset of Java `Pattern`
+- Rust `regex::Regex` syntax with JVM-backed Unicode properties
 - Trino SQL `LIKE` patterns
 
 ## Usage
@@ -74,6 +75,7 @@ Slice patternBytes = utf8Slice("[a-z]+");
 Re2 re2 = Re2.compile(patternBytes);
 TrinoRegexp trinoRegexp = TrinoRegexp.compile(patternBytes);
 JavaRegexp javaRegexp = JavaRegexp.compile(patternBytes);
+RustRegexp rustRegexp = RustRegexp.compile(patternBytes);
 TrinoLikePattern likePattern = TrinoLikePattern.compile(patternBytes);
 ```
 
@@ -99,7 +101,7 @@ Slice is Regulator's only runtime dependency.
 
 ## Runtime acceleration
 
-The three regex compilers share Regulator's RE2-based matching engines. SQL
+The four regex compilers share Regulator's RE2-based matching engines. SQL
 `LIKE` has its own parser, planner, and wildcard matcher. It shares specialized
 literal matchers with the regex engines where the languages behave the same way.
 
@@ -136,6 +138,7 @@ separate native-access and pure-Java results.
 - [RE2 language](docs/reference/languages/RE2.md)
 - [Trino regular-expression language](docs/reference/languages/TRINO_REGEXP.md)
 - [Java regular-expression language](docs/reference/languages/JAVA_REGEXP.md)
+- [Rust regular-expression language](docs/reference/languages/RUST_REGEXP.md)
 - [Trino SQL LIKE language](docs/reference/languages/TRINO_LIKE.md)
 - [Unsupported features](docs/reference/languages/UNSUPPORTED_FEATURES.md)
 
@@ -149,4 +152,5 @@ separate native-access and pure-Java results.
 
 Regulator is licensed under the [Apache License 2.0](LICENSE). It includes a
 Java port of RE2; the required RE2 copyright and BSD license notice are provided
-in [LICENSE-re2.txt](LICENSE-re2.txt).
+in [LICENSE-re2.txt](LICENSE-re2.txt). Rust property-name aliases also include
+their [Unicode license](src/main/resources/META-INF/LICENSE-rust-unicode.txt).

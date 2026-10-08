@@ -34,7 +34,7 @@ code and running the relevant benchmarks.
 
 ## Parser frontends
 
-`RegexpParser`, `TrinoRegexpParser`, and `JavaRegexpParser` each handle their
+`RegexpParser`, `TrinoRegexpParser`, `JavaRegexpParser`, and `RustRegexpParser` each handle their
 language's grammar, state, and errors. Every parse gets a private parser
 instance, so there is no shared mutable parser state to synchronize.
 
@@ -44,7 +44,7 @@ Keep these utilities free of dialect flags, callbacks, and per-token dispatch.
 If one frontend needs different semantics, move that behavior back into the
 frontend rather than obscuring the difference inside the shared helper.
 
-When changing duplicated parser mechanics, assess all three frontends and run
+When changing duplicated parser mechanics, assess all four frontends and run
 their focused syntax and differential tests. Extract another shared helper only
 when it has a clear language-neutral contract and makes each parser easier to
 read; duplicated dialect logic is preferable to a parameterized parser core.
@@ -106,6 +106,7 @@ Every behavior change must identify its authority:
 - Java 25 for the supported Java frontend
 - Trino's Joni fork and Trino function tests for `TrinoRegexp`
 - Trino LIKE semantics for `TrinoLikePattern`
+- Rust regex 1.13.1 for `RustRegexp`, subject to its documented JVM Unicode and resource policies; regenerate fixtures with `tools/rust-golden`
 
 Before changing behavior, add a failing deterministic test based on the
 appropriate authority. Exercise the public or engine path that failed, not just
