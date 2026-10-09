@@ -102,12 +102,16 @@ The choices are:
   own data and is the most reliable choice. A few hundred kilobytes of whole
   lines sampled across the data is a good sample.
 - `ByteFrequencies.fromCounts(counts)`, which uses 256 byte counts.
+- `ByteFrequencies.englishText()` for English prose and `ByteFrequencies.json()`
+  for JSON documents, measured on pinned public English corpora and JSON example
+  files. `tools/byte-frequencies` regenerates both preset tables from their
+  sources.
 - `ByteFrequencies.uniform()`, the default.
 
 Learned and counted distributions may move the scan to any byte after the
-first, including punctuation, digits, and bytes at or above `0x80`. The
-distribution affects only search speed, never results, and the compiled
-pattern does not retain it:
+first, including punctuation, digits, and bytes at or above `0x80`. Every
+preset probes only ASCII bytes. The distribution affects only search speed,
+never results, and the compiled pattern does not retain it:
 
 ```java
 ByteFrequencies frequencies = ByteFrequencies.builder()
