@@ -1,0 +1,16 @@
+[package]
+name = "rust-regex-golden"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+regex = "=1.13.1"
+# Exactly the releases regex 1.13.1 resolves to. Default features stay off so
+# the direct dependency enables nothing beyond what regex's default features
+# already enable; otherwise feature unification could give the meta engine
+# extra strategies that a default regex build does not have.
+regex-automata = { version = "=0.4.18", default-features = false, features = ["std", "syntax", "meta"] }
+regex-syntax = "=0.8.11"
+# Loads the upstream TOML corpus exactly as the regex crate's own tests do.
+regex-test = "=0.1.1"
