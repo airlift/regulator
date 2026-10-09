@@ -135,6 +135,7 @@ public final class Re2
         }
 
         private long maxMemory = DEFAULT_MAX_MEMORY;
+        private ByteFrequencies byteFrequencies = ByteFrequencies.uniform();
         private Encoding encoding = Encoding.UTF8;
         private boolean posixSyntax;
         private boolean longestMatch;
@@ -182,6 +183,7 @@ public final class Re2
         {
             Options copy = new Options();
             copy.maxMemory = maxMemory;
+            copy.byteFrequencies = byteFrequencies;
             copy.encoding = encoding;
             copy.posixSyntax = posixSyntax;
             copy.longestMatch = longestMatch;
@@ -210,6 +212,22 @@ public final class Re2
                 throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
             }
             this.maxMemory = maxMemory;
+            return this;
+        }
+
+        ByteFrequencies byteFrequencies()
+        {
+            return byteFrequencies;
+        }
+
+        /**
+         * Sets the byte-frequency distribution that chooses which byte of a literal a candidate
+         * scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+         * {@link ByteFrequencies#uniform()}, keeps first-byte scanning.
+         */
+        public Options setByteFrequencies(ByteFrequencies byteFrequencies)
+        {
+            this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");
             return this;
         }
 
@@ -471,7 +489,7 @@ public final class Re2
     static Re2 compile(Slice pattern, int flags)
     {
         requireNonNull(pattern, "pattern is null");
-        return compile(pattern.copy(), flags, Options.DEFAULT_MAX_MEMORY, false);
+        return compile(pattern.copy(), flags, Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), false);
     }
 
     /**
@@ -481,7 +499,7 @@ public final class Re2
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
-        return compile(pattern.copy(), options.parseFlags(), options.maxMemory(), options.longestMatch());
+        return compile(pattern.copy(), options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.longestMatch());
     }
 
     /**
@@ -653,11 +671,11 @@ public final class Re2
         return out.slice();
     }
 
-    private static Re2 compile(Slice pattern, int flags, long maxMemory, boolean longestMatch)
+    private static Re2 compile(Slice pattern, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean longestMatch)
     {
         requireNonNull(pattern, "pattern is null");
         ParseResult parsed = RegexpParser.parse(pattern, flags);
-        return build(pattern, parsed, flags, maxMemory, longestMatch);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch);
     }
 
     /**
@@ -673,12 +691,21 @@ public final class Re2
      */
     static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory)
     {
+        return compileParsed(pattern, parsed, flags, maxMemory, ByteFrequencies.uniform());
+    }
+
+    /**
+     * The caller passes a private snapshot that it never mutates.
+     */
+    static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies)
+    {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
+        requireNonNull(byteFrequencies, "byteFrequencies is null");
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(pattern, parsed, flags, maxMemory, false);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false);
     }
 
     /**
@@ -688,8 +715,25 @@ public final class Re2
      */
     static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory, boolean forceScanPlanHandoff)
     {
+        return compileParsedForTrino(pattern, parsed, flags, maxMemory, ByteFrequencies.uniform(), forceScanPlanHandoff);
+    }
+
+    /**
+     * The caller passes a private snapshot that it never mutates. A scan plan built with
+     * {@code forceScanPlanHandoff} continues every unanchored search on the ordinary engine
+     * before its first attempt; only tests request it.
+     */
+    static Re2 compileParsedForTrino(
+            Slice pattern,
+            ParseResult parsed,
+            int flags,
+            long maxMemory,
+            ByteFrequencies byteFrequencies,
+            boolean forceScanPlanHandoff)
+    {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
+        requireNonNull(byteFrequencies, "byteFrequencies is null");
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
@@ -728,7 +772,7 @@ public final class Re2
                         null);
             }
         }
-        return build(pattern, parsed, flags, maxMemory, false, Compiler.Dialect.TRINO, forceScanPlanHandoff);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, forceScanPlanHandoff);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)
@@ -742,9 +786,9 @@ public final class Re2
                 regexp.requiredPrefix() == null;
     }
 
-    private static Re2 build(Slice pattern, ParseResult parsed, int flags, long maxMemory, boolean longestMatch)
+    private static Re2 build(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean longestMatch)
     {
-        return build(pattern, parsed, flags, maxMemory, longestMatch, Compiler.Dialect.RE2, false);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, false);
     }
 
     private static Re2 build(
@@ -752,6 +796,7 @@ public final class Re2
             ParseResult parsed,
             int flags,
             long maxMemory,
+            ByteFrequencies byteFrequencies,
             boolean longestMatch,
             Compiler.Dialect compilerDialect,
             boolean forceScanPlanHandoff)
@@ -779,7 +824,7 @@ public final class Re2
             if (Dfa.nativeAccessEnabled() && RetainedCharacterClassCountDfa.supports(entireRegexp)) {
                 try {
                     Regexp normalizedRegexp = Simplifier.simplify(entireRegexp);
-                    Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect);
+                    Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect, byteFrequencies);
                     if (countProgram.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
                         partialProgram = countProgram;
                     }
@@ -835,13 +880,13 @@ public final class Re2
         Regexp normalizedSuffixRegexp = suffixRegexp == entireRegexp ? normalizedRegexp : Simplifier.simplify(suffixRegexp);
 
         // Compute captures from the entire regexp (named groups come from the full pattern).
-        Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect);
+        Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect, byteFrequencies);
         ExpressionAnalysis.LiteralSequence literalSequence = expressionAnalysis.literalSequence();
         Slice exactLiteral = literalSequence == null || literalSequence.anchoredAtStart() || literalSequence.anchoredAtEnd()
                 ? null
                 : literalSequence.retainedExactLiteral();
         if (exactLiteral != null && exactLiteral.length() != 0) {
-            semanticProgram.configurePrefixAccelShared(exactLiteral, false);
+            semanticProgram.configurePrefixAccelShared(exactLiteral, false, byteFrequencies);
         }
         BooleanPlans booleanPlans = selectBooleanPlans(
                 expressionAnalysis,
@@ -849,7 +894,7 @@ public final class Re2
                 requiredPrefix,
                 semanticProgram);
         TrinoScanPlan trinoScanPlan = compilerDialect == Compiler.Dialect.TRINO && !expressionAnalysis.canMatchEmpty()
-                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount, forceScanPlanHandoff)
+                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount, forceScanPlanHandoff, byteFrequencies)
                 : null;
         // Anchored and literal-led plans take precedence over a lowered boolean program. A run-led
         // unanchored plan yields to one, which keeps the lowered final-line route.
@@ -866,7 +911,8 @@ public final class Re2
                     semanticProgram,
                     booleanPlans,
                     forwardMemory,
-                    compilerDialect);
+                    compilerDialect,
+                    byteFrequencies);
         }
         if (loweredBooleanProgram != null) {
             booleanPlans = selectLoweredBooleanPlans(booleanPlans, loweredBooleanProgram.program());
@@ -929,7 +975,8 @@ public final class Re2
             Prog semanticProgram,
             BooleanPlans booleanPlans,
             long forwardMemory,
-            Compiler.Dialect compilerDialect)
+            Compiler.Dialect compilerDialect,
+            ByteFrequencies byteFrequencies)
     {
         if (!requiresProgramExecution(booleanPlans.find()) &&
                 booleanPlans.lookingAt() != BooleanPlanKind.GENERAL) {
@@ -944,7 +991,7 @@ public final class Re2
         Regexp normalizedRegexp = Simplifier.simplify(loweredRegexp);
         Prog program;
         try {
-            program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory, compilerDialect);
+            program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory, compilerDialect, byteFrequencies);
         }
         catch (RegexpCompileException ignored) {
             // An optional boolean optimization must not reject a valid semantic program.
@@ -1255,7 +1302,7 @@ public final class Re2
      * Returns the array position of the first occurrence of the nonempty exact literal in
      * {@code [offset, offset + length)} of {@code bytes}, or {@code -1} when none occurs. The
      * boolean find, span search, and count of an exact-literal pattern all search with this prefix
-     * scan.
+     * scan, whose probe byte the compile-time byte frequencies chose.
      */
     private int findExactLiteral(byte[] bytes, int offset, int length)
     {

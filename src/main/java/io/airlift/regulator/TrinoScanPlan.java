@@ -116,9 +116,12 @@ final class TrinoScanPlan
     // findFailureResumeOperation.
     private final int failureResumeOperation;
     // Set when an unanchored search starts with a case-sensitive literal of two or more bytes.
-    // Such a search checks the whole literal at each first-byte candidate in its own loop, so
+    // Such a search checks the whole literal at each probe-byte candidate in its own loop, so
     // the candidate loop of every other plan has no whole-literal check.
     private final boolean wholeLiteralCandidates;
+    // The offset of the leading literal byte that the whole-literal candidate scan probes, or 0
+    // without one. See findLeadingLiteral.
+    private final int leadingProbeOffset;
     // Set when the plan has an ASCII-folded operation, which only the ASCII-folded executors run.
     private final boolean usesAsciiFoldedExecutor;
     // Set when an unanchored boolean search may run on the ordinary engine instead. A plan led
@@ -136,7 +139,7 @@ final class TrinoScanPlan
     // before its first attempt. Only tests select the negative value.
     private final int workBudgetBytes;
 
-    private TrinoScanPlan(List<Step> steps, boolean finalLineEnd, boolean partialMatch, boolean anchoredStart, int workBudgetBytes)
+    private TrinoScanPlan(List<Step> steps, boolean finalLineEnd, boolean partialMatch, boolean anchoredStart, int workBudgetBytes, ByteFrequencies byteFrequencies)
     {
         this.steps = steps.toArray(Step[]::new);
         this.booleanTails = partialMatch ? findBooleanTails(this.steps) : new boolean[this.steps.length];
@@ -148,6 +151,7 @@ final class TrinoScanPlan
         this.failureResumeOperation = findFailureResumeOperation(this.steps, leadingOperation);
         Step leading = this.steps[leadingOperation];
         this.wholeLiteralCandidates = !anchoredStart && leading.kind == Kind.LITERAL && leading.literal.length > 1;
+        this.leadingProbeOffset = wholeLiteralCandidates ? byteFrequencies.probeOffset(leading.literal) : 0;
         this.usesAsciiFoldedExecutor = hasAsciiFoldedOperation(this.steps);
         this.allowsOrdinaryBooleanSearch = !anchoredStart && !isLiteralLeading() && consumesOnlyAscii(this.steps);
         this.workBudgetBytes = workBudgetBytes;
@@ -296,6 +300,15 @@ final class TrinoScanPlan
      */
     static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff)
     {
+        return analyze(expression, captureCount, forceHandoff, ByteFrequencies.uniform());
+    }
+
+    /**
+     * Analyzes {@code expression}, with {@code byteFrequencies} choosing the probe byte of a
+     * case-sensitive leading literal.
+     */
+    static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, ByteFrequencies byteFrequencies)
+    {
         StartKind startKind = startKind(expression, 0);
         if (startKind != StartKind.ANCHORED && startKind != StartKind.LITERAL &&
                 startKind != StartKind.SINGLE_CHARACTER_RUN && startKind != StartKind.UNBOUNDED_RUN) {
@@ -304,7 +317,7 @@ final class TrinoScanPlan
         if (startKind == StartKind.UNBOUNDED_RUN && endKind(expression, 0) == EndKind.FINAL_LINE) {
             return null;
         }
-        return Builder.analyze(expression, captureCount, forceHandoff ? -1 : WORK_BUDGET_BYTES);
+        return Builder.analyze(expression, captureCount, forceHandoff ? -1 : WORK_BUDGET_BYTES, byteFrequencies);
     }
 
     private static StartKind startKind(Regexp expression, int depth)
@@ -433,6 +446,15 @@ final class TrinoScanPlan
     }
 
     /**
+     * Returns the offset of the leading literal byte that an unanchored candidate scan probes,
+     * or {@code -1} when the plan does not start with a case-sensitive literal.
+     */
+    int leadingLiteralProbeOffsetForDiagnostics()
+    {
+        return steps[leadingOperation].kind == Kind.LITERAL ? leadingProbeOffset : -1;
+    }
+
+    /**
      * Returns whether {@code [start, end)} of {@code input} lacks the required literal, so an
      * unanchored search of that range stops after its first failed attempt.
      */
@@ -458,7 +480,7 @@ final class TrinoScanPlan
         int candidate = base;
         while (candidate < end) {
             if (wholeLiteralCandidates) {
-                candidate = findLiteral(bytes, candidate, end, leading.literal);
+                candidate = findLeadingLiteral(bytes, candidate, end, leading.literal, leadingProbeOffset);
             }
             else {
                 candidate = usesAsciiFoldedExecutor
@@ -1143,7 +1165,7 @@ final class TrinoScanPlan
 
     /**
      * The unanchored search of {@link #search} and {@link #searchAsciiFolded} for a plan led by a
-     * case-sensitive literal of two or more bytes. Each first-byte candidate is checked for the
+     * case-sensitive literal of two or more bytes. Each probe-byte candidate is checked for the
      * rest of the literal before an attempt, so an attempt starts only where the whole literal
      * occurs. The loop is separate so that the candidate loop of every other plan has no
      * whole-literal check. A literal-led plan has no separate required literal.
@@ -1162,7 +1184,7 @@ final class TrinoScanPlan
             if (failedWork - WORK_BUDGET_FACTOR * (long) (candidate - searchStart) > workBudgetBytes) {
                 return handOff(groups, candidate - offset);
             }
-            candidate = findLiteral(bytes, candidate, end, leading.literal);
+            candidate = findLeadingLiteral(bytes, candidate, end, leading.literal, leadingProbeOffset);
             if (candidate < 0) {
                 break;
             }
@@ -1298,6 +1320,22 @@ final class TrinoScanPlan
     }
 
     /**
+     * Returns the first position at or after {@code candidate} where the whole case-sensitive
+     * leading {@code literal} occurs, or {@code -1} when none remains, scanning for the byte at
+     * {@code probeOffset}. The result is the first whole occurrence for any probe, so the
+     * attempts of a search, and with them its work budget, do not depend on it.
+     */
+    private static int findLeadingLiteral(byte[] bytes, int candidate, int end, byte[] literal, int probeOffset)
+    {
+        // A probe moved off the first byte runs its own loop, so a first-byte probe keeps the
+        // first-byte loop.
+        if (probeOffset != 0) {
+            return findLiteralAtProbe(bytes, candidate, end, literal, probeOffset);
+        }
+        return findLiteral(bytes, candidate, end, literal);
+    }
+
+    /**
      * Returns the first position at or after {@code candidate} where the whole {@code literal}
      * occurs, or {@code -1} when none remains. A literal that does not fit before {@code end} is
      * never a candidate, so no byte at or past {@code end} is read.
@@ -1313,6 +1351,48 @@ final class TrinoScanPlan
             }
             if (index == literal.length) {
                 return candidate;
+            }
+            candidate++;
+        }
+        return -1;
+    }
+
+    /**
+     * Returns the first position at or after {@code candidate} where the whole {@code literal}
+     * occurs, or {@code -1} when none remains, scanning for the byte at {@code probeOffset},
+     * which {@link ByteFrequencies} moved off a common first byte. A literal that does not fit
+     * before {@code end} is never a candidate, so no byte at or past {@code end} is read.
+     * <p>
+     * The scan searches a range shifted by the probe offset, so every candidate starts at or
+     * after {@code candidate}.
+     */
+    private static int findLiteralAtProbe(byte[] bytes, int candidate, int end, byte[] literal, int probeOffset)
+    {
+        byte probe = literal[probeOffset];
+        // A start after this limit leaves too few bytes for the literal, and the probe byte of a
+        // start before it lies before end.
+        int limit = end - literal.length + 1;
+        // Shifting a start past the limit by the probe offset can overflow at the end of a
+        // backing array near the int limit.
+        if (candidate >= limit) {
+            return -1;
+        }
+        int found;
+        while ((found = findByte(bytes, candidate + probeOffset, limit + probeOffset, probe)) >= 0) {
+            candidate = found - probeOffset;
+            // The scan has already compared the probe byte.
+            int index = 0;
+            while (index < probeOffset && bytes[candidate + index] == literal[index]) {
+                index++;
+            }
+            if (index == probeOffset) {
+                index++;
+                while (index < literal.length && bytes[candidate + index] == literal[index]) {
+                    index++;
+                }
+                if (index == literal.length) {
+                    return candidate;
+                }
             }
             candidate++;
         }
@@ -1674,7 +1754,7 @@ final class TrinoScanPlan
         private int optionals;
         private boolean hasVariableLiteralRepeat;
 
-        private static TrinoScanPlan analyze(Regexp expression, int captureCount, int workBudgetBytes)
+        private static TrinoScanPlan analyze(Regexp expression, int captureCount, int workBudgetBytes, ByteFrequencies byteFrequencies)
         {
             if (captureCount > MAX_GROUPS) {
                 return null;
@@ -1726,7 +1806,8 @@ final class TrinoScanPlan
                     anchoredEnd && (sequence.getLast().parseFlags() & Regexp.FINAL_LINE_END) != 0,
                     !anchoredEnd,
                     anchoredStart,
-                    workBudgetBytes);
+                    workBudgetBytes,
+                    byteFrequencies);
         }
 
         private static boolean flatten(Regexp expression, List<Regexp> sequence, int depth)

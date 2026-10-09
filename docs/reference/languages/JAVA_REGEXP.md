@@ -66,7 +66,10 @@ supported Java compile flags:
 - Unicode case
 - Unicode character classes
 
-Compilation copies the pattern and snapshots the option values.
+`setByteFrequencies` chooses which literal byte an unanchored search scans for;
+it affects speed, not results. See
+[Byte frequencies](../REGULATOR_API.md#byte-frequencies). Compilation copies the
+pattern and snapshots the option values.
 
 ## Unsupported features
 
