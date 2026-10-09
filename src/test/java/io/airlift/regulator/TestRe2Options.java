@@ -43,6 +43,15 @@ public class TestRe2Options
     }
 
     @Test
+    public void testByteFrequencies()
+    {
+        assertThat(Re2.Options.defaults().byteFrequencies()).isSameAs(ByteFrequencies.uniform());
+        assertThatThrownBy(() -> Re2.Options.defaults().setByteFrequencies(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("byteFrequencies is null");
+    }
+
+    @Test
     public void testSmallMemoryBudgetDoesNotBecomeUnlimited()
     {
         assertThatThrownBy(() -> Re2.compile(utf8("abc"), Re2.Options.defaults().setMaxMemory(1)))

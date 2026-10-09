@@ -44,6 +44,7 @@ public final class JavaRegexp
         private boolean unicodeCase;
         private boolean unicodeCharacterClasses;
         private long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
+        private ByteFrequencies byteFrequencies = ByteFrequencies.uniform();
 
         private Options() {}
 
@@ -120,6 +121,25 @@ public final class JavaRegexp
             return this;
         }
 
+        /**
+         * Returns the byte-frequency distribution that chooses literal probe bytes.
+         */
+        ByteFrequencies byteFrequencies()
+        {
+            return byteFrequencies;
+        }
+
+        /**
+         * Sets the byte-frequency distribution that chooses which byte of a literal a candidate
+         * scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+         * {@link ByteFrequencies#uniform()}, keeps first-byte scanning.
+         */
+        public Options setByteFrequencies(ByteFrequencies byteFrequencies)
+        {
+            this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");
+            return this;
+        }
+
         int parseFlags()
         {
             int flags = Regexp.LIKE_PERL;
@@ -173,7 +193,12 @@ public final class JavaRegexp
         Slice patternCopy = pattern.copy();
         int parseFlags = options.parseFlags();
         ParseResult parsed = JavaRegexpParser.parse(patternCopy, parseFlags);
-        return new JavaRegexp(Re2.compileParsed(patternCopy, parsed, parseFlags, options.maxMemory()));
+        return new JavaRegexp(Re2.compileParsed(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies()));
+    }
+
+    Re2 pattern()
+    {
+        return pattern;
     }
 
     public boolean find(Slice input)

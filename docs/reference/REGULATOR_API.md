@@ -83,6 +83,41 @@ reachable. Native access is optional; when it is unavailable, the ordinary
 on-heap DFA remains fully functional without a warning or initialization
 failure.
 
+### Byte frequencies
+
+Unanchored searches for a case-sensitive literal scan for its first byte unless
+the caller chooses a byte distribution with `setByteFrequencies` on
+`Re2.Options`, `TrinoRegexp.Options`, or `JavaRegexp.Options`. The default,
+`ByteFrequencies.uniform()`, keeps first-byte scanning. A distribution that
+matches the searched data lets the search scan for a rarer byte of the literal
+instead. `Re2` and `JavaRegexp` move the scan only for a multi-byte literal
+whose first byte is ASCII; `TrinoRegexp` scan plans also move it for a plan's
+leading literal led by a non-ASCII byte. A distribution that does not match the
+data can make literal scans several times slower per byte than first-byte
+scanning, because it moves the scan onto bytes that are common in the searched
+text; it never changes what matches, and the cost stays linear in the input.
+The choices are:
+
+- `ByteFrequencies.builder()`, which learns from sample Slices of the caller's
+  own data and is the most reliable choice. A few hundred kilobytes of whole
+  lines sampled across the data is a good sample.
+- `ByteFrequencies.fromCounts(counts)`, which uses 256 byte counts.
+- `ByteFrequencies.uniform()`, the default.
+
+Learned and counted distributions may move the scan to any byte after the
+first, including punctuation, digits, and bytes at or above `0x80`. The
+distribution affects only search speed, never results, and the compiled
+pattern does not retain it:
+
+```java
+ByteFrequencies frequencies = ByteFrequencies.builder()
+        .add(sampleLogLines)
+        .build();
+Re2 pattern = Re2.compile(
+        Slices.utf8Slice("user=(\\w+)"),
+        Re2.Options.defaults().setByteFrequencies(frequencies));
+```
+
 ## Runtime acceleration
 
 Regulator works without special JVM flags. Two optional flags enable faster

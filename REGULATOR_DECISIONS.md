@@ -577,6 +577,56 @@ and use the engine without resolving the incubating module. Every surviving
 candidate is compared with the complete prefix. Front/back byte selection
 keeps preprocessing bounded and the integrated scanner compact.
 
+## Literal Probe Byte Selection
+
+Like upstream, a case-sensitive literal prefix scan searches for the literal's
+first byte by default. Probing a rarer byte is an opt-in deviation. The `Re2`,
+`TrinoRegexp`, and `JavaRegexp` compile options take a `ByteFrequencies`
+distribution, which defaults to `ByteFrequencies.uniform()`; it gives every
+byte the same probability and so keeps first-byte scanning. A caller can
+instead choose a distribution built from byte counts with `fromCounts` or one
+learned from sample data with `builder()`. A compiled pattern keeps only the
+chosen offsets.
+
+Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
+first byte, and multi-byte leading literals in Trino scan plans, scan for one
+probe byte. Every distribution follows one rule: the probe is the rarest byte
+after the first, earliest on ties, used only when its estimated probability is
+less than a quarter of the first byte's; otherwise the probe remains offset 0.
+The factor keeps the first byte when the estimate is close, because an
+estimate is not the searched text. Each probe hit is shifted back to its
+candidate start and confirmed with the complete literal. The RE2 prefix scan
+checks the farther literal end before the full comparison. The Trino scan
+returns the same first whole-literal occurrence as the first-byte scan, so
+candidate attempts, failed work, and the work budget are unchanged. Density
+hand-off never applies to literal-led plans.
+
+Probing is opt-in because a distribution that does not match the searched data
+moves probes onto bytes that are common there. A mismatched distribution can
+make literal scans several times slower per byte than the default, because the
+probe byte occurs more often than the first byte; it never changes what matches,
+and the cost stays linear in the input. On r9g, probing `/` for `https://` and
+`http://` ran 6.7-8.5x slower than the first-byte scan over access-log text,
+which carries about twelve slashes and one `h` per line.
+
+A distribution learned from a few hundred kilobytes of whole lines sampled
+across the searched data is the most reliable choice. JMH qualification uses
+`BenchmarkLiteralProbe` with the existing prefix and scan-plan benchmarks.
+
+Counts and learned distributions are add-one smoothed:
+`(count + 1) / (total + 256)`. They measure the data they were built from, so
+they may probe any byte after offset 0, including punctuation, digits, and
+bytes at or above `0x80`.
+
+Under every distribution, fused first-byte/last-byte strategies, paired
+candidate scans, case-folded prefixes and literals, required-literal checks,
+and single-byte literals keep first-byte scanning. This is a performance-only
+deviation. Randomized tests compare the RE2 site with scalar literal searches
+in UTF-8 and Latin-1, and the Trino site with Joni, under a distribution learned
+from a short JSON sample and under a supplied distribution that probes
+punctuation, digits, and UTF-8 bytes; the same comparisons under default
+options cover first-byte scanning.
+
 ## Small Candidate-Byte Vector Scan
 
 Forward DFA start-byte and fixed-distance candidate sets containing exactly two

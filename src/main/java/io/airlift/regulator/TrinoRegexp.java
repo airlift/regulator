@@ -50,6 +50,7 @@ public sealed class TrinoRegexp
     public static final class Options
     {
         private long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
+        private ByteFrequencies byteFrequencies = ByteFrequencies.uniform();
 
         private Options() {}
 
@@ -69,6 +70,22 @@ public sealed class TrinoRegexp
                 throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
             }
             this.maxMemory = maxMemory;
+            return this;
+        }
+
+        ByteFrequencies byteFrequencies()
+        {
+            return byteFrequencies;
+        }
+
+        /**
+         * Sets the byte-frequency distribution that chooses which byte of a literal a candidate
+         * scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+         * {@link ByteFrequencies#uniform()}, keeps first-byte scanning.
+         */
+        public Options setByteFrequencies(ByteFrequencies byteFrequencies)
+        {
+            this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");
             return this;
         }
     }
@@ -110,7 +127,12 @@ public sealed class TrinoRegexp
      */
     static TrinoRegexp compileForcingScanPlanHandoffForTesting(Slice pattern)
     {
-        return compile(pattern, Options.defaults(), true);
+        return compileForcingScanPlanHandoffForTesting(pattern, Options.defaults());
+    }
+
+    static TrinoRegexp compileForcingScanPlanHandoffForTesting(Slice pattern, Options options)
+    {
+        return compile(pattern, options, true);
     }
 
     private static TrinoRegexp compile(Slice pattern, Options options, boolean forceScanPlanHandoff)
@@ -126,7 +148,7 @@ public sealed class TrinoRegexp
         if (literalAlternationMatcher != null && literalAlternationMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralAlternationTrinoRegexp(literalAlternationMatcher);
         }
-        Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, Regexp.LIKE_PERL, options.maxMemory(), forceScanPlanHandoff);
+        Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, Regexp.LIKE_PERL, options.maxMemory(), options.byteFrequencies(), forceScanPlanHandoff);
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
             return new BeginLineTrinoRegexp(compiledPattern);

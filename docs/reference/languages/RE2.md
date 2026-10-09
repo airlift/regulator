@@ -60,8 +60,11 @@ leftmost-first matching, and the default memory budget.
 
 The chainable options can also control the memory budget, syntax mode, encoding,
 literal parsing, newline behavior, captures, case sensitivity, Perl classes,
-word boundaries, one-line mode, and leftmost-longest matching. Compilation
-copies the pattern and snapshots the option values.
+word boundaries, one-line mode, and leftmost-longest matching.
+`setByteFrequencies` chooses which literal byte an unanchored search scans for;
+it affects speed, not results. See
+[Byte frequencies](../REGULATOR_API.md#byte-frequencies). Compilation copies the
+pattern and snapshots the option values.
 
 ## Unsupported features
 

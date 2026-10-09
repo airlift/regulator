@@ -50,6 +50,15 @@ public class TestTrinoRegexpFunctions
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
     }
 
+    @Test
+    public void testByteFrequencies()
+    {
+        assertThat(TrinoRegexp.Options.defaults().byteFrequencies()).isSameAs(ByteFrequencies.uniform());
+        assertThatThrownBy(() -> TrinoRegexp.Options.defaults().setByteFrequencies(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("byteFrequencies is null");
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("functionCases")
     public void testFunctionCorpus(FunctionCase functionCase)

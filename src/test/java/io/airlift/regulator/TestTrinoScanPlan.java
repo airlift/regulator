@@ -719,6 +719,154 @@ public class TestTrinoScanPlan
         }
     }
 
+    @Test
+    public void testLeadingLiteralProbeOffset()
+    {
+        // A case-sensitive leading literal scans for the byte its distribution chose; which byte
+        // that is belongs to TestByteFrequencies.
+        ByteFrequencies json = TestingByteFrequencies.learnedJsonRecords();
+        assertThat(leadingLiteralProbe("svc1://(?:www\\.)?([^/]+)/", json)).isEqualTo(1);
+        assertThat(leadingLiteralProbe("https://(?:www\\.)?([^/]+)/", json)).isZero();
+        // The ASCII-folded executor probes a case-sensitive leading literal the same way.
+        assertThat(leadingLiteralProbe("svc1://(?i:www\\.)?([^/]+)/", json)).isEqualTo(1);
+        // A literal led by a non-ASCII byte moves its probe, though the prefix scan of the same
+        // pattern keeps the first byte.
+        assertThat(leadingLiteralProbe("été=([a-z]+)", json)).isEqualTo(5);
+        Re2 accented = TrinoRegexp.compile(utf8Slice("été=([a-z]+)"), TrinoRegexp.Options.defaults().setByteFrequencies(json)).pattern();
+        assertThat(accented.usesTrinoScanPlanForDiagnostics()).isTrue();
+        assertThat(accented.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
+        // A one-byte literal keeps the first byte.
+        assertThat(leadingLiteralProbe("\"([^\"]*)\"", json)).isZero();
+        // Default options keep first-byte scanning.
+        assertThat(requireNonNull(analyze("svc1://(?:www\\.)?([^/]+)/")).leadingLiteralProbeOffsetForDiagnostics()).isZero();
+        Re2 service = TrinoRegexp.compile(utf8Slice("svc1://(?:www\\.)?([^/]+)/")).pattern();
+        assertThat(service.usesTrinoScanPlanForDiagnostics()).isTrue();
+        assertThat(service.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
+        // A distribution in which punctuation is rare probes the colon.
+        ByteFrequencies rareNonLetters = TestingByteFrequencies.rareNonLetters();
+        assertThat(leadingLiteralProbe("https://(?:www\\.)?([^/]+)/", rareNonLetters)).isEqualTo(5);
+        Re2 compiled = TrinoRegexp.compile(utf8Slice("https://(?:www\\.)?([^/]+)/"), TrinoRegexp.Options.defaults().setByteFrequencies(rareNonLetters)).pattern();
+        assertThat(compiled.usesTrinoScanPlanForDiagnostics()).isTrue();
+        assertThat(compiled.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isEqualTo(5);
+        // ASCII-folded literals and run-leading plans keep their own scans.
+        assertThat(leadingLiteralProbe("(?i)content-type:([^;]+);", json)).isEqualTo(-1);
+        assertThat(leadingLiteralProbe("[?&]([^=]+)=", json)).isEqualTo(-1);
+    }
+
+    @Test
+    public void testLeadingLiteralProbeFindsWholeLiterals()
+    {
+        // A probe off the first byte still yields only whole occurrences, overlapping ones
+        // included, and never a literal that starts before the search.
+        ByteFrequencies json = TestingByteFrequencies.learnedJsonRecords();
+        String input = "svc svs vvv svc1:/ svc1://h/";
+        assertThat(candidateAttempts("svc1://(?:www\\.)?([^/]+)/", json, input)).isEqualTo(1);
+        assertThat(candidateAttempts("svc1://(?:www\\.)?([^/]+)/", json, "svc1://")).isEqualTo(1);
+        assertThat(candidateAttempts("svc1://(?:www\\.)?([^/]+)/", json, "vsvc1:/")).isZero();
+        assertThat(candidateAttempts("aab([0-9]+)", json, "aaab aab aaa aa")).isEqualTo(2);
+        assertThat(candidateAttempts("abab([0-9]+)", json, "ababab1")).isEqualTo(2);
+
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("svc1://([^/]+)/"), TrinoRegexp.Options.defaults().setByteFrequencies(json));
+        assertThat(regexp.pattern().usesTrinoScanPlanForDiagnostics()).isTrue();
+        Slice text = utf8Slice("svc1://a/svc1://b/ xsvc1://c/svc1://");
+        assertThat(regexp.count(text)).isEqualTo(3);
+        assertThat(regexp.extractAll(text, 1)).containsExactly(utf8Slice("a"), utf8Slice("b"), utf8Slice("c"));
+        // The search range starts after the first literal's first byte, which puts its
+        // probe byte inside the range.
+        Re2Matcher matcher = regexp.pattern().matcher(text);
+        matcher.reset(text, 1, text.length());
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(9);
+    }
+
+    @Test
+    public void testLeadingLiteralProbeAgainstJoni()
+    {
+        // Literals whose probe is not the first byte, with partial, overlapping, and adjacent
+        // occurrences, probe bytes outside any occurrence, and every region of each text.
+        List<String> probeExpressions = List.of(
+                "svc1://(?:www\\.)?([^/]+)/",
+                "svc5://([^/]+)/",
+                "user=(\\w*)",
+                "abab([0-9]*)",
+                "aab([0-9]*)",
+                "abc(.*)");
+        ByteFrequencies json = TestingByteFrequencies.learnedJsonRecords();
+        for (String expression : probeExpressions) {
+            assertThat(leadingLiteralProbe(expression, json)).as(expression).isPositive();
+        }
+        // Literals whose probe is the first byte run a separate scan loop.
+        List<String> firstByteExpressions = List.of(
+                "https://(?:www\\.)?([^/]+)/",
+                "content-type: ([^;]+)",
+                "error: ([0-9]+)");
+        for (String expression : firstByteExpressions) {
+            assertThat(leadingLiteralProbe(expression, json)).as(expression).isZero();
+        }
+        List<String> expressions = new ArrayList<>(probeExpressions);
+        expressions.addAll(firstByteExpressions);
+        List<Slice> sources = new ArrayList<>(randomSources(
+                241,
+                List.of("s", "v", "c", "1", "5", "svc", "svc1://", "svc5://", "://", ":", "/", "www.", "h", "content", "content-type: ", "type", "-", ";", ": ", "y", "t", "0", "9", "a", "b", "ab", "abab", "aab", "abc", "https://", "http", "user=", "u", "=", "error: ", "e", "r", " ", "é", "caf", "café="),
+                List.of(new byte[] {(byte) 0x80}, new byte[] {(byte) 0xC3}, new byte[] {(byte) 0xFF})));
+        List<String> texts = List.of(
+                "svc1://h/ xsvc1://www.h/ svc1:/",
+                "svc5://a/svc5://b/ svc55://c/",
+                "content-type: content-type: a; ontent-type: b;",
+                "abababab1 aabab2",
+                "aaab9 abcabc",
+                "https://h/ xhttps://www.h/ https:/ http://h/",
+                "user=al user=user= ser=x error: 12 error 3 error: x",
+                "café=x xcafé= cafe=y caf=é café");
+        for (String text : texts) {
+            Slice whole = utf8Slice(text);
+            for (int cut = 0; cut <= whole.length(); cut++) {
+                sources.add(whole.slice(0, cut));
+                sources.add(whole.slice(cut, whole.length() - cut));
+            }
+        }
+        TrinoRegexp.Options jsonOptions = TrinoRegexp.Options.defaults().setByteFrequencies(json);
+        for (String expression : expressions) {
+            verifySourcesAgainstJoni(expression, jsonOptions, sources, true);
+            for (String text : texts) {
+                verifyRegionsAgainstJoni(expression, jsonOptions, utf8Slice(text));
+            }
+        }
+
+        // A supplied distribution in which every byte but letters and space is rare moves probes
+        // onto punctuation, digits, and UTF-8 bytes.
+        ByteFrequencies rareNonLetters = TestingByteFrequencies.rareNonLetters();
+        TrinoRegexp.Options options = TrinoRegexp.Options.defaults().setByteFrequencies(rareNonLetters);
+        boolean asciiNonLetterProbe = false;
+        boolean nonAsciiProbe = false;
+        List<String> suppliedExpressions = List.of(
+                "svc1://(?:www\\.)?([^/]+)/",
+                "content-type: ([^;]+)",
+                "https://(?:www\\.)?([^/]+)/",
+                "user=(\\w*)",
+                "error: ([0-9]+)",
+                "café=(\\w*)");
+        for (String expression : suppliedExpressions) {
+            // Each leading literal is written verbatim at the start of its expression.
+            byte[] literal = expression.getBytes(UTF_8);
+            int probe = leadingLiteralProbe(expression, rareNonLetters);
+            assertThat(probe).as(expression).isPositive();
+            asciiNonLetterProbe |= literal[probe] >= 0 && !Character.isLetter(literal[probe]);
+            nonAsciiProbe |= literal[probe] < 0;
+            verifySourcesAgainstJoni(expression, options, sources, true);
+            for (String text : texts) {
+                verifyRegionsAgainstJoni(expression, options, utf8Slice(text));
+            }
+        }
+        assertThat(asciiNonLetterProbe).isTrue();
+        assertThat(nonAsciiProbe).isTrue();
+    }
+
+    private static int leadingLiteralProbe(String expression, ByteFrequencies frequencies)
+    {
+        return requireNonNull(analyze(expression, frequencies), expression).leadingLiteralProbeOffsetForDiagnostics();
+    }
+
     /**
      * Compares {@link Re2Matcher#find()} over every region of {@code source} that starts and ends
      * on a character boundary with Joni over the same bytes. Each region is also searched with
@@ -727,9 +875,14 @@ public class TestTrinoScanPlan
      */
     private static void verifyRegionsAgainstJoni(String expression, Slice source)
     {
+        verifyRegionsAgainstJoni(expression, TrinoRegexp.Options.defaults(), source);
+    }
+
+    private static void verifyRegionsAgainstJoni(String expression, TrinoRegexp.Options options, Slice source)
+    {
         Slice pattern = utf8Slice(expression);
-        Re2Matcher planMatcher = TrinoRegexp.compile(pattern).pattern().matcher(EMPTY_SLICE);
-        Re2Matcher handoffMatcher = TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern).pattern().matcher(EMPTY_SLICE);
+        Re2Matcher planMatcher = TrinoRegexp.compile(pattern, options).pattern().matcher(EMPTY_SLICE);
+        Re2Matcher handoffMatcher = TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, options).pattern().matcher(EMPTY_SLICE);
         Regex oracle = joniPattern(expression);
         for (int start = 0; start <= source.length(); start++) {
             for (int end = start; end <= source.length(); end++) {
@@ -938,9 +1091,14 @@ public class TestTrinoScanPlan
 
     private static int candidateAttempts(String expression, String input)
     {
-        Re2 pattern = TrinoRegexp.compile(utf8Slice(expression)).pattern();
+        return candidateAttempts(expression, ByteFrequencies.uniform(), input);
+    }
+
+    private static int candidateAttempts(String expression, ByteFrequencies frequencies, String input)
+    {
+        Re2 pattern = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(frequencies)).pattern();
         assertThat(pattern.usesTrinoScanPlanForDiagnostics()).as(expression).isTrue();
-        return requireNonNull(analyze(expression)).candidateAttemptsForDiagnostics(utf8Slice(input));
+        return requireNonNull(analyze(expression, frequencies)).candidateAttemptsForDiagnostics(utf8Slice(input));
     }
 
     @Test
@@ -2380,8 +2538,13 @@ public class TestTrinoScanPlan
      */
     private static TrinoScanPlan analyze(String expression)
     {
+        return analyze(expression, ByteFrequencies.uniform());
+    }
+
+    private static TrinoScanPlan analyze(String expression, ByteFrequencies frequencies)
+    {
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-        return TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false);
+        return TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, frequencies);
     }
 
     private static Regex joniPattern(String expression)
@@ -2695,13 +2858,18 @@ public class TestTrinoScanPlan
      */
     private static void verifySourcesAgainstJoni(String expression, List<Slice> sources, boolean scanPlan)
     {
+        verifySourcesAgainstJoni(expression, TrinoRegexp.Options.defaults(), sources, scanPlan);
+    }
+
+    private static void verifySourcesAgainstJoni(String expression, TrinoRegexp.Options options, List<Slice> sources, boolean scanPlan)
+    {
         Slice pattern = utf8Slice(expression);
         Regex oracle = joniPattern(expression);
-        verifyOperations(expression, TrinoRegexp.compile(pattern), source -> joniMatches(oracle, source), sources, scanPlan);
+        verifyOperations(expression, TrinoRegexp.compile(pattern, options), source -> joniMatches(oracle, source), sources, scanPlan);
         List<Slice> validSources = sources.stream()
                 .filter(source -> Utf8.firstInvalidOffset(source) < 0)
                 .toList();
-        verifyOperations(expression + " after handoff", TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern), source -> joniMatches(oracle, source), validSources, scanPlan);
+        verifyOperations(expression + " after handoff", TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, options), source -> joniMatches(oracle, source), validSources, scanPlan);
     }
 
     /**

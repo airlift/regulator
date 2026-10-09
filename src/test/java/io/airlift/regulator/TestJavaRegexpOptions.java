@@ -84,6 +84,15 @@ public class TestJavaRegexpOptions
         options.setCaseInsensitive(false);
 
         assertThat(regexp.matches(utf8Slice("ABC"))).isTrue();
+
+        // The compiled probe offset, chosen by the distribution at compilation, is retained.
+        options = JavaRegexp.Options.defaults().setByteFrequencies(TestingByteFrequencies.rareNonLetters());
+        regexp = JavaRegexp.compile(utf8Slice("https://(\\S+)"), options);
+
+        options.setByteFrequencies(ByteFrequencies.uniform());
+
+        assertThat(regexp.pattern().forwardProgramForDiagnostics().prefixAccelProbeOffset()).isEqualTo(5);
+        assertThat(JavaRegexp.compile(utf8Slice("https://(\\S+)"), options).pattern().forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
     }
 
     @Test
@@ -97,6 +106,15 @@ public class TestJavaRegexpOptions
                 utf8Slice("abc"),
                 JavaRegexp.Options.defaults().setMaxMemory(1)))
                 .isInstanceOf(RegexpCompileMemoryLimitException.class);
+    }
+
+    @Test
+    public void testByteFrequencies()
+    {
+        assertThat(JavaRegexp.Options.defaults().byteFrequencies()).isSameAs(ByteFrequencies.uniform());
+        assertThatThrownBy(() -> JavaRegexp.Options.defaults().setByteFrequencies(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("byteFrequencies is null");
     }
 
     private static void assertMatchesJdk(String pattern, String input, JavaRegexp.Options options, int jdkFlags)

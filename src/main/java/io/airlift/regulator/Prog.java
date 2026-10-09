@@ -369,6 +369,12 @@ final class Prog
     private int prefixSize;
     private byte[] prefix;
     private long prefixFrontBroadcastMask;  // Pre-computed SWAR broadcast mask for first prefix byte
+    // The REPEATED_BYTE strategy scans for the prefix byte at prefixProbeOffset, chosen by the
+    // compile-time ByteFrequencies, and checks the byte at prefixCheckOffset, the first or last
+    // byte farther from the probe, before comparing the whole prefix.
+    private int prefixProbeOffset;
+    private int prefixCheckOffset;
+    private long prefixProbeBroadcastMask;
     private static final int MAX_FOLD_CASE_PREFIX_BYTES = 9;
 
     // Required prefix for instant rejection (extracted via requiredPrefix()).
@@ -927,6 +933,15 @@ final class Prog
     }
 
     /**
+     * Returns the offset of the prefix byte that the {@link PrefixAccelStrategy#REPEATED_BYTE}
+     * strategy scans for, chosen by {@link ByteFrequencies#probeOffset}.
+     */
+    int prefixAccelProbeOffset()
+    {
+        return prefixProbeOffset;
+    }
+
+    /**
      * Specialized prefix scan for single-byte, case-sensitive prefix acceleration.
      * Keeps the scan path branch-free with respect to foldCase/prefix mode.
      */
@@ -946,29 +961,37 @@ final class Prog
 
     public void configurePrefixAccel(Slice prefix, boolean foldCase)
     {
+        configurePrefixAccel(prefix, foldCase, ByteFrequencies.uniform());
+    }
+
+    void configurePrefixAccel(Slice prefix, boolean foldCase, ByteFrequencies byteFrequencies)
+    {
         if (prefix == null || prefix.length() == 0) {
-            configurePrefixAccelBytes(null, foldCase);
+            configurePrefixAccelBytes(null, foldCase, byteFrequencies);
             return;
         }
 
         byte[] bytes = new byte[prefix.length()];
         System.arraycopy(prefix.byteArray(), prefix.byteArrayOffset(), bytes, 0, prefix.length());
-        configurePrefixAccelBytes(bytes, foldCase);
+        configurePrefixAccelBytes(bytes, foldCase, byteFrequencies);
     }
 
     /**
      * Retains analysis-owned immutable bytes instead of copying a large literal again.
      */
-    void configurePrefixAccelShared(Slice prefix, boolean foldCase)
+    void configurePrefixAccelShared(Slice prefix, boolean foldCase, ByteFrequencies byteFrequencies)
     {
         if (prefix.byteArrayOffset() != 0 || prefix.length() != prefix.byteArray().length) {
             throw new IllegalArgumentException("shared prefix must cover its complete backing array");
         }
-        configurePrefixAccelBytes(prefix.byteArray(), foldCase);
+        configurePrefixAccelBytes(prefix.byteArray(), foldCase, byteFrequencies);
     }
 
-    private void configurePrefixAccelBytes(byte[] bytes, boolean foldCase)
+    private void configurePrefixAccelBytes(byte[] bytes, boolean foldCase, ByteFrequencies byteFrequencies)
     {
+        this.prefixProbeOffset = 0;
+        this.prefixCheckOffset = 0;
+        this.prefixProbeBroadcastMask = 0;
         if (bytes == null || bytes.length == 0) {
             this.prefix = null;
             this.prefixSize = 0;
@@ -987,6 +1010,12 @@ final class Prog
         else if (bytes.length != 1) {
             this.prefixSize = bytes.length;
             this.prefixFrontBroadcastMask = (bytes[0] & 0xFFL) * 0x0101010101010101L;
+            // A non-ASCII first byte selects the fused strategies, which keep the first byte.
+            int probeOffset = bytes[0] >= 0 ? byteFrequencies.probeOffset(bytes) : 0;
+            int lastOffset = bytes.length - 1;
+            this.prefixProbeOffset = probeOffset;
+            this.prefixCheckOffset = probeOffset > lastOffset - probeOffset ? 0 : lastOffset;
+            this.prefixProbeBroadcastMask = (bytes[probeOffset] & 0xFFL) * 0x0101010101010101L;
         }
         else {
             // For single-byte non-foldCase, use simple memchr-style search
@@ -1002,7 +1031,10 @@ final class Prog
      * Uses different strategies depending on configuration:
      * <ul>
      * <li>Parallel front-and-back candidate scanning for folded prefixes
-     * <li>FrontAndBack for non-folded multi-byte prefixes (like C++ {@code Prog::PrefixAccel_FrontAndBack()})
+     * <li>Fused first-byte and last-byte masks for non-folded multi-byte prefixes with a
+     * non-ASCII first byte
+     * <li>A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
+     * derived from C++ {@code Prog::PrefixAccel_FrontAndBack()}; see {@link ByteFrequencies}
      * <li>Simple byte search for single-byte prefix
      * </ul>
      */
@@ -1040,6 +1072,12 @@ final class Prog
             return prefixAccelNoFoldCaseFrontAndBackSwar(data, offset, length);
         }
 
+        // A probe moved off the first byte runs its own loop, so a first-byte probe keeps the
+        // upstream loop below.
+        if (prefixProbeOffset != 0) {
+            return prefixAccelProbe(data, offset, length);
+        }
+
         // FrontAndBack optimization: use first and last bytes to filter candidates
         byte prefixFront = prefix[0];
         byte prefixBack = prefix[prefixSize - 1];
@@ -1066,6 +1104,38 @@ final class Prog
             }
 
             position++;  // Move to next position
+        }
+
+        return -1;
+    }
+
+    private int prefixAccelProbe(byte[] data, int offset, int length)
+    {
+        // Upstream FrontAndBack scans for the first byte and checks the last. This scans for the
+        // probe byte, which ByteFrequencies moved off a common first byte, and checks the first
+        // or last byte farther from it. The scan range is shifted by the probe offset, so every
+        // candidate starts in [offset, lastStart] and a probe byte of an occurrence that starts
+        // before offset is never seen.
+        int probeOffset = prefixProbeOffset;
+        int checkOffset = prefixCheckOffset;
+        byte checkByte = prefix[checkOffset];
+        int end = offset + length;
+        int lastStart = end - prefixSize;
+
+        int position = offset;
+        while (position <= lastStart) {
+            int next = indexOfSWAR(data, position + probeOffset, (lastStart + 1) - position, prefixProbeBroadcastMask);
+            if (next < 0) {
+                return -1;
+            }
+
+            position = next - probeOffset;
+
+            if (data[position + checkOffset] == checkByte && prefixMatchesAt(data, position)) {
+                return position;
+            }
+
+            position++;
         }
 
         return -1;

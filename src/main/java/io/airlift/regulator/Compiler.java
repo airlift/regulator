@@ -94,27 +94,36 @@ final class Compiler
      */
     static Prog compile(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compile(regexp, reversed, maxMemory, false, Dialect.RE2);
+        return compile(regexp, reversed, maxMemory, false, Dialect.RE2, ByteFrequencies.uniform());
     }
 
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compile(regexp, reversed, maxMemory, true, Dialect.RE2);
+        return compile(regexp, reversed, maxMemory, true, Dialect.RE2, ByteFrequencies.uniform());
     }
 
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect)
     {
-        return compile(regexp, reversed, maxMemory, true, dialect);
+        return compile(regexp, reversed, maxMemory, true, dialect, ByteFrequencies.uniform());
+    }
+
+    /**
+     * Compiles with {@code byteFrequencies} choosing the probe byte of a forward program's
+     * literal prefix scan.
+     */
+    static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, ByteFrequencies byteFrequencies)
+    {
+        return compile(regexp, reversed, maxMemory, true, dialect, byteFrequencies);
     }
 
     static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, Dialect.RE2);
+        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, Dialect.RE2, ByteFrequencies.uniform());
     }
 
-    static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect)
+    static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, ByteFrequencies byteFrequencies)
     {
-        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, dialect);
+        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, dialect, byteFrequencies);
     }
 
     static long estimatedProgramMemory(Prog program)
@@ -126,9 +135,9 @@ final class Compiler
         return memory + program.onePassMemory();
     }
 
-    private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect)
+    private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect, ByteFrequencies byteFrequencies)
     {
-        Prog program = compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, normalized, dialect);
+        Prog program = compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, normalized, dialect, byteFrequencies);
         if (!reversed) {
             program.prepareOnePass();
         }
@@ -164,13 +173,13 @@ final class Compiler
     static Prog compileForBenchmark(Regexp regexp, boolean reversed, long maxMemory, CompileStage stage)
     {
         // Benchmark-only hook to isolate Compiler pipeline stages.
-        return compileInternal(regexp, reversed, maxMemory, stage, false, false, Dialect.RE2);
+        return compileInternal(regexp, reversed, maxMemory, stage, false, false, Dialect.RE2, ByteFrequencies.uniform());
     }
 
     static Prog compileNormalizedForBenchmark(Regexp regexp, boolean reversed, long maxMemory, CompileStage stage)
     {
         // Benchmark-only hook to isolate stages after AST normalization.
-        return compileInternal(regexp, reversed, maxMemory, stage, false, true, Dialect.RE2);
+        return compileInternal(regexp, reversed, maxMemory, stage, false, true, Dialect.RE2, ByteFrequencies.uniform());
     }
 
     private static Prog compileInternal(
@@ -180,7 +189,8 @@ final class Compiler
             CompileStage stage,
             boolean configureForwardMetadata,
             boolean normalized,
-            Dialect dialect)
+            Dialect dialect,
+            ByteFrequencies byteFrequencies)
     {
         requireNonNull(regexp, "regexp is null");
         requireNonNull(stage, "stage is null");
@@ -242,7 +252,7 @@ final class Compiler
         if (configureForwardMetadata && !reversed) {
             Regexp.RequiredPrefixForAccelResult requiredPrefixForAccel = regexp.requiredPrefixForAccel();
             if (requiredPrefixForAccel != null) {
-                compiledProgram.configurePrefixAccel(requiredPrefixForAccel.prefix(), requiredPrefixForAccel.foldCase());
+                compiledProgram.configurePrefixAccel(requiredPrefixForAccel.prefix(), requiredPrefixForAccel.foldCase(), byteFrequencies);
             }
 
             // Configure required prefix for instant rejection.
