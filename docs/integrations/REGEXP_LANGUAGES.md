@@ -9,6 +9,7 @@ parser.
 | `Re2.compile(pattern)` | [RE2 Pattern Language](../reference/languages/RE2.md) |
 | `TrinoRegexp.compile(pattern)` | [Trino Regular-Expression Language](../reference/languages/TRINO_REGEXP.md) |
 | `JavaRegexp.compile(pattern)` | [Java Regular-Expression Language](../reference/languages/JAVA_REGEXP.md) |
+| `RustRegexp.compile(pattern)` | [Rust Regular-Expression Language](../reference/languages/RUST_REGEXP.md) |
 | `TrinoLikePattern.compile(pattern, escape)` | [Trino SQL LIKE Language](../reference/languages/TRINO_LIKE.md) |
 
 See [unsupported features](../reference/languages/UNSUPPORTED_FEATURES.md) for
@@ -31,7 +32,7 @@ MatchResult result = pattern.findResult(inputBytes);
 ## Compilation and execution
 
 Each compiler handles its own language's syntax and semantics. `Re2`,
-`TrinoRegexp`, and `JavaRegexp` produce shared Regulator programs that run on
+`TrinoRegexp`, `JavaRegexp`, and `RustRegexp` produce shared Regulator programs that run on
 the same bounded DFA, NFA, OnePass, and BitState engines. `TrinoRegexp` can also
 choose a specialized matcher for an operation when pattern analysis proves it
 will produce the same result.
@@ -55,4 +56,4 @@ the exception message names the feature, for example `lookahead`,
 `backreferences`, or `possessive quantifiers`. Invalid syntax continues to use
 the corresponding syntax error instead of being mislabeled as unsupported.
 
-There is no automatic fallback between `JavaRegexp`, `TrinoRegexp`, and `Re2`.
+There is no automatic fallback between `JavaRegexp`, `TrinoRegexp`, `RustRegexp`, and `Re2`.

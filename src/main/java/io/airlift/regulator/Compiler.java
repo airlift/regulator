@@ -612,18 +612,23 @@ final class Compiler
                 case ANY_BYTE -> byteRange(0x00, 0xFF, false);
                 case CHAR_CLASS -> charClass(regexp.charClass());
                 case BEGIN_LINE -> emptyWidth(beginLineAssertion(regexp, reversed));
-                case END_LINE -> emptyWidth((regexp.parseFlags() & Regexp.JAVA_LINE) != 0
-                        ? (reversed ? EmptyOp.EMPTY_JAVA_BEGIN_LINE : EmptyOp.EMPTY_JAVA_END_LINE)
-                        : (reversed ? EmptyOp.EMPTY_BEGIN_LINE : EmptyOp.EMPTY_END_LINE));
+                case END_LINE -> emptyWidth((regexp.parseFlags() & Regexp.RUST_ASSERTION) != 0
+                        ? (reversed ? RustAssertions.BEGIN_LINE : RustAssertions.END_LINE)
+                        : (regexp.parseFlags() & Regexp.JAVA_LINE) != 0
+                          ? (reversed ? EmptyOp.EMPTY_JAVA_BEGIN_LINE : EmptyOp.EMPTY_JAVA_END_LINE)
+                          : (reversed ? EmptyOp.EMPTY_BEGIN_LINE : EmptyOp.EMPTY_END_LINE));
                 case BEGIN_TEXT -> emptyWidth(reversed ? EmptyOp.EMPTY_END_TEXT : EmptyOp.EMPTY_BEGIN_TEXT);
                 case END_TEXT -> emptyWidth(endTextAssertion(regexp, reversed));
-                case WORD_BOUNDARY -> emptyWidth(wordBoundaryAssertion(regexp, false));
-                case NO_WORD_BOUNDARY -> emptyWidth(wordBoundaryAssertion(regexp, true));
+                case WORD_BOUNDARY -> emptyWidth(wordBoundaryAssertion(regexp, false, reversed));
+                case NO_WORD_BOUNDARY -> emptyWidth(wordBoundaryAssertion(regexp, true, reversed));
             };
         }
 
         private static int beginLineAssertion(Regexp regexp, boolean reversed)
         {
+            if ((regexp.parseFlags() & Regexp.RUST_ASSERTION) != 0) {
+                return reversed ? RustAssertions.END_LINE : RustAssertions.BEGIN_LINE;
+            }
             int line = reversed ? EmptyOp.EMPTY_END_LINE : EmptyOp.EMPTY_BEGIN_LINE;
             if ((regexp.parseFlags() & Regexp.TRINO_LINE) != 0) {
                 return reversed ? EmptyOp.EMPTY_TRINO_END_LINE : EmptyOp.EMPTY_TRINO_BEGIN_LINE;
@@ -648,8 +653,11 @@ final class Compiler
             return reversed ? EmptyOp.EMPTY_BEGIN_TEXT : EmptyOp.EMPTY_END_TEXT;
         }
 
-        private static int wordBoundaryAssertion(Regexp regexp, boolean negate)
+        private static int wordBoundaryAssertion(Regexp regexp, boolean negate, boolean reversed)
         {
+            if ((regexp.parseFlags() & Regexp.RUST_ASSERTION) != 0) {
+                return RustAssertions.wordBoundary(regexp.parseFlags(), negate, reversed);
+            }
             if ((regexp.parseFlags() & Regexp.JAVA_WORD_BOUNDARY) != 0) {
                 boolean unicodeCharacterClass = (regexp.parseFlags() & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0;
                 if (unicodeCharacterClass) {

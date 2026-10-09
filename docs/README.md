@@ -18,6 +18,7 @@ and intermediate benchmark reports are not kept here.
 | [`reference/languages/RE2.md`](reference/languages/RE2.md) | RE2 syntax, modes, and options |
 | [`reference/languages/TRINO_REGEXP.md`](reference/languages/TRINO_REGEXP.md) | Trino's Joni-derived regular-expression language |
 | [`reference/languages/JAVA_REGEXP.md`](reference/languages/JAVA_REGEXP.md) | Supported regular subset of Java 25 Pattern syntax |
+| [`reference/languages/RUST_REGEXP.md`](reference/languages/RUST_REGEXP.md) | Rust regex syntax with JVM-backed Unicode properties |
 | [`reference/languages/TRINO_LIKE.md`](reference/languages/TRINO_LIKE.md) | Trino SQL LIKE syntax and semantics |
 | [`reference/languages/UNSUPPORTED_FEATURES.md`](reference/languages/UNSUPPORTED_FEATURES.md) | Unsupported constructs and future-support policy |
 
