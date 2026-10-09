@@ -584,9 +584,9 @@ first byte by default. Probing a rarer byte is an opt-in deviation. The `Re2`,
 `TrinoRegexp`, and `JavaRegexp` compile options take a `ByteFrequencies`
 distribution, which defaults to `ByteFrequencies.uniform()`; it gives every
 byte the same probability and so keeps first-byte scanning. A caller can
-instead choose a distribution built from byte counts with `fromCounts` or one
-learned from sample data with `builder()`. A compiled pattern keeps only the
-chosen offsets.
+instead choose the `englishText()` or `json()` preset, a distribution built
+from byte counts with `fromCounts`, or one learned from sample data with
+`builder()`. A compiled pattern keeps only the chosen offsets.
 
 Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
 first byte, and multi-byte leading literals in Trino scan plans, scan for one
@@ -609,9 +609,42 @@ and the cost stays linear in the input. On r9g, probing `/` for `https://` and
 `http://` ran 6.7-8.5x slower than the first-byte scan over access-log text,
 which carries about twelve slashes and one `h` per line.
 
+The presets were scored by modeled candidate counts, not timings, over 33
+literals, against the probe each scored corpus's own distribution chooses, on
+corpora the presets were not built from. On English prose (rebar's sherlock,
+OpenSubtitles English, and rebar's leipzig-3200, Project Gutenberg's Mark Twain
+collection), `englishText()` agreed with that probe on 86.9% of rows and made
+no row worse than the first byte. On two GH Archive event hours, `json()`
+agreed on 87.9%, also with no row worse. On each other's format, `englishText()`
+made 6 of 66 JSON rows worse, the worst probing `/` for `GET /` with 82 times
+the first byte's stops, and `json()` made 4 of 99 English rows worse, by at
+most 7.9 times. Over log, access-log, source-code, CSV, Russian, and Chinese
+corpora, `englishText()` made 6.9% of rows worse and `json()` 5.9%. Every
+preset must therefore match the data it searches, and no preset covers mixed
+or log data.
+
 A distribution learned from a few hundred kilobytes of whole lines sampled
 across the searched data is the most reliable choice. JMH qualification uses
 `BenchmarkLiteralProbe` with the existing prefix and scan-plan benchmarks.
+
+Each preset is the unweighted mean of the add-one smoothed distributions of its
+sources, with weight one per source. The English sources are three Leipzig
+Corpora Collection corpora of 100,000 sentences (CC BY): news from 2025,
+Wikipedia from 2016, and web text from 2018. Their sentence cleaning leaves out
+`#`, `=`, brackets, braces, `_`, `|`, `\`, `^`, and almost all `@`, so
+`englishText()` rates those bytes very rare. The JSON sources are the example
+documents of simdjson's `jsonexamples` (Apache-2.0), one file per document. Its
+pretty-printed, compact, and escaped copies of a document are left out, so a
+reformatted document does not count twice, and so are `github_events.json` and
+an array of random numbers. A JSON preset that pooled all bytes, so that large
+files dominate, agreed on only 83.3% of GH Archive rows. The presets may probe
+any ASCII byte. Bytes at or above `0x80` are pinned to the most common ASCII
+value, so no preset probes them. `Re2` and `JavaRegexp` scans move the probe
+only for multi-byte, case-sensitive literals with an ASCII first byte, so a
+literal led by encoded text keeps first-byte scanning there. Trino scan plans
+move a plan's leading literal, including one led by encoded text, to a rarer
+ASCII byte. `tools/byte-frequencies` pins every source of both preset tables and
+regenerates them exactly; only the derived numbers are committed.
 
 Counts and learned distributions are add-one smoothed:
 `(count + 1) / (total + 256)`. They measure the data they were built from, so

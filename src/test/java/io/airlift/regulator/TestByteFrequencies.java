@@ -17,8 +17,10 @@ import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.List;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,6 +46,52 @@ public class TestByteFrequencies
         // A rarer first byte stays.
         assertThat(probeOffset(frequencies, "da")).isZero();
         assertThat(probeOffset(frequencies, "a")).isZero();
+    }
+
+    @Test
+    public void testPresetsNeverProbeNonAsciiBytes()
+    {
+        for (ByteFrequencies frequencies : List.of(ByteFrequencies.englishText(), ByteFrequencies.json())) {
+            // Every byte at or above 0x80 is as common as the most common ASCII byte.
+            double mostCommonAscii = 0;
+            for (int value = 0; value < 0x80; value++) {
+                mostCommonAscii = Math.max(mostCommonAscii, frequencies.probability((byte) value));
+            }
+            for (int value = 0x80; value < 256; value++) {
+                assertThat(frequencies.probability((byte) value)).as("byte %s", value).isEqualTo(mostCommonAscii);
+            }
+
+            for (String literal : new String[] {"夏洛克·福尔摩斯", "例え", "Шерлок Холмс"}) {
+                assertThat(probeOffset(frequencies, literal)).as(literal).isZero();
+            }
+            // A non-ASCII first byte still yields to a rare ASCII byte, and a UTF-8 or Latin-1
+            // byte never becomes the probe.
+            assertThat(probeOffset(frequencies, "év")).isEqualTo(2);
+            assertThat(frequencies.probeOffset("év".getBytes(ISO_8859_1))).isEqualTo(1);
+            assertThat(probeOffset(frequencies, "aé")).isZero();
+        }
+    }
+
+    @Test
+    public void testPresetProbes()
+    {
+        // Each preset may probe punctuation and digits where its own text makes them rare.
+        assertPresetProbes("https://", 6, 0);
+        assertPresetProbes("\"level\":", 0, 3);
+        assertPresetProbes("id=", 2, 2);
+        assertPresetProbes("user=", 4, 4);
+        assertPresetProbes("svc1://", 5, 1);
+        assertPresetProbes("content-type:", 12, 0);
+        assertPresetProbes("error: ", 5, 0);
+        assertPresetProbes("GET /", 4, 0);
+        // A common first byte moves to a much rarer letter.
+        assertPresetProbes("aab", 2, 2);
+        assertPresetProbes("abab", 1, 1);
+        assertPresetProbes("ABCDEFGHIJKLMNOPQRSTUVWXYZ", 25, 23);
+        // Rare or uncontested first bytes, and bytes too close to call, stay.
+        assertPresetProbes("Sherlock Holmes", 0, 0);
+        assertPresetProbes("http", 0, 0);
+        assertPresetProbes("ba", 0, 0);
     }
 
     @Test
@@ -141,6 +189,12 @@ public class TestByteFrequencies
         assertThatThrownBy(() -> ByteFrequencies.fromCounts(negative))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("count for byte 120 is negative: -1");
+    }
+
+    private static void assertPresetProbes(String literal, int englishTextProbe, int jsonProbe)
+    {
+        assertThat(probeOffset(ByteFrequencies.englishText(), literal)).as("englishText() %s", literal).isEqualTo(englishTextProbe);
+        assertThat(probeOffset(ByteFrequencies.json(), literal)).as("json() %s", literal).isEqualTo(jsonProbe);
     }
 
     private static int probeOffset(ByteFrequencies frequencies, String literal)
