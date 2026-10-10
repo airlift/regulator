@@ -193,6 +193,36 @@ assert.ok(groupedDownload.rows.every((entry, index) => entry.result === groupedD
   && entry.population === groupedData.rows[index].population
   && entry.reportSection === workloadSection(groupedData.rows[index])));
 
+// Literal-probe pairs show both comparator ratios and the host-normalized tuned gain.
+const probe = (caseId, family, candidateNs, ratio) => ({ ...reused, id: `language-bulk/${caseId}/execute`, caseId, name: caseId,
+  operation: 'execute', model: 'count', population: 'literal-probe', family, inputBytes: 1000, workContract: 'public-find-count-v2',
+  result: { ...result, candidateNs, comparatorNs: candidateNs / ratio, ratio, minimumRatio: ratio, maximumRatio: ratio,
+    deltaNs: candidateNs - candidateNs / ratio, deltaNsPerByte: null } });
+const probeRows = [probe('literal-probe/nginx-mozilla', 'uniform', 300, 1.5), probe('literal-probe/nginx-mozilla/tuned', 'sampled-log-lines', 100, .5)];
+const [probePair] = exports.literalProbeRows(probeRows);
+assert.equal(probePair.distribution, 'Learned from sample logs');
+assertRatio(probePair.gain.ratio, 1 / 3);
+assert.throws(() => exports.literalProbeRows([probeRows[0]]), /Missing tuned literal-probe partner/);
+assert.throws(() => exports.literalProbeRows([probeRows[1]]), /Missing default literal-probe partner/);
+assert.equal(exports.distributionGain(probeRows[1].result, { ...result, state: 'did-not-finish', reason: 'timeout' }).state, 'did-not-finish');
+const probeHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...groupedData, rows: [...groupedData.rows, ...probeRows] } }));
+const probeHeadings = [...probeHtml.matchAll(/<h2>(.*?)<\/h2>/g)].map(match => match[1]);
+assert.equal(probeHeadings.indexOf('Literal probe distributions'), probeHeadings.indexOf('Text processing workloads') + 1);
+const probeSection = probeHtml.split('<h2>Literal probe distributions</h2>')[1].split('</section>')[0];
+assert.match(probeSection, /Mozilla\/5.0 · nginx access log/);
+assert.match(probeSection, /1.50× slower.*2.00× faster.*3.00× faster/s);
+assert.doesNotMatch(probeHtml.split('<h2>Text processing workloads</h2>')[1].split('</section>')[0], /literal-probe/);
+assert.deepEqual(exports.summaryRatios({ ...data, rows: [...summaryRows, ...probeRows] }), exports.summaryRatios({ ...data, rows: summaryRows }));
+assert.equal(exports.displayedMeasurements(probeRows).length, 2);
+// Two ratios that each include parity cannot add up to a clear tuned gain.
+const uncertainProbe = (row, ratioInterval) => ({ ...row, result: { ...row.result, uncertainty: { method: 'hierarchical-bootstrap-v1', level: .95, ratioInterval,
+  candidateIntervalNs: [row.result.candidateNs * .99, row.result.candidateNs * 1.01], comparatorIntervalNs: [row.result.comparatorNs * .99, row.result.comparatorNs * 1.01],
+  forkMeanRangeNs: { candidate: null, comparator: null } } } });
+const uncertainProbeRows = [uncertainProbe(probe('literal-probe/nginx-mozilla', 'uniform', 100, 1), [.5, 1.5]),
+  uncertainProbe(probe('literal-probe/nginx-mozilla/tuned', 'sampled-log-lines', 50, .5), [.2, 1.2])];
+const uncertainProbeHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...groupedData, rows: [...groupedData.rows, ...uncertainProbeRows] } }));
+assert.match(uncertainProbeHtml, /divided by default ratio: 0.5000×. Conservative interval 0.1333 to 2.4000×.">no clear difference</);
+
 const partial = { state: 'did-not-finish', reason: 'comparator: execution exceeded 30 s on 2 attempts', warnings: [],
   hosts: [80, 100, 120].map((ns, index) => ({ instanceId: `host-${index}`, replica: index + 1,
     candidate: { state: 'compared', medianNs: ns }, comparator: { state: 'did-not-finish' } })) };

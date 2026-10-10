@@ -209,10 +209,11 @@ remain in the separately preserved complete baseline evidence.
 
 Every API page combines single-use and multi-use timings in its pattern
 lifecycle table. The page order is everyday operations, pattern lifecycle,
-Trino-specific operations where available, text processing, then collapsed
-adversarial and synthetic stress groups. Compile-only measurements retained by
-the frozen publication inventory remain in the public JSON download, without a
-separate construction or compiler-stress table.
+Trino-specific operations where available, text processing, literal-probe
+distributions, then collapsed adversarial and synthetic stress groups.
+Compile-only measurements retained by the frozen publication inventory remain
+in the public JSON download, without a separate construction or
+compiler-stress table.
 
 LIKE's default row order starts with prefix, suffix, exact and contains checks,
 then ordered literals and fixed-character gaps, then one-character wildcards.
