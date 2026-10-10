@@ -294,21 +294,25 @@ folding from the pinned database:
    The case conversions of name normalization are checked against `String`
    and `Character` for every conversion whose input and output contain only
    characters assigned in the JDK's Unicode version.
-3. Every rule's simple folds are checked exhaustively to form closed orbits
+3. Rust property and value names, their lookup order, and their errors are
+   checked against fixtures from the pinned regex crate. A name that the
+   database holds and the crate's older Unicode tables lack is an expected
+   difference that must keep compiling.
+4. Every rule's simple folds are checked exhaustively to form closed orbits
    that hold each code point's case mappings, apart from dotted and dotless I
    in RE2 and Trino. Java's Unicode `\w` and `\b` and Trino's `\b` are checked
    to give every member of an orbit the same word-ness. The Java folds are
    checked against the JVM's case classes wherever the JVM assigns every
    member of a class. Focused `Pattern` comparisons cover dotted and dotless I,
    long S, Kelvin sign, and Greek sigma.
-4. Every multi-code-point fold in pinned Joni is checked against the Trino
+5. Every multi-code-point fold in pinned Joni is checked against the Trino
    full-fold table, with the additional U+1E9E and U+1DF95 mappings recorded
    explicitly. On Java 26 and newer, the Trino rule is checked exhaustively
    against the JDK's full case folding comparison for every character the JDK
    assigns.
-5. Unicode-version-only upstream differences have explicit expected results
+6. Unicode-version-only upstream differences have explicit expected results
    rather than unexplained golden-test exceptions.
-6. Complete pinned-native differential, exhaustive, randomized, UTF-8,
+7. Complete pinned-native differential, exhaustive, randomized, UTF-8,
    Latin-1, parser, and compatibility suites pass with each language's
    properties and case folding.
 

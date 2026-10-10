@@ -186,6 +186,12 @@ final class Utf8
         return -1;
     }
 
+    // Returns whether an offset in valid UTF-8 input is a character boundary.
+    static boolean isCharacterBoundary(Slice input, int offset)
+    {
+        return offset == input.length() || (input.getByte(offset) & 0xC0) != 0x80;
+    }
+
     static int encodedLength(int codePoint)
     {
         if (!Character.isValidCodePoint(codePoint)) {

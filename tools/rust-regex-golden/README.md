@@ -46,7 +46,10 @@ on characters assigned after 16.0, and on older characters whose properties
 Unicode changed after 16.0, such as U+0295, so the hand-written cases avoid
 those characters. If either side changes Unicode version, review the cases for
 characters that the new version adds or changes, and replace any case that
-uses one.
+uses one. A case that names a property or value added after 16.0, such as
+`property_age_future`, is an expected difference in `TestRustRegexpGolden`,
+which requires the crate to keep rejecting it and Regulator to keep compiling
+it; add each new name there.
 
 ## Prerequisites
 
@@ -268,6 +271,16 @@ python3 -I tools/rust-regex-golden/cases/emit.py
 tools/rust-regex-golden/generate.sh
 ```
 
+## Unicode property names
+
+`RustUnicodePropertyTables` builds the crate's property and value names when it
+loads, from the property and value aliases in Regulator's Unicode database. It
+follows the naming rules of the crate's table generator, `ucd-generate` 0.3.1,
+which parses the UCD with `ucd-parse` 0.1.13 and normalizes names with
+`ucd-util` 0.2.2, and each rule names the function it follows. When the crate
+pin moves, check those tools for changed naming rules and make the same change
+in `RustUnicodePropertyTables`.
+
 ## Maintenance triggers
 
 Regenerate the fixtures when:
@@ -317,3 +330,17 @@ For any generator or fixture change, verify that:
 - every Java and crate disagreement is investigated rather than normalized into
   a fixture; and
 - `./mvnw clean install` passes.
+
+## License
+
+The upstream fixture is derived from the `regex` crate's test data, which is
+distributed under the crate's MIT or Apache-2.0 license. Its `fowler/*`
+records derive from the AT&T testregex data. The crate no longer ships that
+data's license, although `testdata/fowler/dat/README` still refers to it, so
+the license is reproduced from the crate's history. See
+[`LICENSE-rust-regex.txt`](../../LICENSE-rust-regex.txt).
+
+`RustUnicodePropertyTables` reproduces the naming rules of `ucd-generate` and
+its `ucd-parse` and `ucd-util` crates, which are distributed under the MIT or
+Apache-2.0 license; their MIT notices are in
+[`LICENSE-rust-regex.txt`](../../LICENSE-rust-regex.txt).

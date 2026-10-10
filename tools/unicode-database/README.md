@@ -30,14 +30,16 @@ documents the format. The database holds:
   boundaries
 - the Name of every code point `UnicodeData.txt` names, and the
   Unicode_1_Name of every control, which give Java's `\N{name}` its names
-- the Age of every assigned code point, from `DerivedAge.txt`, which tells the
-  tests which code points the running JDK's Unicode version assigns
+- the Age of every assigned code point, from `DerivedAge.txt`, which gives Rust
+  patterns their Age property and tells the tests which code points the running
+  JDK's Unicode version assigns
 - every binary property of `PropList.txt` and `DerivedCoreProperties.txt`, the
   Script_Extensions of `ScriptExtensions.txt`, the Grapheme_Cluster_Break,
   Word_Break, and Sentence_Break of the `auxiliary/` break property files, the
   names of every property, from `PropertyAliases.txt`, and the names of the
   General_Category, Script, Age, and break property values, from
-  `PropertyValueAliases.txt`, which a language can name its properties by
+  `PropertyValueAliases.txt`, which give Rust patterns their Unicode properties
+  and the names they resolve them by
 
 ## Usage
 
@@ -115,6 +117,12 @@ Moving to a new version changes every result that depends on the database.
    references. A change the new version makes to an older character, which
    the JDK keeps until its own Unicode version catches up, is an expected
    difference in `TestJdkUnicodeAgreement`.
+8. Check the Rust golden fixtures, which the regex crate records from its own
+   Unicode tables. A property or value name the new version adds is an
+   expected difference in `TestRustRegexpGolden`, and a hand-written case
+   whose characters the new version changes is replaced, as the
+   [golden tool's Unicode versions](../rust-regex-golden/README.md#unicode-versions)
+   describe.
 
 ## License
 

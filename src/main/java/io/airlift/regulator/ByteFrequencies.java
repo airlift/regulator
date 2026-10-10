@@ -19,11 +19,11 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Background byte probabilities used to choose which byte of a literal a candidate scan probes.
- * {@link Re2.Options#setByteFrequencies}, {@link TrinoRegexp.Options#setByteFrequencies}, and
- * {@link JavaRegexp.Options#setByteFrequencies} select the distribution used during compilation;
- * a compiled pattern keeps only the chosen probe offsets. The options default to
- * {@link #uniform()}, which gives every byte the same probability, so every literal scan probes
- * its first byte.
+ * {@link Re2.Options#setByteFrequencies}, {@link TrinoRegexp.Options#setByteFrequencies},
+ * {@link JavaRegexp.Options#setByteFrequencies}, and {@link RustRegexp.Options#setByteFrequencies}
+ * select the distribution used during compilation; a compiled pattern keeps only the chosen probe
+ * offsets. The options default to {@link #uniform()}, which gives every byte the same
+ * probability, so every literal scan probes its first byte.
  * <p>
  * A scan for a literal stops at every occurrence of its probe byte, so probing a rare byte
  * hands fewer candidates to verification. The probe leaves the first byte only for a later
@@ -34,7 +34,7 @@ import static java.util.Objects.requireNonNull;
  * the probe byte occurs more often than the first byte. A distribution never changes what
  * matches, and the cost stays linear in the input.
  * <p>
- * Only a case-sensitive literal of more than one byte can probe a later byte. RE2 and Java
+ * Only a case-sensitive literal of more than one byte can probe a later byte. RE2, Java, and Rust
  * patterns move the probe only when the literal's first byte is ASCII. Some Trino patterns that
  * begin with a literal and capture what follows it can also move the probe of a literal whose
  * first byte is not ASCII.
