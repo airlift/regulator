@@ -624,18 +624,23 @@ final class Compiler
                 case ANY_BYTE -> byteRange(0x00, 0xFF, false);
                 case CHAR_CLASS -> charClass(regexp.charClass());
                 case BEGIN_LINE -> emptyWidth(beginLineAssertion(regexp, reversed));
-                case END_LINE -> emptyWidth((regexp.parseFlags() & Regexp.JAVA_LINE) != 0
-                        ? (reversed ? EmptyOp.EMPTY_JAVA_BEGIN_LINE : EmptyOp.EMPTY_JAVA_END_LINE)
-                        : (reversed ? EmptyOp.EMPTY_BEGIN_LINE : EmptyOp.EMPTY_END_LINE));
+                case END_LINE -> emptyWidth(endLineAssertion(regexp, reversed));
                 case BEGIN_TEXT -> emptyWidth(reversed ? EmptyOp.EMPTY_END_TEXT : EmptyOp.EMPTY_BEGIN_TEXT);
                 case END_TEXT -> emptyWidth(endTextAssertion(regexp, reversed));
-                case WORD_BOUNDARY -> emptyWidth(wordBoundaryAssertion(regexp, false));
+                case WORD_BOUNDARY -> emptyWidth((regexp.parseFlags() & Regexp.RUST_ASSERTION) != 0
+                        ? rustWordAssertion(regexp, reversed)
+                        : wordBoundaryAssertion(regexp, false));
                 case NO_WORD_BOUNDARY -> emptyWidth(wordBoundaryAssertion(regexp, true));
             };
         }
 
+        // The Rust assertions below map for a reversed program too, but none is built today:
+        // Re2.compileReverse refuses programs with assertions the DFA cannot evaluate.
         private static int beginLineAssertion(Regexp regexp, boolean reversed)
         {
+            if ((regexp.parseFlags() & Regexp.RUST_ASSERTION) != 0) {
+                return reversed ? EmptyOp.EMPTY_RUST_CRLF_END_LINE : EmptyOp.EMPTY_RUST_CRLF_BEGIN_LINE;
+            }
             int line = reversed ? EmptyOp.EMPTY_END_LINE : EmptyOp.EMPTY_BEGIN_LINE;
             if ((regexp.parseFlags() & Regexp.TRINO_LINE) != 0) {
                 return reversed ? EmptyOp.EMPTY_TRINO_END_LINE : EmptyOp.EMPTY_TRINO_BEGIN_LINE;
@@ -647,6 +652,17 @@ final class Compiler
             // Java multiline caret excludes end-of-input even with UNIX_LINES.
             // Intersecting the existing assertions restricts it to LF boundaries.
             return (regexp.parseFlags() & Regexp.JAVA_UNIX_LINES) != 0 ? line | javaLine : javaLine;
+        }
+
+        private static int endLineAssertion(Regexp regexp, boolean reversed)
+        {
+            if ((regexp.parseFlags() & Regexp.RUST_ASSERTION) != 0) {
+                return reversed ? EmptyOp.EMPTY_RUST_CRLF_BEGIN_LINE : EmptyOp.EMPTY_RUST_CRLF_END_LINE;
+            }
+            if ((regexp.parseFlags() & Regexp.JAVA_LINE) != 0) {
+                return reversed ? EmptyOp.EMPTY_JAVA_BEGIN_LINE : EmptyOp.EMPTY_JAVA_END_LINE;
+            }
+            return reversed ? EmptyOp.EMPTY_BEGIN_LINE : EmptyOp.EMPTY_END_LINE;
         }
 
         private static int endTextAssertion(Regexp regexp, boolean reversed)
@@ -675,6 +691,29 @@ final class Compiler
                 return negate ? EmptyOp.EMPTY_NO_UNICODE_WORD_BOUNDARY : EmptyOp.EMPTY_UNICODE_WORD_BOUNDARY;
             }
             return negate ? EmptyOp.EMPTY_NO_WORD_BOUNDARY : EmptyOp.EMPTY_WORD_BOUNDARY;
+        }
+
+        // A start boundary has a non-word character before it and a word character after it; an end
+        // boundary is the mirror image, and a half boundary checks only the non-word side. A
+        // reversed program reads the text after a position as before it.
+        private static int rustWordAssertion(Regexp regexp, boolean reversed)
+        {
+            boolean unicode = (regexp.parseFlags() & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0;
+            if (unicode) {
+                UnicodeGroups.initializeWordFlags();
+            }
+            boolean nonWordAfter = ((regexp.parseFlags() & Regexp.RUST_WORD_END) != 0) != reversed;
+            int nonWordSide;
+            int wordSide;
+            if (nonWordAfter) {
+                nonWordSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_NON_WORD_AFTER : EmptyOp.EMPTY_RUST_NON_WORD_AFTER;
+                wordSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_WORD_BEFORE : EmptyOp.EMPTY_RUST_WORD_BEFORE;
+            }
+            else {
+                nonWordSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_NON_WORD_BEFORE : EmptyOp.EMPTY_RUST_NON_WORD_BEFORE;
+                wordSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_WORD_AFTER : EmptyOp.EMPTY_RUST_WORD_AFTER;
+            }
+            return (regexp.parseFlags() & Regexp.RUST_WORD_HALF) != 0 ? nonWordSide : nonWordSide | wordSide;
         }
 
         private Prog finish(CompileStage stage)

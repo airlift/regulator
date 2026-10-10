@@ -140,6 +140,44 @@ public class TestRustRegexp
         assertThat(RustRegexp.compile(utf8Slice("\\p{scx=Common}")).matches(tatweel)).isFalse();
     }
 
+    @Test
+    public void testRustAssertionsAgreeInBoundedEngines()
+    {
+        // These assertions keep a program off the DFA and OnePass engines, so both bounded
+        // engines must evaluate them.
+        assertBoundedEngines("(?mR)^é$", "\r\né\r\n", 2, 4);
+        assertBoundedEngines("\\b{start}é\\b{end}", "!é!", 1, 3);
+        assertBoundedEngines("(?-u)\\b{start}a\\b{end}", "!a!", 1, 2);
+        assertBoundedEngines("(?-u)\\b{start}é", "é", -1, -1);
+        assertBoundedEngines("\\b{end-half}", "ab", 2, 2);
+        assertBoundedEngines("\\<é", "aé é", 4, 6);
+        // Different assertions in one program stay distinct.
+        assertBoundedEngines("\\b{start}a|\\b{end}b", "b", -1, -1);
+        assertBoundedEngines("\\b\\b{start}", "a b", 0, 0);
+
+        Re2Matcher matcher = RustRegexp.compile(utf8Slice("\\b\\b{start}")).matcher(utf8Slice("a b"));
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(0);
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(2);
+        assertThat(matcher.find()).isFalse();
+    }
+
+    private static void assertBoundedEngines(String pattern, String text, int start, int end)
+    {
+        RustRegexp.Options options = RustRegexp.Options.defaults();
+        Prog program = Compiler.compile(RustRegexpParser.parse(utf8Slice(pattern), options.syntaxFlags()).regexp());
+        assertThat(program.hasTextDependentAssertions()).isTrue();
+        int[] nfa = new int[2];
+        int[] bitState = new int[2];
+        assertThat(Nfa.search(program, utf8Slice(text), false, Prog.MatchKind.FIRST_MATCH, nfa)).isEqualTo(start >= 0);
+        assertThat(BitState.search(program, utf8Slice(text), false, Prog.MatchKind.FIRST_MATCH, bitState)).isEqualTo(start >= 0);
+        if (start >= 0) {
+            assertThat(nfa).containsExactly(start, end);
+            assertThat(bitState).containsExactly(start, end);
+        }
+    }
+
     private static List<String> instanceMethods(Class<?> type)
     {
         return Arrays.stream(type.getDeclaredMethods())

@@ -28,8 +28,8 @@ import static java.util.Objects.requireNonNull;
  * empty match that splits a UTF-8 character, iteration skips an empty match adjacent to the
  * previous match, and a search of a range or matcher region sees the input outside it as
  * assertion context, as in the crate's {@code Input::range}. Unicode properties read Regulator's
- * Unicode database. Repetition counts above 1,000 and the crate's start and end word-boundary
- * assertions fail during compilation. Match offsets are UTF-8 byte offsets, as in the crate.
+ * Unicode database. Repetition counts above 1,000 fail during compilation. Match offsets are UTF-8
+ * byte offsets, as in the crate.
  */
 public final class RustRegexp
 {

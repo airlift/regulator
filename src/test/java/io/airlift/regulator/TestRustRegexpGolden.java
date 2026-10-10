@@ -43,9 +43,9 @@ public class TestRustRegexpGolden
 
     // Patterns the crate accepts that Regulator rejects by design, by fixture.
     private static final Map<String, Map<Gap, Integer>> GAP_COUNTS = Map.of(
-            SYNTAX_FIXTURE, Map.of(Gap.REPETITION_COUNT, 1, Gap.ASSERTION, 18),
-            MATCH_FIXTURE, Map.of(Gap.ASSERTION, 38),
-            UPSTREAM_FIXTURE, Map.of(Gap.REPETITION_COUNT, 1, Gap.ASSERTION, 159));
+            SYNTAX_FIXTURE, Map.of(Gap.REPETITION_COUNT, 1),
+            MATCH_FIXTURE, Map.of(),
+            UPSTREAM_FIXTURE, Map.of(Gap.REPETITION_COUNT, 1));
 
     // Cases naming a property or value that Regulator's Unicode 18.0 database holds and the crate's
     // Unicode 16.0 tables lack, by fixture and case ID, with the reason. The crate rejects each
@@ -98,27 +98,15 @@ public class TestRustRegexpGolden
             entry("UnsupportedBackreference", RegexpParseErrorCode.UNSUPPORTED_CONSTRUCT),
             entry("UnsupportedLookAround", RegexpParseErrorCode.UNSUPPORTED_CONSTRUCT));
 
-    private static final List<String> UNSUPPORTED_ASSERTIONS = List.of(
-            "\\b{start}",
-            "\\b{end}",
-            "\\b{start-half}",
-            "\\b{end-half}",
-            "\\<",
-            "\\>",
-            "CRLF multi-line ^",
-            "CRLF multi-line $");
-
     // A pattern the crate accepts that Regulator rejects by design.
     private enum Gap
     {
-        REPETITION_COUNT,
-        ASSERTION;
+        REPETITION_COUNT;
 
         static Gap of(RegexpParseException exception)
         {
             String message = exception.getMessage();
             return switch (exception.errorCode()) {
-                case UNSUPPORTED_CONSTRUCT -> UNSUPPORTED_ASSERTIONS.stream().anyMatch(feature -> message.contains(": " + feature + " at byte offset")) ? ASSERTION : null;
                 case REPEAT_SIZE -> message.contains("repetition count above 1000") ? REPETITION_COUNT : null;
                 default -> null;
             };
