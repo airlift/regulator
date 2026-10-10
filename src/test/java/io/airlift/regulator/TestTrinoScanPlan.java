@@ -437,6 +437,15 @@ public class TestTrinoScanPlan
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("^https?://([^/]+)/"));
         Re2Matcher matcher = regexp.pattern().matcher(utf8Slice("https://host/path"));
+        // The matcher and capture extraction run the start-anchored plan directly; group zero
+        // and an unanchored pattern keep the ordinary search.
+        assertThat(matcher.startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
+        assertThat(regexp.extractsWithStartAnchoredScanPlanForDiagnostics(1)).isTrue();
+        assertThat(regexp.extract(utf8Slice("https://host/path"), 1)).isEqualTo(utf8Slice("host"));
+        assertThat(regexp.extractsWithStartAnchoredScanPlanForDiagnostics(0)).isFalse();
+        TrinoRegexp unanchored = TrinoRegexp.compile(utf8Slice("https?://([^/]+)/"));
+        assertThat(unanchored.pattern().matcher(utf8Slice("https://host/path")).startAnchoredScanPlanEnabledForDiagnostics()).isFalse();
+        assertThat(unanchored.extractsWithStartAnchoredScanPlanForDiagnostics(1)).isFalse();
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isZero();
         assertThat(matcher.end()).isEqualTo("https://host/".length());
@@ -452,6 +461,12 @@ public class TestTrinoScanPlan
         assertThat(matcher.start()).isEqualTo(1);
         assertThat(matcher.end()).isEqualTo(1 + "https://host/".length());
         assertThat(matcher.reset(regionInput, 1, regionInput.length() - 2).lookingAt()).isTrue();
+
+        // The anchor binds to the region start, not to the start given to find.
+        Slice repeated = utf8Slice("https://a/https://b/");
+        assertThat(matcher.reset(repeated).find(10)).isFalse();
+        assertThat(matcher.find(0)).isTrue();
+        assertThat(matcher.group(1)).isEqualTo(utf8Slice("a"));
 
         TrinoRegexp optionalRegexp = TrinoRegexp.compile(utf8Slice("^(a)?a"));
         assertThat(optionalRegexp.pattern().usesPartialTrinoScanPlanForDiagnostics()).isTrue();
