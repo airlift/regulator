@@ -21,6 +21,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -119,6 +120,42 @@ public class TestLanguageBulkBenchmark
     }
 
     @Test
+    public void testByteFrequencyFieldsChooseRegulatorDistribution()
+            throws Exception
+    {
+        assertThat(read(input("count", "ex", "exex")).byteFrequencies()).isSameAs(ByteFrequencies.uniform());
+        assertThat(read(input("count", "ex", "exex", "byte-frequencies", "english-text")).byteFrequencies())
+                .isSameAs(ByteFrequencies.englishText());
+        String sample = "e".repeat(100) + "x";
+        RebarRunner.Benchmark learned = read(input("count", "ex", "exex", "byte-frequency-sample", sample));
+        assertThat(learned.byteFrequencies().probeOffset("ex".getBytes(UTF_8))).isEqualTo(1);
+        assertThat(learned.options().byteFrequencies()).isSameAs(learned.byteFrequencies());
+
+        // Every engine still finds the same matches; only the Regulator scan plan changes.
+        Path workload = input("count", "ex", "exex", "byte-frequency-sample", sample);
+        for (String engine : ENGINES) {
+            var data = new BenchmarkLanguageBulk.BenchmarkData();
+            data.engine = engine;
+            data.workloadFile = workload.toString();
+            data.expectedResult = 2;
+            data.setup();
+            assertThat(new BenchmarkLanguageBulk().execute(data)).as(engine).isEqualTo(2);
+        }
+        // The Java and Trino patterns compile with the workload's distribution.
+        for (String engine : List.of("java", "trino")) {
+            assertThat(compiledProbeOffset(engine, "byte-frequency-sample", sample)).as(engine).isEqualTo(1);
+            assertThat(compiledProbeOffset(engine)).as(engine).isZero();
+        }
+
+        assertThatThrownBy(() -> read(input("count", "ex", "exex", "byte-frequencies", "json", "byte-frequency-sample", "x")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("one byte-frequency distribution");
+        assertThatThrownBy(() -> read(input("count", "ex", "exex", "byte-frequencies", "latin")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unknown byte-frequency preset");
+    }
+
+    @Test
     public void testLineSlicesKeepTheirOffsets()
     {
         var lines = BenchmarkLanguageBulk.lines(utf8Slice("paddinga\r\n\nb\r").slice(7, 6));
@@ -153,14 +190,38 @@ public class TestLanguageBulkBenchmark
         }
     }
 
-    private Path input(String model, String pattern, String source)
+    private int compiledProbeOffset(String engine, String... extraFields)
+            throws Exception
+    {
+        var data = new BenchmarkLanguageBulk.BenchmarkData();
+        data.engine = engine;
+        data.workloadFile = input("count", "ex", "exex", extraFields).toString();
+        data.initialize();
+        Re2 pattern = switch (data.compilePattern()) {
+            case JavaRegexp java -> java.pattern();
+            case TrinoRegexp trino -> trino.pattern();
+            default -> throw new IllegalArgumentException("not a Regulator pattern: " + engine);
+        };
+        return pattern.forwardProgramForDiagnostics().prefixAccelProbeOffset();
+    }
+
+    private static RebarRunner.Benchmark read(Path input)
+            throws Exception
+    {
+        return RebarRunner.Benchmark.read(Files.readAllBytes(input));
+    }
+
+    private Path input(String model, String pattern, String source, String... extraFields)
             throws Exception
     {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        String[][] fields = {
+        List<String[]> fields = new ArrayList<>(List.of(new String[][] {
                 {"name", "test"}, {"model", model}, {"pattern", pattern},
                 {"haystack", source}, {"unicode", "true"}, {"case-insensitive", "false"},
-        };
+        }));
+        for (int index = 0; index < extraFields.length; index += 2) {
+            fields.add(new String[] {extraFields[index], extraFields[index + 1]});
+        }
         for (String[] field : fields) {
             byte[] value = field[1].getBytes(UTF_8);
             output.write((field[0] + ":" + value.length + ":").getBytes(UTF_8));

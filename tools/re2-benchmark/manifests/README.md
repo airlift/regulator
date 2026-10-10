@@ -35,3 +35,9 @@ every added or removed workload and result-demand change, update both checksum
 files, and rerun the Rebar Python tests. A manifest update changes the
 qualification corpus and therefore requires a new frozen candidate and new
 qualification results.
+
+`literal-probe-corpus.tsv` pins the corpora for the literal-probe distribution
+workloads by URL, revision, size, checksum, and license, and
+`literal-probe-workloads.tsv` lists those workloads. The corpora are fetched by
+`language/literal_probe.py` and never committed; see the
+[language guide](../language/README.md#literal-probe-distributions).
