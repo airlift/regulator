@@ -189,6 +189,19 @@ public class TestTrinoRegexpFunctions
         assertThat(absent.replace(source, _ -> utf8("_"))).isSameAs(source);
         assertNoCachedDfa(absent);
 
+        // Each search resumes after the previous match, so an occurrence overlapping it is
+        // skipped, but one at a later start position is found.
+        TrinoRegexp overlapping = TrinoRegexp.compile(utf8("aba"));
+        assertThat(overlapping.pattern().booleanPartialMatchStrategyForDiagnostics())
+                .isEqualTo(Re2.BooleanPartialMatchStrategy.EXACT_LITERAL);
+        Slice overlappingSource = utf8("ababa_aba");
+        assertThat(overlapping.count(overlappingSource)).isEqualTo(2);
+        assertThat(overlapping.position(overlappingSource, 1, 2)).isEqualTo(7);
+        assertThat(overlapping.position(overlappingSource, 2, 1)).isEqualTo(3);
+        assertThat(strings(overlapping.split(overlappingSource))).containsExactly("", "ba_", "");
+        assertThat(overlapping.replace(overlappingSource, utf8("_"))).isEqualTo(utf8("_ba__"));
+        assertNoCachedDfa(overlapping);
+
         Re2 latin1 = Re2.compile(Slices.wrappedBuffer(new byte[] {(byte) 0xE9}), Re2.Options.latin1());
         Slice latin1Source = Slices.wrappedBuffer(new byte[] {'!', 'x', (byte) 0xE9, '?'}, 1, 2);
         long latin1Span = latin1.findExactLiteralSpan(latin1Source, 0);
