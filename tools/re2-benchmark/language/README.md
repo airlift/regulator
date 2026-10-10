@@ -411,6 +411,48 @@ ordered byte boundaries, unmatched markers, and captured bytes. The JDK
 adapter precomputes UTF-8 byte offsets for its String indices and rejects a
 boundary inside a supplementary code point instead of inventing a byte span.
 
+## Literal-probe distributions
+
+`literal_probe.py` prepares a separate bulk manifest showing what a
+corpus-matched byte-frequency distribution changes. Each of the three workloads
+in `manifests/literal-probe-workloads.tsv` counts one literal over a pinned
+corpus twice. The default case compiles Regulator with the uniform distribution,
+which probes the literal's first byte. The `/tuned` case compiles with the
+distribution its corpus calls for: `englishText()` for the Sherlock text,
+`json()` for GH Archive events, or one distribution learned from access logs
+for the nginx log. The comparator has no such option and measures identical
+work in both cases. The preparer escapes regex metacharacters, so every engine
+searches the literal's exact bytes, and checks each expected count against
+those bytes.
+
+The learned distribution counts up to 256 KiB of whole lines from the first half
+of each of the Apache and nginx logs, split after the first line feed at or past
+the middle. The lines are drawn in the order `java.util.Random` with seed
+20261009 shuffles them; the second half of the nginx log is the searched
+haystack. The preparer selects the lines and checks the sample against its
+pinned checksum, and the workload file carries the sample.
+`BenchmarkLanguageBulk` builds the distribution during setup, outside timing. A
+preset workload names its preset instead.
+
+`manifests/literal-probe-corpus.tsv` pins each corpus by URL, revision, size,
+checksum, and license. GH Archive is decompressed and truncated at the last
+line feed within 8 MiB. Fetch and verify the corpora outside the repository,
+then prepare the manifest:
+
+```sh
+python3 tools/re2-benchmark/language/literal_probe.py fetch \
+  --corpus-directory /path/to/literal-probe-corpus
+python3 tools/re2-benchmark/language/literal_probe.py prepare \
+  --corpus-directory /path/to/literal-probe-corpus \
+  --manifest-directory /path/to/literal-probe-manifest
+```
+
+The manifest uses the `language-bulk` suite and the `steady-state-v1` profile,
+so `collection.py verify`, `fleet.py prepare`, and `run-campaign.py
+--language-plan` accept it unchanged. Its six cases produce 18 partitions and
+162 jobs. Smoke adds the learned-sample workload to the usual first workload
+for each language.
+
 ## AWS dispatch and recovery
 
 The shared controller accepts repeated `--language-plan` arguments. Run the

@@ -52,6 +52,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * Shared bulk operations over pinned Rebar inputs, through each language's public API.
+ * A workload may name the byte-frequency distribution the Regulator languages compile with;
+ * the JDK and Joni comparators have no such option and ignore it.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -134,8 +136,9 @@ public class BenchmarkLanguageBulk
                 case "java" -> JavaRegexp.compile(patternBytes, JavaRegexp.Options.defaults()
                         .setCaseInsensitive(input.caseInsensitive())
                         .setUnicodeCase(input.unicode())
-                        .setUnicodeCharacterClasses(input.unicode()));
-                case "trino" -> TrinoRegexp.compile(patternBytes);
+                        .setUnicodeCharacterClasses(input.unicode())
+                        .setByteFrequencies(input.byteFrequencies()));
+                case "trino" -> TrinoRegexp.compile(patternBytes, TrinoRegexp.Options.defaults().setByteFrequencies(input.byteFrequencies()));
                 case "jdk" -> Pattern.compile(patternText, flags);
                 case "joni" -> new Regex(
                         patternBytes.byteArray(),

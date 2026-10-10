@@ -1,0 +1,4 @@
+id	pattern	corpus	haystack	distribution	expected_count
+sherlock-exactly	exactly	rebar-sherlock.txt	whole	english-text	7
+gharchive-pull-request-event	"type":"PullRequestEvent"	gharchive-2025-03-10-14.json	whole	json	151
+nginx-mozilla	Mozilla/5.0	elastic-nginx-access.log	second-half	sampled-log-lines	67

@@ -409,7 +409,8 @@ public final class RebarRunner
             long maximumIterations,
             long maximumWarmupIterations,
             long maximumTimeNanos,
-            long maximumWarmupTimeNanos)
+            long maximumWarmupTimeNanos,
+            ByteFrequencies byteFrequencies)
     {
         static Benchmark read(byte[] input)
         {
@@ -423,6 +424,9 @@ public final class RebarRunner
             long maximumWarmupIterations = 0;
             long maximumTimeNanos = 0;
             long maximumWarmupTimeNanos = 0;
+            // Rebar definitions never set a distribution. Language-bulk probe workloads name a
+            // preset or carry the sample a distribution is learned from, so it is built in setup.
+            ByteFrequencies byteFrequencies = null;
 
             int position = 0;
             while (position < input.length) {
@@ -439,6 +443,14 @@ public final class RebarRunner
                     case "max-warmup-iters" -> maximumWarmupIterations = item.asLong();
                     case "max-time" -> maximumTimeNanos = item.asLong();
                     case "max-warmup-time" -> maximumWarmupTimeNanos = item.asLong();
+                    case "byte-frequencies", "byte-frequency-sample" -> {
+                        if (byteFrequencies != null) {
+                            throw new IllegalArgumentException("Rebar model allows one byte-frequency distribution");
+                        }
+                        byteFrequencies = item.key().equals("byte-frequencies")
+                                ? preset(item.asAscii())
+                                : ByteFrequencies.builder().add(item.value()).build();
+                    }
                     default -> throw new IllegalArgumentException("unrecognized KLV key: " + item.key());
                 }
             }
@@ -465,7 +477,18 @@ public final class RebarRunner
                     maximumIterations,
                     maximumWarmupIterations,
                     maximumTimeNanos,
-                    maximumWarmupTimeNanos);
+                    maximumWarmupTimeNanos,
+                    byteFrequencies == null ? ByteFrequencies.uniform() : byteFrequencies);
+        }
+
+        private static ByteFrequencies preset(String name)
+        {
+            return switch (name) {
+                case "uniform" -> ByteFrequencies.uniform();
+                case "english-text" -> ByteFrequencies.englishText();
+                case "json" -> ByteFrequencies.json();
+                default -> throw new IllegalArgumentException("unknown byte-frequency preset: " + name);
+            };
         }
 
         Re2 compile()
@@ -476,7 +499,8 @@ public final class RebarRunner
         Re2.Options options()
         {
             return (unicode ? Re2.Options.defaults() : Re2.Options.latin1())
-                    .setCaseSensitive(!caseInsensitive);
+                    .setCaseSensitive(!caseInsensitive)
+                    .setByteFrequencies(byteFrequencies);
         }
     }
 
