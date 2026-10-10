@@ -1242,12 +1242,24 @@ public final class Re2
             return ((long) start << 32) | (start & 0xFFFF_FFFFL);
         }
 
-        int matchStart = LiteralMatchKernel.find(input, booleanPlans.literal(), start);
-        if (matchStart < 0) {
+        int arrayMatchStart = findExactLiteral(input.byteArray(), input.byteArrayOffset() + start, input.length() - start);
+        if (arrayMatchStart < 0) {
             return Dfa.SEARCH_NO_MATCH;
         }
+        int matchStart = arrayMatchStart - input.byteArrayOffset();
         int matchEnd = matchStart + exactLiteralLength;
         return ((long) matchStart << 32) | (matchEnd & 0xFFFF_FFFFL);
+    }
+
+    /**
+     * Returns the array position of the first occurrence of the nonempty exact literal in
+     * {@code [offset, offset + length)} of {@code bytes}, or {@code -1} when none occurs. The
+     * boolean find, span search, and count of an exact-literal pattern all search with this prefix
+     * scan.
+     */
+    private int findExactLiteral(byte[] bytes, int offset, int length)
+    {
+        return partialProg.prefixAccel(bytes, offset, length);
     }
 
     BooleanPartialMatchStrategy booleanPartialMatchStrategyForDiagnostics()
@@ -1420,7 +1432,7 @@ public final class Re2
             if (exactLiteralLength == 0) {
                 return true;
             }
-            return partialProg.prefixAccel(input.byteArray(), input.byteArrayOffset(), input.length()) >= 0;
+            return findExactLiteral(input.byteArray(), input.byteArrayOffset(), input.length()) >= 0;
         }
         if (canReturnEmptyAtStartForBooleanMatch(input, 0)) {
             return true;
@@ -1789,7 +1801,7 @@ public final class Re2
             int start = text.byteArrayOffset();
             int end = start + text.length();
             while (start < end) {
-                int matchStart = partialProg.prefixAccel(bytes, start, end - start);
+                int matchStart = findExactLiteral(bytes, start, end - start);
                 if (matchStart < 0) {
                     break;
                 }
