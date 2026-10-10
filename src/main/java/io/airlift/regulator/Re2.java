@@ -1658,6 +1658,42 @@ public final class Re2
         return new Re2Matcher(this, input, null, 0, false);
     }
 
+    /**
+     * Returns the start-anchored scan plan that an unanchored capture search may run directly
+     * through {@link #findWithStartAnchoredTrinoScanPlan}, or {@code null}. The compile-time scan
+     * strategy is the whole decision: a pattern with a scan plan never matches empty and has no
+     * candidate-start or group-zero cursor, direct lowered search, or lowered program, so no
+     * {@link Re2Matcher#find()} check runs ahead of the plan. Only a caller's single-byte matcher
+     * can, and such a caller keeps the ordinary route.
+     */
+    TrinoScanPlan startAnchoredTrinoScanPlan()
+    {
+        return switch (trinoScanStrategy) {
+            case BOOLEAN_FIND_TRINO_SCAN, BOOLEAN_FIND_PARTIAL_TRINO_SCAN,
+                 BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN, BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN -> booleanPlans.trinoScanPlan();
+            default -> null;
+        };
+    }
+
+    /**
+     * Returns what {@link #matchRegionInto} returns, with the same groups, for an unanchored
+     * search of {@code [contextStart, contextEnd)} that starts at {@code contextStart}. The
+     * {@code plan} is this pattern's {@link #startAnchoredTrinoScanPlan()}, passed in so callers
+     * that retain it load nothing through this pattern's plans. The call skips the argument checks
+     * and strategy chain of {@link #matchInternal}, which are too large for C2 to inline.
+     */
+    boolean findWithStartAnchoredTrinoScanPlan(TrinoScanPlan plan, Slice text, int contextStart, int contextEnd, int[] groups)
+    {
+        Arrays.fill(groups, -1);
+        return switch (trinoScanStrategy) {
+            case BOOLEAN_FIND_TRINO_SCAN -> plan.matchEndAnchored(text, contextStart, contextEnd, false, groups);
+            case BOOLEAN_FIND_PARTIAL_TRINO_SCAN -> plan.matchPartial(text, contextStart, contextEnd, false, groups);
+            case BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN -> plan.matchAsciiFoldedEndAnchored(text, contextStart, contextEnd, false, groups);
+            case BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN -> plan.matchAsciiFoldedPartial(text, contextStart, contextEnd, false, groups);
+            default -> throw new IllegalStateException("not a start-anchored scan strategy: " + trinoScanStrategy);
+        };
+    }
+
     Dfa.CandidateStartCursor createCandidateStartCursor()
     {
         if (booleanPlans.disjointSuffixRepeatMatcher() != null || usesCompactBoundedCharacterClassForDiagnostics() ||

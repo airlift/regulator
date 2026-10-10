@@ -120,6 +120,13 @@ plans count with a loop over the plan's search that resumes at each match end,
 not the DFA count, so `count` agrees with `extract`, `position`, and
 `extractAll` on malformed bytes.
 
+A start-anchored plan, end-anchored or partial, matches only at the region
+start, and no `Re2Matcher.find` check runs ahead of it. Its matchers therefore
+call the plan entry directly, as does `extract` of a capture group, which also
+skips building a matcher. This removes the shared path's out-of-line calls
+from the capture path. Matchers given a single-byte matcher, `matches`,
+`lookingAt`, and unanchored plans keep shared capture matching.
+
 Boolean unanchored search may continue on the ordinary engine when the plan
 does not begin with a literal and every consuming operation accepts only ASCII
 bytes. No match of such a plan in either engine can include a byte at or above

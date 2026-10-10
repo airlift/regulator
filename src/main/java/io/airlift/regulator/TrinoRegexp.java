@@ -440,11 +440,44 @@ public sealed class TrinoRegexp
     {
         validateGroup(group);
         requireNonNull(source, "source is null");
+        TrinoScanPlan plan = startAnchoredExtractPlan(group);
+        if (plan != null) {
+            return extractWithStartAnchoredScanPlan(plan, source, group);
+        }
         Re2Matcher matcher = group == 0 ? newGroupZeroMatcher(source) : newMatcher(source);
         if (!matcher.find()) {
             return null;
         }
         return matcher.group(group);
+    }
+
+    /**
+     * Returns the start-anchored scan plan that {@link #extract(Slice, int)} runs without a
+     * matcher for {@code group}, or {@code null} when it builds one.
+     */
+    private TrinoScanPlan startAnchoredExtractPlan(int group)
+    {
+        // A capture matcher has no single-byte matcher, so it would run this plan directly.
+        return group == 0 ? null : pattern.startAnchoredTrinoScanPlan();
+    }
+
+    boolean extractsWithStartAnchoredScanPlanForDiagnostics(int group)
+    {
+        return startAnchoredExtractPlan(group) != null;
+    }
+
+    /**
+     * Returns what {@link #extract(Slice, int)} returns through a matcher, without building one.
+     * Groups above {@code group} are not retained.
+     */
+    private Slice extractWithStartAnchoredScanPlan(TrinoScanPlan plan, Slice source, int group)
+    {
+        int[] groups = new int[2 * group + 2];
+        if (!pattern.findWithStartAnchoredTrinoScanPlan(plan, source, 0, source.length(), groups)) {
+            return null;
+        }
+        int start = groups[2 * group];
+        return start < 0 ? null : source.slice(start, groups[2 * group + 1] - start);
     }
 
     /**

@@ -43,6 +43,9 @@ public final class Re2Matcher
     private final boolean enableGroupZeroForwardCursor;
     private final boolean hasLoweredCandidateSearch;
     private final boolean hasDirectLoweredGroupZeroSearch;
+    // Set when find() runs the pattern's start-anchored scan plan directly. See
+    // Re2.startAnchoredTrinoScanPlan.
+    private final TrinoScanPlan startAnchoredScanPlan;
     private OnePass.Workspace onePassWorkspace;
     private BitState.Workspace bitStateWorkspace;
     private Nfa.Workspace nfaWorkspace;
@@ -89,6 +92,7 @@ public final class Re2Matcher
         this.hasLoweredCandidateSearch = pattern.hasLoweredCandidateSearch();
         this.hasDirectLoweredGroupZeroSearch =
                 groups.length == 2 && pattern.hasDirectLoweredGroupZeroSearch();
+        this.startAnchoredScanPlan = this.singleByteMatcher == null ? pattern.startAnchoredTrinoScanPlan() : null;
         reset(input);
     }
 
@@ -152,6 +156,30 @@ public final class Re2Matcher
      * Finds the next non-overlapping match in the current region.
      */
     public boolean find()
+    {
+        // Kept small enough for C2 to inline; each route stays out of line.
+        if (startAnchoredScanPlan != null) {
+            return findWithStartAnchoredScanPlan();
+        }
+        return findGeneral();
+    }
+
+    /**
+     * The start-anchored plan matches only at the region start, so only the first search of the
+     * region can match. A later search fails as {@link #findGeneral} does.
+     */
+    private boolean findWithStartAnchoredScanPlan()
+    {
+        if (nextFindStart == 0 && pattern.findWithStartAnchoredTrinoScanPlan(startAnchoredScanPlan, input, regionStart, regionEnd, groups)) {
+            setMatchAndAdvance(groups[0], groups[1]);
+            return true;
+        }
+        nextFindStart = regionLength() + 1;
+        invalidateMatch();
+        return false;
+    }
+
+    private boolean findGeneral()
     {
         int regionLength = regionLength();
         if (nextFindStart > regionLength) {
@@ -527,6 +555,11 @@ public final class Re2Matcher
     boolean groupZeroForwardCursorEnabledForDiagnostics()
     {
         return enableGroupZeroForwardCursor;
+    }
+
+    boolean startAnchoredScanPlanEnabledForDiagnostics()
+    {
+        return startAnchoredScanPlan != null;
     }
 
     int groupZeroForwardProductivityCheckCountForDiagnostics()
