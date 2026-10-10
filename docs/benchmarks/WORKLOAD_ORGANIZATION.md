@@ -11,7 +11,7 @@ groups below have separate weighting and summary rules within each language.
 
 ## Questions answered separately
 
-The benchmark data has four workload populations. They are never combined
+The benchmark data has five workload populations. They are never combined
 into a row-count-weighted overall score.
 
 | Population | Purpose | Comparators | Headline use |
@@ -19,10 +19,11 @@ into a row-count-weighted overall score.
 | Application-shaped scalar operations | Compiled patterns applied to changing, short and medium inputs | Native RE2, JDK Pattern, or Joni for the selected language; Joni for additional Trino operations | Primary application view |
 | Bulk text search | Whole files, books, source trees, dictionaries, and large logs | Native RE2, JDK Pattern, or Joni for the selected language, where supported | Separate throughput view |
 | Compilation | Cold and repeated pattern compilation | Comparator for the pattern language | Integrated lifecycle view; compile-only data in raw downloads |
+| Literal-probe distributions | One literal counted over a pinned corpus with Regulator's default and a corpus-matched byte-frequency distribution | Native RE2, JDK Pattern, or Joni for the selected regex language | Separate report section; excluded from headlines |
 | User-relevant adversarial and stress | Pathological inputs, reported failures, quadratic cases, and resource pressure that users can encounter | Applicable public APIs | Folded report section; excluded from headlines |
 
 Internal route probes, compiler experiments, synthetic scaling sweeps, memory
-censuses, and capacity checks are diagnostic evidence rather than a fifth
+censuses, and capacity checks are diagnostic evidence rather than a sixth
 publication population. Run them only when a qualification result or an
 explicit investigation requires them. Give that work its own frozen inventory,
 budget, and archive; do not make it part of every release campaign.
@@ -96,6 +97,21 @@ receive same-host measurements; a row that exceeds the semantic timeout is
 reported as a runtime `did-not-finish` outcome. Neither incompatibility nor a
 timeout manufactures a numeric comparison.
 
+### Literal-probe distributions
+
+Literal-probe workloads show what a caller gains by describing its input's
+byte frequencies. Each counts every match of one literal over a pinned,
+checksummed corpus twice: once with Regulator's default uniform distribution
+and once with a distribution matched to the corpus, either a preset or one
+learned from separate sample lines of the same kind of log. Native RE2, JDK
+Pattern, and Joni have no such option and run unchanged against both. The
+learned distribution is built during benchmark setup, outside timing.
+
+These rows carry their own `literal-probe` population. They are a small,
+deliberately chosen set rather than a sample of bulk text, so they never enter
+the text-processing summary. LIKE has no byte-frequency option and no
+literal-probe rows.
+
 ## Adversarial workloads and internal diagnostics
 
 The public adversarial and stress population contains cases that help users
@@ -135,12 +151,20 @@ Within each regex language page, report in this order:
 2. integrated single-use and multi-use pattern lifecycle
 3. Trino-specific operations where available
 4. text processing workloads
-5. folded adversarial and synthetic stress workloads
+5. literal-probe distributions
+6. folded adversarial and synthetic stress workloads
 
 LIKE has its own integrated lifecycle table. Put ordinary prefix, suffix,
 exact, and contains shapes first and dense-false stress last, keeping DFA
 variants adjacent. Compile-only rows retained by the frozen publication
 inventory remain in the public download rather than a separate table.
+
+Each literal-probe row pairs the default and tuned measurements of one
+workload. It shows both ratios against the comparator and the
+tuned-versus-default ratio, computed by dividing those two comparator-relative
+ratios so that differences between the hosts that measured them cancel. Its
+interval divides the far ends of the two ratio intervals, so a gain that
+neither interval clearly supports reads as no clear difference.
 
 Display grouping follows the workload's purpose, not its timing or source
 directory. Reviewed display exceptions do not alter recorded populations or

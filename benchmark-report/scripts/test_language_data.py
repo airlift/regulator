@@ -193,6 +193,29 @@ class TestLanguageData(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, error):
                     validate_language_report(data)
 
+    def test_literal_probe_rows_pair_default_and_tuned_distributions(self):
+        def with_probes():
+            data = report_fixture()
+            for template in [row for row in data['rows'] if row['language'] != 'like' and row['operation'] == 'execute']:
+                for case_id, family in (('literal-probe/log', 'uniform'), ('literal-probe/log/tuned', 'sampled-log-lines')):
+                    data['rows'].append({**deepcopy(template), 'id': f'language-bulk/{case_id}/execute', 'caseId': case_id,
+                                         'population': 'literal-probe', 'family': family})
+            return data
+        validate_language_report(with_probes())
+        tuned = lambda row: row['caseId'].endswith('/tuned')
+        for selected, mutation, error in (
+                (tuned, lambda row: row.update(caseId='literal-probe/other/tuned'), 'distribution partner'),
+                (tuned, lambda row: row.update(family='uniform'), 'tuned distribution'),
+                (lambda row: row['caseId'] == 'literal-probe/log', lambda row: row.update(family='json'), 'tuned distribution'),
+                (lambda row: row['language'] == 'like', lambda row: row.update(population='literal-probe'), 'regex-language')):
+            with self.subTest(error=error):
+                data = with_probes()
+                for row in data['rows']:
+                    if selected(row):
+                        mutation(row)
+                with self.assertRaisesRegex(ValueError, error):
+                    validate_language_report(data)
+
     def test_paired_medians_do_not_divide_unpaired_medians(self):
         rows = [host(1, 10, 1), host(2, 20, 100), host(3, 30, 10)]
         result = reduce_hosts(rows, 10)

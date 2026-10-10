@@ -263,6 +263,7 @@ def validate_language_report(data):
     coverage = defaultdict(set)
     identities = defaultdict(set)
     lifecycle = defaultdict(set)
+    probes = defaultdict(dict)
     for row in data['rows']:
         language, platform, mode = row['language'], row['platform'], row['memoryMode']
         if language not in LANGUAGES or platform not in platforms or mode not in MEMORY_MODES:
@@ -294,6 +295,10 @@ def validate_language_report(data):
                 raise ValueError('invalid benchmark work contract')
         coverage[language, platform, mode].add((row['source'], row['operation']))
         lifecycle[language, platform, mode, row['caseId']].add(row['operation'])
+        if row['population'] == 'literal-probe':
+            if language == 'like' or row['source'] != 'language' or row['operation'] != 'execute':
+                raise ValueError('literal-probe rows must be regex-language executions')
+            probes[language, platform, mode][row['caseId']] = row['family']
         size = row['inputBytes']
         if size is not None and (isinstance(size, bool) or not isinstance(size, (int, float)) or not math.isfinite(size) or size < 0):
             raise ValueError('invalid input size')
@@ -351,6 +356,14 @@ def validate_language_report(data):
         for single, reused in (('singleUse', 'matches'), ('singleUseContains', 'reusedContains'), ('singleUseCount', 'reusedCount')):
             if single in operations and reused not in operations:
                 raise ValueError('missing reused lifecycle partner')
+    # Each literal-probe workload pairs the default uniform distribution with a tuned one.
+    for families in probes.values():
+        for case_id in families:
+            standard = case_id.removesuffix('/tuned')
+            if standard not in families or standard + '/tuned' not in families:
+                raise ValueError('missing literal-probe distribution partner')
+            if families[standard] != 'uniform' or families[standard + '/tuned'] == 'uniform':
+                raise ValueError('literal-probe pair must compare uniform with a tuned distribution')
     shared = {language: {row['id'] for row in data['rows'] if row['language'] == language and row['source'] == 'language'}
               for language in ('re2', 'java', 'trino')}
     if shared['re2'] != shared['java'] or shared['re2'] != shared['trino']:

@@ -288,7 +288,7 @@ export function displayedMeasurements(rows: Row[]): Row[] {
   const eligible = rows.filter(row => workloadSection(row) !== "diagnostic-only" && !comparisonIssue(row));
   const displayed = eligible.filter(row => (row.population === "ordinary-scalar" && row.operation.startsWith("reused"))
     || row.population === "trino-operations"
-    || ["bulk-text", "diagnostics-and-stress", "synthetic-stress"].includes(workloadSection(row)));
+    || ["bulk-text", "literal-probe", "diagnostics-and-stress", "synthetic-stress"].includes(workloadSection(row)));
   for (const pair of lifecycleRows(eligible)) {
     if (pair.single) displayed.push(pair.single);
     displayed.push(pair.reused);
@@ -559,6 +559,78 @@ function LifecycleTable({ rows, like, comparator }: { rows: Row[]; like: boolean
   </tr>)}</tbody></table></div>;
 }
 
+type LiteralProbe = { id: string; name: string; distribution: string; standard: Row; tuned: Row; gain: Result };
+
+const literalProbeWorkloads: Record<string, { name: string; description: string }> = {
+  "literal-probe/sherlock-exactly": { name: "exactly · Sherlock Holmes text",
+    description: "Count the word exactly in the Sherlock Holmes text from the rebar benchmark corpus. The tuned row uses the English text byte-frequency preset." },
+  "literal-probe/gharchive-pull-request-event": { name: "\"type\":\"PullRequestEvent\" · GitHub events JSON",
+    description: "Count pull request events in the first 8 MiB of one hour of GitHub public events from GH Archive. The tuned row uses the JSON byte-frequency preset." },
+  "literal-probe/nginx-mozilla": { name: "Mozilla/5.0 · nginx access log",
+    description: "Count Mozilla/5.0 user agents in the second half of the elastic/examples nginx access log. The tuned distribution is learned from up to 256 KiB of whole lines from the first half of each of the Apache and nginx logs, and is built before timing." },
+};
+const distributionLabels: Record<string, string> = {
+  "english-text": "English text preset", json: "JSON preset", "sampled-log-lines": "Learned from sample logs",
+};
+
+// Each distribution runs on its own hosts beside its own comparator run. Dividing
+// the two comparator-relative ratios cancels host speed from the tuned gain.
+// Dividing the far ends of their intervals gives a conservative envelope, not a
+// calibrated interval, so the usual no-clear-difference rule applies to the gain.
+export function distributionGain(tuned: Result, standard: Result): Result {
+  const failed = [tuned, standard].find(result => result.state !== "compared");
+  if (failed) return { state: failed.state, reason: failed.reason, warnings: [], hosts: [] };
+  const [tunedLow, tunedHigh] = tuned.uncertainty?.ratioInterval ?? [];
+  const [standardLow, standardHigh] = standard.uncertainty?.ratioInterval ?? [];
+  // Only ratio and ratioInterval are read; the other fields only satisfy the Result type.
+  const uncertainty = tuned.uncertainty && standard.uncertainty ? {
+    method: "conservative-ratio-envelope", level: Math.min(tuned.uncertainty.level, standard.uncertainty.level),
+    ratioInterval: [tunedLow! / standardHigh!, tunedHigh! / standardLow!] as [number, number],
+    candidateIntervalNs: tuned.uncertainty.candidateIntervalNs, comparatorIntervalNs: standard.uncertainty.candidateIntervalNs,
+    forkMeanRangeNs: { candidate: tuned.uncertainty.forkMeanRangeNs.candidate, comparator: standard.uncertainty.forkMeanRangeNs.candidate },
+  } : undefined;
+  return { state: "compared", ratio: tuned.ratio! / standard.ratio!, ...(uncertainty ? { uncertainty } : {}),
+    warnings: [...new Set([...standard.warnings, ...tuned.warnings])], hosts: [] };
+}
+
+export function literalProbeRows(rows: Row[]): LiteralProbe[] {
+  const probes = rows.filter(row => row.population === "literal-probe");
+  const byCase = new Map(probes.map(row => [row.caseId, row]));
+  for (const tuned of probes.filter(row => row.caseId.endsWith("/tuned"))) {
+    if (!byCase.has(tuned.caseId.replace(/\/tuned$/, ""))) throw new Error(`Missing default literal-probe partner for ${tuned.id}`);
+  }
+  return probes.filter(row => !row.caseId.endsWith("/tuned")).map(standard => {
+    const tuned = byCase.get(`${standard.caseId}/tuned`);
+    if (!tuned) throw new Error(`Missing tuned literal-probe partner for ${standard.id}`);
+    return { id: standard.id, name: literalProbeWorkloads[standard.caseId]?.name ?? standard.name,
+      distribution: distributionLabels[tuned.family] ?? tuned.family, standard, tuned, gain: distributionGain(tuned.result, standard.result) };
+  });
+}
+
+function LiteralProbeTable({ rows, comparator }: { rows: Row[]; comparator: string }) {
+  const [sort, setSort] = useState<Sort>(null);
+  const ordered = sorted(literalProbeRows(rows), sort, (row, key) => ({
+    name: row.name, distribution: row.distribution, comparatorNs: row.standard.result.comparatorNs,
+    standardNs: row.standard.result.candidateNs, tunedNs: row.tuned.result.candidateNs,
+    standard: row.standard.result.ratio, tuned: row.tuned.result.ratio, gain: row.gain.ratio,
+  } as Record<string, SortValue>)[key]);
+  return <div className="table-scroll"><table className="measurement-table literal-probe-table"><thead><tr>
+    {[["Pattern · corpus", "name"], ["Tuned distribution", "distribution"], [`${comparator} (default run)`, "comparatorNs"], ["Regulator default", "standardNs"], ["Regulator tuned", "tunedNs"],
+      [`Default vs ${comparator}`, "standard"], [`Tuned vs ${comparator}`, "tuned"], ["Tuned vs default", "gain"]].map(([label, column]) =>
+      <Header key={column} label={label} column={column} sort={sort} setSort={setSort} />)}
+  </tr></thead><tbody>{ordered.map(row => <tr key={row.id}>
+    <td><Name row={{ ...row.standard, name: row.name, workload: { ...row.standard.workload, description: literalProbeWorkloads[row.standard.caseId]?.description } }} comparator={comparator} hideOperation /></td>
+    <td>{row.distribution}</td>
+    <td className="measurement">{duration(row.standard.result.comparatorNs)}</td>
+    <td className="measurement">{duration(row.standard.result.candidateNs)}</td>
+    <td className="measurement">{duration(row.tuned.result.candidateNs)}</td>
+    <td className="measurement"><Ratio result={row.standard.result} comparator={comparator}><LifecycleFlags row={row.standard} comparator={comparator} /></Ratio></td>
+    <td className="measurement"><Ratio result={row.tuned.result} comparator={comparator}><LifecycleFlags row={row.tuned} comparator={comparator} /></Ratio></td>
+    <td className="measurement"><span className={`scan-result ${tone(row.gain)}`}
+      title={row.gain.state === "compared" ? `Tuned ratio divided by default ratio: ${row.gain.ratio!.toFixed(4)}×.${row.gain.uncertainty ? ` Conservative interval ${row.gain.uncertainty.ratioInterval.map(value => value.toFixed(4)).join(" to ")}×.` : ""}` : row.gain.reason}>{comparisonText(row.gain)}</span></td>
+  </tr>)}</tbody></table></div>;
+}
+
 function selectionFromUrl(data?: Pick<ReportData, "platforms">): Selection {
   const parameters = new URLSearchParams(typeof window === "undefined" ? "" : window.location.hash.slice(1));
   const available = data ? cpuOrder(data) : cpuOrders.flat();
@@ -589,6 +661,7 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
   const rows = selectedRows.filter(row => !comparisonIssue(row));
   const ordinary = rows.filter(row => row.population === "ordinary-scalar" && row.operation.startsWith("reused"));
   const bulk = rows.filter(row => workloadSection(row) === "bulk-text");
+  const literalProbes = rows.filter(row => workloadSection(row) === "literal-probe");
   const operations = rows.filter(row => row.population === "trino-operations");
   const diagnostic = rows.filter(row => workloadSection(row) === "diagnostics-and-stress")
     .map(row => row.population === "bulk-text" ? { ...row, family: "reported-regression" } : row);
@@ -623,6 +696,7 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
       {language === "like" && <><br />Trino's DFA optimization applies only to some patterns. Those patterns have separate enabled and disabled rows.</>}</>, <LifecycleTable rows={lifecycle} like={language === "like"} comparator={comparator} />)}
     {operations.length > 0 && section("Trino regex operations", "Complete public operations using compiled patterns on rotating Slice values, compared with pinned Joni.", <ResultsTable rows={operations} comparator={comparator} />)}
     {bulk.length > 0 && section("Text processing workloads", "Document searches, tokenization, log parsing and capture workloads using compiled patterns. Expand a row for its pattern, operation and input details.", <ResultsTable rows={bulk} comparator={comparator} />)}
+    {literalProbes.length > 0 && section("Literal probe distributions", <>Count every match of one literal across a whole corpus. Regulator runs once with its default uniform byte-frequency distribution and once with a distribution matched to the corpus; {comparator} has no such option. Tuned vs default divides the two {comparator}-relative ratios, so differences between hosts cancel.</>, <LiteralProbeTable rows={literalProbes} comparator={comparator} />)}
     {(diagnostic.length > 0 || stress.length > 0) && section("Adversarial and stress workloads", "Pathological inputs and synthetic stress tests. These are not representative of typical application performance; interpret them individually.", <div className="adversarial-groups">
       {groupNames.map(family => <details className="diagnostic-group" key={family}><summary>{family}<span>{diagnostic.filter(row => row.family === family).length} rows</span></summary><ResultsTable rows={diagnostic.filter(row => row.family === family)} comparator={diagnostic.find(row => row.family === family)?.comparator || comparator} /></details>)}
       {stress.length > 0 && <details className="diagnostic-group"><summary>Synthetic stress<span>{stress.length} rows</span></summary><ResultsTable rows={stress} comparator={comparator} /></details>}
