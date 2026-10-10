@@ -13,7 +13,9 @@
  */
 package io.airlift.regulator;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -24,7 +26,9 @@ import static java.util.Objects.requireNonNull;
  * Builds Unicode property classes from the pinned {@link UnicodeDatabase} and caches them as
  * immutable range sets. These are the Unicode lookups every language shares; each language
  * resolves its own property names to them. RE2 reads the raw property values of the database,
- * and {@link JavaUnicodeProperties} resolves the Java and Trino property names.
+ * {@link JavaUnicodeProperties} resolves the Java and Trino property names, and
+ * {@link RustUnicodeProperties} resolves the Rust names to the raw values of the database's
+ * binary properties, Age, Script_Extensions, and break properties.
  */
 final class UnicodeGroups
 {
@@ -54,19 +58,7 @@ final class UnicodeGroups
      */
     static CharClass generalCategories(List<String> values)
     {
-        UnicodeDatabase.PropertyValues categories = UnicodeDatabase.generalCategories();
-        for (String value : values) {
-            if (categories.ranges(value) == null) {
-                return null;
-            }
-        }
-        return cached("gc:" + String.join("|", values), () -> {
-            CharClassBuilder builder = new CharClassBuilder();
-            for (String value : values) {
-                addRanges(builder, categories.ranges(value));
-            }
-            return builder.toCharClass();
-        });
+        return propertyValues("gc", UnicodeDatabase.generalCategories(), values);
     }
 
     /**
@@ -147,11 +139,70 @@ final class UnicodeGroups
      */
     static CharClass script(String longName)
     {
-        int[] ranges = UnicodeDatabase.scripts().ranges(longName);
-        if (ranges == null) {
+        return propertyValue("sc", UnicodeDatabase.scripts(), longName);
+    }
+
+    /**
+     * Returns the code points that the database gives the binary property with the given name,
+     * such as Hex_Digit or Other_Alphabetic, or null if it holds no such property.
+     */
+    static CharClass binaryPropertyValue(String property)
+    {
+        return propertyValue("binary", UnicodeDatabase.binaryProperties(), property);
+    }
+
+    /**
+     * Returns the code points that DerivedAge.txt assigns any of the given Age values, versions
+     * such as 1.1, or null if one of them is not a value it assigns.
+     */
+    static CharClass ages(List<String> values)
+    {
+        return propertyValues("age", UnicodeDatabase.ages(), values);
+    }
+
+    /**
+     * Returns the code points whose Script_Extensions include the script with the given long name,
+     * such as Arabic, or null if neither ScriptExtensions.txt nor Scripts.txt names the script. Use
+     * a code point's explicit Script_Extensions list when present; otherwise use its Script value.
+     */
+    static CharClass scriptExtension(String longName)
+    {
+        String shortName = ScriptShortNames.BY_LONG_NAME.get(longName);
+        int[] listed = shortName == null ? null : UnicodeDatabase.scriptExtensions().ranges(shortName);
+        CharClass script = script(longName);
+        if (listed == null && script == null) {
             return null;
         }
-        return cached("sc:" + longName, () -> codePoints(ranges));
+        return cached("scx:" + longName, () -> union(
+                codePoints(listed == null ? new int[0] : listed),
+                script == null ? codePoints() : difference(script, scriptExtensionCodePoints())));
+    }
+
+    /**
+     * Returns the code points with the given Grapheme_Cluster_Break value, a long name such as
+     * Regional_Indicator, or null if GraphemeBreakProperty.txt assigns no such value.
+     */
+    static CharClass graphemeClusterBreak(String value)
+    {
+        return propertyValue("gcb", UnicodeDatabase.graphemeClusterBreaks(), value);
+    }
+
+    /**
+     * Returns the code points with the given Word_Break value, a long name such as ALetter, or
+     * null if WordBreakProperty.txt assigns no such value.
+     */
+    static CharClass wordBreak(String value)
+    {
+        return propertyValue("wb", UnicodeDatabase.wordBreaks(), value);
+    }
+
+    /**
+     * Returns the code points with the given Sentence_Break value, a long name such as ATerm, or
+     * null if SentenceBreakProperty.txt assigns no such value.
+     */
+    static CharClass sentenceBreak(String value)
+    {
+        return propertyValue("sb", UnicodeDatabase.sentenceBreaks(), value);
     }
 
     /**
@@ -196,6 +247,44 @@ final class UnicodeGroups
         return cached("gc:Cn", () -> {
             CharClassBuilder builder = builder(assigned());
             builder.negate();
+            return builder.toCharClass();
+        });
+    }
+
+    private static CharClass propertyValue(String property, UnicodeDatabase.PropertyValues values, String value)
+    {
+        int[] ranges = values.ranges(value);
+        if (ranges == null) {
+            return null;
+        }
+        return cached(property + ":" + value, () -> codePoints(ranges));
+    }
+
+    private static CharClass propertyValues(String property, UnicodeDatabase.PropertyValues values, List<String> names)
+    {
+        for (String name : names) {
+            if (values.ranges(name) == null) {
+                return null;
+            }
+        }
+        return cached(property + ":" + String.join("|", names), () -> {
+            CharClassBuilder builder = new CharClassBuilder();
+            for (String name : names) {
+                addRanges(builder, values.ranges(name));
+            }
+            return builder.toCharClass();
+        });
+    }
+
+    // The code points ScriptExtensions.txt lists, with any script.
+    private static CharClass scriptExtensionCodePoints()
+    {
+        return cached("scx-listed", () -> {
+            CharClassBuilder builder = new CharClassBuilder();
+            UnicodeDatabase.PropertyValues extensions = UnicodeDatabase.scriptExtensions();
+            for (String script : extensions.names()) {
+                addRanges(builder, extensions.ranges(script));
+            }
             return builder.toCharClass();
         });
     }
@@ -270,7 +359,7 @@ final class UnicodeGroups
     /**
      * Returns whether {@code codePoint}, from 0 through {@code RUNEMAX}, is a word character of
      * {@code java.util.regex} with {@code UNICODE_CHARACTER_CLASS}, the class of
-     * {@code \p{IsWord}}, which Java's Unicode word boundaries read.
+     * {@code \p{IsWord}}, which Java's and Rust's Unicode word boundaries read.
      */
     static boolean isWord(int codePoint)
     {
@@ -323,5 +412,18 @@ final class UnicodeGroups
                 categories("Mn"),
                 // Character.isLetterOrDigit: Lu, Ll, Lt, Lm, Lo, or Nd.
                 categories("Ll", "Lm", "Lo", "Lt", "Lu", "Nd")));
+    }
+
+    // The short name of each script by its long name; ScriptExtensions.txt lists scripts by short
+    // name.
+    private static final class ScriptShortNames
+    {
+        private static final Map<String, String> BY_LONG_NAME;
+
+        static {
+            Map<String, String> byLongName = new HashMap<>();
+            UnicodeDatabase.scriptShortNames().forEach((shortName, longName) -> byLongName.put(longName, shortName));
+            BY_LONG_NAME = Map.copyOf(byLongName);
+        }
     }
 }

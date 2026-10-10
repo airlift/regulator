@@ -61,11 +61,15 @@ final class Regexp
     static final int JAVA_LINE = 1 << 24;
     static final int JAVA_WORD_BOUNDARY = 1 << 25;
     static final int TRINO_LINE = 1 << 26;
+    // Pattern-level Rust crate search semantics: a matcher region keeps the whole input as
+    // assertion context, an empty match that splits a UTF-8 character is skipped, and iteration
+    // skips an empty match ending where the previous match ended.
+    static final int RUST_SEARCH = 1 << 27;
 
     // Composite flag groups and masks.
     static final int MATCH_NEWLINE = CLASS_NEWLINE | DOT_MATCHES_NEWLINE;
     static final int LIKE_PERL = CLASS_NEWLINE | ONE_LINE | PERL_CLASSES | PERL_WORD_BOUNDARY | PERL_EXTENSIONS | UNICODE_GROUPS;
-    static final int ALL_PARSE_FLAGS = (1 << 27) - 1;
+    static final int ALL_PARSE_FLAGS = (1 << 28) - 1;
 
     // util/utf.h Runemax
     static final int RUNEMAX = 0x10FFFF;

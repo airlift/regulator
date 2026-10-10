@@ -46,6 +46,7 @@ public final class Re2Matcher
     // Set when find() runs the pattern's start-anchored scan plan directly. See
     // Re2.startAnchoredTrinoScanPlan.
     private final TrinoScanPlan startAnchoredScanPlan;
+    private final boolean rustSearch;
     private OnePass.Workspace onePassWorkspace;
     private BitState.Workspace bitStateWorkspace;
     private Nfa.Workspace nfaWorkspace;
@@ -56,6 +57,8 @@ public final class Re2Matcher
     private int nextFindStart;
     private boolean hasMatch;
     private boolean groupZeroForwardCursorInitialized;
+    // The region-relative end of the previous match, or -1, for Rust search semantics.
+    private int previousMatchEnd = -1;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
 
     Re2Matcher(Re2 pattern, Slice input)
@@ -93,6 +96,7 @@ public final class Re2Matcher
         this.hasDirectLoweredGroupZeroSearch =
                 groups.length == 2 && pattern.hasDirectLoweredGroupZeroSearch();
         this.startAnchoredScanPlan = this.singleByteMatcher == null ? pattern.startAnchoredTrinoScanPlan() : null;
+        this.rustSearch = (pattern.flags() & Regexp.RUST_SEARCH) != 0;
         reset(input);
     }
 
@@ -148,6 +152,7 @@ public final class Re2Matcher
             groupZeroForwardCursorInitialized = false;
         }
         nextFindStart = 0;
+        previousMatchEnd = -1;
         invalidateMatch();
         return this;
     }
@@ -160,6 +165,9 @@ public final class Re2Matcher
         // Kept small enough for C2 to inline; each route stays out of line.
         if (startAnchoredScanPlan != null) {
             return findWithStartAnchoredScanPlan();
+        }
+        if (rustSearch) {
+            return findRust();
         }
         return findGeneral();
     }
@@ -179,12 +187,32 @@ public final class Re2Matcher
         return false;
     }
 
+    /**
+     * The Rust crate skips an empty match that ends where the previous match ended or that splits
+     * a UTF-8 character.
+     */
+    private boolean findRust()
+    {
+        while (findGeneral()) {
+            int matchEnd = groups[1];
+            if (groups[0] != matchEnd || (matchEnd != previousMatchEnd && Utf8.isCharacterBoundary(input, regionStart + matchEnd))) {
+                previousMatchEnd = matchEnd;
+                return true;
+            }
+        }
+        return false;
+    }
+
     private boolean findGeneral()
     {
         int regionLength = regionLength();
         if (nextFindStart > regionLength) {
             invalidateMatch();
             return false;
+        }
+
+        if (rustSearch && isPartialRegion()) {
+            return findNextWithInputContext();
         }
 
         if (singleByteMatcher != null) {
@@ -323,6 +351,42 @@ public final class Re2Matcher
         return true;
     }
 
+    // A Rust search of a region still sees the input outside it, so it bypasses the region-context
+    // fast paths.
+    private boolean findNextWithInputContext()
+    {
+        if (!pattern.matchRegionInto(
+                input,
+                0,
+                input.length(),
+                regionStart + nextFindStart,
+                regionEnd,
+                UNANCHORED,
+                groups,
+                this)) {
+            nextFindStart = regionLength() + 1;
+            invalidateMatch();
+            return false;
+        }
+        toRegionOffsets();
+        setMatchAndAdvance(groups[0], groups[1]);
+        return true;
+    }
+
+    private boolean isPartialRegion()
+    {
+        return regionStart != 0 || regionEnd != input.length();
+    }
+
+    private void toRegionOffsets()
+    {
+        for (int index = 0; index < groups.length; index++) {
+            if (groups[index] >= 0) {
+                groups[index] -= regionStart;
+            }
+        }
+    }
+
     private void setMatchAndAdvance(int matchStart, int matchEnd)
     {
         hasMatch = true;
@@ -357,6 +421,7 @@ public final class Re2Matcher
             groupZeroForwardCursor.reset();
         }
         nextFindStart = start - regionStart;
+        previousMatchEnd = -1;
         invalidateMatch();
         return find();
     }
@@ -380,6 +445,9 @@ public final class Re2Matcher
     private boolean match(Re2.Anchor anchor)
     {
         invalidateMatch();
+        if (rustSearch) {
+            return matchWithInputContext(anchor);
+        }
         if (!pattern.matchRegionInto(
                 input,
                 regionStart,
@@ -392,6 +460,29 @@ public final class Re2Matcher
             return false;
         }
         setMatchAndAdvance(groups[0], groups[1]);
+        return true;
+    }
+
+    private boolean matchWithInputContext(Re2.Anchor anchor)
+    {
+        // An anchored Rust search cannot skip ahead, so an empty match splitting a character fails.
+        if (!Utf8.isCharacterBoundary(input, regionStart)) {
+            return false;
+        }
+        if (!pattern.matchRegionInto(
+                input,
+                0,
+                input.length(),
+                regionStart,
+                regionEnd,
+                anchor,
+                groups,
+                this)) {
+            return false;
+        }
+        toRegionOffsets();
+        setMatchAndAdvance(groups[0], groups[1]);
+        previousMatchEnd = groups[1];
         return true;
     }
 

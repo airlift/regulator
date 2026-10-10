@@ -156,5 +156,9 @@ separate native-access and pure-Java results.
 
 Regulator is licensed under the [Apache License 2.0](LICENSE). It includes a
 Java port of RE2; the required RE2 copyright and BSD license notice are provided
-in [LICENSE-re2.txt](LICENSE-re2.txt). The notice for its Unicode data is in
-[LICENSE-unicode.txt](LICENSE-unicode.txt).
+in [LICENSE-re2.txt](LICENSE-re2.txt). Regulator also implements the Rust
+`regex` crate's pattern language; the notice for its Rust test data is in
+[LICENSE-rust-regex.txt](LICENSE-rust-regex.txt). The notice for its Unicode
+data, including the Rust property names, is in
+[LICENSE-unicode.txt](LICENSE-unicode.txt). The jar carries these notices
+under `META-INF/`.
