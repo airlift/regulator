@@ -348,8 +348,8 @@ final class UnicodeGroups
     }
 
     /**
-     * Builds the table that Java and Trino word boundaries read, if no boundary has yet, so that
-     * compiling a pattern with such a boundary, not its first match, reads the database.
+     * Builds the table that Java, Trino, and Rust word boundaries read, if no boundary has yet, so
+     * that compiling a pattern with such a boundary, not its first match, reads the database.
      */
     static void initializeWordFlags()
     {

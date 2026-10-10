@@ -59,6 +59,8 @@ final class RustRegexpParser
 
     private static final int NEST_LIMIT = 250;
     private static final int NODE_FLAGS = Regexp.LIKE_PERL;
+    // A word boundary is RE2's in ASCII mode and Java's Unicode boundary otherwise, never Java's
+    // ASCII boundary. EmptyOp relies on this to evaluate Rust assertions only without the latter.
     private static final int UNICODE_WORD_BOUNDARY_FLAGS = NODE_FLAGS | Regexp.JAVA_WORD_BOUNDARY | Regexp.JAVA_UNICODE_CHARACTER_CLASS;
 
     // The crate folds case with simple case folding, as RE2 does.
@@ -144,25 +146,18 @@ final class RustRegexpParser
 
     private enum AssertionKind
     {
-        START_LINE("^"),
-        END_LINE("$"),
-        START_TEXT("\\A"),
-        END_TEXT("\\z"),
-        WORD_BOUNDARY("\\b"),
-        NOT_WORD_BOUNDARY("\\B"),
-        WORD_BOUNDARY_START("\\b{start}"),
-        WORD_BOUNDARY_END("\\b{end}"),
-        WORD_BOUNDARY_START_ANGLE("\\<"),
-        WORD_BOUNDARY_END_ANGLE("\\>"),
-        WORD_BOUNDARY_START_HALF("\\b{start-half}"),
-        WORD_BOUNDARY_END_HALF("\\b{end-half}");
-
-        private final String syntax;
-
-        AssertionKind(String syntax)
-        {
-            this.syntax = syntax;
-        }
+        START_LINE,
+        END_LINE,
+        START_TEXT,
+        END_TEXT,
+        WORD_BOUNDARY,
+        NOT_WORD_BOUNDARY,
+        WORD_BOUNDARY_START,
+        WORD_BOUNDARY_END,
+        WORD_BOUNDARY_START_ANGLE,
+        WORD_BOUNDARY_END_ANGLE,
+        WORD_BOUNDARY_START_HALF,
+        WORD_BOUNDARY_END_HALF,
     }
 
     private enum RepetitionKind
@@ -1533,27 +1528,30 @@ final class RustRegexpParser
                     if (!enabled(MULTI_LINE)) {
                         yield Regexp.beginText(NODE_FLAGS);
                     }
-                    yield enabled(CRLF) ? unsupportedAssertion(assertion, "CRLF multi-line ^") : Regexp.beginLine(NODE_FLAGS);
+                    yield Regexp.beginLine(enabled(CRLF) ? NODE_FLAGS | Regexp.RUST_ASSERTION : NODE_FLAGS);
                 }
                 case END_LINE -> {
                     if (!enabled(MULTI_LINE)) {
                         yield Regexp.endText(NODE_FLAGS);
                     }
-                    yield enabled(CRLF) ? unsupportedAssertion(assertion, "CRLF multi-line $") : Regexp.endLine(NODE_FLAGS);
+                    yield Regexp.endLine(enabled(CRLF) ? NODE_FLAGS | Regexp.RUST_ASSERTION : NODE_FLAGS);
                 }
                 case START_TEXT -> Regexp.beginText(NODE_FLAGS);
                 case END_TEXT -> Regexp.endText(NODE_FLAGS);
                 // The Java Unicode word boundary uses the same word characters as the crate's \w.
                 case WORD_BOUNDARY -> Regexp.wordBoundary(enabled(UNICODE) ? UNICODE_WORD_BOUNDARY_FLAGS : NODE_FLAGS);
                 case NOT_WORD_BOUNDARY -> Regexp.noWordBoundary(enabled(UNICODE) ? UNICODE_WORD_BOUNDARY_FLAGS : NODE_FLAGS);
-                default -> unsupportedAssertion(assertion, assertion.kind().syntax);
+                case WORD_BOUNDARY_START, WORD_BOUNDARY_START_ANGLE -> rustWordBoundary(0);
+                case WORD_BOUNDARY_END, WORD_BOUNDARY_END_ANGLE -> rustWordBoundary(Regexp.RUST_WORD_END);
+                case WORD_BOUNDARY_START_HALF -> rustWordBoundary(Regexp.RUST_WORD_HALF);
+                case WORD_BOUNDARY_END_HALF -> rustWordBoundary(Regexp.RUST_WORD_END | Regexp.RUST_WORD_HALF);
             };
         }
 
-        private Regexp unsupportedAssertion(AssertionAst assertion, String feature)
+        private Regexp rustWordBoundary(int kind)
         {
-            recordUnsupported(RegexpParseErrorCode.UNSUPPORTED_CONSTRUCT, feature, assertion.start(), assertion.start() + 1);
-            return Regexp.emptyMatch(NODE_FLAGS);
+            int nodeFlags = NODE_FLAGS | Regexp.RUST_ASSERTION | kind;
+            return Regexp.wordBoundary(enabled(UNICODE) ? nodeFlags | Regexp.JAVA_UNICODE_CHARACTER_CLASS : nodeFlags);
         }
 
         private Regexp translateRepetition(RepetitionAst repetition, Regexp child, boolean childEmptyWidth)

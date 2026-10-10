@@ -65,11 +65,19 @@ final class Regexp
     // assertion context, an empty match that splits a UTF-8 character is skipped, and iteration
     // skips an empty match ending where the previous match ended.
     static final int RUST_SEARCH = 1 << 27;
+    // Rust crate assertions. On BEGIN_LINE and END_LINE, RUST_ASSERTION selects the crate's
+    // CRLF multi-line anchors. On WORD_BOUNDARY it selects the crate's start boundary, or with
+    // RUST_WORD_END its end boundary; RUST_WORD_HALF checks only that boundary's non-word side.
+    // JAVA_UNICODE_CHARACTER_CLASS selects Unicode word characters, as for the Rust \b. Bit 13 is
+    // now the only free parse-flag bit; Re2 uses bit 31 for the compiler dialect.
+    static final int RUST_ASSERTION = 1 << 28;
+    static final int RUST_WORD_END = 1 << 29;
+    static final int RUST_WORD_HALF = 1 << 30;
 
     // Composite flag groups and masks.
     static final int MATCH_NEWLINE = CLASS_NEWLINE | DOT_MATCHES_NEWLINE;
     static final int LIKE_PERL = CLASS_NEWLINE | ONE_LINE | PERL_CLASSES | PERL_WORD_BOUNDARY | PERL_EXTENSIONS | UNICODE_GROUPS;
-    static final int ALL_PARSE_FLAGS = (1 << 28) - 1;
+    static final int ALL_PARSE_FLAGS = (1 << 31) - 1;
 
     // util/utf.h Runemax
     static final int RUNEMAX = 0x10FFFF;
@@ -651,6 +659,9 @@ final class Regexp
     {
         return switch (op) {
             case BEGIN_LINE -> {
+                if ((parseFlags & RUST_ASSERTION) != 0) {
+                    yield RUST_ASSERTION;
+                }
                 if ((parseFlags & TRINO_LINE) != 0) {
                     yield TRINO_LINE;
                 }
@@ -659,10 +670,10 @@ final class Regexp
                 }
                 yield parseFlags & (JAVA_LINE | JAVA_UNIX_LINES);
             }
-            case END_LINE -> parseFlags & JAVA_LINE;
+            case END_LINE -> parseFlags & (JAVA_LINE | RUST_ASSERTION);
             case END_TEXT -> parseFlags & (WAS_DOLLAR | FINAL_LINE_END | JAVA_FINAL_END);
             case WORD_BOUNDARY, NO_WORD_BOUNDARY -> parseFlags &
-                    (UNICODE_WORD_BOUNDARY | JAVA_WORD_BOUNDARY | JAVA_UNICODE_CHARACTER_CLASS);
+                    (UNICODE_WORD_BOUNDARY | JAVA_WORD_BOUNDARY | JAVA_UNICODE_CHARACTER_CLASS | RUST_ASSERTION | RUST_WORD_END | RUST_WORD_HALF);
             case LITERAL, LITERAL_STRING -> parseFlags & (FOLD_CASE | FULL_CASE_FOLD | LATIN1);
             case STAR, PLUS, QUEST, REPEAT -> parseFlags & NON_GREEDY;
             default -> 0;
