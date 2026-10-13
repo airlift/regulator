@@ -23,6 +23,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -735,6 +736,15 @@ public class TestTrinoRegexpFunctions
         }
         assertThat(TrinoRegexp.compile(utf8("(?<name>a)?b")).replace(utf8("b"), utf8("_${name}_")))
                 .isEqualTo(utf8("__"));
+    }
+
+    @Test
+    public void testNamedGroupThatCannotMatch()
+    {
+        // Simplification removes the branch that can never match, but its group keeps its name.
+        TrinoRegexp regexp = TrinoRegexp.compile(utf8("(?<x>a)[a&&b]|b"));
+        assertThat(regexp.namedCapturingGroups()).isEqualTo(Map.of("x", 1));
+        assertThat(regexp.replace(utf8("b"), utf8("_${x}_"))).isEqualTo(utf8("__"));
     }
 
     @Test

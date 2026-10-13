@@ -80,6 +80,21 @@ public class TestRe2NamedCaptures
         want.put(7, "G1");
 
         assertThat(have).isEqualTo(want);
+        assertThat(re.namedCapturingGroups()).isEqualTo(Map.of("G2", 3, "G1", 7));
+    }
+
+    @Test
+    public void testNamedGroupThatCannotMatch()
+    {
+        // Simplification removes the branch that can never match, but its group keeps its name.
+        Re2 re = Re2.compile(utf8("(?P<x>a)[^\\x00-\\x{10FFFF}]|b"), Re2.Options.defaults());
+        assertThat(re.capturingGroupCount()).isEqualTo(1);
+        assertThat(re.namedCapturingGroups()).isEqualTo(Map.of("x", 1));
+        assertThat(re.capturingGroupNames()).isEqualTo(Map.of(1, "x"));
+
+        MatchResult match = re.matchesResult(utf8("b"));
+        assertThat(match).isNotNull();
+        assertThat(match.groupUtf8("x")).isNull();
     }
 
     private static Slice utf8(String value)

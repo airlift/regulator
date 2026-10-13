@@ -276,30 +276,6 @@ final class Regexp
     }
 
     /**
-     * Returns named capturing groups keyed by group name.
-     */
-    Map<String, Integer> namedCaptures()
-    {
-        HashMap<String, Integer> namedCaptures = null;
-        Deque<Regexp> stack = new ArrayDeque<>();
-        stack.addLast(this);
-
-        while (!stack.isEmpty()) {
-            Regexp regexp = stack.removeLast();
-            if (regexp.op == RegexpOp.CAPTURE && regexp.name != null) {
-                if (namedCaptures == null) {
-                    namedCaptures = new HashMap<>();
-                }
-                namedCaptures.putIfAbsent(regexp.name.toStringUtf8(), regexp.captureIndex);
-            }
-
-            pushChildrenReversed(stack, regexp);
-        }
-
-        return (namedCaptures == null) ? Map.of() : Map.copyOf(namedCaptures);
-    }
-
-    /**
      * Returns capturing group names keyed by capture number.
      */
     Map<Integer, String> captureNames()

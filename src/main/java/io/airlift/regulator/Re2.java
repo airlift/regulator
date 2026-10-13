@@ -18,6 +18,7 @@ import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
@@ -371,8 +372,8 @@ public final class Re2
     private final Prog partialProg;
     private final boolean longestMatch;
     private final int capturingGroupCount;
+    private final Map<Integer, String> capturingGroupNames;
     private volatile Map<String, Integer> namedCapturingGroups;
-    private volatile Map<Integer, String> capturingGroupNames;
 
     // AST-specialized analyzers retain the semantic suffix. The compact fixed-width Trino route
     // stores its byte matcher in the same cold slot because its subtype owns every public match
@@ -417,7 +418,6 @@ public final class Re2
             Prog partialProg,
             BooleanPlans booleanPlans,
             int capturingGroupCount,
-            Map<String, Integer> namedCapturingGroups,
             Map<Integer, String> capturingGroupNames,
             BoundedCharacterClassCounter compactBoundedCharacterClass)
     {
@@ -492,8 +492,7 @@ public final class Re2
         this.trinoScanStrategy = scanStrategy;
         this.ordinaryUnanchoredBooleanSearch = ordinaryBooleanSearch;
         this.capturingGroupCount = capturingGroupCount;
-        this.namedCapturingGroups = namedCapturingGroups;
-        this.capturingGroupNames = capturingGroupNames;
+        this.capturingGroupNames = requireNonNull(capturingGroupNames, "capturingGroupNames is null");
         this.boundedCharacterClassCounter = compactBoundedCharacterClass;
     }
 
@@ -787,8 +786,7 @@ public final class Re2
                         placeholderProgram,
                         booleanPlans,
                         0,
-                        null,
-                        null,
+                        Map.of(),
                         null);
             }
         }
@@ -871,8 +869,7 @@ public final class Re2
                     partialProgram,
                     booleanPlans,
                     0,
-                    null,
-                    null,
+                    Map.of(),
                     compactBoundedCharacterClass);
         }
 
@@ -987,8 +984,7 @@ public final class Re2
                 semanticProgram,
                 booleanPlans,
                 capturingGroupCount,
-                null,
-                null,
+                parsed.capturingGroupNames(),
                 null);
     }
 
@@ -1083,14 +1079,21 @@ public final class Re2
     /**
      * Returns an immutable mapping from capture names to group numbers.
      */
-    @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "The returned map is immutable")
     public Map<String, Integer> namedCapturingGroups()
     {
         Map<String, Integer> cachedNamedCapturingGroups = namedCapturingGroups;
         if (cachedNamedCapturingGroups != null) {
             return cachedNamedCapturingGroups;
         }
-        cachedNamedCapturingGroups = regexp.namedCaptures();
+        if (capturingGroupNames.isEmpty()) {
+            cachedNamedCapturingGroups = Map.of();
+        }
+        else {
+            // A name used by several groups refers to the first of them.
+            HashMap<String, Integer> firstGroups = new HashMap<>();
+            capturingGroupNames.forEach((group, name) -> firstGroups.merge(name, group, Math::min));
+            cachedNamedCapturingGroups = Map.copyOf(firstGroups);
+        }
         namedCapturingGroups = cachedNamedCapturingGroups;
         return cachedNamedCapturingGroups;
     }
@@ -1106,13 +1109,7 @@ public final class Re2
     @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "The returned map is immutable")
     public Map<Integer, String> capturingGroupNames()
     {
-        Map<Integer, String> cachedCapturingGroupNames = capturingGroupNames;
-        if (cachedCapturingGroupNames != null) {
-            return cachedCapturingGroupNames;
-        }
-        cachedCapturingGroupNames = regexp.captureNames();
-        capturingGroupNames = cachedCapturingGroupNames;
-        return cachedCapturingGroupNames;
+        return capturingGroupNames;
     }
 
     /**

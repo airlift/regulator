@@ -149,14 +149,13 @@ public class TestRegexpAst
     }
 
     @Test
-    public void testNamedCaptureMaps()
+    public void testCaptureNames()
     {
         Regexp regexp = RegexpParser.parse(
                         Slices.utf8Slice("(?P<g1>a+)|(e)(?P<g2>w*)+(?P<g1>b+)"),
                         Regexp.PERL_EXTENSIONS)
                 .regexp();
 
-        assertThat(regexp.namedCaptures()).isEqualTo(Map.of("g1", 1, "g2", 3));
         assertThat(regexp.captureNames()).isEqualTo(Map.of(1, "g1", 3, "g2", 4, "g1"));
     }
 

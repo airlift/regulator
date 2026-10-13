@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
+import java.util.Map;
 
 import static io.airlift.regulator.Regexp.MAX_REPEAT;
 import static io.airlift.regulator.RegexpParserSupport.addFoldedRangeLatin1;
@@ -57,7 +58,9 @@ final class RegexpParser
         // Upstream parse.cc canonicalizes, but it does not eliminate counted repetitions.
         // We keep compile-time simplify (repeat elimination, named class expansion) in the compiler pipeline.
         Regexp simplifiedRegexp = Simplifier.simplifyForParse(parsedRegexp, CaseFolding.RE2);
-        return new ParseResult(simplifiedRegexp, parser.capturingGroupCount, CaseFolding.RE2);
+        // Simplification can remove a group that never matches, but the group keeps its name.
+        Map<Integer, String> capturingGroupNames = parser.hasCaptureNames ? parsedRegexp.captureNames() : Map.of();
+        return new ParseResult(simplifiedRegexp, parser.capturingGroupCount, capturingGroupNames, CaseFolding.RE2);
     }
 
     @SuppressWarnings("CharUsedInArithmeticContext")
@@ -75,6 +78,7 @@ final class RegexpParser
 
         private int flags;
         private int capturingGroupCount;
+        private boolean hasCaptureNames;
         private boolean inQuote;
 
         Parser(Slice pattern, int flags, CaseFolding caseFolding)
@@ -736,6 +740,7 @@ final class RegexpParser
             }
             // Consume the delimiter.
             index = nameEnd + 1;
+            hasCaptureNames = true;
             return Slices.wrappedBuffer(bytes, nameStart, nameLength);
         }
 

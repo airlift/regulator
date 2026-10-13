@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static io.airlift.regulator.Regexp.MAX_REPEAT;
@@ -59,7 +60,9 @@ final class TrinoRegexpParser
         // Parse-time simplification preserves counted repetitions. The compiler performs repeat
         // elimination and named-class expansion after the frontend has established Trino semantics.
         Regexp simplifiedRegexp = Simplifier.simplifyForParse(parsedRegexp, CaseFolding.TRINO);
-        return new ParseResult(simplifiedRegexp, parser.capturingGroupCount, CaseFolding.TRINO);
+        // Simplification can remove a group that never matches, but the group keeps its name.
+        Map<Integer, String> capturingGroupNames = parser.captureNames.isEmpty() ? Map.of() : parsedRegexp.captureNames();
+        return new ParseResult(simplifiedRegexp, parser.capturingGroupCount, capturingGroupNames, CaseFolding.TRINO);
     }
 
     @SuppressWarnings("CharUsedInArithmeticContext")
