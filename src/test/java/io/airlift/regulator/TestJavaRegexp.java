@@ -19,6 +19,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -62,6 +63,19 @@ public class TestJavaRegexp
         pattern.setByte(3, 'X');
 
         assertThat(regexp.namedCapturingGroups()).containsOnlyKeys("name");
+    }
+
+    @Test
+    public void testNamedGroupThatCannotMatch()
+    {
+        // Simplification removes the branch that can never match, but its group keeps its name.
+        JavaRegexp regexp = JavaRegexp.compile(utf8Slice("(?<x>a)[a&&b]|b"));
+        assertThat(regexp.capturingGroupCount()).isEqualTo(1);
+        assertThat(regexp.namedCapturingGroups()).isEqualTo(Map.of("x", 1));
+
+        MatchResult result = regexp.matchesResult(utf8Slice("b"));
+        assertThat(result).isNotNull();
+        assertThat(result.groupUtf8("x")).isNull();
     }
 
     @Test
