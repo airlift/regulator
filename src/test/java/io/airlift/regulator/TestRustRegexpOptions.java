@@ -42,6 +42,25 @@ public class TestRustRegexpOptions
     }
 
     @Test
+    public void testNestLimit()
+    {
+        assertThat(RustRegexp.Options.defaults().nestLimit()).isEqualTo(250);
+        assertThatThrownBy(() -> RustRegexp.Options.defaults().setNestLimit(-1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("nestLimit must not be negative: -1");
+    }
+
+    @Test
+    public void testNestLimitAboveDefault()
+    {
+        // Every phase walks this nesting with its own stack rather than the thread stack.
+        RustRegexp.Options options = RustRegexp.Options.defaults().setNestLimit(100_000);
+        RustRegexp nested = RustRegexp.compile(utf8Slice("(?:".repeat(100_000) + "a" + ")".repeat(100_000)), options);
+
+        assertThat(nested.matches(utf8Slice("a"))).isTrue();
+    }
+
+    @Test
     public void testMemoryBudget()
     {
         assertThat(RustRegexp.Options.defaults().maxMemory()).isEqualTo(96L << 20);

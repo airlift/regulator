@@ -311,3 +311,25 @@ window_full_match_interior	62	-	616263	1	2
 window_captures	2861292862293f	-	78616279	1	2
 window_crlf_dot	283f52292e	-	610d0a62	1	3
 window_case_insensitive	283f6929e284aa	-	6be284aa6b	1	4
+
+# Octal option
+octal_zero	5c30	o	6100	-	-
+octal_seven	5c37	o	07	-	-
+octal_two_digits	5c3130	o	0801	-	-
+octal_three_digits	5c313431	o	7861	-	-
+octal_max_byte	5c333737	o	c3bf	-	-
+octal_above_byte	5c343030	o	c480	-	-
+octal_max	5c373737	o	c7bf	-	-
+octal_four_digits	5c31343131	o	61206131	-	-
+octal_four_zeros	5c30303030	o	000030	-	-
+octal_zero_then_eight	5c3038	o	0038	-	-
+octal_one_then_nine	5c3139	o	0139	-	-
+octal_class_range	5b5c3134312d5c3134335d2b	o	61626364	-	-
+octal_class_digits	5b5c305c375d2b	o	000701	-	-
+octal_class_then_digit	5b5c313431315d2b	o	61313162	-	-
+octal_negated_class	5b5e5c3134315d2b	o	626163	-	-
+octal_repeated	5c3134317b327d	o	616161	-	-
+octal_after_group	2861295c31	o	6161206101	-	-
+octal_ascii	283f2d753a5c33373729	o	c3bf	-	-
+octal_case_insensitive	5c313031	io	61	-	-
+octal_verbose_space	5c31203431	xo	013431	-	-

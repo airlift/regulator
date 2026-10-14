@@ -125,8 +125,7 @@ A window in `match-cases.tsv` must lie on character boundaries.
 
 ### Options
 
-Options are the `RegexBuilder` settings the front end exposes, written as
-flag letters in this order:
+Options are `RegexBuilder` settings, written as flag letters in this order:
 
 - `i` case insensitive
 - `m` multi-line
@@ -134,12 +133,16 @@ flag letters in this order:
 - `R` CRLF
 - `U` swap greed
 - `x` ignore whitespace
+- `o` octal
 
-Unicode mode is on by default. `-u` turns it off. Defaults are written `-`.
-Examples: `imR`, `-u`, `x,-u`. The generator rejects any other spelling, so
-each option set has exactly one encoding. All other builder settings keep the
-crate's defaults: nest limit 250, octal off, line terminator `\n`, and the
-default size limits.
+Unicode mode is on by default. `-u` turns it off. The nest limit defaults to the
+crate's 250; `n` followed by a decimal limit, such as `n0` or `n251`, sets any
+other limit. Groups are separated by commas in the order flags, `-u`, nest
+limit. Defaults are written `-`. Examples: `imR`, `-u`, `x,-u`, `o`, `n1`,
+`o,-u,n1`. The generator rejects any other spelling, including a nest limit
+with leading zeros or equal to the default, so each option set has exactly one
+encoding. All other builder settings keep the crate's defaults: line terminator
+`\n` and the default size limits.
 
 ### Fixtures
 

@@ -450,6 +450,19 @@ case("empty_trailing_alternative", "a|")
 case("empty_alternation_only", "|")
 case("empty_non_capturing_alternation", "(?:|)")
 
+section("Octal option")
+for name, pattern in [("zero", r"\0"), ("seven", r"\7"), ("two_digits", r"\10"), ("three_digits", r"\141"),
+                      ("max_byte", r"\377"), ("above_byte", r"\400"), ("max", r"\777"),
+                      ("four_digits", r"\1411"), ("four_digits_above_byte", r"\4000"),
+                      ("eight", r"\8"), ("nine", r"\9"), ("zero_then_eight", r"\08"), ("one_then_nine", r"\19"),
+                      ("eight_after_literal", r"a\8"), ("class", r"[\141-\142]"), ("class_eight", r"[\8]"),
+                      ("class_nine_range", r"[\9-a]"), ("class_range_reversed", r"[\142-\141]"),
+                      ("class_then_digit", r"[\1411]"), ("repeated", r"\141{2}"),
+                      ("after_group", r"(a)\1"), ("ascii", r"(?-u:\377)"), ("verbose_space", r"(?x)\1 41")]:
+    case(f"octal_{name}", pattern, "o")
+case("octal_disabled_eight", r"\8")
+case("octal_disabled_class_zero", r"[\0]")
+
 section("Nest limit")
 case("nest_limit_groups_at_limit", "(" * 250 + "a" + ")" * 250)
 case("nest_limit_groups_past_limit", "(" * 251 + "a" + ")" * 251)
@@ -459,3 +472,22 @@ case("nest_limit_classes_at_limit", "[" * 250 + "a" + "]" * 250)
 case("nest_limit_classes_past_limit", "[" * 251 + "a" + "]" * 251)
 case("nest_limit_repetitions_at_limit", "a" + "*" * 250)
 case("nest_limit_repetitions_past_limit", "a" + "*" * 251)
+# Each construct nested to a depth the crate counts one level per group,
+# bracketed class, repetition, alternation, or concatenation.
+nest_constructs = [
+    ("groups", lambda depth: "(" * depth + "a" + ")" * depth),
+    ("classes", lambda depth: "[" * depth + "a" + "]" * depth),
+    ("repetitions", lambda depth: "a" + "*" * depth),
+    ("alternations", lambda depth: "(?:" * (depth - 1) + "a|b" + ")" * (depth - 1)),
+    ("concatenations", lambda depth: "(?:" * (depth - 1) + "ab" + ")" * (depth - 1)),
+]
+case("nest_limit_0_literal", "a", "n0")
+case("nest_limit_0_empty", "", "n0")
+for limit in [0, 1, 2, 251]:
+    for name, nest in nest_constructs:
+        if limit > 0:
+            case(f"nest_limit_{limit}_{name}_at_limit", nest(limit), f"n{limit}")
+        case(f"nest_limit_{limit}_{name}_past_limit", nest(limit + 1), f"n{limit}")
+case("nest_limit_1_class_intersection", "[a&&b]", "n1")
+case("nest_limit_2_class_intersection", "[a&&b]", "n2")
+case("nest_limit_1_with_other_options", "(a)", "o,-u,n1")

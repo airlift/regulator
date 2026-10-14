@@ -166,7 +166,7 @@ public class TestRustRegexp
     private static void assertBoundedEngines(String pattern, String text, int start, int end)
     {
         RustRegexp.Options options = RustRegexp.Options.defaults();
-        Prog program = Compiler.compile(RustRegexpParser.parse(utf8Slice(pattern), options.syntaxFlags()).regexp());
+        Prog program = Compiler.compile(RustRegexpParser.parse(utf8Slice(pattern), options.syntaxFlags(), options.nestLimit()).regexp());
         assertThat(program.hasTextDependentAssertions()).isTrue();
         int[] nfa = new int[2];
         int[] bitState = new int[2];

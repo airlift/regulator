@@ -309,3 +309,28 @@ window("window_full_match_interior", "b", "abc", 1, 2)
 window("window_captures", "(a)(b)?", "xaby", 1, 2)
 window("window_crlf_dot", "(?R).", "a\r\nb", 1, 3)
 window("window_case_insensitive", "(?i)\u212a", "k\u212ak", 1, 4)
+
+section("Octal option")
+for name, pattern, text in [
+    ("zero", "\\0", "a\x00"),
+    ("seven", "\\7", "\x07"),
+    ("two_digits", "\\10", "\x08\x01"),
+    ("three_digits", "\\141", "xa"),
+    ("max_byte", "\\377", "\u00ff"),
+    ("above_byte", "\\400", "\u0100"),
+    ("max", "\\777", "\u01ff"),
+    ("four_digits", "\\1411", "a a1"),
+    ("four_zeros", "\\0000", "\x00\x000"),
+    ("zero_then_eight", "\\08", "\x008"),
+    ("one_then_nine", "\\19", "\x019"),
+    ("class_range", "[\\141-\\143]+", "abcd"),
+    ("class_digits", "[\\0\\7]+", "\x00\x07\x01"),
+    ("class_then_digit", "[\\1411]+", "a11b"),
+    ("negated_class", "[^\\141]+", "bac"),
+    ("repeated", "\\141{2}", "aaa"),
+    ("after_group", "(a)\\1", "aa a\x01"),
+    ("ascii", "(?-u:\\377)", "\u00ff"),
+]:
+    case(f"octal_{name}", pattern, text, "o")
+case("octal_case_insensitive", "\\101", "a", "io")
+case("octal_verbose_space", "\\1 41", "\x0141", "xo")

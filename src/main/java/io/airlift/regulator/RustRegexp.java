@@ -47,6 +47,8 @@ public final class RustRegexp
         private boolean swapGreed;
         private boolean comments;
         private boolean unicode = true;
+        private boolean octal;
+        private int nestLimit = RustRegexpParser.DEFAULT_NEST_LIMIT;
         private long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
         private ByteFrequencies byteFrequencies = ByteFrequencies.uniform();
 
@@ -115,6 +117,35 @@ public final class RustRegexp
         }
 
         /**
+         * Sets whether an escaped digit is an octal code point of up to three digits, such as
+         * {@code \141} for {@code a}. Without it, which is the default, an escaped digit is a
+         * backreference and fails.
+         */
+        public Options setOctal(boolean octal)
+        {
+            this.octal = octal;
+            return this;
+        }
+
+        /**
+         * Sets the crate's limit on syntax nesting depth, which defaults to 250 and cannot be
+         * negative.
+         */
+        public Options setNestLimit(int nestLimit)
+        {
+            if (nestLimit < 0) {
+                throw new IllegalArgumentException("nestLimit must not be negative: " + nestLimit);
+            }
+            this.nestLimit = nestLimit;
+            return this;
+        }
+
+        int nestLimit()
+        {
+            return nestLimit;
+        }
+
+        /**
          * Returns the compilation and DFA-cache memory budget in bytes.
          */
         long maxMemory()
@@ -177,6 +208,9 @@ public final class RustRegexp
             if (unicode) {
                 flags |= RustRegexpParser.UNICODE;
             }
+            if (octal) {
+                flags |= RustRegexpParser.OCTAL;
+            }
             return flags;
         }
     }
@@ -201,7 +235,7 @@ public final class RustRegexp
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
-        ParseResult parsed = RustRegexpParser.parse(patternCopy, options.syntaxFlags());
+        ParseResult parsed = RustRegexpParser.parse(patternCopy, options.syntaxFlags(), options.nestLimit());
         return new RustRegexp(Re2.compileParsed(patternCopy, parsed, Regexp.LIKE_PERL | Regexp.RUST_SEARCH, options.maxMemory(), options.byteFrequencies()));
     }
 
