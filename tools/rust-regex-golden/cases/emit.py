@@ -1,6 +1,7 @@
-# Writes ../syntax-cases.tsv and ../match-cases.tsv from syntax_cases.py and
-# match_cases.py. Run with `python3 -I tools/rust-regex-golden/cases/emit.py`,
-# then regenerate the fixtures with generate.sh.
+# Writes ../syntax-cases.tsv, ../match-cases.tsv, and ../random-cases.tsv from
+# syntax_cases.py, match_cases.py, and random_cases.py. Run with
+# `python3 -I tools/rust-regex-golden/cases/emit.py`, then regenerate the
+# fixtures with generate.sh.
 #
 # Patterns and texts are written as lowercase UTF-8 hex, or `-` when empty, so
 # the tables hold arbitrary text without depending on a platform encoding.
@@ -51,12 +52,13 @@ def main():
         load("syntax_cases"),
         lambda id, pattern, options: [id, encode(pattern), options],
     )
-    emit(
-        "match-cases.tsv",
-        "# id\tpattern hex\toptions\ttext hex\tstart\tend",
-        load("match_cases"),
-        lambda id, pattern, options, text, start, end: [id, encode(pattern), options, encode(text), start, end],
-    )
+    for output, source in [("match-cases.tsv", "match_cases"), ("random-cases.tsv", "random_cases")]:
+        emit(
+            output,
+            "# id\tpattern hex\toptions\ttext hex\tstart\tend",
+            load(source),
+            lambda id, pattern, options, text, start, end: [id, encode(pattern), options, encode(text), start, end],
+        )
 
 
 if __name__ == "__main__":
