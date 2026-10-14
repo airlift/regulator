@@ -294,6 +294,10 @@ public class TestRustRegexpGolden
                 options.setUnicode(false);
                 continue;
             }
+            if (option.startsWith("n")) {
+                options.setNestLimit(Integer.parseInt(option.substring(1)));
+                continue;
+            }
             for (int index = 0; index < option.length(); index++) {
                 switch (option.charAt(index)) {
                     case 'i' -> options.setCaseInsensitive(true);
@@ -302,6 +306,7 @@ public class TestRustRegexpGolden
                     case 'R' -> options.setCrlf(true);
                     case 'U' -> options.setSwapGreed(true);
                     case 'x' -> options.setComments(true);
+                    case 'o' -> options.setOctal(true);
                     default -> throw new IllegalArgumentException("unknown option: " + value);
                 }
             }

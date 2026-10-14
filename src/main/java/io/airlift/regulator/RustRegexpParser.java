@@ -55,9 +55,10 @@ final class RustRegexpParser
     static final int UNICODE = 1 << 4;
     static final int CRLF = 1 << 5;
     static final int IGNORE_WHITESPACE = 1 << 6;
-    private static final int ALL_SYNTAX_FLAGS = (1 << 7) - 1;
+    static final int OCTAL = 1 << 7;
+    private static final int ALL_SYNTAX_FLAGS = (1 << 8) - 1;
 
-    private static final int NEST_LIMIT = 250;
+    static final int DEFAULT_NEST_LIMIT = 250;
     private static final int NODE_FLAGS = Regexp.LIKE_PERL;
     // A word boundary is RE2's in ASCII mode and Java's Unicode boundary otherwise, never Java's
     // ASCII boundary. EmptyOp relies on this to evaluate Rust assertions only without the latter.
@@ -68,10 +69,10 @@ final class RustRegexpParser
 
     private RustRegexpParser() {}
 
-    static ParseResult parse(Slice pattern, int syntaxFlags)
+    static ParseResult parse(Slice pattern, int syntaxFlags, int nestLimit)
     {
         requireNonNull(pattern, "pattern is null");
-        if ((syntaxFlags & ~ALL_SYNTAX_FLAGS) != 0) {
+        if ((syntaxFlags & ~ALL_SYNTAX_FLAGS) != 0 || nestLimit < 0) {
             throw new RegexpParseException(RegexpParseErrorCode.INTERNAL_ERROR, null, -1);
         }
         // The crate parses Rust strings, so a pattern must be valid UTF-8 before parsing starts.
@@ -80,7 +81,7 @@ final class RustRegexpParser
             throw new RegexpParseException(RegexpParseErrorCode.BAD_UTF8, null, invalidOffset);
         }
 
-        Parser parser = new Parser(pattern, syntaxFlags);
+        Parser parser = new Parser(pattern, syntaxFlags, nestLimit);
         Ast ast = parser.parse();
         parser.checkNestLimit(ast);
         Translator translator = new Translator(parser, syntaxFlags);
@@ -477,6 +478,8 @@ final class RustRegexpParser
         private final int[] codePoints;
         private final int[] byteOffsets;
         private final int length;
+        private final boolean octal;
+        private final int nestLimit;
         private int position;
         private boolean ignoreWhitespace;
         private int captureIndex;
@@ -484,7 +487,7 @@ final class RustRegexpParser
         private final Deque<GroupStackEntry> groupStack = new ArrayDeque<>();
         private final Deque<ClassStackEntry> classStack = new ArrayDeque<>();
 
-        Parser(Slice pattern, int syntaxFlags)
+        Parser(Slice pattern, int syntaxFlags, int nestLimit)
         {
             this.pattern = pattern;
             this.codePoints = pattern.toStringUtf8().codePoints().toArray();
@@ -494,6 +497,8 @@ final class RustRegexpParser
                 byteOffsets[index + 1] = byteOffsets[index] + Utf8.encodedLength(codePoints[index]);
             }
             this.ignoreWhitespace = (syntaxFlags & IGNORE_WHITESPACE) != 0;
+            this.octal = (syntaxFlags & OCTAL) != 0;
+            this.nestLimit = nestLimit;
         }
 
         RegexpParseException error(ErrorKind kind, int start, int end)
@@ -972,7 +977,12 @@ final class RustRegexpParser
                 throw error(ErrorKind.ESCAPE_UNEXPECTED_EOF, start, position);
             }
             int character = current();
-            if (character >= '0' && character <= '9') {
+            // Without octal syntax, a digit escape is a backreference. With it, 8 and 9 are
+            // unrecognized escapes.
+            if (octal && character >= '0' && character <= '7') {
+                return parseOctal(start);
+            }
+            if (!octal && character >= '0' && character <= '9') {
                 throw error(ErrorKind.UNSUPPORTED_BACKREFERENCE, start, position + 1);
             }
             switch (character) {
@@ -1055,6 +1065,17 @@ final class RustRegexpParser
                 case "end-half" -> AssertionKind.WORD_BOUNDARY_END_HALF;
                 default -> throw error(ErrorKind.SPECIAL_WORD_BOUNDARY_UNRECOGNIZED, contentsStart, end);
             };
+        }
+
+        // Parses up to three octal digits, which cannot exceed U+01FF. Whitespace ends the number.
+        private LiteralAst parseOctal(int start)
+        {
+            int digitsStart = position;
+            int value = current() - '0';
+            while (bump() && current() >= '0' && current() <= '7' && position - digitsStart <= 2) {
+                value = value * 8 + current() - '0';
+            }
+            return new LiteralAst(start, position, value, false);
         }
 
         private LiteralAst parseHex(int start)
@@ -1374,7 +1395,7 @@ final class RustRegexpParser
                     continue;
                 }
                 int depth = frame.depth() + 1;
-                if (depth > NEST_LIMIT) {
+                if (depth > nestLimit) {
                     if (frame.node() instanceof Ast ast) {
                         throw error(ErrorKind.NEST_LIMIT_EXCEEDED, ast.start(), ast.end());
                     }
@@ -1398,7 +1419,7 @@ final class RustRegexpParser
         Translator(Parser parser, int syntaxFlags)
         {
             this.parser = parser;
-            this.flags = syntaxFlags & ~IGNORE_WHITESPACE;
+            this.flags = syntaxFlags & ~(IGNORE_WHITESPACE | OCTAL);
         }
 
         void throwUnsupported()

@@ -27,9 +27,9 @@ const NFA_SIZE_LIMIT: usize = 10 * (1 << 20);
 const HYBRID_CACHE_CAPACITY: usize = 2 * (1 << 20);
 
 // regex-automata `util::syntax::Config::new` defaults, which `regex` leaves
-// unchanged unless a caller sets them. The front end exposes none of them.
-const NEST_LIMIT: u32 = 250;
-const OCTAL: bool = false;
+// unchanged unless a caller sets them. A case's options may set another nest
+// limit; the front end exposes no other line terminator.
+const DEFAULT_NEST_LIMIT: u32 = 250;
 const LINE_TERMINATOR: u8 = b'\n';
 
 /// Bound on the matches recorded per case. The true count is always recorded.
@@ -95,8 +95,9 @@ fn run() -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // Options
 
-/// The `RegexBuilder` flags the front end exposes. Unicode is on by default.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// The `RegexBuilder` settings the front end exposes. Unicode is on by
+/// default and the nest limit defaults to the crate's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Options {
     case_insensitive: bool,
     multi_line: bool,
@@ -104,18 +105,43 @@ struct Options {
     crlf: bool,
     swap_greed: bool,
     ignore_whitespace: bool,
+    octal: bool,
     unicode_disabled: bool,
+    nest_limit: u32,
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            case_insensitive: false,
+            multi_line: false,
+            dot_matches_new_line: false,
+            crlf: false,
+            swap_greed: false,
+            ignore_whitespace: false,
+            octal: false,
+            unicode_disabled: false,
+            nest_limit: DEFAULT_NEST_LIMIT,
+        }
+    }
 }
 
 impl Options {
-    /// Parses `-` for defaults, enabled flags from `imsRUx` in that order,
-    /// `-u` to disable Unicode, or enabled flags followed by `,-u`.
+    /// Parses `-` for defaults, or comma-separated groups in this order:
+    /// enabled flags from `imsRUxo` in that order, `-u` to disable Unicode,
+    /// and `n` followed by a nest limit other than the default.
     fn parse(field: &str) -> Result<Options, String> {
         let mut options = Options::default();
         if field != "-" {
             for part in field.split(',') {
                 if part == "-u" {
                     options.unicode_disabled = true;
+                    continue;
+                }
+                if let Some(limit) = part.strip_prefix('n') {
+                    options.nest_limit = limit
+                        .parse()
+                        .map_err(|_| format!("invalid nest limit {limit:?} in {field:?}"))?;
                     continue;
                 }
                 if part.is_empty() {
@@ -129,6 +155,7 @@ impl Options {
                         'R' => &mut options.crlf,
                         'U' => &mut options.swap_greed,
                         'x' => &mut options.ignore_whitespace,
+                        'o' => &mut options.octal,
                         _ => return Err(format!("unknown option {flag:?} in {field:?}")),
                     };
                     *enabled = true;
@@ -153,17 +180,26 @@ impl Options {
             ('R', self.crlf),
             ('U', self.swap_greed),
             ('x', self.ignore_whitespace),
+            ('o', self.octal),
         ] {
             if set {
                 enabled.push(flag);
             }
         }
-        match (enabled.is_empty(), self.unicode_disabled) {
-            (true, false) => "-".to_string(),
-            (true, true) => "-u".to_string(),
-            (false, false) => enabled,
-            (false, true) => format!("{enabled},-u"),
+        let mut groups = Vec::new();
+        if !enabled.is_empty() {
+            groups.push(enabled);
         }
+        if self.unicode_disabled {
+            groups.push("-u".to_string());
+        }
+        if self.nest_limit != DEFAULT_NEST_LIMIT {
+            groups.push(format!("n{}", self.nest_limit));
+        }
+        if groups.is_empty() {
+            return "-".to_string();
+        }
+        groups.join(",")
     }
 }
 
@@ -178,6 +214,8 @@ fn build_public(pattern: &str, options: Options) -> Result<regex::Regex, regex::
         .crlf(options.crlf)
         .swap_greed(options.swap_greed)
         .ignore_whitespace(options.ignore_whitespace)
+        .octal(options.octal)
+        .nest_limit(options.nest_limit)
         .unicode(!options.unicode_disabled)
         .build()
 }
@@ -200,6 +238,8 @@ fn syntax_config(options: Options) -> automata_syntax::Config {
         .crlf(options.crlf)
         .swap_greed(options.swap_greed)
         .ignore_whitespace(options.ignore_whitespace)
+        .octal(options.octal)
+        .nest_limit(options.nest_limit)
         .unicode(!options.unicode_disabled)
         .utf8(true)
 }
@@ -217,8 +257,8 @@ fn build_meta(pattern: &str, options: Options) -> Result<meta::Regex, meta::Buil
 fn parse_hir(pattern: &str, options: Options) -> Result<Hir, regex_syntax::Error> {
     let ast = ParserBuilder::new()
         .ignore_whitespace(options.ignore_whitespace)
-        .nest_limit(NEST_LIMIT)
-        .octal(OCTAL)
+        .nest_limit(options.nest_limit)
+        .octal(options.octal)
         .build()
         .parse(pattern)?;
     let hir = TranslatorBuilder::new()
