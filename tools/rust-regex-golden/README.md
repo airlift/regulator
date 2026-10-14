@@ -78,7 +78,7 @@ tools/rust-regex-golden/generate.sh
 
 The script fetches the pinned `regex` source, builds
 `target/rust-regex-golden-build/release/rust-regex-golden` with `--locked`, and
-writes all three fixtures. Each fixture is written to a temporary file first,
+writes all four fixtures. Each fixture is written to a temporary file first,
 so a failed generation never truncates a committed fixture.
 
 The generator has three modes. Run them from the repository root, with
@@ -89,16 +89,18 @@ GENERATOR=target/rust-regex-golden-build/release/rust-regex-golden
 
 "${GENERATOR}" --mode=syntax < tools/rust-regex-golden/syntax-cases.tsv > syntax.jsonl
 "${GENERATOR}" --mode=match < tools/rust-regex-golden/match-cases.tsv > match.jsonl
+"${GENERATOR}" --mode=match < tools/rust-regex-golden/random-cases.tsv > random.jsonl
 "${GENERATOR}" --mode=upstream --testdata="${RUST_REGEX_DIR}/testdata" > upstream.jsonl
 ```
 
 ### Case tables
 
-The case tables `syntax-cases.tsv` and `match-cases.tsv` are generated; edit the
-case lists in `cases/syntax_cases.py` and `cases/match_cases.py` instead.
-`cases/emit.py` writes both tables deterministically: it rejects duplicate
-identifiers, writes ASCII with `\n` line endings, and keeps the order and
-section titles of the case lists. Commit the case lists and tables together.
+The case tables `syntax-cases.tsv`, `match-cases.tsv`, and `random-cases.tsv`
+are generated; edit the case lists in `cases/syntax_cases.py`,
+`cases/match_cases.py`, and `cases/random_cases.py` instead. `cases/emit.py`
+writes all three tables deterministically: it rejects duplicate identifiers,
+writes ASCII with `\n` line endings, and keeps the order and section titles of
+the case lists. Commit the case lists and tables together.
 
 Lines starting with `#` and blank lines are ignored. Identifiers must be
 unique. Pattern and text bytes are lowercase hexadecimal, or `-` for empty, so
@@ -122,6 +124,20 @@ the crate's string API.
 6. exclusive window end byte offset, or `-` for the whole text
 
 A window in `match-cases.tsv` must lie on character boundaries.
+
+`random-cases.tsv` has the `match-cases.tsv` fields. `cases/random_cases.py`
+draws its cases from `random.Random(790431)`, in this order: 800 random
+expressions, nested up to three levels over a small set of atoms, on random
+texts over `a`, `b`, `é`, space, CR, and LF; then 600 malformed token streams of
+regex metacharacters, flag letters, and digits on a fixed list of texts. It
+ends with 154 property-name regression rows, such as `\p{IsL}` spelled with a
+dotted capital I. Python's seeded `random` sequence is stable across Python 3
+releases, so the table is reproducible, but editing an earlier section changes
+every later draw. A pattern and text pair that repeats an earlier case is
+skipped, leaving 1526 cases, and identifiers keep the draw number, such as
+`random_042` or `malformed_147`, so they stay stable. Every case uses the
+default options and searches the whole text. David Phillips wrote the corpus
+for the front end's first golden generator, in pull request 11.
 
 ### Options
 
@@ -224,6 +240,11 @@ Only `\A`, `^` in `\n` multi-line mode, and `\b{start-half}` read solely to
 the left. The generator matches every `Look` variant exhaustively, so a new
 assertion fails compilation until it is classified.
 
+#### `rust-regex-random.jsonl`
+
+One record per `random-cases.tsv` row, in the `rust-regex-match.jsonl` format
+and with the same recorded operations.
+
 #### `rust-regex-upstream.jsonl`
 
 The crate's own TOML test corpus at the pinned tag, recorded in the
@@ -261,10 +282,11 @@ crate and fails if any result disagrees with the upstream expectation.
 
 ## Committed fixtures
 
-`generate.sh` owns all three fixtures:
+`generate.sh` owns all four fixtures:
 
 - `src/test/resources/io/airlift/regulator/rust-regex-syntax.jsonl`
 - `src/test/resources/io/airlift/regulator/rust-regex-match.jsonl`
+- `src/test/resources/io/airlift/regulator/rust-regex-random.jsonl`
 - `src/test/resources/io/airlift/regulator/rust-regex-upstream.jsonl`
 
 Regenerate them together from the repository root, case tables first:
