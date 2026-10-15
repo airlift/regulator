@@ -86,3 +86,25 @@ origin is recorded as a designed control. Run its Joni side with:
 tools/re2-benchmark/trino-joni/run-everyday.sh \
     target/trino-joni-comparator/everyday-results.json
 ```
+
+`BenchmarkTrinoRowsJoni` is the Joni twin of the
+[normative Trino rows](../trino-rows/README.md) benchmark. It reads the same
+manifests and has the same methods and `workload`, `literal`, and
+`corpusDirectory` parameters, so each cell compares one to one with
+`BenchmarkTrinoRows`. Its setup checks the sampled rows and the literal's hit
+count with Joni, as Regulator's setup does with Regulator. Before timing, the
+verifier compares each method's Regulator and Joni result, and checks the Slice
+adapter against Trino's functions, on every sampled row of every literal. It
+checks the OpenSubtitles workloads from test resources, and the fetched
+workloads too when `TRINO_COMPARATOR_ROWS_CORPUS_DIRECTORY` names a corpus
+directory provisioned by `trino_rows.py fetch`. `run-rows.sh` runs every
+method and passes its remaining arguments to JMH, so `-e` excludes methods:
+
+```bash
+TRINO_COMPARATOR_ROWS_CORPUS_DIRECTORY=/path/to/trino-row-corpus \
+    tools/re2-benchmark/trino-joni/verify.sh
+tools/re2-benchmark/trino-joni/run-rows.sh \
+    target/trino-joni-comparator/rows-results.json \
+    -e 'BenchmarkTrinoRowsJoni\.(extract|split)$' \
+    -p workload=english -p literal=mid-none
+```

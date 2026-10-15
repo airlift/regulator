@@ -1,0 +1,8 @@
+workload	corpora	sources	population_rows	sampled_rows	rows	row_bytes	rows_sha256	p50_bytes	p90_bytes	p99_bytes
+english	opensubtitles-en.txt	/io/airlift/regulator/literal-corpus/en-sampled.txt.gzip	30000	4096	4096	118821	c384a7aef48fe0ebe6b43ae1325fcb85a08cdace1fb2ae30f494c35d16ea9947	23	56	119
+russian	opensubtitles-ru.txt	/io/airlift/regulator/literal-corpus/ru-sampled.txt.gzip	29998	4096	4096	209871	fb9017b2d24e75b6ccd49a61013a877ab39359c4cb312d859954e0771d02a52f	40	104	204
+chinese	opensubtitles-zh.txt	/io/airlift/regulator/literal-corpus/zh-sampled.txt.gzip	30000	4096	4096	106851	f3ec5f9a4a1f20501354e665bb22f0a6cad06513dec846676c90e73633e2065d	24	47	82
+nginx	elastic-nginx-access.log	elastic-nginx-access.log	51462	4096	4096	553395	ee3a931da8683f73cfbc73dc6d3743bf4693c296d3f0833cb3e5d22dbc82c7b2	132	143	186
+apache	elastic-apache-access.log	elastic-apache-access.log	10000	4096	4096	966035	40211b44e061cf4bf488f43c525d8742e79152672ddb5aa7acd5dc8600c041d0	231	314	443
+loghub	loghub-hdfs.log,loghub-linux.log,loghub-openssh.log,loghub-spark.log,loghub-windows.log,loghub-android.log	loghub-hdfs.log,loghub-linux.log,loghub-openssh.log,loghub-spark.log,loghub-windows.log,loghub-android.log	2000,2000,2000,2000,2000,2000	683,683,683,683,682,682	4096	502302	97b61a716bc58316c94cbf8c1570faf5a0f47b009b5e6789bb0bade853167e60	118	176	238
+gharchive	gharchive-2025-03-10-14-32MiB.json	gharchive-2025-03-10-14-32MiB.json	8200	4096	4096	16767603	55265cac8937bdea72aa4be42842f6b205ffde65cbca8ce6967f907a908391a7	954	17454	29919
