@@ -101,8 +101,13 @@ public class BenchmarkTrinoScanPlan
         @Param({"true", "false"})
         public boolean dotAll;
 
+        // Experimental per-pattern scan kernels; false keeps existing runs on the interpreter.
+        @Param("false")
+        public boolean generateBytecode;
+
         Slice[] expressions;
-        private TrinoRegexp[] patterns;
+        private TrinoRegexp.Options options;
+        TrinoRegexp[] patterns;
         private TrinoRegexpMatcher[] captures;
         private TrinoRegexpMatcher[] boundaries;
         private int[] extractionGroups;
@@ -114,6 +119,7 @@ public class BenchmarkTrinoScanPlan
         @Setup
         public void setup()
         {
+            options = TrinoRegexp.Options.defaults().setGenerateBytecode(generateBytecode);
             int retryLength = switch (workload) {
                 case "RETRY_64" -> 64;
                 case "RETRY_127" -> 127;
@@ -253,7 +259,7 @@ public class BenchmarkTrinoScanPlan
                     expression = "([a-z]+|x)[0-9]+" + (workload.equals("LOWERED_FALLBACK") ? "$" : "");
                 }
                 expressions[index] = utf8Slice((dotAll ? "(?s)" : "") + expression);
-                patterns[index] = TrinoRegexp.compile(expressions[index]);
+                patterns[index] = TrinoRegexp.compile(expressions[index], options);
                 captures[index] = patterns[index].matcher(EMPTY_SLICE);
                 boundaries[index] = patterns[index].matcher(EMPTY_SLICE, 0);
                 extractionGroups[index] = patterns[index].capturingGroupCount() == 0 ? 0 : 1;
@@ -617,7 +623,7 @@ public class BenchmarkTrinoScanPlan
     public TrinoRegexp compile(BenchmarkData data)
     {
         data.next();
-        return TrinoRegexp.compile(data.expressions[data.patternIndex]);
+        return TrinoRegexp.compile(data.expressions[data.patternIndex], data.options);
     }
 
     /**

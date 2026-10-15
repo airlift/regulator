@@ -25,11 +25,11 @@ final class TrinoScanPlanRun
     static final int MATCHES_EVERY_BYTE = 256;
 
     private static final int CANDIDATE_SCAN_TABLE = 0;
-    private static final int CANDIDATE_SCAN_SMALL_SET = 1;
-    private static final int CANDIDATE_SCAN_RANGE = 2;
-    private static final int CANDIDATE_SCAN_NIBBLE_TABLE = 3;
+    static final int CANDIDATE_SCAN_SMALL_SET = 1;
+    static final int CANDIDATE_SCAN_RANGE = 2;
+    static final int CANDIDATE_SCAN_NIBBLE_TABLE = 3;
     private static final int MAX_VECTOR_CANDIDATE_BYTES = 64;
-    private static final int SCALAR_CANDIDATE_PREFIX_BYTES = 16;
+    static final int SCALAR_CANDIDATE_PREFIX_BYTES = 16;
 
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoScanPlanRun.class);
     private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.LATIN1;
@@ -245,6 +245,54 @@ final class TrinoScanPlanRun
         return minimum;
     }
 
+    // These accessors serve the copies of match, matchMinimum, and findCandidate in
+    // TrinoScanKernelSupport.
+
+    int maximum()
+    {
+        return maximum;
+    }
+
+    boolean[] members()
+    {
+        return members;
+    }
+
+    byte[] needles()
+    {
+        return needles;
+    }
+
+    boolean isInverted()
+    {
+        return inverted;
+    }
+
+    boolean matchesNonAscii()
+    {
+        return matchesNonAscii;
+    }
+
+    int candidateScan()
+    {
+        return candidateScan;
+    }
+
+    int lowestMember()
+    {
+        return lowestMember;
+    }
+
+    int highestMember()
+    {
+        return highestMember;
+    }
+
+    byte[] candidateNibbleTables()
+    {
+        return candidateNibbleTables;
+    }
+
     boolean isUnbounded()
     {
         return maximum < 0;
@@ -288,6 +336,7 @@ final class TrinoScanPlanRun
         return INSTANCE_SIZE + SizeOf.sizeOf(members) + SizeOf.sizeOf(needles) + SizeOf.sizeOf(candidateNibbleTables);
     }
 
+    // Copied as TrinoScanKernelSupport.runMatch; keep the copy in step.
     int match(byte[] input, int cursor, int end)
     {
         if (!matchesNonAscii) {
@@ -316,6 +365,7 @@ final class TrinoScanPlanRun
     /**
      * Returns the position after the run's minimum characters, or {@code -1} when they are absent.
      * It fails exactly when {@link #match} fails but reads no further than the minimum.
+     * Copied as {@code TrinoScanKernelSupport.runMatchMinimum}; keep the copy in step.
      */
     int matchMinimum(byte[] input, int cursor, int end)
     {
@@ -328,6 +378,7 @@ final class TrinoScanPlanRun
         return cursor;
     }
 
+    // Copied as TrinoScanKernelSupport.runScan; keep the copy in step.
     private int scan(byte[] input, int cursor, int end)
     {
         if (needles != null) {
@@ -352,6 +403,7 @@ final class TrinoScanPlanRun
      * Returns the first member byte at or after {@code cursor}, or {@code -1} when none remains.
      * Member sets of one to 64 bytes use the same vector scanners as the DFA's start-byte
      * search; larger sets and their complements keep the plan's own scans.
+     * Copied as {@code TrinoScanKernelSupport.runFindCandidate}; keep the copy in step.
      */
     int findCandidate(byte[] input, int cursor, int end)
     {
@@ -389,6 +441,7 @@ final class TrinoScanPlanRun
         }
     }
 
+    // Copied as TrinoScanKernelSupport.runFindCandidateInTable; keep the copy in step.
     private int findCandidateInTable(byte[] input, int cursor, int end)
     {
         if (needles != null) {

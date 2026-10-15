@@ -26,11 +26,17 @@ Treat these as performance-sensitive unless analysis proves otherwise:
 - candidate-byte and literal scanners
 - engine selection and capture-boundary recovery
 - Slice range and UTF-8 decoding paths used by matching
+- generated Trino scan kernels, their search driver and operation entries, the
+  scan helper copies they call, and the code that emits them
 
 Comments in these paths explain where performance depends on generated code.
 Do not extract helpers, introduce polymorphism, reorder loads, add logging, or
 make naming-only edits inside a protected loop without inspecting generated
 code and running the relevant benchmarks.
+
+When changing a helper marked "Copied as", change the copy it names. When that
+copy is in `TrinoScanKernelSupport` or `VectorTrinoScanKernelSupport`, also run
+`TestTrinoScanKernel`.
 
 ## Parser frontends
 

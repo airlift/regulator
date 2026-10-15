@@ -18,10 +18,13 @@ import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Function;
 
 import static java.lang.Math.toIntExact;
@@ -38,6 +41,7 @@ import static java.util.Objects.requireNonNull;
 public sealed class TrinoRegexp
         permits TrinoRegexp.BeginLineTrinoRegexp,
                 TrinoRegexp.CharacterClassTrinoRegexp,
+                TrinoRegexp.CompiledScanTrinoRegexp,
                 TrinoRegexp.DotStarLiteralTrinoRegexp,
                 TrinoRegexp.ExactLiteralTrinoRegexp,
                 TrinoRegexp.LiteralAlternationTrinoRegexp,
@@ -51,6 +55,7 @@ public sealed class TrinoRegexp
     {
         private long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
         private ByteFrequencies byteFrequencies = ByteFrequencies.uniform();
+        private boolean generateBytecode;
 
         private Options() {}
 
@@ -86,6 +91,25 @@ public sealed class TrinoRegexp
         public Options setByteFrequencies(ByteFrequencies byteFrequencies)
         {
             this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");
+            return this;
+        }
+
+        boolean generateBytecode()
+        {
+            return generateBytecode;
+        }
+
+        /**
+         * Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
+         * so each operation that would run its specialized scan runs dedicated bytecode instead.
+         * Operations that take another route keep it. Patterns that are not eligible, or whose
+         * class cannot be generated, compile as they do without this option. Disabled by default.
+         *
+         * @see TrinoRegexp#usesGeneratedBytecode()
+         */
+        public Options setGenerateBytecode(boolean generateBytecode)
+        {
+            this.generateBytecode = generateBytecode;
             return this;
         }
     }
@@ -173,6 +197,12 @@ public sealed class TrinoRegexp
         if (compiledPattern.hasCharacterClassSpan()) {
             return new CharacterClassTrinoRegexp(compiledPattern);
         }
+        if (options.generateBytecode()) {
+            TrinoRegexp generated = CompiledScanTrinoRegexp.create(compiledPattern);
+            if (generated != null) {
+                return generated;
+            }
+        }
         return new TrinoRegexp(compiledPattern);
     }
 
@@ -207,6 +237,121 @@ public sealed class TrinoRegexp
     Re2 pattern()
     {
         return pattern;
+    }
+
+    /**
+     * Returns whether this compiled pattern has a class generated for it, which only
+     * {@link Options#setGenerateBytecode(boolean)} enables. Each operation of such a pattern that
+     * would run its specialized scan runs the generated class, and the {@code generated}
+     * accessors return its entries.
+     */
+    public boolean usesGeneratedBytecode()
+    {
+        return false;
+    }
+
+    /**
+     * Returns a handle on the generated code of {@link #contains(Slice)}, of type
+     * {@code (Slice)boolean}, or empty when this pattern runs another route for it. Like every
+     * generated handle, it checks arguments as the operation does, except that it requires
+     * non-null arguments but does not check them.
+     */
+    public Optional<MethodHandle> generatedContains()
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Returns a handle on the generated code of {@link #count(Slice)}, of type
+     * {@code (Slice)long}, or empty when this pattern runs another route for it.
+     */
+    public Optional<MethodHandle> generatedCount()
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Returns a handle on the generated code of {@link #position(Slice, long, long)}, of type
+     * {@code (Slice,long,long)long}, or empty when this pattern runs another route for it.
+     */
+    public Optional<MethodHandle> generatedPosition()
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Returns a handle on the generated code of {@link #extract(Slice, int)} for {@code group},
+     * of type {@code (Slice)Slice}, or empty when this pattern runs another route for it.
+     *
+     * @throws IllegalArgumentException if the pattern has no such group
+     */
+    public Optional<MethodHandle> generatedExtract(int group)
+    {
+        validateHandleGroup(group);
+        return Optional.empty();
+    }
+
+    /**
+     * Returns a handle on the generated code of {@link #extractAll(Slice, int)} for
+     * {@code group}, of type {@code (Slice)List}, or empty when this pattern runs another route
+     * for it.
+     *
+     * @throws IllegalArgumentException if the pattern has no such group
+     */
+    public Optional<MethodHandle> generatedExtractAll(int group)
+    {
+        validateHandleGroup(group);
+        return Optional.empty();
+    }
+
+    /**
+     * Returns a handle on the generated code of {@link #split(Slice)}, of type
+     * {@code (Slice)List}, or empty when this pattern runs another route for it.
+     */
+    public Optional<MethodHandle> generatedSplit()
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Returns a handle on the generated code of {@link #replace(Slice, Slice)}, of type
+     * {@code (Slice,Slice)Slice}, or empty when this pattern runs another route for it.
+     */
+    public Optional<MethodHandle> generatedReplace()
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Returns a handle on the generated code of {@link #replace(Slice, Function)}, of type
+     * {@code (Slice,Function)Slice}, or empty when this pattern runs another route for it.
+     */
+    public Optional<MethodHandle> generatedReplaceWithCallback()
+    {
+        return Optional.empty();
+    }
+
+    /**
+     * Rejects a group the pattern does not have, as {@link #extract(Slice, int)} does, for
+     * subclasses without a compiled pattern too.
+     */
+    final void validateHandleGroup(int group)
+    {
+        if (group < 0) {
+            throw new IllegalArgumentException("group cannot be negative");
+        }
+        if (group > capturingGroupCount()) {
+            throw new IllegalArgumentException("pattern has " + capturingGroupCount() + " groups; cannot access group " + group);
+        }
+    }
+
+    /**
+     * Returns the generated static method holding this pattern's scan attempt loop, with the
+     * signature of the plan executor it replaces, or {@code null} without a generated class.
+     */
+    MethodHandle attemptHandleForDiagnostics()
+    {
+        return null;
     }
 
     LiteralAlternationSpanMatcher literalAlternationSpanMatcher()
@@ -385,6 +530,8 @@ public sealed class TrinoRegexp
     public long position(Slice source, long start, long occurrence)
     {
         requireNonNull(source, "source is null");
+        // The checks and offset conversion are copied as positionSearchStart; keep the copy in
+        // step.
         if (start < 1) {
             throw new IllegalArgumentException("start position cannot be smaller than 1");
         }
@@ -422,6 +569,29 @@ public sealed class TrinoRegexp
             }
         }
         return SliceUtf8.countCodePoints(source, 0, matcher.start()) + 1L;
+    }
+
+    /**
+     * Returns the byte offset where {@link #position(Slice, long, long)} starts searching, or
+     * {@code -1} when no match can follow {@code start}, with the same argument checks, for
+     * generated position entries.
+     * A copy of the checks and offset conversion of {@code position(Slice, long, long)}.
+     *
+     * @throws IllegalArgumentException if {@code start} or {@code occurrence} is less than one
+     */
+    static int positionSearchStart(Slice source, long start, long occurrence)
+    {
+        if (start < 1) {
+            throw new IllegalArgumentException("start position cannot be smaller than 1");
+        }
+        if (occurrence < 1) {
+            throw new IllegalArgumentException("occurrence cannot be smaller than 1");
+        }
+        long codePointStart = start - 1;
+        if (codePointStart > source.length()) {
+            return -1;
+        }
+        return SliceUtf8.offsetOfCodePoint(source, toIntExact(codePointStart));
     }
 
     /**
@@ -1556,6 +1726,189 @@ public sealed class TrinoRegexp
             }
             output.writeBytes(source, previousEnd, source.length() - previousEnd);
             return output.slice();
+        }
+    }
+
+    /**
+     * A pattern whose case-sensitive scan plan was compiled to its own hidden class. Each
+     * operation keeps the route it has without the class, decided once when the pattern compiles:
+     * one that would run the plan calls the generated class once, and any other runs the inherited
+     * Java route. Callers that never enable {@link Options#setGenerateBytecode(boolean)} never load
+     * this class.
+     */
+    private static final class CompiledScanTrinoRegexp
+            extends TrinoRegexp
+    {
+        // Whether contains reaches the plan rather than a retained literal kernel.
+        private final boolean contains;
+        private final TrinoScanKernelGenerator.CompiledScan generated;
+        private final CompiledTrinoScan scan;
+
+        private CompiledScanTrinoRegexp(Re2 pattern, boolean contains, TrinoScanKernelGenerator.CompiledScan generated)
+        {
+            super(pattern);
+            this.contains = contains;
+            this.generated = generated;
+            this.scan = generated.scan();
+        }
+
+        /**
+         * Returns {@code pattern} with a generated class, or {@code null} when the pattern is not
+         * eligible or the class cannot be generated. The declared type keeps verification of the
+         * base class from loading this class.
+         */
+        static TrinoRegexp create(Re2 pattern)
+        {
+            TrinoScanKernelGenerator.Routes routes = TrinoScanKernelGenerator.Routes.of(pattern);
+            if (routes == null) {
+                return null;
+            }
+            TrinoScanKernelGenerator.CompiledScan generated;
+            try {
+                generated = TrinoScanKernelGenerator.generateCompiledScan(routes);
+            }
+            catch (RuntimeException | LinkageError ignored) {
+                // Linking the generator fails here only if a consumer excluded the classfile
+                // library, and defining the class can fail too; either leaves the pattern
+                // interpreted.
+                return null;
+            }
+            return new CompiledScanTrinoRegexp(pattern, routes.contains(), generated);
+        }
+
+        @Override
+        public TrinoRegexpMatcher matcher(Slice source, int retainedCapturingGroupCount)
+        {
+            requireNonNull(source, "source is null");
+            if (retainedCapturingGroupCount < 0 || retainedCapturingGroupCount > capturingGroupCount()) {
+                throw new IllegalArgumentException("capturingGroupCount out of range: " + retainedCapturingGroupCount);
+            }
+            return TrinoRegexpMatcher.compiledScan(scan, source, retainedCapturingGroupCount);
+        }
+
+        @Override
+        public boolean usesGeneratedBytecode()
+        {
+            return true;
+        }
+
+        @Override
+        public Optional<MethodHandle> generatedContains()
+        {
+            return Optional.ofNullable(generated.contains());
+        }
+
+        @Override
+        public Optional<MethodHandle> generatedCount()
+        {
+            return Optional.of(generated.count());
+        }
+
+        @Override
+        public Optional<MethodHandle> generatedPosition()
+        {
+            return Optional.of(generated.position());
+        }
+
+        @Override
+        public Optional<MethodHandle> generatedExtract(int group)
+        {
+            validateGroup(group);
+            return Optional.of(MethodHandles.insertArguments(generated.extract(), 1, group));
+        }
+
+        @Override
+        public Optional<MethodHandle> generatedExtractAll(int group)
+        {
+            validateGroup(group);
+            return Optional.of(MethodHandles.insertArguments(generated.extractAll(), 1, group));
+        }
+
+        @Override
+        public Optional<MethodHandle> generatedSplit()
+        {
+            return Optional.of(generated.split());
+        }
+
+        @Override
+        public Optional<MethodHandle> generatedReplace()
+        {
+            return Optional.of(MethodHandles.insertArguments(generated.replace(), 0, this));
+        }
+
+        @Override
+        public Optional<MethodHandle> generatedReplaceWithCallback()
+        {
+            return Optional.of(generated.replaceWithCallback());
+        }
+
+        @Override
+        MethodHandle attemptHandleForDiagnostics()
+        {
+            return TrinoScanKernelGenerator.attemptHandleForDiagnostics(scan, pattern().caseSensitiveTrinoScanPlan());
+        }
+
+        @Override
+        public boolean contains(Slice source)
+        {
+            if (!contains) {
+                return super.contains(source);
+            }
+            requireNonNull(source, "source is null");
+            return scan.contains(source);
+        }
+
+        @Override
+        public long count(Slice source)
+        {
+            requireNonNull(source, "source is null");
+            return scan.count(source);
+        }
+
+        @Override
+        public long position(Slice source, long start, long occurrence)
+        {
+            requireNonNull(source, "source is null");
+            return scan.position(source, start, occurrence);
+        }
+
+        @Override
+        public Slice extract(Slice source, int group)
+        {
+            validateGroup(group);
+            requireNonNull(source, "source is null");
+            return scan.extract(source, group);
+        }
+
+        @Override
+        public List<Slice> extractAll(Slice source, int group)
+        {
+            validateGroup(group);
+            requireNonNull(source, "source is null");
+            return scan.extractAll(source, group);
+        }
+
+        @Override
+        public List<Slice> split(Slice source)
+        {
+            requireNonNull(source, "source is null");
+            return scan.split(source);
+        }
+
+        @Override
+        public Slice replace(Slice source, Slice replacement)
+        {
+            requireNonNull(source, "source is null");
+            requireNonNull(replacement, "replacement is null");
+            return scan.replace(this, source, replacement);
+        }
+
+        @Override
+        public Slice replace(Slice source, Function<List<Slice>, Slice> replacement)
+        {
+            requireNonNull(source, "source is null");
+            requireNonNull(replacement, "replacement is null");
+            return scan.replace(source, replacement);
         }
     }
 

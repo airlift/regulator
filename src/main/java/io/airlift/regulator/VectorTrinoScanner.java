@@ -35,6 +35,7 @@ final class VectorTrinoScanner
      * Returns the first byte at or after {@code cursor} outside {@code members}, or {@code end}
      * when none remains. {@code needles} holds one to four bytes: the members, or the
      * non-members when {@code inverted}.
+     * Copied as {@code VectorTrinoScanKernelSupport.findRunStop}; keep the copy in step.
      */
     static int findRunStop(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
@@ -61,6 +62,7 @@ final class VectorTrinoScanner
     /**
      * Returns the first byte at or after {@code cursor} in {@code members}, or {@code -1} when
      * none remains. {@code needles} is as for {@link #findRunStop}.
+     * Copied as {@code VectorTrinoScanKernelSupport.findRunCandidate}; keep the copy in step.
      */
     static int findRunCandidate(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
@@ -86,6 +88,7 @@ final class VectorTrinoScanner
 
     /**
      * Returns whether the {@code literal} step occurs in {@code [cursor, end)}.
+     * Copied as {@code VectorTrinoScanKernelSupport.containsLiteral}; keep the copy in step.
      */
     static boolean containsLiteral(byte[] bytes, int cursor, int end, TrinoScanPlan.Step literal)
     {
@@ -114,6 +117,7 @@ final class VectorTrinoScanner
         return false;
     }
 
+    // Copied as VectorTrinoScanKernelSupport.findByte; keep the copy in step.
     static int findByte(byte[] bytes, int cursor, int end, byte target)
     {
         ByteVector wanted = ByteVector.broadcast(SPECIES, target);

@@ -397,3 +397,25 @@ Trino replacement strings use `$1` and `${name}` references. Invalid
 replacement syntax or an unknown capture throws
 `TrinoRegexpReplacementException`, whose `byteOffset()` identifies the failing
 byte in the replacement Slice.
+
+`TrinoRegexp.Options.setGenerateBytecode(true)` is an experimental option, off
+by default, that compiles an eligible pattern's scan plan into its own hidden
+class. Results are unchanged; `usesGeneratedBytecode()` reports whether the
+pattern has such a class. A caller holding a constant pattern can bind an
+operation's generated code directly through these accessors, each returning an
+empty `Optional` when the operation does not run the generated class:
+
+| Accessor | Handle type |
+|---|---|
+| `generatedContains()` | `(Slice)boolean` |
+| `generatedCount()` | `(Slice)long` |
+| `generatedPosition()` | `(Slice, long start, long occurrence)long` |
+| `generatedExtract(group)` | `(Slice)Slice` |
+| `generatedExtractAll(group)` | `(Slice)List<Slice>` |
+| `generatedSplit()` | `(Slice)List<Slice>` |
+| `generatedReplace()` | `(Slice, Slice replacement)Slice` |
+| `generatedReplaceWithCallback()` | `(Slice, Function<List<Slice>, Slice>)Slice` |
+
+A handle validates its arguments as the operation does, except that it
+requires non-null arguments but does not check them. For a pattern with a
+generated class, only `generatedContains()` can be empty.

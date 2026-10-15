@@ -134,7 +134,7 @@ final class TrinoReplacementPlan
 
     // The per-match path for a template without group references stays small enough for C2 to
     // inline into the caller's match loop: template parsing, output growth, and invalid-argument
-    // failures are out of line.
+    // failures are out of line. Copied as addMatch(int[]); keep the copy in step.
     void addMatch(Re2Matcher matcher)
     {
         requireNonNull(matcher, "matcher is null");
@@ -149,6 +149,7 @@ final class TrinoReplacementPlan
         recordMatch(matcher, template);
     }
 
+    // Copied as recordMatch(int[], ParsedReplacement); keep the copy in step.
     private void recordMatch(Re2Matcher matcher, ParsedReplacement template)
     {
         int recordOffset = beginMatch(matcher.start(), matcher.end());
@@ -160,6 +161,48 @@ final class TrinoReplacementPlan
         for (int index = 0; index < referencedGroups.length; index++) {
             int start = matcher.start(referencedGroups[index]);
             int end = matcher.end(referencedGroups[index]);
+            matches[recordOffset + 2 + index * 2] = start;
+            matches[recordOffset + 3 + index * 2] = end;
+            if (start >= 0) {
+                replacementLength = addExact(
+                        replacementLength,
+                        multiplyExact((long) (end - start), groupReferenceCounts[index]));
+            }
+        }
+        addReplacementLength(recordOffset, replacementLength);
+    }
+
+    /**
+     * Records the match whose offsets a scan-plan search wrote to {@code groups}, as
+     * {@link #addMatch(Re2Matcher)} records a matcher's current match. Groups that did not
+     * participate hold {@code -1}.
+     * A copy of {@code addMatch(Re2Matcher)}.
+     */
+    void addMatch(int[] groups)
+    {
+        ParsedReplacement template = this.template;
+        if (template == null) {
+            template = parseTemplate();
+        }
+        if (template.referencedGroups().length == 0) {
+            writeMatch(template, groups[0], groups[1]);
+            return;
+        }
+        recordMatch(groups, template);
+    }
+
+    // A copy of recordMatch(Re2Matcher, ParsedReplacement).
+    private void recordMatch(int[] groups, ParsedReplacement template)
+    {
+        int recordOffset = beginMatch(groups[0], groups[1]);
+        int[] referencedGroups = template.referencedGroups();
+        int[] groupReferenceCounts = template.groupReferenceCounts();
+        long replacementLength = addExact(
+                template.literalLength(),
+                multiplyExact((long) (groups[1] - groups[0]), template.groupZeroReferenceCount()));
+        for (int index = 0; index < referencedGroups.length; index++) {
+            int start = groups[2 * referencedGroups[index]];
+            int end = groups[2 * referencedGroups[index] + 1];
             matches[recordOffset + 2 + index * 2] = start;
             matches[recordOffset + 3 + index * 2] = end;
             if (start >= 0) {

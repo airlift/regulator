@@ -35,8 +35,8 @@ final class TrinoScanPlan
     private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.LATIN1;
     private static final int UNSUPPORTED_FLAGS = UNSUPPORTED_ATOM_FLAGS | Regexp.NON_GREEDY;
     private static final int MAX_RECURSIVE_DEPTH = 32;
-    private static final int RETRY_OPERATION_BITS = 6;
-    private static final int RETRY_OPERATION_MASK = (1 << RETRY_OPERATION_BITS) - 1;
+    static final int RETRY_OPERATION_BITS = 6;
+    static final int RETRY_OPERATION_MASK = (1 << RETRY_OPERATION_BITS) - 1;
     private static final int MAX_OPERATIONS = 32;
     private static final int MAX_OPTIONALS = 4;
     private static final int MAX_LITERAL_BYTES = 256;
@@ -45,16 +45,16 @@ final class TrinoScanPlan
     // A boolean search hands off to the ordinary engine when, after each group of this many
     // failed attempts, the attempts average fewer than HANDOFF_BYTES bytes apart and at least
     // HANDOFF_REMAINING_BYTES remain to repay the ordinary engine's setup.
-    private static final int HANDOFF_ATTEMPTS = 8;
-    private static final int HANDOFF_BYTES = 32;
-    private static final int HANDOFF_REMAINING_BYTES = 256;
+    static final int HANDOFF_ATTEMPTS = 8;
+    static final int HANDOFF_BYTES = 32;
+    static final int HANDOFF_REMAINING_BYTES = 256;
     // An unanchored search hands off to the ordinary engine once the bytes its failed attempts
     // examined, each measured from the attempt's start, exceed WORK_BUDGET_BYTES plus
     // WORK_BUDGET_FACTOR times the distance searched. Each search then stays linear in its input.
     // Lets ordinary rows absorb a few long failed attempts without paying the ordinary engine's setup.
     private static final int WORK_BUDGET_BYTES = 2048;
     // Bounded retries may reexamine bytes, so failed attempts that never overlap stay within budget.
-    private static final int WORK_BUDGET_FACTOR = 4;
+    static final int WORK_BUDGET_FACTOR = 4;
     private static final VarHandle SHORT = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.nativeOrder());
     private static final VarHandle INT = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.nativeOrder());
     private static final VarHandle LONG = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
@@ -69,7 +69,7 @@ final class TrinoScanPlan
         }
     }
 
-    private enum Kind
+    enum Kind
     {
         LITERAL,
         ASCII_FOLDED_LITERAL,
@@ -395,6 +395,56 @@ final class TrinoScanPlan
         return allowsOrdinaryBooleanSearch;
     }
 
+    Step step(int operation)
+    {
+        return steps[operation];
+    }
+
+    int operationCount()
+    {
+        return steps.length;
+    }
+
+    boolean isBooleanTail(int operation)
+    {
+        return booleanTails[operation];
+    }
+
+    boolean hasFinalLineEnd()
+    {
+        return finalLineEnd;
+    }
+
+    int failureResumeOperation()
+    {
+        return failureResumeOperation;
+    }
+
+    int leadingOperation()
+    {
+        return leadingOperation;
+    }
+
+    int requiredLiteralOperation()
+    {
+        return requiredLiteralOperation;
+    }
+
+    boolean hasWholeLiteralCandidates()
+    {
+        return wholeLiteralCandidates;
+    }
+
+    int leadingProbeOffset()
+    {
+        return leadingProbeOffset;
+    }
+
+    int workBudgetBytes()
+    {
+        return workBudgetBytes;
+    }
+
     long estimatedRetainedSize()
     {
         long size = INSTANCE_SIZE + SizeOf.sizeOf(steps) + SizeOf.sizeOf(booleanTails);
@@ -411,11 +461,6 @@ final class TrinoScanPlan
             }
         }
         return size;
-    }
-
-    int operationCountForDiagnostics()
-    {
-        return steps.length;
     }
 
     String operationsForDiagnostics()
@@ -514,6 +559,16 @@ final class TrinoScanPlan
                 ? matchAsciiFoldedUnanchoredAt(input.byteArray(), offset, end, offset + start, false, null)
                 : matchUnanchoredAt(input.byteArray(), offset, end, offset + start, false, null);
         return result < 0 ? -1 : (int) result - offset;
+    }
+
+    /**
+     * Returns the raw result of one case-sensitive unanchored attempt at {@code start}: the match
+     * end within the backing array, or the encoded failure.
+     */
+    long unanchoredAttemptForDiagnostics(Slice input, int start, boolean fullMatch, int[] groups)
+    {
+        int offset = input.byteArrayOffset();
+        return matchUnanchoredAt(input.byteArray(), offset, offset + input.length(), offset + start, fullMatch, groups);
     }
 
     @SuppressFBWarnings(value = "SF_SWITCH_NO_DEFAULT", justification = "Folded kinds use separate executors; kept identical to the measured ordinary switch")
@@ -1269,6 +1324,7 @@ final class TrinoScanPlan
     /**
      * Returns whether the required literal occurs in {@code [cursor, end)}. Every match of an
      * unanchored search lies in that range and contains the literal.
+     * Copied as {@code TrinoScanKernelSupport.containsRequiredLiteral}; keep the copy in step.
      */
     private boolean containsRequiredLiteral(byte[] bytes, int cursor, int end)
     {
@@ -1339,6 +1395,7 @@ final class TrinoScanPlan
      * Returns the first position at or after {@code candidate} where the whole {@code literal}
      * occurs, or {@code -1} when none remains. A literal that does not fit before {@code end} is
      * never a candidate, so no byte at or past {@code end} is read.
+     * Copied as {@code TrinoScanKernelSupport.findLiteral}; keep the copy in step.
      */
     private static int findLiteral(byte[] bytes, int candidate, int end, byte[] literal)
     {
@@ -1365,6 +1422,7 @@ final class TrinoScanPlan
      * <p>
      * The scan searches a range shifted by the probe offset, so every candidate starts at or
      * after {@code candidate}.
+     * Copied as {@code TrinoScanKernelSupport.findLiteralAtProbe}; keep the copy in step.
      */
     private static int findLiteralAtProbe(byte[] bytes, int candidate, int end, byte[] literal, int probeOffset)
     {
@@ -1702,6 +1760,7 @@ final class TrinoScanPlan
         }
     }
 
+    // Copied as TrinoScanKernelSupport.findByte; keep the copy in step.
     private static int findByte(byte[] bytes, int cursor, int end, byte target)
     {
         if (VectorSupport.isAvailable()) {
@@ -1733,7 +1792,7 @@ final class TrinoScanPlan
         return 'a' <= value && value <= 'z';
     }
 
-    private record Branch(int target, int captureMask)
+    record Branch(int target, int captureMask)
     {
         private static final int INSTANCE_SIZE = SizeOf.instanceSize(Branch.class);
     }
@@ -2315,6 +2374,57 @@ final class TrinoScanPlan
                     : null;
         }
 
+        Kind kind()
+        {
+            return kind;
+        }
+
+        byte delimiter()
+        {
+            return delimiter;
+        }
+
+        int slot()
+        {
+            return slot;
+        }
+
+        int minimum()
+        {
+            return minimum;
+        }
+
+        int width()
+        {
+            return width;
+        }
+
+        int lastOffset()
+        {
+            return lastOffset;
+        }
+
+        long first()
+        {
+            return first;
+        }
+
+        long last()
+        {
+            return last;
+        }
+
+        TrinoScanPlanRun run()
+        {
+            return run;
+        }
+
+        Branch branch()
+        {
+            return branch;
+        }
+
+        // Copied as TrinoScanKernelSupport.literalMatches; keep the copy in step.
         boolean matches(byte[] input, int cursor, int end)
         {
             if (literal.length > end - cursor) {

@@ -45,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTrinoScanPlan
 {
-    private static final String URL = "^https?://(?:www\\.)?([^/]+)/.*$";
+    static final String URL = "^https?://(?:www\\.)?([^/]+)/.*$";
     // One admitted pattern for each scan executor. The template placeholder is capture group one.
     private static final List<ExecutorRoute> EXECUTOR_ROUTES = List.of(
             new ExecutorRoute(URL, "https://www.%s/path", true, false, false),
@@ -56,7 +56,7 @@ public class TestTrinoScanPlan
             new ExecutorRoute("(?i)content-type:([^;]+);", "x Content-Type:%s; y", false, false, true));
 
     // Each failed attempt over the repeated units reads to the failure. Two matches follow it.
-    private static final List<QuadraticSearch> QUADRATIC_SEARCHES = List.of(
+    static final List<QuadraticSearch> QUADRATIC_SEARCHES = List.of(
             new QuadraticSearch("id=([^&]+)&x", "id=a", "&y", "id=b&xid=c&x"),
             new QuadraticSearch("x([^z]+)zq", "xa", "zr", "xbzqxczq"),
             new QuadraticSearch("(?i)x([^z]+)zq", "Xa", "zr", "xbZqXcZQ"),
@@ -64,7 +64,7 @@ public class TestTrinoScanPlan
             new QuadraticSearch("([ab]a*)c", "a", "bc", "bac"));
 
     // Lone continuation bytes, truncated sequences, and a byte that never occurs in UTF-8.
-    private static final List<byte[]> MALFORMED_SEQUENCES = List.of(
+    static final List<byte[]> MALFORMED_SEQUENCES = List.of(
             new byte[] {(byte) 0x80},
             new byte[] {(byte) 0xBF},
             new byte[] {(byte) 0xC3},
@@ -80,7 +80,7 @@ public class TestTrinoScanPlan
         }
     }
 
-    private record QuadraticSearch(String expression, String unit, String failure, String matches)
+    record QuadraticSearch(String expression, String unit, String failure, String matches)
     {
         Slice input(int units)
         {
@@ -1350,7 +1350,7 @@ public class TestTrinoScanPlan
         String expression = "^(?:(?<key>[a-z]+):(?<value>[^/]+))?/end$";
         TrinoScanPlan plan = analyze(expression);
         assertThat(plan).isNotNull();
-        assertThat(plan.operationCountForDiagnostics()).isEqualTo(10);
+        assertThat(plan.operationCount()).isEqualTo(10);
         assertThat(plan.operationsForDiagnostics()).isEqualTo("FORK,SAVE,RUN,SAVE,LITERAL,SAVE,RUN,SAVE,LITERAL,END");
         verifyAgainstJoni(expression, List.of("key:value/end", "/end", "key:/end", "key:例え😀/end", "key:value/end\n"));
         verifyAgainstJoni("^x([a-z]?)a$", List.of("xa", "xaa", "xba", "xbba", "xa\n"));
@@ -1844,7 +1844,7 @@ public class TestTrinoScanPlan
         String expression = "^" + prefix + "(?:w)?(?:x)?(?:y)?(?:z)?([w-z]+):$";
         TrinoScanPlan plan = analyze(expression);
         assertThat(plan).isNotNull();
-        assertThat(plan.operationCountForDiagnostics()).isEqualTo(33);
+        assertThat(plan.operationCount()).isEqualTo(33);
         String inputPrefix = "a:".repeat(13);
         verifyAgainstJoni(expression, List.of(inputPrefix + "wxyz:", inputPrefix + "w:", inputPrefix + "wxyz?", inputPrefix + ":"));
         assertThat(TrinoRegexp.compile(utf8Slice("^[ab]{1}:" + expression.substring(1))).pattern().usesTrinoScanPlanForDiagnostics()).isFalse();
@@ -1857,7 +1857,7 @@ public class TestTrinoScanPlan
         String expression = "^" + "[ab]{1}:".repeat(14) + "([^/]+)/([^;]+);([^|]+)\\|$";
         TrinoScanPlan plan = analyze(expression);
         assertThat(plan).isNotNull();
-        assertThat(plan.operationCountForDiagnostics()).isEqualTo(32);
+        assertThat(plan.operationCount()).isEqualTo(32);
         verifyAgainstJoni(expression, List.of("a:".repeat(14) + "first/second;third|", "b:".repeat(14) + "//;|"));
     }
 
@@ -2013,7 +2013,7 @@ public class TestTrinoScanPlan
         }
     }
 
-    private static PatternWitness generatedSequence(Random random, int depth)
+    static PatternWitness generatedSequence(Random random, int depth)
     {
         StringBuilder pattern = new StringBuilder();
         StringBuilder text = new StringBuilder();
@@ -2058,7 +2058,7 @@ public class TestTrinoScanPlan
         return new PatternWitness(pattern.toString(), text.toString());
     }
 
-    private record PatternWitness(String pattern, String text) {}
+    record PatternWitness(String pattern, String text) {}
 
     @Test
     public void testMalformedInputDoesNotRequireRe2Agreement()
@@ -2572,7 +2572,7 @@ public class TestTrinoScanPlan
      * Returns 400 views, each of up to 23 symbols drawn from {@code text} and then
      * {@code malformed}, with a byte on either side outside the view.
      */
-    private static List<Slice> randomSources(long seed, List<String> text, List<byte[]> malformed)
+    static List<Slice> randomSources(long seed, List<String> text, List<byte[]> malformed)
     {
         List<byte[]> symbols = new ArrayList<>();
         for (String value : text) {
@@ -2999,7 +2999,7 @@ public class TestTrinoScanPlan
         return start < 0 ? null : source.slice(start, match[2 * group + 1] - start);
     }
 
-    private static Slice callbackReplacement(List<Slice> groups)
+    static Slice callbackReplacement(List<Slice> groups)
     {
         DynamicSliceOutput output = new DynamicSliceOutput(16);
         output.writeByte('<');
