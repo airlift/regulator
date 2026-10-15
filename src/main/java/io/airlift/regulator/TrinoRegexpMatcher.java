@@ -26,7 +26,8 @@ import static java.util.Objects.requireNonNull;
  * may share a compiled pattern. Group values are zero-copy views: they survive reset but reflect
  * mutations to their original input storage. Do not mutate input while matching it.
  */
-public final class TrinoRegexpMatcher
+public sealed class TrinoRegexpMatcher
+        permits TrinoRegexpMatcher.CompiledScanMatcher
 {
     private final Re2Matcher matcher;
     private final LiteralAlternationSpanMatcher literalAlternation;
@@ -36,6 +37,17 @@ public final class TrinoRegexpMatcher
     private int nextStart;
     private boolean exhausted;
 
+    /**
+     * For a subclass that keeps its own state; the base class's matching state is unused.
+     */
+    private TrinoRegexpMatcher()
+    {
+        matcher = null;
+        literalAlternation = null;
+        fixedWidth = null;
+    }
+
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
     TrinoRegexpMatcher(Re2Matcher matcher)
     {
         this.matcher = requireNonNull(matcher, "matcher is null");
@@ -43,6 +55,7 @@ public final class TrinoRegexpMatcher
         fixedWidth = null;
     }
 
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
     TrinoRegexpMatcher(LiteralAlternationSpanMatcher literalAlternation, Slice input)
     {
         matcher = null;
@@ -51,6 +64,7 @@ public final class TrinoRegexpMatcher
         reset(input);
     }
 
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
     TrinoRegexpMatcher(FixedWidthByteSpanMatcher fixedWidth, Slice input)
     {
         matcher = null;
@@ -179,6 +193,15 @@ public final class TrinoRegexpMatcher
         return input.slice(start, end(group) - start);
     }
 
+    /**
+     * Returns a matcher retaining {@code retainedCapturingGroupCount} groups whose finds run the
+     * generated class of a compiled scan.
+     */
+    static TrinoRegexpMatcher compiledScan(CompiledTrinoScan scan, Slice input, int retainedCapturingGroupCount)
+    {
+        return CompiledScanMatcher.create(scan, input, retainedCapturingGroupCount);
+    }
+
     private void checkSpanGroup(int group)
     {
         if (span < 0) {
@@ -186,6 +209,108 @@ public final class TrinoRegexpMatcher
         }
         if (group != 0) {
             throw new IllegalArgumentException("group index out of range: " + group);
+        }
+    }
+
+    /**
+     * A matcher whose finds run a generated {@link CompiledTrinoScan}, with the results and
+     * exceptions of the interpreted matcher it replaces. A scan plan never matches empty, so each
+     * find resumes at the previous match end.
+     */
+    private static final class CompiledScanMatcher
+            extends TrinoRegexpMatcher
+    {
+        private final CompiledTrinoScan scan;
+        private final int[] groups;
+        private Slice input;
+        private int nextStart;
+        private boolean exhausted;
+        private boolean hasMatch;
+
+        private CompiledScanMatcher(CompiledTrinoScan scan, Slice input, int retainedCapturingGroupCount)
+        {
+            this.scan = requireNonNull(scan, "scan is null");
+            this.groups = new int[2 * (retainedCapturingGroupCount + 1)];
+            reset(input);
+        }
+
+        /**
+         * The declared type keeps verification of {@link TrinoRegexpMatcher} from loading this
+         * class.
+         */
+        static TrinoRegexpMatcher create(CompiledTrinoScan scan, Slice input, int retainedCapturingGroupCount)
+        {
+            return new CompiledScanMatcher(scan, input, retainedCapturingGroupCount);
+        }
+
+        @Override
+        public TrinoRegexpMatcher reset(Slice input)
+        {
+            this.input = requireNonNull(input, "input is null");
+            nextStart = 0;
+            exhausted = false;
+            hasMatch = false;
+            return this;
+        }
+
+        @Override
+        public boolean find()
+        {
+            if (!exhausted && scan.find(input, nextStart, groups)) {
+                hasMatch = true;
+                nextStart = groups[1];
+                return true;
+            }
+            exhausted = true;
+            hasMatch = false;
+            return false;
+        }
+
+        @Override
+        public int groupCount()
+        {
+            return (groups.length / 2) - 1;
+        }
+
+        @Override
+        public boolean matched(int group)
+        {
+            checkGroup(group);
+            return groups[2 * group] >= 0;
+        }
+
+        @Override
+        public int start(int group)
+        {
+            checkGroup(group);
+            return groups[2 * group];
+        }
+
+        @Override
+        public int end(int group)
+        {
+            checkGroup(group);
+            return groups[2 * group + 1];
+        }
+
+        @Override
+        public Slice group(int group)
+        {
+            int start = start(group);
+            if (start < 0) {
+                return null;
+            }
+            return input.slice(start, groups[2 * group + 1] - start);
+        }
+
+        private void checkGroup(int group)
+        {
+            if (!hasMatch) {
+                throw new IllegalStateException("no successful match");
+            }
+            if (group < 0 || group > groupCount()) {
+                throw new IllegalArgumentException("group index out of range: " + group);
+            }
         }
     }
 }

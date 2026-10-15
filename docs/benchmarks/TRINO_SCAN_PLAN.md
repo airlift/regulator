@@ -346,7 +346,9 @@ and final qualification remain governed by [METHODOLOGY.md](METHODOLOGY.md).
 Do not expand coverage based solely on aggregate speedups. Preserve the URL and
 mixed-plan controls at every stage. If a richer operation increases ordinary
 execution cost, compare a separate executor route before adding complexity to
-the common dispatch loop. Runtime bytecode generation is not part of this plan.
+the common dispatch loop. By default the plan generates no bytecode; the
+experimental option described in [Generated kernels](#generated-kernels)
+compiles an eligible pattern's plan into its own class.
 
 `BenchmarkTrinoScanProfiles` derives every pattern/input pair from the
 `OPTIONAL_MIXED` workload. `INTERLEAVED` preserves its row order; `GROUPED`
@@ -354,6 +356,8 @@ visits the same 504 pairs grouped by pattern. `PLAN_0` through `PLAN_11` each
 repeat one pattern's 42 inputs twelve times, preserving the same timed array
 length. Every configuration uses the same per-row input, pattern, and reusable
 matcher arrays. Setup does no matching that could pretrain the scan executor.
+The [generated-kernel benchmarks](#benchmarks) describe its `generateBytecode`
+and `generatedNeighbors` parameters.
 
 The `containsWithoutScanPlan`, `capturesWithoutScanPlan`, and
 `extractWithoutScanPlan` methods run the same rows without the scan plan. Each
@@ -396,3 +400,118 @@ six-bit operation indices. Fixed instance sizes are cached, and compilation
 computes each plan's retained size once before budget charging. Seeded
 generated-pattern tests include successful witnesses and mutations, so capture
 participation and retry behavior receive coverage alongside rejection.
+
+## Generated kernels
+
+`TrinoRegexp.Options.setGenerateBytecode(true)` is an experimental opt-in. It
+compiles an eligible pattern to a private `TrinoRegexp` subclass backed by a
+hidden class that `TrinoScanKernelGenerator` emits for the pattern's
+case-sensitive plan. `TrinoRegexp.usesGeneratedBytecode()` reports whether a
+pattern has one. The accepted trade-offs are recorded in
+[`REGULATOR_DECISIONS.md`](../../REGULATOR_DECISIONS.md#generated-trino-scan-kernels).
+
+### Eligibility and routing
+
+A pattern is eligible when it would compile to the base `TrinoRegexp` class
+with a case-sensitive plan that every operation but `contains` reaches.
+ASCII-folded plans, every other `TrinoRegexp` subclass, and a pattern whose
+class cannot be defined compile as they do without the option.
+
+Each operation keeps the route it has without the option, decided once at
+compile time. `contains` runs the generated class when full-Slice `find` runs
+the plan, and otherwise keeps its retained literal kernel. Every other
+operation and every matcher runs the generated class. A pattern with a
+single-byte matcher, which group-zero operations ask before the plan, or with
+a count that skips the plan, is not eligible. Such a pattern has no scan plan
+today, so the check only keeps a future change from routing it to generated
+code.
+
+### Generated class
+
+The class holds the plan's attempt method (`matchEndAnchored`,
+`matchPartial`, or `matchUnanchoredAt`), which keeps the interpreter's
+signature and encoded results. Each operation becomes straight-line code, with
+literals, their lengths, and branch targets as constants. Literals of at most
+16 bytes compare with one or two native-order loads, longer literals use
+`Arrays.mismatch` against a class constant, a run step passes its run to a
+copied run scanner that reads the run's bounds and members, and delimited
+captures search for their delimiter byte. Optional literals and forks push
+the same retry entries as the interpreter, and a failed attempt pops them and
+resumes through a switch on the saved operation, clearing the same capture
+slots.
+
+Those scanners, and every candidate scan below, are copies of the
+interpreter's helpers in `TrinoScanKernelSupport` and
+`VectorTrinoScanKernelSupport`, not calls to the originals, for the reason
+recorded in
+[`REGULATOR_DECISIONS.md`](../../REGULATOR_DECISIONS.md#generated-trino-scan-kernels).
+The search handoff to the ordinary engine and result assembly stay shared;
+they are not scan-loop helpers.
+
+An unanchored plan also gets `search` and, when full-Slice `find` would hand
+off to the ordinary boolean search, `searchBeforeHandoff`. Both mirror the
+interpreter's candidate search with its work budget and density limits as
+constants: the same candidates in the same order, the same required-literal
+check, and the same handoff offsets, after which the ordinary engine continues
+from the same position. A leading literal's candidate scan is chosen when the
+class is generated; a leading run passes its run to a copied candidate scanner. A whole-literal candidate scan probes
+the literal byte that the pattern's byte distribution chose, emitted as a
+constant, so a supplied distribution or preset moves the generated probe
+exactly as it moves the interpreter's.
+
+Each routed operation has a public static entry named for it with an `Entry`
+suffix, such as `containsEntry`; the suffix keeps the entries apart from the
+`CompiledTrinoScan` interface methods, which delegate to them. The subclass
+calls the interface once per operation, and the `generated*` accessors return
+the entries as method handles. The class is stateless and holds the pattern's
+`Re2`, plan, literals, and runs as class data.
+
+`TrinoRegexpMatcher` is sealed, permitting one nested subclass that runs the
+generated `find` into its own offset array. Without the option it is never
+loaded, so the existing matcher keeps its single implementation.
+
+Set the system property `io.airlift.regulator.scan-kernel.dump-directory` to a
+directory to write each generated class file there before it is defined.
+
+### Benchmarks
+
+Three shapes measure the option, each against a build without the option on
+the same hosts:
+
+- Patterns compiled without the option through the public API:
+  `BenchmarkTrinoScanPlan` with `generateBytecode=false`, and
+  `BenchmarkTrinoScanProfiles` with `generatedNeighbors` 0 and 4, described
+  below.
+- A constant pattern bound as a handle: `BenchmarkTrinoScanKernelDispatch`
+  defines a hidden caller per pattern that invokes an operation handle as a
+  class-data constant. `INTERPRETER` binds the public method to the pattern,
+  and `GENERATED` binds its generated handle, for `contains`, `count`,
+  `extract`, and `position` on four `OPTIONAL_MIXED` patterns, an
+  `UNANCHORED_MIXED` pattern, and the short `URL_SHORT` rows. `ISOLATED` runs
+  the target alone; `INTERLEAVED` first trains every pattern of the target's
+  workload. The generated API is resolved reflectively, so the same source runs
+  on a build without the option with `-p executor=INTERPRETER`.
+- Compiled patterns through the public API at shared call sites:
+  `BenchmarkTrinoScanPlan` and `BenchmarkTrinoScanProfiles` with
+  `generateBytecode=true`, where twelve compiled patterns share each call site.
+
+With `generatedNeighbors=4`, `BenchmarkTrinoScanProfiles` setup also compiles
+two anchored and two unanchored patterns from other workloads with generated
+bytecode and runs them through their own hidden callers, before the trial and
+before each iteration, so the twelve measured patterns, compiled without the
+option, run in a JVM that has loaded the compiled subclasses and generated
+classes. Its `WithoutScanPlan` methods, described under
+[Correctness and measurement](#correctness-and-measurement), then compare the
+interpreter beside generated neighbors with the ordinary engine. Generated
+bytecode is requested reflectively through
+`BenchmarkTrinoScanKernelDispatch`, so with `generateBytecode=false` and
+`generatedNeighbors=0`, the two sources also run on a build without the option.
+
+`BenchmarkTrinoScanKernelCost` is a plain main that reports, for 1, 100, and
+10,000 distinct patterns, the time per class to generate, define, and
+instantiate it (`buildMicrosPerClass`), method bytecode and classfile size per
+class, and metaspace, compressed class space, and code cache growth; run each
+count in its own JVM on an AWS host. The figures are cold first-use costs that
+include loading the generator and the classfile library, and the code cache
+figures are snapshots taken immediately after defining and after exercising the
+classes, without waiting for background compilation.

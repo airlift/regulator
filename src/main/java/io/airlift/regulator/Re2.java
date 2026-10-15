@@ -59,6 +59,21 @@ public final class Re2
         LOWERED_PROGRAM,
     }
 
+    /**
+     * How {@link #countMatches} counts a pattern with a case-sensitive scan plan. See
+     * {@link #trinoScanPlanCount()}.
+     */
+    enum TrinoScanPlanCount
+    {
+        // countMatches loops over the plan's search, or declines so that the caller counts with
+        // a group-zero matcher, whose finds reach the plan.
+        SEARCH_LOOP,
+        // countMatches makes one start-anchored boolean attempt.
+        SINGLE_ATTEMPT,
+        // countMatches answers without the plan.
+        OTHER,
+    }
+
     private static final byte BOOLEAN_FIND_GENERAL = 0;
     private static final byte BOOLEAN_FIND_EXACT_LITERAL = 1;
     private static final byte BOOLEAN_FIND_NULLABLE_START = 2;
@@ -1692,6 +1707,61 @@ public final class Re2
             case BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN -> plan.matchAsciiFoldedPartial(text, contextStart, contextEnd, false, groups);
             default -> throw new IllegalStateException("not a start-anchored scan strategy: " + trinoScanStrategy);
         };
+    }
+
+    /**
+     * Returns the case-sensitive scan plan that every capture search of this pattern runs, or
+     * {@code null}. As for {@link #startAnchoredTrinoScanPlan()}, the compile-time scan strategy
+     * is the whole decision, so no {@link #matchRegionInto} check runs ahead of the plan route of
+     * {@link #matchInternal} either. Only a caller's single-byte matcher can still answer first.
+     */
+    TrinoScanPlan caseSensitiveTrinoScanPlan()
+    {
+        return switch (trinoScanStrategy) {
+            case BOOLEAN_FIND_TRINO_SCAN, BOOLEAN_FIND_PARTIAL_TRINO_SCAN, BOOLEAN_FIND_UNANCHORED_TRINO_SCAN -> booleanPlans.trinoScanPlan();
+            default -> null;
+        };
+    }
+
+    /**
+     * Returns whether group-zero matchers of this pattern use a single-byte matcher, without
+     * loading it.
+     */
+    boolean hasSingleByteMatcher()
+    {
+        return singleByteMatcher != SingleByteMatcher.unsupported();
+    }
+
+    /**
+     * Returns how {@link #countMatches} counts this pattern, following its checks in order, for a
+     * pattern with a {@link #caseSensitiveTrinoScanPlan()}.
+     */
+    TrinoScanPlanCount trinoScanPlanCount()
+    {
+        if (trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_TRINO_SCAN) {
+            return TrinoScanPlanCount.SEARCH_LOOP;
+        }
+        if (exactLiteralLength > 0 ||
+                booleanPlans.disjointSuffixRepeatMatcher() != null ||
+                booleanFindStrategy == BOOLEAN_FIND_SINGLE_BYTE) {
+            return TrinoScanPlanCount.OTHER;
+        }
+        if (canMatchEmpty() || partialProg.hasDfaUnsupportedAssertions()) {
+            return TrinoScanPlanCount.SEARCH_LOOP;
+        }
+        if (requiredPrefix != null || partialProg.anchorStart()) {
+            return TrinoScanPlanCount.SINGLE_ATTEMPT;
+        }
+        return TrinoScanPlanCount.OTHER;
+    }
+
+    /**
+     * Continues on the ordinary engine an unanchored search of all of {@code text} that a
+     * scan-plan search handed off at {@code resume}, as {@link #finishTrinoScanSearch} does.
+     */
+    boolean continueTrinoScanSearch(Slice text, int resume, int[] groups)
+    {
+        return matchInternal(partialProg, text, 0, text.length(), resume, text.length(), Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES, false);
     }
 
     Dfa.CandidateStartCursor createCandidateStartCursor()

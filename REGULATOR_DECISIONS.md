@@ -1064,11 +1064,13 @@ character runs, optional bodies, nested captures, and terminal tails. Preserve
 specified matching and capture behavior on valid UTF-8. Malformed Trino input
 has a garbage-in, garbage-out contract, while bounded input access and normal
 matcher lifecycle behavior remain required. This does not relax RE2 or Java
-semantics or authorize a public malformed-input opt-in. The plan performs no
-runtime code generation, and the ordinary semantic program remains the
-fallback. The [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md) describes
-candidate selection, resume rules, the executors, and optional-capture
-execution.
+semantics or authorize a public malformed-input opt-in. By default the plan
+performs no runtime code generation; an experimental option may compile the
+plan into its own class, as described in
+[Generated Trino Scan Kernels](#generated-trino-scan-kernels). The ordinary
+semantic program remains the fallback. The
+[scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md) describes candidate
+selection, resume rules, the executors, and optional-capture execution.
 
 Plans may require the logical input start or perform unanchored search. An
 unanchored plan must begin, after capture saves, with a literal, an exact
@@ -1186,3 +1188,57 @@ Other protected controls retain unresolved differences. These are not accepted
 release trade-offs and require qualification before broad adoption. The
 development campaign evidence is in the private archive; see the
 [archive index](docs/benchmarks/trino-scan-plan-archives.json).
+
+## Generated Trino Scan Kernels
+
+`TrinoRegexp.Options.setGenerateBytecode` is an experimental opt-in, disabled
+by default, that compiles the case-sensitive scan plan of an eligible pattern
+into its own hidden class. The class holds the plan's attempt loop as
+straight-line code, with literals, their lengths, and branch targets as
+constants; a run step passes its run to a copied run scanner that reads the
+run's bounds and members. The class also holds the candidate search of an
+unanchored plan, with its limits as constants, and a static entry for each
+Trino operation. A hot pattern therefore shares neither the interpreter's
+operation dispatch nor its profiles with other plans. Its results, retries, captures, and search
+handoffs are those of the interpreter, which differential tests check
+operation by operation.
+
+- An eligible pattern compiles to a private `TrinoRegexp` subclass. Each
+  operation keeps the route it has without the option, decided once when the
+  pattern compiles: an operation that would run the case-sensitive plan runs
+  the generated class, and one that would run other Java, such as a retained
+  literal kernel for `contains`, still runs that Java.
+- A pattern is eligible when it would compile to the base `TrinoRegexp` class
+  with a case-sensitive plan that every operation but `contains` reaches. Any
+  other pattern, including one with an ASCII-folded plan, compiles exactly as
+  it does without the option.
+- Generation happens once, when the pattern is compiled, never on first match.
+  A pattern whose class cannot be generated or defined is silently
+  interpreted; generation never makes compilation fail and has no mandatory
+  mode.
+- The interpreter never references generated code. Without the option no
+  scan-plan, matcher, or `TrinoRegexp` path checks for it, and neither the
+  subclass nor any generated class is loaded.
+- An interpreted plan, with or without generated neighbors, must not be slower
+  than the same pattern without its scan plan.
+- Generated code calls its own copies of the interpreter's scan helpers, such
+  as the run, byte, literal, and candidate scans and UTF-8 decoding, rather than
+  sharing them. A shared helper is compiled from every caller's profile: with
+  generated neighbors running first, the interpreter's run scanners compiled
+  larger and stopped inlining into its attempt methods, which slowed
+  interpreted patterns. Code outside the scan loops, such as the
+  ordinary-engine handoff and result assembly, and trivial accessors stay
+  shared.
+- A caller holding a constant pattern can bind an operation's generated entry
+  directly through the `generated*` accessors, each an `Optional` of a
+  `MethodHandle` that is empty when the operation does not reach the plan.
+- `TrinoRegexpMatcher` is sealed rather than final, so the matcher of a
+  compiled pattern can run its generated search. Callers still cannot extend
+  it.
+- The class is defined in Regulator's package through a hidden-class lookup,
+  so it reaches package-private helpers without widening the public API, and
+  becomes unreachable with its pattern.
+- The class is not charged to the pattern's memory budget. That budget bounds
+  retained heap, and the class lives in metaspace and the code cache, which the
+  heap estimate cannot measure. A caller compiling many distinct patterns with
+  the option bounds that cost by bounding the patterns it retains.

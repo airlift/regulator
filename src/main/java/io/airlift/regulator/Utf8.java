@@ -35,6 +35,7 @@ final class Utf8
      * </ul>
      * <p>
      * For invalid sequences, returns {@code RUNE_ERROR} with width 1.
+     * Copied as {@code TrinoScanKernelSupport.decode}; keep the copy in step.
      */
     static long decode(byte[] bytes, int index, int end)
     {
@@ -206,6 +207,7 @@ final class Utf8
         }
     }
 
+    // Copied as TrinoScanKernelSupport.pack; keep the copy in step.
     private static long pack(int codePoint, int width)
     {
         return (((long) width) << 32) | (codePoint & 0xFFFFFFFFL);

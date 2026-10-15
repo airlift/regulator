@@ -24,6 +24,7 @@ public class TestBenchmarkTrinoScanProfiles
 {
     @Test
     public void testSelectionsPreserveInputsAndResults()
+            throws Throwable
     {
         BenchmarkTrinoScanPlan.BenchmarkData source = new BenchmarkTrinoScanPlan.BenchmarkData();
         source.workload = "OPTIONAL_MIXED";
@@ -31,35 +32,38 @@ public class TestBenchmarkTrinoScanProfiles
         source.setup();
         TrinoRegexp[] patterns = Arrays.stream(source.expressions).map(TrinoRegexp::compile).toArray(TrinoRegexp[]::new);
         BenchmarkTrinoScanProfiles benchmark = new BenchmarkTrinoScanProfiles();
-        for (int selected = -2; selected < patterns.length; selected++) {
-            String selection = selected == -2 ? "INTERLEAVED" : selected == -1 ? "GROUPED" : "PLAN_" + selected;
-            BenchmarkTrinoScanProfiles.BenchmarkData contains = data(selection);
-            BenchmarkTrinoScanProfiles.BenchmarkData captures = data(selection);
-            BenchmarkTrinoScanProfiles.BenchmarkData extract = data(selection);
-            int[] occurrences = new int[source.inputs.length];
-            for (int row = 0; row < contains.inputs.length; row++) {
-                int sourceRow = contains.sourceRows[row];
-                occurrences[sourceRow]++;
-                assertThat(contains.inputs[row]).as("%s row %s", selection, row).isEqualTo(source.inputs[sourceRow]);
-                assertThat(contains.inputs[row].byteArrayOffset()).as("%s row %s", selection, row).isEqualTo(source.inputs[sourceRow].byteArrayOffset());
-                TrinoRegexp pattern = patterns[sourceRow % patterns.length];
-                assertThat(benchmark.contains(contains)).as("%s row %s", selection, row).isEqualTo(pattern.contains(source.inputs[sourceRow]));
-                assertThat(benchmark.extract(extract)).as("%s row %s", selection, row).isEqualTo(pattern.extract(source.inputs[sourceRow], 1));
-                assertThat(benchmark.captures(captures)).as("%s row %s", selection, row).isEqualTo(checksum(pattern, source.inputs[sourceRow]));
+        for (boolean generateBytecode : new boolean[] {false, true}) {
+            for (int selected = -2; selected < patterns.length; selected++) {
+                String selection = selected == -2 ? "INTERLEAVED" : selected == -1 ? "GROUPED" : "PLAN_" + selected;
+                BenchmarkTrinoScanProfiles.BenchmarkData contains = data(selection, generateBytecode);
+                BenchmarkTrinoScanProfiles.BenchmarkData captures = data(selection, generateBytecode);
+                BenchmarkTrinoScanProfiles.BenchmarkData extract = data(selection, generateBytecode);
+                assertThat(contains.patterns).as(selection).allSatisfy(pattern -> assertThat(pattern.usesGeneratedBytecode()).isEqualTo(generateBytecode));
+                int[] occurrences = new int[source.inputs.length];
+                for (int row = 0; row < contains.inputs.length; row++) {
+                    int sourceRow = contains.sourceRows[row];
+                    occurrences[sourceRow]++;
+                    assertThat(contains.inputs[row]).as("%s row %s", selection, row).isEqualTo(source.inputs[sourceRow]);
+                    assertThat(contains.inputs[row].byteArrayOffset()).as("%s row %s", selection, row).isEqualTo(source.inputs[sourceRow].byteArrayOffset());
+                    TrinoRegexp pattern = patterns[sourceRow % patterns.length];
+                    assertThat(benchmark.contains(contains)).as("%s row %s", selection, row).isEqualTo(pattern.contains(source.inputs[sourceRow]));
+                    assertThat(benchmark.extract(extract)).as("%s row %s", selection, row).isEqualTo(pattern.extract(source.inputs[sourceRow], 1));
+                    assertThat(benchmark.captures(captures)).as("%s row %s", selection, row).isEqualTo(checksum(pattern, source.inputs[sourceRow]));
+                }
+                for (int row = 0; row < occurrences.length; row++) {
+                    int expected = selected < 0 ? 1 : row % patterns.length == selected ? patterns.length : 0;
+                    assertThat(occurrences[row]).as("%s row %s", selection, row).isEqualTo(expected);
+                }
+                // Every method wraps around to the first row.
+                TrinoRegexp first = patterns[contains.sourceRows[0] % patterns.length];
+                assertThat(benchmark.contains(contains)).as(selection).isEqualTo(first.contains(contains.inputs[0]));
+                assertThat(benchmark.extract(extract)).as(selection).isEqualTo(first.extract(extract.inputs[0], 1));
+                assertThat(benchmark.captures(captures)).as(selection).isEqualTo(checksum(first, captures.inputs[0]));
             }
-            for (int row = 0; row < occurrences.length; row++) {
-                int expected = selected < 0 ? 1 : row % patterns.length == selected ? patterns.length : 0;
-                assertThat(occurrences[row]).as("%s row %s", selection, row).isEqualTo(expected);
-            }
-            // Every method wraps around to the first row.
-            TrinoRegexp first = patterns[contains.sourceRows[0] % patterns.length];
-            assertThat(benchmark.contains(contains)).as(selection).isEqualTo(first.contains(contains.inputs[0]));
-            assertThat(benchmark.extract(extract)).as(selection).isEqualTo(first.extract(extract.inputs[0], 1));
-            assertThat(benchmark.captures(captures)).as(selection).isEqualTo(checksum(first, captures.inputs[0]));
         }
 
-        BenchmarkTrinoScanProfiles.BenchmarkData interleaved = data("INTERLEAVED");
-        BenchmarkTrinoScanProfiles.BenchmarkData grouped = data("GROUPED");
+        BenchmarkTrinoScanProfiles.BenchmarkData interleaved = data("INTERLEAVED", false);
+        BenchmarkTrinoScanProfiles.BenchmarkData grouped = data("GROUPED", false);
         assertThat(grouped.sourceRows).isNotEqualTo(interleaved.sourceRows);
         int rowsPerPlan = source.inputs.length / patterns.length;
         for (int row = 0; row < grouped.sourceRows.length; row++) {
@@ -68,9 +72,9 @@ public class TestBenchmarkTrinoScanProfiles
         }
 
         // The patterns without the scan plan give the results of the measured patterns.
-        BenchmarkTrinoScanProfiles.BenchmarkData containsWithoutScanPlan = data("INTERLEAVED");
-        BenchmarkTrinoScanProfiles.BenchmarkData capturesWithoutScanPlan = data("INTERLEAVED");
-        BenchmarkTrinoScanProfiles.BenchmarkData extractWithoutScanPlan = data("INTERLEAVED");
+        BenchmarkTrinoScanProfiles.BenchmarkData containsWithoutScanPlan = data("INTERLEAVED", false);
+        BenchmarkTrinoScanProfiles.BenchmarkData capturesWithoutScanPlan = data("INTERLEAVED", false);
+        BenchmarkTrinoScanProfiles.BenchmarkData extractWithoutScanPlan = data("INTERLEAVED", false);
         assertThat(containsWithoutScanPlan.patternsWithoutScanPlan).allSatisfy(pattern -> assertThat(pattern.usesTrinoScanPlanForDiagnostics()).isFalse());
         for (int row = 0; row < source.inputs.length; row++) {
             TrinoRegexp pattern = patterns[row % patterns.length];
@@ -79,6 +83,13 @@ public class TestBenchmarkTrinoScanProfiles
             assertThat(benchmark.extractWithoutScanPlan(extractWithoutScanPlan)).as("row %s", row).isEqualTo(pattern.extract(input, 1));
             assertThat(benchmark.capturesWithoutScanPlan(capturesWithoutScanPlan)).as("row %s", row).isEqualTo(checksum(pattern, input));
         }
+
+        // Generated neighbors run beside the measured patterns, which stay without generated code.
+        BenchmarkTrinoScanProfiles.BenchmarkData neighbors = data("INTERLEAVED", false, 4);
+        neighbors.runNeighbors();
+        assertThat(neighbors.patterns).allSatisfy(pattern -> assertThat(pattern.usesGeneratedBytecode()).isFalse());
+        assertThat(neighbors.sourceRows).isEqualTo(interleaved.sourceRows);
+        assertThat(benchmark.contains(neighbors)).isEqualTo(patterns[neighbors.sourceRows[0] % patterns.length].contains(neighbors.inputs[0]));
     }
 
     private static long checksum(TrinoRegexp pattern, Slice input)
@@ -95,10 +106,17 @@ public class TestBenchmarkTrinoScanProfiles
         return checksum;
     }
 
-    private static BenchmarkTrinoScanProfiles.BenchmarkData data(String selection)
+    private static BenchmarkTrinoScanProfiles.BenchmarkData data(String selection, boolean generateBytecode)
+    {
+        return data(selection, generateBytecode, 0);
+    }
+
+    private static BenchmarkTrinoScanProfiles.BenchmarkData data(String selection, boolean generateBytecode, int generatedNeighbors)
     {
         BenchmarkTrinoScanProfiles.BenchmarkData data = new BenchmarkTrinoScanProfiles.BenchmarkData();
         data.selection = selection;
+        data.generateBytecode = generateBytecode;
+        data.generatedNeighbors = generatedNeighbors;
         data.setup();
         return data;
     }
