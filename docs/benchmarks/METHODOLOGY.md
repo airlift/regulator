@@ -148,6 +148,7 @@ Representative JMH classes include:
 | `BenchmarkExpressionPlans` | Direct expression plans and general controls |
 | `BenchmarkEverydayTrinoRegexp` | Application-shaped Trino operations over rotating Slice values |
 | `BenchmarkTrinoRegexp` | Fixed-haystack Trino operation diagnostics |
+| `BenchmarkTrinoRows` | [Normative Trino rows](#normative-trino-rows): one Trino function per real corpus row |
 
 Compile the test classes and resolve their classpath with Maven:
 
@@ -225,6 +226,32 @@ runtime `did-not-finish` outcome rather than being reclassified as incompatible.
 
 Run semantic smoke tests before timing either side. A comparator mismatch is a
 correctness problem, not a performance result.
+
+## Normative Trino rows
+
+`BenchmarkTrinoRows` measures the paths Trino calls once per row, such as
+literal scans. A query costs roughly rows × (fixed per-call cost + per-byte
+cost × row length), so a normative workload has:
+
+- real corpus rows with their natural lengths, never synthetic padding
+- 4,096 sampled rows per workload, repeats kept as they occur in the corpus,
+  visited in one fixed shuffled order over all 4,096 rows, rather than a few
+  repeating rows
+- mostly non-matching rows, with the hit rate recorded for each literal
+- literals chosen by a written rule over first-byte frequency and row hit rate
+- results per row: ns/row, the absolute ns difference, and ns/byte
+
+The workloads are OpenSubtitles English, Russian, and Chinese, nginx and Apache
+access logs, six pooled loghub application logs, and a 32 MiB prefix of one GH
+Archive hour. The
+[workload guide](../../tools/re2-benchmark/trino-rows/README.md) defines the
+rows, the literal rule, the corpus provisioning, and the core-tier and
+full-suite JMH arguments. The benchmark's Joni twin, `BenchmarkTrinoRowsJoni`
+in the [Trino/Joni comparator](../../tools/re2-benchmark/trino-joni/README.md),
+runs the same cells through Trino's Joni functions. The
+[maintenance guide](../MAINTAINING_REGULATOR.md#normative-trino-rows-gate)
+defines how these results gate a change against base and Joni, and which
+benchmarks serve as its edge controls.
 
 ## AWS execution
 

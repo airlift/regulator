@@ -7,6 +7,7 @@ REGULATOR_DIR=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 source "${SCRIPT_DIR}/pins.env"
 
 WORK_DIR=${TRINO_COMPARATOR_WORK_DIR:-${REGULATOR_DIR}/target/trino-joni-comparator}
+ROWS_CORPUS_DIRECTORY=${TRINO_COMPARATOR_ROWS_CORPUS_DIRECTORY:-}
 NATIVE_ACCESS=${TRINO_COMPARATOR_NATIVE_ACCESS:-true}
 CLASSPATH_FILE=${WORK_DIR}/classpath.txt
 PROVENANCE_FILE=${WORK_DIR}/provenance.properties
@@ -47,6 +48,8 @@ grep -Fqx "joni_version=${TRINO_COMPARATOR_JONI_VERSION}" "${PROVENANCE_FILE}"
 grep -Fqx "joni_jar_sha256=${TRINO_COMPARATOR_JONI_SHA256}" "${PROVENANCE_FILE}"
 grep -Fqx "everyday_benchmark_source_sha256=$(sha256 "${SCRIPT_DIR}/src/BenchmarkEverydayTrinoJoni.java")" "${PROVENANCE_FILE}"
 grep -Fqx "everyday_verifier_source_sha256=$(sha256 "${SCRIPT_DIR}/src/EverydayTrinoJoniVerifier.java")" "${PROVENANCE_FILE}"
+grep -Fqx "rows_benchmark_source_sha256=$(sha256 "${SCRIPT_DIR}/src/BenchmarkTrinoRowsJoni.java")" "${PROVENANCE_FILE}"
+grep -Fqx "rows_verifier_source_sha256=$(sha256 "${SCRIPT_DIR}/src/TrinoRowsJoniVerifier.java")" "${PROVENANCE_FILE}"
 grep -Fqx "rebar_runner_source_sha256=$(sha256 "${SCRIPT_DIR}/src/RebarJoniRunner.java")" "${PROVENANCE_FILE}"
 grep -Fqx "benchmark_source_sha256=$(sha256 "${SCRIPT_DIR}/src/BenchmarkTrinoJoniComparator.java")" "${PROVENANCE_FILE}"
 grep -Fqx "verifier_source_sha256=$(sha256 "${SCRIPT_DIR}/src/TrinoJoniComparatorVerifier.java")" "${PROVENANCE_FILE}"
@@ -76,8 +79,8 @@ expected_benchmarks=$(mktemp)
 trap 'rm -f "${actual_benchmarks}" "${expected_benchmarks}"' EXIT
 
 java "${java_access_arguments[@]}" -cp "${classpath}" \
-    org.openjdk.jmh.Main -l '^io\.trino\.operator\.scalar\.(BenchmarkEverydayTrinoJoni|BenchmarkTrinoJoniComparator)\..*$' |
-    grep -E '^io\.trino\.operator\.scalar\.(BenchmarkEverydayTrinoJoni|BenchmarkTrinoJoniComparator)\.' |
+    org.openjdk.jmh.Main -l '^io\.trino\.operator\.scalar\.(BenchmarkEverydayTrinoJoni|BenchmarkTrinoJoniComparator|BenchmarkTrinoRowsJoni)\..*$' |
+    grep -E '^io\.trino\.operator\.scalar\.(BenchmarkEverydayTrinoJoni|BenchmarkTrinoJoniComparator|BenchmarkTrinoRowsJoni)\.' |
     sort > "${actual_benchmarks}"
 cat > "${expected_benchmarks}" <<'EOF'
 io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.contains
@@ -104,6 +107,12 @@ io.trino.operator.scalar.BenchmarkTrinoJoniComparator.replaceLambdaRegulator
 io.trino.operator.scalar.BenchmarkTrinoJoniComparator.replaceRegulator
 io.trino.operator.scalar.BenchmarkTrinoJoniComparator.splitJoni
 io.trino.operator.scalar.BenchmarkTrinoJoniComparator.splitRegulator
+io.trino.operator.scalar.BenchmarkTrinoRowsJoni.contains
+io.trino.operator.scalar.BenchmarkTrinoRowsJoni.count
+io.trino.operator.scalar.BenchmarkTrinoRowsJoni.extract
+io.trino.operator.scalar.BenchmarkTrinoRowsJoni.position
+io.trino.operator.scalar.BenchmarkTrinoRowsJoni.replace
+io.trino.operator.scalar.BenchmarkTrinoRowsJoni.split
 EOF
 diff -u "${expected_benchmarks}" "${actual_benchmarks}"
 
@@ -118,6 +127,13 @@ java \
     "${java_access_arguments[@]}" \
     -cp "${classpath}" \
     io.trino.operator.scalar.EverydayTrinoJoniVerifier
+
+java \
+    --add-modules jdk.incubator.vector \
+    "${java_access_arguments[@]}" \
+    -cp "${classpath}" \
+    io.trino.operator.scalar.TrinoRowsJoniVerifier \
+    ${ROWS_CORPUS_DIRECTORY:+"${ROWS_CORPUS_DIRECTORY}"}
 
 "${SCRIPT_DIR}/run-rebar.sh" --version | grep -F 'Trino Joni 2.1.5.3' >/dev/null
 

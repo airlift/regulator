@@ -155,6 +155,33 @@ affected qualification shards or complete qualification matrix in addition to
 focused controls. Do not commit exploratory outputs. The preliminary 1.0 report
 is an explicitly labeled publication snapshot, not an exploratory campaign log.
 
+### Normative Trino rows gate
+
+Judge a change to a path Trino calls once per row, such as a literal scan, on
+the [normative Trino rows](benchmarks/METHODOLOGY.md#normative-trino-rows),
+with Joni measured on the same rows. Start each host with an A/A run of the
+base against itself. A difference is real only when every candidate fork falls
+outside the base fork range and the ratio exceeds that host's A/A spread.
+
+Two rules are hard on each host the change's
+[classification](#change-classification) requires:
+
+1. each workload's geomean over its grid literals and functions is no worse
+   than base beyond noise
+2. no cell turns from a win against Joni into a loss
+
+List every cell that loses to base beyond noise in the change's
+description, with its absolute ns/row, and weigh it against the wins; the
+reviewer decides. GH Archive's long rows are a normative workload, not an edge
+control. Hand-picked query literals are reported as their own flagged group and
+never enter a geomean.
+
+The edge controls are `BenchmarkTrinoRegexp`'s `literalSparse` cases, which
+search long inputs, and `BenchmarkEverydayTrinoRegexp`'s `trinoLiteral`. Judge
+them the same way, outside the geomean. An edge loss that grows with input size
+fails the gate. Record any accepted edge loss, with its cause, in
+`REGULATOR_DECISIONS.md`. An edge win never offsets a normative loss.
+
 ## Validating a performance change
 
 Use this sequence for a focused repair or optimization. Full release collection

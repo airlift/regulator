@@ -41,3 +41,10 @@ workloads by URL, revision, size, checksum, and license, and
 `literal-probe-workloads.tsv` lists those workloads. The corpora are fetched by
 `language/literal_probe.py` and never committed; see the
 [language guide](../language/README.md#literal-probe-distributions).
+
+`trino-row-corpus.tsv` pins the corpora of the normative Trino row workloads
+by location, revision, size, checksum, and license. The subtitle corpora come
+from repository resources, and the access-log entries equal those of
+`literal-probe-corpus.tsv`. `trino-rows/trino_rows.py` fetches the others and
+generates the workload manifests; see the
+[workload guide](../trino-rows/README.md).
