@@ -245,12 +245,13 @@ public class TestPrefixProbeAcceleration
                 int probe = pattern.forwardProgramForDiagnostics().prefixAccelProbeOffset();
                 asciiNonLetterProbe |= probe > 0 && literal[probe] >= 0 && !Character.isLetter(literal[probe]);
                 nonAsciiProbe |= probe > 0 && literal[probe] < 0;
-                // A Trino pattern of the bare literal plans the exact-literal search, which uses
-                // the same prefix scan.
+                // A Trino pattern of the bare literal plans the exact-literal search.
                 TrinoRegexp trino = TrinoRegexp.compile(Slices.utf8Slice(value), TrinoRegexp.Options.defaults().setByteFrequencies(options.byteFrequencies()));
                 assertThat(trino.pattern().hasExactLiteralSpan()).isTrue();
                 assertThat(trino.pattern().booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.EXACT_LITERAL);
                 assertThat(trino.pattern().forwardProgramForDiagnostics().prefixAccelProbeOffset()).as(value).isEqualTo(probe);
+                assertThat(trino.pattern().exactLiteralSpanUsesPrefixScan(63)).as(value).isEqualTo(probe > 0);
+                assertThat(trino.pattern().exactLiteralSpanUsesPrefixScan(64)).as(value).isTrue();
                 trinoProbe |= probe > 0;
                 byte[] alphabet = (value + "0123").getBytes(UTF_8);
                 for (int iteration = 0; iteration < 200; iteration++) {

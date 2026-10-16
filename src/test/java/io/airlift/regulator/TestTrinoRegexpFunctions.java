@@ -149,6 +149,13 @@ public class TestTrinoRegexpFunctions
         assertExactLiteralOperationDoesNotCreateDfa(regexp -> assertThat(strings(regexp.split(source))).containsExactly("z", "", ""));
         assertExactLiteralOperationDoesNotCreateDfa(regexp -> assertThat(regexp.replace(source, utf8("_"))).isEqualTo(utf8("z__")));
         assertExactLiteralOperationDoesNotCreateDfa(regexp -> assertThat(regexp.replace(source, _ -> utf8("_"))).isEqualTo(utf8("z__")));
+
+        // Rows of at least 64 bytes take the prefix scan, which searches the backing array, so
+        // check its offset translation too.
+        Slice longBacking = utf8("!" + "z".repeat(60) + "abc" + "z".repeat(10) + "abc" + "z".repeat(64) + "?");
+        Slice longSource = Slices.wrappedBuffer(longBacking.byteArray(), longBacking.byteArrayOffset() + 1, longBacking.length() - 2);
+        assertExactLiteralOperationDoesNotCreateDfa(regexp -> assertThat(regexp.count(longSource)).isEqualTo(2));
+        assertExactLiteralOperationDoesNotCreateDfa(regexp -> assertThat(regexp.position(longSource, 1, 2)).isEqualTo(74));
     }
 
     @Test
