@@ -29,7 +29,7 @@ import java.util.List;
  */
 final class TrinoLikeWildcardMatcher
 {
-    private static final int MATCH_ANY = -1;
+    static final int MATCH_ANY = -1;
     private static final int MATCH_NONE = -2;
     // A malformed character equals no literal code point and no match marker.
     private static final int INVALID_CHARACTER = Integer.MIN_VALUE;
@@ -74,6 +74,32 @@ final class TrinoLikeWildcardMatcher
         }
     }
 
+    /**
+     * Returns what each pattern position matches, a code point or {@link #MATCH_ANY}, in pattern
+     * order. Position {@code i} leads from state {@code i} to state {@code i + 1}; the last state
+     * accepts.
+     */
+    int[] positions()
+    {
+        return Arrays.copyOf(match, acceptState);
+    }
+
+    /**
+     * Returns, for each state, whether a {@code %} before the next position lets it consume any
+     * character and stay.
+     */
+    boolean[] loopback()
+    {
+        return loopback.clone();
+    }
+
+    boolean exact()
+    {
+        return exact;
+    }
+
+    // TrinoLikeKernelGenerator emits an equivalent bit-parallel matcher for generated LIKE
+    // patterns; keep the two in step.
     boolean matches(Slice input, int offset, int length)
     {
         byte[] bytes = input.byteArray();
@@ -198,6 +224,7 @@ final class TrinoLikeWildcardMatcher
 
     // A character is well formed exactly when it is as long as its lead byte announces;
     // every shorter non-ASCII character is a maximal subpart of malformed input.
+    // Copied as TrinoLikeKernelSupport.nonAsciiCodePoint; keep the copy in step.
     private static int nonAsciiCodePoint(byte[] input, int position, int width)
     {
         int header = input[position] & 0xFF;

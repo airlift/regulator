@@ -92,7 +92,12 @@ final class LiteralGapMatcher
         return new LiteralGapMatcher(literals, Arrays.copyOf(codePointGaps, gapCount), false);
     }
 
-    int[] codePointGapsForDiagnostics()
+    List<LiteralSearchKernel> literals()
+    {
+        return List.of(literals);
+    }
+
+    int[] codePointGaps()
     {
         return codePointGaps.clone();
     }
@@ -106,6 +111,8 @@ final class LiteralGapMatcher
         return retainedSize;
     }
 
+    // TrinoLikeKernelGenerator emits a copy of this search for generated LIKE patterns; keep the
+    // copy in step.
     boolean matches(Slice input, int offset, int length)
     {
         int end = offset + length;

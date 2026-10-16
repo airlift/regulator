@@ -8,6 +8,8 @@ from pathlib import Path
 
 
 METHODS = ("candidate", "trinoSql", "trinoOptimized")
+# Present only when the run selected the generated-bytecode method; then every scenario needs it.
+OPTIONAL_METHODS = ("candidateGenerated",)
 SCENARIOS = {
     "ANY_ASCII",
     "ANY_MULTIBYTE",
@@ -30,7 +32,7 @@ def load(path):
     for result in results:
         method = result["benchmark"].rsplit(".", 1)[-1]
         scenario = result["params"]["scenario"]
-        if method not in METHODS:
+        if method not in METHODS and method not in OPTIONAL_METHODS:
             raise ValueError(f"unexpected benchmark method: {method}")
         if scenario not in SCENARIOS:
             raise ValueError(f"unexpected benchmark scenario: {scenario}")
@@ -50,7 +52,8 @@ def load(path):
     scenarios = {scenario for _, scenario in rows}
     if scenarios != SCENARIOS:
         raise ValueError(f"incomplete Trino LIKE scenario set: {sorted(scenarios)}")
-    expected = {(method, scenario) for method in METHODS for scenario in SCENARIOS}
+    methods = METHODS + tuple(method for method in OPTIONAL_METHODS if any(key[0] == method for key in rows))
+    expected = {(method, scenario) for method in methods for scenario in SCENARIOS}
     if set(rows) != expected:
         raise ValueError("incomplete Trino LIKE benchmark matrix")
     return rows, sorted(scenarios)
@@ -63,14 +66,20 @@ def summarize(path):
         candidate = scores["candidate", scenario]
         sql = scores["trinoSql", scenario]
         optimized = scores["trinoOptimized", scenario]
-        rows.append({
+        row = {
             "scenario": scenario,
             "candidate_ns": candidate,
             "trino_sql_ns": sql,
             "trino_optimized_ns": optimized,
             "candidate_to_sql": candidate / sql,
             "candidate_to_optimized": candidate / optimized,
-        })
+        }
+        generated = scores.get(("candidateGenerated", scenario))
+        if generated is not None:
+            row["candidate_generated_ns"] = generated
+            row["candidate_generated_to_sql"] = generated / sql
+            row["candidate_generated_to_optimized"] = generated / optimized
+        rows.append(row)
     return rows
 
 
@@ -82,16 +91,30 @@ def write_csv(path, rows):
 
 
 def write_report(path, rows):
+    generated = "candidate_generated_ns" in rows[0]
     with path.open("w", encoding="utf-8") as output:
         output.write("# Trino LIKE Comparison\n\n")
         output.write("Lower candidate/Trino ratios are better.\n\n")
-        output.write("| Scenario | Candidate | Trino SQL | Trino optimized | Candidate/SQL | Candidate/optimized |\n")
-        output.write("|---|---:|---:|---:|---:|---:|\n")
-        for row in rows:
+        if generated:
             output.write(
-                f"| {row['scenario']} | {row['candidate_ns']:.3f} ns | "
-                f"{row['trino_sql_ns']:.3f} ns | {row['trino_optimized_ns']:.3f} ns | "
-                f"{row['candidate_to_sql']:.3f}x | {row['candidate_to_optimized']:.3f}x |\n")
+                "| Scenario | Candidate | Generated | Trino SQL | Trino optimized | Candidate/SQL | "
+                "Candidate/optimized | Generated/SQL | Generated/optimized |\n")
+            output.write("|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        else:
+            output.write("| Scenario | Candidate | Trino SQL | Trino optimized | Candidate/SQL | Candidate/optimized |\n")
+            output.write("|---|---:|---:|---:|---:|---:|\n")
+        for row in rows:
+            if generated:
+                output.write(
+                    f"| {row['scenario']} | {row['candidate_ns']:.3f} ns | {row['candidate_generated_ns']:.3f} ns | "
+                    f"{row['trino_sql_ns']:.3f} ns | {row['trino_optimized_ns']:.3f} ns | "
+                    f"{row['candidate_to_sql']:.3f}x | {row['candidate_to_optimized']:.3f}x | "
+                    f"{row['candidate_generated_to_sql']:.3f}x | {row['candidate_generated_to_optimized']:.3f}x |\n")
+            else:
+                output.write(
+                    f"| {row['scenario']} | {row['candidate_ns']:.3f} ns | "
+                    f"{row['trino_sql_ns']:.3f} ns | {row['trino_optimized_ns']:.3f} ns | "
+                    f"{row['candidate_to_sql']:.3f}x | {row['candidate_to_optimized']:.3f}x |\n")
 
 
 def main():

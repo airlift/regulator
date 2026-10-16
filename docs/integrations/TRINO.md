@@ -128,6 +128,16 @@ pattern and requested operation permit them. For example, `count` can use
 single-byte, repeated-byte, or literal counting paths. The compiled RE2 program
 remains available as the fallback; specialization is specific to each operation.
 
+`TrinoLikePattern.Options.setGenerateBytecode(true)` is the same experimental
+option for LIKE: each pattern compiled with it defines its own hidden class,
+whatever its plan, and `usesGeneratedBytecode()` reports whether it has one.
+For a constant pattern, `generatedMatches()` returns the generated code as an
+`Optional<MethodHandle>` of type `(Slice)boolean`, which a generated
+expression can bind as a constant instead of calling `matches`; it is empty
+only when the pattern stays interpreted. Variable patterns use `matches`.
+Each successful generation defines a new hidden class, so compile patterns that
+are not cached, such as a different pattern on every row, without this option.
+
 See [`reference/languages/TRINO_LIKE.md`](../reference/languages/TRINO_LIKE.md).
 
 ## Public API expectations

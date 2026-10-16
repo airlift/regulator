@@ -22,6 +22,8 @@ final class LiteralMatchKernel
     // The first and last words overlap for non-power-of-two lengths. Together they
     // cover every literal byte without reading outside the matched range. This
     // byte-equality kernel has no regex or LIKE language semantics of its own.
+    // TrinoLikeKernelGenerator emits a copy of these comparisons for the short literals of a
+    // generated LIKE pattern; keep the copy in step.
     static final class ShortLiteral
     {
         private final int width;
