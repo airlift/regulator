@@ -143,7 +143,7 @@ Representative JMH classes include:
 | `BenchmarkBoundedCharacterClassCounter` | Specialized counting versus repeated matching |
 | `BenchmarkRe2PublicApi` | Boolean, caller-buffer, result, and matcher APIs |
 | `BenchmarkTrinoScanPlan` | [Trino scan-plan integration](TRINO_SCAN_PLAN.md): public operations, mixed plans, suffix semantics, and fallback controls |
-| `BenchmarkTrinoScanProfiles` | The twelve plans of the `BenchmarkTrinoScanPlan` `OPTIONAL_MIXED` workload, run individually, interleaved, or grouped to investigate shared execution profiles |
+| `BenchmarkTrinoScanProfiles` | The twelve plans of the `BenchmarkTrinoScanPlan` `OPTIONAL_MIXED` workload, run individually, interleaved, or grouped to investigate shared execution profiles, and the same rows without the scan plan |
 | `BenchmarkClickBenchRegexp` | [ClickBench URL pattern](CLICKBENCH_REGEXP.md): dot-all matching, capture, replacement, and host/path scaling |
 | `BenchmarkExpressionPlans` | Direct expression plans and general controls |
 | `BenchmarkEverydayTrinoRegexp` | Application-shaped Trino operations over rotating Slice values |

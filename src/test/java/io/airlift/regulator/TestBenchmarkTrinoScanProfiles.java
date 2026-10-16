@@ -66,6 +66,19 @@ public class TestBenchmarkTrinoScanProfiles
             assertThat(interleaved.sourceRows[row] % patterns.length).as("INTERLEAVED row %s", row).isEqualTo(row % patterns.length);
             assertThat(grouped.sourceRows[row] % patterns.length).as("GROUPED row %s", row).isEqualTo(row / rowsPerPlan);
         }
+
+        // The patterns without the scan plan give the results of the measured patterns.
+        BenchmarkTrinoScanProfiles.BenchmarkData containsWithoutScanPlan = data("INTERLEAVED");
+        BenchmarkTrinoScanProfiles.BenchmarkData capturesWithoutScanPlan = data("INTERLEAVED");
+        BenchmarkTrinoScanProfiles.BenchmarkData extractWithoutScanPlan = data("INTERLEAVED");
+        assertThat(containsWithoutScanPlan.patternsWithoutScanPlan).allSatisfy(pattern -> assertThat(pattern.usesTrinoScanPlanForDiagnostics()).isFalse());
+        for (int row = 0; row < source.inputs.length; row++) {
+            TrinoRegexp pattern = patterns[row % patterns.length];
+            Slice input = source.inputs[row];
+            assertThat(benchmark.containsWithoutScanPlan(containsWithoutScanPlan)).as("row %s", row).isEqualTo(pattern.contains(input));
+            assertThat(benchmark.extractWithoutScanPlan(extractWithoutScanPlan)).as("row %s", row).isEqualTo(pattern.extract(input, 1));
+            assertThat(benchmark.capturesWithoutScanPlan(capturesWithoutScanPlan)).as("row %s", row).isEqualTo(checksum(pattern, input));
+        }
     }
 
     private static long checksum(TrinoRegexp pattern, Slice input)

@@ -36,6 +36,14 @@ import static io.airlift.slice.Slices.EMPTY_SLICE;
 /**
  * Profiles the dot-all {@code OPTIONAL_MIXED} workload of {@link BenchmarkTrinoScanPlan} with its
  * twelve plans interleaved, grouped by plan, or restricted to one plan.
+ * <p>
+ * The {@code WithoutScanPlan} methods run the same patterns and inputs without the scan plan:
+ * each pattern is compiled with Trino's parser and the RE2 compiler dialect, which builds no plan,
+ * and each method calls the {@link Re2} route that the base {@link TrinoRegexp} takes for its
+ * operation when a pattern has no plan. For these patterns, which all have capturing groups and
+ * no nullable loops, the dialects compile the same program, so the methods measure the current
+ * ordinary engine on the plan's workload, without {@link TrinoRegexp}'s own dispatch. That is not
+ * the engine before the plan existed, which lacked every later engine change.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -68,6 +76,8 @@ public class BenchmarkTrinoScanProfiles
         Slice[] inputs;
         TrinoRegexp[] patterns;
         TrinoRegexpMatcher[] matchers;
+        Re2[] patternsWithoutScanPlan;
+        Re2Matcher[] matchersWithoutScanPlan;
         int[] sourceRows;
         private int cursor;
 
@@ -83,13 +93,19 @@ public class BenchmarkTrinoScanProfiles
             int selectedPlan = selection.startsWith("PLAN_") ? Integer.parseInt(selection.substring(5)) : -1;
             TrinoRegexp[] compiled = new TrinoRegexp[count];
             TrinoRegexpMatcher[] captures = new TrinoRegexpMatcher[count];
+            Re2[] compiledWithoutScanPlan = new Re2[count];
+            Re2Matcher[] capturesWithoutScanPlan = new Re2Matcher[count];
             for (int plan = 0; plan < count; plan++) {
                 compiled[plan] = TrinoRegexp.compile(source.expressions[plan]);
                 captures[plan] = compiled[plan].matcher(EMPTY_SLICE);
+                compiledWithoutScanPlan[plan] = compileWithoutScanPlan(source.expressions[plan]);
+                capturesWithoutScanPlan[plan] = compiledWithoutScanPlan[plan].matcher(EMPTY_SLICE);
             }
             inputs = new Slice[source.inputs.length];
             patterns = new TrinoRegexp[inputs.length];
             matchers = new TrinoRegexpMatcher[inputs.length];
+            patternsWithoutScanPlan = new Re2[inputs.length];
+            matchersWithoutScanPlan = new Re2Matcher[inputs.length];
             sourceRows = new int[inputs.length];
             for (int row = 0; row < inputs.length; row++) {
                 int sourceRow;
@@ -106,8 +122,24 @@ public class BenchmarkTrinoScanProfiles
                 inputs[row] = source.inputs[sourceRow];
                 patterns[row] = compiled[plan];
                 matchers[row] = captures[plan];
+                patternsWithoutScanPlan[row] = compiledWithoutScanPlan[plan];
+                matchersWithoutScanPlan[row] = capturesWithoutScanPlan[plan];
                 sourceRows[row] = sourceRow;
             }
+        }
+
+        /**
+         * Compiles {@code expression} as {@link TrinoRegexp} does, with Trino's parser and default
+         * memory budget, but with the RE2 compiler dialect, which builds no scan plan.
+         */
+        private static Re2 compileWithoutScanPlan(Slice expression)
+        {
+            Slice copy = expression.copy();
+            Re2 compiled = Re2.compileParsed(copy, TrinoRegexpParser.parse(copy, Regexp.LIKE_PERL), Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY);
+            if (compiled.usesTrinoScanPlanForDiagnostics()) {
+                throw new IllegalStateException("Pattern has a scan plan: " + expression.toStringUtf8());
+            }
+            return compiled;
         }
 
         private int next()
@@ -148,6 +180,40 @@ public class BenchmarkTrinoScanProfiles
     {
         int row = data.next();
         return data.patterns[row].extract(data.inputs[row], 1);
+    }
+
+    @Benchmark
+    public boolean containsWithoutScanPlan(BenchmarkData data)
+    {
+        int row = data.next();
+        return data.patternsWithoutScanPlan[row].find(data.inputs[row]);
+    }
+
+    @Benchmark
+    public long capturesWithoutScanPlan(BenchmarkData data)
+    {
+        int row = data.next();
+        Re2Matcher matcher = data.matchersWithoutScanPlan[row];
+        if (!matcher.reset(data.inputs[row]).find()) {
+            return -1;
+        }
+        long result = 0;
+        for (int group = 0; group <= matcher.groupCount(); group++) {
+            result = result * 31 + matcher.start(group);
+            result = result * 31 + matcher.end(group);
+        }
+        return result;
+    }
+
+    @Benchmark
+    public Slice extractWithoutScanPlan(BenchmarkData data)
+    {
+        int row = data.next();
+        Re2Matcher matcher = data.patternsWithoutScanPlan[row].matcher(data.inputs[row]);
+        if (!matcher.find()) {
+            return null;
+        }
+        return matcher.group(1);
     }
 
     public static void main(String[] args)
