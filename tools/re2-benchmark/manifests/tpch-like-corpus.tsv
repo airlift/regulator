@@ -1,0 +1,5 @@
+column	generator	license	scale_factor	table	field	first_row	row_count	resource_path	uncompressed_bytes	sha256
+part-name	io.trino.tpch:tpch:1.4	Apache-2.0	1	part	name	1	16384	src/test/resources/io/airlift/regulator/tpch-like/part-name.txt.gzip	552363	9258f95737c9f9f2a88d01af011fae8d1dd907cf47dfaa0b57618b6f480b6585
+part-type	io.trino.tpch:tpch:1.4	Apache-2.0	1	part	type	1	16384	src/test/resources/io/airlift/regulator/tpch-like/part-type.txt.gzip	353340	5cc14e8b3bfab5ac939202d6a1e8545792cf3eda13e617d99370221e5a0d5591
+orders-comment	io.trino.tpch:tpch:1.4	Apache-2.0	1	orders	comment	1	16384	src/test/resources/io/airlift/regulator/tpch-like/orders-comment.txt.gzip	812014	f5dbbaa67333df6b1187d3fc6ed28ef3524ced24eb6f217f26874ded8700c8a8
+supplier-comment	io.trino.tpch:tpch:1.4	Apache-2.0	1	supplier	comment	1	10000	src/test/resources/io/airlift/regulator/tpch-like/supplier-comment.txt.gzip	635695	8b550df1440a7866d7921dbb07c589708c3f0657d2c4530d6816059326a33ab6

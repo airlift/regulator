@@ -1,0 +1,370 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.airlift.regulator;
+
+import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
+import io.trino.likematcher.LikeMatcher;
+import org.openjdk.jmh.annotations.Benchmark;
+import org.openjdk.jmh.annotations.BenchmarkMode;
+import org.openjdk.jmh.annotations.Fork;
+import org.openjdk.jmh.annotations.Measurement;
+import org.openjdk.jmh.annotations.Mode;
+import org.openjdk.jmh.annotations.OutputTimeUnit;
+import org.openjdk.jmh.annotations.Param;
+import org.openjdk.jmh.annotations.Scope;
+import org.openjdk.jmh.annotations.Setup;
+import org.openjdk.jmh.annotations.State;
+import org.openjdk.jmh.annotations.Warmup;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.classfile.ClassFile;
+import java.lang.constant.ClassDesc;
+import java.lang.constant.DirectMethodHandleDesc;
+import java.lang.constant.DynamicConstantDesc;
+import java.lang.constant.MethodHandleDesc;
+import java.lang.constant.MethodTypeDesc;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.zip.GZIPInputStream;
+
+import static java.lang.constant.ConstantDescs.CD_Class;
+import static java.lang.constant.ConstantDescs.CD_MethodHandle;
+import static java.lang.constant.ConstantDescs.CD_MethodHandles;
+import static java.lang.constant.ConstantDescs.CD_MethodHandles_Lookup;
+import static java.lang.constant.ConstantDescs.CD_Object;
+import static java.lang.constant.ConstantDescs.CD_String;
+import static java.lang.constant.ConstantDescs.CD_boolean;
+import static java.lang.constant.ConstantDescs.CD_int;
+import static java.lang.constant.ConstantDescs.CD_void;
+import static java.lang.constant.ConstantDescs.INIT_NAME;
+import static java.nio.charset.StandardCharsets.UTF_8;
+
+/**
+ * Matches each TPC-H LIKE predicate over every row of a pinned TPC-H column sample.
+ * <p>
+ * The column values share one backing array, like a Trino variable-width block, so every row has
+ * a nonzero offset. Each invocation returns the match count over all rows of the column.
+ * <p>
+ * {@code candidate} binds the pattern's {@code matches} the way a query engine binds a constant
+ * pattern: a per-pattern hidden class that invokes the bound handle held as a class-data
+ * constant.
+ */
+@BenchmarkMode(Mode.AverageTime)
+@OutputTimeUnit(TimeUnit.MICROSECONDS)
+@Fork(3)
+@Warmup(iterations = 10, time = 500, timeUnit = TimeUnit.MILLISECONDS)
+@Measurement(iterations = 7, time = 500, timeUnit = TimeUnit.MILLISECONDS)
+public class BenchmarkTrinoLikeTpch
+{
+    private static final int LEADING_BYTES = 3;
+
+    @State(Scope.Thread)
+    public static class BenchmarkData
+    {
+        @Param
+        Workload workload;
+
+        private TrinoLikePattern pattern;
+        private Predicate<Slice> candidate;
+        private LikeMatcher trinoSql;
+        private LikeMatcher trinoOptimized;
+        private Slice[] rows;
+
+        @Setup
+        public void setup()
+                throws IOException, ReflectiveOperationException
+        {
+            pattern = TrinoLikePattern.compile(Slices.utf8Slice(workload.pattern()));
+            candidate = constantCaller(MethodHandles.lookup()
+                    .findVirtual(TrinoLikePattern.class, "matches", MethodType.methodType(boolean.class, Slice.class))
+                    .bindTo(pattern));
+            trinoSql = LikeMatcher.compile(workload.pattern(), Optional.empty(), false);
+            trinoOptimized = LikeMatcher.compile(workload.pattern(), Optional.empty(), true);
+            rows = loadRows(workload.column());
+
+            BenchmarkTrinoLikeTpch benchmark = new BenchmarkTrinoLikeTpch();
+            int expected = benchmark.trinoSql(this);
+            if (benchmark.candidate(this) != expected || benchmark.trinoOptimized(this) != expected) {
+                throw new IllegalStateException("benchmark outcome mismatch for " + workload);
+            }
+        }
+    }
+
+    public enum Column
+    {
+        PART_NAME("part-name"),
+        PART_TYPE("part-type"),
+        ORDERS_COMMENT("orders-comment"),
+        SUPPLIER_COMMENT("supplier-comment");
+
+        private final String id;
+
+        Column(String id)
+        {
+            this.id = id;
+        }
+
+        String id()
+        {
+            return id;
+        }
+
+        String resourcePath()
+        {
+            return "src/test/resources/io/airlift/regulator/tpch-like/" + id + ".txt.gzip";
+        }
+    }
+
+    public enum Workload
+    {
+        Q02_TYPE_BRASS("q02-type-brass", Column.PART_TYPE, "%BRASS"),
+        Q09_NAME_GREEN("q09-name-green", Column.PART_NAME, "%green%"),
+        Q13_ORDER_COMMENT("q13-order-comment", Column.ORDERS_COMMENT, "%special%requests%"),
+        Q14_TYPE_PROMO("q14-type-promo", Column.PART_TYPE, "PROMO%"),
+        Q16_TYPE_MEDIUM_POLISHED("q16-type-medium-polished", Column.PART_TYPE, "MEDIUM POLISHED%"),
+        Q16_SUPPLIER_COMPLAINTS("q16-supplier-complaints", Column.SUPPLIER_COMMENT, "%Customer%Complaints%"),
+        Q20_NAME_FOREST("q20-name-forest", Column.PART_NAME, "forest%");
+
+        private final String id;
+        private final Column column;
+        private final String pattern;
+
+        Workload(String id, Column column, String pattern)
+        {
+            this.id = id;
+            this.column = column;
+            this.pattern = pattern;
+        }
+
+        String id()
+        {
+            return id;
+        }
+
+        Column column()
+        {
+            return column;
+        }
+
+        String pattern()
+        {
+            return pattern;
+        }
+    }
+
+    @Benchmark
+    public int candidate(BenchmarkData data)
+    {
+        Predicate<Slice> candidate = data.candidate;
+        int count = 0;
+        for (Slice row : data.rows) {
+            if (candidate.test(row)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    @Benchmark
+    public int trinoSql(BenchmarkData data)
+    {
+        return trinoCount(data.trinoSql, data.rows);
+    }
+
+    @Benchmark
+    public int trinoOptimized(BenchmarkData data)
+    {
+        return trinoCount(data.trinoOptimized, data.rows);
+    }
+
+    private static int trinoCount(LikeMatcher matcher, Slice[] rows)
+    {
+        int count = 0;
+        for (Slice row : rows) {
+            // Trino's LIKE function passes the value's backing array and offset to the matcher.
+            if (matcher.match(row.byteArray(), row.byteArrayOffset(), row.length())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    static byte[] loadColumn(Column column)
+            throws IOException
+    {
+        String resource = "/io/airlift/regulator/tpch-like/" + column.id() + ".txt.gzip";
+        InputStream input = BenchmarkTrinoLikeTpch.class.getResourceAsStream(resource);
+        if (input == null) {
+            throw new IOException("TPC-H LIKE benchmark corpus does not exist: " + resource);
+        }
+        try (GZIPInputStream gzipInput = new GZIPInputStream(input)) {
+            return gzipInput.readAllBytes();
+        }
+    }
+
+    static Slice[] loadRows(Column column)
+            throws IOException
+    {
+        // One value per line; the values are packed without separators behind a few leading bytes.
+        byte[] lines = loadColumn(column);
+        byte[] backing = new byte[LEADING_BYTES + lines.length];
+        List<Slice> rows = new ArrayList<>();
+        int position = LEADING_BYTES;
+        int start = 0;
+        for (int index = 0; index < lines.length; index++) {
+            if (lines[index] == '\n') {
+                int length = index - start;
+                System.arraycopy(lines, start, backing, position, length);
+                rows.add(Slices.wrappedBuffer(backing, position, length));
+                position += length;
+                start = index + 1;
+            }
+        }
+        if (start != lines.length) {
+            throw new IOException("TPC-H LIKE benchmark corpus does not end with a line feed: " + column.id());
+        }
+        return rows.toArray(Slice[]::new);
+    }
+
+    public static void main(String[] args)
+            throws Exception
+    {
+        if (args.length > 1) {
+            throw new IllegalArgumentException("usage: BenchmarkTrinoLikeTpch [repository-root]");
+        }
+        Path manifests = Path.of(args.length == 0 ? "" : args[0]).resolve("tools/re2-benchmark/manifests");
+
+        Map<String, Map<String, String>> corpus = readManifest(manifests.resolve("tpch-like-corpus.tsv"), "column");
+        if (!corpus.keySet().equals(Arrays.stream(Column.values()).map(Column::id).collect(Collectors.toSet()))) {
+            throw new IllegalStateException("TPC-H LIKE corpus manifest columns differ from the benchmark: " + corpus.keySet());
+        }
+        for (Column column : Column.values()) {
+            Map<String, String> row = corpus.get(column.id());
+            byte[] source = loadColumn(column);
+            String sha256 = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(source));
+            if (!row.get("resource_path").equals(column.resourcePath()) ||
+                    source.length != Integer.parseInt(row.get("uncompressed_bytes")) ||
+                    !sha256.equals(row.get("sha256")) ||
+                    loadRows(column).length != Integer.parseInt(row.get("row_count"))) {
+                throw new IllegalStateException("TPC-H LIKE corpus differs from manifest: " + column.id());
+            }
+        }
+
+        Map<String, Map<String, String>> workloads = readManifest(manifests.resolve("tpch-like-workloads.tsv"), "id");
+        if (!List.copyOf(workloads.keySet()).equals(Arrays.stream(Workload.values()).map(Workload::id).toList())) {
+            throw new IllegalStateException("TPC-H LIKE workload manifest differs from the benchmark: " + workloads.keySet());
+        }
+        BenchmarkTrinoLikeTpch benchmark = new BenchmarkTrinoLikeTpch();
+        System.out.println("workload\tpattern\trows\tmatches\tmatch_rate\tplan");
+        for (Workload workload : Workload.values()) {
+            Map<String, String> row = workloads.get(workload.id());
+            if (!row.get("column").equals(workload.column().id()) || !row.get("pattern").equals(workload.pattern())) {
+                throw new IllegalStateException("TPC-H LIKE workload differs from manifest: " + workload.id());
+            }
+            BenchmarkData data = new BenchmarkData();
+            data.workload = workload;
+            data.setup();
+            int expected = Integer.parseInt(row.get("expected_count"));
+            int candidate = benchmark.candidate(data);
+            int trinoSql = benchmark.trinoSql(data);
+            int trinoOptimized = benchmark.trinoOptimized(data);
+            if (candidate != expected || trinoSql != expected || trinoOptimized != expected) {
+                throw new IllegalStateException("TPC-H LIKE count mismatch for %s: expected %s, candidate %s, trinoSql %s, trinoOptimized %s"
+                        .formatted(workload.id(), expected, candidate, trinoSql, trinoOptimized));
+            }
+            System.out.printf("%s\t%s\t%d\t%d\t%.2f%%\t%s%n",
+                    workload.id(),
+                    workload.pattern(),
+                    data.rows.length,
+                    expected,
+                    100.0 * expected / data.rows.length,
+                    data.pattern.planForDiagnostics());
+        }
+        System.out.println("Verified " + Column.values().length + " TPC-H LIKE columns and " + Workload.values().length + " workloads in three engines");
+    }
+
+    /**
+     * Returns a per-pattern hidden class whose {@code test} invokes {@code matches}, a
+     * {@code (Slice)boolean} handle, held as a class-data constant, as
+     * {@code BenchmarkTrinoScanKernelDispatch} binds a constant pattern. Each row is then one
+     * interface call to a constant target.
+     */
+    static Predicate<Slice> constantCaller(MethodHandle matches)
+            throws ReflectiveOperationException
+    {
+        ClassDesc owner = ClassDesc.of(BenchmarkTrinoLikeTpch.class.getPackageName() + ".ConstantLikeCaller");
+        ClassDesc slice = ClassDesc.of(Slice.class.getName());
+        DirectMethodHandleDesc bootstrap = MethodHandleDesc.ofMethod(
+                DirectMethodHandleDesc.Kind.STATIC,
+                CD_MethodHandles,
+                "classDataAt",
+                MethodTypeDesc.of(CD_Object, CD_MethodHandles_Lookup, CD_String, CD_Class, CD_int));
+        DynamicConstantDesc<?> boundMatches = DynamicConstantDesc.ofNamed(bootstrap, "_", CD_MethodHandle, 0);
+        byte[] bytecode = ClassFile.of().build(owner, builder -> {
+            builder.withFlags(ClassFile.ACC_PUBLIC | ClassFile.ACC_FINAL);
+            builder.withInterfaceSymbols(ClassDesc.of(Predicate.class.getName()));
+            builder.withMethodBody(INIT_NAME, MethodTypeDesc.of(CD_void), ClassFile.ACC_PUBLIC, code ->
+                    code.aload(0).invokespecial(CD_Object, INIT_NAME, MethodTypeDesc.of(CD_void)).return_());
+            builder.withMethodBody("test", MethodTypeDesc.of(CD_boolean, CD_Object), ClassFile.ACC_PUBLIC, code ->
+                    code.loadConstant(boundMatches).aload(1).checkcast(slice)
+                            .invokevirtual(CD_MethodHandle, "invokeExact", MethodTypeDesc.of(CD_boolean, slice)).ireturn());
+        });
+        MethodHandles.Lookup lookup = MethodHandles.lookup().defineHiddenClassWithClassData(
+                bytecode,
+                List.of(matches),
+                true,
+                MethodHandles.Lookup.ClassOption.NESTMATE);
+        @SuppressWarnings("unchecked")
+        Predicate<Slice> caller = (Predicate<Slice>) lookup.lookupClass().getConstructor().newInstance();
+        return caller;
+    }
+
+    private static Map<String, Map<String, String>> readManifest(Path path, String key)
+            throws IOException
+    {
+        List<String> lines = Files.readAllLines(path, UTF_8);
+        List<String> header = List.of(lines.getFirst().split("\t", -1));
+        Map<String, Map<String, String>> rows = new LinkedHashMap<>();
+        for (String line : lines.subList(1, lines.size())) {
+            String[] values = line.split("\t", -1);
+            if (values.length != header.size()) {
+                throw new IOException("invalid manifest row in " + path + ": " + line);
+            }
+            Map<String, String> row = new LinkedHashMap<>();
+            for (int index = 0; index < values.length; index++) {
+                row.put(header.get(index), values[index]);
+            }
+            if (rows.put(row.get(key), row) != null) {
+                throw new IOException("duplicate manifest row in " + path + ": " + row.get(key));
+            }
+        }
+        return rows;
+    }
+}

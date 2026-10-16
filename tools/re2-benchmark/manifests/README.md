@@ -48,3 +48,9 @@ from repository resources, and the access-log entries equal those of
 `literal-probe-corpus.tsv`. `trino-rows/trino_rows.py` fetches the others and
 generates the workload manifests; see the
 [workload guide](../trino-rows/README.md).
+
+`tpch-like-corpus.tsv` pins the committed TPC-H column samples used by the
+Trino LIKE TPC-H benchmark by generator, scale factor, row range, size, and
+checksum, and `tpch-like-workloads.tsv` lists its workloads with their source
+queries and expected match counts. See the
+[LIKE guide](../trino-like/README.md#tpc-h-column-samples).
