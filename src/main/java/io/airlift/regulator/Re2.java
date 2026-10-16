@@ -93,6 +93,10 @@ public final class Re2
     private static final int DIRECT_BIT_STATE_CAPTURE_MINIMUM_LENGTH = 4 * 1024;
     private static final int LOWERED_CANDIDATE_SEARCH_BYTES = 64;
 
+    // The first-byte prefix scan restarts its word scan after each false candidate, which on rows
+    // shorter than this many bytes costs more than the substring search.
+    private static final int EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES = 64;
+
     interface MatchWorkspaces {}
 
     private record FixedMatchWorkspaces(
@@ -1289,6 +1293,35 @@ public final class Re2
             return ((long) start << 32) | (start & 0xFFFF_FFFFL);
         }
 
+        if (exactLiteralSpanUsesPrefixScan(input.length() - start)) {
+            return findExactLiteralSpanWithPrefixScan(input, start);
+        }
+        int matchStart = LiteralMatchKernel.find(input, booleanPlans.literal(), start);
+        if (matchStart < 0) {
+            return Dfa.SEARCH_NO_MATCH;
+        }
+        int matchEnd = matchStart + exactLiteralLength;
+        return ((long) matchStart << 32) | (matchEnd & 0xFFFF_FFFFL);
+    }
+
+    /**
+     * Returns whether {@link #findExactLiteralSpan(Slice, int)} searches {@code remainingBytes}
+     * with the prefix scan rather than the substring search: when at least
+     * {@value #EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES} bytes remain, or when the byte
+     * frequencies chose a probe byte other than the literal's first byte.
+     */
+    boolean exactLiteralSpanUsesPrefixScan(int remainingBytes)
+    {
+        return remainingBytes >= EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES || partialProg.prefixAccelProbeOffset() != 0;
+    }
+
+    /**
+     * Answers {@link #findExactLiteralSpan(Slice, int)} with the prefix scan. It is out of line so
+     * that the short-row substring search stays small enough for C2 to inline into per-row callers
+     * without pulling the prefix scan in with it.
+     */
+    private long findExactLiteralSpanWithPrefixScan(Slice input, int start)
+    {
         int arrayMatchStart = findExactLiteral(input.byteArray(), input.byteArrayOffset() + start, input.length() - start);
         if (arrayMatchStart < 0) {
             return Dfa.SEARCH_NO_MATCH;
@@ -1300,9 +1333,10 @@ public final class Re2
 
     /**
      * Returns the array position of the first occurrence of the nonempty exact literal in
-     * {@code [offset, offset + length)} of {@code bytes}, or {@code -1} when none occurs. The
-     * boolean find, span search, and count of an exact-literal pattern all search with this prefix
-     * scan, whose probe byte the compile-time byte frequencies chose.
+     * {@code [offset, offset + length)} of {@code bytes}, or {@code -1} when none occurs.
+     * Re2's boolean find and count of an exact-literal pattern search with this prefix scan, whose
+     * probe byte the compile-time byte frequencies chose. Span searches use it when
+     * {@link #exactLiteralSpanUsesPrefixScan(int)} says so.
      */
     private int findExactLiteral(byte[] bytes, int offset, int length)
     {
