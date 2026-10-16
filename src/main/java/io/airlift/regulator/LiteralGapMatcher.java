@@ -25,7 +25,9 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Finds literal chains separated by a fixed number of UTF-8 code points.
+ * Finds literal chains separated by a fixed number of UTF-8 characters. Literals compare raw bytes;
+ * a gap steps over characters as {@link Utf8#characterWidth} reads them, so malformed input in a
+ * gap counts one character per maximal subpart.
  */
 final class LiteralGapMatcher
 {
@@ -107,6 +109,8 @@ final class LiteralGapMatcher
     boolean matches(Slice input, int offset, int length)
     {
         int end = offset + length;
+        byte[] bytes = input.byteArray();
+        int inputOffset = input.byteArrayOffset();
         LiteralSearchKernel firstLiteral = literals[0];
         for (int searchOffset = offset; searchOffset <= end - firstLiteral.literalLength(); ) {
             int matchOffset = firstLiteral.find(input, searchOffset, end - searchOffset);
@@ -122,13 +126,7 @@ final class LiteralGapMatcher
                         matched = false;
                         break;
                     }
-                    int inputPosition = input.byteArrayOffset() + position;
-                    long decoded = Utf8.decode(input.byteArray(), inputPosition, input.byteArrayOffset() + end);
-                    if (Utf8.decodedCodePoint(decoded) == Utf8.RUNE_ERROR && Utf8.decodedWidth(decoded) == 1) {
-                        matched = false;
-                        break;
-                    }
-                    position += Utf8.decodedWidth(decoded);
+                    position += Utf8.characterWidth(bytes, inputOffset + position, inputOffset + end);
                 }
                 LiteralSearchKernel literal = literals[literalIndex];
                 if (!matched || position > end - literal.literalLength() || !literal.matchesAt(input, position)) {

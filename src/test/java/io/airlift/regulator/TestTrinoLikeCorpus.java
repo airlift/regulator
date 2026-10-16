@@ -17,11 +17,18 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.EnumMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.OptionalInt;
 import java.util.Random;
 import java.util.Set;
@@ -39,16 +46,74 @@ import static io.airlift.regulator.TrinoLikePattern.Plan.LITERAL_GAPS;
 import static io.airlift.regulator.TrinoLikePattern.Plan.ORDERED_LITERALS;
 import static io.airlift.regulator.TrinoLikePattern.Plan.STARTS_WITH;
 import static io.airlift.regulator.TrinoLikePattern.Plan.TRINO_WILDCARD;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTrinoLikeCorpus
 {
+    // Rows where Regulator deliberately differs from the corpus's Trino SQL result, mapped to
+    // Regulator's result. See "Trino LIKE Frontend" in REGULATOR_DECISIONS.md. Regulator reads each
+    // maximal invalid subpart of malformed input as one character that only _ or % consumes. Trino
+    // takes a character's width from its lead byte without checking continuation bytes, and fails
+    // the whole match on a byte it cannot decode.
+    private static final Map<String, Boolean> SQL_DEVIATIONS = Map.ofEntries(
+            // Trino's NFA compares a supplementary literal as two UTF-16 surrogates, so it never matches.
+            entry("supplementary-nfa-quirk", true),
+            // A lone invalid byte or a truncated sequence is one character; Trino fails the match.
+            entry("underscore-invalid-single", true),
+            entry("underscore-truncated", true),
+            entry("mixed-malformed", true),
+            entry("gap-invalid-single", true),
+            entry("gap-continuation-lead", true),
+            entry("gap-truncated", true),
+            entry("gap-truncated-before-multibyte-literal", true),
+            entry("gap-invalid-before-match", true),
+            entry("gap-retry-after-invalid", true),
+            entry("wildcard-invalid-before-match", true),
+            entry("wildcard-invalid-between-segments", true),
+            entry("wildcard-prefix-invalid-next", true),
+            entry("wildcard-prefix-invalid-end", true),
+            entry("wildcard-prefix-invalid-then-ascii", true),
+            entry("percent-underscore-invalid", true),
+            // A lead byte followed by an invalid byte does not swallow it; Trino decodes C2 'a' as one character.
+            entry("gap-lead-swallows-literal", true),
+            // Overlong, surrogate, and out-of-range forms are one character per maximal subpart, not one per lead byte.
+            entry("underscore-overlong", false),
+            entry("underscore-invalid-continuation", false),
+            entry("underscore-out-of-range", false),
+            entry("underscore-surrogate", false),
+            entry("underscore-above-unicode", false),
+            entry("underscore-pair-overlong", true),
+            entry("gap-overlong", false),
+            entry("gap-invalid-continuation", false),
+            entry("gap-out-of-range", false),
+            entry("gap-surrogate", false),
+            entry("wildcard-gap-overlong", false),
+            // An overlong form never equals a literal; Trino decodes C1 A3 as 'c'.
+            entry("gap-overlong-literal", false),
+            entry("wildcard-overlong-literal", false));
+
+    private static final int MALFORMED = -1;
+
+    // Unicode Table 3-7, well-formed UTF-8 byte sequences: first-byte range, second-byte range, length.
+    private static final int[][] WELL_FORMED_UTF8 = {
+            {0xC2, 0xDF, 0x80, 0xBF, 2},
+            {0xE0, 0xE0, 0xA0, 0xBF, 3},
+            {0xE1, 0xEC, 0x80, 0xBF, 3},
+            {0xED, 0xED, 0x80, 0x9F, 3},
+            {0xEE, 0xEF, 0x80, 0xBF, 3},
+            {0xF0, 0xF0, 0x90, 0xBF, 4},
+            {0xF1, 0xF3, 0x80, 0xBF, 4},
+            {0xF4, 0xF4, 0x80, 0x8F, 4},
+    };
+
     @Test
     public void testCorpusShape()
     {
         List<TestingTrinoLikeCorpus.TestCase> cases = TestingTrinoLikeCorpus.load();
-        assertThat(cases).hasSize(54);
+        assertThat(cases).hasSize(95);
 
         Set<String> names = new HashSet<>();
         for (TestingTrinoLikeCorpus.TestCase testCase : cases) {
@@ -75,10 +140,8 @@ public class TestTrinoLikeCorpus
     @Test
     public void testSqlCompatibilityCorpus()
     {
+        Set<String> deviations = new HashSet<>();
         for (TestingTrinoLikeCorpus.TestCase testCase : TestingTrinoLikeCorpus.load()) {
-            if (testCase.name().equals("supplementary-nfa-quirk")) {
-                continue;
-            }
             // Trino accepts a pattern that is not valid UTF-8; Regulator rejects it.
             if (testCase.sqlOutcome() == ERROR || Utf8.firstInvalidOffset(Slices.wrappedBuffer(testCase.pattern())) >= 0) {
                 assertThatThrownBy(() -> compile(testCase))
@@ -87,11 +150,153 @@ public class TestTrinoLikeCorpus
                 continue;
             }
 
+            boolean expected = testCase.sqlOutcome() == MATCH;
+            Boolean deviation = SQL_DEVIATIONS.get(testCase.name());
+            if (deviation != null) {
+                deviations.add(testCase.name());
+                assertThat(deviation).as("deviation differs from Trino: %s", testCase.name()).isNotEqualTo(expected);
+                assertThat(isValidUtf8(testCase.input()))
+                        .as("only malformed input deviates: %s", testCase.name())
+                        .isEqualTo(testCase.name().equals("supplementary-nfa-quirk"));
+                expected = deviation;
+            }
+
+            // The wildcard and gap matchers index the backing array directly, so also match a
+            // slice whose neighbors are continuation bytes that a stray read would consume.
+            byte[] input = testCase.input();
+            byte[] padded = new byte[input.length + 6];
+            Arrays.fill(padded, (byte) 0x80);
+            System.arraycopy(input, 0, padded, 3, input.length);
             TrinoLikePattern pattern = compile(testCase);
-            assertThat(pattern.matches(Slices.wrappedBuffer(testCase.input())))
+            assertThat(pattern.matches(Slices.wrappedBuffer(input)))
                     .as(testCase.name())
-                    .isEqualTo(testCase.sqlOutcome() == MATCH);
+                    .isEqualTo(expected);
+            assertThat(pattern.matches(Slices.wrappedBuffer(padded, 3, input.length)))
+                    .as("%s at a nonzero offset", testCase.name())
+                    .isEqualTo(expected);
         }
+        assertThat(deviations).isEqualTo(SQL_DEVIATIONS.keySet());
+    }
+
+    @Test
+    public void testMatchesCodePointReference()
+    {
+        // Malformed input matches as if each maximal invalid subpart were one U+FFFD.
+        assertThat(referenceCharacters(bytes(0xE2, 0x82))).containsExactly(MALFORMED);
+        assertThat(referenceCharacters(bytes(0xC0, 0xAF))).containsExactly(MALFORMED, MALFORMED);
+        assertThat(referenceCharacters(bytes(0xC2, 'A'))).containsExactly(MALFORMED, 'A');
+        assertThat(referenceCharacters(bytes(0xE0, 0x80))).containsExactly(MALFORMED, MALFORMED);
+        assertThat(referenceCharacters(bytes(0xED, 0xA0, 0x80))).containsExactly(MALFORMED, MALFORMED, MALFORMED);
+        assertThat(referenceCharacters(bytes(0xF4, 0x90, 0x80, 0x80))).containsExactly(MALFORMED, MALFORMED, MALFORMED, MALFORMED);
+        assertThat(referenceCharacters(bytes(0xF7, 0xBF, 0xBF, 0xBF))).containsExactly(MALFORMED, MALFORMED, MALFORMED, MALFORMED);
+        assertThat(referenceCharacters(bytes(0xF0, 0x9F, 0x98, 'x'))).containsExactly(MALFORMED, 'x');
+        assertThat(referenceCharacters(bytes(0xEF, 0xBF, 0xBD))).containsExactly(0xFFFD);
+
+        // Patterns draw from literals of every UTF-8 width, a literal longer than the short
+        // comparison limit, wildcards, and escapes, so every plan is selected. Inputs follow the
+        // pattern with substitutions from valid characters and malformed sequences. No pattern
+        // contains U+FFFD, whose literal matches only its own bytes.
+        String[] literals = {"a", "b", "ab", "\u03C0", "\u20AC", "\uD83D\uDE00", "0123456789abcdefg"};
+        byte[][] substitutes = {
+                bytes('a'), bytes('b'), bytes('z'), bytes('%'), bytes('_'),
+                "\u03C0".getBytes(UTF_8), "\u20AC".getBytes(UTF_8), "\uD83D\uDE00".getBytes(UTF_8), "\uFFFD".getBytes(UTF_8),
+                bytes(0xFF), bytes(0x80), bytes(0xC0, 0xAF), bytes(0xC1, 0xA3), bytes(0xC2), bytes(0xE2, 0x82), bytes(0xE0, 0x80),
+                bytes(0xED, 0xA0, 0x80), bytes(0xF0, 0x9F, 0x98), bytes(0xF4, 0x90, 0x80, 0x80), bytes(0xF7, 0xBF, 0xBF, 0xBF),
+        };
+        Random random = new Random(20261016);
+        Map<TrinoLikePattern.Plan, int[]> outcomes = new EnumMap<>(TrinoLikePattern.Plan.class);
+        int malformedMatches = 0;
+        int malformedMisses = 0;
+        for (int patternIndex = 0; patternIndex < 10_000; patternIndex++) {
+            boolean escaped = random.nextBoolean();
+            List<String> atoms = new ArrayList<>();
+            if (random.nextInt(5) == 0) {
+                // The literal-gap shape: %, a literal of at least two bytes, then _ runs between literals.
+                atoms.add("%");
+                atoms.add(literals[2 + random.nextInt(literals.length - 2)]);
+                for (int gap = random.nextInt(3); gap >= 0; gap--) {
+                    atoms.addAll(Collections.nCopies(1 + random.nextInt(2), "_"));
+                    atoms.add(literals[random.nextInt(literals.length)]);
+                }
+                if (random.nextBoolean()) {
+                    atoms.add("%");
+                }
+            }
+            else {
+                for (int atom = random.nextInt(7); atom > 0; atom--) {
+                    int choice = random.nextInt(10);
+                    if (choice < 2) {
+                        atoms.add("%");
+                    }
+                    else if (choice < 4) {
+                        atoms.add("_");
+                    }
+                    else if (choice == 4 && escaped) {
+                        atoms.add("\\" + "%_\\".charAt(random.nextInt(3)));
+                    }
+                    else {
+                        atoms.add(literals[random.nextInt(literals.length)]);
+                    }
+                }
+            }
+
+            // Each template entry is null for %, empty for _, or the literal's bytes.
+            StringBuilder patternText = new StringBuilder();
+            List<byte[]> template = new ArrayList<>();
+            for (String atom : atoms) {
+                patternText.append(atom);
+                template.add(switch (atom) {
+                    case "%" -> null;
+                    case "_" -> new byte[0];
+                    default -> (atom.startsWith("\\") ? atom.substring(1) : atom).getBytes(UTF_8);
+                });
+            }
+            Slice patternSlice = Slices.utf8Slice(patternText.toString());
+            OptionalInt escape = escaped ? OptionalInt.of('\\') : OptionalInt.empty();
+            TrinoLikePattern pattern = escaped ? TrinoLikePattern.compile(patternSlice, '\\') : TrinoLikePattern.compile(patternSlice);
+            List<TrinoLikeParser.Element> elements = TrinoLikeParser.parse(patternSlice, escape);
+
+            for (int inputIndex = 0; inputIndex < 8; inputIndex++) {
+                ByteArrayOutputStream inputBytes = new ByteArrayOutputStream();
+                for (byte[] atom : template) {
+                    int repetitions = atom == null ? random.nextInt(4) : 1;
+                    for (int repetition = 0; repetition < repetitions; repetition++) {
+                        boolean substitute = atom == null || atom.length == 0 || random.nextInt(8) == 0;
+                        inputBytes.writeBytes(substitute ? substitutes[random.nextInt(substitutes.length)] : atom);
+                    }
+                }
+                if (random.nextInt(4) == 0) {
+                    inputBytes.writeBytes(substitutes[random.nextInt(substitutes.length)]);
+                }
+                byte[] input = inputBytes.toByteArray();
+
+                boolean expected = referenceMatches(elements, input);
+                byte[] padded = new byte[input.length + 6];
+                Arrays.fill(padded, (byte) 0x80);
+                System.arraycopy(input, 0, padded, 3, input.length);
+                String description = patternText + " against " + HexFormat.of().formatHex(input);
+                assertThat(pattern.matches(Slices.wrappedBuffer(input))).as(description).isEqualTo(expected);
+                assertThat(pattern.matches(Slices.wrappedBuffer(padded, 3, input.length))).as(description).isEqualTo(expected);
+
+                outcomes.computeIfAbsent(pattern.planForDiagnostics(), _ -> new int[2])[expected ? 1 : 0]++;
+                if (!isValidUtf8(input)) {
+                    if (expected) {
+                        malformedMatches++;
+                    }
+                    else {
+                        malformedMisses++;
+                    }
+                }
+            }
+        }
+
+        assertThat(outcomes).containsOnlyKeys(TrinoLikePattern.Plan.values());
+        outcomes.forEach((plan, counts) -> {
+            assertThat(counts[0]).as("%s misses", plan).isGreaterThanOrEqualTo(20);
+            assertThat(counts[1]).as("%s matches", plan).isGreaterThanOrEqualTo(20);
+        });
+        assertThat(malformedMatches).isGreaterThan(5_000);
+        assertThat(malformedMisses).isGreaterThan(5_000);
     }
 
     @Test
@@ -113,15 +318,6 @@ public class TestTrinoLikeCorpus
         assertDirectLiteralPlan("%π", "π-tail", ENDS_WITH, false);
         assertDirectLiteralPlan("%π%", "head-π-tail", CONTAINS, true);
         assertDirectLiteralPlan("%π%", "head-ρ-tail", CONTAINS, false);
-    }
-
-    @Test
-    public void testSupplementaryLiteralBeforeWildcardUsesOneCodePoint()
-    {
-        TrinoLikePattern pattern = TrinoLikePattern.compile(Slices.utf8Slice("%😀_%"));
-
-        assertThat(pattern.matches(Slices.utf8Slice("😀x"))).isTrue();
-        assertThat(pattern.matches(Slices.utf8Slice("😀"))).isFalse();
     }
 
     @Test
@@ -459,5 +655,93 @@ public class TestTrinoLikeCorpus
     {
         Slice slice = Slices.utf8Slice(input);
         return matcher.matches(slice, 0, slice.length());
+    }
+
+    // Reference LIKE: decode the input, then match code points. A literal never equals a
+    // MALFORMED character; _ and % consume it like any other.
+    private static boolean referenceMatches(List<TrinoLikeParser.Element> pattern, byte[] input)
+    {
+        int[] characters = referenceCharacters(input);
+        // matched[i]: the pattern elements seen so far match exactly characters[0, i)
+        boolean[] matched = new boolean[characters.length + 1];
+        matched[0] = true;
+        for (TrinoLikeParser.Element element : pattern) {
+            switch (element) {
+                case TrinoLikeParser.ZeroOrMore _ -> {
+                    for (int index = 1; index <= characters.length; index++) {
+                        matched[index] |= matched[index - 1];
+                    }
+                }
+                case TrinoLikeParser.Any any -> matched = shift(matched, characters, any.count(), null);
+                case TrinoLikeParser.Literal literal -> {
+                    int[] codePoints = literal.bytes().toStringUtf8().codePoints().toArray();
+                    matched = shift(matched, characters, codePoints.length, codePoints);
+                }
+            }
+        }
+        return matched[characters.length];
+    }
+
+    // Advances every match by count characters, which must equal codePoints when they are given.
+    private static boolean[] shift(boolean[] matched, int[] characters, int count, int[] codePoints)
+    {
+        boolean[] next = new boolean[matched.length];
+        for (int start = 0; start + count < matched.length; start++) {
+            boolean equal = matched[start];
+            for (int index = 0; equal && codePoints != null && index < count; index++) {
+                equal = characters[start + index] == codePoints[index];
+            }
+            next[start + count] = equal;
+        }
+        return next;
+    }
+
+    // Decodes UTF-8, reading each maximal subpart of malformed input as one MALFORMED character
+    // (Unicode chapter 3, "U+FFFD Substitution of Maximal Subparts"). The JVM decoder is not the
+    // reference because it replaces an encoded surrogate such as ED A0 80 with one U+FFFD, not three.
+    private static int[] referenceCharacters(byte[] input)
+    {
+        List<Integer> characters = new ArrayList<>();
+        int position = 0;
+        while (position < input.length) {
+            int first = input[position] & 0xFF;
+            int[] form = null;
+            for (int[] candidate : WELL_FORMED_UTF8) {
+                if (first >= candidate[0] && first <= candidate[1]) {
+                    form = candidate;
+                }
+            }
+            int width = 1;
+            if (form != null && position + 1 < input.length && (input[position + 1] & 0xFF) >= form[2] && (input[position + 1] & 0xFF) <= form[3]) {
+                width = 2;
+                while (width < form[4] && position + width < input.length && (input[position + width] & 0xC0) == 0x80) {
+                    width++;
+                }
+            }
+            boolean wellFormed = first < 0x80 || (form != null && width == form[4]);
+            characters.add(wellFormed ? new String(input, position, width, UTF_8).codePointAt(0) : MALFORMED);
+            position += width;
+        }
+        return characters.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    private static boolean isValidUtf8(byte[] input)
+    {
+        try {
+            UTF_8.newDecoder().decode(ByteBuffer.wrap(input));
+            return true;
+        }
+        catch (CharacterCodingException e) {
+            return false;
+        }
+    }
+
+    private static byte[] bytes(int... values)
+    {
+        byte[] bytes = new byte[values.length];
+        for (int index = 0; index < values.length; index++) {
+            bytes[index] = (byte) values[index];
+        }
+        return bytes;
     }
 }

@@ -111,7 +111,8 @@ Every behavior change must identify its authority:
 - pinned upstream RE2 for RE2 syntax and matching
 - Java 25 for the supported Java frontend
 - Trino's Joni fork and Trino function tests for `TrinoRegexp`
-- Trino LIKE semantics for `TrinoLikePattern`
+- Trino LIKE semantics on valid UTF-8, and the malformed-input rule in
+  `REGULATOR_DECISIONS.md`, for `TrinoLikePattern`
 
 Before changing behavior, add a failing deterministic test based on the
 appropriate authority. Exercise the public or engine path that failed, not just

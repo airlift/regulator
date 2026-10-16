@@ -112,6 +112,13 @@ Compiling LIKE directly makes its common pattern shapes easy to recognize:
 The compiler canonicalizes redundant `%` operators. Dynamic patterns should be
 compiled once and reused whenever the caller can cache them.
 
+Results equal Trino's SQL LIKE except in three deliberate cases. A
+supplementary literal always matches itself, so `%😀_%` matches `😀x`, which
+Trino's SQL path rejects. Malformed input reads each maximal invalid subpart
+as one character that only `_` or `%` consumes. A pattern that is not valid
+UTF-8 is a syntax error. See
+[UTF-8 and malformed input](../reference/languages/TRINO_LIKE.md#utf-8-and-malformed-input).
+
 Ordered LIKE patterns and eligible Trino regular expressions share a fused
 front-and-back byte scanner with a bounded KMP fallback. This is an execution
 kernel, not a shared parser or a translation between languages. Eligible patterns

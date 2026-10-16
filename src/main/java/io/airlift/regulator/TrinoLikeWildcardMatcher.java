@@ -23,13 +23,16 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Matches Trino LIKE {@code _} using the SQL execution path's UTF-8 decoding semantics.
+ * Matches Trino LIKE patterns with {@code _} over UTF-8 characters. Malformed input is read one
+ * maximal subpart at a time ({@link Utf8#characterWidth}); such a character is consumed by
+ * {@code _} or {@code %} but never equals a literal code point.
  */
 final class TrinoLikeWildcardMatcher
 {
     private static final int MATCH_ANY = -1;
     private static final int MATCH_NONE = -2;
-    private static final int INVALID_CODE_POINT = -1;
+    // A malformed character equals no literal code point and no match marker.
+    private static final int INVALID_CHARACTER = Integer.MIN_VALUE;
     private static final ThreadLocal<Workspace> WORKSPACE = ThreadLocal.withInitial(Workspace::new);
 
     private final boolean exact;
@@ -76,16 +79,42 @@ final class TrinoLikeWildcardMatcher
         byte[] bytes = input.byteArray();
         int position = input.byteArrayOffset() + offset;
         int end = position + length;
+        if (directAnyCount == 1) {
+            // Without a loop: when the profiled input has one character width, C2 makes the loop
+            // below a counted loop, and its range check setup costs more than the character.
+            return position < end && position + Utf8.characterWidth(bytes, position, end) == end;
+        }
         if (directAnyCount >= 0) {
-            for (int anyIndex = 0; anyIndex < directAnyCount; anyIndex++) {
+            // Up to four characters step without a loop, for the same reason as one: C2 would
+            // make the loop below a counted loop, whose setup costs more than a short run. A
+            // longer run pays the setup once for the loop's faster steps.
+            if (position >= end) {
+                return false;
+            }
+            position += Utf8.characterWidth(bytes, position, end);
+            if (position >= end) {
+                return false;
+            }
+            position += Utf8.characterWidth(bytes, position, end);
+            if (directAnyCount == 2) {
+                return position == end;
+            }
+            if (position >= end) {
+                return false;
+            }
+            position += Utf8.characterWidth(bytes, position, end);
+            if (directAnyCount == 3) {
+                return position == end;
+            }
+            if (position >= end) {
+                return false;
+            }
+            position += Utf8.characterWidth(bytes, position, end);
+            for (int anyIndex = 4; anyIndex < directAnyCount; anyIndex++) {
                 if (position >= end) {
                     return false;
                 }
-                long decoded = decode(bytes, position, end);
-                if ((int) decoded == INVALID_CODE_POINT) {
-                    return false;
-                }
-                position += (int) (decoded >>> 32);
+                position += Utf8.characterWidth(bytes, position, end);
             }
             return position == end;
         }
@@ -99,12 +128,15 @@ final class TrinoLikeWildcardMatcher
         boolean accept = false;
 
         while (position < end) {
-            long decoded = decode(bytes, position, end);
-            int codePoint = (int) decoded;
-            if (codePoint == INVALID_CODE_POINT) {
-                return false;
+            int codePoint = bytes[position] & 0xFF;
+            if (codePoint < 0x80) {
+                position++;
             }
-            position += (int) (decoded >>> 32);
+            else {
+                int width = Utf8.characterWidth(bytes, position, end);
+                codePoint = nonAsciiCodePoint(bytes, position, width);
+                position += width;
+            }
 
             int generation = workspace.nextGeneration();
             int nextStateCount = 0;
@@ -164,36 +196,26 @@ final class TrinoLikeWildcardMatcher
         return count;
     }
 
-    private static long decode(byte[] input, int position, int end)
+    // A character is well formed exactly when it is as long as its lead byte announces;
+    // every shorter non-ASCII character is a maximal subpart of malformed input.
+    private static int nonAsciiCodePoint(byte[] input, int position, int width)
     {
         int header = input[position] & 0xFF;
-        if (header < 0x80) {
-            return pack(header, 1);
+        if (width == 2 && header < 0xE0) {
+            return ((header & 0b0001_1111) << 6) | (input[position + 1] & 0b0011_1111);
         }
-        if ((header & 0b1110_0000) == 0b1100_0000 && position + 1 < end) {
-            return pack(((header & 0b0001_1111) << 6) | (input[position + 1] & 0b0011_1111), 2);
+        if (width == 3 && header < 0xF0) {
+            return ((header & 0b0000_1111) << 12) |
+                    ((input[position + 1] & 0b0011_1111) << 6) |
+                    (input[position + 2] & 0b0011_1111);
         }
-        if ((header & 0b1111_0000) == 0b1110_0000 && position + 2 < end) {
-            return pack(
-                    ((header & 0b0000_1111) << 12) |
-                            ((input[position + 1] & 0b0011_1111) << 6) |
-                            (input[position + 2] & 0b0011_1111),
-                    3);
+        if (width == 4) {
+            return ((header & 0b0000_0111) << 18) |
+                    ((input[position + 1] & 0b0011_1111) << 12) |
+                    ((input[position + 2] & 0b0011_1111) << 6) |
+                    (input[position + 3] & 0b0011_1111);
         }
-        if ((header & 0b1111_1000) == 0b1111_0000 && position + 3 < end) {
-            return pack(
-                    ((header & 0b0000_0111) << 18) |
-                            ((input[position + 1] & 0b0011_1111) << 12) |
-                            ((input[position + 2] & 0b0011_1111) << 6) |
-                            (input[position + 3] & 0b0011_1111),
-                    4);
-        }
-        return pack(INVALID_CODE_POINT, 0);
-    }
-
-    private static long pack(int codePoint, int width)
-    {
-        return ((long) width << 32) | (codePoint & 0xFFFF_FFFFL);
+        return INVALID_CHARACTER;
     }
 
     private static final class Workspace
