@@ -149,7 +149,7 @@ public final class FilteredRe2
                 (codePoint >= Character.MIN_SURROGATE && codePoint <= Character.MAX_SURROGATE)) {
             throw new IllegalArgumentException("invalid Unicode code point: " + codePoint);
         }
-        return Character.toLowerCase(Character.toUpperCase(codePoint));
+        return CaseFolding.RE2.simpleFold(codePoint);
     }
 
     /**

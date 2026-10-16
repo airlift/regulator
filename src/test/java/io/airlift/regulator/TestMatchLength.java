@@ -55,14 +55,14 @@ public class TestMatchLength
     public void testImpossibleLanguage()
     {
         Regexp noMatch = Regexp.noMatch(Regexp.LIKE_PERL);
-        assertThat(MatchLength.analyze(noMatch)).isEqualTo(new MatchLength.Analysis(Integer.MAX_VALUE, -1));
+        assertThat(MatchLength.analyze(noMatch, CaseFolding.RE2)).isEqualTo(new MatchLength.Analysis(Integer.MAX_VALUE, -1));
 
         Regexp literal = Regexp.literal(Regexp.LIKE_PERL, 'a');
         Regexp alternate = Regexp.alternate(Regexp.LIKE_PERL, List.of(noMatch, literal));
-        assertThat(MatchLength.analyze(alternate)).isEqualTo(new MatchLength.Analysis(1, 1));
+        assertThat(MatchLength.analyze(alternate, CaseFolding.RE2)).isEqualTo(new MatchLength.Analysis(1, 1));
 
         Regexp optionalNoMatch = Regexp.star(Regexp.LIKE_PERL, noMatch);
-        assertThat(MatchLength.analyze(optionalNoMatch)).isEqualTo(new MatchLength.Analysis(0, 0));
+        assertThat(MatchLength.analyze(optionalNoMatch, CaseFolding.RE2)).isEqualTo(new MatchLength.Analysis(0, 0));
     }
 
     @Test
@@ -72,14 +72,14 @@ public class TestMatchLength
         Regexp literal = Regexp.literal(parseFlags, 0x1F4B0);
         Regexp saturated = Regexp.repeat(parseFlags, literal, Integer.MAX_VALUE, Integer.MAX_VALUE);
 
-        assertThat(MatchLength.analyze(saturated)).isEqualTo(new MatchLength.Analysis(Integer.MAX_VALUE, -1));
-        assertThat(MatchLength.analyze(Regexp.concat(parseFlags, List.of(saturated, literal))))
+        assertThat(MatchLength.analyze(saturated, CaseFolding.RE2)).isEqualTo(new MatchLength.Analysis(Integer.MAX_VALUE, -1));
+        assertThat(MatchLength.analyze(Regexp.concat(parseFlags, List.of(saturated, literal)), CaseFolding.RE2))
                 .isEqualTo(new MatchLength.Analysis(Integer.MAX_VALUE, -1));
-        assertThat(MatchLength.analyze(Regexp.alternate(parseFlags, List.of(saturated, literal))))
+        assertThat(MatchLength.analyze(Regexp.alternate(parseFlags, List.of(saturated, literal)), CaseFolding.RE2))
                 .isEqualTo(new MatchLength.Analysis(4, 4));
-        assertThat(MatchLength.analyze(Regexp.quest(parseFlags, saturated)))
+        assertThat(MatchLength.analyze(Regexp.quest(parseFlags, saturated), CaseFolding.RE2))
                 .isEqualTo(new MatchLength.Analysis(0, 0));
-        assertThat(MatchLength.analyze(Regexp.repeat(parseFlags, saturated, 2, 2)))
+        assertThat(MatchLength.analyze(Regexp.repeat(parseFlags, saturated, 2, 2), CaseFolding.RE2))
                 .isEqualTo(new MatchLength.Analysis(Integer.MAX_VALUE, -1));
     }
 
@@ -91,6 +91,6 @@ public class TestMatchLength
     private static void assertLength(String pattern, int parseFlags, int minimum, int fixed)
     {
         Regexp regexp = RegexpParser.parse(utf8Slice(pattern), parseFlags).regexp();
-        assertThat(MatchLength.analyze(regexp)).isEqualTo(new MatchLength.Analysis(minimum, fixed));
+        assertThat(MatchLength.analyze(regexp, CaseFolding.RE2)).isEqualTo(new MatchLength.Analysis(minimum, fixed));
     }
 }

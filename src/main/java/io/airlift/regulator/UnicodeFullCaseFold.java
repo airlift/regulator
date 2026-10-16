@@ -21,9 +21,12 @@ import java.util.Locale;
 import java.util.Map;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
+import static java.util.Objects.requireNonNull;
 
 /**
- * JVM-derived full case-fold mappings used by the Trino language frontend.
+ * Full case-fold mappings that join the simple folding of one {@link CaseFolding} with the JVM's
+ * multi-character {@code String} case mappings. Only a rule with multi-character folds, the Trino
+ * rule, builds them.
  */
 final class UnicodeFullCaseFold
 {
@@ -50,11 +53,24 @@ final class UnicodeFullCaseFold
 
     record ByteLength(int minimum, int maximum) {}
 
-    private UnicodeFullCaseFold() {}
+    private final CaseFolding caseFolding;
+    private final Data data;
+    // ASCII literals dominate Trino (?i) patterns, and the compiler asks for their classes once
+    // per rune per literal.
+    private final CharClass[] asciiSimpleFoldClasses;
 
-    static int[] fold(int[] runes)
+    private UnicodeFullCaseFold(CaseFolding caseFolding, Map<Integer, int[]> mappingByRune, List<FoldToken> multiCharacterTokens)
     {
-        Data data = DataHolder.DATA;
+        this.caseFolding = requireNonNull(caseFolding, "caseFolding is null");
+        this.data = new Data(mappingByRune, multiCharacterTokens);
+        asciiSimpleFoldClasses = new CharClass[0x80];
+        for (int rune = 0; rune < asciiSimpleFoldClasses.length; rune++) {
+            asciiSimpleFoldClasses[rune] = buildSimpleFoldClass(rune);
+        }
+    }
+
+    int[] fold(int[] runes)
+    {
         int[] folded = new int[Math.max(4, runes.length)];
         int size = 0;
         for (int rune : runes) {
@@ -64,7 +80,7 @@ final class UnicodeFullCaseFold
                 folded = Arrays.copyOf(folded, Math.max(folded.length * 2, size + length));
             }
             if (mapping == null) {
-                folded[size] = canonicalSimpleFold(rune);
+                folded[size] = caseFolding.simpleFold(rune);
             }
             else {
                 System.arraycopy(mapping, 0, folded, size, length);
@@ -74,17 +90,15 @@ final class UnicodeFullCaseFold
         return size == folded.length ? folded : Arrays.copyOf(folded, size);
     }
 
-    static CharClass simpleFoldClass(int rune)
+    CharClass simpleFoldClass(int rune)
     {
-        // ASCII literals dominate Trino (?i) patterns, and the compiler asks for their classes
-        // once per rune per literal.
-        if (rune >= 0 && rune < AsciiSimpleFoldClasses.CLASSES.length) {
-            return AsciiSimpleFoldClasses.CLASSES[rune];
+        if (rune >= 0 && rune < asciiSimpleFoldClasses.length) {
+            return asciiSimpleFoldClasses[rune];
         }
         return buildSimpleFoldClass(rune);
     }
 
-    private static CharClass buildSimpleFoldClass(int rune)
+    private CharClass buildSimpleFoldClass(int rune)
     {
         CharClassBuilder builder = new CharClassBuilder();
         int current = rune;
@@ -92,30 +106,29 @@ final class UnicodeFullCaseFold
             if (current < Character.MIN_SURROGATE || current > Character.MAX_SURROGATE) {
                 builder.addRange(current, current);
             }
-            current = UnicodeCaseFold.cycleFoldRune(current);
+            current = caseFolding.cycleFoldRune(current);
         }
         while (current != rune);
         return builder.toCharClass();
     }
 
-    static List<FoldToken> multiCharacterTokens()
+    List<FoldToken> multiCharacterTokens()
     {
-        return DataHolder.DATA.multiCharacterTokens;
+        return data.multiCharacterTokens;
     }
 
     /**
      * Returns the tokens whose folded sequence begins with {@code foldedRune}, in the order of
      * {@link #multiCharacterTokens()}.
      */
-    static List<FoldToken> multiCharacterTokensStartingWith(int foldedRune)
+    List<FoldToken> multiCharacterTokensStartingWith(int foldedRune)
     {
-        Data data = DataHolder.DATA;
         int start = data.firstTokenIndex(foldedRune);
         int end = data.tokenEndIndex(foldedRune, start);
         return data.multiCharacterTokens.subList(start, end);
     }
 
-    static boolean requiresFullCaseFold(int[] runes)
+    boolean requiresFullCaseFold(int[] runes)
     {
         int[] folded = fold(runes);
         for (int index = 0; index < folded.length; index++) {
@@ -128,9 +141,8 @@ final class UnicodeFullCaseFold
         return false;
     }
 
-    static List<FoldToken> multiCharacterTokens(CharClass characterClass)
+    List<FoldToken> multiCharacterTokens(CharClass characterClass)
     {
-        Data data = DataHolder.DATA;
         // Most classes contain no rune with a multi-character fold, so one intersection test
         // against the union of all token sources answers for every token.
         if (!intersects(characterClass, data.allSourceRunes)) {
@@ -145,9 +157,8 @@ final class UnicodeFullCaseFold
         return List.copyOf(result);
     }
 
-    static ByteLength byteLength(int[] runes)
+    ByteLength byteLength(int[] runes)
     {
-        Data data = DataHolder.DATA;
         int[] folded = fold(runes);
         int[] minimum = new int[folded.length + 1];
         int[] maximum = new int[folded.length + 1];
@@ -163,7 +174,7 @@ final class UnicodeFullCaseFold
                     simpleMinimum = Math.min(simpleMinimum, length);
                     simpleMaximum = Math.max(simpleMaximum, length);
                 }
-                current = UnicodeCaseFold.cycleFoldRune(current);
+                current = caseFolding.cycleFoldRune(current);
             }
             while (current != rune);
             minimum[index] = simpleMinimum + minimum[index + 1];
@@ -227,7 +238,11 @@ final class UnicodeFullCaseFold
         return Utf8.encodedLength(rune);
     }
 
-    private static Data build()
+    /**
+     * Returns the full case folding that joins the simple folding of {@code caseFolding} with the
+     * JVM's multi-character {@code String} case mappings.
+     */
+    static UnicodeFullCaseFold withJvmMultiCharacterFolds(CaseFolding caseFolding)
     {
         Map<Integer, int[]> directMappings = new HashMap<>();
         for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
@@ -239,7 +254,7 @@ final class UnicodeFullCaseFold
             int[] lowercase = value.toLowerCase(Locale.ROOT).codePoints().toArray();
             int[] mapping = uppercase.length > 1 ? uppercase : (lowercase.length > 1 ? lowercase : null);
             if (mapping != null) {
-                directMappings.put(codePoint, canonicalize(mapping));
+                directMappings.put(codePoint, canonicalize(caseFolding, mapping));
             }
         }
 
@@ -267,24 +282,16 @@ final class UnicodeFullCaseFold
                 .map(entry -> new FoldToken(entry.getKey().runes(), entry.getValue().toCharClass()))
                 .sorted((left, right) -> compare(left.foldedRunes(), right.foldedRunes()))
                 .toList();
-        return new Data(Map.copyOf(mappingByRune), tokens);
+        return new UnicodeFullCaseFold(caseFolding, mappingByRune, tokens);
     }
 
-    private static int[] canonicalize(int[] runes)
+    private static int[] canonicalize(CaseFolding caseFolding, int[] runes)
     {
         int[] canonical = runes.clone();
         for (int index = 0; index < canonical.length; index++) {
-            canonical[index] = canonicalSimpleFold(canonical[index]);
+            canonical[index] = caseFolding.simpleFold(canonical[index]);
         }
         return canonical;
-    }
-
-    private static int canonicalSimpleFold(int rune)
-    {
-        if (rune < 0x80) {
-            return rune >= 'A' && rune <= 'Z' ? rune + ('a' - 'A') : rune;
-        }
-        return Character.toLowerCase(Character.toUpperCase(rune));
     }
 
     private static int compare(int[] left, int[] right)
@@ -331,9 +338,10 @@ final class UnicodeFullCaseFold
                 tokenMinimumLengths[index] = minimumUtf8Length(tokens[index].sourceRunes());
                 tokenMaximumLengths[index] = maximumUtf8Length(tokens[index].sourceRunes());
             }
+            // Each mapped rune is a source rune of exactly one token.
             CharClassBuilder sources = new CharClassBuilder();
-            for (FoldToken token : tokens) {
-                sources.addCharClass(token.sourceRunes(), Regexp.CLASS_NEWLINE);
+            for (int rune : mappedRunes) {
+                sources.addRange(rune, rune);
             }
             allSourceRunes = sources.toCharClass();
         }
@@ -371,25 +379,6 @@ final class UnicodeFullCaseFold
             }
             return end;
         }
-    }
-
-    private static final class AsciiSimpleFoldClasses
-    {
-        private static final CharClass[] CLASSES = build();
-
-        private static CharClass[] build()
-        {
-            CharClass[] classes = new CharClass[0x80];
-            for (int rune = 0; rune < classes.length; rune++) {
-                classes[rune] = buildSimpleFoldClass(rune);
-            }
-            return classes;
-        }
-    }
-
-    private static final class DataHolder
-    {
-        private static final Data DATA = build();
     }
 
     private record IntSequence(int[] runes)

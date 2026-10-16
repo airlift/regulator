@@ -146,8 +146,8 @@ public class TestDfaRetainedState
 
     private static Prog compileTrinoProgram(String expression, boolean reversed, long memoryBudget)
     {
-        Regexp regexp = Simplifier.simplify(
-                TrinoRegexpParser.parse(Slices.utf8Slice(expression), Regexp.LIKE_PERL).regexp());
-        return Compiler.compileNormalized(regexp, reversed, memoryBudget, Compiler.Dialect.TRINO);
+        ParseResult parsed = TrinoRegexpParser.parse(Slices.utf8Slice(expression), Regexp.LIKE_PERL);
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        return Compiler.compileNormalized(regexp, reversed, memoryBudget, Compiler.Dialect.TRINO, parsed.caseFolding());
     }
 }

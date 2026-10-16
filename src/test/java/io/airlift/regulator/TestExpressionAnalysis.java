@@ -115,7 +115,7 @@ public class TestExpressionAnalysis
         patterns.addAll(sharedPatterns);
         for (String pattern : patterns) {
             Slice slice = utf8Slice(pattern);
-            for (Regexp regexp : Arrays.asList(
+            for (ParseResult parsed : Arrays.asList(
                     parseOrNull(() -> RegexpParser.parse(slice, Regexp.LIKE_PERL)),
                     parseOrNull(() -> RegexpParser.parse(slice, Regexp.LIKE_PERL | Regexp.LATIN1)),
                     parseOrNull(() -> RegexpParser.parse(slice, Regexp.LIKE_PERL | Regexp.FOLD_CASE)),
@@ -123,11 +123,13 @@ public class TestExpressionAnalysis
                     parseOrNull(() -> JavaRegexpParser.parse(slice, Regexp.LIKE_PERL | Regexp.FOLD_CASE)),
                     parseOrNull(() -> TrinoRegexpParser.parse(slice, Regexp.LIKE_PERL)),
                     parseOrNull(() -> TrinoRegexpParser.parse(slice, Regexp.LIKE_PERL | Regexp.FOLD_CASE)))) {
-                if (regexp == null) {
+                if (parsed == null) {
                     continue;
                 }
-                int raw = MatchLength.analyze(regexp).encoded();
-                int normalized = ExpressionAnalysis.analyzeNormalized(Simplifier.simplify(regexp)).length().encoded();
+                Regexp regexp = parsed.regexp();
+                CaseFolding caseFolding = parsed.caseFolding();
+                int raw = MatchLength.analyze(regexp, caseFolding).encoded();
+                int normalized = ExpressionAnalysis.analyzeNormalized(Simplifier.simplify(regexp, caseFolding), caseFolding).length().encoded();
                 assertThat(normalized).as("encoded length: %s", pattern).isEqualTo(raw);
             }
         }
@@ -144,21 +146,21 @@ public class TestExpressionAnalysis
                 "[a💰]",
                 "(?i:K)")) {
             Regexp regexp = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
-            Regexp normalized = Simplifier.simplify(regexp);
-            assertThat(ExpressionAnalysis.analyzeNormalized(normalized).length().encoded())
+            Regexp normalized = Simplifier.simplify(regexp, CaseFolding.RE2);
+            assertThat(ExpressionAnalysis.analyzeNormalized(normalized, CaseFolding.RE2).length().encoded())
                     .as("encoded length: %s", pattern)
-                    .isEqualTo(MatchLength.analyze(regexp).encoded());
+                    .isEqualTo(MatchLength.analyze(regexp, CaseFolding.RE2).encoded());
         }
 
         Regexp noMatch = Regexp.noMatch(Regexp.LIKE_PERL);
-        assertThat(ExpressionAnalysis.analyzeNormalized(noMatch).length().encoded())
-                .isEqualTo(MatchLength.analyze(noMatch).encoded());
+        assertThat(ExpressionAnalysis.analyzeNormalized(noMatch, CaseFolding.RE2).length().encoded())
+                .isEqualTo(MatchLength.analyze(noMatch, CaseFolding.RE2).encoded());
 
         Regexp literal = Regexp.literal(Regexp.LIKE_PERL, 0x1F4B0);
         Regexp saturated = Regexp.repeat(Regexp.LIKE_PERL, literal, Integer.MAX_VALUE, Integer.MAX_VALUE);
-        ExpressionAnalysis.Length saturatedLength = ExpressionAnalysis.analyzeNormalized(saturated).length();
+        ExpressionAnalysis.Length saturatedLength = ExpressionAnalysis.analyzeNormalized(saturated, CaseFolding.RE2).length();
         assertThat(saturatedLength.encoded())
-                .isEqualTo(MatchLength.analyze(saturated).encoded());
+                .isEqualTo(MatchLength.analyze(saturated, CaseFolding.RE2).encoded());
         assertThat(saturatedLength.fixed()).isEqualTo(-1);
     }
 
@@ -293,9 +295,9 @@ public class TestExpressionAnalysis
                 "(?s:foo.*bar)",
                 "(?i:foo)")) {
             Regexp regexp = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
-            Regexp normalized = Simplifier.simplify(regexp);
-            MatchLength.Analysis currentLength = MatchLength.analyze(normalized);
-            ExpressionAnalysis analysis = ExpressionAnalysis.analyzeNormalized(normalized);
+            Regexp normalized = Simplifier.simplify(regexp, CaseFolding.RE2);
+            MatchLength.Analysis currentLength = MatchLength.analyze(normalized, CaseFolding.RE2);
+            ExpressionAnalysis analysis = ExpressionAnalysis.analyzeNormalized(normalized, CaseFolding.RE2);
 
             assertThat(analysis.length().minimum()).as("minimum: %s", pattern).isEqualTo(currentLength.minimum());
             assertThat(analysis.length().fixed()).as("fixed: %s", pattern).isEqualTo(currentLength.fixed());
@@ -317,7 +319,7 @@ public class TestExpressionAnalysis
 
         for (String pattern : List.of("^abc", "^abc.*", "\\Aabc(?s:.*)")) {
             Re2 re2 = Re2.compile(utf8Slice(pattern));
-            Regexp.RequiredPrefixResult currentPrefix = re2.regexp().requiredPrefix();
+            Regexp.RequiredPrefixResult currentPrefix = re2.regexp().requiredPrefix(re2.caseFolding());
             assertThat(currentPrefix).as("current prefix: %s", pattern).isNotNull();
             assertThat(re2.expressionAnalysisForDiagnostics().literalSequence().requiredPrefix())
                     .as("shared prefix: %s", pattern)
@@ -434,10 +436,10 @@ public class TestExpressionAnalysis
         }
     }
 
-    private static Regexp parseOrNull(Supplier<ParseResult> parser)
+    private static ParseResult parseOrNull(Supplier<ParseResult> parser)
     {
         try {
-            return parser.get().regexp();
+            return parser.get();
         }
         catch (RegexpParseException e) {
             // Patterns that a frontend rejects have no analysis to compare.

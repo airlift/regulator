@@ -48,7 +48,7 @@ final class JavaRegexpParser
             }
         }
 
-        Parser parser = new Parser(pattern, parseFlags);
+        Parser parser = new Parser(pattern, parseFlags, CaseFolding.JAVA);
         Regexp parsedRegexp = parser.parseRegexp();
         if (!parser.atEnd()) {
             // Unconsumed input at the top-level is typically a stray ')'.
@@ -59,8 +59,8 @@ final class JavaRegexpParser
         }
         // Parse-time simplification preserves counted repetitions. The compiler performs repeat
         // elimination and named-class expansion after the frontend has established Java semantics.
-        Regexp simplifiedRegexp = Simplifier.simplifyForParse(parsedRegexp);
-        return new ParseResult(simplifiedRegexp, parser.capturingGroupCount);
+        Regexp simplifiedRegexp = Simplifier.simplifyForParse(parsedRegexp, CaseFolding.JAVA);
+        return new ParseResult(simplifiedRegexp, parser.capturingGroupCount, CaseFolding.JAVA);
     }
 
     @SuppressWarnings("CharUsedInArithmeticContext")
@@ -71,6 +71,7 @@ final class JavaRegexpParser
         private final byte[] bytes;
         private final int start;
         private final int end;
+        private final CaseFolding caseFolding;
         private int index;
 
         private int flags;
@@ -78,11 +79,12 @@ final class JavaRegexpParser
         private boolean inQuote;
         private final Set<String> captureNames = new HashSet<>();
 
-        Parser(Slice pattern, int flags)
+        Parser(Slice pattern, int flags, CaseFolding caseFolding)
         {
             this.bytes = pattern.byteArray();
             this.start = pattern.byteArrayOffset();
             this.end = start + pattern.length();
+            this.caseFolding = caseFolding;
             this.index = start;
             this.flags = flags;
 
@@ -461,7 +463,7 @@ final class JavaRegexpParser
 
             int nodeFlags = nonGreedy ? (flags | Regexp.NON_GREEDY) : (flags & ~Regexp.NON_GREEDY);
             if (max != 1) {
-                ExpressionAnalysis analysis = ExpressionAnalysis.analyzeNormalized(atom);
+                ExpressionAnalysis analysis = ExpressionAnalysis.analyzeNormalized(atom, caseFolding);
                 if (analysis.hasCaptures() && analysis.canMatchEmpty()) {
                     throw unsupportedConstruct("nullable repeated captures", repetitionStart, index);
                 }
@@ -897,7 +899,7 @@ final class JavaRegexpParser
                 }
 
                 // For explicit singletons/ranges, do not implicitly filter '\n' out.
-                characterClassBuilder.addRangeFlags(low, high, nodeFlags | Regexp.CLASS_NEWLINE);
+                characterClassBuilder.addRangeFlags(low, high, nodeFlags | Regexp.CLASS_NEWLINE, caseFolding);
             }
 
             return new ClassUnionResult(characterClassBuilder, hasClassAtom);
@@ -1069,7 +1071,7 @@ final class JavaRegexpParser
             };
             if (characterClass != null) {
                 index += 2;
-                addGroup(characterClassBuilder, characterClass, 1, nodeFlags);
+                addGroup(characterClassBuilder, characterClass, 1, nodeFlags, caseFolding);
                 return true;
             }
 
@@ -1324,14 +1326,14 @@ final class JavaRegexpParser
             addJavaUnicodeGroup(characterClassBuilder, name, group, sign, parseFlags);
         }
 
-        private static void addJavaUnicodeGroup(CharClassBuilder builder, String name, CharClass group, int sign, int flags)
+        private void addJavaUnicodeGroup(CharClassBuilder builder, String name, CharClass group, int sign, int flags)
         {
             // Java applies property-specific case predicates before complement/intersection,
             // not the fold closure used for literal ranges. Other properties remain unchanged.
             if ((flags & (Regexp.ASCII_FOLD_CASE | Regexp.FOLD_CASE)) != 0) {
                 group = caseInsensitiveJavaProperty(name, group, flags);
             }
-            addGroup(builder, group, sign, flags & ~(Regexp.ASCII_FOLD_CASE | Regexp.FOLD_CASE));
+            addGroup(builder, group, sign, flags & ~(Regexp.ASCII_FOLD_CASE | Regexp.FOLD_CASE), caseFolding);
         }
 
         private static CharClass caseInsensitiveJavaProperty(String name, CharClass group, int flags)
@@ -1372,9 +1374,9 @@ final class JavaRegexpParser
             private static CharClass casedProperty()
             {
                 CharClassBuilder builder = new CharClassBuilder();
-                builder.addCharClass(UnicodeGroups.lookup("javaLowerCase"), 0);
-                builder.addCharClass(UnicodeGroups.lookup("javaUpperCase"), 0);
-                builder.addCharClass(UnicodeGroups.lookup("javaTitleCase"), 0);
+                builder.addCharClass(UnicodeGroups.lookup("javaLowerCase"), 0, CaseFolding.JAVA);
+                builder.addCharClass(UnicodeGroups.lookup("javaUpperCase"), 0, CaseFolding.JAVA);
+                builder.addCharClass(UnicodeGroups.lookup("javaTitleCase"), 0, CaseFolding.JAVA);
                 return builder.toCharClass();
             }
         }
@@ -1489,7 +1491,7 @@ final class JavaRegexpParser
             return characterClassBuilder.toCharClass();
         }
 
-        private static Regexp perlDigits(int flags, boolean negate)
+        private Regexp perlDigits(int flags, boolean negate)
         {
             if ((flags & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0) {
                 return unicodePredefinedClass(flags, "IsDigit", negate);
@@ -1500,7 +1502,7 @@ final class JavaRegexpParser
             return perlCharClass(flags, negate, perlDigitsCharClass(flags, false));
         }
 
-        private static Regexp perlSpaces(int flags, boolean negate)
+        private Regexp perlSpaces(int flags, boolean negate)
         {
             if ((flags & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0) {
                 return unicodePredefinedClass(flags, "IsWhiteSpace", negate);
@@ -1508,7 +1510,7 @@ final class JavaRegexpParser
             return perlCharClass(flags, negate, perlSpacesCharClass(flags, false));
         }
 
-        private static Regexp perlWord(int flags, boolean negate)
+        private Regexp perlWord(int flags, boolean negate)
         {
             if ((flags & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0) {
                 return unicodePredefinedClass(flags, "IsWord", negate);
@@ -1516,16 +1518,16 @@ final class JavaRegexpParser
             return perlCharClass(flags, negate, perlWordCharClass(flags, false));
         }
 
-        private static Regexp unicodePredefinedClass(int flags, String name, boolean negate)
+        private Regexp unicodePredefinedClass(int flags, String name, boolean negate)
         {
             CharClass group = requireNonNull(UnicodeGroups.lookup(name), "Unicode group is missing: " + name);
             return perlCharClass(flags, negate, group);
         }
 
-        private static Regexp perlCharClass(int flags, boolean negate, CharClass group)
+        private Regexp perlCharClass(int flags, boolean negate, CharClass group)
         {
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            addGroup(characterClassBuilder, group, negate ? -1 : 1, flags);
+            addGroup(characterClassBuilder, group, negate ? -1 : 1, flags, caseFolding);
             characterClassBuilder.removeAbove(Regexp.maxRune(flags));
             return Regexp.charClass(flags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());
         }
@@ -1544,7 +1546,7 @@ final class JavaRegexpParser
             return characterClassBuilder.toCharClass();
         }
 
-        private static CharClass digitsCharClass(int flags, boolean negate)
+        private CharClass digitsCharClass(int flags, boolean negate)
         {
             return predefinedCharClass(flags, negate, "IsDigit", perlDigitsCharClass(flags, false));
         }
@@ -1568,7 +1570,7 @@ final class JavaRegexpParser
             return characterClassBuilder.toCharClass();
         }
 
-        private static CharClass spacesCharClass(int flags, boolean negate)
+        private CharClass spacesCharClass(int flags, boolean negate)
         {
             return predefinedCharClass(flags, negate, "IsWhiteSpace", perlSpacesCharClass(flags, false));
         }
@@ -1587,12 +1589,12 @@ final class JavaRegexpParser
             return characterClassBuilder.toCharClass();
         }
 
-        private static CharClass wordCharClass(int flags, boolean negate)
+        private CharClass wordCharClass(int flags, boolean negate)
         {
             return predefinedCharClass(flags, negate, "IsWord", perlWordCharClass(flags, false));
         }
 
-        private static CharClass predefinedCharClass(int flags, boolean negate, String unicodeName, CharClass asciiClass)
+        private CharClass predefinedCharClass(int flags, boolean negate, String unicodeName, CharClass asciiClass)
         {
             CharClass group = (flags & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0
                     ? requireNonNull(UnicodeGroups.lookup(unicodeName), "Unicode group is missing: " + unicodeName)
@@ -1601,7 +1603,7 @@ final class JavaRegexpParser
                 return group;
             }
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            addGroup(characterClassBuilder, group, -1, flags);
+            addGroup(characterClassBuilder, group, -1, flags, caseFolding);
             characterClassBuilder.removeAbove(Regexp.maxRune(flags));
             return characterClassBuilder.toCharClass();
         }
@@ -1763,7 +1765,7 @@ final class JavaRegexpParser
             if ((flags & Regexp.ASCII_FOLD_CASE) != 0 &&
                     ((rune >= 'A' && rune <= 'Z') || (rune >= 'a' && rune <= 'z'))) {
                 CharClassBuilder characterClassBuilder = new CharClassBuilder();
-                characterClassBuilder.addRangeFlags(rune, rune, flags);
+                characterClassBuilder.addRangeFlags(rune, rune, flags, caseFolding);
                 return Regexp.charClass(flags & ~Regexp.ASCII_FOLD_CASE, characterClassBuilder.toCharClass());
             }
 
@@ -1778,14 +1780,14 @@ final class JavaRegexpParser
                         return Regexp.charClass(flags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());
                     }
                 }
-                else if (UnicodeCaseFold.cycleFoldRune(rune) != rune) {
+                else if (caseFolding.cycleFoldRune(rune) != rune) {
                     CharClassBuilder characterClassBuilder = new CharClassBuilder();
                     int initialRune = rune;
                     do {
                         if ((flags & Regexp.NEVER_NEWLINE) == 0 || rune != '\n') {
                             characterClassBuilder.addRange(rune, rune);
                         }
-                        rune = UnicodeCaseFold.cycleFoldRune(rune);
+                        rune = caseFolding.cycleFoldRune(rune);
                     }
                     while (rune != initialRune);
                     return Regexp.charClass(flags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());

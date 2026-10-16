@@ -75,17 +75,17 @@ final class RegexpParserSupport
 
     private record RepetitionFrame(Regexp regexp, int budget) {}
 
-    static void addGroup(CharClassBuilder targetClassBuilder, CharClass group, int sign, int parseFlags)
+    static void addGroup(CharClassBuilder targetClassBuilder, CharClass group, int sign, int parseFlags, CaseFolding caseFolding)
     {
         if (sign == 1) {
-            targetClassBuilder.addCharClass(group, parseFlags);
+            targetClassBuilder.addCharClass(group, parseFlags, caseFolding);
             return;
         }
 
         if ((parseFlags & Regexp.FOLD_CASE) != 0) {
             // Negating a case-folded group requires a two-step approach.
             CharClassBuilder temporaryBuilder = new CharClassBuilder();
-            addGroup(temporaryBuilder, group, 1, parseFlags);
+            addGroup(temporaryBuilder, group, 1, parseFlags, caseFolding);
             boolean excludeNewline = ((parseFlags & Regexp.CLASS_NEWLINE) == 0) || ((parseFlags & Regexp.NEVER_NEWLINE) != 0);
             if (excludeNewline) {
                 temporaryBuilder.addRange('\n', '\n');
@@ -103,12 +103,12 @@ final class RegexpParserSupport
         int next = 0;
         for (RuneRange runeRange : group.ranges()) {
             if (next < runeRange.low()) {
-                targetClassBuilder.addRangeFlags(next, runeRange.low() - 1, parseFlags);
+                targetClassBuilder.addRangeFlags(next, runeRange.low() - 1, parseFlags, caseFolding);
             }
             next = runeRange.high() + 1;
         }
         if (next <= Regexp.RUNEMAX) {
-            targetClassBuilder.addRangeFlags(next, Regexp.RUNEMAX, parseFlags);
+            targetClassBuilder.addRangeFlags(next, Regexp.RUNEMAX, parseFlags, caseFolding);
         }
     }
 

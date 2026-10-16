@@ -111,7 +111,7 @@ public class TestCompilerDominatorElision
     private static void assertFlatteningIdentical(Slice pattern, Re2.Options options, boolean reversed)
     {
         Regexp parsed = RegexpParser.parse(pattern, options.parseFlags()).regexp();
-        Regexp normalized = Simplifier.simplify(parsed);
+        Regexp normalized = Simplifier.simplify(parsed, CaseFolding.RE2);
         long forwardMemory = options.maxMemory() - (options.maxMemory() / 3);
         Prog control = Compiler.compileNormalizedForBenchmark(
                 normalized,
@@ -146,7 +146,7 @@ public class TestCompilerDominatorElision
     private static boolean usesDominatorFreeRoute(Slice pattern, Re2.Options options)
     {
         Regexp parsed = RegexpParser.parse(pattern, options.parseFlags()).regexp();
-        Regexp normalized = Simplifier.simplify(parsed);
+        Regexp normalized = Simplifier.simplify(parsed, CaseFolding.RE2);
         long forwardMemory = options.maxMemory() - (options.maxMemory() / 3);
         Prog optimized = Compiler.compileNormalizedForBenchmark(
                 normalized,

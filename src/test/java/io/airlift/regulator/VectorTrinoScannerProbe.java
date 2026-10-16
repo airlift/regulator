@@ -118,7 +118,7 @@ public final class VectorTrinoScannerProbe
         check(regexp.pattern().usesTrinoScanPlanForDiagnostics(), expression + ": no scan plan");
         check(regexp.pattern().usesAsciiFoldedTrinoScanExecutorForDiagnostics() == asciiFolded, expression + ": unexpected executor");
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-        TrinoScanPlan plan = TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false);
+        TrinoScanPlan plan = TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding());
         check(plan != null, expression + ": no plan");
         check(plan.operationsForDiagnostics().equals(operations), expression + ": unexpected operations " + plan.operationsForDiagnostics());
         byte[] required = plan.requiredLiteralForDiagnostics();

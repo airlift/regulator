@@ -15,11 +15,16 @@ package io.airlift.regulator;
 
 import static java.util.Objects.requireNonNull;
 
-record ParseResult(Regexp regexp, int capturingGroupCount)
+/**
+ * @param caseFolding the case folding of the pattern language, which every later stage of
+ *         compilation applies
+ */
+record ParseResult(Regexp regexp, int capturingGroupCount, CaseFolding caseFolding)
 {
     ParseResult
     {
         requireNonNull(regexp, "regexp is null");
+        requireNonNull(caseFolding, "caseFolding is null");
         if (capturingGroupCount < 0) {
             throw new IllegalArgumentException("capturingGroupCount is negative: " + capturingGroupCount);
         }

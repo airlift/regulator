@@ -93,7 +93,7 @@ public class TestCharClassBuilder
     public void testAddCharClassAppliesNewlineAndCaseFoldFlags()
     {
         CharClassBuilder newlineBuilder = new CharClassBuilder();
-        newlineBuilder.addCharClass(new CharClass(false, 21, new RuneRange[] {new RuneRange(0, 20)}), 0);
+        newlineBuilder.addCharClass(new CharClass(false, 21, new RuneRange[] {new RuneRange(0, 20)}), 0, CaseFolding.RE2);
         assertThat(newlineBuilder.contains('\t')).isTrue();
         assertThat(newlineBuilder.contains('\n')).isFalse();
         assertThat(newlineBuilder.contains('\u000B')).isTrue();
@@ -101,7 +101,8 @@ public class TestCharClassBuilder
         CharClassBuilder caseFoldBuilder = new CharClassBuilder();
         caseFoldBuilder.addCharClass(
                 new CharClass(false, 1, new RuneRange[] {new RuneRange('A', 'A')}),
-                Regexp.CLASS_NEWLINE | Regexp.ASCII_FOLD_CASE);
+                Regexp.CLASS_NEWLINE | Regexp.ASCII_FOLD_CASE,
+                CaseFolding.RE2);
         assertThat(caseFoldBuilder.contains('A')).isTrue();
         assertThat(caseFoldBuilder.contains('a')).isTrue();
     }
@@ -138,8 +139,8 @@ public class TestCharClassBuilder
         CharClass lower = UnicodeGroups.lookup("Ll");
 
         CharClassBuilder merged = new CharClassBuilder();
-        merged.addCharClass(upper, Regexp.LIKE_PERL);
-        merged.addCharClass(lower, Regexp.LIKE_PERL);
+        merged.addCharClass(upper, Regexp.LIKE_PERL, CaseFolding.RE2);
+        merged.addCharClass(lower, Regexp.LIKE_PERL, CaseFolding.RE2);
 
         CharClassBuilder expected = new CharClassBuilder();
         for (RuneRange range : lower.ranges()) {
@@ -177,7 +178,7 @@ public class TestCharClassBuilder
             CharClassBuilder viaBuilder = existing.copy();
             viaBuilder.addCharClass(source);
             CharClassBuilder viaClass = existing.copy();
-            viaClass.addCharClass(source.toCharClass(), Regexp.CLASS_NEWLINE);
+            viaClass.addCharClass(source.toCharClass(), Regexp.CLASS_NEWLINE, CaseFolding.RE2);
 
             for (CharClassBuilder builder : new CharClassBuilder[] {viaBuilder, viaClass}) {
                 assertThat(builder.runeCount()).as("iteration %s", iteration).isEqualTo(model.cardinality());
@@ -203,7 +204,7 @@ public class TestCharClassBuilder
 
         CharClassBuilder builder = new CharClassBuilder();
         builder.addRange(1000, 1000);
-        builder.addCharClass(source.toCharClass(), 0);
+        builder.addCharClass(source.toCharClass(), 0, CaseFolding.RE2);
         assertThat(builder.contains('\n')).isFalse();
         assertThat(builder.contains(11)).isTrue();
         assertThat(builder.contains(13)).isTrue();

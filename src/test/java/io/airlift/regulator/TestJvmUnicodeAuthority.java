@@ -239,7 +239,7 @@ public class TestJvmUnicodeAuthority
                 if (actualGroupSize > expectedGroupSize[canonicalCodePoint]) {
                     throw new AssertionError(String.format(Locale.ROOT, "fold cycle does not close for U+%04X", codePoint));
                 }
-                foldedCodePoint = UnicodeCaseFold.cycleFoldRune(foldedCodePoint);
+                foldedCodePoint = CaseFolding.JAVA.cycleFoldRune(foldedCodePoint);
             }
             while (foldedCodePoint != codePoint);
 
@@ -283,7 +283,7 @@ public class TestJvmUnicodeAuthority
             if (codePoint == candidateCodePoint) {
                 return true;
             }
-            codePoint = UnicodeCaseFold.cycleFoldRune(codePoint);
+            codePoint = CaseFolding.JAVA.cycleFoldRune(codePoint);
         }
         while (codePoint != initialCodePoint);
         return false;

@@ -20,7 +20,6 @@ import java.util.ArrayDeque;
 import java.util.List;
 
 final class SingleByteMatcher
-        extends RegexpWalker<SingleByteMatcher.Analysis>
 {
     private static final int MAX_RECURSIVE_DEPTH = 256;
     private static final Analysis INVALID = new Analysis(-1, 0, 0, 0, 0);
@@ -46,43 +45,43 @@ final class SingleByteMatcher
         }
     }
 
-    static SingleByteMatcher analyze(Regexp regexp)
+    static SingleByteMatcher analyze(Regexp regexp, CaseFolding caseFolding)
     {
-        Analysis analysis = analyzePattern(regexp);
+        Analysis analysis = analyzePattern(regexp, caseFolding);
         if (analysis.length() != 1 || analysis.isEmpty()) {
             return null;
         }
         return new SingleByteMatcher(analysis);
     }
 
-    static boolean supports(Regexp regexp)
+    static boolean supports(Regexp regexp, CaseFolding caseFolding)
     {
-        return supports(regexp, 0);
+        return supports(regexp, caseFolding, 0);
     }
 
-    private static boolean supports(Regexp regexp, int depth)
+    private static boolean supports(Regexp regexp, CaseFolding caseFolding, int depth)
     {
-        if (!supportsNode(regexp)) {
+        if (!supportsNode(regexp, caseFolding)) {
             return false;
         }
         if (depth == MAX_RECURSIVE_DEPTH) {
-            return supportsIteratively(regexp);
+            return supportsIteratively(regexp, caseFolding);
         }
         for (int childIndex = 0; childIndex < regexp.childCount(); childIndex++) {
-            if (!supports(regexp.child(childIndex), depth + 1)) {
+            if (!supports(regexp.child(childIndex), caseFolding, depth + 1)) {
                 return false;
             }
         }
         return true;
     }
 
-    private static boolean supportsIteratively(Regexp root)
+    private static boolean supportsIteratively(Regexp root, CaseFolding caseFolding)
     {
         ArrayDeque<Regexp> stack = new ArrayDeque<>();
         stack.add(root);
         while (!stack.isEmpty()) {
             Regexp regexp = stack.removeLast();
-            if (!supportsNode(regexp)) {
+            if (!supportsNode(regexp, caseFolding)) {
                 return false;
             }
             stack.addAll(regexp.children());
@@ -90,13 +89,13 @@ final class SingleByteMatcher
         return true;
     }
 
-    private static boolean supportsNode(Regexp regexp)
+    private static boolean supportsNode(Regexp regexp, CaseFolding caseFolding)
     {
         return switch (regexp.op()) {
             case EMPTY_MATCH, CONCAT, ALTERNATE, CAPTURE, ANY_BYTE -> true;
-            case LITERAL -> supportsLiteral(regexp.rune(), regexp.parseFlags());
+            case LITERAL -> supportsLiteral(regexp.rune(), regexp.parseFlags(), caseFolding);
             case LITERAL_STRING -> regexp.runes().length <= 1 &&
-                    (regexp.runes().length == 0 || supportsLiteral(regexp.runes()[0], regexp.parseFlags()));
+                    (regexp.runes().length == 0 || supportsLiteral(regexp.runes()[0], regexp.parseFlags(), caseFolding));
             case REPEAT -> regexp.max() == 0 || (regexp.min() == 1 && regexp.max() == 1);
             case ANY_CHAR -> (regexp.parseFlags() & Regexp.LATIN1) != 0;
             case CHAR_CLASS -> supportsCharacterClass(regexp.charClass(), regexp.parseFlags());
@@ -105,7 +104,7 @@ final class SingleByteMatcher
         };
     }
 
-    private static boolean supportsLiteral(int rune, int parseFlags)
+    private static boolean supportsLiteral(int rune, int parseFlags, CaseFolding caseFolding)
     {
         boolean latin1 = (parseFlags & Regexp.LATIN1) != 0;
         if (latin1) {
@@ -120,7 +119,7 @@ final class SingleByteMatcher
             if ((parseFlags & Regexp.FOLD_CASE) == 0) {
                 break;
             }
-            currentRune = UnicodeCaseFold.cycleFoldRune(currentRune);
+            currentRune = caseFolding.cycleFoldRune(currentRune);
         }
         while (currentRune != rune);
         return true;
@@ -135,9 +134,9 @@ final class SingleByteMatcher
         return characterClass.range(characterClass.rangeCount() - 1).high() <= maximum;
     }
 
-    static Analysis analyzePattern(Regexp regexp)
+    static Analysis analyzePattern(Regexp regexp, CaseFolding caseFolding)
     {
-        return analyze(regexp, 0);
+        return analyze(regexp, caseFolding, 0);
     }
 
     static SingleByteMatcher unsupported()
@@ -183,20 +182,20 @@ final class SingleByteMatcher
         return -1;
     }
 
-    private static Analysis analyze(Regexp regexp, int depth)
+    private static Analysis analyze(Regexp regexp, CaseFolding caseFolding, int depth)
     {
         if (depth >= MAX_RECURSIVE_DEPTH) {
-            return new SingleByteMatcher().walk(regexp, null);
+            return new Walker(caseFolding).walk(regexp, null);
         }
 
         return switch (regexp.op()) {
             case EMPTY_MATCH -> EMPTY;
-            case LITERAL -> literal(regexp.rune(), regexp.parseFlags());
-            case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags());
-            case CONCAT -> concatenate(regexp, depth + 1);
-            case ALTERNATE -> alternate(regexp, depth + 1);
-            case REPEAT -> repeat(analyze(regexp.child(0), depth + 1), regexp.min(), regexp.max());
-            case CAPTURE -> analyze(regexp.child(0), depth + 1);
+            case LITERAL -> literal(regexp.rune(), regexp.parseFlags(), caseFolding);
+            case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags(), caseFolding);
+            case CONCAT -> concatenate(regexp, caseFolding, depth + 1);
+            case ALTERNATE -> alternate(regexp, caseFolding, depth + 1);
+            case REPEAT -> repeat(analyze(regexp.child(0), caseFolding, depth + 1), regexp.min(), regexp.max());
+            case CAPTURE -> analyze(regexp.child(0), caseFolding, depth + 1);
             case ANY_CHAR -> (regexp.parseFlags() & Regexp.LATIN1) != 0 ? ALL_BYTES : INVALID;
             case ANY_BYTE -> ALL_BYTES;
             case CHAR_CLASS -> characterClass(regexp.charClass(), regexp.parseFlags());
@@ -205,38 +204,7 @@ final class SingleByteMatcher
         };
     }
 
-    @Override
-    protected PreVisitResult<Analysis> preVisit(Regexp regexp, Analysis parentArgument)
-    {
-        return new PreVisitResult<>(null, false);
-    }
-
-    @Override
-    protected Analysis postVisit(Regexp regexp, Analysis parentArgument, Analysis preArgument, List<Analysis> childAnalyses)
-    {
-        return switch (regexp.op()) {
-            case EMPTY_MATCH -> EMPTY;
-            case LITERAL -> literal(regexp.rune(), regexp.parseFlags());
-            case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags());
-            case CONCAT -> concatenate(childAnalyses);
-            case ALTERNATE -> alternate(childAnalyses);
-            case REPEAT -> repeat(childAnalyses.getFirst(), regexp.min(), regexp.max());
-            case CAPTURE -> childAnalyses.getFirst();
-            case ANY_CHAR -> (regexp.parseFlags() & Regexp.LATIN1) != 0 ? ALL_BYTES : INVALID;
-            case ANY_BYTE -> ALL_BYTES;
-            case CHAR_CLASS -> characterClass(regexp.charClass(), regexp.parseFlags());
-            case NO_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT,
-                 STAR, PLUS, QUEST, HAVE_MATCH -> INVALID;
-        };
-    }
-
-    @Override
-    protected Analysis shortVisit(Regexp regexp, Analysis parentArgument)
-    {
-        throw new AssertionError("short visit is not used");
-    }
-
-    private static Analysis literalString(int[] runes, int parseFlags)
+    private static Analysis literalString(int[] runes, int parseFlags, CaseFolding caseFolding)
     {
         if (runes.length == 0) {
             return EMPTY;
@@ -244,10 +212,10 @@ final class SingleByteMatcher
         if (runes.length != 1) {
             return INVALID;
         }
-        return literal(runes[0], parseFlags);
+        return literal(runes[0], parseFlags, caseFolding);
     }
 
-    private static Analysis literal(int rune, int parseFlags)
+    private static Analysis literal(int rune, int parseFlags, CaseFolding caseFolding)
     {
         boolean latin1 = (parseFlags & Regexp.LATIN1) != 0;
         if (latin1) {
@@ -263,7 +231,7 @@ final class SingleByteMatcher
             if ((parseFlags & Regexp.FOLD_CASE) == 0) {
                 break;
             }
-            currentRune = UnicodeCaseFold.cycleFoldRune(currentRune);
+            currentRune = caseFolding.cycleFoldRune(currentRune);
         }
         while (currentRune != rune);
         return analysis.withLength(1);
@@ -301,11 +269,11 @@ final class SingleByteMatcher
         return new Analysis(1, bits[0], bits[1], bits[2], bits[3]);
     }
 
-    private static Analysis concatenate(Regexp regexp, int depth)
+    private static Analysis concatenate(Regexp regexp, CaseFolding caseFolding, int depth)
     {
         Analysis result = EMPTY;
         for (int childIndex = 0; childIndex < regexp.childCount(); childIndex++) {
-            result = concatenate(result, analyze(regexp.child(childIndex), depth));
+            result = concatenate(result, analyze(regexp.child(childIndex), caseFolding, depth));
             if (result == INVALID) {
                 return INVALID;
             }
@@ -339,14 +307,14 @@ final class SingleByteMatcher
         return INVALID;
     }
 
-    private static Analysis alternate(Regexp regexp, int depth)
+    private static Analysis alternate(Regexp regexp, CaseFolding caseFolding, int depth)
     {
         if (regexp.childCount() == 0) {
             return INVALID;
         }
-        Analysis result = analyze(regexp.child(0), depth);
+        Analysis result = analyze(regexp.child(0), caseFolding, depth);
         for (int childIndex = 1; childIndex < regexp.childCount(); childIndex++) {
-            result = alternate(result, analyze(regexp.child(childIndex), depth));
+            result = alternate(result, analyze(regexp.child(childIndex), caseFolding, depth));
             if (result == INVALID) {
                 return INVALID;
             }
@@ -391,6 +359,48 @@ final class SingleByteMatcher
             return child;
         }
         return INVALID;
+    }
+
+    private static final class Walker
+            extends RegexpWalker<Analysis>
+    {
+        private final CaseFolding caseFolding;
+
+        private Walker(CaseFolding caseFolding)
+        {
+            this.caseFolding = caseFolding;
+        }
+
+        @Override
+        protected PreVisitResult<Analysis> preVisit(Regexp regexp, Analysis parentArgument)
+        {
+            return new PreVisitResult<>(null, false);
+        }
+
+        @Override
+        protected Analysis postVisit(Regexp regexp, Analysis parentArgument, Analysis preArgument, List<Analysis> childAnalyses)
+        {
+            return switch (regexp.op()) {
+                case EMPTY_MATCH -> EMPTY;
+                case LITERAL -> literal(regexp.rune(), regexp.parseFlags(), caseFolding);
+                case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags(), caseFolding);
+                case CONCAT -> concatenate(childAnalyses);
+                case ALTERNATE -> alternate(childAnalyses);
+                case REPEAT -> repeat(childAnalyses.getFirst(), regexp.min(), regexp.max());
+                case CAPTURE -> childAnalyses.getFirst();
+                case ANY_CHAR -> (regexp.parseFlags() & Regexp.LATIN1) != 0 ? ALL_BYTES : INVALID;
+                case ANY_BYTE -> ALL_BYTES;
+                case CHAR_CLASS -> characterClass(regexp.charClass(), regexp.parseFlags());
+                case NO_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT,
+                     STAR, PLUS, QUEST, HAVE_MATCH -> INVALID;
+            };
+        }
+
+        @Override
+        protected Analysis shortVisit(Regexp regexp, Analysis parentArgument)
+        {
+            throw new AssertionError("short visit is not used");
+        }
     }
 
     record Analysis(int length, long first, long second, long third, long fourth)

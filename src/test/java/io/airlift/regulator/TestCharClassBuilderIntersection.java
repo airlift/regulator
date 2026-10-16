@@ -60,7 +60,7 @@ public class TestCharClassBuilderIntersection
     public void testAsciiCaseFolding()
     {
         CharClassBuilder characterClassBuilder = new CharClassBuilder();
-        characterClassBuilder.addRangeFlags('k', 'k', Regexp.ASCII_FOLD_CASE);
+        characterClassBuilder.addRangeFlags('k', 'k', Regexp.ASCII_FOLD_CASE, CaseFolding.RE2);
 
         assertThat(characterClassBuilder.toCharClass()).isEqualTo(new CharClass(
                 true,

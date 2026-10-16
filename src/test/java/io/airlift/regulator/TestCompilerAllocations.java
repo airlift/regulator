@@ -29,16 +29,16 @@ public class TestCompilerAllocations
     {
         ThreadMXBean threadBean = allocatedMemoryBean();
         Regexp regexp = RegexpParser.parse(utf8Slice("(.*)-(\\d+)-of-(\\d+)"), Regexp.LIKE_PERL).regexp();
-        Regexp normalized = Simplifier.simplify(regexp);
+        Regexp normalized = Simplifier.simplify(regexp, CaseFolding.RE2);
         for (int iteration = 0; iteration < 10_000; iteration++) {
-            ExpressionAnalysis.analyzeNormalized(normalized);
+            ExpressionAnalysis.analyzeNormalized(normalized, CaseFolding.RE2);
         }
 
         long threadId = Thread.currentThread().threadId();
         long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         int iterations = 10_000;
         for (int iteration = 0; iteration < iterations; iteration++) {
-            ExpressionAnalysis.analyzeNormalized(normalized);
+            ExpressionAnalysis.analyzeNormalized(normalized, CaseFolding.RE2);
         }
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
@@ -76,14 +76,14 @@ public class TestCompilerAllocations
                 utf8Slice("^((a)?(b)?(c)?(d)?)abcd([^/]+)/$"),
                 Regexp.LIKE_PERL);
         for (int iteration = 0; iteration < 10_000; iteration++) {
-            assertThat(TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false)).isNotNull();
+            assertThat(TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding())).isNotNull();
         }
 
         long threadId = Thread.currentThread().threadId();
         long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         int iterations = 10_000;
         for (int iteration = 0; iteration < iterations; iteration++) {
-            TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false);
+            TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding());
         }
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
@@ -99,7 +99,7 @@ public class TestCompilerAllocations
                 TrinoRegexpParser.parse(utf8Slice("([a-z]+)$"), Regexp.LIKE_PERL));
         for (int iteration = 0; iteration < 10_000; iteration++) {
             for (ParseResult expression : expressions) {
-                assertThat(TrinoScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false))
+                assertThat(TrinoScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding()))
                         .as(RegexpToString.toString(expression.regexp()))
                         .isNull();
             }
@@ -110,7 +110,7 @@ public class TestCompilerAllocations
         int iterations = 10_000;
         for (int iteration = 0; iteration < iterations; iteration++) {
             for (ParseResult expression : expressions) {
-                TrinoScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false);
+                TrinoScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding());
             }
         }
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;

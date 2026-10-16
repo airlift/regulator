@@ -28,7 +28,7 @@ public class TestSimplifier
         for (int flags : List.of(Regexp.LIKE_PERL, Regexp.LIKE_PERL | Regexp.DOT_MATCHES_NEWLINE)) {
             Regexp parsed = RegexpParser.parse(utf8Slice("[\\s\\S]"), flags).regexp();
             assertThat(parsed.op()).isEqualTo(RegexpOp.CHAR_CLASS);
-            Regexp simplified = Simplifier.simplify(parsed);
+            Regexp simplified = Simplifier.simplify(parsed, CaseFolding.RE2);
             assertThat(simplified.op()).isEqualTo(RegexpOp.ANY_CHAR);
             assertThat(simplified.parseFlags()).isEqualTo(flags);
             Prog compiled = Compiler.compile(simplified);
@@ -44,7 +44,7 @@ public class TestSimplifier
                 Regexp.concat(0, List.of(Regexp.literal(0, 'a'), Regexp.literal(0, 'b'))),
                 Regexp.emptyMatch(0)));
 
-        Regexp simplified = Simplifier.simplify(re);
+        Regexp simplified = Simplifier.simplify(re, CaseFolding.RE2);
         assertThat(simplified.op()).isEqualTo(RegexpOp.LITERAL_STRING);
         assertThat(simplified.runes()).containsExactly('a', 'b');
     }
@@ -53,7 +53,7 @@ public class TestSimplifier
     public void testConcatWithNoMatchIsNoMatch()
     {
         Regexp re = Regexp.concat(0, List.of(Regexp.literal(0, 'a'), Regexp.noMatch(0)));
-        assertThat(Simplifier.simplify(re).op()).isEqualTo(RegexpOp.NO_MATCH);
+        assertThat(Simplifier.simplify(re, CaseFolding.RE2).op()).isEqualTo(RegexpOp.NO_MATCH);
     }
 
     @Test
@@ -63,7 +63,7 @@ public class TestSimplifier
                 Regexp.noMatch(0),
                 Regexp.alternate(0, List.of(Regexp.literal(0, 'a'), Regexp.literal(0, 'b')))));
 
-        Regexp simplified = Simplifier.simplify(re);
+        Regexp simplified = Simplifier.simplify(re, CaseFolding.RE2);
         assertThat(simplified.op()).isEqualTo(RegexpOp.CHAR_CLASS);
         assertThat(simplified.charClass().contains('a')).isTrue();
         assertThat(simplified.charClass().contains('b')).isTrue();
@@ -73,7 +73,7 @@ public class TestSimplifier
     public void testStarNoMatchIsEmpty()
     {
         Regexp re = Regexp.star(0, Regexp.noMatch(0));
-        assertThat(Simplifier.simplify(re).op()).isEqualTo(RegexpOp.EMPTY_MATCH);
+        assertThat(Simplifier.simplify(re, CaseFolding.RE2).op()).isEqualTo(RegexpOp.EMPTY_MATCH);
     }
 
     @Test
@@ -81,11 +81,11 @@ public class TestSimplifier
     {
         for (String pattern : List.of("abc", "(a|b)*c", "[a-z]+-[0-9]+", "(?:x+y)+z", "a*b*", "a+(a)")) {
             Regexp parsed = parse(pattern);
-            assertThat(Simplifier.Coalescer.coalesce(parsed)).as(pattern).isSameAs(parsed);
+            assertThat(Simplifier.Coalescer.coalesce(parsed, CaseFolding.RE2)).as(pattern).isSameAs(parsed);
         }
         for (String pattern : List.of("a*a+", "x(?:a+a)y", "(b|c*c)", "[0-9]+[0-9]{2}")) {
             Regexp parsed = parse(pattern);
-            assertThat(Simplifier.Coalescer.coalesce(parsed)).as(pattern).isNotSameAs(parsed);
+            assertThat(Simplifier.Coalescer.coalesce(parsed, CaseFolding.RE2)).as(pattern).isNotSameAs(parsed);
         }
     }
 
@@ -97,14 +97,14 @@ public class TestSimplifier
         for (int depth : new int[] {200, 300, 2_000}) {
             String coalescing = "(".repeat(depth) + "a*a+" + ")".repeat(depth);
             Regexp parsed = parse(coalescing);
-            Regexp coalesced = Simplifier.Coalescer.coalesce(parsed);
+            Regexp coalesced = Simplifier.Coalescer.coalesce(parsed, CaseFolding.RE2);
             assertThat(coalesced).as("depth %s", depth).isNotSameAs(parsed);
             Regexp expected = parse("(".repeat(depth) + "a+" + ")".repeat(depth));
-            assertThat(Simplifier.simplify(coalesced)).as("depth %s", depth).isEqualTo(Simplifier.simplify(expected));
+            assertThat(Simplifier.simplify(coalesced, CaseFolding.RE2)).as("depth %s", depth).isEqualTo(Simplifier.simplify(expected, CaseFolding.RE2));
 
             String unchanged = "(".repeat(depth) + "a*b+" + ")".repeat(depth);
             parsed = parse(unchanged);
-            assertThat(Simplifier.Coalescer.coalesce(parsed)).as("depth %s", depth).isSameAs(parsed);
+            assertThat(Simplifier.Coalescer.coalesce(parsed, CaseFolding.RE2)).as("depth %s", depth).isSameAs(parsed);
         }
     }
 
@@ -113,10 +113,10 @@ public class TestSimplifier
     {
         for (String pattern : List.of("(a+)x*[b-d]", "(?:ab)?[0-9]+z", "(x[a-f]+)+")) {
             Regexp parsed = parse(pattern);
-            assertThat(Simplifier.simplify(parsed)).as(pattern).isSameAs(parsed);
+            assertThat(Simplifier.simplify(parsed, CaseFolding.RE2)).as(pattern).isSameAs(parsed);
         }
         Regexp repeated = parse("(a{2})b");
-        assertThat(Simplifier.simplify(repeated)).isNotSameAs(repeated);
+        assertThat(Simplifier.simplify(repeated, CaseFolding.RE2)).isNotSameAs(repeated);
     }
 
     private static Regexp parse(String pattern)

@@ -33,7 +33,8 @@ public class TestTrinoScanPlanRun
         // Most runs would continue through this tail; the minimum check must not.
         String tail = "y".repeat(4096);
         for (String expression : List.of("[^/]+", "[^/]{3,}", "[^/]{2,5}", "[a-z]{2,}", "(?s).*", "[^/]*", "[^/]?", "[^/]", "[0-9]+")) {
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL).regexp()), expression);
+            ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
+            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), expression);
             for (String text : List.of("", "a", "ab", "abc", "é", "é😀x", "例え", "😀😀😀😀", "a/", "/", "ab/c", "A", "1")) {
                 String value = text + tail;
                 byte[] input = ("!" + value + "!").getBytes(UTF_8);
@@ -48,7 +49,8 @@ public class TestTrinoScanPlanRun
             }
         }
         // A bounded view cannot take its minimum from bytes after the view.
-        TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(TrinoRegexpParser.parse(utf8Slice("[^/]{3,}"), Regexp.LIKE_PERL).regexp()));
+        ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("[^/]{3,}"), Regexp.LIKE_PERL);
+        TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()));
         byte[] input = "xabc".getBytes(UTF_8);
         assertThat(run.matchMinimum(input, 1, 3)).isEqualTo(-1);
         assertThat(run.matchMinimum(input, 0, 3)).isEqualTo(3);
@@ -61,7 +63,7 @@ public class TestTrinoScanPlanRun
         // negated classes hold line feeds and every non-ASCII byte without dotAll.
         for (String set : List.of("[^/]", "[^:]", "[^,]", "[^\\n]", "[^/x]", "[^=]", "[^\\x00-\\x7F]", "\\w", "[a]", "[\\x00-\\x7F]", ".", "(?s).")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(set + "+"), Regexp.LIKE_PERL);
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp()), set);
+            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
             // Only a line feed ends a line in this dialect.
             Pattern reference = Pattern.compile(set, Pattern.UNIX_LINES);
             int excluded = -1;
@@ -87,7 +89,7 @@ public class TestTrinoScanPlanRun
         // set, and larger sets and complements that keep the table scan.
         for (String set : List.of("[a]", "[?&]", "[abz]", "[0-9]", "[0-9a]", "[a-z@]", "\\w", "[\\x00-\\x3F]", "[\\x00-\\x7F]", "[^=]", "[^/:?#]", "[^\\x00-\\x7F]", ".")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("(?s)" + set + "+"), Regexp.LIKE_PERL);
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp()), set);
+            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
             Pattern reference = Pattern.compile("(?s)" + set);
             boolean[] members = new boolean[256];
             int filler = -1;

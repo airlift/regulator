@@ -131,9 +131,10 @@ final class Regexp
      * Determines whether matches must be anchored with a fixed string prefix
      * (i.e., the regexp is of the form {@code ^literal...} in one-line mode).
      * If so, returns the prefix (as bytes), whether it is ASCII-case-folded,
-     * and the remaining regexp suffix.
+     * and the remaining regexp suffix. A fully case-folded literal is a prefix only when
+     * {@code caseFolding} keeps its folds within ASCII.
      */
-    RequiredPrefixResult requiredPrefix()
+    RequiredPrefixResult requiredPrefix(CaseFolding caseFolding)
     {
         // The regexp must be of the form:
         // 1. some number of BEGIN_TEXT anchors
@@ -155,7 +156,7 @@ final class Regexp
         if (regexp.op != RegexpOp.LITERAL && regexp.op != RegexpOp.LITERAL_STRING) {
             return null;
         }
-        if ((regexp.parseFlags & FULL_CASE_FOLD) != 0 && !supportsAsciiFoldPrefix(regexp)) {
+        if ((regexp.parseFlags & FULL_CASE_FOLD) != 0 && !supportsAsciiFoldPrefix(regexp, caseFolding)) {
             return null;
         }
         childIndex++;
@@ -182,9 +183,10 @@ final class Regexp
     /**
      * Determines whether matches must be unanchored with a fixed string prefix.
      * This "sees through" capturing groups but does not try to glue multiple
-     * prefix fragments together.
+     * prefix fragments together. A fully case-folded literal is a prefix only when
+     * {@code caseFolding} keeps its folds within ASCII.
      */
-    RequiredPrefixForAccelResult requiredPrefixForAccel()
+    RequiredPrefixForAccelResult requiredPrefixForAccel(CaseFolding caseFolding)
     {
         // The regexp must either begin with or be a literal char or string.
         Regexp regexp = (op == RegexpOp.CONCAT && children.length != 0) ? children[0] : this;
@@ -197,7 +199,7 @@ final class Regexp
         if (regexp.op != RegexpOp.LITERAL && regexp.op != RegexpOp.LITERAL_STRING) {
             return null;
         }
-        if ((regexp.parseFlags & FULL_CASE_FOLD) != 0 && !supportsAsciiFoldPrefix(regexp)) {
+        if ((regexp.parseFlags & FULL_CASE_FOLD) != 0 && !supportsAsciiFoldPrefix(regexp, caseFolding)) {
             return null;
         }
 
@@ -207,12 +209,17 @@ final class Regexp
         return new RequiredPrefixForAccelResult(Slices.wrappedBuffer(prefixBytes), foldCase);
     }
 
-    private static boolean supportsAsciiFoldPrefix(Regexp regexp)
+    private static boolean supportsAsciiFoldPrefix(Regexp regexp, CaseFolding caseFolding)
     {
-        return supportsAsciiFold(regexp.op == RegexpOp.LITERAL ? new int[] {regexp.rune} : regexp.runes);
+        return supportsAsciiFold(regexp.op == RegexpOp.LITERAL ? new int[] {regexp.rune} : regexp.runes, caseFolding);
     }
 
-    static boolean supportsAsciiFold(int[] literalRunes)
+    /**
+     * Returns whether ASCII case-insensitive comparison matches exactly the text that
+     * {@code caseFolding} matches for these literal runes. Call it only behind the literal's
+     * case-fold flag, so the full-fold table is built only for patterns that fold case.
+     */
+    static boolean supportsAsciiFold(int[] literalRunes, CaseFolding caseFolding)
     {
         for (int literalRune : literalRunes) {
             int foldedRune = literalRune;
@@ -220,11 +227,11 @@ final class Regexp
                 if (foldedRune > 0x7F) {
                     return false;
                 }
-                foldedRune = UnicodeCaseFold.cycleFoldRune(foldedRune);
+                foldedRune = caseFolding.cycleFoldRune(foldedRune);
             }
             while (foldedRune != literalRune);
         }
-        return !UnicodeFullCaseFold.requiresFullCaseFold(literalRunes);
+        return !caseFolding.requiresFullCaseFold(literalRunes);
     }
 
     /**

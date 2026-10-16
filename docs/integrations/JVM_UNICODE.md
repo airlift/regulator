@@ -140,7 +140,7 @@ silently reinterpret a recognized Java spelling as a different RE2 construct.
 
 ### Case folding
 
-`UnicodeCaseFold` builds JVM-derived simple case-equivalence classes instead of
+`CaseFolding` builds JVM-derived simple case-equivalence classes instead of
 using an upstream-generated table. The parser, character-class builder,
 required-match analysis, and single-byte optimizations continue to use an
 efficient immutable cycle for each equivalence class.

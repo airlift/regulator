@@ -42,7 +42,7 @@ final class TrinoRegexpParser
     {
         requireNonNull(pattern, "pattern is null");
 
-        Parser parser = new Parser(pattern, parseFlags);
+        Parser parser = new Parser(pattern, parseFlags, CaseFolding.TRINO);
         Regexp parsedRegexp = parser.parseRegexp();
         if (!parser.atEnd()) {
             // Unconsumed input at the top-level is typically a stray ')'.
@@ -53,8 +53,8 @@ final class TrinoRegexpParser
         }
         // Parse-time simplification preserves counted repetitions. The compiler performs repeat
         // elimination and named-class expansion after the frontend has established Trino semantics.
-        Regexp simplifiedRegexp = Simplifier.simplifyForParse(parsedRegexp);
-        return new ParseResult(simplifiedRegexp, parser.capturingGroupCount);
+        Regexp simplifiedRegexp = Simplifier.simplifyForParse(parsedRegexp, CaseFolding.TRINO);
+        return new ParseResult(simplifiedRegexp, parser.capturingGroupCount, CaseFolding.TRINO);
     }
 
     @SuppressWarnings("CharUsedInArithmeticContext")
@@ -69,6 +69,7 @@ final class TrinoRegexpParser
         private final byte[] bytes;
         private final int start;
         private final int end;
+        private final CaseFolding caseFolding;
         private int index;
 
         private int flags;
@@ -76,11 +77,12 @@ final class TrinoRegexpParser
         private boolean inQuote;
         private final Set<String> captureNames = new HashSet<>();
 
-        Parser(Slice pattern, int flags)
+        Parser(Slice pattern, int flags, CaseFolding caseFolding)
         {
             this.bytes = pattern.byteArray();
             this.start = pattern.byteArrayOffset();
             this.end = start + pattern.length();
+            this.caseFolding = caseFolding;
             this.index = start;
             this.flags = flags;
 
@@ -903,12 +905,12 @@ final class TrinoRegexpParser
 
             List<Regexp> alternatives = new ArrayList<>();
             alternatives.add(base);
-            for (UnicodeFullCaseFold.FoldToken token : UnicodeFullCaseFold.multiCharacterTokens(characterClass)) {
+            for (UnicodeFullCaseFold.FoldToken token : caseFolding.multiCharacterTokens(characterClass)) {
                 List<Regexp> sequence = new ArrayList<>(token.foldedRunes().length);
                 for (int foldedRune : token.foldedRunes()) {
                     sequence.add(Regexp.charClass(
                             nodeFlags & ~(Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD),
-                            UnicodeFullCaseFold.simpleFoldClass(foldedRune)));
+                            caseFolding.simpleFoldClass(foldedRune)));
                 }
                 alternatives.add(sequence.size() == 1
                         ? sequence.getFirst()
@@ -993,7 +995,7 @@ final class TrinoRegexpParser
                 }
 
                 // For explicit singletons/ranges, do not implicitly filter '\n' out.
-                characterClassBuilder.addRangeFlags(low, high, nodeFlags | Regexp.CLASS_NEWLINE);
+                characterClassBuilder.addRangeFlags(low, high, nodeFlags | Regexp.CLASS_NEWLINE, caseFolding);
             }
 
             return characterClassBuilder;
@@ -1051,7 +1053,7 @@ final class TrinoRegexpParser
             };
             if (characterClass != null) {
                 index += 2;
-                addGroup(characterClassBuilder, characterClass, 1, nodeFlags);
+                addGroup(characterClassBuilder, characterClass, 1, nodeFlags, caseFolding);
                 return true;
             }
 
@@ -1072,7 +1074,7 @@ final class TrinoRegexpParser
                 if (characterClass == null) {
                     throw new IllegalStateException("missing Unicode group: " + group);
                 }
-                addGroup(captureNameClassBuilder, characterClass, 1, 0);
+                addGroup(captureNameClassBuilder, characterClass, 1, 0, CaseFolding.TRINO);
             }
             return captureNameClassBuilder.toCharClass();
         }
@@ -1117,7 +1119,7 @@ final class TrinoRegexpParser
 
             String name = new String(bytes, nameStart, nameEnd - nameStart, StandardCharsets.US_ASCII);
             CharClass characterClass = posixCharClass(name);
-            addGroup(characterClassBuilder, characterClass, negate ? -1 : 1, parseFlags);
+            addGroup(characterClassBuilder, characterClass, negate ? -1 : 1, parseFlags, caseFolding);
             return true;
         }
 
@@ -1355,7 +1357,7 @@ final class TrinoRegexpParser
                 if (group == null) {
                     throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
                 }
-                addGroup(characterClassBuilder, group, sign, parseFlags);
+                addGroup(characterClassBuilder, group, sign, parseFlags, caseFolding);
                 return;
             }
 
@@ -1377,7 +1379,7 @@ final class TrinoRegexpParser
             if (group == null) {
                 throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
-            addGroup(characterClassBuilder, group, sign, parseFlags);
+            addGroup(characterClassBuilder, group, sign, parseFlags, caseFolding);
         }
 
         private static CharClass lookupTrinoUnicodeGroup(String name)
@@ -1547,7 +1549,7 @@ final class TrinoRegexpParser
             return escapedByte < 0x80 && !Character.isDigit((char) escapedByte);
         }
 
-        private static Regexp perlDigits(int flags, boolean negate)
+        private Regexp perlDigits(int flags, boolean negate)
         {
             if (!negate) {
                 return Regexp.charClass(flags & ~Regexp.FOLD_CASE, PERL_DIGITS_CLASS);
@@ -1555,20 +1557,20 @@ final class TrinoRegexpParser
             return perlCharClass(flags, negate, perlDigitsCharClass(flags, false));
         }
 
-        private static Regexp perlSpaces(int flags, boolean negate)
+        private Regexp perlSpaces(int flags, boolean negate)
         {
             return perlCharClass(flags, negate, perlSpacesCharClass(flags, false));
         }
 
-        private static Regexp perlWord(int flags, boolean negate)
+        private Regexp perlWord(int flags, boolean negate)
         {
             return perlCharClass(flags, negate, perlWordCharClass(flags, false));
         }
 
-        private static Regexp perlCharClass(int flags, boolean negate, CharClass group)
+        private Regexp perlCharClass(int flags, boolean negate, CharClass group)
         {
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            addGroup(characterClassBuilder, group, negate ? -1 : 1, flags);
+            addGroup(characterClassBuilder, group, negate ? -1 : 1, flags, caseFolding);
             characterClassBuilder.removeAbove(Regexp.maxRune(flags));
             return Regexp.charClass(flags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());
         }
