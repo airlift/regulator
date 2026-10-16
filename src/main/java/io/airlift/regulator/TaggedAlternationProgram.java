@@ -40,7 +40,8 @@ final class TaggedAlternationProgram
             int capturingGroupCount,
             boolean longestMatch,
             Prog semanticProgram,
-            Compiler.Dialect compilerDialect)
+            Compiler.Dialect compilerDialect,
+            CaseFolding caseFolding)
     {
         if (longestMatch ||
                 semanticProgram.isOnePass() ||
@@ -74,7 +75,8 @@ final class TaggedAlternationProgram
                     false,
                     false,
                     availableForwardMemory,
-                    compilerDialect);
+                    compilerDialect,
+                    caseFolding);
         }
         catch (RegexpCompileException ignored) {
             // This program is optional; the semantic capture engines remain the fallback.

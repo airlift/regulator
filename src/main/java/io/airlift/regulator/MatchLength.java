@@ -34,11 +34,16 @@ final class MatchLength
         }
     }
 
-    private MatchLength() {}
+    private final CaseFolding caseFolding;
 
-    static Analysis analyze(Regexp regexp)
+    private MatchLength(CaseFolding caseFolding)
     {
-        int encoded = analyzeEncoded(regexp, 0);
+        this.caseFolding = caseFolding;
+    }
+
+    static Analysis analyze(Regexp regexp, CaseFolding caseFolding)
+    {
+        int encoded = analyzeEncoded(regexp, caseFolding, 0);
         return new Analysis(minimum(encoded), fixed(encoded));
     }
 
@@ -52,23 +57,23 @@ final class MatchLength
         return encoded >= 0 ? encoded : -1;
     }
 
-    private static int analyzeEncoded(Regexp regexp, int depth)
+    private static int analyzeEncoded(Regexp regexp, CaseFolding caseFolding, int depth)
     {
         if (depth >= MAX_RECURSIVE_DEPTH) {
-            return new MatchLength().walk(regexp, 0);
+            return new MatchLength(caseFolding).walk(regexp, 0);
         }
 
         return switch (regexp.op()) {
             case NO_MATCH -> IMPOSSIBLE;
             case EMPTY_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT, HAVE_MATCH -> 0;
-            case LITERAL -> literal(regexp.rune(), regexp.parseFlags());
-            case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags());
-            case CONCAT -> concatenate(regexp, depth + 1);
-            case ALTERNATE -> alternate(regexp, depth + 1);
-            case STAR, QUEST -> optional(analyzeEncoded(regexp.child(0), depth + 1));
-            case PLUS -> plus(analyzeEncoded(regexp.child(0), depth + 1));
-            case REPEAT -> repeat(analyzeEncoded(regexp.child(0), depth + 1), regexp.min(), regexp.max());
-            case CAPTURE -> analyzeEncoded(regexp.child(0), depth + 1);
+            case LITERAL -> literal(regexp.rune(), regexp.parseFlags(), caseFolding);
+            case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags(), caseFolding);
+            case CONCAT -> concatenate(regexp, caseFolding, depth + 1);
+            case ALTERNATE -> alternate(regexp, caseFolding, depth + 1);
+            case STAR, QUEST -> optional(analyzeEncoded(regexp.child(0), caseFolding, depth + 1));
+            case PLUS -> plus(analyzeEncoded(regexp.child(0), caseFolding, depth + 1));
+            case REPEAT -> repeat(analyzeEncoded(regexp.child(0), caseFolding, depth + 1), regexp.min(), regexp.max());
+            case CAPTURE -> analyzeEncoded(regexp.child(0), caseFolding, depth + 1);
             case ANY_CHAR -> (regexp.parseFlags() & Regexp.LATIN1) != 0 ? 1 : variable(1);
             case ANY_BYTE -> 1;
             case CHAR_CLASS -> characterClass(regexp.charClass(), regexp.parseFlags());
@@ -84,16 +89,16 @@ final class MatchLength
     @Override
     protected Integer postVisit(Regexp regexp, Integer parentArgument, Integer preArgument, List<Integer> childLengths)
     {
-        return combine(regexp, childLengths);
+        return combine(regexp, childLengths, caseFolding);
     }
 
-    static int combine(Regexp regexp, List<Integer> childLengths)
+    static int combine(Regexp regexp, List<Integer> childLengths, CaseFolding caseFolding)
     {
         return switch (regexp.op()) {
             case NO_MATCH -> IMPOSSIBLE;
             case EMPTY_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT, HAVE_MATCH -> 0;
-            case LITERAL -> literal(regexp.rune(), regexp.parseFlags());
-            case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags());
+            case LITERAL -> literal(regexp.rune(), regexp.parseFlags(), caseFolding);
+            case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags(), caseFolding);
             case CONCAT -> concatenate(childLengths);
             case ALTERNATE -> alternate(childLengths);
             case STAR, QUEST -> optional(childLengths.getFirst());
@@ -106,13 +111,13 @@ final class MatchLength
         };
     }
 
-    static int combine(Regexp regexp, int[] childLengths)
+    static int combine(Regexp regexp, int[] childLengths, CaseFolding caseFolding)
     {
         return switch (regexp.op()) {
             case NO_MATCH -> IMPOSSIBLE;
             case EMPTY_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT, HAVE_MATCH -> 0;
-            case LITERAL -> literal(regexp.rune(), regexp.parseFlags());
-            case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags());
+            case LITERAL -> literal(regexp.rune(), regexp.parseFlags(), caseFolding);
+            case LITERAL_STRING -> literalString(regexp.runes(), regexp.parseFlags(), caseFolding);
             case CONCAT -> concatenate(childLengths);
             case ALTERNATE -> alternate(childLengths);
             case STAR, QUEST -> optional(childLengths[0]);
@@ -136,24 +141,24 @@ final class MatchLength
         return -minimum - 1;
     }
 
-    private static int literalString(int[] runes, int parseFlags)
+    private static int literalString(int[] runes, int parseFlags, CaseFolding caseFolding)
     {
         if ((parseFlags & Regexp.FULL_CASE_FOLD) != 0) {
-            UnicodeFullCaseFold.ByteLength length = UnicodeFullCaseFold.byteLength(runes);
+            UnicodeFullCaseFold.ByteLength length = caseFolding.byteLength(runes);
             return length.minimum() == length.maximum() ? length.minimum() : variable(length.minimum());
         }
 
         int result = 0;
         for (int rune : runes) {
-            result = concatenate(result, literal(rune, parseFlags));
+            result = concatenate(result, literal(rune, parseFlags, caseFolding));
         }
         return result;
     }
 
-    private static int literal(int rune, int parseFlags)
+    private static int literal(int rune, int parseFlags, CaseFolding caseFolding)
     {
         if ((parseFlags & Regexp.FULL_CASE_FOLD) != 0) {
-            UnicodeFullCaseFold.ByteLength length = UnicodeFullCaseFold.byteLength(new int[] {rune});
+            UnicodeFullCaseFold.ByteLength length = caseFolding.byteLength(new int[] {rune});
             return length.minimum() == length.maximum() ? length.minimum() : variable(length.minimum());
         }
 
@@ -168,12 +173,12 @@ final class MatchLength
 
         int minimum = initialLength;
         boolean fixed = true;
-        int foldedRune = UnicodeCaseFold.cycleFoldRune(rune);
+        int foldedRune = caseFolding.cycleFoldRune(rune);
         while (foldedRune != rune) {
             int foldedLength = utf8Length(foldedRune);
             minimum = Math.min(minimum, foldedLength);
             fixed &= foldedLength == initialLength;
-            foldedRune = UnicodeCaseFold.cycleFoldRune(foldedRune);
+            foldedRune = caseFolding.cycleFoldRune(foldedRune);
         }
         return fixed ? minimum : variable(minimum);
     }
@@ -196,11 +201,11 @@ final class MatchLength
         return result;
     }
 
-    private static int concatenate(Regexp regexp, int depth)
+    private static int concatenate(Regexp regexp, CaseFolding caseFolding, int depth)
     {
         int result = 0;
         for (int childIndex = 0; childIndex < regexp.childCount(); childIndex++) {
-            result = concatenate(result, analyzeEncoded(regexp.child(childIndex), depth));
+            result = concatenate(result, analyzeEncoded(regexp.child(childIndex), caseFolding, depth));
         }
         return result;
     }
@@ -235,11 +240,11 @@ final class MatchLength
         return result;
     }
 
-    private static int alternate(Regexp regexp, int depth)
+    private static int alternate(Regexp regexp, CaseFolding caseFolding, int depth)
     {
         int result = IMPOSSIBLE;
         for (int childIndex = 0; childIndex < regexp.childCount(); childIndex++) {
-            result = alternate(result, analyzeEncoded(regexp.child(childIndex), depth));
+            result = alternate(result, analyzeEncoded(regexp.child(childIndex), caseFolding, depth));
         }
         return result;
     }

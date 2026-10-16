@@ -56,7 +56,7 @@ public class TestBenchmarkLiteralProbe
     {
         for (Workload workload : Workload.values()) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(workload.expression()), Regexp.LIKE_PERL);
-            TrinoScanPlan plan = TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, BenchmarkLiteralProbe.backgroundFrequencies());
+            TrinoScanPlan plan = TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding(), BenchmarkLiteralProbe.backgroundFrequencies());
             assertThat(plan).as(workload.toString()).isNotNull();
             assertThat(plan.leadingLiteralProbeOffsetForDiagnostics()).as(workload.toString()).isEqualTo(workload.probeOffset());
         }

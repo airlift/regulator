@@ -298,16 +298,16 @@ final class TrinoScanPlan
      * search to the ordinary engine before its first attempt, so tests can run the continuation
      * on every input.
      */
-    static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff)
+    static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding)
     {
-        return analyze(expression, captureCount, forceHandoff, ByteFrequencies.uniform());
+        return analyze(expression, captureCount, forceHandoff, caseFolding, ByteFrequencies.uniform());
     }
 
     /**
      * Analyzes {@code expression}, with {@code byteFrequencies} choosing the probe byte of a
      * case-sensitive leading literal.
      */
-    static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, ByteFrequencies byteFrequencies)
+    static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         StartKind startKind = startKind(expression, 0);
         if (startKind != StartKind.ANCHORED && startKind != StartKind.LITERAL &&
@@ -317,7 +317,7 @@ final class TrinoScanPlan
         if (startKind == StartKind.UNBOUNDED_RUN && endKind(expression, 0) == EndKind.FINAL_LINE) {
             return null;
         }
-        return Builder.analyze(expression, captureCount, forceHandoff ? -1 : WORK_BUDGET_BYTES, byteFrequencies);
+        return Builder.analyze(expression, captureCount, forceHandoff ? -1 : WORK_BUDGET_BYTES, caseFolding, byteFrequencies);
     }
 
     private static StartKind startKind(Regexp expression, int depth)
@@ -1749,12 +1749,18 @@ final class TrinoScanPlan
         private static final int MAX_GROUPS = 16;
         private static final int MAX_ANALYSIS_OPERATIONS = MAX_OPERATIONS + MAX_GROUPS;
 
+        private final CaseFolding caseFolding;
         private final List<Step> steps = new ArrayList<>();
         private int captures;
         private int optionals;
         private boolean hasVariableLiteralRepeat;
 
-        private static TrinoScanPlan analyze(Regexp expression, int captureCount, int workBudgetBytes, ByteFrequencies byteFrequencies)
+        private Builder(CaseFolding caseFolding)
+        {
+            this.caseFolding = caseFolding;
+        }
+
+        private static TrinoScanPlan analyze(Regexp expression, int captureCount, int workBudgetBytes, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
         {
             if (captureCount > MAX_GROUPS) {
                 return null;
@@ -1770,7 +1776,7 @@ final class TrinoScanPlan
             if (bodyStart >= bodyEnd) {
                 return null;
             }
-            Builder builder = new Builder();
+            Builder builder = new Builder(caseFolding);
             for (int index = bodyStart; index < bodyEnd; index++) {
                 if (!builder.emit(sequence.get(index), 0)) {
                     return null;
@@ -1930,7 +1936,7 @@ final class TrinoScanPlan
             return steps.size() <= MAX_ANALYSIS_OPERATIONS;
         }
 
-        private static byte[] literalBytes(Regexp expression)
+        private byte[] literalBytes(Regexp expression)
         {
             if ((expression.parseFlags() & UNSUPPORTED_ATOM_FLAGS) != 0 ||
                     (expression.op() != RegexpOp.LITERAL && expression.op() != RegexpOp.LITERAL_STRING)) {
@@ -1941,7 +1947,7 @@ final class TrinoScanPlan
                 return null;
             }
             boolean foldAscii = (expression.parseFlags() & Regexp.FOLD_CASE) != 0;
-            if (foldAscii && !Regexp.supportsAsciiFold(runes)) {
+            if (foldAscii && !Regexp.supportsAsciiFold(runes, caseFolding)) {
                 return null;
             }
             if (!foldAscii && (expression.parseFlags() & Regexp.FULL_CASE_FOLD) != 0) {
@@ -2009,7 +2015,7 @@ final class TrinoScanPlan
 
         private boolean emitRun(Regexp expression)
         {
-            TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression);
+            TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression, caseFolding);
             if (run == null) {
                 return false;
             }
@@ -2074,7 +2080,7 @@ final class TrinoScanPlan
             // A top-level optional character atom is lowered to one bounded run
             // without a retry checkpoint.
             if (depth == 0) {
-                TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression);
+                TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression, caseFolding);
                 if (run != null) {
                     steps.add(Step.run(0, run));
                     return true;

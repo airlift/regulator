@@ -65,6 +65,7 @@ public class BenchmarkRe2CompilerPhases
         byte[] patternBytes;
         Slice patternSlice;
         Regexp preParsed;
+        CaseFolding caseFolding;
         Regexp normalized;
 
         @Setup(Level.Trial)
@@ -74,7 +75,8 @@ public class BenchmarkRe2CompilerPhases
             patternSlice = Slices.wrappedBuffer(patternBytes);
             ParseResult parsed = RegexpParser.parse(patternSlice, Regexp.LIKE_PERL);
             preParsed = parsed.regexp();
-            normalized = Simplifier.simplify(preParsed);
+            caseFolding = parsed.caseFolding();
+            normalized = Simplifier.simplify(preParsed, caseFolding);
         }
     }
 
@@ -87,25 +89,25 @@ public class BenchmarkRe2CompilerPhases
     @Benchmark
     public Object simplify(CompilePatternState state)
     {
-        return Simplifier.simplify(state.preParsed);
+        return Simplifier.simplify(state.preParsed, state.caseFolding);
     }
 
     @Benchmark
     public Object analyzeExpression(CompilePatternState state)
     {
-        return ExpressionAnalysis.analyzeNormalized(state.normalized);
+        return ExpressionAnalysis.analyzeNormalized(state.normalized, state.caseFolding);
     }
 
     @Benchmark
     public Object analyzeRequiredPrefix(CompilePatternState state)
     {
-        return state.preParsed.requiredPrefix();
+        return state.preParsed.requiredPrefix(state.caseFolding);
     }
 
     @Benchmark
     public Object analyzeMatchLength(CompilePatternState state)
     {
-        return MatchLength.analyze(state.preParsed);
+        return MatchLength.analyze(state.preParsed, state.caseFolding);
     }
 
     @Benchmark

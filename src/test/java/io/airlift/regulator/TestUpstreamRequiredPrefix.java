@@ -58,7 +58,7 @@ public class TestUpstreamRequiredPrefix
                 int flags = Regexp.LIKE_PERL | (latin1 ? Regexp.LATIN1 : 0);
                 ParseResult parsed = RegexpParser.parse(Slices.wrappedBuffer(t.regexp().getBytes(StandardCharsets.UTF_8)), flags);
 
-                Regexp.RequiredPrefixResult result = parsed.regexp().requiredPrefix();
+                Regexp.RequiredPrefixResult result = parsed.regexp().requiredPrefix(parsed.caseFolding());
                 assertThat(result != null).as("requiredPrefix() present: %s (latin1=%s)", t.regexp, latin1).isEqualTo(t.hasPrefix);
 
                 if (t.hasPrefix) {
@@ -109,7 +109,7 @@ public class TestUpstreamRequiredPrefix
                 int flags = Regexp.LIKE_PERL | (latin1 ? Regexp.LATIN1 : 0);
                 ParseResult parsed = RegexpParser.parse(Slices.wrappedBuffer(t.regexp().getBytes(StandardCharsets.UTF_8)), flags);
 
-                Regexp.RequiredPrefixForAccelResult result = parsed.regexp().requiredPrefixForAccel();
+                Regexp.RequiredPrefixForAccelResult result = parsed.regexp().requiredPrefixForAccel(parsed.caseFolding());
                 assertThat(result != null).as("requiredPrefixForAccel() present: %s (latin1=%s)", t.regexp, latin1).isEqualTo(t.hasPrefix);
 
                 if (t.hasPrefix) {
@@ -129,13 +129,13 @@ public class TestUpstreamRequiredPrefix
 
         // With Latin-1 encoding, `(?i)` prefixes can include 'k' and 's'.
         parsed = RegexpParser.parse(Slices.wrappedBuffer("(?i)KLM".getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL | Regexp.LATIN1);
-        prefix = parsed.regexp().requiredPrefixForAccel();
+        prefix = parsed.regexp().requiredPrefixForAccel(parsed.caseFolding());
         assertThat(prefix).isNotNull();
         assertThat(decodeUtf8(prefix.prefix())).isEqualTo("klm");
         assertThat(prefix.foldCase()).isTrue();
 
         parsed = RegexpParser.parse(Slices.wrappedBuffer("(?i)STU".getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL | Regexp.LATIN1);
-        prefix = parsed.regexp().requiredPrefixForAccel();
+        prefix = parsed.regexp().requiredPrefixForAccel(parsed.caseFolding());
         assertThat(prefix).isNotNull();
         assertThat(decodeUtf8(prefix.prefix())).isEqualTo("stu");
         assertThat(prefix.foldCase()).isTrue();
@@ -143,10 +143,10 @@ public class TestUpstreamRequiredPrefix
         // With UTF-8 encoding, `(?i)` prefixes can't include 'k' and 's' because the
         // parser emits character classes instead of literals.
         parsed = RegexpParser.parse(Slices.wrappedBuffer("(?i)KLM".getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL);
-        assertThat(parsed.regexp().requiredPrefixForAccel()).isNull();
+        assertThat(parsed.regexp().requiredPrefixForAccel(parsed.caseFolding())).isNull();
 
         parsed = RegexpParser.parse(Slices.wrappedBuffer("(?i)STU".getBytes(StandardCharsets.UTF_8)), Regexp.LIKE_PERL);
-        assertThat(parsed.regexp().requiredPrefixForAccel()).isNull();
+        assertThat(parsed.regexp().requiredPrefixForAccel(parsed.caseFolding())).isNull();
     }
 
     private static String decodeUtf8(Slice bytes)

@@ -98,7 +98,9 @@ final class Prefilter
             return null;
         }
 
-        Regexp regexp = Simplifier.simplify(re2.regexp());
+        // Only RE2 patterns build prefilters, so atoms fold with RE2's rule, the rule
+        // FilteredRe2.canonicalizeText applies to the searched text.
+        Regexp regexp = Simplifier.simplify(re2.regexp(), CaseFolding.RE2);
         boolean latin1 = (regexp.parseFlags() & Regexp.LATIN1) != 0;
         return buildInfo(regexp, latin1).takeMatch();
     }
@@ -270,6 +272,7 @@ final class Prefilter
         if (latin1) {
             return Slices.wrappedBuffer((byte) FilteredRe2.canonicalizeLatin1Byte(rune));
         }
+        // Atoms apply only the simple fold; multi-character folds are not canonicalized.
         int canonicalCodePoint = FilteredRe2.canonicalizeUnicodeCodePoint(rune);
         byte[] bytes = new byte[Utf8.encodedLength(canonicalCodePoint)];
         Utf8.encode(bytes, 0, canonicalCodePoint);

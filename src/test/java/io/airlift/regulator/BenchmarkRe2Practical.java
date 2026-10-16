@@ -149,7 +149,7 @@ public class BenchmarkRe2Practical
     {
         Slice pat = Slices.wrappedBuffer(state.compilePatternBytes);
         ParseResult parsed = RegexpParser.parse(pat, Regexp.LIKE_PERL);
-        return Simplifier.simplify(parsed.regexp());
+        return Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
     }
 
     @Benchmark
@@ -163,7 +163,7 @@ public class BenchmarkRe2Practical
     {
         Slice pat = Slices.wrappedBuffer(state.compilePatternBytes);
         ParseResult parsed = RegexpParser.parse(pat, Regexp.LIKE_PERL);
-        Regexp simplified = Simplifier.simplify(parsed.regexp());
+        Regexp simplified = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
         return Compiler.compile(simplified, false, 0);
     }
 

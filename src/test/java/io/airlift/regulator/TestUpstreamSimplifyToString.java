@@ -223,7 +223,7 @@ public class TestUpstreamSimplifyToString
         for (Case c : cases) {
             ParseResult parsed = RegexpParser.parse(Slices.wrappedBuffer(c.pattern().getBytes(StandardCharsets.UTF_8)), flags);
 
-            Regexp simplified = Simplifier.simplify(parsed.regexp());
+            Regexp simplified = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
             assertThat(RegexpToString.toString(simplified))
                     .as("simplified: %s", c.pattern())
                     .isEqualTo(c.expected());

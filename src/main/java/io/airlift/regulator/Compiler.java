@@ -94,36 +94,31 @@ final class Compiler
      */
     static Prog compile(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compile(regexp, reversed, maxMemory, false, Dialect.RE2, ByteFrequencies.uniform());
+        return compile(regexp, reversed, maxMemory, false, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform());
     }
 
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory)
     {
-        return compile(regexp, reversed, maxMemory, true, Dialect.RE2, ByteFrequencies.uniform());
+        return compile(regexp, reversed, maxMemory, true, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform());
     }
 
-    static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect)
+    static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding)
     {
-        return compile(regexp, reversed, maxMemory, true, dialect, ByteFrequencies.uniform());
+        return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, ByteFrequencies.uniform());
     }
 
     /**
      * Compiles with {@code byteFrequencies} choosing the probe byte of a forward program's
      * literal prefix scan.
      */
-    static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, ByteFrequencies byteFrequencies)
+    static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        return compile(regexp, reversed, maxMemory, true, dialect, byteFrequencies);
+        return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, byteFrequencies);
     }
 
-    static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory)
+    static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, Dialect.RE2, ByteFrequencies.uniform());
-    }
-
-    static Prog compileNormalizedForDfa(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, ByteFrequencies byteFrequencies)
-    {
-        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, dialect, byteFrequencies);
+        return compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, true, dialect, caseFolding, byteFrequencies);
     }
 
     static long estimatedProgramMemory(Prog program)
@@ -135,9 +130,9 @@ final class Compiler
         return memory + program.onePassMemory();
     }
 
-    private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect, ByteFrequencies byteFrequencies)
+    private static Prog compile(Regexp regexp, boolean reversed, long maxMemory, boolean normalized, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        Prog program = compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, normalized, dialect, byteFrequencies);
+        Prog program = compileInternal(regexp, reversed, maxMemory, CompileStage.BYTEMAP, true, normalized, dialect, caseFolding, byteFrequencies);
         if (!reversed) {
             program.prepareOnePass();
         }
@@ -146,17 +141,17 @@ final class Compiler
 
     static Prog compileSet(Regexp regexp, boolean unanchored, boolean anchorBoth, long maxMemory)
     {
-        return compileSet(regexp, unanchored, anchorBoth, maxMemory, Dialect.RE2);
+        return compileSet(regexp, unanchored, anchorBoth, maxMemory, Dialect.RE2, CaseFolding.RE2);
     }
 
-    static Prog compileSet(Regexp regexp, boolean unanchored, boolean anchorBoth, long maxMemory, Dialect dialect)
+    static Prog compileSet(Regexp regexp, boolean unanchored, boolean anchorBoth, long maxMemory, Dialect dialect, CaseFolding caseFolding)
     {
         requireNonNull(regexp, "regexp is null");
-        CompilerState compiler = new CompilerState();
+        CompilerState compiler = new CompilerState(caseFolding);
         compiler.setup(regexp.parseFlags(), maxMemory, dialect);
         compiler.setAnchorBoth = anchorBoth;
 
-        Regexp simplifiedRegexp = Simplifier.simplify(regexp);
+        Regexp simplifiedRegexp = Simplifier.simplify(regexp, caseFolding);
         Fragment compiledFragment = compiler.compileTree(simplifiedRegexp, 2 * compiler.maxInstructions);
 
         compiler.program.setAnchorStart(true);
@@ -173,13 +168,13 @@ final class Compiler
     static Prog compileForBenchmark(Regexp regexp, boolean reversed, long maxMemory, CompileStage stage)
     {
         // Benchmark-only hook to isolate Compiler pipeline stages.
-        return compileInternal(regexp, reversed, maxMemory, stage, false, false, Dialect.RE2, ByteFrequencies.uniform());
+        return compileInternal(regexp, reversed, maxMemory, stage, false, false, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform());
     }
 
     static Prog compileNormalizedForBenchmark(Regexp regexp, boolean reversed, long maxMemory, CompileStage stage)
     {
         // Benchmark-only hook to isolate stages after AST normalization.
-        return compileInternal(regexp, reversed, maxMemory, stage, false, true, Dialect.RE2, ByteFrequencies.uniform());
+        return compileInternal(regexp, reversed, maxMemory, stage, false, true, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform());
     }
 
     private static Prog compileInternal(
@@ -190,17 +185,18 @@ final class Compiler
             boolean configureForwardMetadata,
             boolean normalized,
             Dialect dialect,
+            CaseFolding caseFolding,
             ByteFrequencies byteFrequencies)
     {
         requireNonNull(regexp, "regexp is null");
         requireNonNull(stage, "stage is null");
-        CompilerState compiler = new CompilerState();
+        CompilerState compiler = new CompilerState(caseFolding);
         compiler.setup(regexp.parseFlags(), maxMemory, dialect);
         compiler.reversed = reversed;
 
         // Match upstream compile.cc: compiler runs Regexp::Simplify() first,
         // primarily to eliminate counted repetitions (and later to expand named classes).
-        Regexp simplifiedRegexp = normalized ? regexp : Simplifier.simplify(regexp);
+        Regexp simplifiedRegexp = normalized ? regexp : Simplifier.simplify(regexp, caseFolding);
 
         // Match upstream compile.cc: record whether the compiled program is anchored by
         // BeginText/EndText ops and remove those anchors from the AST for optimization.
@@ -250,14 +246,14 @@ final class Compiler
 
         // Match upstream: configure prefix acceleration on forward programs.
         if (configureForwardMetadata && !reversed) {
-            Regexp.RequiredPrefixForAccelResult requiredPrefixForAccel = regexp.requiredPrefixForAccel();
+            Regexp.RequiredPrefixForAccelResult requiredPrefixForAccel = regexp.requiredPrefixForAccel(caseFolding);
             if (requiredPrefixForAccel != null) {
                 compiledProgram.configurePrefixAccel(requiredPrefixForAccel.prefix(), requiredPrefixForAccel.foldCase(), byteFrequencies);
             }
 
             // Configure required prefix for instant rejection.
             // Pattern must be "^literal..." for this optimization.
-            Regexp.RequiredPrefixResult requiredPrefix = regexp.requiredPrefix();
+            Regexp.RequiredPrefixResult requiredPrefix = regexp.requiredPrefix(caseFolding);
             if (requiredPrefix != null) {
                 compiledProgram.configureRequiredPrefix(requiredPrefix.prefix(), requiredPrefix.foldCase());
             }
@@ -485,6 +481,7 @@ final class Compiler
         // Rune-range compilation state shared while building one program.
         private final RuneCache runeCache = new RuneCache();
         private final Fragment runeRange = new Fragment();
+        private final CaseFolding caseFolding;
 
         boolean reversed;
         boolean setAnchorBoth;
@@ -494,6 +491,11 @@ final class Compiler
         Encoding encoding = Encoding.UTF8;
         int maxInstructions;
         long maxMemory;
+
+        CompilerState(CaseFolding caseFolding)
+        {
+            this.caseFolding = requireNonNull(caseFolding, "caseFolding is null");
+        }
 
         void setup(int flags, long maxMemory, Dialect dialect)
         {
@@ -1025,10 +1027,10 @@ final class Compiler
 
         private Fragment fullCaseFoldLiteral(int[] runes)
         {
-            if (!UnicodeFullCaseFold.requiresFullCaseFold(runes)) {
-                Fragment fragment = charClass(UnicodeFullCaseFold.simpleFoldClass(runes[0]));
+            if (!caseFolding.requiresFullCaseFold(runes)) {
+                Fragment fragment = charClass(caseFolding.simpleFoldClass(runes[0]));
                 for (int index = 1; index < runes.length; index++) {
-                    fragment = concatenate(fragment, charClass(UnicodeFullCaseFold.simpleFoldClass(runes[index])));
+                    fragment = concatenate(fragment, charClass(caseFolding.simpleFoldClass(runes[index])));
                 }
                 return fragment;
             }
@@ -1037,7 +1039,7 @@ final class Compiler
             }
             program.setHasFullCaseFold(true);
 
-            int[] foldedRunes = UnicodeFullCaseFold.fold(runes);
+            int[] foldedRunes = caseFolding.fold(runes);
             Fragment terminal = noOperation();
             Fragment[] suffixes = new Fragment[foldedRunes.length + 1];
             suffixes[foldedRunes.length] = terminal;
@@ -1046,10 +1048,10 @@ final class Compiler
                 List<Integer> branchStarts = new ArrayList<>();
                 addFullCaseFoldBranch(
                         branchStarts,
-                        UnicodeFullCaseFold.simpleFoldClass(foldedRunes[index]),
+                        caseFolding.simpleFoldClass(foldedRunes[index]),
                         suffixes[index + 1]);
 
-                for (UnicodeFullCaseFold.FoldToken token : UnicodeFullCaseFold.multiCharacterTokensStartingWith(foldedRunes[index])) {
+                for (UnicodeFullCaseFold.FoldToken token : caseFolding.multiCharacterTokensStartingWith(foldedRunes[index])) {
                     if (token.matches(foldedRunes, index)) {
                         addFullCaseFoldBranch(
                                 branchStarts,

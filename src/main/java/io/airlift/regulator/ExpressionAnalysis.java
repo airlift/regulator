@@ -178,6 +178,7 @@ final class ExpressionAnalysis
         }
     }
 
+    private final CaseFolding caseFolding;
     private final Length length;
     private final boolean latin1;
     private final boolean hasCaptures;
@@ -187,8 +188,9 @@ final class ExpressionAnalysis
     private final boolean canConsumeLineFeed;
     private final LiteralSequence literalSequence;
 
-    private ExpressionAnalysis(Regexp regexp, Node node)
+    private ExpressionAnalysis(Regexp regexp, Node node, CaseFolding caseFolding)
     {
+        this.caseFolding = caseFolding;
         this.length = new Length(node.maximumLength, node.encodedLength);
         this.latin1 = (regexp.parseFlags() & LATIN1) != 0;
         this.hasCaptures = node.hasCaptures;
@@ -201,17 +203,18 @@ final class ExpressionAnalysis
                 : buildLiteralSequence(node.elements);
     }
 
-    static ExpressionAnalysis analyzeNormalized(Regexp normalizedRegexp)
+    static ExpressionAnalysis analyzeNormalized(Regexp normalizedRegexp, CaseFolding caseFolding)
     {
         requireNonNull(normalizedRegexp, "normalizedRegexp is null");
-        Node node = analyze(normalizedRegexp, 0);
-        return new ExpressionAnalysis(normalizedRegexp, node);
+        requireNonNull(caseFolding, "caseFolding is null");
+        Node node = analyze(normalizedRegexp, caseFolding, 0);
+        return new ExpressionAnalysis(normalizedRegexp, node, caseFolding);
     }
 
-    private static Node analyze(Regexp regexp, int depth)
+    private static Node analyze(Regexp regexp, CaseFolding caseFolding, int depth)
     {
         if (depth >= MAX_RECURSIVE_DEPTH) {
-            return new Analyzer().walk(regexp, null);
+            return new Analyzer(caseFolding).walk(regexp, null);
         }
 
         List<Node> children;
@@ -219,15 +222,23 @@ final class ExpressionAnalysis
             children = List.of();
         }
         else if (regexp.childCount() == 1) {
-            children = List.of(analyze(regexp.child(0), depth + 1));
+            children = List.of(analyze(regexp.child(0), caseFolding, depth + 1));
         }
         else {
             children = new ArrayList<>(regexp.childCount());
             for (int childIndex = 0; childIndex < regexp.childCount(); childIndex++) {
-                children.add(analyze(regexp.child(childIndex), depth + 1));
+                children.add(analyze(regexp.child(childIndex), caseFolding, depth + 1));
             }
         }
-        return Analyzer.analyzeNode(regexp, children);
+        return Analyzer.analyzeNode(regexp, children, caseFolding);
+    }
+
+    /**
+     * Returns the case folding of the pattern language, under which this analysis was derived.
+     */
+    CaseFolding caseFolding()
+    {
+        return caseFolding;
     }
 
     Length length()
@@ -467,13 +478,13 @@ final class ExpressionAnalysis
         return false;
     }
 
-    private static int maximumLength(Regexp regexp, List<Node> children)
+    private static int maximumLength(Regexp regexp, List<Node> children, CaseFolding caseFolding)
     {
         return switch (regexp.op()) {
             case NO_MATCH -> IMPOSSIBLE;
             case EMPTY_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT, HAVE_MATCH -> 0;
-            case LITERAL -> maximumLiteralLength(regexp, new int[] {regexp.rune()});
-            case LITERAL_STRING -> maximumLiteralLength(regexp, regexp.runes());
+            case LITERAL -> maximumLiteralLength(regexp, new int[] {regexp.rune()}, caseFolding);
+            case LITERAL_STRING -> maximumLiteralLength(regexp, regexp.runes(), caseFolding);
             case CONCAT -> addMaximums(children);
             case ALTERNATE -> alternateMaximum(children);
             case STAR -> repeatMaximum(children.getFirst().maximumLength, 0, -1);
@@ -487,10 +498,10 @@ final class ExpressionAnalysis
         };
     }
 
-    private static int maximumLiteralLength(Regexp regexp, int[] runes)
+    private static int maximumLiteralLength(Regexp regexp, int[] runes, CaseFolding caseFolding)
     {
         if ((regexp.parseFlags() & Regexp.FULL_CASE_FOLD) != 0) {
-            return UnicodeFullCaseFold.byteLength(runes).maximum();
+            return caseFolding.byteLength(runes).maximum();
         }
 
         boolean latin1 = (regexp.parseFlags() & LATIN1) != 0;
@@ -498,10 +509,10 @@ final class ExpressionAnalysis
         for (int rune : runes) {
             int runeLength = latin1 ? 1 : Utf8.encodedLength(rune);
             if ((regexp.parseFlags() & FOLD_CASE) != 0) {
-                int foldedRune = UnicodeCaseFold.cycleFoldRune(rune);
+                int foldedRune = caseFolding.cycleFoldRune(rune);
                 while (foldedRune != rune) {
                     runeLength = Math.max(runeLength, latin1 ? 1 : Utf8.encodedLength(foldedRune));
-                    foldedRune = UnicodeCaseFold.cycleFoldRune(foldedRune);
+                    foldedRune = caseFolding.cycleFoldRune(foldedRune);
                 }
             }
             length = saturatedAdd(length, runeLength);
@@ -613,6 +624,13 @@ final class ExpressionAnalysis
         private static final PreVisitResult<Node> CONTINUE = new PreVisitResult<>(null, false);
         private static final int[] NO_CHILD_LENGTHS = {};
 
+        private final CaseFolding caseFolding;
+
+        private Analyzer(CaseFolding caseFolding)
+        {
+            this.caseFolding = caseFolding;
+        }
+
         @Override
         protected PreVisitResult<Node> preVisit(Regexp regexp, Node parentArgument)
         {
@@ -622,10 +640,10 @@ final class ExpressionAnalysis
         @Override
         protected Node postVisit(Regexp regexp, Node parentArgument, Node preArgument, List<Node> children)
         {
-            return analyzeNode(regexp, children);
+            return analyzeNode(regexp, children, caseFolding);
         }
 
-        private static Node analyzeNode(Regexp regexp, List<Node> children)
+        private static Node analyzeNode(Regexp regexp, List<Node> children, CaseFolding caseFolding)
         {
             int[] childLengths = children.isEmpty() ? NO_CHILD_LENGTHS : new int[children.size()];
             boolean hasCaptures = regexp.op() == RegexpOp.CAPTURE;
@@ -647,8 +665,8 @@ final class ExpressionAnalysis
                 childCanConsumeLineFeed |= child.canConsumeLineFeed;
             }
 
-            int encodedLength = MatchLength.combine(regexp, childLengths);
-            int maximumLength = maximumLength(regexp, children);
+            int encodedLength = MatchLength.combine(regexp, childLengths, caseFolding);
+            int maximumLength = maximumLength(regexp, children, caseFolding);
 
             return new Node(
                     encodedLength,

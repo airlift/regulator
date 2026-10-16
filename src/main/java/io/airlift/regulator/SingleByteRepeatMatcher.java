@@ -47,7 +47,7 @@ final class SingleByteRepeatMatcher
         this.latin1 = latin1;
     }
 
-    static SingleByteRepeatMatcher analyze(Regexp regexp)
+    static SingleByteRepeatMatcher analyze(Regexp regexp, CaseFolding caseFolding)
     {
         while (regexp.op() == CAPTURE) {
             regexp = regexp.child(0);
@@ -58,7 +58,7 @@ final class SingleByteRepeatMatcher
             return null;
         }
 
-        SingleByteMatcher.Analysis analysis = SingleByteMatcher.analyzePattern(regexp.child(0));
+        SingleByteMatcher.Analysis analysis = SingleByteMatcher.analyzePattern(regexp.child(0), caseFolding);
         if (analysis.length() != 1 || analysis.isEmpty()) {
             return null;
         }

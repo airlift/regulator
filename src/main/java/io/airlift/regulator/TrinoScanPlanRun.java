@@ -111,7 +111,7 @@ final class TrinoScanPlanRun
         this.candidateNibbleTables = candidateScan == CANDIDATE_SCAN_NIBBLE_TABLE ? nibbleTables : null;
     }
 
-    static TrinoScanPlanRun analyze(Regexp expression)
+    static TrinoScanPlanRun analyze(Regexp expression, CaseFolding caseFolding)
     {
         if ((expression.parseFlags() & UNSUPPORTED_FLAGS) != 0) {
             return null;
@@ -151,13 +151,13 @@ final class TrinoScanPlanRun
                     return null;
                 }
                 if ((atom.parseFlags() & Regexp.FOLD_CASE) != 0) {
-                    if (!Regexp.supportsAsciiFold(new int[] {atom.rune()})) {
+                    if (!Regexp.supportsAsciiFold(new int[] {atom.rune()}, caseFolding)) {
                         return null;
                     }
                     int member = atom.rune();
                     do {
                         members[member] = true;
-                        member = UnicodeCaseFold.cycleFoldRune(member);
+                        member = caseFolding.cycleFoldRune(member);
                     }
                     while (member != atom.rune());
                 }

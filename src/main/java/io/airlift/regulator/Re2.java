@@ -744,13 +744,14 @@ public final class Re2
 
         long forwardMemory = Math.max(1, maxMemory - Math.max(1, maxMemory / 3));
         Regexp entireRegexp = parsed.regexp();
+        CaseFolding caseFolding = parsed.caseFolding();
         FixedWidthByteSpanMatcher fixedWidthMatcher = shouldAnalyzeFixedWidthByteSpanForTrino(parsed)
                 ? FixedWidthByteSpanMatcher.analyze(entireRegexp)
                 : null;
         if (fixedWidthMatcher != null) {
-            Regexp normalizedRegexp = Simplifier.simplify(entireRegexp);
-            ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp);
-            Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, forwardMemory, Compiler.Dialect.TRINO);
+            Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
+            ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
+            Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, forwardMemory, Compiler.Dialect.TRINO, caseFolding);
             if (fixedWidthMatcher.estimatedRetainedSize() <= placeholderProgram.dfaMemory()) {
                 placeholderProgram.setDfaMemory(0);
                 BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram);
@@ -787,7 +788,7 @@ public final class Re2
         return parsed.capturingGroupCount() == 0 &&
                 regexp.op() != RegexpOp.LITERAL &&
                 regexp.op() != RegexpOp.LITERAL_STRING &&
-                regexp.requiredPrefix() == null;
+                regexp.requiredPrefix(parsed.caseFolding()) == null;
     }
 
     private static Re2 build(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean longestMatch)
@@ -810,6 +811,7 @@ public final class Re2
 
         Regexp entireRegexp = parsed.regexp();
         int capturingGroupCount = parsed.capturingGroupCount();
+        CaseFolding caseFolding = parsed.caseFolding();
         BoundedCharacterClassCounter compactBoundedCharacterClass = capturingGroupCount == 0 && !longestMatch
                 ? BoundedCharacterClassCounter.analyzeCompactRoute(entireRegexp)
                 : null;
@@ -819,16 +821,16 @@ public final class Re2
                 throw new RegexpCompileMemoryLimitException(maxMemory);
             }
 
-            ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(entireRegexp);
+            ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(entireRegexp, caseFolding);
             long availableMemory = forwardMemory - counterMemory;
-            Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, availableMemory, compilerDialect);
+            Prog placeholderProgram = Compiler.compileNormalized(Regexp.noMatch(flags), false, availableMemory, compilerDialect, caseFolding);
             placeholderProgram.setDfaMemory(0);
             BooleanPlans booleanPlans = selectBooleanPlans(expressionAnalysis, -1, null, placeholderProgram);
             Prog partialProgram = placeholderProgram;
             if (Dfa.nativeAccessEnabled() && RetainedCharacterClassCountDfa.supports(entireRegexp)) {
                 try {
-                    Regexp normalizedRegexp = Simplifier.simplify(entireRegexp);
-                    Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect, byteFrequencies);
+                    Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
+                    Prog countProgram = Compiler.compileNormalizedForDfa(normalizedRegexp, false, availableMemory, compilerDialect, caseFolding, byteFrequencies);
                     if (countProgram.dfaMemory() >= RetainedCharacterClassCountDfa.MINIMUM_DFA_MEMORY) {
                         partialProgram = countProgram;
                     }
@@ -859,8 +861,8 @@ public final class Re2
                     compactBoundedCharacterClass);
         }
 
-        Regexp normalizedRegexp = Simplifier.simplify(entireRegexp);
-        ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp);
+        Regexp normalizedRegexp = Simplifier.simplify(entireRegexp, caseFolding);
+        ExpressionAnalysis expressionAnalysis = ExpressionAnalysis.analyzeNormalized(normalizedRegexp, caseFolding);
 
         // For "^literal...", compile only the suffix and check the required prefix before matching.
         // Retain the suffix AST so reverse-program construction also avoids the stripped literal.
@@ -868,23 +870,23 @@ public final class Re2
         int encodedMatchLength;
         byte[] requiredPrefix = null;
         boolean prefixFoldCase = false;
-        Regexp.RequiredPrefixResult prefixResult = entireRegexp.requiredPrefix();
+        Regexp.RequiredPrefixResult prefixResult = entireRegexp.requiredPrefix(caseFolding);
         if (prefixResult != null) {
             requiredPrefix = prefixResult.prefix().getBytes();
             prefixFoldCase = prefixResult.foldCase();
             suffixRegexp = prefixResult.suffix();
             // The whole-expression analysis describes the entire expression, so the split-off
             // suffix needs its own length.
-            encodedMatchLength = MatchLength.analyze(suffixRegexp).encoded();
+            encodedMatchLength = MatchLength.analyze(suffixRegexp, caseFolding).encoded();
         }
         else {
             suffixRegexp = entireRegexp;
             encodedMatchLength = expressionAnalysis.length().encoded();
         }
-        Regexp normalizedSuffixRegexp = suffixRegexp == entireRegexp ? normalizedRegexp : Simplifier.simplify(suffixRegexp);
+        Regexp normalizedSuffixRegexp = suffixRegexp == entireRegexp ? normalizedRegexp : Simplifier.simplify(suffixRegexp, caseFolding);
 
         // Compute captures from the entire regexp (named groups come from the full pattern).
-        Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect, byteFrequencies);
+        Prog semanticProgram = Compiler.compileNormalized(normalizedSuffixRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
         ExpressionAnalysis.LiteralSequence literalSequence = expressionAnalysis.literalSequence();
         Slice exactLiteral = literalSequence == null || literalSequence.anchoredAtStart() || literalSequence.anchoredAtEnd()
                 ? null
@@ -898,7 +900,7 @@ public final class Re2
                 requiredPrefix,
                 semanticProgram);
         TrinoScanPlan trinoScanPlan = compilerDialect == Compiler.Dialect.TRINO && !expressionAnalysis.canMatchEmpty()
-                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount, forceScanPlanHandoff, byteFrequencies)
+                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount, forceScanPlanHandoff, caseFolding, byteFrequencies)
                 : null;
         // Anchored and literal-led plans take precedence over a lowered boolean program. A run-led
         // unanchored plan yields to one, which keeps the lowered final-line route.
@@ -916,6 +918,7 @@ public final class Re2
                     booleanPlans,
                     forwardMemory,
                     compilerDialect,
+                    caseFolding,
                     byteFrequencies);
         }
         if (loweredBooleanProgram != null) {
@@ -927,7 +930,7 @@ public final class Re2
             booleanPlans = booleanPlans.withTrinoScanPlan(trinoScanPlan);
         }
         TaggedAlternationProgram taggedAlternationProgram = requiredPrefix == null && loweredBooleanProgram == null
-                ? TaggedAlternationProgram.compile(entireRegexp, capturingGroupCount, longestMatch, semanticProgram, compilerDialect)
+                ? TaggedAlternationProgram.compile(entireRegexp, capturingGroupCount, longestMatch, semanticProgram, compilerDialect, caseFolding)
                 : null;
         booleanPlans = booleanPlans.withTaggedAlternationProgram(taggedAlternationProgram);
         WordRunMatcher wordRunMatcher = requiredPrefix == null && loweredBooleanProgram == null
@@ -980,6 +983,7 @@ public final class Re2
             BooleanPlans booleanPlans,
             long forwardMemory,
             Compiler.Dialect compilerDialect,
+            CaseFolding caseFolding,
             ByteFrequencies byteFrequencies)
     {
         if (!requiresProgramExecution(booleanPlans.find()) &&
@@ -992,10 +996,10 @@ public final class Re2
             return null;
         }
 
-        Regexp normalizedRegexp = Simplifier.simplify(loweredRegexp);
+        Regexp normalizedRegexp = Simplifier.simplify(loweredRegexp, caseFolding);
         Prog program;
         try {
-            program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory, compilerDialect, byteFrequencies);
+            program = Compiler.compileNormalized(normalizedRegexp, false, forwardMemory, compilerDialect, caseFolding, byteFrequencies);
         }
         catch (RegexpCompileException ignored) {
             // An optional boolean optimization must not reject a valid semantic program.
@@ -1103,6 +1107,15 @@ public final class Re2
     Regexp regexp()
     {
         return regexp;
+    }
+
+    /**
+     * Returns the case folding of the pattern language. The expression analysis carries it, which
+     * keeps it off the compiled-pattern layout.
+     */
+    CaseFolding caseFolding()
+    {
+        return expressionAnalysis.caseFolding();
     }
 
     ExpressionAnalysis expressionAnalysisForDiagnostics()
@@ -1950,7 +1963,7 @@ public final class Re2
         if (!mayHaveSingleByteMatcher()) {
             return null;
         }
-        return SingleByteMatcher.analyze(suffixRegexp());
+        return SingleByteMatcher.analyze(suffixRegexp(), caseFolding());
     }
 
     SingleByteMatcher sharedSingleByteMatcher()
@@ -1985,7 +1998,7 @@ public final class Re2
 
     boolean supportsSingleByteMatcher()
     {
-        return mayHaveSingleByteMatcher() && SingleByteMatcher.supports(suffixRegexp());
+        return mayHaveSingleByteMatcher() && SingleByteMatcher.supports(suffixRegexp(), caseFolding());
     }
 
     SingleByteRepeatMatcher createSingleByteRepeatMatcher()
@@ -1993,7 +2006,7 @@ public final class Re2
         if (requiredPrefix != null || partialProg.hasTextDependentAssertions()) {
             return null;
         }
-        return SingleByteRepeatMatcher.analyze(suffixRegexp());
+        return SingleByteRepeatMatcher.analyze(suffixRegexp(), caseFolding());
     }
 
     BoundedCharacterClassCounter createBoundedCharacterClassCounter()
@@ -3202,7 +3215,7 @@ public final class Re2
         // Compile from the stored normalized suffix instead of re-parsing or re-simplifying.
         Prog prog;
         try {
-            prog = Compiler.compileNormalized(normalizedReverseRegexp, true, reverseMemory, compilerDialect());
+            prog = Compiler.compileNormalized(normalizedReverseRegexp, true, reverseMemory, compilerDialect(), caseFolding());
         }
         catch (RegexpCompileMemoryLimitException ignored) {
             return null;

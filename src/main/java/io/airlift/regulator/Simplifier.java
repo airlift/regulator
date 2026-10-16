@@ -27,23 +27,25 @@ final class Simplifier
 
     private Simplifier() {}
 
-    static Regexp simplify(Regexp regexp)
+    static Regexp simplify(Regexp regexp, CaseFolding caseFolding)
     {
         requireNonNull(regexp, "regexp is null");
+        requireNonNull(caseFolding, "caseFolding is null");
         // Upstream simplify.cc runs a coalescing pass before simplification.
-        return simplifyInternal(Coalescer.coalesce(regexp), Mode.FULL);
+        return simplifyInternal(Coalescer.coalesce(regexp, caseFolding), Mode.FULL, caseFolding);
     }
 
     /**
      * Parse-time canonicalization that intentionally preserves counted repetitions ({@code {n,m}}),
      * matching upstream RE2 parse.cc behavior (parse dumps still contain {@code rep{...}} nodes).
      * <p>
-     * Compiler pipelines must call {@link #simplify(Regexp)} (FULL) to eliminate counted repeats.
+     * Compiler pipelines must call {@link #simplify(Regexp, CaseFolding)} (FULL) to eliminate counted repeats.
      */
-    static Regexp simplifyForParse(Regexp regexp)
+    static Regexp simplifyForParse(Regexp regexp, CaseFolding caseFolding)
     {
         requireNonNull(regexp, "regexp is null");
-        return simplifyInternal(regexp, Mode.PARSE);
+        requireNonNull(caseFolding, "caseFolding is null");
+        return simplifyInternal(regexp, Mode.PARSE, caseFolding);
     }
 
     private enum Mode
@@ -51,15 +53,15 @@ final class Simplifier
         PARSE, FULL
     }
 
-    private static Regexp simplifyInternal(Regexp regexp, Mode mode)
+    private static Regexp simplifyInternal(Regexp regexp, Mode mode, CaseFolding caseFolding)
     {
-        return simplifyRecursive(regexp, mode, 0);
+        return simplifyRecursive(regexp, mode, caseFolding, 0);
     }
 
-    private static Regexp simplifyRecursive(Regexp regexp, Mode mode, int depth)
+    private static Regexp simplifyRecursive(Regexp regexp, Mode mode, CaseFolding caseFolding, int depth)
     {
         if (depth == MAX_RECURSIVE_DEPTH) {
-            return new SimplifyWalker(mode).walk(regexp, null);
+            return new SimplifyWalker(mode, caseFolding).walk(regexp, null);
         }
 
         int flags = regexp.parseFlags();
@@ -87,15 +89,15 @@ final class Simplifier
             }
 
             case CAPTURE -> {
-                Regexp child = simplifyRecursive(regexp.child(0), mode, depth + 1);
+                Regexp child = simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1);
                 yield child == regexp.child(0) ? regexp : Regexp.capture(flags, child, regexp.captureIndex(), regexp.name());
             }
-            case STAR -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), UnaryOp.STAR, regexp);
-            case PLUS -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), UnaryOp.PLUS, regexp);
-            case QUEST -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, depth + 1), UnaryOp.QUEST, regexp);
-            case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifyRecursive(regexp.child(0), mode, depth + 1));
-            case CONCAT -> simplifyConcatRecursive(mode, flags, regexp, depth);
-            case ALTERNATE -> simplifyAlternateRecursive(mode, flags, regexp, depth);
+            case STAR -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.STAR, regexp);
+            case PLUS -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.PLUS, regexp);
+            case QUEST -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.QUEST, regexp);
+            case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1));
+            case CONCAT -> simplifyConcatRecursive(mode, caseFolding, flags, regexp, depth);
+            case ALTERNATE -> simplifyAlternateRecursive(mode, caseFolding, flags, regexp, depth);
             case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
         };
     }
@@ -104,10 +106,12 @@ final class Simplifier
             extends RegexpWalker<Regexp>
     {
         private final Mode mode;
+        private final CaseFolding caseFolding;
 
-        private SimplifyWalker(Mode mode)
+        private SimplifyWalker(Mode mode, CaseFolding caseFolding)
         {
             this.mode = mode;
+            this.caseFolding = caseFolding;
         }
 
         @Override
@@ -158,7 +162,7 @@ final class Simplifier
                 case QUEST -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.QUEST, regexp);
                 case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifiedChildren.getFirst());
                 case CONCAT -> simplifyConcat(flags, regexp, simplifiedChildren);
-                case ALTERNATE -> simplifyAlternate(mode, flags, simplifiedChildren);
+                case ALTERNATE -> simplifyAlternate(mode, caseFolding, flags, simplifiedChildren);
                 case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
             };
         }
@@ -339,11 +343,11 @@ final class Simplifier
         return Regexp.concat(flags, simplifiedChildren);
     }
 
-    private static Regexp simplifyConcatRecursive(Mode mode, int flags, Regexp regexp, int depth)
+    private static Regexp simplifyConcatRecursive(Mode mode, CaseFolding caseFolding, int flags, Regexp regexp, int depth)
     {
         List<Regexp> simplifiedChildren = new ArrayList<>();
         for (Regexp child : regexp.children()) {
-            Regexp simplifiedChild = simplifyRecursive(child, mode, depth + 1);
+            Regexp simplifiedChild = simplifyRecursive(child, mode, caseFolding, depth + 1);
             if (simplifiedChild.op() == RegexpOp.NO_MATCH) {
                 return Regexp.noMatch(flags);
             }
@@ -407,7 +411,7 @@ final class Simplifier
         return Regexp.literalString(left.parseFlags(), merged);
     }
 
-    private static Regexp simplifyAlternate(Mode mode, int flags, List<Regexp> children)
+    private static Regexp simplifyAlternate(Mode mode, CaseFolding caseFolding, int flags, List<Regexp> children)
     {
         List<Regexp> simplifiedAlternatives = new ArrayList<>();
         for (Regexp simplifiedChild : children) {
@@ -422,10 +426,10 @@ final class Simplifier
             }
         }
 
-        return simplifyAlternatives(mode, flags, simplifiedAlternatives);
+        return simplifyAlternatives(mode, caseFolding, flags, simplifiedAlternatives);
     }
 
-    private static Regexp simplifyAlternatives(Mode mode, int flags, List<Regexp> simplifiedAlternatives)
+    private static Regexp simplifyAlternatives(Mode mode, CaseFolding caseFolding, int flags, List<Regexp> simplifiedAlternatives)
     {
         if (simplifiedAlternatives.isEmpty()) {
             return Regexp.noMatch(flags);
@@ -456,9 +460,9 @@ final class Simplifier
                     byteAlternatives &= alternative.op() == RegexpOp.ANY_BYTE;
                     scalarAlternatives &= switch (alternative.op()) {
                         case LITERAL -> (flags & Regexp.FULL_CASE_FOLD) == 0 ||
-                                !UnicodeFullCaseFold.requiresFullCaseFold(new int[] {alternative.rune()});
+                                !caseFolding.requiresFullCaseFold(new int[] {alternative.rune()});
                         case CHAR_CLASS -> (alternative.parseFlags() & Regexp.FULL_CASE_FOLD) == 0 ||
-                                UnicodeFullCaseFold.multiCharacterTokens(alternative.charClass()).isEmpty();
+                                caseFolding.multiCharacterTokens(alternative.charClass()).isEmpty();
                         case ANY_CHAR -> true;
                         case ANY_BYTE -> (flags & Regexp.LATIN1) != 0;
                         default -> false;
@@ -472,14 +476,14 @@ final class Simplifier
                 }
             }
 
-            List<Regexp> factored = factorAlternationForParse(simplifiedAlternatives, flags);
+            List<Regexp> factored = factorAlternationForParse(simplifiedAlternatives, flags, caseFolding);
             if (factored.size() == 1) {
                 return factored.getFirst();
             }
             return Regexp.alternate(flags, factored);
         }
 
-        List<Regexp> merged = mergeAlternateCharClassesWherePossible(mode, flags, simplifiedAlternatives);
+        List<Regexp> merged = mergeAlternateCharClassesWherePossible(mode, caseFolding, flags, simplifiedAlternatives);
         if (merged.size() == 1) {
             return merged.getFirst();
         }
@@ -487,11 +491,11 @@ final class Simplifier
         return Regexp.alternate(flags, merged);
     }
 
-    private static Regexp simplifyAlternateRecursive(Mode mode, int flags, Regexp regexp, int depth)
+    private static Regexp simplifyAlternateRecursive(Mode mode, CaseFolding caseFolding, int flags, Regexp regexp, int depth)
     {
         List<Regexp> simplifiedAlternatives = new ArrayList<>();
         for (Regexp child : regexp.children()) {
-            Regexp simplifiedChild = simplifyRecursive(child, mode, depth + 1);
+            Regexp simplifiedChild = simplifyRecursive(child, mode, caseFolding, depth + 1);
             if (simplifiedChild.op() == RegexpOp.NO_MATCH) {
                 continue;
             }
@@ -503,7 +507,7 @@ final class Simplifier
             }
         }
 
-        return simplifyAlternatives(mode, flags, simplifiedAlternatives);
+        return simplifyAlternatives(mode, caseFolding, flags, simplifiedAlternatives);
     }
 
     /**
@@ -564,7 +568,7 @@ final class Simplifier
         return original != null ? original : Regexp.charClass(flags, charClass);
     }
 
-    private static List<Regexp> mergeAlternateCharClassesWherePossible(Mode mode, int flags, List<Regexp> alternatives)
+    private static List<Regexp> mergeAlternateCharClassesWherePossible(Mode mode, CaseFolding caseFolding, int flags, List<Regexp> alternatives)
     {
         ArrayList<Regexp> mergedAlternatives = new ArrayList<>(alternatives.size());
 
@@ -588,12 +592,12 @@ final class Simplifier
                     break;
                 }
                 if (scanAlternative.op() == RegexpOp.LITERAL) {
-                    mergedClassBuilder.addRangeFlags(scanAlternative.rune(), scanAlternative.rune(), flags);
+                    mergedClassBuilder.addRangeFlags(scanAlternative.rune(), scanAlternative.rune(), flags, caseFolding);
                 }
                 else {
                     CharClass charClass = scanAlternative.charClass();
                     for (RuneRange runeRange : charClass.ranges()) {
-                        mergedClassBuilder.addRangeFlags(runeRange.low(), runeRange.high(), flags);
+                        mergedClassBuilder.addRangeFlags(runeRange.low(), runeRange.high(), flags, caseFolding);
                     }
                 }
                 count++;
@@ -626,20 +630,20 @@ final class Simplifier
 
     private record LeadingString(int[] runes, int flags) {}
 
-    private static List<Regexp> factorAlternationForParse(List<Regexp> subs, int flags)
+    private static List<Regexp> factorAlternationForParse(List<Regexp> subs, int flags, CaseFolding caseFolding)
     {
-        List<Regexp> round1 = factorAlternationRound1(subs, flags);
-        List<Regexp> round2 = factorAlternationRound2(round1, flags);
-        return factorAlternationRound3(round2, flags);
+        List<Regexp> round1 = factorAlternationRound1(subs, flags, caseFolding);
+        List<Regexp> round2 = factorAlternationRound2(round1, flags, caseFolding);
+        return factorAlternationRound3(round2, flags, caseFolding);
     }
 
-    private static List<Regexp> factorAlternationRound1(List<Regexp> alternatives, int flags)
+    private static List<Regexp> factorAlternationRound1(List<Regexp> alternatives, int flags, CaseFolding caseFolding)
     {
         ArrayList<Regexp> factoredAlternatives = new ArrayList<>(alternatives.size());
         int alternativeIndex = 0;
         while (alternativeIndex < alternatives.size()) {
             LeadingString base = leadingString(alternatives.get(alternativeIndex));
-            if (base == null || base.runes.length == 0 || requiresFullCaseFold(base.flags, base.runes)) {
+            if (base == null || base.runes.length == 0 || requiresFullCaseFold(base.flags, base.runes, caseFolding)) {
                 factoredAlternatives.add(alternatives.get(alternativeIndex));
                 alternativeIndex++;
                 continue;
@@ -650,7 +654,7 @@ final class Simplifier
             int endIndex = alternativeIndex + 1;
             for (; endIndex < alternatives.size(); endIndex++) {
                 LeadingString next = leadingString(alternatives.get(endIndex));
-                if (next == null || next.flags != base.flags || requiresFullCaseFold(next.flags, next.runes)) {
+                if (next == null || next.flags != base.flags || requiresFullCaseFold(next.flags, next.runes, caseFolding)) {
                     break;
                 }
                 int same = commonPrefixLength(base.runes, next.runes, commonLen);
@@ -671,7 +675,7 @@ final class Simplifier
                     suffixes.add(removeLeadingString(alternatives.get(suffixIndex), commonLen));
                 }
 
-                List<Regexp> factoredSuffixes = factorAlternationForParse(suffixes, flags);
+                List<Regexp> factoredSuffixes = factorAlternationForParse(suffixes, flags, caseFolding);
                 Regexp suffix = alternateNoFactor(flags, factoredSuffixes);
                 factoredAlternatives.add(Regexp.concat(flags, List.of(prefix, suffix)));
             }
@@ -687,7 +691,7 @@ final class Simplifier
         return factoredAlternatives;
     }
 
-    private static List<Regexp> factorAlternationRound2(List<Regexp> alternatives, int flags)
+    private static List<Regexp> factorAlternationRound2(List<Regexp> alternatives, int flags, CaseFolding caseFolding)
     {
         ArrayList<Regexp> factoredAlternatives = new ArrayList<>(alternatives.size());
         int alternativeIndex = 0;
@@ -714,7 +718,7 @@ final class Simplifier
                     suffixes.add(removeLeadingRegexp(alternatives.get(suffixIndex)));
                 }
 
-                List<Regexp> factoredSuffixes = factorAlternationForParse(suffixes, flags);
+                List<Regexp> factoredSuffixes = factorAlternationForParse(suffixes, flags, caseFolding);
                 Regexp suffix = alternateNoFactor(flags, factoredSuffixes);
                 factoredAlternatives.add(Regexp.concat(flags, List.of(firstPrefix, suffix)));
             }
@@ -728,13 +732,13 @@ final class Simplifier
         return factoredAlternatives;
     }
 
-    private static List<Regexp> factorAlternationRound3(List<Regexp> alternatives, int flags)
+    private static List<Regexp> factorAlternationRound3(List<Regexp> alternatives, int flags, CaseFolding caseFolding)
     {
         ArrayList<Regexp> factoredAlternatives = new ArrayList<>(alternatives.size());
         int alternativeIndex = 0;
         while (alternativeIndex < alternatives.size()) {
             Regexp alternative = alternatives.get(alternativeIndex);
-            if (!isRound3CharClassCandidate(alternative, flags)) {
+            if (!isRound3CharClassCandidate(alternative, flags, caseFolding)) {
                 factoredAlternatives.add(alternative);
                 alternativeIndex++;
                 continue;
@@ -744,7 +748,7 @@ final class Simplifier
             int endIndex = alternativeIndex + 1;
             while (endIndex < alternatives.size()) {
                 Regexp scanAlternative = alternatives.get(endIndex);
-                if (isRound3CharClassCandidate(scanAlternative, flags)) {
+                if (isRound3CharClassCandidate(scanAlternative, flags, caseFolding)) {
                     endIndex++;
                 }
                 else {
@@ -753,7 +757,7 @@ final class Simplifier
             }
 
             if ((endIndex - startIndex) > 1) {
-                CharClass charClass = mergeAlternativesIntoCharClass(alternatives, startIndex, endIndex);
+                CharClass charClass = mergeAlternativesIntoCharClass(alternatives, startIndex, endIndex, caseFolding);
                 factoredAlternatives.add(Regexp.charClass(flags & ~Regexp.FOLD_CASE, charClass));
             }
             else {
@@ -764,22 +768,22 @@ final class Simplifier
         return factoredAlternatives;
     }
 
-    private static boolean isRound3CharClassCandidate(Regexp regexp, int flags)
+    private static boolean isRound3CharClassCandidate(Regexp regexp, int flags, CaseFolding caseFolding)
     {
         return (regexp.op() == RegexpOp.LITERAL || regexp.op() == RegexpOp.CHAR_CLASS) &&
                 ((regexp.parseFlags() ^ flags) & Regexp.LATIN1) == 0 &&
                 (regexp.op() != RegexpOp.LITERAL || (regexp.parseFlags() & Regexp.FULL_CASE_FOLD) == 0 ||
-                        !UnicodeFullCaseFold.requiresFullCaseFold(new int[] {regexp.rune()}));
+                        !caseFolding.requiresFullCaseFold(new int[] {regexp.rune()}));
     }
 
-    private static boolean requiresFullCaseFold(int flags, int[] runes)
+    private static boolean requiresFullCaseFold(int flags, int[] runes, CaseFolding caseFolding)
     {
         // Full folds can consume multiple code points, including across a new factored
         // prefix boundary. Keep those literals intact; simple folding still factors.
-        return (flags & Regexp.FULL_CASE_FOLD) != 0 && UnicodeFullCaseFold.requiresFullCaseFold(runes);
+        return (flags & Regexp.FULL_CASE_FOLD) != 0 && caseFolding.requiresFullCaseFold(runes);
     }
 
-    private static CharClass mergeAlternativesIntoCharClass(List<Regexp> alternatives, int startIndex, int endIndex)
+    private static CharClass mergeAlternativesIntoCharClass(List<Regexp> alternatives, int startIndex, int endIndex, CaseFolding caseFolding)
     {
         CharClassBuilder builder = new CharClassBuilder();
         for (int mergeIndex = startIndex; mergeIndex < endIndex; mergeIndex++) {
@@ -787,16 +791,16 @@ final class Simplifier
             if (mergeAlternative.op() == RegexpOp.CHAR_CLASS) {
                 CharClass charClass = mergeAlternative.charClass();
                 for (RuneRange runeRange : charClass.ranges()) {
-                    builder.addRangeFlags(runeRange.low(), runeRange.high(), mergeAlternative.parseFlags());
+                    builder.addRangeFlags(runeRange.low(), runeRange.high(), mergeAlternative.parseFlags(), caseFolding);
                 }
             }
             else if ((mergeAlternative.parseFlags() & Regexp.FOLD_CASE) != 0) {
                 CharClassBuilder foldedLiteralClass = new CharClassBuilder();
-                foldedLiteralClass.addRangeFlags(mergeAlternative.rune(), mergeAlternative.rune(), mergeAlternative.parseFlags());
+                foldedLiteralClass.addRangeFlags(mergeAlternative.rune(), mergeAlternative.rune(), mergeAlternative.parseFlags(), caseFolding);
                 builder.addCharClass(foldedLiteralClass);
             }
             else {
-                builder.addRangeFlags(mergeAlternative.rune(), mergeAlternative.rune(), mergeAlternative.parseFlags());
+                builder.addRangeFlags(mergeAlternative.rune(), mergeAlternative.rune(), mergeAlternative.parseFlags(), caseFolding);
             }
         }
         return builder.toCharClass();
@@ -933,17 +937,17 @@ final class Simplifier
     {
         private Coalescer() {}
 
-        public static Regexp coalesce(Regexp regexp)
+        public static Regexp coalesce(Regexp regexp, CaseFolding caseFolding)
         {
             // Without an adjacent coalescible pair in any concatenation, every node's children are
             // unchanged, so the walk would return the input without rebuilding anything.
-            if (!mayCoalesce(regexp, 0)) {
+            if (!mayCoalesce(regexp, caseFolding, 0)) {
                 return regexp;
             }
-            return new CoalesceWalker().walk(regexp, null);
+            return new CoalesceWalker(caseFolding).walk(regexp, null);
         }
 
-        private static boolean mayCoalesce(Regexp regexp, int depth)
+        private static boolean mayCoalesce(Regexp regexp, CaseFolding caseFolding, int depth)
         {
             // The scan recurses only as deep as simplification does, so it stays within the small
             // thread stacks that compilation supports. Deeper trees are handed to the iterative walk.
@@ -955,10 +959,10 @@ final class Simplifier
                 Regexp child = regexp.child(childIndex);
                 if (regexp.op() == RegexpOp.CONCAT &&
                         childIndex + 1 < childCount &&
-                        CoalesceWalker.canCoalesce(child, regexp.child(childIndex + 1))) {
+                        CoalesceWalker.canCoalesce(child, regexp.child(childIndex + 1), caseFolding)) {
                     return true;
                 }
-                if (mayCoalesce(child, depth + 1)) {
+                if (mayCoalesce(child, caseFolding, depth + 1)) {
                     return true;
                 }
             }
@@ -968,6 +972,13 @@ final class Simplifier
         private static final class CoalesceWalker
                 extends RegexpWalker<Regexp>
         {
+            private final CaseFolding caseFolding;
+
+            private CoalesceWalker(CaseFolding caseFolding)
+            {
+                this.caseFolding = caseFolding;
+            }
+
             @Override
             protected PreVisitResult<Regexp> preVisit(Regexp regexp, Regexp parentValue)
             {
@@ -996,7 +1007,7 @@ final class Simplifier
 
                 boolean foundCoalescingPair = false;
                 for (int pairIndex = 0; pairIndex + 1 < childValues.size(); pairIndex++) {
-                    if (canCoalesce(childValues.get(pairIndex), childValues.get(pairIndex + 1))) {
+                    if (canCoalesce(childValues.get(pairIndex), childValues.get(pairIndex + 1), caseFolding)) {
                         foundCoalescingPair = true;
                         break;
                     }
@@ -1014,7 +1025,7 @@ final class Simplifier
                 Regexp current = childValues.getFirst();
                 for (int childIndex = 1; childIndex < childValues.size(); childIndex++) {
                     Regexp next = childValues.get(childIndex);
-                    if (canCoalesce(current, next)) {
+                    if (canCoalesce(current, next, caseFolding)) {
                         current = coalescePair(current, next, coalescedChildren);
                     }
                     else {
@@ -1077,7 +1088,7 @@ final class Simplifier
                 return Regexp.concat(regexp.parseFlags(), childValues);
             }
 
-            private static boolean canCoalesce(Regexp repeatedExpression, Regexp followingExpression)
+            private static boolean canCoalesce(Regexp repeatedExpression, Regexp followingExpression, CaseFolding caseFolding)
             {
                 // The left expression must be repetition over a literal/class/any-char/any-byte atom.
                 if ((repeatedExpression.op() == RegexpOp.STAR || repeatedExpression.op() == RegexpOp.PLUS ||
@@ -1107,7 +1118,7 @@ final class Simplifier
                             followingExpression.runes().length > 0 &&
                             followingExpression.runes()[0] == repeatedAtom.rune() &&
                             repeatedAtom.parseFlags() == followingExpression.parseFlags() &&
-                            !requiresFullCaseFold(followingExpression.parseFlags(), followingExpression.runes())) {
+                            !requiresFullCaseFold(followingExpression.parseFlags(), followingExpression.runes(), caseFolding)) {
                         return true;
                     }
                 }

@@ -139,7 +139,7 @@ final class CharClassBuilder
         addSortedRanges(other.ranges);
     }
 
-    public void addCharClass(CharClass characterClass, int parseFlags)
+    public void addCharClass(CharClass characterClass, int parseFlags, CaseFolding caseFolding)
     {
         boolean excludeNewline = ((parseFlags & Regexp.CLASS_NEWLINE) == 0) || ((parseFlags & Regexp.NEVER_NEWLINE) != 0);
         boolean foldCase = (parseFlags & (Regexp.ASCII_FOLD_CASE | Regexp.FOLD_CASE)) != 0;
@@ -150,7 +150,7 @@ final class CharClassBuilder
         }
 
         for (RuneRange runeRange : characterClass.ranges()) {
-            addRangeFlags(runeRange.low(), runeRange.high(), parseFlags);
+            addRangeFlags(runeRange.low(), runeRange.high(), parseFlags, caseFolding);
         }
     }
 
@@ -249,16 +249,16 @@ final class CharClassBuilder
         return copy;
     }
 
-    public void addRangeFlags(int low, int high, int parseFlags)
+    public void addRangeFlags(int low, int high, int parseFlags, CaseFolding caseFolding)
     {
         // Exclude \n unless CLASS_NEWLINE is set, or NEVER_NEWLINE forces exclusion.
         boolean excludeNewline = ((parseFlags & Regexp.CLASS_NEWLINE) == 0) || ((parseFlags & Regexp.NEVER_NEWLINE) != 0);
         if (excludeNewline && low <= '\n' && '\n' <= high) {
             if (low < '\n') {
-                addRangeFlags(low, '\n' - 1, parseFlags);
+                addRangeFlags(low, '\n' - 1, parseFlags, caseFolding);
             }
             if (high > '\n') {
-                addRangeFlags('\n' + 1, high, parseFlags);
+                addRangeFlags('\n' + 1, high, parseFlags, caseFolding);
             }
             return;
         }
@@ -283,7 +283,7 @@ final class CharClassBuilder
                 addFoldedRangeLatin1(low, high);
             }
             else {
-                addFoldedRange(low, high);
+                addFoldedRange(low, high, caseFolding);
             }
             return;
         }
@@ -305,19 +305,10 @@ final class CharClassBuilder
         }
     }
 
-    private void addFoldedRange(int low, int high)
+    private void addFoldedRange(int low, int high, CaseFolding caseFolding)
     {
         addRange(low, high);
-
-        int rune = UnicodeCaseFold.nextCaseFoldedRuneAtOrAfter(low);
-        while (rune >= 0 && rune <= high) {
-            int foldedRune = UnicodeCaseFold.cycleFoldRune(rune);
-            while (foldedRune != rune) {
-                addRange(foldedRune, foldedRune);
-                foldedRune = UnicodeCaseFold.cycleFoldRune(foldedRune);
-            }
-            rune = rune == CharClass.RUNEMAX ? -1 : UnicodeCaseFold.nextCaseFoldedRuneAtOrAfter(rune + 1);
-        }
+        caseFolding.addOtherOrbitMembers(this, low, high);
     }
 
     public boolean foldsAscii()

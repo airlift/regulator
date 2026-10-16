@@ -109,7 +109,7 @@ public class BenchmarkRe2CompileFocused
     public Object simplifyOnly(CompilePatternState state)
     {
         ParseResult parsed = RegexpParser.parse(Slices.wrappedBuffer(state.patternBytes), Regexp.LIKE_PERL);
-        return Simplifier.simplify(parsed.regexp());
+        return Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
     }
 
     @Benchmark

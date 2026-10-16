@@ -164,7 +164,7 @@ public class TestTrinoScanPlan
             Slice pattern = utf8Slice(expression);
             ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
             long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
-            Prog control = Compiler.compileNormalized(Simplifier.simplify(parsed.regexp()), false, maxMemory - maxMemory / 3, Compiler.Dialect.TRINO);
+            Prog control = Compiler.compileNormalized(Simplifier.simplify(parsed.regexp(), parsed.caseFolding()), false, maxMemory - maxMemory / 3, Compiler.Dialect.TRINO, parsed.caseFolding());
             TrinoScanPlan plan = analyze(expression);
             assertThat(plan).isNotNull();
             Re2 compiled = TrinoRegexp.compile(pattern).pattern();
@@ -2544,7 +2544,7 @@ public class TestTrinoScanPlan
     private static TrinoScanPlan analyze(String expression, ByteFrequencies frequencies)
     {
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-        return TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, frequencies);
+        return TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding(), frequencies);
     }
 
     private static Regex joniPattern(String expression)

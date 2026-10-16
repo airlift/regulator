@@ -45,7 +45,7 @@ public class TestUnicodeFullCaseFold
                     encoded,
                     0,
                     encoded.length);
-            int[] jvmFold = UnicodeFullCaseFold.fold(new int[] {codePoint});
+            int[] jvmFold = CaseFolding.TRINO.fold(new int[] {codePoint});
 
             boolean hasJoniMultiCharacterFold = false;
             boolean jvmFoldMatchesJoni = false;
@@ -89,9 +89,9 @@ public class TestUnicodeFullCaseFold
     {
         // ASCII runes have no multi-character mapping of their own, but their folded sequence can
         // still be the target of one, so the Trino frontend must keep those alternatives.
-        assertThat(UnicodeFullCaseFold.requiresFullCaseFold(new int[] {'S', 'S'})).isTrue();
-        assertThat(UnicodeFullCaseFold.requiresFullCaseFold(new int[] {'f', 'f', 'i'})).isTrue();
-        assertThat(UnicodeFullCaseFold.requiresFullCaseFold("hello".codePoints().toArray())).isFalse();
+        assertThat(CaseFolding.TRINO.requiresFullCaseFold(new int[] {'S', 'S'})).isTrue();
+        assertThat(CaseFolding.TRINO.requiresFullCaseFold(new int[] {'f', 'f', 'i'})).isTrue();
+        assertThat(CaseFolding.TRINO.requiresFullCaseFold("hello".codePoints().toArray())).isFalse();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)ss")).contains(utf8Slice("\u00DF"))).isTrue();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)ffi")).contains(utf8Slice("\uFB03"))).isTrue();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)stra\u00DFe")).contains(utf8Slice("STRASSE"))).isTrue();
@@ -101,16 +101,16 @@ public class TestUnicodeFullCaseFold
     @Test
     public void testTokensSelectedByFirstFoldedRune()
     {
-        List<UnicodeFullCaseFold.FoldToken> tokens = UnicodeFullCaseFold.multiCharacterTokens();
+        List<UnicodeFullCaseFold.FoldToken> tokens = CaseFolding.TRINO.multiCharacterTokens();
         for (UnicodeFullCaseFold.FoldToken token : tokens) {
             int firstRune = token.foldedRunes()[0];
-            assertThat(UnicodeFullCaseFold.multiCharacterTokensStartingWith(firstRune))
+            assertThat(CaseFolding.TRINO.multiCharacterTokensStartingWith(firstRune))
                     .containsExactlyElementsOf(tokens.stream()
                             .filter(candidate -> candidate.foldedRunes()[0] == firstRune)
                             .toList());
         }
-        assertThat(UnicodeFullCaseFold.multiCharacterTokensStartingWith('_')).isEmpty();
-        assertThat(UnicodeFullCaseFold.multiCharacterTokensStartingWith(0x1F600)).isEmpty();
+        assertThat(CaseFolding.TRINO.multiCharacterTokensStartingWith('_')).isEmpty();
+        assertThat(CaseFolding.TRINO.multiCharacterTokensStartingWith(0x1F600)).isEmpty();
     }
 
     @Test
@@ -121,21 +121,21 @@ public class TestUnicodeFullCaseFold
             int current = rune;
             do {
                 expected.addRange(current, current);
-                current = UnicodeCaseFold.cycleFoldRune(current);
+                current = CaseFolding.TRINO.cycleFoldRune(current);
             }
             while (current != rune);
-            CharClass cached = UnicodeFullCaseFold.simpleFoldClass(rune);
+            CharClass cached = CaseFolding.TRINO.simpleFoldClass(rune);
             assertThat(cached).as("rune %s", rune).isEqualTo(expected.toCharClass());
-            assertThat(UnicodeFullCaseFold.simpleFoldClass(rune)).isSameAs(cached);
+            assertThat(CaseFolding.TRINO.simpleFoldClass(rune)).isSameAs(cached);
         }
-        assertThat(UnicodeFullCaseFold.simpleFoldClass('k').contains(0x212A)).isTrue();
-        assertThat(UnicodeFullCaseFold.simpleFoldClass(0x212A)).isEqualTo(UnicodeFullCaseFold.simpleFoldClass('k'));
+        assertThat(CaseFolding.TRINO.simpleFoldClass('k').contains(0x212A)).isTrue();
+        assertThat(CaseFolding.TRINO.simpleFoldClass(0x212A)).isEqualTo(CaseFolding.TRINO.simpleFoldClass('k'));
     }
 
     @Test
     public void testClassTokensMatchCompleteScan()
     {
-        List<UnicodeFullCaseFold.FoldToken> tokens = UnicodeFullCaseFold.multiCharacterTokens();
+        List<UnicodeFullCaseFold.FoldToken> tokens = CaseFolding.TRINO.multiCharacterTokens();
         List<CharClass> classes = new ArrayList<>();
         classes.add(classOf('0', '9'));
         classes.add(classOf('a', 'z'));
@@ -151,7 +151,7 @@ public class TestUnicodeFullCaseFold
             List<UnicodeFullCaseFold.FoldToken> expected = tokens.stream()
                     .filter(token -> intersects(token.sourceRunes(), characterClass))
                     .toList();
-            assertThat(UnicodeFullCaseFold.multiCharacterTokens(characterClass))
+            assertThat(CaseFolding.TRINO.multiCharacterTokens(characterClass))
                     .as(characterClass.toString())
                     .containsExactlyElementsOf(expected);
         }
@@ -160,7 +160,7 @@ public class TestUnicodeFullCaseFold
     @Test
     public void testIndexedLookupsMatchCompleteTokenScan()
     {
-        List<UnicodeFullCaseFold.FoldToken> tokens = UnicodeFullCaseFold.multiCharacterTokens();
+        List<UnicodeFullCaseFold.FoldToken> tokens = CaseFolding.TRINO.multiCharacterTokens();
         for (int codePoint = 0; codePoint <= Character.MAX_CODE_POINT; codePoint++) {
             assertIndexedLookupsMatch(tokens, new int[] {codePoint});
         }
@@ -184,12 +184,12 @@ public class TestUnicodeFullCaseFold
 
     private static void assertIndexedLookupsMatch(List<UnicodeFullCaseFold.FoldToken> tokens, int[] runes)
     {
-        int[] folded = UnicodeFullCaseFold.fold(runes);
+        int[] folded = CaseFolding.TRINO.fold(runes);
         assertThat(folded).as("fold %s", Arrays.toString(runes)).isEqualTo(referenceFold(tokens, runes));
-        assertThat(UnicodeFullCaseFold.requiresFullCaseFold(runes))
+        assertThat(CaseFolding.TRINO.requiresFullCaseFold(runes))
                 .as("requiresFullCaseFold %s", Arrays.toString(runes))
                 .isEqualTo(referenceRequiresFullCaseFold(tokens, folded));
-        assertThat(UnicodeFullCaseFold.byteLength(runes))
+        assertThat(CaseFolding.TRINO.byteLength(runes))
                 .as("byteLength %s", Arrays.toString(runes))
                 .isEqualTo(referenceByteLength(tokens, folded));
     }
@@ -230,7 +230,7 @@ public class TestUnicodeFullCaseFold
         int[] minimum = new int[folded.length + 1];
         int[] maximum = new int[folded.length + 1];
         for (int index = folded.length - 1; index >= 0; index--) {
-            CharClass simpleClass = UnicodeFullCaseFold.simpleFoldClass(folded[index]);
+            CharClass simpleClass = CaseFolding.TRINO.simpleFoldClass(folded[index]);
             minimum[index] = minimumUtf8Length(simpleClass) + minimum[index + 1];
             maximum[index] = maximumUtf8Length(simpleClass) + maximum[index + 1];
             for (UnicodeFullCaseFold.FoldToken token : tokens) {

@@ -469,12 +469,12 @@ public class TestTrinoRegexpLanguage
     public void testMultilineBeginLineCompilesForBothDirections()
     {
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("(?m)^"), Regexp.LIKE_PERL);
-        Regexp regexp = Simplifier.simplify(parsed.regexp());
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
 
         assertThat(regexp.parseFlags() & Regexp.TRINO_LINE).isEqualTo(Regexp.TRINO_LINE);
-        assertThat(emptyWidthAssertions(Compiler.compileNormalized(regexp, false, 1 << 20, Compiler.Dialect.TRINO)))
+        assertThat(emptyWidthAssertions(Compiler.compileNormalized(regexp, false, 1 << 20, Compiler.Dialect.TRINO, parsed.caseFolding())))
                 .containsExactly(EmptyOp.EMPTY_TRINO_BEGIN_LINE);
-        assertThat(emptyWidthAssertions(Compiler.compileNormalized(regexp, true, 1 << 20, Compiler.Dialect.TRINO)))
+        assertThat(emptyWidthAssertions(Compiler.compileNormalized(regexp, true, 1 << 20, Compiler.Dialect.TRINO, parsed.caseFolding())))
                 .containsExactly(EmptyOp.EMPTY_TRINO_END_LINE);
 
         Slice context = utf8Slice("!\na\n?").slice(1, 3);
@@ -784,8 +784,8 @@ public class TestTrinoRegexpLanguage
         assertThat(simpleFold.reverseProgramSize()).isGreaterThan(0);
 
         Re2 nonAsciiSimpleFold = TrinoRegexp.compile(utf8Slice("(?i)seek")).pattern();
-        assertThat(nonAsciiSimpleFold.regexp().requiredPrefix()).isNull();
-        assertThat(nonAsciiSimpleFold.regexp().requiredPrefixForAccel()).isNull();
+        assertThat(nonAsciiSimpleFold.regexp().requiredPrefix(nonAsciiSimpleFold.caseFolding())).isNull();
+        assertThat(nonAsciiSimpleFold.regexp().requiredPrefixForAccel(nonAsciiSimpleFold.caseFolding())).isNull();
     }
 
     @Test
@@ -1044,9 +1044,9 @@ public class TestTrinoRegexpLanguage
 
     private static Prog compileTrinoProgram(String pattern, boolean reversed)
     {
-        Regexp regexp = Simplifier.simplify(
-                TrinoRegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp());
-        return Compiler.compileNormalized(regexp, reversed, 1 << 20, Compiler.Dialect.TRINO);
+        ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL);
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        return Compiler.compileNormalized(regexp, reversed, 1 << 20, Compiler.Dialect.TRINO, parsed.caseFolding());
     }
 
     private static void assertMultilineMatches(String patternText, String inputText, List<MatchBoundary> expected)
