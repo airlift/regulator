@@ -348,6 +348,17 @@ repeat one pattern's 42 inputs twelve times, preserving the same timed array
 length. Every configuration uses the same per-row input, pattern, and reusable
 matcher arrays. Setup does no matching that could pretrain the scan executor.
 
+The `containsWithoutScanPlan`, `capturesWithoutScanPlan`, and
+`extractWithoutScanPlan` methods run the same rows without the scan plan. Each
+pattern is parsed as Trino parses it and compiled with the RE2 compiler
+dialect, which builds no plan, and each method calls the `Re2` route the base
+`TrinoRegexp` takes for its operation when a pattern has no plan. For these
+patterns, which all have capturing groups and no nullable loops, both dialects
+compile the same program, so the methods measure the current ordinary engine on
+the plan's workload, without `TrinoRegexp`'s own dispatch. They do not measure
+the engine from before the plan existed, which lacked every later engine
+change.
+
 Compare an equal-weight mean of all twelve individual-pattern timings with the
 interleaved and grouped timings. Grouping changes input order while retaining
 the same pattern frequencies; it does not guarantee identical JIT decisions.
