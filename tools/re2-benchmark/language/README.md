@@ -499,6 +499,9 @@ Use `--spot-only`, a `--spot-vcpu-reserve` matching the policy, and the same
 `--fleet-budget` file for baseline and language collection. Select
 `--release-version 1.0` to reproduce measurements of the published artifact.
 See the [AWS guide](../aws/README.md#shared-fleet-budget).
+If one platform runs out of Spot capacity, finish the same result root on
+On-Demand with `--refill-unresolved`; see
+[recovery](../aws/README.md#recovery-and-evidence).
 Use `--max-concurrent` and `--max-concurrent-per-platform` to impose smaller
 total and CPU-family limits. Running retries count toward those limits. The
 language safety deadline is derived from batch count, requested concurrency,
@@ -506,7 +509,8 @@ per-platform and vCPU waves, the 90-minute per-host limit, one retry wave,
 and a capacity-wait allowance. `--phase-timeout-seconds` can set a larger
 frozen deadline. This is a worst-case bound,
 not an ETA. The candidate, plan hashes, batch membership, heap, concurrency,
-and deadlines are persisted; changing them on restart is rejected.
+and deadlines are persisted; changing them on restart is rejected, except
+that a refill records its own concurrency and deadline.
 
 For baseline-only follow-ups, repeat `--shard NAME` on `run-campaign.py` to
 collect complete affected shards. Use the same selection with

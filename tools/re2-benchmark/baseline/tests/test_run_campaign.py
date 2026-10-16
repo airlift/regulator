@@ -115,7 +115,7 @@ class TestRunCampaign(unittest.TestCase):
         job = RUN_CAMPAIGN.Job(self.platform, "language", 1, 1, 1, "spot", "language-batch")
         for receipt in ({}, {"released_artifact": {"version": "1.1"}}):
             with self.subTest(receipt=receipt), self.assertRaisesRegex(RuntimeError, "selected release"):
-                RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, job, receipt)
+                RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, root, job, receipt)
 
     def test_release_campaign_requires_baseline_artifact_proof_on_recovery(self):
         root = SCRIPT.parents[3]
@@ -123,7 +123,7 @@ class TestRunCampaign(unittest.TestCase):
         arguments.release_version = "1.0"
         job = RUN_CAMPAIGN.Job(self.platform, "engine", 1, 1, 1, "spot")
         with self.assertRaisesRegex(RuntimeError, "recovered artifact evidence"):
-            RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, job, {})
+            RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, root, job, {})
 
     def test_platform_limit_applies_independently_of_global_capacity(self):
         arguments = SimpleNamespace(max_concurrent=9, max_concurrent_per_platform=3)
@@ -197,6 +197,20 @@ class TestRunCampaign(unittest.TestCase):
             arguments.smoke_protocol = 'qualification'
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
                 RUN_CAMPAIGN.validate_execution_policy(arguments, root)
+
+            refill = SimpleNamespace(refill_unresolved=True, smoke_protocol="qualification")
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "release and protocol"):
+                RUN_CAMPAIGN.validate_execution_policy(refill, root)
+            with self.assertRaisesRegex(SystemExit, "existing campaign"):
+                RUN_CAMPAIGN.refill_launch_jobs(refill, root / "jobs", [])
+            original = (root / "execution-policy.json").read_bytes()
+            refill.smoke_protocol = "smoke"
+            RUN_CAMPAIGN.validate_execution_policy(refill, root)
+            RUN_CAMPAIGN.validate_execution_policy(refill, root)
+            self.assertEqual((root / "execution-policy.json").read_bytes(), original)
+            refill.max_concurrent = 3
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
+                RUN_CAMPAIGN.validate_execution_policy(refill, root)
 
     def test_spot_only_launcher_rejects_on_demand_before_aws(self):
         environment = dict(os.environ, CAMPAIGN_SPOT_ONLY="1", INSTANCE_MARKET_TYPE="on-demand")
@@ -427,6 +441,15 @@ class TestRunCampaign(unittest.TestCase):
 
             self.assertEqual(arguments.engine_tree, values["engine_tree"])
             self.assertEqual(arguments.candidate_archive_sha256, values["archive_sha256"])
+
+            # Only a refill may run a controller newer than the candidate it measures.
+            (repository / "controller.py").write_text("refill\n")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(["git", "commit", "-qm", "Controller"], cwd=repository, check=True)
+            with self.assertRaisesRegex(SystemExit, "but HEAD is"):
+                RUN_CAMPAIGN.validate_source(repository, arguments)
+            arguments.refill_unresolved = True
+            RUN_CAMPAIGN.validate_source(repository, arguments)
 
     def test_archive_listing_preserves_directory_slashes_from_freeze_script(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -852,6 +875,13 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "reserve matching its policy"):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
         arguments.spot_vcpu_reserve = 16
+        arguments.refill_unresolved = True
+        with self.assertRaisesRegex(SystemExit, "without --spot-only or a shared fleet budget"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.spot_only = False
+        with self.assertRaisesRegex(SystemExit, "without --spot-only or a shared fleet budget"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.refill_unresolved, arguments.spot_only = False, True
         arguments.max_concurrent = 0
         with self.assertRaisesRegex(SystemExit, "positive integer"):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
@@ -2024,6 +2054,52 @@ done
             replacement, _ = pending[0]
             self.assertEqual(replacement.host_epoch, 4)
             self.assertEqual(next_epoch, 5)
+
+    def test_refill_replaces_each_exhausted_job_once_on_demand(self):
+        accepted_job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 1, 1, "spot")
+        exhausted_job = RUN_CAMPAIGN.Job(self.platform, "traditional-capture", 1, 2, 3, "spot")
+        rejected_job = RUN_CAMPAIGN.Job(self.platform, "traditional-extra", 1, 3, 1, "spot")
+        jobs = [accepted_job, RUN_CAMPAIGN.replace(exhausted_job, attempt=1), rejected_job]
+        accepted = {accepted_job.logical_identity: self.receipt_for_job(accepted_job)}
+        refill = RUN_CAMPAIGN.replace(exhausted_job, host_epoch=4, attempt=4, market="on-demand")
+        capacity_retry = RUN_CAMPAIGN.replace(refill, host_epoch=5, attempt=5)
+        # A failed refill attempt stays unresolved, even when its wrapper, or the wrapper of its
+        # capacity retry, could not start. A controller stopped before it started the wrapper used
+        # no attempt, so the grant remains.
+        for refill_end, expected_pending, expected_unresolved in (
+                ("host failure", [], [refill, rejected_job]),
+                ("other pre-start failure", [], [exhausted_job, rejected_job]),
+                ("capacity retry pre-start failure", [], [refill, rejected_job]),
+                (RUN_CAMPAIGN.WRAPPER_NOT_CREATED, [(RUN_CAMPAIGN.replace(refill, host_epoch=5), 0)], [rejected_job])):
+            with self.subTest(refill_end), tempfile.TemporaryDirectory() as temporary_directory:
+                result_root = Path(temporary_directory)
+                attempts = result_root / "job-attempts.tsv"
+                self.write_cleanup_session(result_root, exhausted_job, failure_classification="retryable-spot",
+                                           failure_detail="launch-capacity:InsufficientInstanceCapacity")
+                RUN_CAMPAIGN.write_attempt(attempts, exhausted_job, "unresolved", "exhausted")
+                self.write_cleanup_session(result_root, rejected_job, failure_classification="benchmark-failure")
+                RUN_CAMPAIGN.write_attempt(attempts, rejected_job, "rejected", "benchmark failure")
+
+                pending, unresolved, _ = RUN_CAMPAIGN.prepare_refill(result_root, jobs, attempts, accepted)
+
+                self.assertEqual(pending, [(refill, 0)])
+                self.assertEqual([job for job, _ in unresolved], [rejected_job])
+
+                RUN_CAMPAIGN.write_attempt(attempts, refill, "starting")
+                if refill_end == "host failure":
+                    self.write_cleanup_session(result_root, refill, failure_classification="retryable-infrastructure")
+                    RUN_CAMPAIGN.write_attempt(attempts, refill, "unresolved", "exhausted")
+                elif refill_end == "capacity retry pre-start failure":
+                    self.write_cleanup_session(result_root, refill, failure_classification="retryable-capacity")
+                    RUN_CAMPAIGN.write_attempt(attempts, refill, "retryable-capacity", "capacity")
+                    RUN_CAMPAIGN.write_attempt(attempts, capacity_retry, "starting")
+                    RUN_CAMPAIGN.write_attempt(attempts, capacity_retry, "retryable-infrastructure", refill_end)
+                else:
+                    RUN_CAMPAIGN.write_attempt(attempts, refill, "retryable-infrastructure", refill_end)
+                pending, unresolved, _ = RUN_CAMPAIGN.prepare_refill(result_root, jobs, attempts, accepted)
+
+                self.assertEqual(pending, expected_pending)
+                self.assertEqual([job for job, _ in unresolved], expected_unresolved)
 
     def test_unexpected_controller_error_stops_sibling_jobs(self):
         malformed_job = RUN_CAMPAIGN.Job(

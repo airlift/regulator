@@ -283,6 +283,23 @@ invalid artifacts remain unresolved after verified cleanup while independent
 jobs continue. Unverifiable cleanup and other unsafe controller failures stop
 admissions across both collectors.
 
+A Spot-only campaign can exhaust its retries when one platform runs out of
+Spot capacity. Once no job awaits an ordinary retry, rerun the phase in the
+same result root with `--execute --refill-unresolved`, without `--spot-only`
+or `--fleet-budget`, to give each exhausted job one more attempt on
+On-Demand. Restart an interrupted refill with the same flag and policy.
+A refill attempt that fails stays unresolved and gets no second refill; only
+a launch waiting for On-Demand quota is retried.
+
+A refill leaves `execution-policy.json` unchanged and records its own policy,
+start time, and granted jobs in `refill-execution-policy.json`,
+`refill-state.tsv`, and `refill-jobs.tsv`. Hosts measure the candidate
+archive, so a refill may run from a newer controller checkout and identifies
+the candidate by `--candidate-ref`. Each refill host's environment must match
+the campaign's accepted original hosts, so those hosts must already cover
+every platform, shard, and Trino use the refill needs, or it refuses before
+launching.
+
 See:
 
 - `../baseline/SHARD_DISPATCH.md` for routes and timing protocol
