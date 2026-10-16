@@ -71,6 +71,22 @@ public class TestRe2CaseInsensitive
         assertThat(toString(matcher.group(1))).isEqualTo("Wanda");
     }
 
+    @Test
+    public void testLatin1FoldsOnlyAsciiLetters()
+    {
+        // Upstream RE2 folds only ASCII letters in Latin-1 mode, so (?i)Ñ does not match ñ.
+        Re2 re2 = Re2.compile(latin1("(?i)Ñ"), Re2.Options.latin1());
+        assertThat(re2.find(latin1("Ñ"))).isTrue();
+        assertThat(re2.count(latin1("Ñ"))).isEqualTo(1);
+        assertThat(re2.find(latin1("ñ"))).isFalse();
+        assertThat(re2.count(latin1("ñ"))).isZero();
+    }
+
+    private static Slice latin1(String value)
+    {
+        return Slices.wrappedBuffer(value.getBytes(StandardCharsets.ISO_8859_1));
+    }
+
     private static Slice utf8(String value)
     {
         return Slices.wrappedBuffer(value.getBytes(StandardCharsets.UTF_8));
