@@ -1,0 +1,8 @@
+id	query_source	query_predicate	column	pattern	expected_count
+q02-type-brass	testing/trino-benchmark-queries/src/main/resources/sql/trino/tpch/q02.sql	LIKE	part-type	%BRASS	3315
+q09-name-green	testing/trino-benchmark-queries/src/main/resources/sql/trino/tpch/q09.sql	LIKE	part-name	%green%	869
+q13-order-comment	testing/trino-benchmark-queries/src/main/resources/sql/trino/tpch/q13.sql	NOT LIKE	orders-comment	%special%requests%	180
+q14-type-promo	testing/trino-benchmark-queries/src/main/resources/sql/trino/tpch/q14.sql	LIKE	part-type	PROMO%	2706
+q16-type-medium-polished	testing/trino-benchmark-queries/src/main/resources/sql/trino/tpch/q16.sql	NOT LIKE	part-type	MEDIUM POLISHED%	534
+q16-supplier-complaints	testing/trino-benchmark-queries/src/main/resources/sql/trino/tpch/q16.sql	LIKE	supplier-comment	%Customer%Complaints%	4
+q20-name-forest	testing/trino-benchmark-queries/src/main/resources/sql/trino/tpch/q20.sql	LIKE	part-name	forest%	162
