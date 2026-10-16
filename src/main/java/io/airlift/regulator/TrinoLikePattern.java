@@ -29,10 +29,13 @@ import static java.util.Objects.requireNonNull;
 /**
  * A compiled Trino SQL LIKE pattern over UTF-8 bytes.
  * <p>
- * The pattern syntax and malformed UTF-8 input behavior match Trino's SQL execution path. A
- * pattern that is not valid UTF-8 throws {@link TrinoLikePatternSyntaxException}, while Trino
- * accepts it. This is intentionally a separate frontend from {@link Re2}; LIKE is not treated as
- * a regex dialect.
+ * The pattern syntax and matching on valid UTF-8 follow Trino's SQL execution path, with one
+ * exception: a supplementary literal always matches itself, so {@code %😀_%} matches
+ * {@code 😀x} here but not in Trino's SQL path. A pattern that is not valid UTF-8 throws
+ * {@link TrinoLikePatternSyntaxException}, while Trino accepts it. Malformed input matches as if
+ * each maximal invalid subpart had been replaced by U+FFFD, so it is one character that only
+ * {@code _} or {@code %} consumes. This is intentionally a separate frontend from {@link Re2};
+ * LIKE is not treated as a regex dialect.
  */
 public final class TrinoLikePattern
 {

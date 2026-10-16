@@ -103,6 +103,48 @@ final class Utf8
         return pack(RUNE_ERROR, 1);
     }
 
+    /**
+     * Returns the width of the character starting at {@code index}, which must be before
+     * {@code end}, when malformed input is read as if each maximal subpart had been replaced by
+     * U+FFFD (Unicode chapter 3, "U+FFFD Substitution of Maximal Subparts"). A well-formed sequence
+     * is one character. Otherwise the character is the longest prefix of a well-formed sequence
+     * that a bad byte or {@code end} cuts off, or one byte when no well-formed sequence starts
+     * with it. Only continuation bytes can follow the first byte of a character, so every ASCII
+     * byte and every lead byte starts a new character.
+     */
+    static int characterWidth(byte[] bytes, int index, int end)
+    {
+        int b0 = bytes[index] & 0xFF;
+        if (b0 < 0x80) {
+            return 1;
+        }
+        if (b0 < 0xC2 || index + 1 >= end) {
+            return 1;
+        }
+        int b1 = bytes[index + 1] & 0xFF;
+        if ((b1 & 0xC0) != 0x80) {
+            return 1;
+        }
+        if (b0 < 0xE0) {
+            return 2;
+        }
+        if (b0 < 0xF0) {
+            // After E0 a continuation byte below A0 would be overlong; after ED one above 9F, a surrogate.
+            if ((b0 == 0xE0 && b1 < 0xA0) || (b0 == 0xED && b1 > 0x9F)) {
+                return 1;
+            }
+            return index + 2 < end && (bytes[index + 2] & 0xC0) == 0x80 ? 3 : 2;
+        }
+        // After F0 a continuation byte below 90 would be overlong; after F4 one above 8F, beyond U+10FFFF.
+        if (b0 > 0xF4 || (b0 == 0xF0 && b1 < 0x90) || (b0 == 0xF4 && b1 > 0x8F)) {
+            return 1;
+        }
+        if (index + 2 >= end || (bytes[index + 2] & 0xC0) != 0x80) {
+            return 2;
+        }
+        return index + 3 < end && (bytes[index + 3] & 0xC0) == 0x80 ? 4 : 3;
+    }
+
     static int decodedWidth(long decoded)
     {
         return (int) (decoded >>> 32);

@@ -566,9 +566,11 @@ within the protected-path gate on Intel and Graviton.
 ## Trino LIKE Frontend
 
 `TrinoLikePattern` is a separate language frontend rather than an RE2 dialect.
-It compiles Slice pattern bytes and matches complete Slice inputs. `%`, `_`,
-and escape semantics follow Trino's SQL execution path, using Trino
-`LikeMatcher` with optimization disabled as the semantic authority.
+It compiles Slice pattern bytes and matches complete Slice inputs. On valid
+UTF-8 input, `%`, `_`, and escape semantics follow Trino's SQL execution path,
+using Trino `LikeMatcher` with optimization disabled as the semantic authority.
+Malformed input and supplementary literals deliberately differ, as described
+below.
 
 A pattern that is not valid UTF-8 throws `TrinoLikePatternSyntaxException` at
 its first invalid byte, as RE2 and Java regex patterns do. This deliberately
@@ -612,6 +614,42 @@ The final benchmark campaign must compare every route with Trino's semantic and
 optimized LIKE implementations. Exact, prefix, and suffix operations are
 expected to be dominated by fixed call overhead, so report absolute time as
 well as ratios for those tiny operations.
+
+### Malformed LIKE Input
+
+Every LIKE plan matches as if each invalid UTF-8 sequence in the input had been
+replaced by U+FFFD, one replacement per maximal invalid subpart (Unicode
+chapter 3, as in the WHATWG Encoding Standard). Such a subpart is one
+character: `_` consumes it, `%` spans it, and it never equals a literal. The
+JVM's decoder is not the definition; it replaces an encoded surrogate such as
+`ED A0 80` with one U+FFFD rather than three.
+
+One decoding serves every plan. Pattern literals are valid UTF-8 after parsing,
+and under this decoding every ASCII byte and every lead byte starts a new
+character, so a raw byte occurrence of a literal always starts and ends on
+character boundaries. Exact, prefix, suffix, contains, ordered-literal, and
+short-literal plans therefore keep comparing raw bytes without decoding, while
+the literal-gap and wildcard matchers step over characters with the same
+shared width rule. Because `%` and `_` count the same characters everywhere,
+normalizing `%_` and `_%` stays sound.
+
+On valid UTF-8 this equals Trino's SQL LIKE except for one case. Trino's NFA
+stores literal characters as UTF-16 units, so a supplementary literal between
+wildcards of a pattern containing `_` never matches; Trino returns false for
+`%😀_%` against `😀x`. That is a Trino defect; Regulator returns true.
+
+On malformed input Regulator deliberately differs from Trino. Trino's NFA takes
+a character's width from its lead byte without checking continuation bytes,
+so an overlong `C0 AF` is one character, `C1 A3` decodes as `c`, and an `F0`
+swallows the next three bytes, including ASCII. A byte it cannot decode fails
+the whole match, even inside `%`, while its raw-byte plans ignore the same
+byte, so its result can depend on the plan a pattern selects. Trino treats
+malformed `VARCHAR` as garbage in, garbage out; the maximal-subpart rule is
+the understandable one, and the pinned corpus test lists every row where it
+differs from Trino.
+
+A U+FFFD literal in a pattern matches only the bytes `EF BF BD` in the input,
+not an invalid sequence that the rule reads as U+FFFD.
 
 ### Short LIKE Literal Comparisons
 

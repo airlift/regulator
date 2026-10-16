@@ -16,6 +16,7 @@ import io.airlift.slice.Slices;
 import io.airlift.regulator.TrinoLikePattern;
 import io.trino.likematcher.LikeMatcher;
 
+import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.Optional;
@@ -26,7 +27,18 @@ public final class TrinoLikeDifferentialVerifier
 {
     private static final char[] PATTERN_ALPHABET = {'a', 'b', '%', '_'};
     private static final char[] ESCAPED_PATTERN_ALPHABET = {'a', 'b', '%', '_', '\\'};
-    private static final byte[] INPUT_ALPHABET = {'a', 'b', '\n', (byte) 0xFF, (byte) 0xC0, (byte) 0xAF};
+    // Trino is the oracle only for valid UTF-8 input: Regulator deliberately reads malformed input
+    // differently (REGULATOR_DECISIONS.md "Trino LIKE Frontend"), and TestTrinoLikeCorpus covers it.
+    // Supplementary characters are left out because Trino's NFA never matches the supplementary
+    // literal in "%💰_", another documented deviation.
+    private static final byte[][] INPUT_ALPHABET = {
+            {'a'},
+            {'b'},
+            {'\n'},
+            "é".getBytes(UTF_8),
+            "π".getBytes(UTF_8),
+            "€".getBytes(UTF_8),
+    };
 
     private TrinoLikeDifferentialVerifier() {}
 
@@ -145,12 +157,12 @@ public final class TrinoLikeDifferentialVerifier
 
     private static byte[] input(int value, int length)
     {
-        byte[] result = new byte[length];
+        ByteArrayOutputStream result = new ByteArrayOutputStream();
         for (int index = 0; index < length; index++) {
-            result[index] = INPUT_ALPHABET[value % INPUT_ALPHABET.length];
+            result.writeBytes(INPUT_ALPHABET[value % INPUT_ALPHABET.length]);
             value /= INPUT_ALPHABET.length;
         }
-        return result;
+        return result.toByteArray();
     }
 
     private static int power(int base, int exponent)
