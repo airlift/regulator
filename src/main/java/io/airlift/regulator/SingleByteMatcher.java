@@ -108,9 +108,13 @@ final class SingleByteMatcher
     private static boolean supportsLiteral(int rune, int parseFlags)
     {
         boolean latin1 = (parseFlags & Regexp.LATIN1) != 0;
+        if (latin1) {
+            // Latin-1 folds only ASCII letters, as upstream RE2 does, so each rune stays one byte.
+            return rune <= 0xFF;
+        }
         int currentRune = rune;
         do {
-            if ((!latin1 && currentRune >= 0x80) || currentRune > 0xFF) {
+            if (currentRune >= 0x80) {
                 return false;
             }
             if ((parseFlags & Regexp.FOLD_CASE) == 0) {
@@ -246,10 +250,13 @@ final class SingleByteMatcher
     private static Analysis literal(int rune, int parseFlags)
     {
         boolean latin1 = (parseFlags & Regexp.LATIN1) != 0;
+        if (latin1) {
+            return latin1Literal(rune, parseFlags);
+        }
         Analysis analysis = EMPTY;
         int currentRune = rune;
         do {
-            if ((!latin1 && currentRune >= 0x80) || currentRune > 0xFF) {
+            if (currentRune >= 0x80) {
                 return INVALID;
             }
             analysis = analysis.withByte(currentRune);
@@ -259,6 +266,20 @@ final class SingleByteMatcher
             currentRune = UnicodeCaseFold.cycleFoldRune(currentRune);
         }
         while (currentRune != rune);
+        return analysis.withLength(1);
+    }
+
+    private static Analysis latin1Literal(int rune, int parseFlags)
+    {
+        // Latin-1 folds only ASCII letters, as upstream RE2 does; any other rune matches itself.
+        if (rune > 0xFF) {
+            return INVALID;
+        }
+        Analysis analysis = EMPTY.withByte(rune);
+        int lowerCase = rune | 0x20;
+        if ((parseFlags & Regexp.FOLD_CASE) != 0 && lowerCase >= 'a' && lowerCase <= 'z') {
+            analysis = analysis.withByte(rune ^ 0x20);
+        }
         return analysis.withLength(1);
     }
 
