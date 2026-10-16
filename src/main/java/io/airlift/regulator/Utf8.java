@@ -111,6 +111,7 @@ final class Utf8
      * that a bad byte or {@code end} cuts off, or one byte when no well-formed sequence starts
      * with it. Only continuation bytes can follow the first byte of a character, so every ASCII
      * byte and every lead byte starts a new character.
+     * Copied as {@code TrinoLikeKernelSupport.characterWidth}; keep the copy in step.
      */
     static int characterWidth(byte[] bytes, int index, int end)
     {

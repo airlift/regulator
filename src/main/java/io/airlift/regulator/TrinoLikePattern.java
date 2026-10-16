@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import io.airlift.regulator.TrinoLikeParser.Any;
 import io.airlift.regulator.TrinoLikeParser.Element;
 import io.airlift.regulator.TrinoLikeParser.Literal;
@@ -20,8 +21,10 @@ import io.airlift.regulator.TrinoLikeParser.ZeroOrMore;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
+import java.lang.invoke.MethodHandle;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 
 import static java.util.Objects.requireNonNull;
@@ -37,7 +40,8 @@ import static java.util.Objects.requireNonNull;
  * {@code _} or {@code %} consumes. This is intentionally a separate frontend from {@link Re2};
  * LIKE is not treated as a regex dialect.
  */
-public final class TrinoLikePattern
+public sealed class TrinoLikePattern
+        permits TrinoLikePattern.CompiledTrinoLikePattern
 {
     private static final byte EMPTY = 0;
     private static final byte EQUALS = 1;
@@ -63,6 +67,41 @@ public final class TrinoLikePattern
         LITERAL_GAPS,
     }
 
+    /**
+     * Mutable compilation options. Compilation snapshots every option, so later changes do not
+     * affect an existing {@link TrinoLikePattern}. Options instances are not thread-safe.
+     */
+    public static final class Options
+    {
+        private boolean generateBytecode;
+
+        private Options() {}
+
+        public static Options defaults()
+        {
+            return new Options();
+        }
+
+        boolean generateBytecode()
+        {
+            return generateBytecode;
+        }
+
+        /**
+         * Experimental. When enabled, compilation generates a hidden class for the pattern, so
+         * {@link TrinoLikePattern#matches(Slice)} runs dedicated bytecode instead of the
+         * interpreted plan. A pattern whose class cannot be generated compiles as it does without
+         * this option. Disabled by default.
+         *
+         * @see TrinoLikePattern#usesGeneratedBytecode()
+         */
+        public Options setGenerateBytecode(boolean generateBytecode)
+        {
+            this.generateBytecode = generateBytecode;
+            return this;
+        }
+    }
+
     private final int minimumSize;
     private final int maximumSize;
     private final Slice prefix;
@@ -71,6 +110,7 @@ public final class TrinoLikePattern
     private final byte strategy;
     private final LiteralMatchKernel.ShortLiteral shortLiteral;
 
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
     private TrinoLikePattern(
             int minimumSize,
             int maximumSize,
@@ -108,6 +148,16 @@ public final class TrinoLikePattern
     public static TrinoLikePattern compile(Slice pattern, int escapeCodePoint)
     {
         return compile(pattern, OptionalInt.of(escapeCodePoint));
+    }
+
+    public static TrinoLikePattern compile(Slice pattern, Options options)
+    {
+        return compile(pattern, OptionalInt.empty(), options);
+    }
+
+    public static TrinoLikePattern compile(Slice pattern, int escapeCodePoint, Options options)
+    {
+        return compile(pattern, OptionalInt.of(escapeCodePoint), options);
     }
 
     private static TrinoLikePattern compile(Slice pattern, OptionalInt escapeCodePoint)
@@ -259,6 +309,8 @@ public final class TrinoLikePattern
                 CONTAINS);
     }
 
+    // TrinoLikeKernelGenerator emits a copy of this method, with matchesComplex, as the entry of a
+    // generated pattern; keep the copy in step.
     public boolean matches(Slice input)
     {
         requireNonNull(input, "input is null");
@@ -278,6 +330,8 @@ public final class TrinoLikePattern
         };
     }
 
+    // TrinoLikeKernelGenerator emits a copy of this method in the entry of a generated pattern;
+    // keep the copy in step.
     private boolean matchesComplex(Slice input, int length)
     {
         if (!startsWith(input, 0, prefix) || !startsWith(input, length - suffix.length(), suffix)) {
@@ -287,6 +341,60 @@ public final class TrinoLikePattern
             return true;
         }
         return matcher.matches(input, prefix.length(), length - prefix.length() - suffix.length());
+    }
+
+    // Declared after matches because javac numbers constants in declaration order: declared
+    // before it, this method's constants push a constant of matches out of the one-byte ldc
+    // range, which grows matches.
+    private static TrinoLikePattern compile(Slice pattern, OptionalInt escapeCodePoint, Options options)
+    {
+        requireNonNull(options, "options is null");
+        TrinoLikePattern compiled = compile(pattern, escapeCodePoint);
+        if (options.generateBytecode()) {
+            TrinoLikePattern generated = CompiledTrinoLikePattern.create(compiled);
+            if (generated != null) {
+                return generated;
+            }
+        }
+        return compiled;
+    }
+
+    // Declared after matches for the same reason.
+    private TrinoLikePattern(TrinoLikePattern pattern)
+    {
+        this.minimumSize = pattern.minimumSize;
+        this.maximumSize = pattern.maximumSize;
+        this.prefix = pattern.prefix;
+        this.suffix = pattern.suffix;
+        this.matcher = pattern.matcher;
+        this.strategy = pattern.strategy;
+        this.shortLiteral = pattern.shortLiteral;
+    }
+
+    /**
+     * Returns whether this compiled pattern has a class generated for it, which only
+     * {@link Options#setGenerateBytecode(boolean)} enables. {@link #matches(Slice)} of such a
+     * pattern runs the generated class, and {@link #generatedMatches()} returns its entry.
+     */
+    public boolean usesGeneratedBytecode()
+    {
+        return false;
+    }
+
+    /**
+     * Returns a handle on the generated code of {@link #matches(Slice)}, of type
+     * {@code (Slice)boolean}, or empty when this pattern is interpreted. The handle checks its
+     * argument as {@link #matches(Slice)} does, except that it requires a non-null input but does
+     * not check it.
+     */
+    public Optional<MethodHandle> generatedMatches()
+    {
+        return Optional.empty();
+    }
+
+    TrinoLikeKernelGenerator.Kernel kernelForDiagnostics()
+    {
+        return CompiledTrinoLikePattern.kernel(this);
     }
 
     Plan planForDiagnostics()
@@ -428,6 +536,93 @@ public final class TrinoLikePattern
                 return false;
             }
             return !exact || matchOffset + literal.length() == end;
+        }
+    }
+
+    /**
+     * A pattern compiled to its own hidden class, which {@link #matches(Slice)} calls instead of
+     * the interpreted plan. Callers that never enable {@link Options#setGenerateBytecode(boolean)}
+     * never load this class.
+     */
+    private static final class CompiledTrinoLikePattern
+            extends TrinoLikePattern
+    {
+        private final TrinoLikeKernelGenerator.CompiledLike generated;
+        private final CompiledTrinoLike like;
+
+        private CompiledTrinoLikePattern(TrinoLikePattern pattern, TrinoLikeKernelGenerator.CompiledLike generated)
+        {
+            super(pattern);
+            this.generated = generated;
+            this.like = generated.like();
+        }
+
+        /**
+         * Returns {@code pattern} with a generated class, or {@code null} when the class cannot
+         * be generated or a method of it would be too large for HotSpot to compile. The declared
+         * type keeps verification of the base class from loading this class.
+         */
+        static TrinoLikePattern create(TrinoLikePattern pattern)
+        {
+            TrinoLikeKernelGenerator.CompiledLike generated;
+            try {
+                generated = TrinoLikeKernelGenerator.generate(kernel(pattern));
+            }
+            catch (RuntimeException | LinkageError ignored) {
+                // Linking the generator fails here only if a consumer excluded the classfile
+                // library, and defining the class can fail too; either leaves the pattern
+                // interpreted.
+                return null;
+            }
+            if (generated == null) {
+                return null;
+            }
+            return new CompiledTrinoLikePattern(pattern, generated);
+        }
+
+        static TrinoLikeKernelGenerator.Kernel kernel(TrinoLikePattern pattern)
+        {
+            TrinoLikeKernelGenerator.Region region = switch (pattern.matcher) {
+                case null -> null;
+                case ContainsMatcher contains -> new TrinoLikeKernelGenerator.OrderedLiterals(
+                        List.of(new LiteralSearchKernel(contains.literal)));
+                case OrderedMatcher ordered -> new TrinoLikeKernelGenerator.OrderedLiterals(
+                        ordered.matcher().literals());
+                case LiteralGapPlanMatcher gaps -> new TrinoLikeKernelGenerator.LiteralGaps(
+                        gaps.matcher().literals(),
+                        gaps.matcher().codePointGaps());
+                case WildcardMatcher wildcard -> new TrinoLikeKernelGenerator.Wildcard(
+                        wildcard.matcher().positions(),
+                        wildcard.matcher().loopback(),
+                        wildcard.matcher().exact());
+                default -> throw new IllegalStateException("unknown Trino LIKE matcher: " + pattern.matcher);
+            };
+            return new TrinoLikeKernelGenerator.Kernel(
+                    decode(pattern.strategy),
+                    pattern.minimumSize,
+                    pattern.maximumSize,
+                    pattern.prefix.getBytes(),
+                    pattern.suffix.getBytes(),
+                    region);
+        }
+
+        @Override
+        public boolean matches(Slice input)
+        {
+            requireNonNull(input, "input is null");
+            return like.matches(input);
+        }
+
+        @Override
+        public boolean usesGeneratedBytecode()
+        {
+            return true;
+        }
+
+        @Override
+        public Optional<MethodHandle> generatedMatches()
+        {
+            return Optional.of(generated.matches());
         }
     }
 }

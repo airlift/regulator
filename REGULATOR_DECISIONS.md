@@ -1286,3 +1286,59 @@ operation by operation.
   retained heap, and the class lives in metaspace and the code cache, which the
   heap estimate cannot measure. A caller compiling many distinct patterns with
   the option bounds that cost by bounding the patterns it retains.
+
+## Generated Trino LIKE Kernels
+
+`TrinoLikePattern.Options.setGenerateBytecode` is an experimental opt-in,
+disabled by default, that compiles a LIKE pattern into its own hidden class
+with the same rules as generated Trino scan kernels: generation happens once
+at compilation, a pattern whose class cannot be generated or defined is
+silently interpreted, the interpreter never references generated code, and
+generated code calls its own copies of the interpreter's helpers. Every plan
+has a class, because each is one call per row and the interpreter dispatches
+every plan through the same `matches`, so a hot pattern of any plan otherwise
+shares that dispatch and its profile with every other pattern. The generated
+`matches` gives the interpreter's result on every input, including malformed
+UTF-8, which differential tests check over the corpus and seeded patterns.
+
+- Each class checks the plan's length bounds and compares its anchored prefix
+  and suffix as constants: a literal of up to sixteen bytes in at most two
+  overlapping little-endian reads, a longer one with one array comparison.
+  The empty pattern and the exact, prefix, and suffix plans need nothing more.
+- Contained and ordered literals search with a copy of the literal search for
+  each literal: the first-and-last-byte word scan, or the two-word scan of a
+  single byte, with the literal's bytes and KMP shifts as constants, and the
+  same candidate comparison budget before switching to KMP. Ordered
+  literals search one after another, as the interpreter does. Generated
+  contains specializes its literal with this search, while interpreted
+  contains uses `Slice.indexOf`.
+- A literal-gap plan searches for its first literal with the same generated
+  search, steps each gap a character at a time by the interpreter's character
+  width, inline for ASCII, compares each later literal as a constant, and
+  retries from the next candidate exactly where the interpreter does.
+- Any other wildcard plan runs a bit-parallel shift-and automaton over the
+  interpreter's states. A switch over the pattern's distinct code points
+  selects which positions the character advances, with `_` positions in every
+  mask and in the default, so a malformed character, which has no code point,
+  advances only `_` positions. States that loop on `%` stay set. The match
+  fails once no state remains and succeeds as soon as the accepting state is
+  reached, or at the end of the middle for an exact pattern, which is the
+  interpreter's state-set automaton step for step. Patterns of sixty-four or
+  more positions use several state words with a carry between them, so there
+  is no position limit.
+- The size guard is HotSpot's: a method longer than its 8,000-byte
+  huge-method limit is never JIT-compiled, so a pattern any of whose generated
+  methods would exceed it, such as a wildcard of hundreds of distinct code
+  points, is interpreted instead. Building a class costs time and memory that
+  grow with the pattern, so a lower bound on the method size, from the counts
+  of literals, gaps, state words, and distinct code points, rejects a pattern
+  certain to exceed the limit before its class is built.
+- The copied helpers, character width, code-point decoding, candidate prefix
+  comparison, and KMP search, live in one LIKE kernel support class, separate
+  from the scan-kernel copies.
+- A caller holding a constant pattern can bind the generated entry directly
+  through `generatedMatches`, an `Optional` of a `(Slice)boolean`
+  `MethodHandle` that is empty for an interpreted pattern.
+- `TrinoLikePattern` is sealed rather than final, so a pattern with a
+  generated class can run it through a private subclass. Callers still cannot
+  extend it.

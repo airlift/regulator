@@ -16,6 +16,8 @@ package io.airlift.regulator;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
+import java.util.List;
+
 import static io.airlift.regulator.ExpressionAnalysis.Gap.NONE;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_BYTES;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_CODE_POINTS;
@@ -73,6 +75,11 @@ final class OrderedLiteralMatcher
         return gap == ZERO_OR_MORE_BYTES || gap == ZERO_OR_MORE_CODE_POINTS;
     }
 
+    List<LiteralSearchKernel> literals()
+    {
+        return List.of(literals);
+    }
+
     boolean usesSharedLiteralSearchForDiagnostics()
     {
         return true;
@@ -87,6 +94,8 @@ final class OrderedLiteralMatcher
         return retainedSize;
     }
 
+    // TrinoLikeKernelGenerator emits a copy of this search for generated LIKE patterns; keep the
+    // copy in step.
     boolean matches(Slice input, int offset, int length)
     {
         int searchOffset = offset;

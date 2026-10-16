@@ -23,6 +23,10 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.function.LongSupplier;
 
+import static io.airlift.regulator.TrinoLikePattern.Plan.CONTAINS;
+import static io.airlift.regulator.TrinoLikePattern.Plan.LITERAL_GAPS;
+import static io.airlift.regulator.TrinoLikePattern.Plan.ORDERED_LITERALS;
+import static io.airlift.regulator.TrinoLikePattern.Plan.TRINO_WILDCARD;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestRe2Allocations
@@ -408,30 +412,40 @@ public class TestRe2Allocations
         assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
         threadBean.setThreadAllocatedMemoryEnabled(true);
 
-        TrinoLikePattern contains = TrinoLikePattern.compile(Slices.utf8Slice("%needle%"));
-        TrinoLikePattern ordered = TrinoLikePattern.compile(Slices.utf8Slice("%alpha%omega%"));
-        TrinoLikePattern wildcard = TrinoLikePattern.compile(Slices.utf8Slice("%alpha_omega%"));
-        Slice containsInput = Slices.utf8Slice("xxneedleyy");
-        Slice orderedInput = Slices.utf8Slice("xxalpha--omegayy");
-        Slice wildcardInput = Slices.utf8Slice("xxalpha💰omegayy");
+        for (boolean generateBytecode : new boolean[] {false, true}) {
+            TrinoLikePattern.Options options = TrinoLikePattern.Options.defaults().setGenerateBytecode(generateBytecode);
+            TrinoLikePattern contains = TrinoLikePattern.compile(Slices.utf8Slice("%needle%"), options);
+            TrinoLikePattern ordered = TrinoLikePattern.compile(Slices.utf8Slice("%alpha%omega%"), options);
+            TrinoLikePattern gaps = TrinoLikePattern.compile(Slices.utf8Slice("%alpha_omega%"), options);
+            TrinoLikePattern wildcard = TrinoLikePattern.compile(Slices.utf8Slice("%alpha%_omega%"), options);
+            assertThat(List.of(contains, ordered, gaps, wildcard)).allMatch(pattern -> pattern.usesGeneratedBytecode() == generateBytecode);
+            assertThat(List.of(contains, ordered, gaps, wildcard))
+                    .extracting(TrinoLikePattern::planForDiagnostics)
+                    .containsExactly(CONTAINS, ORDERED_LITERALS, LITERAL_GAPS, TRINO_WILDCARD);
+            Slice containsInput = Slices.utf8Slice("xxneedleyy");
+            Slice orderedInput = Slices.utf8Slice("xxalpha--omegayy");
+            Slice gapsInput = Slices.utf8Slice("xxalpha💰omegayy");
 
-        for (int iteration = 0; iteration < 20_000; iteration++) {
-            assertThat(contains.matches(containsInput)).isTrue();
-            assertThat(ordered.matches(orderedInput)).isTrue();
-            assertThat(wildcard.matches(wildcardInput)).isTrue();
-        }
-
-        long allocatedBytes = minimumAllocatedBytes(30_000, () -> {
-            int matchCount = 0;
-            for (int iteration = 0; iteration < 10_000; iteration++) {
-                matchCount += contains.matches(containsInput) ? 1 : 0;
-                matchCount += ordered.matches(orderedInput) ? 1 : 0;
-                matchCount += wildcard.matches(wildcardInput) ? 1 : 0;
+            for (int iteration = 0; iteration < 20_000; iteration++) {
+                assertThat(contains.matches(containsInput)).isTrue();
+                assertThat(ordered.matches(orderedInput)).isTrue();
+                assertThat(gaps.matches(gapsInput)).isTrue();
+                assertThat(wildcard.matches(gapsInput)).isTrue();
             }
-            return matchCount;
-        });
 
-        assertThat(allocatedBytes / 10_000).isZero();
+            long allocatedBytes = minimumAllocatedBytes(40_000, () -> {
+                int matchCount = 0;
+                for (int iteration = 0; iteration < 10_000; iteration++) {
+                    matchCount += contains.matches(containsInput) ? 1 : 0;
+                    matchCount += ordered.matches(orderedInput) ? 1 : 0;
+                    matchCount += gaps.matches(gapsInput) ? 1 : 0;
+                    matchCount += wildcard.matches(gapsInput) ? 1 : 0;
+                }
+                return matchCount;
+            });
+
+            assertThat(allocatedBytes / 10_000).as("generateBytecode=%s", generateBytecode).isZero();
+        }
     }
 
     @Test

@@ -29,7 +29,7 @@ final class LiteralSearchKernel
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
     private static final long LOW_BITS = 0x0101010101010101L;
     private static final long HIGH_BITS = 0x8080808080808080L;
-    private static final int CANDIDATE_COMPARISON_BUDGET = 64;
+    static final int CANDIDATE_COMPARISON_BUDGET = 64;
 
     private final byte[] literal;
     private final int[] prefixShifts;
@@ -53,6 +53,16 @@ final class LiteralSearchKernel
     long estimatedRetainedSize()
     {
         return INSTANCE_SIZE + SizeOf.sizeOf(literal) + SizeOf.sizeOf(prefixShifts);
+    }
+
+    byte[] literal()
+    {
+        return literal.clone();
+    }
+
+    int[] prefixShifts()
+    {
+        return prefixShifts.clone();
     }
 
     int find(Slice input, int offset, int length)
@@ -81,6 +91,8 @@ final class LiteralSearchKernel
         return Arrays.equals(input.byteArray(), inputOffset, inputOffset + literal.length, literal, 0, literal.length);
     }
 
+    // TrinoLikeKernelGenerator emits a copy of this scan, and of findSingleByte, for each literal
+    // of a generated LIKE pattern; keep the copies in step.
     private int findFrontAndBack(byte[] input, int searchStart, int searchEnd)
     {
         int candidateCount = searchEnd - searchStart - literal.length + 1;
@@ -123,6 +135,8 @@ final class LiteralSearchKernel
         return -1;
     }
 
+    // TrinoLikeKernelGenerator emits a copy of this scan for each one-byte literal of a generated
+    // LIKE pattern; keep the copy in step.
     private int findSingleByte(byte[] input, int searchStart, int searchEnd)
     {
         int wordEnd = searchStart + ((searchEnd - searchStart) / (2 * Long.BYTES)) * (2 * Long.BYTES);
@@ -147,6 +161,7 @@ final class LiteralSearchKernel
         return -1;
     }
 
+    // Copied as TrinoLikeKernelSupport.findKmp; keep the copy in step.
     private int findKmp(byte[] input, int searchStart, int searchEnd)
     {
         int matchedLength = 0;
@@ -162,6 +177,7 @@ final class LiteralSearchKernel
         return -1;
     }
 
+    // Copied as TrinoLikeKernelSupport.matchingPrefixLength; keep the copy in step.
     private int matchingPrefixLength(byte[] input, int inputOffset)
     {
         for (int index = 0; index < literal.length; index++) {
@@ -192,6 +208,8 @@ final class LiteralSearchKernel
         return (value & 0xFFL) * LOW_BITS;
     }
 
+    // TrinoLikeKernelGenerator emits this mask in a deliberately different form with the same
+    // bits (see its zeroByteMask); keep the two in step.
     private static long zeroByteMask(long value)
     {
         return (value - LOW_BITS) & ~value & HIGH_BITS;

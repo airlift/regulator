@@ -404,7 +404,7 @@ public class TestTrinoScanKernel
         }
     }
 
-    private static byte[] classfile(Class<?> type)
+    static byte[] classfile(Class<?> type)
     {
         try (InputStream input = type.getResourceAsStream(type.getSimpleName() + ".class")) {
             return requireNonNull(input, type.getName()).readAllBytes();
@@ -418,7 +418,7 @@ public class TestTrinoScanKernel
      * Returns each method of another class that {@code classfile} invokes, as its owner's binary
      * name, without the package for an owner in this package, a dot, and the method name.
      */
-    private static Set<String> invokedMethods(byte[] classfile)
+    static Set<String> invokedMethods(byte[] classfile)
     {
         String packagePrefix = TestTrinoScanKernel.class.getPackageName() + ".";
         ClassModel model = ClassFile.of().parse(classfile);

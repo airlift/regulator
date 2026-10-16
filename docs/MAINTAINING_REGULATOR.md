@@ -28,6 +28,8 @@ Treat these as performance-sensitive unless analysis proves otherwise:
 - Slice range and UTF-8 decoding paths used by matching
 - generated Trino scan kernels, their search driver and operation entries, the
   scan helper copies they call, and the code that emits them
+- generated Trino LIKE kernels, the helper copies they call, and the code that
+  emits them
 
 Comments in these paths explain where performance depends on generated code.
 Do not extract helpers, introduce polymorphism, reorder loads, add logging, or
@@ -36,7 +38,10 @@ code and running the relevant benchmarks.
 
 When changing a helper marked "Copied as", change the copy it names. When that
 copy is in `TrinoScanKernelSupport` or `VectorTrinoScanKernelSupport`, also run
-`TestTrinoScanKernel`.
+`TestTrinoScanKernel`; when it is in `TrinoLikeKernelSupport`, run
+`TestTrinoLikeKernel` and `TestTrinoLikeCorpus`. Code whose comment names
+`TrinoLikeKernelGenerator` has its copy in the emitter rather than in Java
+source; change the emitter with it and run the same tests.
 
 ## Parser frontends
 
