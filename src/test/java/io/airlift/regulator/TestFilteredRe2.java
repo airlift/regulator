@@ -136,6 +136,18 @@ public class TestFilteredRe2
         assertThat(canonicalText.toStringUtf8()).isEqualTo("δσk");
         assertThat(filteredRe2.atoms()).containsExactly(canonicalText);
         assertThat(filteredRe2.encoding()).isEqualTo(Re2.Options.Encoding.UTF8);
+
+        // Every ASCII byte folds by the rule, and bytes of invalid UTF-8 are preserved.
+        byte[] ascii = new byte[0x80];
+        byte[] foldedAscii = new byte[0x80];
+        for (int value = 0; value < 0x80; value++) {
+            ascii[value] = (byte) value;
+            foldedAscii[value] = (byte) FilteredRe2.canonicalizeUnicodeCodePoint(value);
+        }
+        assertThat(filteredRe2.canonicalizeText(Slices.wrappedBuffer(ascii))).isEqualTo(Slices.wrappedBuffer(foldedAscii));
+        byte[] invalid = {'A', (byte) 0x80, 'Z', (byte) 0xC3, '(', (byte) 0xCE, (byte) 0x94, (byte) 0xF0, (byte) 0x9F, '!', (byte) 0xFF};
+        byte[] canonicalInvalid = {'a', (byte) 0x80, 'z', (byte) 0xC3, '(', (byte) 0xCE, (byte) 0xB4, (byte) 0xF0, (byte) 0x9F, '!', (byte) 0xFF};
+        assertThat(filteredRe2.canonicalizeText(Slices.wrappedBuffer(invalid))).isEqualTo(Slices.wrappedBuffer(canonicalInvalid));
     }
 
     @Test

@@ -125,15 +125,25 @@ public final class FilteredRe2
             return output.slice();
         }
 
+        // ASCII folds to ASCII, so an ASCII byte is replaced without decoding. Any other byte that
+        // decodes alone is invalid and preserved; every longer decode is a valid scalar value, which
+        // indexes the table directly.
+        byte[] asciiSimpleFolds = CaseFolding.RE2.asciiSimpleFolds();
+        CodePointTable simpleFolds = CaseFolding.RE2.simpleFoldTable();
         while (index < end) {
+            byte value = bytes[index];
+            if (value >= 0) {
+                output.writeByte(asciiSimpleFolds[value]);
+                index++;
+                continue;
+            }
             long decoded = Utf8.decode(bytes, index, end);
             int width = Utf8.decodedWidth(decoded);
-            int codePoint = Utf8.decodedCodePoint(decoded);
-            if (width == 1 && codePoint == Utf8.RUNE_ERROR && (bytes[index] & 0x80) != 0) {
-                output.writeByte(bytes[index] & 0xFF);
+            if (width == 1) {
+                output.writeByte(value);
             }
             else {
-                Utf8.encode(output, canonicalizeUnicodeCodePoint(codePoint));
+                Utf8.encode(output, simpleFolds.get(Utf8.decodedCodePoint(decoded)));
             }
             index += width;
         }
