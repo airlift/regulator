@@ -70,8 +70,8 @@ construction fails.
   simple case equivalence come from the executing JVM's public `Character` APIs.
   Pinned upstream RE2's generated Unicode tables are intentionally not retained.
 - Properties are converted lazily to immutable `CharClass` ranges and cached by
-  canonical identity. Case equivalence is built once as an immutable cyclic
-  lookup table. Matching uses only the resulting ranges and compiled
+  canonical identity. Each folding rule builds its fold tables once, on
+  first use. Matching uses only the resulting ranges and compiled
   instructions; it does not call `Character` or perform property lookup.
 - Unicode-version-sensitive results can change when the runtime JDK changes.
   Deployments that require identical Unicode behavior must use equivalent

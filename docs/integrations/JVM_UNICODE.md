@@ -165,7 +165,17 @@ Unicode scans happen on first use, not on every compilation:
 
 - Each property is built lazily and cached by canonical identity.
 - Published ranges are immutable and safe for concurrent compilation.
-- Simple case equivalence is initialized once on first use.
+- Each folding rule's simple case equivalence is initialized once on first
+  use: the first compile that folds case with the rule, including a
+  letter-pair class such as `[Aa]`, which parse-time simplification turns into
+  a case-folded literal. The RE2 rule is also initialized by the first
+  `FilteredRe2.Builder.add` of a UTF-8 pattern that contains a literal or a
+  character class of at most ten code points, and by the first `FilteredRe2`
+  canonicalization of UTF-8 text or of a code point. A rule derives its tables
+  with one scan of every code point. Its simple folds and orbit successors are
+  two-stage tables that hold only the blocks of 256 code points with a case
+  partner, about 100 KB per rule in all. Every language folds with the same
+  rule, so a process holds one rule's tables.
 - Full case mappings are initialized once on first use by a frontend that
   enables full folding.
 - No production table is generated at build time, which would bind behavior to

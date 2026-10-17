@@ -29,7 +29,10 @@ import static java.util.Objects.requireNonNull;
  * A rule is a simple fold, which maps each code point to the code point of its case class, plus
  * an optional set of multi-character folds. Code points with the same simple fold form an orbit,
  * which {@link #cycleFoldRune(int)} visits in ascending order, wrapping from the largest member to
- * the smallest. Instances are shared and immutable; their tables are built lazily, once.
+ * the smallest. Instances are shared and immutable. On first use, a rule builds its simple folds,
+ * its orbit successors, and its sorted case-folded runes together from the sparse list of code
+ * points its simple fold changes; each table holds only the few dozen blocks of 256 code points
+ * that have a case partner. The multi-character folds are built separately, on first use.
  * <p>
  * Each table field is plain rather than volatile, so the compiler's fold loops read it without a
  * fence. A thread that reads the field before another thread's write is visible sees null and
@@ -64,7 +67,7 @@ final class CaseFolding
     private final IntUnaryOperator simpleFold;
     private final boolean multiCharacterFolds;
     @SuppressFBWarnings(value = "IS2_INCONSISTENT_SYNC", justification = "Each lazy table publishes through its final fields; a reader that sees null takes the synchronized path")
-    private Orbits orbits;
+    private FoldTables foldTables;
     @SuppressFBWarnings(value = "IS2_INCONSISTENT_SYNC", justification = "Each lazy table publishes through its final fields; a reader that sees null takes the synchronized path")
     private UnicodeFullCaseFold fullCaseFold;
 
@@ -83,7 +86,26 @@ final class CaseFolding
         if (codePoint < 0 || codePoint > RUNEMAX) {
             return codePoint;
         }
-        return simpleFold.applyAsInt(codePoint);
+        return foldTables().simpleFolds.get(codePoint);
+    }
+
+    /**
+     * Returns the table of {@link #simpleFold(int)} for every code point from 0 through
+     * {@code RUNEMAX}, so callers can reuse the table instead of calling {@code simpleFold} for
+     * each code point.
+     */
+    CodePointTable simpleFoldTable()
+    {
+        return foldTables().simpleFolds;
+    }
+
+    /**
+     * Returns {@link #simpleFold(int)} of each ASCII code point, indexed by code point. Every rule
+     * folds ASCII to ASCII. Callers must not modify the returned array.
+     */
+    byte[] asciiSimpleFolds()
+    {
+        return foldTables().asciiSimpleFolds;
     }
 
     /**
@@ -94,7 +116,7 @@ final class CaseFolding
         if (rune < 0 || rune > RUNEMAX) {
             return rune;
         }
-        return orbits().next[rune];
+        return foldTables().orbitSuccessors.get(rune);
     }
 
     /**
@@ -103,16 +125,16 @@ final class CaseFolding
      */
     void addOtherOrbitMembers(CharClassBuilder builder, int low, int high)
     {
-        Orbits orbits = orbits();
-        int[] next = orbits.next;
-        int[] caseFoldedRunes = orbits.caseFoldedRunes;
+        FoldTables foldTables = foldTables();
+        CodePointTable orbitSuccessors = foldTables.orbitSuccessors;
+        int[] caseFoldedRunes = foldTables.caseFoldedRunes;
         int index = Arrays.binarySearch(caseFoldedRunes, low);
         if (index < 0) {
             index = -index - 1;
         }
         for (; index < caseFoldedRunes.length && caseFoldedRunes[index] <= high; index++) {
             int rune = caseFoldedRunes[index];
-            for (int foldedRune = next[rune]; foldedRune != rune; foldedRune = next[foldedRune]) {
+            for (int foldedRune = orbitSuccessors.get(rune); foldedRune != rune; foldedRune = orbitSuccessors.get(foldedRune)) {
                 builder.addRange(foldedRune, foldedRune);
             }
         }
@@ -159,21 +181,21 @@ final class CaseFolding
         return name;
     }
 
-    private Orbits orbits()
+    private FoldTables foldTables()
     {
-        Orbits cached = orbits;
+        FoldTables cached = foldTables;
         if (cached != null) {
             return cached;
         }
-        return createOrbits();
+        return createFoldTables();
     }
 
-    private synchronized Orbits createOrbits()
+    private synchronized FoldTables createFoldTables()
     {
-        if (orbits == null) {
-            orbits = new Orbits(simpleFold);
+        if (foldTables == null) {
+            foldTables = new FoldTables(scanSimpleFolds(simpleFold));
         }
-        return orbits;
+        return foldTables;
     }
 
     private UnicodeFullCaseFold fullCaseFold()
@@ -201,53 +223,104 @@ final class CaseFolding
         return Character.toLowerCase(Character.toUpperCase(codePoint));
     }
 
-    /**
-     * Dense orbit successors and the sorted runes whose orbit has another member.
-     */
-    private static final class Orbits
+    // One scan of every code point collects the code points the simple fold changes.
+    private static SimpleFolds scanSimpleFolds(IntUnaryOperator simpleFold)
     {
-        private final int[] next;
+        int[] sources = new int[1024];
+        int[] targets = new int[1024];
+        int count = 0;
+        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
+            int target = simpleFold.applyAsInt(codePoint);
+            if (target != codePoint) {
+                if (count == sources.length) {
+                    sources = Arrays.copyOf(sources, count * 2);
+                    targets = Arrays.copyOf(targets, count * 2);
+                }
+                sources[count] = codePoint;
+                targets[count] = target;
+                count++;
+            }
+        }
+        return new SimpleFolds(Arrays.copyOf(sources, count), Arrays.copyOf(targets, count));
+    }
+
+    /**
+     * The code points that a simple fold changes, ascending, and the code point each folds to.
+     * Every other code point folds to itself. Holders must not modify the arrays.
+     */
+    private record SimpleFolds(int[] sources, int[] targets) {}
+
+    /**
+     * The simple fold and orbit successor of every code point, the sorted runes whose orbit has
+     * another member, and the simple folds of ASCII.
+     */
+    private static final class FoldTables
+    {
+        private final CodePointTable simpleFolds;
+        private final CodePointTable orbitSuccessors;
         private final int[] caseFoldedRunes;
+        private final byte[] asciiSimpleFolds;
 
-        private Orbits(IntUnaryOperator simpleFold)
+        private FoldTables(SimpleFolds changedFolds)
         {
-            int[] first = new int[RUNEMAX + 1];
-            int[] last = new int[RUNEMAX + 1];
-            int[] next = new int[RUNEMAX + 1];
-            Arrays.fill(first, -1);
+            int[] sources = changedFolds.sources();
+            int[] targets = changedFolds.targets();
+            this.simpleFolds = new CodePointTable(sources, targets);
 
-            for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-                int foldedCodePoint = simpleFold.applyAsInt(codePoint);
-                if (first[foldedCodePoint] < 0) {
-                    first[foldedCodePoint] = codePoint;
-                }
-                else {
-                    next[last[foldedCodePoint]] = codePoint;
-                }
-                last[foldedCodePoint] = codePoint;
-            }
-
-            for (int foldedCodePoint = 0; foldedCodePoint <= RUNEMAX; foldedCodePoint++) {
-                if (first[foldedCodePoint] >= 0) {
-                    next[last[foldedCodePoint]] = first[foldedCodePoint];
+            // An orbit holds the sources that fold to one target, and the target itself unless it
+            // folds elsewhere. Keying each member by its target sorts every orbit into one run in
+            // ascending member order. A target that folds to itself is added once per source.
+            long[] orbitMembers = new long[sources.length * 2];
+            int orbitMemberCount = 0;
+            for (int index = 0; index < sources.length; index++) {
+                long orbit = (long) targets[index] << 32;
+                orbitMembers[orbitMemberCount++] = orbit | sources[index];
+                if (Arrays.binarySearch(sources, targets[index]) < 0) {
+                    orbitMembers[orbitMemberCount++] = orbit | targets[index];
                 }
             }
+            Arrays.sort(orbitMembers, 0, orbitMemberCount);
 
-            int caseFoldedRuneCount = 0;
-            for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-                if (next[codePoint] != codePoint) {
-                    caseFoldedRuneCount++;
-                }
-            }
-            int[] caseFoldedRunes = new int[caseFoldedRuneCount];
+            // Link each member of an orbit with another member to the next larger member, and the
+            // largest to the smallest, keyed by member.
+            long[] successors = new long[orbitMemberCount];
+            int successorCount = 0;
             int index = 0;
-            for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-                if (next[codePoint] != codePoint) {
-                    caseFoldedRunes[index++] = codePoint;
+            while (index < orbitMemberCount) {
+                long orbit = orbitMembers[index] >>> 32;
+                int firstMember = (int) orbitMembers[index];
+                int previousMember = firstMember;
+                for (index++; index < orbitMemberCount && orbitMembers[index] >>> 32 == orbit; index++) {
+                    int member = (int) orbitMembers[index];
+                    if (member != previousMember) {
+                        successors[successorCount++] = ((long) previousMember << 32) | member;
+                        previousMember = member;
+                    }
+                }
+                if (previousMember != firstMember) {
+                    successors[successorCount++] = ((long) previousMember << 32) | firstMember;
                 }
             }
-            this.next = next;
+            Arrays.sort(successors, 0, successorCount);
+
+            int[] caseFoldedRunes = new int[successorCount];
+            int[] nextRunes = new int[successorCount];
+            for (int successor = 0; successor < successorCount; successor++) {
+                caseFoldedRunes[successor] = (int) (successors[successor] >>> 32);
+                nextRunes[successor] = (int) successors[successor];
+            }
+            this.orbitSuccessors = new CodePointTable(caseFoldedRunes, nextRunes);
             this.caseFoldedRunes = caseFoldedRunes;
+
+            byte[] asciiSimpleFolds = new byte[0x80];
+            for (int codePoint = 0; codePoint < 0x80; codePoint++) {
+                int folded = simpleFolds.get(codePoint);
+                if (folded >= 0x80) {
+                    throw new IllegalStateException("ASCII code point " + codePoint + " folds outside ASCII to " + folded);
+                }
+                asciiSimpleFolds[codePoint] = (byte) folded;
+            }
+            this.asciiSimpleFolds = asciiSimpleFolds;
         }
     }
 }
