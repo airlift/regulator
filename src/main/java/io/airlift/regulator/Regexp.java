@@ -62,6 +62,12 @@ final class Regexp
     static final int JAVA_WORD_BOUNDARY = 1 << 25;
     static final int TRINO_LINE = 1 << 26;
 
+    // Rust assertion metadata is attached only to anchor/boundary nodes.
+    static final int RUST_ASSERTION = 1 << 27;
+    static final int RUST_BOUNDARY_SHIFT = 28;
+    static final int RUST_BOUNDARY_MASK = 7 << RUST_BOUNDARY_SHIFT;
+    static final int RUST_UNICODE = 1 << 31;
+
     // Composite flag groups and masks.
     static final int MATCH_NEWLINE = CLASS_NEWLINE | DOT_MATCHES_NEWLINE;
     static final int LIKE_PERL = CLASS_NEWLINE | ONE_LINE | PERL_CLASSES | PERL_WORD_BOUNDARY | PERL_EXTENSIONS | UNICODE_GROUPS;
@@ -664,6 +670,9 @@ final class Regexp
     {
         return switch (op) {
             case BEGIN_LINE -> {
+                if ((parseFlags & RUST_ASSERTION) != 0) {
+                    yield RUST_ASSERTION;
+                }
                 if ((parseFlags & TRINO_LINE) != 0) {
                     yield TRINO_LINE;
                 }
@@ -672,10 +681,10 @@ final class Regexp
                 }
                 yield parseFlags & (JAVA_LINE | JAVA_UNIX_LINES);
             }
-            case END_LINE -> parseFlags & JAVA_LINE;
+            case END_LINE -> parseFlags & (JAVA_LINE | RUST_ASSERTION);
             case END_TEXT -> parseFlags & (WAS_DOLLAR | FINAL_LINE_END | JAVA_FINAL_END);
             case WORD_BOUNDARY, NO_WORD_BOUNDARY -> parseFlags &
-                    (UNICODE_WORD_BOUNDARY | JAVA_WORD_BOUNDARY | JAVA_UNICODE_CHARACTER_CLASS);
+                    (UNICODE_WORD_BOUNDARY | JAVA_WORD_BOUNDARY | JAVA_UNICODE_CHARACTER_CLASS | RUST_ASSERTION | RUST_BOUNDARY_MASK | RUST_UNICODE);
             case LITERAL, LITERAL_STRING -> parseFlags & (FOLD_CASE | FULL_CASE_FOLD | LATIN1);
             case STAR, PLUS, QUEST, REPEAT -> parseFlags & NON_GREEDY;
             default -> 0;

@@ -9,7 +9,7 @@ support would require.
 Regulator's shared engine matches in linear time with bounded memory. It avoids
 the catastrophic worst cases of general ordered-backtracking engines.
 
-`Re2`, `TrinoRegexp`, and `JavaRegexp` reject recognized unsupported constructs
+`Re2`, `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` reject recognized unsupported constructs
 at compilation. They do not retry with another language or silently switch to
 an engine with different resource guarantees.
 
@@ -25,6 +25,7 @@ an engine with different resource guarantees.
 | Nullable repeated captures | Java resets captures within repeated nullable groups according to rules not represented by the current capture program. |
 | Canonical equivalence | Supporting canonical normalization equivalence requires a defined expansion, matching, and resource policy. |
 | Raw byte and surrogate escapes | Java patterns represent Unicode code points, and Trino does not assign portable character semantics to these escape forms. Trino still preserves malformed bytes that occur as ordinary literal pattern text. |
+| Rust properties requiring supplemental Unicode data | Deferred to preserve the JVM Unicode policy; see [Rust Unicode support](RUST_REGEXP.md#unicode-policy-and-deferred-properties). |
 | Repetition counts above 1,000 | The compiler limit bounds program expansion and follows RE2's implementation restriction. |
 
 The limits have different causes. General backreferences conflict with the
@@ -79,4 +80,5 @@ guarantees.
 - [RE2 Pattern Language](RE2.md)
 - [Trino Regular-Expression Language](TRINO_REGEXP.md)
 - [Java Regular-Expression Language](JAVA_REGEXP.md)
+- [Rust Regular-Expression Language](RUST_REGEXP.md)
 - [Trino SQL LIKE Language](TRINO_LIKE.md)

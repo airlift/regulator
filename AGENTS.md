@@ -2,7 +2,7 @@
 
 Regulator is a high-performance regular-expression engine for Slice. Its core
 matching algorithms are a faithful Java port of Google RE2, with separate
-frontends for RE2, Trino regular expressions, Java regular expressions, and
+frontends for RE2, Trino regular expressions, Java regular expressions, Rust regular expressions, and
 Trino SQL LIKE.
 
 ## Key Principle

@@ -83,6 +83,24 @@ construction fails.
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.
 
+## Rust Frontend
+
+`RustRegexp` follows Rust regex 1.13.1 syntax and matching over UTF-8 Slice
+inputs, with Regulator's JVM-sourced Unicode policy and compilation budgets.
+Character categories, scripts, supported binary properties, and case folding
+come from the JVM. The generated property alias resource contains syntax names
+only. Properties requiring supplemental character tables are rejected explicitly
+and can be added later without changing supported syntax. See the complete
+[Rust contract](docs/reference/languages/RUST_REGEXP.md).
+
+Rust CRLF anchors and directional word boundaries use dedicated text-dependent
+assertions through the existing BitState/NFA route. They do not change the DFA
+transition representation. Rust's matcher suppresses adjacent empty matches
+without changing `Re2Matcher` iteration. Input and region UTF-8 checks occur at
+public operation entry or matcher construction/reset. Pattern/option snapshots,
+Slice-relative offsets, zero-copy groups, and memory limits follow the other
+frontends. Native Rust is used only to generate committed test fixtures.
+
 ## Java Regular-Subset Frontend
 
 - `JavaRegexp` is a separate compiler for the documented regular subset of

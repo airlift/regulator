@@ -40,7 +40,8 @@ final class EmptyOp
     public static final int EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY = 1 << 17;
 
     public static final int TEXT_DEPENDENT =
-            EMPTY_END_TEXT_OR_FINAL_NEWLINE |
+            RustAssertions.ALL |
+                    EMPTY_END_TEXT_OR_FINAL_NEWLINE |
                     EMPTY_UNICODE_WORD_BOUNDARY |
                     EMPTY_NO_UNICODE_WORD_BOUNDARY |
                     EMPTY_JAVA_BEGIN_LINE |
@@ -138,6 +139,9 @@ final class EmptyOp
             }
         }
 
+        if ((textDependentAssertions & RustAssertions.ALL) != 0) {
+            flags |= RustAssertions.context(bytes, begin, end, position, textDependentAssertions);
+        }
         return flags;
     }
 
@@ -273,14 +277,14 @@ final class EmptyOp
         }
     }
 
-    private static boolean isCodePointBoundary(byte[] bytes, int begin, int end, int position)
+    static boolean isCodePointBoundary(byte[] bytes, int begin, int end, int position)
     {
         return position == begin ||
                 position == end ||
                 (bytes[position] & 0xC0) != 0x80;
     }
 
-    private static int previousCodePoint(byte[] bytes, int begin, int position)
+    static int previousCodePoint(byte[] bytes, int begin, int position)
     {
         if (position == begin) {
             return -1;
@@ -305,7 +309,7 @@ final class EmptyOp
         return codePointStart;
     }
 
-    private static int nextCodePoint(byte[] bytes, int end, int position)
+    static int nextCodePoint(byte[] bytes, int end, int position)
     {
         if (position == end) {
             return -1;
