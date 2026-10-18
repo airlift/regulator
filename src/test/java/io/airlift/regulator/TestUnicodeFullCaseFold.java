@@ -18,21 +18,26 @@ import io.airlift.jcodings.Config;
 import io.airlift.jcodings.specific.NonStrictUTF8Encoding;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class TestUnicodeFullCaseFold
 {
     @Test
-    public void testJvmMappingsCoverPinnedJoniMultiCharacterFolds()
+    public void testMappingsCoverPinnedJoniMultiCharacterFolds()
     {
         int joniMappingCount = 0;
-        int jvmMappingCount = 0;
 
         for (int codePoint = 0; codePoint <= Character.MAX_CODE_POINT; codePoint++) {
             if (codePoint >= Character.MIN_SURROGATE && codePoint <= Character.MAX_SURROGATE) {
@@ -45,20 +50,20 @@ public class TestUnicodeFullCaseFold
                     encoded,
                     0,
                     encoded.length);
-            int[] jvmFold = CaseFolding.TRINO.fold(new int[] {codePoint});
+            int[] trinoFold = CaseFolding.TRINO.fold(new int[] {codePoint});
 
             boolean hasJoniMultiCharacterFold = false;
-            boolean jvmFoldMatchesJoni = false;
+            boolean trinoFoldMatchesJoni = false;
             for (CaseFoldCodeItem item : joniItems) {
                 if (item.codeLen <= 1) {
                     continue;
                 }
                 hasJoniMultiCharacterFold = true;
                 int[] expectedFold = Arrays.stream(item.code)
-                        .map(TestUnicodeFullCaseFold::canonicalSimpleFold)
+                        .map(CaseFolding.TRINO::simpleFold)
                         .toArray();
-                if (Arrays.equals(jvmFold, expectedFold)) {
-                    jvmFoldMatchesJoni = true;
+                if (Arrays.equals(trinoFold, expectedFold)) {
+                    trinoFoldMatchesJoni = true;
                 }
                 assertFullFoldMatch(new int[] {codePoint}, item.code);
                 assertFullFoldMatch(item.code, new int[] {codePoint});
@@ -66,22 +71,91 @@ public class TestUnicodeFullCaseFold
 
             if (hasJoniMultiCharacterFold) {
                 joniMappingCount++;
-                assertThat(jvmFoldMatchesJoni)
-                        .as("JVM full fold for U+%04X", codePoint)
+                assertThat(trinoFoldMatchesJoni)
+                        .as("Trino full fold for U+%04X", codePoint)
                         .isTrue();
             }
-            if (jvmFold.length > 1) {
-                jvmMappingCount++;
-                if (!hasJoniMultiCharacterFold) {
-                    assertThat(codePoint)
-                            .as("JVM-only full fold")
-                            .isEqualTo(0x1E9E);
-                }
+            if (trinoFold.length > 1 && !hasJoniMultiCharacterFold) {
+                assertThat(codePoint)
+                        .as("full fold missing from Joni's Unicode 4.1 tables")
+                        .isIn(0x1E9E, 0x1DF95);
             }
         }
 
         assertThat(joniMappingCount).isEqualTo(103);
-        assertThat(jvmMappingCount).isEqualTo(104);
+        // Joni's tables lack the Unicode 18.0 fold of U+1DF95, so require it directly.
+        assertFullFoldMatch(new int[] {0x1DF95}, new int[] {'s', 's'});
+        assertFullFoldMatch(new int[] {'s', 's'}, new int[] {0x1DF95});
+    }
+
+    @Test
+    public void testFoldMatchesJdkFullCaseFolding()
+            throws ReflectiveOperationException
+    {
+        // JDK 26 added full case folding comparison, at the Unicode version of its case mappings.
+        Field order;
+        try {
+            order = String.class.getField("UNICODE_CASEFOLD_ORDER");
+        }
+        catch (NoSuchFieldException e) {
+            order = null;
+        }
+        assumeTrue(order != null, "requires String.UNICODE_CASEFOLD_ORDER");
+        @SuppressWarnings("unchecked")
+        Comparator<String> caseFoldOrder = (Comparator<String>) order.get(null);
+        // JDK 26 compares two Latin-1 strings without folding the micro sign to Greek small mu, so
+        // its order is not transitive. A shared non-Latin-1 suffix keeps every comparison folded.
+        assertFoldMatches((left, right) -> caseFoldOrder.compare(left + "Ā", right + "Ā"));
+    }
+
+    // Trino folding must equal Unicode full case folding (statuses C and F) at the Unicode version
+    // of the JVM for every character the JVM assigns: the reference comparator and Trino folding
+    // produce identical equivalence classes, and comparing each code point with its Trino fold and
+    // its JDK case mappings gives the same result under both rules. Unicode never changes the full
+    // fold of an assigned character, so the database, whose version is at least the JVM's, agrees
+    // on them.
+    private static void assertFoldMatches(Comparator<String> reference)
+    {
+        List<String> codePoints = new ArrayList<>();
+        for (int codePoint = 0; codePoint <= Character.MAX_CODE_POINT; codePoint++) {
+            if (Character.isDefined(codePoint) && Character.getType(codePoint) != Character.SURROGATE) {
+                codePoints.add(Character.toString(codePoint));
+            }
+        }
+        codePoints.sort(reference);
+        // Sorting by the reference places each class of equivalent code points in one run.
+        Map<String, String> referenceClassByTrinoFold = new HashMap<>();
+        String referenceClass = null;
+        String referenceClassTrinoFold = null;
+        for (int index = 0; index < codePoints.size(); index++) {
+            String value = codePoints.get(index);
+            String trinoFold = trinoFold(value);
+            if (index == 0 || reference.compare(codePoints.get(index - 1), value) != 0) {
+                referenceClass = value;
+                referenceClassTrinoFold = trinoFold;
+            }
+            else if (!trinoFold.equals(referenceClassTrinoFold)) {
+                throw new AssertionError(String.format(Locale.ROOT, "Trino separates U+%04X from U+%04X", value.codePointAt(0), referenceClass.codePointAt(0)));
+            }
+            String previous = referenceClassByTrinoFold.putIfAbsent(trinoFold, referenceClass);
+            if (previous != null && !previous.equals(referenceClass)) {
+                throw new AssertionError(String.format(Locale.ROOT, "Trino joins U+%04X with U+%04X", value.codePointAt(0), previous.codePointAt(0)));
+            }
+
+            for (String candidate : List.of(trinoFold, value.toUpperCase(Locale.ROOT), value.toLowerCase(Locale.ROOT))) {
+                if ((reference.compare(value, candidate) == 0) != trinoFold.equals(trinoFold(candidate))) {
+                    throw new AssertionError(String.format(Locale.ROOT, "U+%04X against %s", value.codePointAt(0), candidate.codePoints()
+                            .mapToObj(codePoint -> String.format(Locale.ROOT, "U+%04X", codePoint))
+                            .toList()));
+                }
+            }
+        }
+    }
+
+    private static String trinoFold(String value)
+    {
+        int[] folded = CaseFolding.TRINO.fold(value.codePoints().toArray());
+        return new String(folded, 0, folded.length);
     }
 
     @Test
@@ -199,7 +273,7 @@ public class TestUnicodeFullCaseFold
     {
         List<Integer> folded = new ArrayList<>();
         for (int rune : runes) {
-            int[] mapping = new int[] {canonicalSimpleFold(rune)};
+            int[] mapping = new int[] {CaseFolding.TRINO.simpleFold(rune)};
             for (UnicodeFullCaseFold.FoldToken token : tokens) {
                 if (token.sourceRunes().contains(rune)) {
                     mapping = token.foldedRunes();
@@ -281,11 +355,6 @@ public class TestUnicodeFullCaseFold
         assertThat(TrinoRegexp.compile(utf8Slice(pattern.toString())).contains(utf8Slice(input)))
                 .as("%s matches %s", Arrays.toString(patternRunes), Arrays.toString(inputRunes))
                 .isTrue();
-    }
-
-    private static int canonicalSimpleFold(int rune)
-    {
-        return Character.toLowerCase(Character.toUpperCase(rune));
     }
 
     private static CharClass classOf(int low, int high)

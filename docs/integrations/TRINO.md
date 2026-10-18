@@ -59,7 +59,7 @@ The Trino frontend implements these SQL-visible behaviors:
 - Joni-compatible multiline `^`, including empty input but excluding the
   position after a terminal LF
 - Unicode word boundaries
-- JVM-derived multi-code-point case folding
+- Unicode 18.0 full case folding, including multi-code-point folds
 - Trino replacement references such as `$1` and `${name}`
 - Slice-relative group offsets
 - non-strict malformed literal pattern bytes

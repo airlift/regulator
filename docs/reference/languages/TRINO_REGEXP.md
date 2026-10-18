@@ -47,23 +47,34 @@ Repetition counts are limited to 1,000. The default `$` assertion matches at
 the end of input or before one final LF, and multiline mode recognizes LF as
 the line terminator. Multiline `^` matches at the start of input and after an
 internal LF, but not after a terminal LF; it also matches at the start of empty
-input. Case-insensitive matching includes JVM-derived multi-code-point folds
-such as `ß` and `SS`.
+input. Case-insensitive matching includes Unicode multi-code-point folds such
+as `ß` and `SS`.
 
 ### Unicode data and case folding
 
-Regulator builds case-folding tables on first use from the running JVM's
-character mappings and locale-independent String case conversions. The tables
-follow that JVM's Unicode data, not the JDK used to compile Regulator.
-Upgrading the runtime can therefore change the mappings without rebuilding
-the library.
+Case-insensitive matching uses Unicode 18.0 full case folding, `CaseFolding.txt`
+statuses C and F, from Regulator's pinned Unicode database, so the folding is
+the same on every JVM. Unicode properties and word boundaries still follow the
+running JVM.
+
+Full case folding keeps dotted capital `İ` and dotless small `ı` apart from
+`I` and `i` outside its Turkic mappings, and so does Joni: `(?i)i` matches
+neither `İ` nor `ı`, `(?i)ı` matches only `ı`, and `(?i)İ` matches `i` followed
+by a combining dot above.
+
+Folds that Unicode 18.0 adds include U+1DF95, which folds to `ss` with `ß` and
+`ẞ`, and new case pairs such as U+0277 and U+A7DD.
 
 Trino's pinned Joni dependency, `io.airlift:joni:2.1.5.3`, instead bundles fixed
-Unicode tables through jcodings. Those tables do not change when the JVM is
-upgraded. For example, Regulator's `(?i:ss)` matches capital `ẞ`, while that
-Joni version does not. The `ẞ` to `ss` full fold is defined in
+fold tables built from Unicode 4.1 data through jcodings, so mappings added or
+changed in Unicode since then differ between Regulator and Joni, in both
+directions. For example,
+Regulator's `(?i:ss)` matches capital `ẞ`, while that Joni version does not. The
+`ẞ` to `ss` full fold is defined in
 [Unicode 5.1](https://www.unicode.org/Public/5.1.0/ucd/CaseFolding.txt), released
-in 2008; it is not a Regulator-specific equivalence.
+in 2008; it is not a Regulator-specific equivalence. In the other direction,
+Joni's `(?i)ʔ` matches capital glottal stop `Ɂ` and Regulator's does not,
+because Unicode 5.0 paired `Ɂ` with the then-new small `ɂ` instead of `ʔ`.
 
 Regex case folding is not SQL `upper` or `lower`. Those Trino functions use
 Slice case conversion, which does not perform the same multi-character

@@ -67,17 +67,16 @@ construction fails.
 ## JVM-Sourced Unicode
 
 - General categories, scripts, blocks, binary properties, and Java properties
-  come from the executing JVM's public `Character` APIs. Java and Trino
-  patterns fold case with the JVM's case mappings, and RE2 patterns with the
-  pinned database described below. Pinned upstream RE2's generated Unicode
-  tables are intentionally not retained.
+  come from the executing JVM's public `Character` APIs. Every language folds
+  case with the pinned database described below. Pinned upstream RE2's
+  generated Unicode tables are intentionally not retained.
 - Properties are converted lazily to immutable `CharClass` ranges and cached by
   canonical identity. Each folding rule builds its fold tables once, on
   first use. Matching uses only the resulting ranges and compiled
   instructions; it does not call `Character` or perform property lookup.
-- Property results, and Java and Trino case folding, can change when the
-  runtime JDK changes. Deployments that require identical Unicode behavior
-  must use equivalent supported JDK versions.
+- Property results can change when the runtime JDK changes. Deployments that
+  require identical Unicode behavior must use equivalent supported JDK
+  versions.
 - RE2's ASCII definitions of shorthand classes remain regex-language semantics,
   not Unicode data. Java-specific shorthand modes and other syntax extensions
   require separate explicit decisions.
@@ -85,20 +84,42 @@ construction fails.
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.
 
-## Pinned RE2 Case Folding
+## Pinned Unicode Case Folding
+
+Every language folds case with data from the database that
+`tools/unicode-database` generates from pinned Unicode 18.0 UCD files, so case
+folding does not change with the JDK. Each language keeps the rule of its
+reference engine.
 
 RE2 patterns and `FilteredRe2` canonicalization fold with Unicode 18.0 simple
-case folding (`CaseFolding.txt` statuses C and S), read from the database that
-`tools/unicode-database` generates from pinned UCD files. This is the rule of
-upstream RE2's generated tables, so RE2 folding no longer changes with the JDK,
-and upstream tests that expect it, such as `(?i)i` not matching dotted capital
-`İ` or dotless small `ı`, apply unchanged.
+case folding (`CaseFolding.txt` statuses C and S). This is the rule of
+upstream RE2's generated tables, so upstream tests that expect it, such as
+`(?i)i` not matching dotted capital `İ` or dotless small `ı`, apply unchanged.
 
 Pinned upstream's tables are Unicode 15.1 data. From 15.1 to 18.0, simple case
 folding only gained folds for characters added after 15.1. Most form new
 orbits; nine join the orbit of an existing letter, such as U+A7CB, which folds
 to U+0264, and U+1DF95, which folds to `ß`. One upstream expectation changes
-for this reason: `(?i)[\x00-\x{FFFD}]` also matches U+1DF95. Moving to
+for this reason: `(?i)[\x00-\x{FFFD}]` also matches U+1DF95.
+
+Java patterns fold with the rule of `java.util.regex` `UNICODE_CASE`: code
+points with the same simple lower-case mapping of their simple upper-case
+mapping share a class, computed from the database's `UnicodeData.txt`
+mappings. Trino patterns fold with Unicode 18.0 full case folding
+(`CaseFolding.txt` statuses C and F), Joni's rule; its single-code-point
+classes are the RE2 orbits, and status F supplies its multi-code-point folds.
+
+Both rules previously read the running JVM's case mappings. On the JVM's own
+Unicode version they agree with the database: on JDK 26, whose data is Unicode
+17.0, the previous Trino rule differed from Unicode 17.0 full case folding only
+by putting dotted capital I and dotless small i in the class of I, and the Java
+rule equals the JVM's case classes wherever the JVM assigns every member of a
+class. Java case classes therefore differ from the JVM's only for characters
+Unicode added after the JVM's version, and their case partners. Trino case
+classes differ for the same characters, and also keep dotted capital I and
+dotless small i out of the class of I, as Joni does.
+Case-insensitive matching built on those classes can still differ from
+`Pattern` independently of Unicode version. Moving to
 another Unicode version follows the generator's
 [version procedure](tools/unicode-database/README.md#moving-to-a-new-unicode-version).
 
@@ -115,9 +136,11 @@ another Unicode version follows the generator's
   the compiler combines LF-only beginning-of-line with Java's non-EOF
   assertion, using the same context-sensitive fallback. UNIX multiline `$`
   retains its LF-only rule, including a boundary between CR and LF.
-- Java case folding, Unicode character classes, properties, and boundaries use
-  the executing JVM's Unicode data. `UNICODE_CHARACTER_CLASS` implies
-  `UNICODE_CASE`, matching the JDK flag contract.
+- Unicode character classes, properties, and boundaries use the executing
+  JVM's Unicode data, and case folding uses the pinned database's case
+  mappings, as described in Pinned Unicode Case Folding.
+  `UNICODE_CHARACTER_CLASS` implies `UNICODE_CASE`, matching the JDK flag
+  contract.
 - `JavaRegexp.Options` exposes the supported compile flags as mutable chainable
   options. Compilation snapshots their values and copies the pattern bytes.
 - `\G`, `\R`, nullable repeated captures, canonical equivalence, lookaround,
@@ -928,22 +951,26 @@ profiles from making allocation depend on HotSpot scalar replacement. Capture
 execution retains its existing loop and finalization behavior; this is a shared
 engine specialization rather than a Trino-specific branch.
 
-Full case mappings are derived lazily from the executing JVM's
-character mappings and locale-independent String case transformations. Unicode
-data comes from the running JDK, not the JDK used to compile Regulator. A JDK
-Unicode update can change the derived tables without rebuilding the library.
-Trino's pinned `io.airlift:joni:2.1.5.3` dependency instead carries fixed
-jcodings Unicode tables, which do not change with the running JVM.
+Full case folding is Unicode 18.0 full case folding from the pinned database,
+as described in Pinned Unicode Case Folding. Trino's pinned
+`io.airlift:joni:2.1.5.3` dependency instead carries fixed jcodings fold tables
+built from Unicode 4.1 data.
 
-Keep the JVM-derived mappings rather than reproducing omissions in that pinned
-table. The Java 25 exhaustive test covers all 103 characters with multi-code-point
-folds in pinned Joni and identifies one additional character, capital `ẞ`,
-folding to `ss`. This mapping is defined in
-[Unicode 5.1's case-folding data](https://www.unicode.org/Public/5.1.0/ucd/CaseFolding.txt)
-from 2008. The count is a checked Java 25 comparison, not a permanent limit or
-an inventory of all Unicode differences. Validate mappings and review changed
-expectations when upgrading the supported JDK; do not remove newly supported
-folds merely to retain Joni's old table contents.
+Unicode full case folding keeps dotted capital `İ` and dotless small `ı` apart
+from `I` and `i` outside its Turkic mappings, and so does Joni: `İ` folds only
+to `i` followed by a combining dot above, and `ı` has no fold. An exhaustive
+test checks the Trino rule against the JDK's full case folding comparison, for
+every character the JDK assigns, on Java 26 and newer.
+
+Keep the Unicode 18.0 mappings rather than reproducing omissions in Joni's
+Unicode 4.1 data. Mappings added or changed since then differ in both
+directions: capital `ẞ`, added in
+[Unicode 5.1's case-folding data](https://www.unicode.org/Public/5.1.0/ucd/CaseFolding.txt),
+folds to `ss` in Regulator but not in Joni, as does U+1DF95 from Unicode 18.0,
+and capital glottal stop `Ɂ`, which Unicode 5.0 paired with the new small `ɂ`,
+still folds with `ʔ` in Joni. Review changed expectations when moving the
+database to a new Unicode version; do not remove newly supported folds merely
+to retain Joni's old table contents.
 
 Literals that require full folding compile to a shared-suffix graph whose size
 is linear in the folded literal length. Patterns
@@ -962,8 +989,7 @@ must keep multi-character-foldable literal segments intact.
 Trino's Joni regex functions pass the original Slice bytes to Joni; they do
 not apply SQL `upper`/`lower`. Those functions use Slice case conversion and
 are not regex-folding oracles. No input or pattern is converted through Java
-String to implement matching; String case transformations above are used only
-to derive the shared Unicode mapping table.
+String to implement matching.
 
 Trino patterns and inputs are not validated as UTF-8. Malformed bytes in
 ordinary literal pattern text retain one-byte identity and compare

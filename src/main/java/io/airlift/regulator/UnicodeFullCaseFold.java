@@ -13,20 +13,19 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.UnicodeDatabase.MultiCharacterMappings;
+
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
-import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Full case-fold mappings that join the simple folding of one {@link CaseFolding} with the JVM's
- * multi-character {@code String} case mappings. Only a rule with multi-character folds, the Trino
- * rule, builds them.
+ * Full case-fold mappings that join the simple folding of one {@link CaseFolding} with
+ * multi-character folds. Only a rule with multi-character folds, the Trino rule, builds them.
  */
 final class UnicodeFullCaseFold
 {
@@ -59,10 +58,10 @@ final class UnicodeFullCaseFold
     // per rune per literal.
     private final CharClass[] asciiSimpleFoldClasses;
 
-    private UnicodeFullCaseFold(CaseFolding caseFolding, Map<Integer, int[]> mappingByRune, List<FoldToken> multiCharacterTokens)
+    private UnicodeFullCaseFold(CaseFolding caseFolding, MultiCharacterMappings multiCharacterFolds, List<FoldToken> multiCharacterTokens)
     {
         this.caseFolding = requireNonNull(caseFolding, "caseFolding is null");
-        this.data = new Data(mappingByRune, multiCharacterTokens);
+        this.data = new Data(multiCharacterFolds, multiCharacterTokens);
         asciiSimpleFoldClasses = new CharClass[0x80];
         for (int rune = 0; rune < asciiSimpleFoldClasses.length; rune++) {
             asciiSimpleFoldClasses[rune] = buildSimpleFoldClass(rune);
@@ -239,59 +238,23 @@ final class UnicodeFullCaseFold
     }
 
     /**
-     * Returns the full case folding that joins the simple folding of {@code caseFolding} with the
-     * JVM's multi-character {@code String} case mappings.
+     * Returns the full case folding that joins the simple folding of {@code caseFolding} with
+     * {@code multiCharacterFolds}, whose folded runes are already simple folds.
      */
-    static UnicodeFullCaseFold withJvmMultiCharacterFolds(CaseFolding caseFolding)
+    static UnicodeFullCaseFold withMultiCharacterFolds(CaseFolding caseFolding, MultiCharacterMappings multiCharacterFolds)
     {
-        Map<Integer, int[]> directMappings = new HashMap<>();
-        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-            if (!Character.isLetter(codePoint)) {
-                continue;
-            }
-            String value = new String(Character.toChars(codePoint));
-            int[] uppercase = value.toUpperCase(Locale.ROOT).codePoints().toArray();
-            int[] lowercase = value.toLowerCase(Locale.ROOT).codePoints().toArray();
-            int[] mapping = uppercase.length > 1 ? uppercase : (lowercase.length > 1 ? lowercase : null);
-            if (mapping != null) {
-                directMappings.put(codePoint, canonicalize(caseFolding, mapping));
-            }
-        }
-
-        Map<Integer, int[]> mappingByRune = new HashMap<>(directMappings);
-        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-            if (mappingByRune.containsKey(codePoint)) {
-                continue;
-            }
-            int[] mapping = directMappings.get(Character.toLowerCase(codePoint));
-            if (mapping == null) {
-                mapping = directMappings.get(Character.toUpperCase(codePoint));
-            }
-            if (mapping != null) {
-                mappingByRune.put(codePoint, mapping);
-            }
-        }
-
+        int[] sources = multiCharacterFolds.codePoints();
         Map<IntSequence, CharClassBuilder> sourcesByMapping = new HashMap<>();
-        for (Map.Entry<Integer, int[]> entry : mappingByRune.entrySet()) {
-            sourcesByMapping.computeIfAbsent(new IntSequence(entry.getValue()), _ -> new CharClassBuilder())
-                    .addRange(entry.getKey(), entry.getKey());
+        for (int index = 0; index < sources.length; index++) {
+            sourcesByMapping.computeIfAbsent(new IntSequence(multiCharacterFolds.values()[index]), _ -> new CharClassBuilder())
+                    .addRange(sources[index], sources[index]);
         }
 
         List<FoldToken> tokens = sourcesByMapping.entrySet().stream()
                 .map(entry -> new FoldToken(entry.getKey().runes(), entry.getValue().toCharClass()))
                 .sorted((left, right) -> compare(left.foldedRunes(), right.foldedRunes()))
                 .toList();
-        return new UnicodeFullCaseFold(caseFolding, mappingByRune, tokens);
-    }
-
-    private static int[] canonicalize(CaseFolding caseFolding, int[] runes)
-    {
-        int[] canonical = runes.clone();
-        for (int index = 0; index < canonical.length; index++) {
-            canonical[index] = caseFolding.simpleFold(canonical[index]);
-        }
-        return canonical;
+        return new UnicodeFullCaseFold(caseFolding, multiCharacterFolds, tokens);
     }
 
     private static int compare(int[] left, int[] right)
@@ -321,14 +284,11 @@ final class UnicodeFullCaseFold
         private final int[] tokenMaximumLengths;
         private final CharClass allSourceRunes;
 
-        private Data(Map<Integer, int[]> mappingByRune, List<FoldToken> multiCharacterTokens)
+        private Data(MultiCharacterMappings multiCharacterFolds, List<FoldToken> multiCharacterTokens)
         {
             this.multiCharacterTokens = multiCharacterTokens;
-            mappedRunes = mappingByRune.keySet().stream().mapToInt(Integer::intValue).sorted().toArray();
-            mappings = new int[mappedRunes.length][];
-            for (int index = 0; index < mappedRunes.length; index++) {
-                mappings[index] = mappingByRune.get(mappedRunes[index]);
-            }
+            mappedRunes = multiCharacterFolds.codePoints();
+            mappings = multiCharacterFolds.values();
             tokens = multiCharacterTokens.toArray(FoldToken[]::new);
             tokenFirstRunes = new int[tokens.length];
             tokenMinimumLengths = new int[tokens.length];
