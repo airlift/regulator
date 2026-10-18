@@ -51,6 +51,14 @@ locally:
 ./mvnw clean install -Dregulator.nativeAccessJvmArgument=--enable-native-access=ALL-UNNAMED
 ```
 
+Before changing the Unicode database generator, its manifest, or the
+generated database, run the same check CI runs. It downloads the pinned UCD
+files from unicode.org:
+
+```bash
+python3 -I tools/unicode-database/generate.py --check
+```
+
 ## Benchmark setup
 
 Before changing collectors, campaign orchestration, manifests, or reducers, run

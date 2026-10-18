@@ -28,6 +28,7 @@ and intermediate benchmark reports are not kept here.
 | [`reference/REGULATOR_API.md`](reference/REGULATOR_API.md) | Public API, ownership, matching, captures, and resources |
 | [`integrations/TRINO.md`](integrations/TRINO.md) | Trino compatibility boundary and adoption requirements |
 | [`integrations/JVM_UNICODE.md`](integrations/JVM_UNICODE.md) | JVM-sourced Unicode policy and regeneration |
+| [Unicode database generator](../tools/unicode-database/README.md) | Pinned Unicode database and its regeneration |
 | [`reference/REVERSE_DFA.md`](reference/REVERSE_DFA.md) | Reverse-DFA design reference |
 
 ## Correctness and development
