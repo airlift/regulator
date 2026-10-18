@@ -13,22 +13,42 @@
  */
 package io.airlift.regulator;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.IntPredicate;
+import java.util.function.Supplier;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Builds Unicode property classes and caches them as immutable range sets. The raw property values
- * of the pinned {@link UnicodeDatabase} serve every language; {@link #lookup} resolves the Java and
- * Trino property names from the executing JVM.
+ * Builds Unicode property classes from the pinned {@link UnicodeDatabase} and caches them as
+ * immutable range sets. RE2 reads the raw property values of the database; {@link #lookup}
+ * resolves the Java and Trino property names, which add aliases, blocks, binary properties, and
+ * the properties of {@link Character}, rebuilt from the formulas its documentation gives.
  */
 final class UnicodeGroups
 {
     private static final ConcurrentHashMap<String, CharClass> CACHE = new ConcurrentHashMap<>();
+
+    // The script of every code point that Scripts.txt omits, Character.UnicodeScript.UNKNOWN.
+    private static final String UNKNOWN_SCRIPT = "Unknown";
+
+    // Character.UnicodeBlock keeps the identifier of the earlier name of three blocks that Unicode
+    // renamed, and accepts that name too: GREEK for Greek and Coptic, COMBINING_MARKS_FOR_SYMBOLS
+    // for Combining Diacritical Marks for Symbols, and CYRILLIC_SUPPLEMENTARY for Cyrillic
+    // Supplement, as the javadoc of each constant states.
+    private static final Map<String, String> EARLIER_BLOCK_NAMES = Map.of(
+            "Greek and Coptic", "Greek",
+            "Combining Diacritical Marks for Symbols", "Combining Marks for Symbols",
+            "Cyrillic Supplement", "Cyrillic Supplementary");
+
+    // Character.UnicodeBlock.forName accepts the deprecated SURROGATES_AREA, but its javadoc states
+    // that UnicodeBlock.of returns the standard surrogate blocks instead, so it holds no code point.
+    private static final String SURROGATES_AREA = "SURROGATES_AREA";
 
     private UnicodeGroups() {}
 
@@ -37,11 +57,7 @@ final class UnicodeGroups
      */
     static CharClass any()
     {
-        return CACHE.computeIfAbsent("any", _ -> {
-            CharClassBuilder builder = new CharClassBuilder();
-            builder.addRange(0, RUNEMAX);
-            return builder.toCharClass();
-        });
+        return cached("any", () -> codePoints(0, RUNEMAX));
     }
 
     /**
@@ -64,7 +80,7 @@ final class UnicodeGroups
                 return null;
             }
         }
-        return CACHE.computeIfAbsent("gc:" + String.join("|", values), _ -> {
+        return cached("gc:" + String.join("|", values), () -> {
             CharClassBuilder builder = new CharClassBuilder();
             for (String value : values) {
                 addRanges(builder, categories.ranges(value));
@@ -95,34 +111,27 @@ final class UnicodeGroups
         if (ranges == null) {
             return null;
         }
-        return CACHE.computeIfAbsent("sc:" + longName, _ -> {
-            CharClassBuilder builder = new CharClassBuilder();
-            addRanges(builder, ranges);
-            return builder.toCharClass();
-        });
+        return cached("sc:" + longName, () -> codePoints(ranges));
     }
 
-    private static void addRanges(CharClassBuilder builder, int[] ranges)
+    /**
+     * Returns the long names of the Java and Trino scripts, which are the scripts of Scripts.txt
+     * and Unknown.
+     */
+    static List<String> scriptNames()
     {
-        for (int index = 0; index < ranges.length; index += 2) {
-            builder.addRange(ranges[index], ranges[index + 1]);
-        }
+        return ScriptNames.NAMES;
     }
 
+    /**
+     * Returns the class of a Java or Trino property name, such as Lu, IsGreek, InBasicLatin,
+     * script=Greek, IsAlphabetic, or javaLowerCase, or null if the name is not one.
+     */
     public static CharClass lookup(String name)
     {
         requireNonNull(name, "name is null");
-        Property property = resolve(name);
-        if (property == null) {
-            return null;
-        }
-        return CACHE.computeIfAbsent(property.identity(), _ -> build(property.predicate()));
-    }
-
-    private static Property resolve(String name)
-    {
         if (name.equals("Any") || name.equals("all")) {
-            return new Property("all", _ -> true);
+            return any();
         }
 
         int equalsIndex = name.indexOf('=');
@@ -142,14 +151,14 @@ final class UnicodeGroups
         }
         if (name.startsWith("Is")) {
             String value = name.substring(2);
-            Property property = binaryProperty(value);
+            CharClass property = binaryProperty(value);
             if (property == null) {
                 property = category(value);
             }
             return property != null ? property : javaScript(value);
         }
 
-        Property property = category(name);
+        CharClass property = category(name);
         if (property == null) {
             property = javaProperty(name);
         }
@@ -159,269 +168,318 @@ final class UnicodeGroups
         return property != null ? property : javaScript(name);
     }
 
-    private static Property category(String name)
+    private static CharClass category(String name)
     {
-        int mask = switch (name) {
-            case "Cn", "Unassigned" -> mask(Character.UNASSIGNED);
-            case "Lu", "Uppercase_Letter" -> mask(Character.UPPERCASE_LETTER);
-            case "Ll", "Lowercase_Letter" -> mask(Character.LOWERCASE_LETTER);
-            case "Lt", "Titlecase_Letter" -> mask(Character.TITLECASE_LETTER);
-            case "Lm", "Modifier_Letter" -> mask(Character.MODIFIER_LETTER);
-            case "Lo", "Other_Letter" -> mask(Character.OTHER_LETTER);
-            case "Mn", "Nonspacing_Mark" -> mask(Character.NON_SPACING_MARK);
-            case "Me", "Enclosing_Mark" -> mask(Character.ENCLOSING_MARK);
-            case "Mc", "Spacing_Mark", "Combining_Spacing_Mark" -> mask(Character.COMBINING_SPACING_MARK);
-            case "Nd", "Decimal_Number", "Decimal_Digit_Number" -> mask(Character.DECIMAL_DIGIT_NUMBER);
-            case "Nl", "Letter_Number" -> mask(Character.LETTER_NUMBER);
-            case "No", "Other_Number" -> mask(Character.OTHER_NUMBER);
-            case "Zs", "Space_Separator" -> mask(Character.SPACE_SEPARATOR);
-            case "Zl", "Line_Separator" -> mask(Character.LINE_SEPARATOR);
-            case "Zp", "Paragraph_Separator" -> mask(Character.PARAGRAPH_SEPARATOR);
-            case "Cc", "Control" -> mask(Character.CONTROL);
-            case "Cf", "Format" -> mask(Character.FORMAT);
-            case "Co", "Private_Use" -> mask(Character.PRIVATE_USE);
-            case "Cs", "Surrogate" -> mask(Character.SURROGATE);
-            case "Pd", "Dash_Punctuation" -> mask(Character.DASH_PUNCTUATION);
-            case "Ps", "Open_Punctuation", "Start_Punctuation" -> mask(Character.START_PUNCTUATION);
-            case "Pe", "Close_Punctuation", "End_Punctuation" -> mask(Character.END_PUNCTUATION);
-            case "Pc", "Connector_Punctuation" -> mask(Character.CONNECTOR_PUNCTUATION);
-            case "Po", "Other_Punctuation" -> mask(Character.OTHER_PUNCTUATION);
-            case "Sm", "Math_Symbol" -> mask(Character.MATH_SYMBOL);
-            case "Sc", "Currency_Symbol" -> mask(Character.CURRENCY_SYMBOL);
-            case "Sk", "Modifier_Symbol" -> mask(Character.MODIFIER_SYMBOL);
-            case "So", "Other_Symbol" -> mask(Character.OTHER_SYMBOL);
-            case "Pi", "Initial_Punctuation", "Initial_Quote_Punctuation" -> mask(Character.INITIAL_QUOTE_PUNCTUATION);
-            case "Pf", "Final_Punctuation", "Final_Quote_Punctuation" -> mask(Character.FINAL_QUOTE_PUNCTUATION);
-            case "L", "Letter" -> mask(
-                    Character.UPPERCASE_LETTER,
-                    Character.LOWERCASE_LETTER,
-                    Character.TITLECASE_LETTER,
-                    Character.MODIFIER_LETTER,
-                    Character.OTHER_LETTER);
-            case "LC", "Cased_Letter" -> mask(
-                    Character.UPPERCASE_LETTER,
-                    Character.LOWERCASE_LETTER,
-                    Character.TITLECASE_LETTER);
-            case "M", "Mark" -> mask(
-                    Character.NON_SPACING_MARK,
-                    Character.ENCLOSING_MARK,
-                    Character.COMBINING_SPACING_MARK);
-            case "N", "Number" -> mask(
-                    Character.DECIMAL_DIGIT_NUMBER,
-                    Character.LETTER_NUMBER,
-                    Character.OTHER_NUMBER);
-            case "Z", "Separator" -> mask(
-                    Character.SPACE_SEPARATOR,
-                    Character.LINE_SEPARATOR,
-                    Character.PARAGRAPH_SEPARATOR);
-            case "C", "Other" -> mask(
-                    Character.CONTROL,
-                    Character.FORMAT,
-                    Character.PRIVATE_USE,
-                    Character.SURROGATE,
-                    Character.UNASSIGNED);
-            case "P", "Punctuation" -> mask(
-                    Character.DASH_PUNCTUATION,
-                    Character.START_PUNCTUATION,
-                    Character.END_PUNCTUATION,
-                    Character.CONNECTOR_PUNCTUATION,
-                    Character.OTHER_PUNCTUATION,
-                    Character.INITIAL_QUOTE_PUNCTUATION,
-                    Character.FINAL_QUOTE_PUNCTUATION);
-            case "S", "Symbol" -> mask(
-                    Character.MATH_SYMBOL,
-                    Character.CURRENCY_SYMBOL,
-                    Character.MODIFIER_SYMBOL,
-                    Character.OTHER_SYMBOL);
-            case "LD" -> mask(
-                    Character.UPPERCASE_LETTER,
-                    Character.LOWERCASE_LETTER,
-                    Character.TITLECASE_LETTER,
-                    Character.MODIFIER_LETTER,
-                    Character.OTHER_LETTER,
-                    Character.DECIMAL_DIGIT_NUMBER);
-            default -> 0;
+        return switch (name) {
+            case "Cn", "Unassigned" -> unassigned();
+            case "Lu", "Uppercase_Letter" -> categories("Lu");
+            case "Ll", "Lowercase_Letter" -> categories("Ll");
+            case "Lt", "Titlecase_Letter" -> categories("Lt");
+            case "Lm", "Modifier_Letter" -> categories("Lm");
+            case "Lo", "Other_Letter" -> categories("Lo");
+            case "Mn", "Nonspacing_Mark" -> categories("Mn");
+            case "Me", "Enclosing_Mark" -> categories("Me");
+            case "Mc", "Spacing_Mark", "Combining_Spacing_Mark" -> categories("Mc");
+            case "Nd", "Decimal_Number", "Decimal_Digit_Number" -> categories("Nd");
+            case "Nl", "Letter_Number" -> categories("Nl");
+            case "No", "Other_Number" -> categories("No");
+            case "Zs", "Space_Separator" -> categories("Zs");
+            case "Zl", "Line_Separator" -> categories("Zl");
+            case "Zp", "Paragraph_Separator" -> categories("Zp");
+            case "Cc", "Control" -> categories("Cc");
+            case "Cf", "Format" -> categories("Cf");
+            case "Co", "Private_Use" -> categories("Co");
+            case "Cs", "Surrogate" -> categories("Cs");
+            case "Pd", "Dash_Punctuation" -> categories("Pd");
+            case "Ps", "Open_Punctuation", "Start_Punctuation" -> categories("Ps");
+            case "Pe", "Close_Punctuation", "End_Punctuation" -> categories("Pe");
+            case "Pc", "Connector_Punctuation" -> categories("Pc");
+            case "Po", "Other_Punctuation" -> categories("Po");
+            case "Sm", "Math_Symbol" -> categories("Sm");
+            case "Sc", "Currency_Symbol" -> categories("Sc");
+            case "Sk", "Modifier_Symbol" -> categories("Sk");
+            case "So", "Other_Symbol" -> categories("So");
+            case "Pi", "Initial_Punctuation", "Initial_Quote_Punctuation" -> categories("Pi");
+            case "Pf", "Final_Punctuation", "Final_Quote_Punctuation" -> categories("Pf");
+            case "L", "Letter" -> majorClass('L');
+            case "LC", "Cased_Letter" -> categories("Ll", "Lt", "Lu");
+            case "M", "Mark" -> majorClass('M');
+            case "N", "Number" -> majorClass('N');
+            case "Z", "Separator" -> majorClass('Z');
+            // Character.getType reports an unassigned code point as UNASSIGNED, which
+            // java.util.regex counts in C.
+            case "C", "Other" -> cached("gc:Cc|Cf|Cn|Co|Cs", () -> union(majorClass('C'), unassigned()));
+            case "P", "Punctuation" -> majorClass('P');
+            case "S", "Symbol" -> majorClass('S');
+            case "LD" -> categories("Ll", "Lm", "Lo", "Lt", "Lu", "Nd");
+            default -> null;
         };
-        if (mask == 0) {
-            return null;
-        }
-        return new Property("category:" + mask, codePoint -> (mask & (1 << Character.getType(codePoint))) != 0);
     }
 
-    private static Property javaScript(String name)
+    // Character.UnicodeScript.forName uppercases the name with Locale.ENGLISH and accepts a
+    // script's ISO 15924 code, which is its short name in PropertyValueAliases.txt, before its
+    // long name.
+    private static CharClass javaScript(String name)
     {
-        try {
-            Character.UnicodeScript script = Character.UnicodeScript.forName(name);
-            return new Property("script:" + script.name(), codePoint -> Character.UnicodeScript.of(codePoint) == script);
-        }
-        catch (IllegalArgumentException ignored) {
+        String longName = ScriptNames.BY_UPPERCASE_NAME.get(name.toUpperCase(Locale.ENGLISH));
+        if (longName == null) {
             return null;
         }
+        if (longName.equals(UNKNOWN_SCRIPT)) {
+            return cached("sc:" + UNKNOWN_SCRIPT, () -> {
+                CharClassBuilder builder = new CharClassBuilder();
+                for (String script : UnicodeDatabase.scripts().names()) {
+                    addRanges(builder, UnicodeDatabase.scripts().ranges(script));
+                }
+                builder.negate();
+                return builder.toCharClass();
+            });
+        }
+        return script(longName);
     }
 
-    private static Property block(String name)
+    // Character.UnicodeBlock.forName uppercases the name with Locale.US, and accepts a block's
+    // identifier, which is its name with spaces and hyphens replaced by underscores, its name, and
+    // its name without spaces.
+    private static CharClass block(String name)
     {
-        try {
-            Character.UnicodeBlock block = Character.UnicodeBlock.forName(name);
-            return new Property("block:" + block, codePoint -> Character.UnicodeBlock.of(codePoint) == block);
-        }
-        catch (IllegalArgumentException ignored) {
+        String block = BlockNames.BY_KEY.get(name.toUpperCase(Locale.US));
+        if (block == null) {
             return null;
         }
+        if (block.equals(SURROGATES_AREA)) {
+            return cached("blk:" + SURROGATES_AREA, () -> new CharClassBuilder().toCharClass());
+        }
+        return cached("blk:" + block, () -> codePoints(UnicodeDatabase.blocks().ranges(block)));
     }
 
-    private static Property binaryProperty(String name)
+    // The Unicode properties of java.util.regex, defined in CharPredicates.
+    private static CharClass binaryProperty(String name)
     {
         String normalizedName = name.replace("_", "").toUpperCase(Locale.ROOT);
         return switch (normalizedName) {
-            case "ALPHABETIC", "ALPHA" -> new Property("binary:ALPHABETIC", Character::isAlphabetic);
-            case "ASSIGNED" -> new Property("binary:ASSIGNED", Character::isDefined);
-            case "CONTROL", "CNTRL" -> new Property(
-                    "binary:CONTROL",
-                    codePoint -> Character.getType(codePoint) == Character.CONTROL);
-            case "DIGIT" -> new Property("binary:DIGIT", Character::isDigit);
-            case "EMOJI" -> new Property("binary:EMOJI", Character::isEmoji);
-            case "EMOJICOMPONENT" -> new Property("binary:EMOJICOMPONENT", Character::isEmojiComponent);
-            case "EMOJIMODIFIER" -> new Property("binary:EMOJIMODIFIER", Character::isEmojiModifier);
-            case "EMOJIMODIFIERBASE" -> new Property("binary:EMOJIMODIFIERBASE", Character::isEmojiModifierBase);
-            case "EMOJIPRESENTATION" -> new Property("binary:EMOJIPRESENTATION", Character::isEmojiPresentation);
-            case "EXTENDEDPICTOGRAPHIC" -> new Property("binary:EXTENDEDPICTOGRAPHIC", Character::isExtendedPictographic);
-            case "HEXDIGIT", "XDIGIT" -> new Property("binary:HEXDIGIT", UnicodeGroups::isHexDigit);
-            case "IDEOGRAPHIC" -> new Property("binary:IDEOGRAPHIC", Character::isIdeographic);
-            case "JOINCONTROL" -> new Property(
-                    "binary:JOINCONTROL",
-                    codePoint -> codePoint == 0x200C || codePoint == 0x200D);
-            case "LETTER" -> new Property("binary:LETTER", Character::isLetter);
-            case "LOWERCASE", "LOWER" -> new Property("binary:LOWERCASE", Character::isLowerCase);
-            case "NONCHARACTERCODEPOINT" -> new Property("binary:NONCHARACTERCODEPOINT", UnicodeGroups::isNoncharacterCodePoint);
-            case "PUNCTUATION", "PUNCT" -> new Property("binary:PUNCTUATION", UnicodeGroups::isPunctuation);
-            case "TITLECASE" -> new Property("binary:TITLECASE", Character::isTitleCase);
-            case "UPPERCASE", "UPPER" -> new Property("binary:UPPERCASE", Character::isUpperCase);
-            case "WHITESPACE", "SPACE" -> new Property("binary:WHITESPACE", UnicodeGroups::isWhiteSpace);
-            case "WORD" -> new Property("binary:WORD", UnicodeGroups::isWord);
-            case "ALNUM" -> new Property(
-                    "binary:ALNUM",
-                    codePoint -> Character.isAlphabetic(codePoint) || Character.isDigit(codePoint));
-            case "BLANK" -> new Property(
-                    "binary:BLANK",
-                    codePoint -> Character.getType(codePoint) == Character.SPACE_SEPARATOR || codePoint == '\t');
-            case "GRAPH" -> new Property("binary:GRAPH", UnicodeGroups::isGraph);
-            case "PRINT" -> new Property(
-                    "binary:PRINT",
-                    codePoint -> isGraph(codePoint) ||
-                            ((Character.getType(codePoint) == Character.SPACE_SEPARATOR || codePoint == '\t') &&
-                                    Character.getType(codePoint) != Character.CONTROL));
+            case "ALPHABETIC", "ALPHA" -> alphabetic();
+            case "ASSIGNED" -> assigned();
+            case "CONTROL", "CNTRL" -> categories("Cc");
+            case "DIGIT" -> categories("Nd");
+            case "EMOJI" -> binary("Emoji");
+            case "EMOJICOMPONENT" -> binary("Emoji_Component");
+            case "EMOJIMODIFIER" -> binary("Emoji_Modifier");
+            case "EMOJIMODIFIERBASE" -> binary("Emoji_Modifier_Base");
+            case "EMOJIPRESENTATION" -> binary("Emoji_Presentation");
+            case "EXTENDEDPICTOGRAPHIC" -> binary("Extended_Pictographic");
+            case "HEXDIGIT", "XDIGIT" -> cached("java:HexDigit", () -> union(categories("Nd"), binary("Hex_Digit")));
+            case "IDEOGRAPHIC" -> binary("Ideographic");
+            case "JOINCONTROL" -> binary("Join_Control");
+            case "LETTER" -> majorClass('L');
+            case "LOWERCASE", "LOWER" -> lowercase();
+            case "NONCHARACTERCODEPOINT" -> binary("Noncharacter_Code_Point");
+            case "PUNCTUATION", "PUNCT" -> majorClass('P');
+            case "TITLECASE" -> categories("Lt");
+            case "UPPERCASE", "UPPER" -> uppercase();
+            case "WHITESPACE", "SPACE" -> cached("java:WhiteSpace", () -> union(majorClass('Z'), codePoints(0x09, 0x0D, 0x85, 0x85)));
+            case "WORD" -> cached("java:Word", () -> union(
+                    alphabetic(),
+                    categories("Mc", "Me", "Mn", "Nd", "Pc"),
+                    binary("Join_Control")));
+            case "ALNUM" -> cached("java:Alnum", () -> union(alphabetic(), categories("Nd")));
+            case "BLANK" -> blank();
+            case "GRAPH" -> graph();
+            case "PRINT" -> cached("java:Print", () -> difference(union(graph(), blank()), categories("Cc")));
             default -> null;
         };
     }
 
-    private static Property javaProperty(String name)
+    // The predicates of Character, from the formulas of their javadoc.
+    private static CharClass javaProperty(String name)
     {
-        IntPredicate predicate = switch (name) {
-            case "javaLowerCase" -> Character::isLowerCase;
-            case "javaUpperCase" -> Character::isUpperCase;
-            case "javaAlphabetic" -> Character::isAlphabetic;
-            case "javaIdeographic" -> Character::isIdeographic;
-            case "javaTitleCase" -> Character::isTitleCase;
-            case "javaDigit" -> Character::isDigit;
-            case "javaDefined" -> Character::isDefined;
-            case "javaLetter" -> Character::isLetter;
-            case "javaLetterOrDigit" -> Character::isLetterOrDigit;
-            case "javaJavaIdentifierStart" -> Character::isJavaIdentifierStart;
-            case "javaJavaIdentifierPart" -> Character::isJavaIdentifierPart;
-            case "javaUnicodeIdentifierStart" -> Character::isUnicodeIdentifierStart;
-            case "javaUnicodeIdentifierPart" -> Character::isUnicodeIdentifierPart;
-            case "javaIdentifierIgnorable" -> Character::isIdentifierIgnorable;
-            case "javaSpaceChar" -> Character::isSpaceChar;
-            case "javaWhitespace" -> Character::isWhitespace;
-            case "javaISOControl" -> Character::isISOControl;
-            case "javaMirrored" -> Character::isMirrored;
+        return switch (name) {
+            case "javaLowerCase" -> lowercase();
+            case "javaUpperCase" -> uppercase();
+            case "javaAlphabetic" -> alphabetic();
+            case "javaIdeographic" -> binary("Ideographic");
+            case "javaTitleCase" -> categories("Lt");
+            case "javaDigit" -> categories("Nd");
+            case "javaDefined" -> assigned();
+            case "javaLetter" -> majorClass('L');
+            case "javaLetterOrDigit" -> categories("Ll", "Lm", "Lo", "Lt", "Lu", "Nd");
+            case "javaJavaIdentifierStart" -> cached("java:JavaIdentifierStart", () -> union(majorClass('L'), categories("Nl", "Pc", "Sc")));
+            case "javaJavaIdentifierPart" -> cached("java:JavaIdentifierPart", () -> union(
+                    majorClass('L'),
+                    categories("Mc", "Mn", "Nd", "Nl", "Pc", "Sc"),
+                    identifierIgnorable()));
+            case "javaUnicodeIdentifierStart" -> cached("java:UnicodeIdentifierStart", () -> union(
+                    majorClass('L'),
+                    categories("Nl"),
+                    binary("Other_ID_Start")));
+            case "javaUnicodeIdentifierPart" -> cached("java:UnicodeIdentifierPart", () -> union(
+                    majorClass('L'),
+                    categories("Mc", "Mn", "Nd", "Nl", "Pc"),
+                    identifierIgnorable(),
+                    binary("Other_ID_Start"),
+                    binary("Other_ID_Continue")));
+            case "javaIdentifierIgnorable" -> identifierIgnorable();
+            case "javaSpaceChar" -> majorClass('Z');
+            // Character.isWhitespace: a space, line, or paragraph separator other than the
+            // no-break spaces U+00A0, U+2007, and U+202F, or one of U+0009 through U+000D and
+            // U+001C through U+001F.
+            case "javaWhitespace" -> cached("java:Whitespace", () -> union(
+                    difference(majorClass('Z'), codePoints(0xA0, 0xA0, 0x2007, 0x2007, 0x202F, 0x202F)),
+                    codePoints(0x09, 0x0D, 0x1C, 0x1F)));
+            // Character.isISOControl: U+0000 through U+001F and U+007F through U+009F.
+            case "javaISOControl" -> cached("java:ISOControl", () -> codePoints(0x00, 0x1F, 0x7F, 0x9F));
+            case "javaMirrored" -> binary("Bidi_Mirrored");
             default -> null;
         };
-        return predicate == null ? null : new Property("java:" + name, predicate);
     }
 
-    private static Property asciiPosixProperty(String name)
+    private static CharClass asciiPosixProperty(String name)
     {
-        IntPredicate predicate = switch (name) {
-            case "ASCII" -> codePoint -> codePoint <= 0x7F;
-            case "Alnum" -> codePoint -> isAsciiLetter(codePoint) || isAsciiDigit(codePoint);
-            case "Alpha" -> UnicodeGroups::isAsciiLetter;
-            case "Blank" -> codePoint -> codePoint == ' ' || codePoint == '\t';
-            case "Cntrl" -> codePoint -> codePoint <= 0x1F || codePoint == 0x7F;
-            case "Digit" -> UnicodeGroups::isAsciiDigit;
-            case "Graph" -> codePoint -> codePoint >= 0x21 && codePoint <= 0x7E;
-            case "Lower" -> codePoint -> codePoint >= 'a' && codePoint <= 'z';
-            case "Print" -> codePoint -> codePoint >= 0x20 && codePoint <= 0x7E;
-            case "Punct" -> codePoint -> codePoint >= 0x21 && codePoint <= 0x7E &&
-                    !isAsciiLetter(codePoint) && !isAsciiDigit(codePoint);
-            case "Space" -> codePoint -> codePoint == ' ' || (codePoint >= '\t' && codePoint <= '\r');
-            case "Upper" -> codePoint -> codePoint >= 'A' && codePoint <= 'Z';
-            case "XDigit" -> codePoint -> isAsciiDigit(codePoint) ||
-                    (codePoint >= 'A' && codePoint <= 'F') || (codePoint >= 'a' && codePoint <= 'f');
+        return switch (name) {
+            case "ASCII" -> ascii(name, 0x00, 0x7F);
+            case "Alnum" -> ascii(name, '0', '9', 'A', 'Z', 'a', 'z');
+            case "Alpha" -> ascii(name, 'A', 'Z', 'a', 'z');
+            case "Blank" -> ascii(name, '\t', '\t', ' ', ' ');
+            case "Cntrl" -> ascii(name, 0x00, 0x1F, 0x7F, 0x7F);
+            case "Digit" -> ascii(name, '0', '9');
+            case "Graph" -> ascii(name, 0x21, 0x7E);
+            case "Lower" -> ascii(name, 'a', 'z');
+            case "Print" -> ascii(name, 0x20, 0x7E);
+            case "Punct" -> ascii(name, 0x21, 0x2F, 0x3A, 0x40, 0x5B, 0x60, 0x7B, 0x7E);
+            case "Space" -> ascii(name, '\t', '\r', ' ', ' ');
+            case "Upper" -> ascii(name, 'A', 'Z');
+            case "XDigit" -> ascii(name, '0', '9', 'A', 'F', 'a', 'f');
             default -> null;
         };
-        return predicate == null ? null : new Property("posix:" + name, predicate);
     }
 
-    private static CharClass build(IntPredicate predicate)
+    private static CharClass ascii(String name, int... ranges)
     {
-        CharClassBuilder characterClassBuilder = new CharClassBuilder();
-        int rangeStart = -1;
-        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-            if (predicate.test(codePoint)) {
-                if (rangeStart < 0) {
-                    rangeStart = codePoint;
-                }
-            }
-            else if (rangeStart >= 0) {
-                characterClassBuilder.addRange(rangeStart, codePoint - 1);
-                rangeStart = -1;
-            }
+        return cached("posix:" + name, () -> codePoints(ranges));
+    }
+
+    private static CharClass categories(String... values)
+    {
+        return requireNonNull(generalCategories(List.of(values)), "missing General_Category value");
+    }
+
+    private static CharClass assigned()
+    {
+        return requireNonNull(generalCategories(generalCategoryValues()), "missing General_Category value");
+    }
+
+    private static CharClass unassigned()
+    {
+        return cached("gc:Cn", () -> {
+            CharClassBuilder builder = builder(assigned());
+            builder.negate();
+            return builder.toCharClass();
+        });
+    }
+
+    private static CharClass binary(String property)
+    {
+        int[] ranges = requireNonNull(UnicodeDatabase.binaryProperties().ranges(property), () -> "missing binary property " + property);
+        return cached("binary:" + property, () -> codePoints(ranges));
+    }
+
+    // Character.isAlphabetic: Lu, Ll, Lt, Lm, Lo, Nl, or Other_Alphabetic.
+    private static CharClass alphabetic()
+    {
+        return cached("java:Alphabetic", () -> union(majorClass('L'), categories("Nl"), binary("Other_Alphabetic")));
+    }
+
+    // Character.isLowerCase: Ll or Other_Lowercase.
+    private static CharClass lowercase()
+    {
+        return cached("java:Lowercase", () -> union(categories("Ll"), binary("Other_Lowercase")));
+    }
+
+    // Character.isUpperCase: Lu or Other_Uppercase.
+    private static CharClass uppercase()
+    {
+        return cached("java:Uppercase", () -> union(categories("Lu"), binary("Other_Uppercase")));
+    }
+
+    // CharPredicates.BLANK: Zs or U+0009.
+    private static CharClass blank()
+    {
+        return cached("java:Blank", () -> union(categories("Zs"), codePoints(0x09, 0x09)));
+    }
+
+    // CharPredicates.GRAPH: none of Zs, Zl, Zp, Cc, Cs, and Cn.
+    private static CharClass graph()
+    {
+        return cached("java:Graph", () -> {
+            CharClassBuilder builder = builder(union(categories("Cc", "Cs", "Zl", "Zp", "Zs"), unassigned()));
+            builder.negate();
+            return builder.toCharClass();
+        });
+    }
+
+    // Character.isIdentifierIgnorable: U+0000 through U+0008, U+000E through U+001B, U+007F
+    // through U+009F, and Cf.
+    private static CharClass identifierIgnorable()
+    {
+        return cached("java:IdentifierIgnorable", () -> union(codePoints(0x00, 0x08, 0x0E, 0x1B, 0x7F, 0x9F), categories("Cf")));
+    }
+
+    private static CharClass cached(String identity, Supplier<CharClass> supplier)
+    {
+        // Not computeIfAbsent: a class built from other classes looks them up in the cache.
+        CharClass characterClass = CACHE.get(identity);
+        if (characterClass != null) {
+            return characterClass;
         }
-        if (rangeStart >= 0) {
-            characterClassBuilder.addRange(rangeStart, RUNEMAX);
+        characterClass = supplier.get();
+        CharClass previous = CACHE.putIfAbsent(identity, characterClass);
+        return previous != null ? previous : characterClass;
+    }
+
+    private static CharClass union(CharClass... classes)
+    {
+        CharClassBuilder builder = new CharClassBuilder();
+        for (CharClass characterClass : classes) {
+            builder.addCharClass(builder(characterClass));
         }
-        return characterClassBuilder.toCharClass();
+        return builder.toCharClass();
     }
 
-    private static int mask(int... types)
+    private static CharClass difference(CharClass characterClass, CharClass excluded)
     {
-        int mask = 0;
-        for (int type : types) {
-            mask |= 1 << type;
+        CharClassBuilder builder = builder(characterClass);
+        CharClassBuilder retained = builder(excluded);
+        retained.negate();
+        builder.retainAll(retained);
+        return builder.toCharClass();
+    }
+
+    private static CharClassBuilder builder(CharClass characterClass)
+    {
+        CharClassBuilder builder = new CharClassBuilder();
+        for (RuneRange range : characterClass.rangeView()) {
+            builder.addRange(range.low(), range.high());
         }
-        return mask;
+        return builder;
     }
 
-    private static boolean isHexDigit(int codePoint)
+    // Builds a class from pairs of first and last code point.
+    private static CharClass codePoints(int... ranges)
     {
-        return Character.isDigit(codePoint) ||
-                (codePoint >= 'A' && codePoint <= 'F') ||
-                (codePoint >= 'a' && codePoint <= 'f') ||
-                (codePoint >= 0xFF21 && codePoint <= 0xFF26) ||
-                (codePoint >= 0xFF41 && codePoint <= 0xFF46);
+        CharClassBuilder builder = new CharClassBuilder();
+        addRanges(builder, ranges);
+        return builder.toCharClass();
     }
 
-    private static boolean isNoncharacterCodePoint(int codePoint)
+    private static void addRanges(CharClassBuilder builder, int[] ranges)
     {
-        return (codePoint & 0xFFFE) == 0xFFFE || (codePoint >= 0xFDD0 && codePoint <= 0xFDEF);
+        for (int index = 0; index < ranges.length; index += 2) {
+            builder.addRange(ranges[index], ranges[index + 1]);
+        }
     }
 
-    private static boolean isPunctuation(int codePoint)
-    {
-        int type = Character.getType(codePoint);
-        return (type >= Character.DASH_PUNCTUATION && type <= Character.OTHER_PUNCTUATION) ||
-                type == Character.INITIAL_QUOTE_PUNCTUATION || type == Character.FINAL_QUOTE_PUNCTUATION;
-    }
-
-    private static boolean isWhiteSpace(int codePoint)
-    {
-        int type = Character.getType(codePoint);
-        return (type >= Character.SPACE_SEPARATOR && type <= Character.PARAGRAPH_SEPARATOR) ||
-                (codePoint >= '\t' && codePoint <= '\r') || codePoint == 0x85;
-    }
-
+    // The word property of java.util.regex on the executing JVM, which the match-time word
+    // boundaries of Java and Trino read.
     static boolean isWord(int codePoint)
     {
         int type = Character.getType(codePoint);
@@ -434,26 +492,48 @@ final class UnicodeGroups
                 codePoint == 0x200C || codePoint == 0x200D;
     }
 
-    private static boolean isGraph(int codePoint)
+    private static final class ScriptNames
     {
-        int type = Character.getType(codePoint);
-        return type != Character.SPACE_SEPARATOR &&
-                type != Character.LINE_SEPARATOR &&
-                type != Character.PARAGRAPH_SEPARATOR &&
-                type != Character.CONTROL &&
-                type != Character.SURROGATE &&
-                type != Character.UNASSIGNED;
+        private static final List<String> NAMES;
+        private static final Map<String, String> BY_UPPERCASE_NAME;
+
+        static {
+            List<String> names = new ArrayList<>(UnicodeDatabase.scripts().names());
+            names.add(UNKNOWN_SCRIPT);
+            NAMES = List.copyOf(names);
+
+            Map<String, String> byUppercaseName = new HashMap<>();
+            for (String name : NAMES) {
+                byUppercaseName.put(name.toUpperCase(Locale.ENGLISH), name);
+            }
+            // A short name of a script that Scripts.txt assigns no code point, such as Hrkt, names
+            // no Java script.
+            UnicodeDatabase.scriptShortNames().forEach((shortName, longName) -> {
+                if (NAMES.contains(longName)) {
+                    byUppercaseName.put(shortName.toUpperCase(Locale.ENGLISH), longName);
+                }
+            });
+            BY_UPPERCASE_NAME = Map.copyOf(byUppercaseName);
+        }
     }
 
-    private static boolean isAsciiLetter(int codePoint)
+    private static final class BlockNames
     {
-        return (codePoint >= 'A' && codePoint <= 'Z') || (codePoint >= 'a' && codePoint <= 'z');
-    }
+        private static final Map<String, String> BY_KEY;
 
-    private static boolean isAsciiDigit(int codePoint)
-    {
-        return codePoint >= '0' && codePoint <= '9';
+        static {
+            Map<String, String> byKey = new HashMap<>();
+            for (String block : UnicodeDatabase.blocks().names()) {
+                String identifierName = EARLIER_BLOCK_NAMES.getOrDefault(block, block);
+                byKey.put(identifierName.toUpperCase(Locale.US).replace(' ', '_').replace('-', '_'), block);
+                for (String name : List.of(block, identifierName)) {
+                    String uppercaseName = name.toUpperCase(Locale.US);
+                    byKey.put(uppercaseName, block);
+                    byKey.put(uppercaseName.replace(" ", ""), block);
+                }
+            }
+            byKey.put(SURROGATES_AREA, SURROGATES_AREA);
+            BY_KEY = Map.copyOf(byKey);
+        }
     }
-
-    private record Property(String identity, IntPredicate predicate) {}
 }

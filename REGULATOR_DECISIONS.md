@@ -64,23 +64,40 @@ semantics.
 Regulator does not retain invalid `Re2` instances or C++-style success flags after
 construction fails.
 
-## JVM-Sourced Unicode
+## Pinned Unicode Properties
 
-- Java and Trino general categories, scripts, blocks, binary properties, and
-  Java properties come from the executing JVM's public `Character` APIs. RE2
-  property groups and case folding in every language come from the pinned
-  database described below. Pinned upstream RE2's generated Unicode tables are
-  intentionally not retained.
-- Properties are converted lazily to immutable `CharClass` ranges and cached by
-  canonical identity. Each folding rule builds its fold tables once, on
-  first use. Matching uses only the resulting ranges and compiled
-  instructions; it does not call `Character` or perform property lookup.
-- Property results can change when the runtime JDK changes. Deployments that
-  require identical Unicode behavior must use equivalent supported JDK
-  versions.
+- Unicode properties in every language come from the database that
+  `tools/unicode-database` generates from pinned Unicode 18.0 UCD files, so
+  they do not change with the JDK. Pinned upstream RE2's generated Unicode
+  tables are intentionally not retained.
+- The database holds only Unicode data. RE2 names it by upstream's rule, as
+  RE2 Unicode Property Groups describes. Java and Trino layer the JDK's names
+  on it: categories with their long names and `LC`, `LD`, and `Cn`, scripts
+  with their ISO 15924 codes, blocks with the JDK's identifiers, the `Is`,
+  `In`, `gc=`, `sc=`, and `blk=` forms, binary properties, `java...`
+  properties, and POSIX classes. A JDK property that Unicode does not define
+  as one property is the formula of its `Character` javadoc, and a JDK choice
+  that is not Unicode data is a constant citing that javadoc.
+- Properties are built lazily from the database's ranges into immutable
+  `CharClass` values and cached by canonical identity. Matching uses only the
+  resulting ranges and compiled instructions.
+- Java and Trino match-time word boundaries, and Java's named code points,
+  still read the running JVM.
 - RE2's ASCII definitions of shorthand classes remain regex-language semantics,
   not Unicode data. Java-specific shorthand modes and other syntax extensions
   require separate explicit decisions.
+
+Java and Trino properties previously came from the running JVM's `Character`
+APIs, so their results changed with each JDK upgrade. They now agree with the
+JDK at every code point its own Unicode version assigns, 16.0 on Java 25 and
+17.0 on Java 26, apart from two changes Unicode 17.0 made to older characters:
+U+0295 moved from `Ll` to `Lo`, and 689 code points that are not emoji, such
+as U+2605 BLACK STAR, lost Extended_Pictographic. Characters and names Unicode
+added after the JDK's version, such as the Unicode 18.0 scripts Jurchen and
+Seal, resolve only in Regulator. This agreement is of property membership,
+which uses the JDK's formulas over the pinned database; the accepted property
+spellings keep Regulator's existing rules, which are not identical to
+`Pattern`'s.
 
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.
@@ -157,9 +174,10 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   the compiler combines LF-only beginning-of-line with Java's non-EOF
   assertion, using the same context-sensitive fallback. UNIX multiline `$`
   retains its LF-only rule, including a boundary between CR and LF.
-- Unicode character classes, properties, and boundaries use the executing
-  JVM's Unicode data, and case folding uses the pinned database's case
-  mappings, as described in Pinned Unicode Case Folding.
+- Unicode character classes and properties use the pinned database, as
+  described in Pinned Unicode Properties, and case folding uses its case
+  mappings, as described in Pinned Unicode Case Folding. Boundaries use the
+  executing JVM's Unicode data.
   `UNICODE_CHARACTER_CLASS` implies `UNICODE_CASE`, matching the JDK flag
   contract.
 - `JavaRegexp.Options` exposes the supported compile flags as mutable chainable

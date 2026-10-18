@@ -17,7 +17,7 @@ ACCEPT	(?i)k	ASCII case-insensitive mode is supported
 ACCEPT	\p{IsLatin}	Java Is-prefixed script syntax is supported
 ACCEPT	\p{script=Latin}	Java explicit script syntax is supported
 ACCEPT	\p{InBasic_Latin}	Java Unicode block syntax is supported
-ACCEPT	\p{javaLowerCase}	JVM-backed Java binary properties are supported
+ACCEPT	\p{javaLowerCase}	Java binary properties are supported
 ACCEPT	abc$	Java final-terminator semantics are supported
 ACCEPT	\babc\b	Java word boundaries use Java combining-aware classification
 ACCEPT	\Babc	Java non-boundaries use Java combining-aware classification
@@ -27,7 +27,7 @@ REJECT	\C	This is not a Java Pattern escape
 ACCEPT	(?m)abc	Java multiline anchors are supported
 ACCEPT	(?d)abc	Unix-lines mode is supported
 ACCEPT	(?u)abc	Unicode case-insensitive mode uses Java simple folding
-ACCEPT	(?U)abc	Unicode character-class mode uses JVM-derived predicates
+ACCEPT	(?U)abc	Unicode character-class mode uses the database's classes
 ACCEPT	(?x)abc	Java comments mode is supported throughout the grammar
 REJECT	\R	Java linebreak escape requires atomic CRLF behavior under repetition
 ACCEPT	[\Qabc\E]	Quoted character-class atoms are supported

@@ -32,7 +32,7 @@ ACCEPT	(?m)^b$	Multiline anchors use LF-only line boundaries
 ACCEPT	(?x)a b	Comments mode is supported
 ACCEPT	\p{OldItalic}	Trino Unicode script names omit underscores
 ACCEPT	\p{InBasicLatin}	Trino Unicode blocks use the In prefix
-ACCEPT	\p{javaLowerCase}	JVM-backed Java binary properties are supported
+ACCEPT	\p{javaLowerCase}	Java binary properties are supported
 ACCEPT	\p{Alphabetic}	Direct binary Unicode properties are supported
 ACCEPT	\p{lu}	Unicode category names are case-insensitive
 ACCEPT	\p{inBasicLatin}	Unicode block prefixes are case-insensitive
