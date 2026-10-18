@@ -106,9 +106,9 @@ public class TestUpstreamSimplifyToString
                 new Case("(?i)K", "[Kk\\x{212a}]"),
                 new Case("(?i)k", "[Kk\\x{212a}]"),
                 new Case("(?i)\\x{212a}", "[Kk\\x{212a}]"),
-                // JVM case equivalence also includes dotted and dotless I.
-                new Case("(?i)[a-z]", "[A-Za-z\\x{130}-\\x{131}\\x{17f}\\x{212a}]"),
-                new Case("(?i)[\\x00-\\x{FFFD}]", "[\\x00-\\x{fffd}]"),
+                new Case("(?i)[a-z]", "[A-Za-z\\x{17f}\\x{212a}]"),
+                // Unicode 18.0 added U+1DF95, which folds to U+00DF; upstream's 15.1 tables lack it.
+                new Case("(?i)[\\x00-\\x{FFFD}]", "[\\x00-\\x{fffd}\\x{1df95}]"),
                 new Case("(?i)[\\x00-\\x{10ffff}]", "."),
                 new Case("(a|b|)", "([a-b]|(?:))"),
                 new Case("(|)", "((?:)|(?:))"),

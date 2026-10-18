@@ -26,13 +26,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 // Ported from upstream RE2: re2/testing/possible_match_test.cc.
 public class TestUpstreamPossibleMatchRange
 {
-    private record PrefixTest(String regexp, int maximumLength, String min, String max, boolean maximumUtf8)
-    {
-        private PrefixTest(String regexp, int maximumLength, String min, String max)
-        {
-            this(regexp, maximumLength, min, max, false);
-        }
-    }
+    private record PrefixTest(String regexp, int maximumLength, String min, String max) {}
 
     private static final List<PrefixTest> TESTS = List.of(
             new PrefixTest("", 10, "", ""),
@@ -54,7 +48,7 @@ public class TestUpstreamPossibleMatchRange
             new PrefixTest("a*", 10, "", "ab"),
 
             new PrefixTest("(?i)Abcdef", 10, "ABCDEF", "abcdef"),
-            new PrefixTest("(?i)abc(def|ghi)", 10, "ABCDEF", "abcgh\u0131", true),
+            new PrefixTest("(?i)abc(def|ghi)", 10, "ABCDEF", "abcghi"),
             new PrefixTest("(?i)a+hello", 10, "AA", "ahello"),
             new PrefixTest("(?i)a*hello", 10, "A", "hello"),
             new PrefixTest("(?i)def|abc", 10, "ABC", "def"),
@@ -89,7 +83,7 @@ public class TestUpstreamPossibleMatchRange
             new PrefixTest("\\Aa*", 10, "", "ab"),
 
             new PrefixTest("(?i)\\AAbcdef", 10, "ABCDEF", "abcdef"),
-            new PrefixTest("(?i)\\Aabc(def|ghi)", 10, "ABCDEF", "abcgh\u0131", true),
+            new PrefixTest("(?i)\\Aabc(def|ghi)", 10, "ABCDEF", "abcghi"),
             new PrefixTest("(?i)\\Aa+hello", 10, "AA", "ahello"),
             new PrefixTest("(?i)\\Aa*hello", 10, "A", "hello"),
             new PrefixTest("(?i)\\Adef|abc", 10, "ABC", "def"),
@@ -116,8 +110,7 @@ public class TestUpstreamPossibleMatchRange
             assertThat(range).as("possibleMatchRange(%s)", escape(testCase.regexp)).isNotNull();
 
             assertThat(toByteArray(range.min())).as("min (%s)", escape(testCase.regexp)).isEqualTo(toBytesLatin1(testCase.min));
-            byte[] expectedMaximum = testCase.maximumUtf8 ? testCase.max.getBytes(StandardCharsets.UTF_8) : toBytesLatin1(testCase.max);
-            assertThat(toByteArray(range.max())).as("max (%s)", escape(testCase.regexp)).isEqualTo(expectedMaximum);
+            assertThat(toByteArray(range.max())).as("max (%s)", escape(testCase.regexp)).isEqualTo(toBytesLatin1(testCase.max));
         }
     }
 

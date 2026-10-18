@@ -10,7 +10,8 @@ URL and SHA-256 of each file the generator reads, and the version in those URLs
 is the version of the database. The comment at the top of `generate.py`
 documents the format. The database holds:
 
-- the simple case folding of `CaseFolding.txt`, statuses C and S, as orbits
+- the simple case folding of `CaseFolding.txt`, statuses C and S, as orbits,
+  which RE2 patterns and `FilteredRe2` fold with
 - the multi-character full case folding of `CaseFolding.txt`, status F
 - the simple uppercase and lowercase mappings of `UnicodeData.txt`
 
@@ -74,7 +75,9 @@ Moving to a new version changes every result that depends on the database.
 4. Delete the previous `unicode-<version>.bin`, and set
    `UnicodeDatabase.UNICODE_VERSION` to the new version.
 5. Set the version stated in both copies of `LICENSE-unicode.txt`.
-6. Run the complete test suite. Explain every changed result, and record the
+6. Update the version named in the docs, the `FilteredRe2` Javadoc, and this
+   README; `git grep -n '18\.0'` lists them.
+7. Run the complete test suite. Explain every changed result, and record the
    accepted differences in `REGULATOR_DECISIONS.md` and the language
    references.
 

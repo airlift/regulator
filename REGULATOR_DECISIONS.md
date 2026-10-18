@@ -66,22 +66,41 @@ construction fails.
 
 ## JVM-Sourced Unicode
 
-- General categories, scripts, blocks, binary properties, Java properties, and
-  simple case equivalence come from the executing JVM's public `Character` APIs.
-  Pinned upstream RE2's generated Unicode tables are intentionally not retained.
+- General categories, scripts, blocks, binary properties, and Java properties
+  come from the executing JVM's public `Character` APIs. Java and Trino
+  patterns fold case with the JVM's case mappings, and RE2 patterns with the
+  pinned database described below. Pinned upstream RE2's generated Unicode
+  tables are intentionally not retained.
 - Properties are converted lazily to immutable `CharClass` ranges and cached by
   canonical identity. Each folding rule builds its fold tables once, on
   first use. Matching uses only the resulting ranges and compiled
   instructions; it does not call `Character` or perform property lookup.
-- Unicode-version-sensitive results can change when the runtime JDK changes.
-  Deployments that require identical Unicode behavior must use equivalent
-  supported JDK versions.
+- Property results, and Java and Trino case folding, can change when the
+  runtime JDK changes. Deployments that require identical Unicode behavior
+  must use equivalent supported JDK versions.
 - RE2's ASCII definitions of shorthand classes remain regex-language semantics,
   not Unicode data. Java-specific shorthand modes and other syntax extensions
   require separate explicit decisions.
 
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.
+
+## Pinned RE2 Case Folding
+
+RE2 patterns and `FilteredRe2` canonicalization fold with Unicode 18.0 simple
+case folding (`CaseFolding.txt` statuses C and S), read from the database that
+`tools/unicode-database` generates from pinned UCD files. This is the rule of
+upstream RE2's generated tables, so RE2 folding no longer changes with the JDK,
+and upstream tests that expect it, such as `(?i)i` not matching dotted capital
+`İ` or dotless small `ı`, apply unchanged.
+
+Pinned upstream's tables are Unicode 15.1 data. From 15.1 to 18.0, simple case
+folding only gained folds for characters added after 15.1. Most form new
+orbits; nine join the orbit of an existing letter, such as U+A7CB, which folds
+to U+0264, and U+1DF95, which folds to `ß`. One upstream expectation changes
+for this reason: `(?i)[\x00-\x{FFFD}]` also matches U+1DF95. Moving to
+another Unicode version follows the generator's
+[version procedure](tools/unicode-database/README.md#moving-to-a-new-unicode-version).
 
 ## Java Regular-Subset Frontend
 

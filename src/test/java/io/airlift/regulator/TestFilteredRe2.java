@@ -137,6 +137,17 @@ public class TestFilteredRe2
         assertThat(filteredRe2.atoms()).containsExactly(canonicalText);
         assertThat(filteredRe2.encoding()).isEqualTo(Re2.Options.Encoding.UTF8);
 
+        // Canonicalization follows RE2's Unicode simple case folding: dotted and dotless I have no
+        // fold, U+1FD3 folds to U+0390, and Cherokee small letters fold to their capitals.
+        builder = FilteredRe2.builder();
+        builder.add(utf8("(?i)\u0130\u0131\u0390\uAB70"), Re2.Options.defaults());
+        filteredRe2 = builder.build();
+        canonicalText = filteredRe2.canonicalizeText(utf8("\u0130\u0131\u1FD3\uAB70"));
+        assertThat(canonicalText.toStringUtf8()).isEqualTo("\u0130\u0131\u0390\u13A0");
+        assertThat(filteredRe2.atoms()).containsExactly(canonicalText);
+        assertThat(FilteredRe2.canonicalizeUnicodeCodePoint(0x130)).isEqualTo(0x130);
+        assertThat(FilteredRe2.canonicalizeUnicodeCodePoint(0x1FD3)).isEqualTo(0x390);
+
         // Every ASCII byte folds by the rule, and bytes of invalid UTF-8 are preserved.
         byte[] ascii = new byte[0x80];
         byte[] foldedAscii = new byte[0x80];

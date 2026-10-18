@@ -219,37 +219,14 @@ public class TestJvmUnicodeAuthority
         }
     }
 
+    // Java and Trino fold with the JVM's case classes. TestCaseFolding checks that the folds form
+    // closed orbits.
     @Test
     public void testCaseFoldingUsesJvmCanonicalEquivalence()
     {
-        int[] expectedGroupSize = new int[RUNEMAX + 1];
         for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-            expectedGroupSize[canonicalCaseFold(codePoint)]++;
-        }
-
-        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-            int canonicalCodePoint = canonicalCaseFold(codePoint);
-            int foldedCodePoint = codePoint;
-            int actualGroupSize = 0;
-            do {
-                if (canonicalCaseFold(foldedCodePoint) != canonicalCodePoint) {
-                    throw new AssertionError(String.format(Locale.ROOT, "wrong canonical fold in cycle for U+%04X", codePoint));
-                }
-                actualGroupSize++;
-                if (actualGroupSize > expectedGroupSize[canonicalCodePoint]) {
-                    throw new AssertionError(String.format(Locale.ROOT, "fold cycle does not close for U+%04X", codePoint));
-                }
-                foldedCodePoint = CaseFolding.JAVA.cycleFoldRune(foldedCodePoint);
-            }
-            while (foldedCodePoint != codePoint);
-
-            if (actualGroupSize != expectedGroupSize[canonicalCodePoint]) {
-                throw new AssertionError(String.format(
-                        Locale.ROOT,
-                        "incomplete fold equivalence class for U+%04X: expected %s, got %s",
-                        codePoint,
-                        expectedGroupSize[canonicalCodePoint],
-                        actualGroupSize));
+            if (CaseFolding.JAVA.simpleFold(codePoint) != canonicalCaseFold(codePoint)) {
+                throw new AssertionError(String.format(Locale.ROOT, "%s: wrong simple fold for U+%04X", CaseFolding.JAVA, codePoint));
             }
         }
     }
