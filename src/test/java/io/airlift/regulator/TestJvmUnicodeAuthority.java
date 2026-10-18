@@ -219,16 +219,31 @@ public class TestJvmUnicodeAuthority
         }
     }
 
-    // Java and Trino fold with the JVM's case classes. TestCaseFolding checks that the folds form
-    // closed orbits.
+    // Java folds as the JVM's case classes do, but from the database's case mappings. Unicode keeps
+    // the case mappings of an assigned character, but a newer character can join the orbit of an
+    // older one, so the two agree wherever the JVM assigns every member of the orbit. The database's
+    // Unicode version is at least that of every supported JVM.
     @Test
-    public void testCaseFoldingUsesJvmCanonicalEquivalence()
+    public void testCaseFoldingMatchesJvmCaseClasses()
     {
         for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-            if (CaseFolding.JAVA.simpleFold(codePoint) != canonicalCaseFold(codePoint)) {
+            if (orbitAssignedByJvm(codePoint) && CaseFolding.JAVA.simpleFold(codePoint) != canonicalCaseFold(codePoint)) {
                 throw new AssertionError(String.format(Locale.ROOT, "%s: wrong simple fold for U+%04X", CaseFolding.JAVA, codePoint));
             }
         }
+    }
+
+    private static boolean orbitAssignedByJvm(int codePoint)
+    {
+        int member = codePoint;
+        do {
+            if (!Character.isDefined(member)) {
+                return false;
+            }
+            member = CaseFolding.JAVA.cycleFoldRune(member);
+        }
+        while (member != codePoint);
+        return true;
     }
 
     @Test

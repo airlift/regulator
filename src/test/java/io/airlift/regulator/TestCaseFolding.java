@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.UnicodeDatabase.CodePointMappings;
 import org.junit.jupiter.api.Test;
 
 import java.util.Locale;
@@ -60,6 +61,28 @@ public class TestCaseFolding
                             codePoint,
                             orbitSize,
                             foldCount[fold]));
+                }
+            }
+        }
+    }
+
+    // The simple uppercase and lowercase of every code point are in its orbit. Simple case folding
+    // gives dotted capital I and dotless small i no fold, so RE2 and Trino keep them apart from the
+    // I and i their case mappings name; Java joins them, as java.util.regex does.
+    @Test
+    public void testCaseMappingsStayInFoldOrbit()
+    {
+        for (CaseFolding caseFolding : new CaseFolding[] {CaseFolding.RE2, CaseFolding.JAVA, CaseFolding.TRINO}) {
+            for (CodePointMappings mappings : new CodePointMappings[] {UnicodeDatabase.simpleUppercaseMappings(), UnicodeDatabase.simpleLowercaseMappings()}) {
+                for (int index = 0; index < mappings.codePoints().length; index++) {
+                    int codePoint = mappings.codePoints()[index];
+                    if (caseFolding != CaseFolding.JAVA && (codePoint == 0x130 || codePoint == 0x131)) {
+                        continue;
+                    }
+                    int mapping = mappings.values()[index];
+                    if (caseFolding.simpleFold(mapping) != caseFolding.simpleFold(codePoint)) {
+                        throw new AssertionError(String.format(Locale.ROOT, "%s: case mapping U+%04X of U+%04X is outside its orbit", caseFolding, mapping, codePoint));
+                    }
                 }
             }
         }

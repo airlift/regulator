@@ -751,7 +751,8 @@ public class TestTrinoRegexpLanguage
         assertFirstMatchMatchesJoni("(?i:s{1})(?-i:ss)", "Sss");
         assertFirstMatchMatchesJoni("(?i:s{1})(?-i:ss)", "SSS");
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:a+aa)")).pattern().forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
-        // The JVM-derived table also folds capital sharp S; pinned Joni does not.
+        // Capital sharp S joined Unicode in 5.1; pinned Joni's fold tables are Unicode 4.1 data,
+        // so it does not fold it. Regulator follows its pinned Unicode full case folding.
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:ss)")).extract(utf8Slice("ẞ"))).isEqualTo(utf8Slice("ẞ"));
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:s{1}ss)")).extract(utf8Slice("sẞ"))).isEqualTo(utf8Slice("sẞ"));
     }
@@ -791,16 +792,21 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testFullCaseFoldProgramGrowthIsLinear()
     {
-        int shortProgramSize = TrinoRegexp.compile(utf8Slice("(?i)" + "ss".repeat(16)))
-                .pattern()
-                .forwardProgramForDiagnostics()
-                .size();
-        int longProgramSize = TrinoRegexp.compile(utf8Slice("(?i)" + "ss".repeat(32)))
-                .pattern()
-                .forwardProgramForDiagnostics()
-                .size();
+        // Each further 16 repetitions adds no more instructions than the previous 16. Comparing
+        // increments removes the program's fixed size offset.
+        int shortProgramSize = fullCaseFoldProgramSize(16);
+        int mediumProgramSize = fullCaseFoldProgramSize(32);
+        int longProgramSize = fullCaseFoldProgramSize(48);
 
-        assertThat(longProgramSize).isLessThanOrEqualTo((shortProgramSize * 2) + 2);
+        assertThat(longProgramSize - mediumProgramSize).isLessThanOrEqualTo(mediumProgramSize - shortProgramSize);
+    }
+
+    private static int fullCaseFoldProgramSize(int repetitions)
+    {
+        return TrinoRegexp.compile(utf8Slice("(?i)" + "ss".repeat(repetitions)))
+                .pattern()
+                .forwardProgramForDiagnostics()
+                .size();
     }
 
     @ParameterizedTest(name = "{0}")
@@ -928,6 +934,17 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("(?i)\\Aß+\\z", "SSSS", true),
                 new MatchCase("(?i)\\A[ß]\\z", "ss", true),
                 new MatchCase("(?i)\\A[s][s]\\z", "ß", false),
+                // Joni folds dotted capital I only to "i" with a combining dot above and gives dotless
+                // small i no fold, as Unicode full case folding does outside its Turkic mappings.
+                new MatchCase("(?i)\\Ai\\z", "\u0130", false),
+                new MatchCase("(?i)\\AI\\z", "\u0130", false),
+                new MatchCase("(?i)\\Ai\\z", "\u0131", false),
+                new MatchCase("(?i)\\AI\\z", "\u0131", false),
+                new MatchCase("(?i)\\A\u0131\\z", "i", false),
+                new MatchCase("(?i)\\A\u0131\\z", "I", false),
+                new MatchCase("(?i)\\A\u0131\\z", "\u0131", true),
+                new MatchCase("(?i)\\A\u0130\\z", "i\u0307", true),
+                new MatchCase("(?i)\\Ai\u0307\\z", "\u0130", true),
                 new MatchCase("\\p{Alphabetic}+", "abc", true),
                 new MatchCase("\\p{lu}+", "ABC", true),
                 new MatchCase("\\p{inBasicLatin}+", "abc", true),

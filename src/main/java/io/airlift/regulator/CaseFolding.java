@@ -18,8 +18,8 @@ import io.airlift.regulator.UnicodeDatabase.CodePointMappings;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.function.IntUnaryOperator;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
@@ -33,9 +33,9 @@ import static java.util.Objects.requireNonNull;
  * which {@link #cycleFoldRune(int)} visits in ascending order, wrapping from the largest member to
  * the smallest. Instances are shared and immutable. On first use, a rule builds its simple folds,
  * its orbit successors, and its sorted case-folded runes together from the sparse list of code
- * points its simple fold changes, which comes from the pinned {@link UnicodeDatabase} or from a
- * scan of the JVM's case mappings; each table holds only the few dozen blocks of 256 code points
- * that have a case partner. The multi-character folds are built separately, on first use.
+ * points its simple fold changes, which comes from the pinned {@link UnicodeDatabase}; each table
+ * holds only the few dozen blocks of 256 code points that have a case partner. The
+ * multi-character folds are built separately, on first use.
  * <p>
  * Each table field is plain rather than volatile, so the compiler's fold loops read it without a
  * fence. A thread that reads the field before another thread's write is visible sees null and
@@ -45,27 +45,25 @@ import static java.util.Objects.requireNonNull;
 final class CaseFolding
 {
     /**
-     * The JVM's case classes, {@code Character.toLowerCase(Character.toUpperCase(codePoint))}, and its
-     * multi-character {@code String} case mappings. Java and Trino fold with this one rule, so its
-     * tables are shared.
+     * Trino's full case folding, CaseFolding.txt statuses C and F from the pinned
+     * {@link UnicodeDatabase}, the rule Joni folds with. It shares the orbits and tables of the
+     * RE2 rule, because each status S fold joins code points whose status F folds are equal.
      */
-    private static final CaseFolding JVM = new CaseFolding("JVM case folding", () -> new FoldTables(scanSimpleFolds(CaseFolding::jvmSimpleFold)), true);
+    static final CaseFolding TRINO = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " full case folding", () -> SimpleCaseFolding.TABLES, true);
+
+    /**
+     * Java's case classes, {@code toLowerCase(toUpperCase(codePoint))} as {@code java.util.regex}
+     * folds them, computed from the simple case mappings of the pinned {@link UnicodeDatabase}.
+     * Case-insensitive matching built on these classes, such as of ranges, is Regulator's and is
+     * not identical to {@code Pattern}'s.
+     */
+    static final CaseFolding JAVA = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " case classes", () -> new FoldTables(javaSimpleFolds()), false);
 
     /**
      * RE2's simple case folding, CaseFolding.txt statuses C and S from the pinned
      * {@link UnicodeDatabase}, as upstream RE2 folds with its own Unicode tables.
      */
-    static final CaseFolding RE2 = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " simple case folding", () -> new FoldTables(UnicodeDatabase.simpleCaseFolding()), false);
-
-    /**
-     * The Java language default.
-     */
-    static final CaseFolding JAVA = JVM;
-
-    /**
-     * The Trino language default, whose patterns also use the multi-character folds.
-     */
-    static final CaseFolding TRINO = JVM;
+    static final CaseFolding RE2 = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " simple case folding", () -> SimpleCaseFolding.TABLES, false);
 
     private final String name;
     private final Supplier<FoldTables> tables;
@@ -217,35 +215,39 @@ final class CaseFolding
             throw new IllegalStateException(name + " has no multi-character folds");
         }
         if (fullCaseFold == null) {
-            fullCaseFold = UnicodeFullCaseFold.withJvmMultiCharacterFolds(this);
+            fullCaseFold = UnicodeFullCaseFold.withMultiCharacterFolds(this, UnicodeDatabase.fullCaseFolding());
         }
         return fullCaseFold;
     }
 
-    private static int jvmSimpleFold(int codePoint)
+    // toLowerCase(toUpperCase(codePoint)) differs from the code point only where one of the two
+    // mappings changes it.
+    private static CodePointMappings javaSimpleFolds()
     {
-        return Character.toLowerCase(Character.toUpperCase(codePoint));
-    }
-
-    // One scan of every code point collects the code points the simple fold changes.
-    private static CodePointMappings scanSimpleFolds(IntUnaryOperator simpleFold)
-    {
-        int[] sources = new int[1024];
-        int[] targets = new int[1024];
+        CodePointMappings uppercase = UnicodeDatabase.simpleUppercaseMappings();
+        CodePointMappings lowercase = UnicodeDatabase.simpleLowercaseMappings();
+        int[] candidates = IntStream.concat(Arrays.stream(uppercase.codePoints()), Arrays.stream(lowercase.codePoints()))
+                .sorted()
+                .distinct()
+                .toArray();
+        int[] sources = new int[candidates.length];
+        int[] targets = new int[candidates.length];
         int count = 0;
-        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-            int target = simpleFold.applyAsInt(codePoint);
+        for (int codePoint : candidates) {
+            int target = lowercase.map(uppercase.map(codePoint));
             if (target != codePoint) {
-                if (count == sources.length) {
-                    sources = Arrays.copyOf(sources, count * 2);
-                    targets = Arrays.copyOf(targets, count * 2);
-                }
                 sources[count] = codePoint;
                 targets[count] = target;
                 count++;
             }
         }
         return new CodePointMappings(Arrays.copyOf(sources, count), Arrays.copyOf(targets, count));
+    }
+
+    // The RE2 and Trino rules share the tables of the database's simple case folding.
+    private static final class SimpleCaseFolding
+    {
+        private static final FoldTables TABLES = new FoldTables(UnicodeDatabase.simpleCaseFolding());
     }
 
     /**

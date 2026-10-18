@@ -49,6 +49,13 @@ Repetition counts are limited to 1,000. The implementation preserves Java's
 final-terminator behavior, multiline CRLF handling, Unix-lines mode, Unicode
 case folding, and Unicode character classes.
 
+Unicode case folding uses Java's rule, which puts code points whose upper case
+has the same lower case in one class, applied to the simple case mappings of
+Regulator's pinned Unicode 18.0 database, so it is the same on every JVM. Unicode
+properties and boundaries follow the running JVM. On a JVM with an older
+Unicode version, characters that Unicode added since then, and the case
+partners they joined, fold differently in Regulator and in `Pattern`.
+
 `find`, `lookingAt`, and `matches` have the same high-level meaning as their JDK
 counterparts. Captures are returned as zero-copy Slice views.
 

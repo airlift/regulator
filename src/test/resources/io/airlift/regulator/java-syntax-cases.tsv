@@ -26,7 +26,7 @@ REJECT	\G	Previous-match boundary is stateful
 REJECT	\C	This is not a Java Pattern escape
 ACCEPT	(?m)abc	Java multiline anchors are supported
 ACCEPT	(?d)abc	Unix-lines mode is supported
-ACCEPT	(?u)abc	Unicode case-insensitive mode uses JVM-derived simple folding
+ACCEPT	(?u)abc	Unicode case-insensitive mode uses Java simple folding
 ACCEPT	(?U)abc	Unicode character-class mode uses JVM-derived predicates
 ACCEPT	(?x)abc	Java comments mode is supported throughout the grammar
 REJECT	\R	Java linebreak escape requires atomic CRLF behavior under repetition
