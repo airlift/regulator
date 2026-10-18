@@ -22,6 +22,7 @@ import java.util.BitSet;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.IntPredicate;
 import java.util.regex.Pattern;
@@ -32,9 +33,10 @@ import static java.util.regex.Pattern.UNICODE_CASE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The Java and Trino Unicode properties and word boundaries come from the pinned database, and
- * agree with the running JDK at every code point except those Unicode assigned after the JDK's
- * Unicode version.
+ * Checks Java and Trino properties, word boundaries, Java character names, name case conversions,
+ * and Java case classes against the running JDK. Inputs and case-mapping outputs newer than the
+ * JDK's Unicode version are excluded. {@code EXPECTED_DIFFERENCES} lists allowed changes to older
+ * characters.
  */
 public class TestJdkUnicodeAgreement
 {
@@ -243,6 +245,103 @@ public class TestJdkUnicodeAgreement
         assertAgreement(EmptyOp::isUnicodeWord, TestJdkUnicodeAgreement::isTrinoWord, "Trino word");
         assertAgreement(UnicodeGroups::isNonspacingMark, codePoint -> Character.getType(codePoint) == Character.NON_SPACING_MARK, "Mn");
         assertAgreement(UnicodeGroups::isLetterOrDigit, Character::isLetterOrDigit, "javaLetterOrDigit");
+    }
+
+    // Every name that Java's \N{name} resolves is the JDK's name for its code point, and both
+    // resolve it.
+    @Test
+    public void testCharacterNamesAgreeWithCharacter()
+    {
+        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
+            if (NEWER.get(codePoint)) {
+                continue;
+            }
+            String name = JavaCharacterNames.getName(codePoint);
+            String jdkName = Character.getName(codePoint);
+            if (!Objects.equals(name, jdkName)) {
+                throw new AssertionError(String.format(Locale.ROOT, "U+%04X is named %s, not %s as in the JDK's Unicode %s", codePoint, name, jdkName, JDK_UNICODE_VERSION));
+            }
+            if (name != null && (JavaCharacterNames.codePointOf(name) != codePoint || Character.codePointOf(name) != codePoint)) {
+                throw new AssertionError(String.format(Locale.ROOT, "%s does not name U+%04X", name, codePoint));
+            }
+        }
+
+        // Character.codePointOf trims characters up to U+0020 and uppercases as the root locale
+        // does, which takes some non-ASCII letters to ASCII, but accepts neither aliases, such as
+        // LINE FEED, nor the names Unicode derives for ranges, such as CJK UNIFIED IDEOGRAPH-4E00.
+        for (String name : List.of(
+                " latin small letter a\t",
+                "Latin Small Letter A",
+                "LATIN SMALL LETTER  A",
+                "\u00A0LATIN SMALL LETTER A",
+                "lat\u0131n small letter a",
+                "LAT\u0130N SMALL LETTER A",
+                "\u017Fpace",
+                "CRO\u00DF MARK",
+                "\uFB01RE",
+                "\u212Aelvin sign",
+                "line feed (lf)",
+                "LINE FEED",
+                "BEL",
+                "BELL",
+                "PADDING CHARACTER",
+                "latin 1 supplement 84",
+                "BASIC LATIN 41",
+                "cjk unified ideographs 4e00",
+                "CJK UNIFIED IDEOGRAPHS 04E00",
+                "CJK UNIFIED IDEOGRAPHS +4E00",
+                "CJK UNIFIED IDEOGRAPH-4E00",
+                "cjk compatibility ideograph-f900",
+                "TANGUT COMPONENT-001",
+                "HIGH SURROGATES D800",
+                "HANGUL SYLLABLE GA",
+                "GREEK 0378",
+                "",
+                " ")) {
+            assertThat(JavaCharacterNames.codePointOf(name)).as(name).isEqualTo(jdkCodePointOf(name));
+        }
+    }
+
+    // The parsers normalize property and character names with the case conversions of String and
+    // Character without a locale, from the database's mappings. A mapping Unicode added after the
+    // JDK's version can map an older character to a newer one.
+    @Test
+    public void testCaseConversionsAgreeWithString()
+    {
+        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
+            String value = Character.toString(codePoint);
+            String uppercase = UnicodeCase.toUpperCase(value);
+            String lowercase = UnicodeCase.toLowerCase(value);
+            if (NEWER.get(codePoint) || hasNewer(uppercase) || hasNewer(lowercase)) {
+                continue;
+            }
+            if (!uppercase.equals(value.toUpperCase(Locale.ROOT)) ||
+                    !lowercase.equals(value.toLowerCase(Locale.ROOT)) ||
+                    UnicodeCase.toUpperCase(codePoint) != Character.toUpperCase(codePoint)) {
+                throw new AssertionError(String.format(Locale.ROOT, "U+%04X converts case unlike the JDK's Unicode %s", codePoint, JDK_UNICODE_VERSION));
+            }
+            for (int other : new int[] {Character.toUpperCase(codePoint), Character.toLowerCase(codePoint), 'I', 'K', 'S'}) {
+                String otherValue = Character.toString(other);
+                if (UnicodeCase.equalsIgnoreCase(value, otherValue) != value.equalsIgnoreCase(otherValue)) {
+                    throw new AssertionError(String.format(Locale.ROOT, "U+%04X and U+%04X compare ignoring case unlike the JDK's Unicode %s", codePoint, other, JDK_UNICODE_VERSION));
+                }
+            }
+        }
+    }
+
+    private static boolean hasNewer(String value)
+    {
+        return value.codePoints().anyMatch(NEWER::get);
+    }
+
+    private static int jdkCodePointOf(String name)
+    {
+        try {
+            return Character.codePointOf(name);
+        }
+        catch (IllegalArgumentException e) {
+            return -1;
+        }
     }
 
     @Test

@@ -41,7 +41,7 @@ Compare the complete operation on your workload.
 | Boundaries | Combining-aware `\b` and `\B` in ASCII and Unicode-character-class modes |
 | Character classes | Union, nested intersection, subtraction, negation, quoted atoms, ranges, and Java's empty intersection operands |
 | Predefined classes | ASCII and Unicode forms of digit, whitespace, word, horizontal-whitespace, vertical-whitespace, and POSIX classes |
-| Unicode properties | Categories, scripts, blocks, binary properties, and `java...` properties from the pinned Unicode 18.0 database, and JVM-derived named code points |
+| Unicode properties | Categories, scripts, blocks, binary properties, and `java...` properties from the pinned Unicode 18.0 database |
 | Escapes | Quoting, hexadecimal, Unicode, octal, control, named-code-point, horizontal-whitespace, and vertical-whitespace escapes |
 | Inline flags | `d`, `i`, `m`, `s`, `u`, `U`, and `x`, including scoped forms |
 
@@ -54,22 +54,22 @@ Unicode 18.0 database, so it is the same on every JVM. Unicode case folding
 uses Java's rule, which puts code points whose upper case has the same lower
 case in one class, applied to the database's simple case mappings. Word
 boundaries read the database's word characters, nonspacing marks, letters, and
-digits by the same formulas. Named code points follow the running JVM.
+digits by the same formulas. Named code points `\N{name}` accept the names of
+`Character.codePointOf`, built from the database's character names and blocks.
 
 On a JVM with an older Unicode version, characters that Unicode added since
 then, and the case partners they joined, have properties, folds, and word
 boundaries in Regulator but not in `Pattern`, and names that Unicode added
-since then, such as the script `Seal`, are accepted only by Regulator. On
-Java 25 three more results differ from `Pattern`. Unicode 17.0 changed two for
-older characters: U+0295 is `Lo` rather than lowercase, and 689 code points
-that are not emoji, such as U+2605 BLACK STAR, are not
-`\p{IsExtended_Pictographic}`. And JDK 25's `Pattern` does not match `ß`
-against `ẞ` case-insensitively, which JDK 26 does.
+since then, such as the script `Seal` and the names of new characters in
+`\N{name}`, are accepted only by Regulator. On Java 25 three more results
+differ from `Pattern`. Unicode 17.0 changed two for older characters: U+0295 is
+`Lo` rather than lowercase, and 689 code points that are not emoji, such as
+U+2605 BLACK STAR, are not `\p{IsExtended_Pictographic}`. And JDK 25's
+`Pattern` does not match `ß` against `ẞ` case-insensitively, which JDK 26 does.
 
 Regulator's supported property names and case-insensitive matching can differ
 from `Pattern` independently of Unicode version, as
-[`JVM_UNICODE.md`](../../integrations/JVM_UNICODE.md#differences-from-the-jdk)
-says.
+[`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) says.
 
 `find`, `lookingAt`, and `matches` have the same high-level meaning as their JDK
 counterparts. Captures are returned as zero-copy Slice views.

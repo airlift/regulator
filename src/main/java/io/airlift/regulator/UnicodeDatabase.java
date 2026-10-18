@@ -21,6 +21,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.IntPredicate;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 
@@ -30,7 +31,9 @@ import static io.airlift.regulator.CharClass.RUNEMAX;
  * <p>
  * The resource is read once, on first use, and each section is decoded once, on its own first
  * use, through a holder class, so a process that never folds case with a rule, or never uses a
- * property, decodes none of the data that only it needs.
+ * property, decodes none of the data that only it needs. The character names are most of the
+ * resource, and only Java's {@code \N{name}} reads them, so the first read keeps every other
+ * section, and the names are read from the resource again on their own first use.
  */
 final class UnicodeDatabase
 {
@@ -50,7 +53,13 @@ final class UnicodeDatabase
     private static final int SECTION_BLOCK = 8;
     private static final int SECTION_BINARY_PROPERTIES = 9;
     private static final int SECTION_AGE = 10;
-    private static final int SECTION_COUNT = 11;
+    private static final int SECTION_FULL_UPPERCASE_MAPPINGS = 11;
+    private static final int SECTION_FULL_LOWERCASE_MAPPINGS = 12;
+    private static final int SECTION_NAME = 13;
+    private static final int SECTION_CONTROL_NAME = 14;
+    private static final int SECTION_COUNT = 15;
+    private static final int MAX_NAME_TOKENS = 15;
+    private static final char[] HEX_DIGITS = "0123456789ABCDEF".toCharArray();
 
     private UnicodeDatabase() {}
 
@@ -156,6 +165,44 @@ final class UnicodeDatabase
     }
 
     /**
+     * Returns the unconditional uppercase mappings of SpecialCasing.txt to two or more code
+     * points. Every other code point fully uppercases as it simply uppercases.
+     */
+    static MultiCharacterMappings fullUppercaseMappings()
+    {
+        return FullUppercaseMappings.MAPPINGS;
+    }
+
+    /**
+     * Returns the unconditional lowercase mappings of SpecialCasing.txt to two or more code
+     * points. Every other code point fully lowercases as it simply lowercases, except where a
+     * conditional mapping, such as Final_Sigma, applies.
+     */
+    static MultiCharacterMappings fullLowercaseMappings()
+    {
+        return FullLowercaseMappings.MAPPINGS;
+    }
+
+    /**
+     * Returns the Name of each code point that UnicodeData.txt field 1 names, such as LATIN SMALL
+     * LETTER A. Code points that the field gives a label in angle brackets, such as
+     * {@code <control>} or a range of CJK ideographs, have none.
+     */
+    static CharacterNames names()
+    {
+        return Names.NAMES;
+    }
+
+    /**
+     * Returns the Unicode_1_Name, UnicodeData.txt field 10, of each control code point that has
+     * one, such as LINE FEED (LF).
+     */
+    static CharacterNames controlNames()
+    {
+        return ControlNames.NAMES;
+    }
+
+    /**
      * Code points in strictly ascending order and the code point each maps to; every other code
      * point maps to itself. Holders must not modify the arrays.
      */
@@ -222,6 +269,173 @@ final class UnicodeDatabase
         }
     }
 
+    /**
+     * Code points and a name of each. A name is words of uppercase letters, digits, hyphens, and
+     * parentheses, separated by single spaces.
+     */
+    static final class CharacterNames
+    {
+        private final byte[] words;
+        private final int[] wordEnds;
+        private final int frequentWordCount;
+        private final int[] codePoints;
+        private final int[] tokenEnds;
+        // Token 0 is a hyphen and the code point in hexadecimal; token n is word n - 1.
+        private final char[] tokens;
+        // An open-addressing table of name indexes plus one, by the hash of their tokens; 0 marks
+        // an empty slot. It has at least half again as many slots as names, so that a lookup
+        // probes few of them.
+        private final int[] namesByHash;
+
+        private CharacterNames(byte[] words, int[] wordEnds, int frequentWordCount, int[] codePoints, int[] tokenEnds, char[] tokens)
+        {
+            this.words = words;
+            this.wordEnds = wordEnds;
+            this.frequentWordCount = frequentWordCount;
+            this.codePoints = codePoints;
+            this.tokenEnds = tokenEnds;
+            this.tokens = tokens;
+            namesByHash = new int[Integer.highestOneBit(Math.max(1, codePoints.length * 3 / 2 - 1)) << 1];
+            for (int index = 0; index < codePoints.length; index++) {
+                int start = index == 0 ? 0 : tokenEnds[index - 1];
+                int slot = hash(tokens, start, tokenEnds[index]) & (namesByHash.length - 1);
+                while (namesByHash[slot] != 0) {
+                    slot = (slot + 1) & (namesByHash.length - 1);
+                }
+                namesByHash[slot] = index + 1;
+            }
+        }
+
+        /**
+         * Returns the name of {@code codePoint}, or null if it has none.
+         */
+        String name(int codePoint)
+        {
+            int index = Arrays.binarySearch(codePoints, codePoint);
+            if (index < 0) {
+                return null;
+            }
+            StringBuilder name = new StringBuilder();
+            for (int position = index == 0 ? 0 : tokenEnds[index - 1]; position < tokenEnds[index]; position++) {
+                int token = tokens[position];
+                if (token == 0) {
+                    name.append('-');
+                    int digits = Math.max(4, (Integer.SIZE - Integer.numberOfLeadingZeros(codePoint) + 3) / 4);
+                    for (int digit = digits - 1; digit >= 0; digit--) {
+                        name.append(HEX_DIGITS[(codePoint >>> (digit * 4)) & 0xF]);
+                    }
+                    continue;
+                }
+                if (!name.isEmpty()) {
+                    name.append(' ');
+                }
+                for (int offset = wordStart(token - 1); offset < wordEnds[token - 1]; offset++) {
+                    name.append((char) words[offset]);
+                }
+            }
+            return name.toString();
+        }
+
+        /**
+         * Returns the code point whose name is exactly {@code name}, or -1 if there is none.
+         */
+        int codePoint(String name)
+        {
+            // A name that ends in a hyphen and its code point, such as CJK COMPATIBILITY
+            // IDEOGRAPH-F900, can hold the code point as a token of its own.
+            int hyphen = name.lastIndexOf('-');
+            if (hyphen >= 0 && name.length() - hyphen - 1 >= 4 && name.length() - hyphen - 1 <= 6) {
+                int codePoint = 0;
+                for (int index = hyphen + 1; index < name.length() && codePoint >= 0; index++) {
+                    int digit = Arrays.binarySearch(HEX_DIGITS, name.charAt(index));
+                    codePoint = digit < 0 ? -1 : codePoint << 4 | digit;
+                }
+                if (codePoint >= 0 && name.equals(name(codePoint))) {
+                    return codePoint;
+                }
+            }
+
+            char[] expected = new char[MAX_NAME_TOKENS];
+            int tokenCount = 0;
+            int wordStart = 0;
+            while (true) {
+                int wordEnd = name.indexOf(' ', wordStart);
+                if (wordEnd < 0) {
+                    wordEnd = name.length();
+                }
+                int token = wordToken(name, wordStart, wordEnd);
+                if (token < 0 || tokenCount == MAX_NAME_TOKENS) {
+                    return -1;
+                }
+                expected[tokenCount++] = (char) token;
+                if (wordEnd == name.length()) {
+                    break;
+                }
+                wordStart = wordEnd + 1;
+            }
+            for (int slot = hash(expected, 0, tokenCount) & (namesByHash.length - 1); namesByHash[slot] != 0; slot = (slot + 1) & (namesByHash.length - 1)) {
+                int index = namesByHash[slot] - 1;
+                if (Arrays.equals(tokens, index == 0 ? 0 : tokenEnds[index - 1], tokenEnds[index], expected, 0, tokenCount)) {
+                    return codePoints[index];
+                }
+            }
+            return -1;
+        }
+
+        private static int hash(char[] tokens, int start, int end)
+        {
+            int hash = 0;
+            for (int index = start; index < end; index++) {
+                hash = hash * 31 + tokens[index];
+            }
+            return hash ^ (hash >>> 16);
+        }
+
+        // Returns the token of the word from start to end of name, or -1 if it is no word.
+        private int wordToken(String name, int start, int end)
+        {
+            for (int word = 0; word < frequentWordCount; word++) {
+                if (compareWord(word, name, start, end) == 0) {
+                    return word + 1;
+                }
+            }
+            int low = frequentWordCount;
+            int high = wordEnds.length - 1;
+            while (low <= high) {
+                int middle = (low + high) >>> 1;
+                int comparison = compareWord(middle, name, start, end);
+                if (comparison == 0) {
+                    return middle + 1;
+                }
+                if (comparison < 0) {
+                    low = middle + 1;
+                }
+                else {
+                    high = middle - 1;
+                }
+            }
+            return -1;
+        }
+
+        private int compareWord(int word, String name, int start, int end)
+        {
+            int offset = wordStart(word);
+            int wordEnd = wordEnds[word];
+            while (offset < wordEnd && start < end) {
+                int difference = words[offset++] - name.charAt(start++);
+                if (difference != 0) {
+                    return difference;
+                }
+            }
+            return (wordEnd - offset) - (end - start);
+        }
+
+        private int wordStart(int word)
+        {
+            return word == 0 ? 0 : wordEnds[word - 1];
+        }
+    }
+
     private static CodePointMappings parseSimpleCaseFoldingOrbits(Reader reader)
     {
         int orbitCount = reader.varint();
@@ -277,11 +491,11 @@ final class UnicodeDatabase
         return new CodePointMappings(sources, targets);
     }
 
-    private static MultiCharacterMappings parseFullCaseFolding(Reader reader)
+    private static MultiCharacterMappings parseMultiCharacterMappings(Reader reader)
     {
         int count = reader.varint();
         if (count > RUNEMAX) {
-            throw reader.corrupt("too many full case folds");
+            throw reader.corrupt("too many multi-character mappings");
         }
         int[] sources = new int[count];
         int[][] values = new int[count][];
@@ -290,7 +504,7 @@ final class UnicodeDatabase
             source = nextCodePoint(reader, source, index);
             int length = reader.varint();
             if (length < 2 || length > reader.remaining()) {
-                throw reader.corrupt("U+" + Integer.toHexString(source) + " fully folds to " + length + " code points");
+                throw reader.corrupt("U+" + Integer.toHexString(source) + " maps to " + length + " code points");
             }
             int[] mapping = new int[length];
             int value = source;
@@ -393,6 +607,80 @@ final class UnicodeDatabase
         return Map.copyOf(names);
     }
 
+    private static CharacterNames parseCharacterNames(Reader reader)
+    {
+        int wordCount = reader.varint();
+        int frequentWordCount = reader.varint();
+        // A token is a char, and token 0 is the code point suffix.
+        if (wordCount > reader.remaining() || wordCount >= 0xFFFF || frequentWordCount > wordCount) {
+            throw reader.corrupt("bad word counts");
+        }
+        byte[] words = new byte[0];
+        int[] wordEnds = new int[wordCount];
+        int length = 0;
+        for (int word = 0; word < wordCount; word++) {
+            // The previous word runs from start to length.
+            int start = word < 2 ? 0 : wordEnds[word - 2];
+            int shared = reader.varint();
+            byte[] rest = reader.bytes(reader.varint());
+            if (shared > length - start || shared + rest.length == 0) {
+                throw reader.corrupt("bad word " + word);
+            }
+            if (words.length < length + shared + rest.length) {
+                words = Arrays.copyOf(words, Math.max(words.length * 2, length + shared + rest.length));
+            }
+            System.arraycopy(words, start, words, length, shared);
+            for (byte character : rest) {
+                if (!((character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '(' || character == ')')) {
+                    throw reader.corrupt("word " + word + " has a character other than an uppercase letter, digit, hyphen, or parenthesis");
+                }
+            }
+            System.arraycopy(rest, 0, words, length + shared, rest.length);
+            wordEnds[word] = length + shared + rest.length;
+            if (word > frequentWordCount && Arrays.compare(words, start, length, words, length, wordEnds[word]) >= 0) {
+                throw reader.corrupt("words are not ascending");
+            }
+            length = wordEnds[word];
+        }
+
+        int nameCount = reader.varint();
+        if (nameCount > reader.remaining()) {
+            throw reader.corrupt("too many names");
+        }
+        int[] codePoints = new int[nameCount];
+        int[] tokenEnds = new int[nameCount];
+        char[] tokens = new char[0];
+        int tokenCount = 0;
+        int codePoint = 0;
+        for (int index = 0; index < nameCount; index++) {
+            codePoint = nextCodePoint(reader, codePoint, index);
+            // The tokens of the previous name run from start to tokenCount.
+            int start = index < 2 ? 0 : tokenEnds[index - 2];
+            int counts = reader.varint();
+            int kept = counts >>> 4;
+            int added = counts & 0xF;
+            if (kept > tokenCount - start || kept + added == 0 || kept + added > MAX_NAME_TOKENS) {
+                throw reader.corrupt("bad token counts of U+" + Integer.toHexString(codePoint));
+            }
+            if (tokens.length < tokenCount + kept + added) {
+                tokens = Arrays.copyOf(tokens, Math.max(tokens.length * 2, tokenCount + kept + added));
+            }
+            System.arraycopy(tokens, start, tokens, tokenCount, kept);
+            for (int offset = kept; offset < kept + added; offset++) {
+                int token = reader.varint();
+                if (token > wordCount || (token == 0 && offset == 0)) {
+                    throw reader.corrupt("bad token in the name of U+" + Integer.toHexString(codePoint));
+                }
+                tokens[tokenCount + offset] = (char) token;
+            }
+            codePoints[index] = codePoint;
+            tokenCount += kept + added;
+            tokenEnds[index] = tokenCount;
+        }
+        reader.requireEnd();
+        return new CharacterNames(Arrays.copyOf(words, length), wordEnds, frequentWordCount, codePoints, tokenEnds, Arrays.copyOf(tokens, tokenCount));
+    }
+
     private static String scriptName(Reader reader)
     {
         byte[] name = reader.bytes(reader.varint());
@@ -426,23 +714,20 @@ final class UnicodeDatabase
     }
 
     /**
-     * The resource bytes, the header, and the location of each section.
+     * The header of the resource and the payload of each section it keeps.
      */
     private static final class Resource
     {
-        private static final Resource RESOURCE = load();
+        private static final Resource RESOURCE = load(sectionId -> sectionId != SECTION_NAME);
 
-        private final byte[] data;
         private final byte[] generationKey;
-        // The payload start and end of each known section, indexed by section ID; an end of 0
-        // marks a missing section.
-        private final int[] sectionStarts = new int[SECTION_COUNT];
-        private final int[] sectionEnds = new int[SECTION_COUNT];
+        // The payload of each kept section, indexed by section ID; null marks a section that is
+        // missing or not kept.
+        private final byte[][] sections = new byte[SECTION_COUNT][];
 
-        private Resource(byte[] data)
+        private Resource(byte[] data, IntPredicate keptSections)
         {
-            this.data = data;
-            Reader reader = new Reader(data, 0, data.length);
+            Reader reader = new Reader("resource", data);
             if (!Arrays.equals(reader.bytes(MAGIC.length), MAGIC)) {
                 throw reader.corrupt("bad magic");
             }
@@ -466,31 +751,38 @@ final class UnicodeDatabase
                 }
                 previousSectionId = sectionId;
                 int length = reader.varint();
-                int start = reader.position;
-                reader.skip(length);
                 // A section ID this reader does not know is skipped.
-                if (sectionId < SECTION_COUNT) {
-                    sectionStarts[sectionId] = start;
-                    sectionEnds[sectionId] = start + length;
+                if (sectionId < SECTION_COUNT && keptSections.test(sectionId)) {
+                    sections[sectionId] = reader.bytes(length);
+                }
+                else {
+                    reader.skip(length);
                 }
             }
         }
 
         private Reader section(int sectionId)
         {
-            if (sectionEnds[sectionId] == 0) {
+            byte[] section = sections[sectionId];
+            if (section == null) {
                 throw new IllegalStateException("corrupt Unicode database: missing section " + sectionId);
             }
-            return new Reader(data, sectionStarts[sectionId], sectionEnds[sectionId]);
+            return new Reader("section " + sectionId, section);
         }
 
-        private static Resource load()
+        // Reads the resource again for a section that the first read does not keep.
+        private static Reader unkeptSection(int sectionId)
+        {
+            return load(id -> id == sectionId).section(sectionId);
+        }
+
+        private static Resource load(IntPredicate keptSections)
         {
             try (InputStream input = UnicodeDatabase.class.getResourceAsStream(UnicodeDatabase.RESOURCE)) {
                 if (input == null) {
                     throw new IllegalStateException("missing Unicode database resource: " + UnicodeDatabase.RESOURCE);
                 }
-                return new Resource(input.readAllBytes());
+                return new Resource(input.readAllBytes(), keptSections);
             }
             catch (IOException e) {
                 throw new UncheckedIOException("failed to read Unicode database resource: " + UnicodeDatabase.RESOURCE, e);
@@ -500,25 +792,24 @@ final class UnicodeDatabase
 
     private static final class Reader
     {
+        private final String part;
         private final byte[] data;
-        private final int end;
         private int position;
 
-        private Reader(byte[] data, int position, int end)
+        private Reader(String part, byte[] data)
         {
+            this.part = part;
             this.data = data;
-            this.position = position;
-            this.end = end;
         }
 
         private boolean atEnd()
         {
-            return position == end;
+            return position == data.length;
         }
 
         private int remaining()
         {
-            return end - position;
+            return data.length - position;
         }
 
         private void requireEnd()
@@ -567,14 +858,14 @@ final class UnicodeDatabase
 
         private void requireAvailable(int length)
         {
-            if (length < 0 || length > end - position) {
+            if (length < 0 || length > data.length - position) {
                 throw corrupt("truncated");
             }
         }
 
         private IllegalStateException corrupt(String message)
         {
-            return new IllegalStateException("corrupt Unicode database at byte " + position + ": " + message);
+            return new IllegalStateException("corrupt Unicode database " + part + " at byte " + position + ": " + message);
         }
     }
 
@@ -585,7 +876,7 @@ final class UnicodeDatabase
 
     private static final class FullCaseFolding
     {
-        private static final MultiCharacterMappings MAPPINGS = parseFullCaseFolding(Resource.RESOURCE.section(SECTION_FULL_CASE_FOLDING));
+        private static final MultiCharacterMappings MAPPINGS = parseMultiCharacterMappings(Resource.RESOURCE.section(SECTION_FULL_CASE_FOLDING));
     }
 
     private static final class SimpleUppercaseMappings
@@ -626,5 +917,25 @@ final class UnicodeDatabase
     private static final class Ages
     {
         private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_AGE));
+    }
+
+    private static final class FullUppercaseMappings
+    {
+        private static final MultiCharacterMappings MAPPINGS = parseMultiCharacterMappings(Resource.RESOURCE.section(SECTION_FULL_UPPERCASE_MAPPINGS));
+    }
+
+    private static final class FullLowercaseMappings
+    {
+        private static final MultiCharacterMappings MAPPINGS = parseMultiCharacterMappings(Resource.RESOURCE.section(SECTION_FULL_LOWERCASE_MAPPINGS));
+    }
+
+    private static final class Names
+    {
+        private static final CharacterNames NAMES = parseCharacterNames(Resource.unkeptSection(SECTION_NAME));
+    }
+
+    private static final class ControlNames
+    {
+        private static final CharacterNames NAMES = parseCharacterNames(Resource.RESOURCE.section(SECTION_CONTROL_NAME));
     }
 }

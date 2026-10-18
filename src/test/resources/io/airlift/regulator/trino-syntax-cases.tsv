@@ -50,6 +50,7 @@ REJECT	\351	Joni treats non-ASCII octal escapes as raw bytes
 REJECT	a{1001}	The current compiler cannot represent Joni's larger counted repetitions compactly
 REJECT	(?<x>a)(?<x>b)	Duplicate capture names are rejected
 REJECT	(?<1>x)	Capture names cannot begin with a digit
+REJECT	(?<𑷠x>x)	Capture names cannot begin with a Unicode 17.0 decimal digit
 REJECT	[a&&]	The initial subset rejects empty intersection operands
 REJECT	[&&a]	The initial subset rejects empty intersection operands
 REJECT	[a-\d]	A complete character class cannot be a range endpoint

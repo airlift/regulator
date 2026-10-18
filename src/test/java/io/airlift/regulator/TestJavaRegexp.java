@@ -104,13 +104,15 @@ public class TestJavaRegexp
                 .isInstanceOf(IndexOutOfBoundsException.class);
     }
 
-    // Properties and word boundaries hold Unicode 18.0 data on every JVM. Unicode 18.0 added U+0558
-    // MODIFIER LETTER ARMENIAN SMALL EH, a letter, and the Seal script, which starts at U+3D000.
+    // Properties, word boundaries, and character names hold Unicode 18.0 data on every JVM. Unicode
+    // 18.0 added U+0558 MODIFIER LETTER ARMENIAN SMALL EH, a letter, and the Seal script, which
+    // starts at U+3D000.
     @Test
     public void testUnicode18DataOnEveryJvm()
     {
         assertThat(JavaRegexp.compile(utf8Slice("\\p{L}")).matches(utf8Slice("\u0558"))).isTrue();
         assertThat(JavaRegexp.compile(utf8Slice("(?U)\\b\u0558\\b")).find(utf8Slice("\u0558"))).isTrue();
+        assertThat(JavaRegexp.compile(utf8Slice("\\N{MODIFIER LETTER ARMENIAN SMALL EH}")).matches(utf8Slice("\u0558"))).isTrue();
         assertThat(JavaRegexp.compile(utf8Slice("\\p{IsSeal}")).matches(utf8Slice("\uD8B4\uDC00"))).isTrue();
     }
 

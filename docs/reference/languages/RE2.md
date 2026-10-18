@@ -60,7 +60,7 @@ folding, upstream RE2's rule, on every JVM:
 `(?i)k` matches the Kelvin sign, but `(?i)i` matches neither dotted capital `İ`
 nor dotless small `ı`. Upstream's tables are Unicode 15.1 data, so characters
 added since then fold only in Regulator. See
-[`JVM_UNICODE.md`](../../integrations/JVM_UNICODE.md).
+[`UNICODE.md`](../../integrations/UNICODE.md).
 
 ## Compilation options
 
