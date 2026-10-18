@@ -52,17 +52,19 @@ case folding, and Unicode character classes.
 Unicode property membership uses the JDK's formulas over Regulator's pinned
 Unicode 18.0 database, so it is the same on every JVM. Unicode case folding
 uses Java's rule, which puts code points whose upper case has the same lower
-case in one class, applied to the database's simple case mappings. Boundaries
-and named code points follow the running JVM.
+case in one class, applied to the database's simple case mappings. Word
+boundaries read the database's word characters, nonspacing marks, letters, and
+digits by the same formulas. Named code points follow the running JVM.
 
 On a JVM with an older Unicode version, characters that Unicode added since
-then, and the case partners they joined, have properties and folds in
-Regulator but not in `Pattern`, and names that Unicode added since then, such
-as the script `Seal`, are accepted only by Regulator. On Java 25 three more
-results differ from `Pattern`. Unicode 17.0 changed two for older characters:
-U+0295 is `Lo` rather than lowercase, and 689 code points that are not emoji,
-such as U+2605 BLACK STAR, are not `\p{IsExtended_Pictographic}`. And JDK 25's
-`Pattern` does not match `ß` against `ẞ` case-insensitively, which JDK 26 does.
+then, and the case partners they joined, have properties, folds, and word
+boundaries in Regulator but not in `Pattern`, and names that Unicode added
+since then, such as the script `Seal`, are accepted only by Regulator. On
+Java 25 three more results differ from `Pattern`. Unicode 17.0 changed two for
+older characters: U+0295 is `Lo` rather than lowercase, and 689 code points
+that are not emoji, such as U+2605 BLACK STAR, are not
+`\p{IsExtended_Pictographic}`. And JDK 25's `Pattern` does not match `ß`
+against `ẞ` case-insensitively, which JDK 26 does.
 
 Regulator's supported property names and case-insensitive matching can differ
 from `Pattern` independently of Unicode version, as

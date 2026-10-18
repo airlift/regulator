@@ -24,7 +24,8 @@ documents the format. The database holds:
   every code point `Blocks.txt` lists, Bidi_Mirrored from `UnicodeData.txt`,
   and the binary properties of `emoji/emoji-data.txt` and the subset of
   `PropList.txt` that Java properties read, which with the categories and
-  scripts give Java and Trino patterns their Unicode properties
+  scripts give Java and Trino patterns their Unicode properties and word
+  boundaries
 - the Age of every assigned code point, from `DerivedAge.txt`, which tells the
   tests which code points the running JDK's Unicode version assigns
 

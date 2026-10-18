@@ -663,6 +663,7 @@ final class Compiler
         private static int wordBoundaryAssertion(Regexp regexp, boolean negate)
         {
             if ((regexp.parseFlags() & Regexp.JAVA_WORD_BOUNDARY) != 0) {
+                UnicodeGroups.initializeWordFlags();
                 boolean unicodeCharacterClass = (regexp.parseFlags() & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0;
                 if (unicodeCharacterClass) {
                     return negate ? EmptyOp.EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY : EmptyOp.EMPTY_JAVA_UNICODE_WORD_BOUNDARY;
@@ -670,6 +671,7 @@ final class Compiler
                 return negate ? EmptyOp.EMPTY_JAVA_NO_WORD_BOUNDARY : EmptyOp.EMPTY_JAVA_WORD_BOUNDARY;
             }
             if ((regexp.parseFlags() & Regexp.UNICODE_WORD_BOUNDARY) != 0) {
+                UnicodeGroups.initializeWordFlags();
                 return negate ? EmptyOp.EMPTY_NO_UNICODE_WORD_BOUNDARY : EmptyOp.EMPTY_UNICODE_WORD_BOUNDARY;
             }
             return negate ? EmptyOp.EMPTY_NO_WORD_BOUNDARY : EmptyOp.EMPTY_WORD_BOUNDARY;

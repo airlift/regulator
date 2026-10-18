@@ -53,11 +53,11 @@ as `ß` and `SS`.
 ### Unicode data and case folding
 
 Unicode property membership uses the JDK's formulas over Regulator's pinned
-Unicode 18.0 database, and case-insensitive matching uses its full case
-folding, `CaseFolding.txt` statuses C and F, so both are the same on every JVM.
-Word boundaries still follow the running JVM. Property membership agrees with
-Java's `Pattern` except where Unicode changed since the JVM's Unicode version,
-as
+Unicode 18.0 database, case-insensitive matching uses its full case folding,
+`CaseFolding.txt` statuses C and F, and word boundaries use its word
+characters, so all three are the same on every JVM. Property membership agrees
+with Java's `Pattern` except where Unicode changed since the JVM's Unicode
+version, as
 [`JVM_UNICODE.md`](../../integrations/JVM_UNICODE.md#differences-from-the-jdk)
 lists; the accepted property spellings keep Regulator's existing rules, which
 are not identical to `Pattern`'s.

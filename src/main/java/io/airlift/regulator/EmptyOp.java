@@ -220,7 +220,7 @@ final class EmptyOp
         if (unicodeCharacterClass ? UnicodeGroups.isWord(codePoint) : isAsciiWord(codePoint)) {
             return true;
         }
-        return Character.getType(codePoint) == Character.NON_SPACING_MARK &&
+        return UnicodeGroups.isNonspacingMark(codePoint) &&
                 hasJavaBoundaryBaseCharacter(bytes, begin, end, codePointStart);
     }
 
@@ -230,10 +230,10 @@ final class EmptyOp
         int codePointStart = position;
         while (codePointStart >= begin) {
             int codePoint = nextCodePoint(bytes, end, codePointStart);
-            if (Character.isLetterOrDigit(codePoint)) {
+            if (UnicodeGroups.isLetterOrDigit(codePoint)) {
                 return true;
             }
-            if (Character.getType(codePoint) != Character.NON_SPACING_MARK || codePointStart == begin) {
+            if (!UnicodeGroups.isNonspacingMark(codePoint) || codePointStart == begin) {
                 return false;
             }
             codePointStart = previousCodePointStart(bytes, begin, codePointStart);
@@ -328,25 +328,6 @@ final class EmptyOp
 
     static boolean isUnicodeWord(int codePoint)
     {
-        if (codePoint < 0) {
-            return false;
-        }
-        int type = Character.getType(codePoint);
-        return Character.isAlphabetic(codePoint) ||
-                type == Character.NON_SPACING_MARK ||
-                type == Character.ENCLOSING_MARK ||
-                type == Character.COMBINING_SPACING_MARK ||
-                type == Character.DECIMAL_DIGIT_NUMBER ||
-                type == Character.CONNECTOR_PUNCTUATION ||
-                isJoniLatin1WordNumber(codePoint);
-    }
-
-    private static boolean isJoniLatin1WordNumber(int codePoint)
-    {
-        // Joni's Java syntax includes these six superscript and fraction numbers.
-        return codePoint == 0x00B2 ||
-                codePoint == 0x00B3 ||
-                codePoint == 0x00B9 ||
-                (codePoint >= 0x00BC && codePoint <= 0x00BE);
+        return codePoint >= 0 && UnicodeGroups.isTrinoWord(codePoint);
     }
 }

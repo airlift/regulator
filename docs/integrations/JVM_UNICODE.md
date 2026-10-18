@@ -1,12 +1,11 @@
 # Unicode data policy
 
-Every language reads its Unicode properties and case folding from Regulator's
-pinned Unicode 18.0 database, described in
+Every language reads its Unicode properties, case folding, and word boundaries
+from Regulator's pinned Unicode 18.0 database, described in
 [`tools/unicode-database/README.md`](../../tools/unicode-database/README.md),
-so they are the same on every JVM. Only the match-time word boundaries of Java
-and Trino and Java's named code points still read the running JVM. This
-differs from pinned upstream RE2, whose generated tables are Unicode 15.1
-data, as `REGULATOR_DECISIONS.md` records.
+so they are the same on every JVM. Only Java's named code points still read
+the running JVM. This differs from pinned upstream RE2, whose generated tables
+are Unicode 15.1 data, as `REGULATOR_DECISIONS.md` records.
 
 ## Implemented direction
 
@@ -104,8 +103,13 @@ Property construction follows this flow:
 Character-class membership and case-fold expansions are compiled into engine
 instructions and ranges. Matching those classes performs no property lookup.
 Language-specific word-boundary assertions are different: Java and Trino
-boundary checks inspect input code points with `Character` predicates during
-matching, so they follow the running JVM.
+boundary checks classify input code points during matching. They read one
+table of flags, built from the database's classes by the same formulas as the
+properties: Java's word characters, the class of `\p{IsWord}`; Trino's, which
+are Java's without Join_Control plus the six superscript and fraction numbers
+of Latin-1 that Joni's Java syntax includes; nonspacing marks; and
+`Character.isLetterOrDigit`, which gives a Java boundary's nonspacing mark its
+base.
 
 ### Java properties
 
@@ -193,6 +197,13 @@ Unicode data is read on first use, not on every compilation:
   two sets of tables.
 - Trino's multi-code-point folds are initialized once on first use by a
   frontend that enables full folding.
+- The word-boundary flags are built once, when the first Java or Trino pattern
+  with a word boundary compiles, not per pattern. They are a two-stage table
+  of one flag byte per code point: each block of 256 code points points to its
+  flags, and blocks with equal flags are stored once, so the 4,352 blocks share
+  135 stored ones, about 52 KB in all. Latin-1 is the first stored block, so a
+  Latin-1 code point needs no block lookup. RE2's ASCII word boundary reads no
+  table.
 - No production table is generated at build time. The pinned database is
   generated ahead of time from pinned UCD files and depends on neither the
   build JDK nor the executing JDK.
@@ -206,26 +217,28 @@ folding from the pinned database:
 - `CharClassBuilder`
 - required-match analysis
 - single-byte matcher optimizations
+- the Java and Trino word boundaries of `EmptyOp`
 - the canonicalization of `FilteredRe2` and `Prefilter`
 
 ## Correctness contract
 
 1. Java and Trino categories, scripts, every JDK block, supported binary
-   properties, and Java properties are checked against their corresponding
-   `Character` APIs at every code point that the running JDK's Unicode version
-   assigns, allowing only the cited differences above. Every script and block
-   spelling the JDK accepts must name the same class, and a name it rejects,
-   such as a script Unicode added since, must hold no character the JDK
-   assigns. RE2's accepted group names and
-   syntax are checked against upstream's rule.
+   properties, Java properties, and the word classes of match-time boundaries
+   are checked against their corresponding `Character` APIs at every code
+   point that the running JDK's Unicode version assigns, allowing only the
+   cited differences above. Every script and block spelling the JDK accepts
+   must name the same class, and a name it rejects, such as a script Unicode
+   added since, must hold no character the JDK assigns. RE2's accepted group
+   names and syntax are checked against upstream's rule.
 2. Canonical aliases are checked for identity, and unsupported names are
    rejected.
 3. Every rule's simple folds are checked exhaustively to form closed orbits
    that hold each code point's case mappings, apart from dotted and dotless I
-   in RE2 and Trino. The Java folds are checked against the JVM's case classes
-   wherever the JVM assigns every member of a class. Focused `Pattern`
-   comparisons cover dotted and dotless I, long S, Kelvin sign, and Greek
-   sigma.
+   in RE2 and Trino. Java's Unicode `\w` and `\b` and Trino's `\b` are checked
+   to give every member of an orbit the same word-ness. The Java folds are
+   checked against the JVM's case classes wherever the JVM assigns every
+   member of a class. Focused `Pattern` comparisons cover dotted and dotless I,
+   long S, Kelvin sign, and Greek sigma.
 4. Every multi-code-point fold in pinned Joni is checked against the Trino
    full-fold table, with the additional U+1E9E and U+1DF95 mappings recorded
    explicitly. On Java 26 and newer, the Trino rule is checked exhaustively
