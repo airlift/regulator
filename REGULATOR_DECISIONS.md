@@ -66,10 +66,11 @@ construction fails.
 
 ## JVM-Sourced Unicode
 
-- General categories, scripts, blocks, binary properties, and Java properties
-  come from the executing JVM's public `Character` APIs. Every language folds
-  case with the pinned database described below. Pinned upstream RE2's
-  generated Unicode tables are intentionally not retained.
+- Java and Trino general categories, scripts, blocks, binary properties, and
+  Java properties come from the executing JVM's public `Character` APIs. RE2
+  property groups and case folding in every language come from the pinned
+  database described below. Pinned upstream RE2's generated Unicode tables are
+  intentionally not retained.
 - Properties are converted lazily to immutable `CharClass` ranges and cached by
   canonical identity. Each folding rule builds its fold tables once, on
   first use. Matching uses only the resulting ranges and compiled
@@ -122,6 +123,26 @@ Case-insensitive matching built on those classes can still differ from
 `Pattern` independently of Unicode version. Moving to
 another Unicode version follows the generator's
 [version procedure](tools/unicode-database/README.md#moving-to-a-new-unicode-version).
+
+## RE2 Unicode Property Groups
+
+RE2 `\p` and `\P` groups come from the pinned Unicode 18.0 database by the
+rule of upstream's generator, `make_unicode_groups.py`: one group for every
+General_Category value that appears in `UnicodeData.txt`, one for the union of
+each major class, such as `L` for `Lu`, `Ll`, `Lt`, `Lm`, and `Lo`, and one for
+every script in `Scripts.txt` under its long name, plus `Any`, which `parse.cc`
+adds. Lookup is an exact, case-sensitive name match, so RE2 accepts `\pL`,
+`\p{Greek}`, `\p{^Greek}`, `\PL`, and `\P{Greek}`, and rejects `\p{greek}`,
+`\p{IsGreek}`, `\p{InGreek}`, `\p{Letter}`, `\p{Cn}`, `\p{LC}`, and
+`\p{Unknown}` with upstream's bad character range error. Unassigned code
+points are in no category, so `\p{C}` is `Cc`, `Cf`, `Co`, and `Cs`.
+
+RE2 previously resolved these names through the JVM registry that serves Java
+and Trino, so it accepted their aliases, blocks, and binary properties, and its
+results followed the JDK's Unicode version. Upstream's tables are Unicode 15.1
+data; groups now differ from upstream only where Unicode 18.0 assigned or
+reclassified code points, such as the scripts added since 15.1, including
+Garay, Jurchen, Proto_Cuneiform, and Seal.
 
 ## Java Regular-Subset Frontend
 

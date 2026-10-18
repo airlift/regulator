@@ -18,6 +18,9 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 
@@ -26,8 +29,8 @@ import static io.airlift.regulator.CharClass.RUNEMAX;
  * {@code tools/unicode-database/generate.py} writes. The generator documents the format.
  * <p>
  * The resource is read once, on first use, and each section is decoded once, on its own first
- * use, through a holder class, so a process that never folds case with a rule decodes none of the
- * data that only that rule needs.
+ * use, through a holder class, so a process that never folds case with a rule, or never uses a
+ * property, decodes none of the data that only it needs.
  */
 final class UnicodeDatabase
 {
@@ -41,7 +44,9 @@ final class UnicodeDatabase
     private static final int SECTION_FULL_CASE_FOLDING = 2;
     private static final int SECTION_SIMPLE_UPPERCASE_MAPPINGS = 3;
     private static final int SECTION_SIMPLE_LOWERCASE_MAPPINGS = 4;
-    private static final int SECTION_COUNT = 5;
+    private static final int SECTION_GENERAL_CATEGORY = 5;
+    private static final int SECTION_SCRIPT = 6;
+    private static final int SECTION_COUNT = 7;
 
     private UnicodeDatabase() {}
 
@@ -90,6 +95,24 @@ final class UnicodeDatabase
     }
 
     /**
+     * Returns the General_Category values of UnicodeData.txt field 2, such as Lu, and their code
+     * points. Unassigned code points, which have the value Cn, are in none.
+     */
+    static PropertyValues generalCategories()
+    {
+        return GeneralCategories.VALUES;
+    }
+
+    /**
+     * Returns the Script values of Scripts.txt, which are long names such as Old_Italic, and their
+     * code points. Code points of the default value, Unknown, are in none.
+     */
+    static PropertyValues scripts()
+    {
+        return Scripts.VALUES;
+    }
+
+    /**
      * Code points in strictly ascending order and the code point each maps to; every other code
      * point maps to itself. Holders must not modify the arrays.
      */
@@ -120,6 +143,39 @@ final class UnicodeDatabase
         {
             int index = Arrays.binarySearch(codePoints, codePoint);
             return index < 0 ? null : values[index];
+        }
+    }
+
+    /**
+     * The values of a property and the code points that have each. A value's code points are
+     * ranges, as pairs of first and last code point, in ascending order; ranges neither overlap
+     * nor touch. Holders must not modify the arrays.
+     */
+    static final class PropertyValues
+    {
+        private final List<String> names;
+        private final Map<String, int[]> ranges;
+
+        private PropertyValues(List<String> names, Map<String, int[]> ranges)
+        {
+            this.names = names;
+            this.ranges = ranges;
+        }
+
+        /**
+         * Returns the value names in ascending order.
+         */
+        List<String> names()
+        {
+            return names;
+        }
+
+        /**
+         * Returns the ranges of the named value, or null if the property has no such value.
+         */
+        int[] ranges(String name)
+        {
+            return ranges.get(name);
         }
     }
 
@@ -226,6 +282,52 @@ final class UnicodeDatabase
         }
         reader.requireEnd();
         return new CodePointMappings(sources, targets);
+    }
+
+    private static PropertyValues parsePropertyValues(Reader reader)
+    {
+        int count = reader.varint();
+        if (count > reader.remaining()) {
+            throw reader.corrupt("too many property values");
+        }
+        String[] names = new String[count];
+        Map<String, int[]> ranges = new HashMap<>();
+        for (int index = 0; index < count; index++) {
+            byte[] name = reader.bytes(reader.varint());
+            for (byte character : name) {
+                if (character <= ' ' || character > '~') {
+                    throw reader.corrupt("property value name is not printable ASCII");
+                }
+            }
+            names[index] = new String(name, StandardCharsets.US_ASCII);
+            if (name.length == 0 || (index > 0 && names[index].compareTo(names[index - 1]) <= 0)) {
+                throw reader.corrupt("property value names are empty or not ascending");
+            }
+
+            int rangeCount = reader.varint();
+            if (rangeCount > reader.remaining()) {
+                throw reader.corrupt("too many ranges for " + names[index]);
+            }
+            int[] valueRanges = new int[rangeCount * 2];
+            long next = 0;
+            for (int range = 0; range < rangeCount; range++) {
+                long gap = reader.varint();
+                if (gap == 0 && range > 0) {
+                    throw reader.corrupt("ranges of " + names[index] + " touch");
+                }
+                long low = next + gap;
+                long high = low + reader.varint();
+                if (high > RUNEMAX) {
+                    throw reader.corrupt("invalid code point " + high);
+                }
+                valueRanges[range * 2] = (int) low;
+                valueRanges[range * 2 + 1] = (int) high;
+                next = high + 1;
+            }
+            ranges.put(names[index], valueRanges);
+        }
+        reader.requireEnd();
+        return new PropertyValues(List.of(names), Map.copyOf(ranges));
     }
 
     // Reads the distance to the next mapped code point, which must exceed the previous one.
@@ -417,5 +519,15 @@ final class UnicodeDatabase
     private static final class SimpleLowercaseMappings
     {
         private static final CodePointMappings MAPPINGS = parseMappings(Resource.RESOURCE.section(SECTION_SIMPLE_LOWERCASE_MAPPINGS));
+    }
+
+    private static final class GeneralCategories
+    {
+        private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_GENERAL_CATEGORY));
+    }
+
+    private static final class Scripts
+    {
+        private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_SCRIPT));
     }
 }

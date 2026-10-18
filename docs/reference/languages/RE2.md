@@ -39,16 +39,24 @@ Compare the complete operation on your workload.
 | Repetition | `*`, `+`, `?`, `{n}`, `{n,}`, and `{n,m}`, including reluctant forms |
 | Groups | Numbered captures, `(?P<name>...)`, `(?<name>...)`, and noncapturing `(?:...)` groups |
 | Anchors | `^`, `$`, `\A`, `\z`, ASCII word boundary `\b`, and non-boundary `\B` |
-| Character classes | Ranges, negation, ASCII POSIX classes, ASCII Perl classes, and JVM-derived Unicode properties |
+| Character classes | Ranges, negation, ASCII POSIX classes, ASCII Perl classes, and Unicode properties from the pinned database |
 | Escapes | C-style escapes, octal and hexadecimal escapes, Unicode escapes, and `\Q...\E` quoting |
 | Inline flags | `i`, `m`, `s`, and `U`, including scoped forms and flag removal |
 
 Counted repetitions reject minimum or maximum counts above 1,000. Unbounded
 forms such as `x*` and `x{3,}` remain supported.
 
-Unicode categories and scripts follow the running JVM's Unicode version,
-rather than a frozen copy of upstream RE2's tables. Case-insensitive matching
-uses Unicode 18.0 simple case folding, upstream RE2's rule, on every JVM:
+Unicode property groups are upstream's: `\pL`, `\p{Name}`, `\p{^Name}`,
+`\PL`, and `\P{Name}` name a General_Category value, the union of a major
+class such as `L`, a script under its long name such as `Greek`, or `Any`, with
+an exact, case-sensitive match. Unassigned code points are in no group except
+`Any`, so `\p{C}` is `Cc`, `Cf`, `Co`, and `Cs`. The groups hold Unicode 18.0
+data from Regulator's pinned database on every JVM, where upstream's tables are
+Unicode 15.1 data, so scripts and characters added since then, such as Garay,
+match only in Regulator, and code points Unicode has reclassified since then,
+such as U+0295 from `Ll` to `Lo` and U+1171E from `Mn` to `Mc`, are in
+different groups. Case-insensitive matching uses Unicode 18.0 simple case
+folding, upstream RE2's rule, on every JVM:
 `(?i)k` matches the Kelvin sign, but `(?i)i` matches neither dotted capital `İ`
 nor dotless small `ı`. Upstream's tables are Unicode 15.1 data, so characters
 added since then fold only in Regulator. See

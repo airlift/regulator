@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.IntPredicate;
@@ -21,13 +22,92 @@ import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Resolves Unicode properties from the executing JVM and caches immutable range sets.
+ * Builds Unicode property classes and caches them as immutable range sets. The raw property values
+ * of the pinned {@link UnicodeDatabase} serve every language; {@link #lookup} resolves the Java and
+ * Trino property names from the executing JVM.
  */
 final class UnicodeGroups
 {
     private static final ConcurrentHashMap<String, CharClass> CACHE = new ConcurrentHashMap<>();
 
     private UnicodeGroups() {}
+
+    /**
+     * Returns the class of every code point.
+     */
+    static CharClass any()
+    {
+        return CACHE.computeIfAbsent("any", _ -> {
+            CharClassBuilder builder = new CharClassBuilder();
+            builder.addRange(0, RUNEMAX);
+            return builder.toCharClass();
+        });
+    }
+
+    /**
+     * Returns the General_Category values that UnicodeData.txt assigns, in ascending order.
+     */
+    private static List<String> generalCategoryValues()
+    {
+        return UnicodeDatabase.generalCategories().names();
+    }
+
+    /**
+     * Returns the code points that UnicodeData.txt assigns any of the given General_Category
+     * values, or null if one of them is not a value it assigns.
+     */
+    static CharClass generalCategories(List<String> values)
+    {
+        UnicodeDatabase.PropertyValues categories = UnicodeDatabase.generalCategories();
+        for (String value : values) {
+            if (categories.ranges(value) == null) {
+                return null;
+            }
+        }
+        return CACHE.computeIfAbsent("gc:" + String.join("|", values), _ -> {
+            CharClassBuilder builder = new CharClassBuilder();
+            for (String value : values) {
+                addRanges(builder, categories.ranges(value));
+            }
+            return builder.toCharClass();
+        });
+    }
+
+    /**
+     * Returns the code points of every General_Category value whose name starts with the given
+     * letter, such as L for Lu, Ll, Lt, Lm, and Lo, or null if no value does.
+     */
+    static CharClass majorClass(char letter)
+    {
+        List<String> values = generalCategoryValues().stream()
+                .filter(value -> value.charAt(0) == letter)
+                .toList();
+        return values.isEmpty() ? null : generalCategories(values);
+    }
+
+    /**
+     * Returns the code points that Scripts.txt assigns the script with the given long name, such as
+     * Old_Italic, or null if it assigns no such script.
+     */
+    static CharClass script(String longName)
+    {
+        int[] ranges = UnicodeDatabase.scripts().ranges(longName);
+        if (ranges == null) {
+            return null;
+        }
+        return CACHE.computeIfAbsent("sc:" + longName, _ -> {
+            CharClassBuilder builder = new CharClassBuilder();
+            addRanges(builder, ranges);
+            return builder.toCharClass();
+        });
+    }
+
+    private static void addRanges(CharClassBuilder builder, int[] ranges)
+    {
+        for (int index = 0; index < ranges.length; index += 2) {
+            builder.addRange(ranges[index], ranges[index + 1]);
+        }
+    }
 
     public static CharClass lookup(String name)
     {
@@ -50,7 +130,7 @@ final class UnicodeGroups
             String propertyName = name.substring(0, equalsIndex).toLowerCase(Locale.ROOT);
             String value = name.substring(equalsIndex + 1);
             return switch (propertyName) {
-                case "sc", "script" -> script(value);
+                case "sc", "script" -> javaScript(value);
                 case "blk", "block" -> block(value);
                 case "gc", "general_category" -> category(value);
                 default -> null;
@@ -66,7 +146,7 @@ final class UnicodeGroups
             if (property == null) {
                 property = category(value);
             }
-            return property != null ? property : script(value);
+            return property != null ? property : javaScript(value);
         }
 
         Property property = category(name);
@@ -76,7 +156,7 @@ final class UnicodeGroups
         if (property == null) {
             property = asciiPosixProperty(name);
         }
-        return property != null ? property : script(name);
+        return property != null ? property : javaScript(name);
     }
 
     private static Property category(String name)
@@ -168,7 +248,7 @@ final class UnicodeGroups
         return new Property("category:" + mask, codePoint -> (mask & (1 << Character.getType(codePoint))) != 0);
     }
 
-    private static Property script(String name)
+    private static Property javaScript(String name)
     {
         try {
             Character.UnicodeScript script = Character.UnicodeScript.forName(name);

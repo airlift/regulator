@@ -1,20 +1,23 @@
 # JVM-sourced Unicode policy
 
-Regulator derives Unicode properties from the JVM running the application.
-This is an intentional difference from pinned upstream RE2, recorded in
-`REGULATOR_DECISIONS.md`. Case folding in every language instead comes from
-Regulator's pinned Unicode 18.0 database, described in
+Regulator derives Java and Trino Unicode properties from the JVM running the
+application. This is an intentional difference from pinned upstream RE2,
+recorded in `REGULATOR_DECISIONS.md`. RE2 property groups and case folding in
+every language instead come from Regulator's pinned Unicode 18.0 database,
+described in
 [`tools/unicode-database/README.md`](../../tools/unicode-database/README.md).
 
 ## Implemented direction
 
-All regex languages use the same JVM-backed Unicode properties. Regulator
-derives character classes from public JVM APIs, converts them to immutable
-ranges, and caches them outside the matching hot path. It does not keep a
-separate copy of upstream RE2's category, script, or case-fold tables. Case
-folding follows each pattern's language, and every rule reads the pinned
-database: RE2 folds with its simple case folding, Java with its simple case
-mappings, and Trino with its full case folding.
+Java and Trino use the same JVM-backed Unicode properties. Regulator derives
+their character classes from public JVM APIs, converts them to immutable
+ranges, and caches them outside the matching hot path. RE2 property groups are
+the database's General_Category and Script values, named and grouped by the
+rule of upstream's generator, as `REGULATOR_DECISIONS.md` records. Regulator
+does not keep a copy of upstream RE2's generated category, script, or
+case-fold tables. Case folding follows each pattern's language, and every rule
+reads the pinned database: RE2 folds with its simple case folding, Java with
+its simple case mappings, and Trino with its full case folding.
 
 ## Motivation
 
@@ -205,7 +208,7 @@ Unicode scans happen on first use, not on every compilation:
 
 ## Consumers
 
-These components use the JVM-derived properties and each language's case
+These components use the Unicode properties of each language and its case
 folding from the pinned database:
 
 - `RegexpParser`
@@ -215,9 +218,10 @@ folding from the pinned database:
 
 ## Correctness contract
 
-1. Categories, scripts, every JDK block, supported binary properties, and Java
-   properties are checked over the complete Unicode code-point domain against
-   their corresponding `Character` APIs.
+1. Java and Trino categories, scripts, every JDK block, supported binary
+   properties, and Java properties are checked over the complete Unicode
+   code-point domain against their corresponding `Character` APIs. RE2's
+   accepted group names and syntax are checked against upstream's rule.
 2. Canonical aliases are checked for identity, and unsupported names are
    rejected.
 3. Every rule's simple folds are checked exhaustively to form closed orbits
@@ -234,8 +238,8 @@ folding from the pinned database:
 5. Unicode-version-only upstream differences have explicit expected results
    rather than unexplained golden-test exceptions.
 6. Complete pinned-native differential, exhaustive, randomized, UTF-8,
-   Latin-1, parser, and compatibility suites pass with the JVM-backed
-   properties and each language's case folding.
+   Latin-1, parser, and compatibility suites pass with each language's
+   properties and case folding.
 
 Test failures name the property or case-equivalence class that changed, so a
 JDK upgrade can be diagnosed without deciphering a range-table diff.
