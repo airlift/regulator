@@ -23,7 +23,6 @@ import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 
 import static io.airlift.regulator.Regexp.MAX_REPEAT;
@@ -64,6 +63,8 @@ final class TrinoRegexpParser
 
         // Capture names permit Lu, Ll, Lt, Lm, Lo, Nl, Mn, Mc, Nd, and Pc categories.
         private static final CharClass VALID_CAPTURE_NAME = buildValidCaptureNameCharClass();
+        // A capture name must not start with a decimal digit, Nd.
+        private static final CharClass DECIMAL_DIGIT = requireNonNull(UnicodeGroups.lookup("Nd"), "missing Unicode group: Nd");
         private static final CharClass PERL_DIGITS_CLASS = buildPerlDigitsCharClass();
 
         private final byte[] bytes;
@@ -857,7 +858,7 @@ final class TrinoRegexpParser
             boolean firstRune = true;
             while (index < nameEnd) {
                 int rune = readUtf8RuneInName();
-                if (!isValidCaptureNameRune(rune) || (firstRune && Character.isDigit(rune))) {
+                if (!isValidCaptureNameRune(rune) || (firstRune && DECIMAL_DIGIT.contains(rune))) {
                     // Match upstream: error_arg is the full "(?P<...>" / "(?<...>" capture header.
                     throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, Slices.wrappedBuffer(bytes, groupStart, (nameEnd - groupStart) + 1));
                 }
@@ -1389,7 +1390,7 @@ final class TrinoRegexpParser
                     name.startsWith("Is")) {
                 return null;
             }
-            if (name.regionMatches(true, 0, "In", 0, 2)) {
+            if (name.length() >= 2 && UnicodeCase.equalsIgnoreCase(name.substring(0, 2), "In")) {
                 CharClass block = UnicodeGroups.lookup("In" + name.substring(2));
                 if (block != null) {
                     return block;
@@ -1404,12 +1405,13 @@ final class TrinoRegexpParser
                 return group;
             }
             if (name.length() == 1) {
-                group = UnicodeGroups.lookup(name.toUpperCase(Locale.ROOT));
+                group = UnicodeGroups.lookup(UnicodeCase.toUpperCase(name));
             }
             else if (name.length() == 2) {
-                group = UnicodeGroups.lookup(
-                        Character.toUpperCase(name.charAt(0)) +
-                                name.substring(1).toLowerCase(Locale.ROOT));
+                group = UnicodeGroups.lookup(new StringBuilder()
+                        .appendCodePoint(UnicodeCase.toUpperCase(name.charAt(0)))
+                        .append(UnicodeCase.toLowerCase(name.substring(1)))
+                        .toString());
             }
             if (group != null) {
                 return group;
@@ -1419,7 +1421,7 @@ final class TrinoRegexpParser
                 return group;
             }
             for (String script : UnicodeGroups.scriptNames()) {
-                if (script.replace("_", "").equalsIgnoreCase(name)) {
+                if (UnicodeCase.equalsIgnoreCase(script.replace("_", ""), name)) {
                     return UnicodeGroups.lookup("sc=" + script);
                 }
             }
@@ -1428,7 +1430,7 @@ final class TrinoRegexpParser
 
         private static String canonicalJavaProperty(String name)
         {
-            return switch (name.toLowerCase(Locale.ROOT)) {
+            return switch (UnicodeCase.toLowerCase(name)) {
                 case "javalowercase" -> "javaLowerCase";
                 case "javauppercase" -> "javaUpperCase";
                 case "javaalphabetic" -> "javaAlphabetic";

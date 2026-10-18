@@ -83,23 +83,36 @@ construction fails.
   resulting ranges and compiled instructions.
 - Java and Trino match-time word boundaries read a table of the database's
   word characters, nonspacing marks, and letters and digits, built once, when
-  the first Java or Trino pattern with a word boundary compiles. Java's named
-  code points still read the running JVM.
+  the first Java or Trino pattern with a word boundary compiles.
+- Java's `\N{name}` accepts the names `Character.codePointOf` accepts, built
+  from the database's character names, the earlier Unicode names of controls,
+  and blocks by the JDK's rule. The JDK's two choices for controls that are not
+  Unicode data are constants citing the JDK's build tool. The names are read on
+  the first `\N{name}`.
+- Java and Trino normalize property and character names with the database's
+  case mappings, including the unconditional mappings of `SpecialCasing.txt`,
+  as the JDK's `String` and `Character` conversions do, and Trino's capture
+  names cannot start with the database's decimal digits.
 - RE2's ASCII definitions of shorthand classes remain regex-language semantics,
   not Unicode data. Java-specific shorthand modes and other syntax extensions
   require separate explicit decisions.
 
-Java and Trino properties and word boundaries previously came from the running
-JVM's `Character` APIs, so their results changed with each JDK upgrade. They
+Java and Trino properties, word boundaries, and name normalization, and Java's
+character names, previously came from the running JVM's `Character` and
+`String` APIs, so their results changed with each JDK upgrade. They
 now agree with the JDK at every code point its own Unicode version assigns,
 16.0 on Java 25 and 17.0 on Java 26, apart from two changes Unicode 17.0 made
 to older characters: U+0295 moved from `Ll` to `Lo`, and 689 code points that
 are not emoji, such as U+2605 BLACK STAR, lost Extended_Pictographic.
-Characters and names Unicode added after the JDK's version, such as the
-Unicode 18.0 scripts Jurchen and Seal, resolve only in Regulator. This
-agreement is of property membership, which uses the JDK's formulas over the
-pinned database; the accepted property spellings keep Regulator's existing
-rules, which are not identical to `Pattern`'s.
+Name case conversions agree where their input and output contain only
+characters assigned in the JDK's Unicode version; Unicode 18.0 also uppercases
+some older characters to newer ones, such as U+0277 to U+A7DD, but neither is
+ASCII, so no name resolves differently. Characters and names Unicode added
+after the JDK's version, such as the Unicode 18.0 scripts Jurchen and Seal and
+the names of their characters, resolve only in Regulator. This agreement is of
+property membership, which uses the JDK's formulas over the pinned database;
+the accepted property spellings keep Regulator's existing rules, which are not
+identical to `Pattern`'s.
 
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.

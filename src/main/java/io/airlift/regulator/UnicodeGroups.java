@@ -14,10 +14,11 @@
 package io.airlift.regulator;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
@@ -136,7 +137,7 @@ final class UnicodeGroups
 
         int equalsIndex = name.indexOf('=');
         if (equalsIndex >= 0) {
-            String propertyName = name.substring(0, equalsIndex).toLowerCase(Locale.ROOT);
+            String propertyName = UnicodeCase.toLowerCase(name.substring(0, equalsIndex));
             String value = name.substring(equalsIndex + 1);
             return switch (propertyName) {
                 case "sc", "script" -> javaScript(value);
@@ -221,7 +222,7 @@ final class UnicodeGroups
     // long name.
     private static CharClass javaScript(String name)
     {
-        String longName = ScriptNames.BY_UPPERCASE_NAME.get(name.toUpperCase(Locale.ENGLISH));
+        String longName = ScriptNames.BY_UPPERCASE_NAME.get(UnicodeCase.toUpperCase(name));
         if (longName == null) {
             return null;
         }
@@ -243,7 +244,7 @@ final class UnicodeGroups
     // its name without spaces.
     private static CharClass block(String name)
     {
-        String block = BlockNames.BY_KEY.get(name.toUpperCase(Locale.US));
+        String block = BlockNames.BY_KEY.get(UnicodeCase.toUpperCase(name));
         if (block == null) {
             return null;
         }
@@ -256,7 +257,7 @@ final class UnicodeGroups
     // The Unicode properties of java.util.regex, defined in CharPredicates.
     private static CharClass binaryProperty(String name)
     {
-        String normalizedName = name.replace("_", "").toUpperCase(Locale.ROOT);
+        String normalizedName = UnicodeCase.toUpperCase(name.replace("_", ""));
         return switch (normalizedName) {
             case "ALPHABETIC", "ALPHA" -> alphabetic();
             case "ASSIGNED" -> assigned();
@@ -525,6 +526,23 @@ final class UnicodeGroups
         return (WordFlags.FLAGS.get(codePoint) & WordFlags.LETTER_OR_DIGIT) != 0;
     }
 
+    /**
+     * Returns the identifier of the block of {@code codePoint}, which
+     * {@code Character.UnicodeBlock.of(codePoint).toString()} returns, such as
+     * LATIN_1_SUPPLEMENT, or null if the code point is in no block.
+     */
+    static String javaBlockIdentifier(int codePoint)
+    {
+        int index = Arrays.binarySearch(BlockNames.FIRST_CODE_POINTS, codePoint);
+        if (index < 0) {
+            index = -index - 2;
+        }
+        if (index < 0 || codePoint > BlockNames.LAST_CODE_POINTS[index]) {
+            return null;
+        }
+        return BlockNames.IDENTIFIERS[index];
+    }
+
     // The classes that match-time word boundaries read for each input code point, as the flags of
     // one table, built when the first pattern with such a boundary compiles rather than by each
     // pattern.
@@ -556,13 +574,13 @@ final class UnicodeGroups
 
             Map<String, String> byUppercaseName = new HashMap<>();
             for (String name : NAMES) {
-                byUppercaseName.put(name.toUpperCase(Locale.ENGLISH), name);
+                byUppercaseName.put(UnicodeCase.toUpperCase(name), name);
             }
             // A short name of a script that Scripts.txt assigns no code point, such as Hrkt, names
             // no Java script.
             UnicodeDatabase.scriptShortNames().forEach((shortName, longName) -> {
                 if (NAMES.contains(longName)) {
-                    byUppercaseName.put(shortName.toUpperCase(Locale.ENGLISH), longName);
+                    byUppercaseName.put(UnicodeCase.toUpperCase(shortName), longName);
                 }
             });
             BY_UPPERCASE_NAME = Map.copyOf(byUppercaseName);
@@ -572,20 +590,36 @@ final class UnicodeGroups
     private static final class BlockNames
     {
         private static final Map<String, String> BY_KEY;
+        // The first code point, last code point, and identifier of each block, in ascending order.
+        private static final int[] FIRST_CODE_POINTS;
+        private static final int[] LAST_CODE_POINTS;
+        private static final String[] IDENTIFIERS;
 
         static {
             Map<String, String> byKey = new HashMap<>();
+            Map<Integer, String> identifiersByFirstCodePoint = new TreeMap<>();
+            Map<Integer, Integer> lastCodePointsByFirst = new HashMap<>();
             for (String block : UnicodeDatabase.blocks().names()) {
                 String identifierName = EARLIER_BLOCK_NAMES.getOrDefault(block, block);
-                byKey.put(identifierName.toUpperCase(Locale.US).replace(' ', '_').replace('-', '_'), block);
+                String identifier = UnicodeCase.toUpperCase(identifierName).replace(' ', '_').replace('-', '_');
+                byKey.put(identifier, block);
                 for (String name : List.of(block, identifierName)) {
-                    String uppercaseName = name.toUpperCase(Locale.US);
+                    String uppercaseName = UnicodeCase.toUpperCase(name);
                     byKey.put(uppercaseName, block);
                     byKey.put(uppercaseName.replace(" ", ""), block);
+                }
+                int[] ranges = UnicodeDatabase.blocks().ranges(block);
+                for (int index = 0; index < ranges.length; index += 2) {
+                    identifiersByFirstCodePoint.put(ranges[index], identifier);
+                    lastCodePointsByFirst.put(ranges[index], ranges[index + 1]);
                 }
             }
             byKey.put(SURROGATES_AREA, SURROGATES_AREA);
             BY_KEY = Map.copyOf(byKey);
+
+            FIRST_CODE_POINTS = identifiersByFirstCodePoint.keySet().stream().mapToInt(Integer::intValue).toArray();
+            LAST_CODE_POINTS = Arrays.stream(FIRST_CODE_POINTS).map(lastCodePointsByFirst::get).toArray();
+            IDENTIFIERS = identifiersByFirstCodePoint.values().toArray(String[]::new);
         }
     }
 }

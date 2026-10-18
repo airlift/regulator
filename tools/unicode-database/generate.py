@@ -101,14 +101,46 @@
 # versions such as 1.1. Code points of the default value, Unassigned, are
 # absent.
 #
+# Sections 11 and 12, full uppercase and lowercase mappings: the unconditional
+# SpecialCasing.txt uppercase and lowercase mappings to two or more code
+# points, in the format of section 2. Every other code point fully maps as it
+# simply maps.
+#
+# A character name set holds code points and a name of each. Its payload is a
+# dictionary of the words in the names, then the names. The dictionary is a
+# varint word count, a varint count of the leading frequent words, and per word
+# the varint length of the prefix it shares with the previous word (0 for the
+# first), the varint length of the rest, and the rest in ASCII. The frequent
+# words are the words the names use most, at most 127, in descending order of
+# use, and the other words follow in ascending order. Then come a varint name
+# count and per name, in ascending order of code point, the varint distance
+# from the previous code point (from 0 for the first), a varint of the count of
+# leading tokens it shares with the previous name, shifted left four bits, plus
+# the count of its other tokens, and each other token as a varint. Token 0 is a
+# hyphen and the code point in at least four uppercase hexadecimal digits,
+# appended to the previous token, and token n is dictionary word n - 1, after a
+# space unless it starts the name. A name has at most 15 tokens.
+#
+# Section 13, Name, a character name set: the UnicodeData.txt field 1 names,
+# such as LATIN SMALL LETTER A. A row whose field 1 is a label in angle
+# brackets, such as <control> or a First or Last row, gives no name.
+#
+# Section 14, control names, a character name set: the Unicode_1_Name,
+# UnicodeData.txt field 10, of each row labeled <control> that has one, such
+# as LINE FEED (LF).
+#
 # The generator refuses data that breaks what the readers assume: a code point
 # with two mappings of one kind, a simple fold whose target folds again, a full
 # fold whose result folds again, a status S mapping without a status F one,
 # simple case folding orbits that differ from the classes of code points with
 # equal full folding, a lowercase-of-uppercase mapping that is not idempotent,
 # a code point with two values of one single-valued property, such as two
-# scripts, a First row without its Last row, and a binary property that one of
-# its files does not list.
+# scripts, a First row without its Last row, a binary property that one of its
+# files does not list, an unconditional special casing to one code point that
+# differs from the simple mapping, two code points with one name, two controls
+# with one control name, and a name with characters other than uppercase
+# letters, digits, hyphens, and parentheses, with spaces other than single ones
+# between words, or with more than 15 tokens.
 
 import argparse
 import hashlib
@@ -131,11 +163,20 @@ INPUT_FILES = (
     "PropList.txt",
     "PropertyValueAliases.txt",
     "Scripts.txt",
+    "SpecialCasing.txt",
     "UnicodeData.txt",
     "emoji/emoji-data.txt",
 )
 # Files whose first line names the file and its version, such as "# Scripts-18.0.0.txt".
-VERSIONED_FILES = ("Blocks.txt", "CaseFolding.txt", "DerivedAge.txt", "PropList.txt", "PropertyValueAliases.txt", "Scripts.txt")
+VERSIONED_FILES = (
+    "Blocks.txt",
+    "CaseFolding.txt",
+    "DerivedAge.txt",
+    "PropList.txt",
+    "PropertyValueAliases.txt",
+    "Scripts.txt",
+    "SpecialCasing.txt",
+)
 # Files whose first line names the file, such as "# emoji-data.txt", and a later
 # header line its version, such as "# Version: 18.0.0".
 EMOJI_FILES = ("emoji/emoji-data.txt",)
@@ -161,6 +202,14 @@ EMOJI_PROPERTIES = (
 NAME = r"[A-Za-z0-9_]+"
 BLOCK_NAME = r"[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*"
 AGE = r"[0-9]+\.[0-9]+"
+# A character name is words of letters, digits, hyphens, and parentheses, separated by single
+# spaces, such as "LINE FEED (LF)".
+CHARACTER_NAME = r"[A-Z0-9()-]+(?: [A-Z0-9()-]+)*"
+# Each frequent word of a character name set, at most this many, gets a one-byte varint token;
+# token 0 is reserved for the code point suffix.
+FREQUENT_WORDS = 127
+# The kept and new token counts of a character name share one varint, four bits each.
+MAX_NAME_TOKENS = 15
 
 MAGIC = b"RGUD"
 FORMAT_VERSION = 1
@@ -174,6 +223,10 @@ SECTION_SCRIPT_SHORT_NAMES = 7
 SECTION_BLOCK = 8
 SECTION_BINARY_PROPERTIES = 9
 SECTION_AGE = 10
+SECTION_FULL_UPPERCASE_MAPPINGS = 11
+SECTION_FULL_LOWERCASE_MAPPINGS = 12
+SECTION_NAME = 13
+SECTION_CONTROL_NAME = 14
 MAX_CODE_POINT = 0x10FFFF
 
 
@@ -342,15 +395,19 @@ def case_folding(text):
 
 
 def unicode_data(text):
-    # UnicodeData.txt rows have 15 fields; field 2 is the general category,
-    # field 9 Bidi_Mirrored, Y or N, field 12 the simple uppercase mapping, and
-    # field 13 the simple lowercase mapping. A range of code points, given by a
-    # First row and a Last row of the same name, category, and Bidi_Mirrored,
-    # has no mappings.
+    # UnicodeData.txt rows have 15 fields; field 1 is the name, field 2 the
+    # general category, field 9 Bidi_Mirrored, Y or N, field 10 the
+    # Unicode_1_Name, field 12 the simple uppercase mapping, and field 13 the
+    # simple lowercase mapping. A range of code points, given by a First row and
+    # a Last row of the same name, category, and Bidi_Mirrored, has no mappings
+    # and no name of its own. The name of any other row in angle brackets, such
+    # as <control>, is a label, not a Name.
     uppercase = {}
     lowercase = {}
     categories = {}
     mirrored = []
+    names = []
+    control_names = []
     previous = -1
     first = None
     for number, line in enumerate(text.split("\n"), 1):
@@ -387,6 +444,11 @@ def unicode_data(text):
             add_range(categories, category, low, source)
             if fields[9] == "Y":
                 mirrored.append((low, source))
+        if fields[1] == "<control>":
+            if fields[10]:
+                control_names.append((source, character_name(fields[10], number)))
+        elif not fields[1].startswith("<"):
+            names.append((source, character_name(fields[1], number)))
         for mappings, field in ((uppercase, fields[12]), (lowercase, fields[13])):
             if not field:
                 continue
@@ -409,7 +471,54 @@ def unicode_data(text):
         fold = java_fold(value)
         if java_fold(fold) != fold:
             raise ValueError(f"U+{value:04X} folds to U+{fold:04X} by lowercase of uppercase, which folds again")
-    return sorted(uppercase.items()), sorted(lowercase.items()), categories, mirrored
+    unique_names = {name for _, name in names}
+    if len(unique_names) != len(names):
+        raise ValueError("UnicodeData.txt gives two code points one name")
+    # A control's Unicode_1_Name may also be another code point's name, such as
+    # BELL, but no two controls share one.
+    if len({name for _, name in control_names}) != len(control_names):
+        raise ValueError("UnicodeData.txt gives two controls one Unicode_1_Name")
+    return sorted(uppercase.items()), sorted(lowercase.items()), categories, mirrored, names, control_names
+
+
+def character_name(name, number):
+    if re.fullmatch(CHARACTER_NAME, name) is None:
+        raise ValueError(f"UnicodeData.txt:{number}: unexpected character name {name!r}")
+    return name
+
+
+def special_casing(text, uppercase, lowercase):
+    # SpecialCasing.txt rows are "<code>; <lower>; <title>; <upper>; # <name>",
+    # each mapping one or more code points, or with a condition list before the
+    # comment, such as Final_Sigma or tr. Only the unconditional lowercase and
+    # uppercase mappings are read; a mapping to one code point must equal the
+    # simple mapping of UnicodeData.txt, so only those to two or more are kept.
+    full_uppercase = {}
+    full_lowercase = {}
+    unconditional = set()
+    for number, line in enumerate(text.split("\n"), 1):
+        row = line.split("#", 1)[0].strip()
+        if not row:
+            continue
+        fields = [field.strip() for field in row.split(";")]
+        if len(fields) not in (5, 6) or fields[-1]:
+            raise ValueError(f"SpecialCasing.txt:{number}: unexpected row {line!r}")
+        if len(fields) == 6:
+            continue
+        source = code_point(fields[0], "SpecialCasing.txt", number)
+        if source in unconditional:
+            raise ValueError(f"SpecialCasing.txt:{number}: U+{source:04X} has two unconditional rows")
+        unconditional.add(source)
+        for mappings, simple, field in ((full_uppercase, uppercase, fields[3]), (full_lowercase, lowercase, fields[1])):
+            mapping = tuple(code_point(value, "SpecialCasing.txt", number) for value in field.split())
+            if not mapping:
+                raise ValueError(f"SpecialCasing.txt:{number}: an empty mapping")
+            if len(mapping) == 1:
+                if mapping[0] != simple.get(source, source):
+                    raise ValueError(f"SpecialCasing.txt:{number}: U+{source:04X} maps to one code point other than its simple mapping")
+                continue
+            mappings[source] = mapping
+    return sorted(full_uppercase.items()), sorted(full_lowercase.items())
 
 
 def property_values(name, text, value_pattern=NAME, single_valued=True):
@@ -523,7 +632,7 @@ def orbit_section(orbits):
     return section(SECTION_SIMPLE_CASE_FOLDING_ORBITS, bytes(payload))
 
 
-def full_folding_section(mappings):
+def multi_character_section(section_id, mappings):
     payload = bytearray(varint(len(mappings)))
     previous_source = 0
     for source, mapping in mappings:
@@ -534,7 +643,7 @@ def full_folding_section(mappings):
             payload += signed_varint(value - previous)
             previous = value
         previous_source = source
-    return section(SECTION_FULL_CASE_FOLDING, bytes(payload))
+    return section(section_id, bytes(payload))
 
 
 def property_value_section(section_id, values):
@@ -571,9 +680,64 @@ def mapping_section(section_id, mappings):
     return section(section_id, bytes(payload))
 
 
+def name_tokens(code_point, name):
+    # The words of a name, with the hyphen and code point that end a name such
+    # as "CJK COMPATIBILITY IDEOGRAPH-F900" as a separate token, None.
+    words = name.split(" ")
+    suffix = f"-{code_point:04X}"
+    if len(words[-1]) > len(suffix) and words[-1].endswith(suffix):
+        words[-1] = words[-1][:-len(suffix)]
+        words.append(None)
+    if len(words) > MAX_NAME_TOKENS:
+        raise ValueError(f"the name of U+{code_point:04X} has more than {MAX_NAME_TOKENS} tokens")
+    return words
+
+
+def character_name_section(section_id, names):
+    tokens = [(code_point, name_tokens(code_point, name)) for code_point, name in names]
+    counts = {}
+    for _, words in tokens:
+        for word in words:
+            if word is not None:
+                counts[word] = counts.get(word, 0) + 1
+    by_frequency = sorted(counts, key=lambda word: (-counts[word], word))
+    frequent = by_frequency[:FREQUENT_WORDS]
+    words = frequent + sorted(by_frequency[FREQUENT_WORDS:])
+    if len(words) >= 0xFFFF:
+        raise ValueError(f"section {section_id} has more than {0xFFFF - 1} words")
+    token_values = {word: index + 1 for index, word in enumerate(words)}
+    token_values[None] = 0
+
+    payload = bytearray(varint(len(words)) + varint(len(frequent)))
+    previous_word = b""
+    for word in words:
+        encoded_word = word.encode("ascii")
+        shared = 0
+        while shared < min(len(word), len(previous_word)) and encoded_word[shared] == previous_word[shared]:
+            shared += 1
+        payload += varint(shared) + varint(len(encoded_word) - shared) + encoded_word[shared:]
+        previous_word = encoded_word
+
+    payload += varint(len(tokens))
+    previous_code_point = 0
+    previous_tokens = []
+    for code_point, name_words in tokens:
+        kept = 0
+        while kept < min(len(name_words), len(previous_tokens)) and name_words[kept] == previous_tokens[kept]:
+            kept += 1
+        payload += varint(code_point - previous_code_point)
+        payload += varint(kept << 4 | len(name_words) - kept)
+        for word in name_words[kept:]:
+            payload += varint(token_values[word])
+        previous_code_point = code_point
+        previous_tokens = name_words
+    return section(section_id, bytes(payload))
+
+
 def database(version, files, texts, key):
     simple_orbits, full_folds = case_folding(texts["CaseFolding.txt"])
-    uppercase, lowercase, categories, mirrored = unicode_data(texts["UnicodeData.txt"])
+    uppercase, lowercase, categories, mirrored, names, control_names = unicode_data(texts["UnicodeData.txt"])
+    full_uppercase, full_lowercase = special_casing(texts["SpecialCasing.txt"], dict(uppercase), dict(lowercase))
     scripts = property_values("Scripts.txt", texts["Scripts.txt"])
     blocks = property_values("Blocks.txt", texts["Blocks.txt"], BLOCK_NAME)
     binary = {"Bidi_Mirrored": mirrored}
@@ -587,7 +751,7 @@ def database(version, files, texts, key):
             + key
             + input_digest(files)
             + orbit_section(simple_orbits)
-            + full_folding_section(full_folds)
+            + multi_character_section(SECTION_FULL_CASE_FOLDING, full_folds)
             + mapping_section(SECTION_SIMPLE_UPPERCASE_MAPPINGS, uppercase)
             + mapping_section(SECTION_SIMPLE_LOWERCASE_MAPPINGS, lowercase)
             + property_value_section(SECTION_GENERAL_CATEGORY, categories)
@@ -595,7 +759,11 @@ def database(version, files, texts, key):
             + name_section(SECTION_SCRIPT_SHORT_NAMES, script_short_names(texts["PropertyValueAliases.txt"]))
             + property_value_section(SECTION_BLOCK, blocks)
             + property_value_section(SECTION_BINARY_PROPERTIES, binary)
-            + property_value_section(SECTION_AGE, ages))
+            + property_value_section(SECTION_AGE, ages)
+            + multi_character_section(SECTION_FULL_UPPERCASE_MAPPINGS, full_uppercase)
+            + multi_character_section(SECTION_FULL_LOWERCASE_MAPPINGS, full_lowercase)
+            + character_name_section(SECTION_NAME, names)
+            + character_name_section(SECTION_CONTROL_NAME, control_names))
 
 
 def generated(key, data):

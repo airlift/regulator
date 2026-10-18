@@ -1,11 +1,11 @@
 # Unicode data policy
 
-Every language reads its Unicode properties, case folding, and word boundaries
-from Regulator's pinned Unicode 18.0 database, described in
+Every language reads its Unicode properties, case folding, word boundaries,
+and character names from Regulator's pinned Unicode 18.0 database, described in
 [`tools/unicode-database/README.md`](../../tools/unicode-database/README.md),
-so they are the same on every JVM. Only Java's named code points still read
-the running JVM. This differs from pinned upstream RE2, whose generated tables
-are Unicode 15.1 data, as `REGULATOR_DECISIONS.md` records.
+so they are the same on every JVM. No Unicode data comes from the running JVM.
+This differs from pinned upstream RE2, whose generated tables are Unicode 15.1
+data, as `REGULATOR_DECISIONS.md` records.
 
 ## Implemented direction
 
@@ -18,6 +18,8 @@ it:
   `java.lang.Character`. Their categories, scripts, blocks, binary properties,
   and `java...` properties are the database's values combined by the formulas
   of the `Character` javadoc, under the JDK's names and aliases.
+- Java's `\N{name}` accepts the names of `Character.codePointOf`, built from
+  the database's character names and blocks by the JDK's rule.
 
 Regulator does not keep a copy of upstream RE2's generated category, script,
 or case-fold tables. Case folding follows each pattern's language: RE2 folds
@@ -26,8 +28,8 @@ and Trino with its full case folding.
 
 ## Motivation
 
-Properties read from the running JVM changed with each JDK upgrade, and a JDK
-upgrade changes the Unicode version. One pinned database gives every language,
+Unicode data read from the running JVM changes with each JDK upgrade, which
+changes the Unicode version. One pinned database gives every language,
 every JVM, and every node of a distributed Trino installation the same Unicode
 results, and moves to a new Unicode version only through an explicit,
 reviewed regeneration.
@@ -39,17 +41,23 @@ data, not that table version.
 ## Differences from the JDK
 
 Java and Trino property membership uses the JDK's formulas over the pinned
-database. Property membership therefore agrees with `Character` and `Pattern`
-on the JDK's own Unicode version, which the `Character` javadoc names: Unicode
-16.0 for Java 25 and 17.0 for Java 26. They differ for:
+database. Property membership, Java's character names, and the case
+conversions that normalize property and character names therefore agree with
+`Character`, `String`, and `Pattern` on the JDK's own Unicode version, which
+the `Character` javadoc names: Unicode 16.0 for Java 25 and 17.0 for Java 26.
+They differ for:
 
 - characters Unicode assigned after the JDK's version, and names it added,
-  such as the Unicode 18.0 scripts Jurchen and Seal and their blocks
+  such as the Unicode 18.0 scripts Jurchen and Seal and their blocks, and the
+  names of the characters themselves
 - U+0295 LATIN LETTER PHARYNGEAL VOICED FRICATIVE, which Unicode 17.0 changed
   from `Ll` to `Lo`, so Regulator does not classify it as lowercase, even when
   running on Java 25
 - 689 code points that are not emoji, such as U+2388 HELM SYMBOL and U+2605
   BLACK STAR, from which Unicode 17.0 removed Extended_Pictographic
+- case mappings Unicode added from older characters to newer ones, such as
+  U+0277 uppercasing to U+A7DD; neither is ASCII, so no name resolves
+  differently
 
 Regulator's supported property names and case-insensitive matching can differ
 from `Pattern` independently of Unicode version.
@@ -69,7 +77,8 @@ Examples of database data include:
 - general category, script, block, and age
 - binary properties such as Extended_Pictographic, Hex_Digit, and
   Other_Alphabetic
-- simple case mappings and case folding
+- simple and full case mappings and case folding
+- character names
 
 Examples of regex-language decisions include:
 
@@ -141,6 +150,44 @@ The parser distinguishes:
 Alias handling is tested independently from range membership and does not
 silently reinterpret a recognized Java spelling as a different RE2 construct.
 
+### Name normalization
+
+Java and Trino resolve property names, and Java resolves character names, with
+the JDK's case conversions, such as uppercasing a script name or comparing it
+ignoring case. A name in a pattern can hold any text, and these conversions
+take some non-ASCII characters to ASCII, such as the long s to S, the Kelvin
+sign to k, and sharp s to SS, so they read the database rather than `String`:
+its simple case mappings and the unconditional mappings of `SpecialCasing.txt`.
+Lowercasing omits the one condition that applies without a locale,
+Final_Sigma, which chooses between two non-ASCII sigmas that no name holds.
+Trino's capture names cannot start with a decimal digit, the database's `Nd`.
+
+### Character names
+
+Java's `\N{name}` resolves names as `Character.codePointOf` does. It trims
+characters up to U+0020 and uppercases the name, then accepts the name of a
+code point by the JDK's rule:
+
+- the Name of `UnicodeData.txt`, such as LATIN SMALL LETTER A
+- for a control, its Unicode_1_Name, such as LINE FEED (LF), except that
+  U+0007 is BEL, because U+1F514 is BELL, and the three controls without one,
+  U+0080, U+0081, and U+0099, have the figment names of `NameAliases.txt`
+- for any other assigned code point, its block's identifier with spaces for
+  underscores, a space, and the code point in hexadecimal, such as CJK UNIFIED
+  IDEOGRAPHS 4E00
+
+The two JDK exceptions are constants citing the JDK's build tool. Aliases,
+such as LINE FEED, and the names that Unicode derives for ranges, such as CJK
+UNIFIED IDEOGRAPH-4E00, are rejected, as they are by the JDK.
+
+The database stores the names as a dictionary of their words and, per name, a
+code point and word indexes, each sharing its leading words with the previous
+name. A name that ends in its own code point, such as CJK COMPATIBILITY
+IDEOGRAPH-F900, stores that suffix as one token. The 127 most used words have
+one-byte indexes. This takes the 41,232 names of Unicode 18.0 from 1.1 MB of
+text to 247 KB, where front coding the names alone would take 437 KB, because
+most names share words, such as LETTER, with names that do not precede them.
+
 ### Case folding
 
 Each compiled pattern carries the `CaseFolding` rule of its language, and the
@@ -197,6 +244,11 @@ Unicode data is read on first use, not on every compilation:
   two sets of tables.
 - Trino's multi-code-point folds are initialized once on first use by a
   frontend that enables full folding.
+- The character names are read on the first `\N{name}`, from the resource
+  again, because the first read of the resource keeps every section but the
+  names, which are most of it. They are decoded into arrays of words, code
+  points, and word indexes, with a hash table of the names, about 1 MB in
+  all.
 - The word-boundary flags are built once, when the first Java or Trino pattern
   with a word boundary compiles, not per pattern. They are a two-stage table
   of one flag byte per code point: each block of 256 code points points to its
@@ -218,6 +270,8 @@ folding from the pinned database:
 - required-match analysis
 - single-byte matcher optimizations
 - the Java and Trino word boundaries of `EmptyOp`
+- the Java and Trino property-name normalization, Java's `\N{name}`, and
+  Trino's capture names
 - the canonicalization of `FilteredRe2` and `Prefilter`
 
 ## Correctness contract
@@ -231,7 +285,12 @@ folding from the pinned database:
    added since, must hold no character the JDK assigns. RE2's accepted group
    names and syntax are checked against upstream's rule.
 2. Canonical aliases are checked for identity, and unsupported names are
-   rejected.
+   rejected. Every character name is checked against `Character.getName` and
+   `Character.codePointOf` at every code point the running JDK's Unicode
+   version assigns, and focused spellings against `Character.codePointOf`.
+   The case conversions of name normalization are checked against `String`
+   and `Character` for every conversion whose input and output contain only
+   characters assigned in the JDK's Unicode version.
 3. Every rule's simple folds are checked exhaustively to form closed orbits
    that hold each code point's case mappings, apart from dotted and dotless I
    in RE2 and Trino. Java's Unicode `\w` and `\b` and Trino's `\b` are checked

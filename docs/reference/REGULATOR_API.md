@@ -26,9 +26,8 @@ bytes into strings is always the caller's choice.
 
 Regulator requires Java 25 or newer. Releases are tested on Java 25 and the
 current feature release used by Trino, including short-term-support releases.
-Unicode properties, case folding, and word boundaries in every language use
-Regulator's pinned Unicode 18.0 data on every JVM. Java named code points
-follow the supported JVM executing the application.
+Unicode properties, case folding, word boundaries, and Java named code points
+use Regulator's pinned Unicode 18.0 data on every JVM.
 
 ## Input model
 

@@ -81,7 +81,7 @@ public class TestJavaRegexpSyntax
 
     private static List<SyntaxCase> syntaxCases()
     {
-        return TsvTestData.load(SYNTAX_CASES, 3, 50).stream()
+        return TsvTestData.load(SYNTAX_CASES, 3, 51).stream()
                 .map(row -> new SyntaxCase(row.field(1), Expected.valueOf(row.field(0)), row.field(2)))
                 .toList();
     }

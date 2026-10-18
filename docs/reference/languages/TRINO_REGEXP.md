@@ -56,11 +56,11 @@ Unicode property membership uses the JDK's formulas over Regulator's pinned
 Unicode 18.0 database, case-insensitive matching uses its full case folding,
 `CaseFolding.txt` statuses C and F, and word boundaries use its word
 characters, so all three are the same on every JVM. Property membership agrees
-with Java's `Pattern` except where Unicode changed since the JVM's Unicode
+with Java's `Pattern` except where Unicode changed since the JDK's Unicode
 version, as
-[`JVM_UNICODE.md`](../../integrations/JVM_UNICODE.md#differences-from-the-jdk)
-lists; the accepted property spellings keep Regulator's existing rules, which
-are not identical to `Pattern`'s.
+[`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) lists;
+the accepted property spellings keep Regulator's existing rules, which are not
+identical to `Pattern`'s.
 
 Full case folding keeps dotted capital `İ` and dotless small `ı` apart from
 `I` and `i` outside its Turkic mappings, and so does Joni: `(?i)i` matches

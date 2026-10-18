@@ -23,7 +23,6 @@ import java.util.Arrays;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 
 import static io.airlift.regulator.Regexp.MAX_REPEAT;
@@ -1341,7 +1340,7 @@ final class JavaRegexpParser
             String property = name;
             int equals = name.indexOf('=');
             if (equals >= 0) {
-                String family = name.substring(0, equals).toLowerCase(Locale.ROOT);
+                String family = UnicodeCase.toLowerCase(name.substring(0, equals));
                 if (!family.equals("gc") && !family.equals("general_category")) {
                     return group;
                 }
@@ -1349,7 +1348,7 @@ final class JavaRegexpParser
             }
             else if (name.startsWith("Is")) {
                 property = name.substring(2);
-                if (switch (property.toUpperCase(Locale.ROOT)) {
+                if (switch (UnicodeCase.toUpperCase(property)) {
                     case "LOWER", "UPPER", "LOWERCASE", "UPPERCASE", "TITLECASE" -> true;
                     default -> false;
                 }) {
@@ -1408,7 +1407,7 @@ final class JavaRegexpParser
             String originalName = name;
             int equals = name.indexOf('=');
             if (equals >= 0) {
-                String family = name.substring(0, equals).toLowerCase(Locale.ROOT);
+                String family = UnicodeCase.toLowerCase(name.substring(0, equals));
                 if (family.equals("gc") || family.equals("general_category")) {
                     // Pattern.family resolves these through forProperty, without
                     // the Unicode POSIX widening used for bare property names.
@@ -1465,7 +1464,7 @@ final class JavaRegexpParser
             if (!name.startsWith("Is") && name.indexOf('=') < 0) {
                 String normalizedName = name.replace("_", "");
                 for (String script : UnicodeGroups.scriptNames()) {
-                    if (script.replace("_", "").equalsIgnoreCase(normalizedName)) {
+                    if (UnicodeCase.equalsIgnoreCase(script.replace("_", ""), normalizedName)) {
                         return null;
                     }
                 }
@@ -1688,7 +1687,6 @@ final class JavaRegexpParser
             return character ^ 64;
         }
 
-        @SuppressWarnings("UnusedException")
         private int parseNamedCodePoint(int sequenceStart)
         {
             if (atEnd() || consumeByte() != '{') {
@@ -1703,12 +1701,11 @@ final class JavaRegexpParser
             }
             String name = new String(bytes, nameStart, index - nameStart, StandardCharsets.UTF_8);
             consumeByte('}');
-            try {
-                return Character.codePointOf(name);
-            }
-            catch (IllegalArgumentException ignored) {
+            int codePoint = JavaCharacterNames.codePointOf(name);
+            if (codePoint < 0) {
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
+            return codePoint;
         }
 
         private int parseFourHexDigits(int sequenceStart)

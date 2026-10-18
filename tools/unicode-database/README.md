@@ -16,7 +16,9 @@ documents the format. The database holds:
 - the multi-character full case folding of `CaseFolding.txt`, status F, which
   gives Trino patterns their multi-code-point folds
 - the simple uppercase and lowercase mappings of `UnicodeData.txt`, from which
-  Java patterns fold
+  Java patterns fold, and the unconditional multi-character mappings of
+  `SpecialCasing.txt`, which with them normalize Java and Trino property and
+  character names
 - the General_Category of every assigned code point, from `UnicodeData.txt`,
   and the Script of every code point `Scripts.txt` lists, which give RE2
   patterns their Unicode property groups
@@ -26,6 +28,8 @@ documents the format. The database holds:
   `PropList.txt` that Java properties read, which with the categories and
   scripts give Java and Trino patterns their Unicode properties and word
   boundaries
+- the Name of every code point `UnicodeData.txt` names, and the
+  Unicode_1_Name of every control, which give Java's `\N{name}` its names
 - the Age of every assigned code point, from `DerivedAge.txt`, which tells the
   tests which code points the running JDK's Unicode version assigns
 
@@ -75,8 +79,8 @@ Moving to a new version changes every result that depends on the database.
    version=19.0.0
    mkdir -p target && mkdir "target/ucd-${version}" "target/ucd-${version}/emoji"
    for file in Blocks.txt CaseFolding.txt DerivedAge.txt PropList.txt \
-           PropertyValueAliases.txt Scripts.txt UnicodeData.txt \
-           emoji/emoji-data.txt; do
+           PropertyValueAliases.txt Scripts.txt SpecialCasing.txt \
+           UnicodeData.txt emoji/emoji-data.txt; do
        curl -sSfL -o "target/ucd-${version}/${file}" \
            "https://www.unicode.org/Public/${version}/ucd/${file}"
    done
