@@ -40,6 +40,12 @@ final class TrinoRegexpParser
     public static ParseResult parse(Slice pattern, int parseFlags)
     {
         requireNonNull(pattern, "pattern is null");
+        if ((parseFlags & Regexp.LATIN1) == 0) {
+            int invalidOffset = Utf8.firstInvalidOffset(pattern);
+            if (invalidOffset >= 0) {
+                throw new RegexpParseException(RegexpParseErrorCode.BAD_UTF8, null, invalidOffset);
+            }
+        }
 
         Parser parser = new Parser(pattern, parseFlags, CaseFolding.TRINO);
         Regexp parsedRegexp = parser.parseRegexp();
@@ -1703,20 +1709,6 @@ final class TrinoRegexpParser
 
         private Regexp parseLiteral()
         {
-            if ((flags & Regexp.LATIN1) == 0) {
-                long decoded = Utf8.decode(bytes, index, end);
-                int width = Utf8.decodedWidth(decoded);
-                if (width == 1 &&
-                        Utf8.decodedCodePoint(decoded) == Utf8.RUNE_ERROR &&
-                        (bytes[index] & 0xFF) >= 0x80) {
-                    int rawByte = consumeByte();
-                    // Trino's non-strict Joni path preserves malformed literal bytes without
-                    // changing the encoding of adjacent valid UTF-8 literals.
-                    return Regexp.literal(
-                            (flags | Regexp.LATIN1) & ~(Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD),
-                            rawByte);
-                }
-            }
             int rune = readRune(flags);
             return literalFromRune(rune);
         }

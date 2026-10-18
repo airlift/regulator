@@ -355,8 +355,9 @@ TrinoLikePattern escaped = TrinoLikePattern.compile(
 `matches` always applies to the complete input. `%` matches zero or more
 Unicode code points, `_` matches exactly one code point, and the optional escape
 may quote `%`, `_`, or itself. Redundant wildcard runs are normalized during
-compilation. Invalid escape syntax throws `TrinoLikePatternSyntaxException`,
-whose `byteOffset()` is relative to the logical pattern Slice.
+compilation. Invalid escape syntax and a pattern that is not valid UTF-8 throw
+`TrinoLikePatternSyntaxException`, whose `byteOffset()` is relative to the
+logical pattern Slice.
 
 The compiled pattern is immutable and safe to share across threads. This API
 has no captures, partial-input matching, match-result object, replacement

@@ -79,7 +79,8 @@ public class TestTrinoLikeCorpus
             if (testCase.name().equals("supplementary-nfa-quirk")) {
                 continue;
             }
-            if (testCase.sqlOutcome() == ERROR) {
+            // Trino accepts a pattern that is not valid UTF-8; Regulator rejects it.
+            if (testCase.sqlOutcome() == ERROR || Utf8.firstInvalidOffset(Slices.wrappedBuffer(testCase.pattern())) >= 0) {
                 assertThatThrownBy(() -> compile(testCase))
                         .as(testCase.name())
                         .isInstanceOf(TrinoLikePatternSyntaxException.class);
@@ -213,18 +214,13 @@ public class TestTrinoLikeCorpus
     {
         // The general parser runs whenever an escape is supplied. An escape code point that no
         // pattern contains makes it the reference for the no-escape fast path, over patterns that
-        // mix wildcards, escapes, multibyte runes and malformed bytes at non-zero slice offsets.
+        // mix wildcards, escapes and multibyte runes at non-zero slice offsets.
         byte[][] atoms = {
                 {'a'}, {'b'}, {'%'}, {'_'}, {'\\'}, {'!'},
                 {(byte) 0xCF, (byte) 0x80},
                 {(byte) 0xE2, (byte) 0x82, (byte) 0xAC},
                 {(byte) 0xEF, (byte) 0xBF, (byte) 0xBD},
                 {(byte) 0xF0, (byte) 0x9F, (byte) 0x98, (byte) 0x80},
-                {(byte) 0xFF}, {(byte) 0x80}, {(byte) 0xC3},
-                {(byte) 0xE2, (byte) 0x82},
-                {(byte) 0xC0, (byte) 0x80},
-                {(byte) 0xED, (byte) 0xA0, (byte) 0x80},
-                {(byte) 0xF4, (byte) 0x90, (byte) 0x80, (byte) 0x80},
         };
         OptionalInt absentEscape = OptionalInt.of(0x2603);
         Random random = new Random(20260923);
@@ -330,7 +326,7 @@ public class TestTrinoLikeCorpus
     }
 
     @Test
-    public void testParsedLiteralsDecodeEscapesAndMalformedBytes()
+    public void testParsedLiteralsDecodeEscapes()
     {
         byte[] storage = "xxab%c_d\\%e\\\\f".getBytes(StandardCharsets.UTF_8);
         Slice pattern = Slices.wrappedBuffer(storage, 2, storage.length - 2);
@@ -342,16 +338,10 @@ public class TestTrinoLikeCorpus
         assertThat(elements.get(3)).isEqualTo(new TrinoLikeParser.Any(1));
         assertThat(literalText(elements.get(4))).isEqualTo("d%e\\f");
         assertLiteralsCopied(elements, storage);
-
-        Slice malformed = Slices.wrappedBuffer(new byte[] {'a', (byte) 0xFF, 'b', '%', (byte) 0xC3, (byte) 0xA9});
-        List<TrinoLikeParser.Element> malformedElements = TrinoLikeParser.parse(malformed, OptionalInt.empty());
-        assertThat(malformedElements).hasSize(3);
-        assertThat(literalText(malformedElements.get(0))).isEqualTo("a\uFFFDb");
-        assertThat(literalText(malformedElements.get(2))).isEqualTo("\u00E9");
     }
 
     @Test
-    public void testEscapeErrors()
+    public void testSyntaxErrors()
     {
         assertThatThrownBy(() -> TrinoLikePattern.compile(Slices.utf8Slice("abc\\"), '\\'))
                 .isInstanceOf(TrinoLikePatternSyntaxException.class)
@@ -364,16 +354,21 @@ public class TestTrinoLikeCorpus
         TrinoLikePattern supplementaryEscape = TrinoLikePattern.compile(Slices.utf8Slice("😀%"), 0x1F600);
         assertThat(supplementaryEscape.matches(Slices.utf8Slice("%"))).isTrue();
 
-        assertEscapeErrorOffset(new byte[] {(byte) 0xFF, '\\'}, 1);
-        assertEscapeErrorOffset(new byte[] {(byte) 0xFF, '\\', 'x'}, 2);
-        assertEscapeErrorOffset(new byte[] {'a', (byte) 0xC0, (byte) 0xAF, '\\', 'x'}, 4);
+        assertEscapeErrorOffset(new byte[] {(byte) 0xC3, (byte) 0xA9, '\\'}, 2);
+        assertEscapeErrorOffset(new byte[] {(byte) 0xC3, (byte) 0xA9, '\\', 'x'}, 3);
+        assertEscapeErrorOffset(new byte[] {'a', (byte) 0xE2, (byte) 0x82, (byte) 0xAC, '\\', 'x'}, 5);
 
-        byte[] backing = new byte[] {'!', '!', (byte) 0xFF, '\\', 'x', '!', '!'};
-        Slice pattern = Slices.wrappedBuffer(backing).slice(2, 3);
+        byte[] backing = new byte[] {'!', '!', (byte) 0xC3, (byte) 0xA9, '\\', 'x', '!', '!'};
+        Slice pattern = Slices.wrappedBuffer(backing).slice(2, 4);
         assertThatThrownBy(() -> TrinoLikePattern.compile(pattern, '\\'))
                 .isInstanceOf(TrinoLikePatternSyntaxException.class)
                 .extracting("byteOffset")
-                .isEqualTo(2);
+                .isEqualTo(3);
+
+        // Trino accepts a pattern that is not valid UTF-8; Regulator rejects it at the first bad byte.
+        assertInvalidUtf8Offset(new byte[] {'a', (byte) 0xE2, (byte) 0x82, 'b'}, 1);
+        assertInvalidUtf8Offset(new byte[] {'%', '_', (byte) 0xED, (byte) 0xA0, (byte) 0x80}, 2);
+        assertInvalidUtf8Offset(new byte[] {(byte) 0xFF}, 0);
     }
 
     @Test
@@ -425,6 +420,15 @@ public class TestTrinoLikeCorpus
                 .isInstanceOf(TrinoLikePatternSyntaxException.class)
                 .extracting("byteOffset")
                 .isEqualTo(byteOffset);
+    }
+
+    private static void assertInvalidUtf8Offset(byte[] pattern, int byteOffset)
+    {
+        assertThatThrownBy(() -> TrinoLikePattern.compile(Slices.wrappedBuffer(pattern)))
+                .isInstanceOf(TrinoLikePatternSyntaxException.class)
+                .extracting("byteOffset")
+                .isEqualTo(byteOffset);
+        assertEscapeErrorOffset(pattern, byteOffset);
     }
 
     private static TrinoLikePattern compile(TestingTrinoLikeCorpus.TestCase testCase)

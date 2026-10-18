@@ -25,7 +25,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.stream.Stream;
@@ -109,26 +108,6 @@ public class TestTrinoRegexpLanguage
         pattern.setByte(3, 'X');
 
         assertThat(regexp.replace(utf8Slice("a"), utf8Slice("${name}")).toStringUtf8()).isEqualTo("a");
-    }
-
-    @Test
-    public void testMalformedPatternLiteralsMatchJoniByteForByte()
-    {
-        assertMalformedPatternMatchesJoni(rawBytes(0xFF), rawBytes(0xFF));
-        assertMalformedPatternMatchesJoni(rawBytes(0xFF), rawBytes(0xC3, 0xBF));
-        assertMalformedPatternMatchesJoni(rawBytes(0xC3), rawBytes(0xC3, 0xBF));
-        assertMalformedPatternMatchesJoni(
-                rawBytes('A', 0xED, 0xA0, 0x80, 'B'),
-                rawBytes('A', 0xED, 0xA0, 0x80, 'B'));
-        assertMalformedPatternMatchesJoni(
-                rawBytes('\\', 'Q', 0xFF, '\\', 'E'),
-                rawBytes(0xFF));
-        assertMalformedPatternMatchesJoni(
-                rawBytes(0xFF, '|', 'a'),
-                rawBytes(0xFF));
-        assertMalformedPatternMatchesJoni(
-                rawBytes('(', '?', 'i', ')', 0xC9),
-                rawBytes(0xE9));
     }
 
     @Test
@@ -1016,13 +995,6 @@ public class TestTrinoRegexpLanguage
         assertThat(new MatchBoundary(result.start(), result.end()))
                 .as(patternText + " input=" + inputText)
                 .isEqualTo(new MatchBoundary(matcher.getBegin(), matcher.getEnd()));
-    }
-
-    private static void assertMalformedPatternMatchesJoni(Slice pattern, Slice input)
-    {
-        assertThat(TrinoRegexp.compile(pattern).contains(input))
-                .as("pattern %s against input %s", HexFormat.of().formatHex(pattern.getBytes()), HexFormat.of().formatHex(input.getBytes()))
-                .isEqualTo(joniFind(pattern, input));
     }
 
     private static Slice rawBytes(int... values)

@@ -39,6 +39,12 @@ final class TrinoLikeParser
                 return ascii;
             }
         }
+        // Trino accepts a pattern that is not valid UTF-8 and replaces its malformed bytes; such a
+        // pattern has no specified meaning, so it is a syntax error here, as in the regex frontends.
+        int invalidOffset = Utf8.firstInvalidOffset(pattern);
+        if (invalidOffset >= 0) {
+            throw new TrinoLikePatternSyntaxException("pattern is not valid UTF-8", invalidOffset);
+        }
 
         List<Element> result = new ArrayList<>();
         LiteralBuilder literal = new LiteralBuilder(pattern);
@@ -60,7 +66,7 @@ final class TrinoLikeParser
                 if (codePoint != '%' && codePoint != '_' && codePoint != escape) {
                     throw syntaxException(byteOffset);
                 }
-                literal.append(byteOffset, width, codePoint);
+                literal.append(byteOffset, width);
                 inEscape = false;
             }
             else if (escapeCodePoint.isPresent() && codePoint == escape) {
@@ -83,7 +89,7 @@ final class TrinoLikeParser
                 addWildcards(result, anyCount, hasZeroOrMore);
                 anyCount = 0;
                 hasZeroOrMore = false;
-                literal.append(byteOffset, width, codePoint);
+                literal.append(byteOffset, width);
             }
             position += width;
         }
@@ -98,7 +104,7 @@ final class TrinoLikeParser
 
     /**
      * Parses a pattern without an escape character when every byte is ASCII, so no code point
-     * decoding or malformed-byte replacement is needed. Returns null for other patterns. For the
+     * decoding or UTF-8 validation is needed. Returns null for other patterns. For the
      * patterns it accepts, the result must equal what {@link #parse} produces without an escape.
      */
     static List<Element> parseAsciiNoEscape(Slice pattern)
@@ -157,8 +163,8 @@ final class TrinoLikeParser
 
     /**
      * Accumulates one literal. A literal is usually one contiguous run of pattern bytes, which is
-     * copied once; escapes and replaced malformed bytes fall back to an output buffer. Once the
-     * buffer exists, every later literal is built in it.
+     * copied once; escapes fall back to an output buffer. Once the buffer exists, every later
+     * literal is built in it.
      */
     private static final class LiteralBuilder
     {
@@ -172,10 +178,9 @@ final class TrinoLikeParser
             this.pattern = pattern;
         }
 
-        void append(int byteOffset, int width, int codePoint)
+        void append(int byteOffset, int width)
         {
-            boolean replaced = codePoint == Utf8.RUNE_ERROR && width == 1;
-            if (buffer == null && !replaced) {
+            if (buffer == null) {
                 if (runStart < 0) {
                     runStart = byteOffset;
                     runEnd = byteOffset + width;
@@ -185,20 +190,13 @@ final class TrinoLikeParser
                     runEnd += width;
                     return;
                 }
-            }
-            if (buffer == null) {
                 buffer = new DynamicSliceOutput(pattern.length());
             }
             if (runStart >= 0) {
                 buffer.writeBytes(pattern, runStart, runEnd - runStart);
                 runStart = -1;
             }
-            if (replaced) {
-                Utf8.encode(buffer, Utf8.RUNE_ERROR);
-            }
-            else {
-                buffer.writeBytes(pattern, byteOffset, width);
-            }
+            buffer.writeBytes(pattern, byteOffset, width);
         }
 
         void addTo(List<Element> result)

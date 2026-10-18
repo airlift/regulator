@@ -829,7 +829,7 @@ prepare_trino_like()
         TrinoLikeDifferentialVerifier 2>&1 | tee -a "${semantic_log}"
     grep -Fx 'Verified 530255 Trino LIKE comparisons' "${semantic_log}" >/dev/null
     grep -Fx 'Verified 810155 escaped Trino LIKE comparisons' "${semantic_log}" >/dev/null
-    grep -Fx 'Verified 21770 encoded Trino LIKE comparisons' "${semantic_log}" >/dev/null
+    grep -Fx 'Verified 9330 encoded Trino LIKE comparisons' "${semantic_log}" >/dev/null
 }
 
 prepare_rebar()

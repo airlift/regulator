@@ -65,7 +65,7 @@ def build(session, shard):
             required.add("Verified 176 Trino final-line operation comparisons")
         if handler == "trino-like":
             required.update({"Verified 60 Trino LIKE lifecycle comparisons", "Verified 530255 Trino LIKE comparisons",
-                             "Verified 810155 escaped Trino LIKE comparisons", "Verified 21770 encoded Trino LIKE comparisons"})
+                             "Verified 810155 escaped Trino LIKE comparisons", "Verified 9330 encoded Trino LIKE comparisons"})
         if not required <= verified:
             raise ValueError("missing semantic mode or differential verification")
         with (directory / "semantic-evidence.tsv").open() as source:
