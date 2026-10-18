@@ -30,7 +30,7 @@ public class TestRe2ParsedCompile
                 "(?i)folded",
                 "^prefix.*suffix$",
                 "(?:a|b){2,4}",
-                "\\p{Letter}+",
+                "\\p{L}+",
         }) {
             Slice patternSlice = utf8Slice(pattern);
             ParseResult parsed = RegexpParser.parse(patternSlice, Regexp.LIKE_PERL);

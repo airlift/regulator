@@ -17,6 +17,9 @@ documents the format. The database holds:
   gives Trino patterns their multi-code-point folds
 - the simple uppercase and lowercase mappings of `UnicodeData.txt`, from which
   Java patterns fold
+- the General_Category of every assigned code point, from `UnicodeData.txt`,
+  and the Script of every code point `Scripts.txt` lists, which give RE2
+  patterns their Unicode property groups
 
 ## Usage
 
@@ -63,7 +66,7 @@ Moving to a new version changes every result that depends on the database.
    ```bash
    version=19.0.0
    mkdir -p target && mkdir "target/ucd-${version}"
-   for file in CaseFolding.txt UnicodeData.txt; do
+   for file in CaseFolding.txt Scripts.txt UnicodeData.txt; do
        curl -sSfL -o "target/ucd-${version}/${file}" \
            "https://www.unicode.org/Public/${version}/ucd/${file}"
    done

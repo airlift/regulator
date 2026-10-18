@@ -62,12 +62,28 @@
 # previous mapped code point (from 0 for the first) and the signed varint
 # distance from the mapped code point to its mapping.
 #
+# The remaining sections are property value sets: each value of a property and
+# the code points that have it. The payload is a varint value count, then per
+# value, in ascending order of name, the varint byte length of the name and the
+# name in ASCII, a varint range count, and per range, in ascending order, the
+# varint distance from the code point after the previous range (from 0 for the
+# first) to the range's first code point, and the varint count of its other
+# code points. Ranges of one value neither overlap nor touch.
+#
+# Section 5, General_Category: the UnicodeData.txt field 2 values, such as Lu,
+# including the code points of First and Last ranges. Unassigned code points,
+# Cn, are absent, as are the one-letter major classes.
+#
+# Section 6, Script: the Scripts.txt values, which are long names such as
+# Old_Italic. Code points of the default value, Unknown, are absent.
+#
 # The generator refuses data that breaks what the readers assume: a code point
 # with two mappings of one kind, a simple fold whose target folds again, a full
 # fold whose result folds again, a status S mapping without a status F one,
 # simple case folding orbits that differ from the classes of code points with
-# equal full folding, and a lowercase-of-uppercase mapping that is not
-# idempotent.
+# equal full folding, a lowercase-of-uppercase mapping that is not idempotent,
+# a code point with two values of one single-valued property, such as two
+# scripts, and a First row without its Last row.
 
 import argparse
 import hashlib
@@ -83,7 +99,9 @@ DOWNLOAD_ROOT = ROOT_DIR / "target/unicode-database"
 OUTPUT_DIR = ROOT_DIR / "src/main/resources/io/airlift/regulator/unicode"
 
 URL_PATTERN = re.compile(r"https://www\.unicode\.org/Public/(\d+\.\d+\.\d+)/ucd/([A-Za-z]+\.txt)")
-INPUT_FILES = ("CaseFolding.txt", "UnicodeData.txt")
+INPUT_FILES = ("CaseFolding.txt", "Scripts.txt", "UnicodeData.txt")
+# Files whose first line names the file and its version, such as "# Scripts-18.0.0.txt".
+VERSIONED_FILES = ("CaseFolding.txt", "Scripts.txt")
 
 MAGIC = b"RGUD"
 FORMAT_VERSION = 1
@@ -91,6 +109,8 @@ SECTION_SIMPLE_CASE_FOLDING_ORBITS = 1
 SECTION_FULL_CASE_FOLDING = 2
 SECTION_SIMPLE_UPPERCASE_MAPPINGS = 3
 SECTION_SIMPLE_LOWERCASE_MAPPINGS = 4
+SECTION_GENERAL_CATEGORY = 5
+SECTION_SCRIPT = 6
 MAX_CODE_POINT = 0x10FFFF
 
 
@@ -147,7 +167,7 @@ def download(version, files, refresh):
                 raise ValueError(f"{url} has sha256 {checksum}, not the {expected} pinned in manifest.txt")
             file.write_bytes(data)
         text = data.decode("utf-8")
-        if name == "CaseFolding.txt":
+        if name in VERSIONED_FILES:
             check_header(url, name, text, version)
         texts[name] = text
     return texts
@@ -242,12 +262,15 @@ def case_folding(text):
 
 
 def unicode_data(text):
-    # UnicodeData.txt rows have 15 fields; field 12 is the simple uppercase
-    # mapping and field 13 the simple lowercase mapping. A range of code points,
-    # given by a First row and a Last row, has no mappings.
+    # UnicodeData.txt rows have 15 fields; field 2 is the general category,
+    # field 12 the simple uppercase mapping, and field 13 the simple lowercase
+    # mapping. A range of code points, given by a First row and a Last row of
+    # the same name and category, has no mappings.
     uppercase = {}
     lowercase = {}
+    categories = {}
     previous = -1
+    first = None
     for number, line in enumerate(text.split("\n"), 1):
         if not line:
             continue
@@ -261,6 +284,21 @@ def unicode_data(text):
         if source <= previous:
             raise ValueError(f"UnicodeData.txt:{number}: U+{source:04X} is out of order")
         previous = source
+        category = fields[2]
+        if re.fullmatch(r"[A-Z][a-z]", category) is None or category == "Cn":
+            raise ValueError(f"UnicodeData.txt:{number}: unexpected general category {category!r}")
+        range_name = re.fullmatch(r"<(.+), (First|Last)>", fields[1])
+        if first is not None:
+            if range_name is None or range_name.group(2) != "Last" or (range_name.group(1), category) != first[1:]:
+                raise ValueError(f"UnicodeData.txt:{number}: expected the Last row of {first[1]}")
+            add_range(categories, category, first[0], source)
+            first = None
+        elif range_name is not None and range_name.group(2) == "First":
+            first = (source, range_name.group(1), category)
+        elif range_name is not None:
+            raise ValueError(f"UnicodeData.txt:{number}: a Last row without its First row")
+        else:
+            add_range(categories, category, source, source)
         for mappings, field in ((uppercase, fields[12]), (lowercase, fields[13])):
             if not field:
                 continue
@@ -270,6 +308,8 @@ def unicode_data(text):
             if target == source:
                 raise ValueError(f"UnicodeData.txt:{number}: U+{source:04X} maps to itself")
             mappings[source] = target
+    if first is not None:
+        raise ValueError(f"UnicodeData.txt: expected the Last row of {first[1]}")
 
     # Java's case classes fold a code point to the lowercase of its uppercase,
     # which must fold to itself again.
@@ -281,7 +321,50 @@ def unicode_data(text):
         fold = java_fold(value)
         if java_fold(fold) != fold:
             raise ValueError(f"U+{value:04X} folds to U+{fold:04X} by lowercase of uppercase, which folds again")
-    return sorted(uppercase.items()), sorted(lowercase.items())
+    return sorted(uppercase.items()), sorted(lowercase.items()), categories
+
+
+def property_values(name, text):
+    # Rows of a property file are "<code>[..<code>] ; <value>", followed by an
+    # optional "# <comment>". A code point has at most one value.
+    values = {}
+    for number, line in enumerate(text.split("\n"), 1):
+        row = line.split("#", 1)[0].strip()
+        if not row:
+            continue
+        fields = [field.strip() for field in row.split(";")]
+        match = re.fullmatch(r"([0-9A-F]{4,6})(?:\.\.([0-9A-F]{4,6}))?", fields[0])
+        if len(fields) != 2 or match is None or re.fullmatch(r"[A-Za-z0-9_]+", fields[1]) is None:
+            raise ValueError(f"{name}:{number}: unexpected row {line!r}")
+        low = int(match.group(1), 16)
+        high = int(match.group(2), 16) if match.group(2) else low
+        if high < low or high > MAX_CODE_POINT:
+            raise ValueError(f"{name}:{number}: bad code point range {fields[0]}")
+        add_range(values, fields[1], low, high)
+    check_single_valued(name, values)
+    return values
+
+
+def add_range(values, value, low, high):
+    values.setdefault(value, []).append((low, high))
+
+
+def coalesce(ranges):
+    # Sorts ranges and merges the ones that overlap or touch.
+    merged = []
+    for low, high in sorted(ranges):
+        if merged and low <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+        else:
+            merged.append((low, high))
+    return merged
+
+
+def check_single_valued(name, values):
+    claimed = sorted((low, high, value) for value, ranges in values.items() for low, high in ranges)
+    for (_, previous_high, previous_value), (low, _, value) in zip(claimed, claimed[1:]):
+        if low <= previous_high:
+            raise ValueError(f"{name}: U+{low:04X} is both {previous_value} and {value}")
 
 
 def varint(value):
@@ -334,6 +417,21 @@ def full_folding_section(mappings):
     return section(SECTION_FULL_CASE_FOLDING, bytes(payload))
 
 
+def property_value_section(section_id, values):
+    payload = bytearray(varint(len(values)))
+    for name in sorted(values):
+        encoded_name = name.encode("ascii")
+        ranges = coalesce(values[name])
+        payload += varint(len(encoded_name)) + encoded_name
+        payload += varint(len(ranges))
+        next_code_point = 0
+        for low, high in ranges:
+            payload += varint(low - next_code_point)
+            payload += varint(high - low)
+            next_code_point = high + 1
+    return section(section_id, bytes(payload))
+
+
 def mapping_section(section_id, mappings):
     payload = bytearray(varint(len(mappings)))
     previous_source = 0
@@ -346,7 +444,8 @@ def mapping_section(section_id, mappings):
 
 def database(version, files, texts, key):
     simple_orbits, full_folds = case_folding(texts["CaseFolding.txt"])
-    uppercase, lowercase = unicode_data(texts["UnicodeData.txt"])
+    uppercase, lowercase, categories = unicode_data(texts["UnicodeData.txt"])
+    scripts = property_values("Scripts.txt", texts["Scripts.txt"])
     encoded_version = version.encode("ascii")
     return (MAGIC
             + varint(FORMAT_VERSION)
@@ -356,7 +455,9 @@ def database(version, files, texts, key):
             + orbit_section(simple_orbits)
             + full_folding_section(full_folds)
             + mapping_section(SECTION_SIMPLE_UPPERCASE_MAPPINGS, uppercase)
-            + mapping_section(SECTION_SIMPLE_LOWERCASE_MAPPINGS, lowercase))
+            + mapping_section(SECTION_SIMPLE_LOWERCASE_MAPPINGS, lowercase)
+            + property_value_section(SECTION_GENERAL_CATEGORY, categories)
+            + property_value_section(SECTION_SCRIPT, scripts))
 
 
 def generated(key, data):

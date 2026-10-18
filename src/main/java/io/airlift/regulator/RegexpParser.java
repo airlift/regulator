@@ -902,7 +902,7 @@ final class RegexpParser
             CharClassBuilder captureNameClassBuilder = new CharClassBuilder();
             // As in upstream, these are added with NoParseFlags (0), so no case folding applies.
             for (String group : new String[] {"Lu", "Ll", "Lt", "Lm", "Lo", "Nl", "Mn", "Mc", "Nd", "Pc"}) {
-                CharClass characterClass = UnicodeGroups.lookup(group);
+                CharClass characterClass = lookupUnicodeGroup(group);
                 if (characterClass == null) {
                     throw new IllegalStateException("missing Unicode group: " + group);
                 }
@@ -1165,7 +1165,7 @@ final class RegexpParser
                 }
 
                 String name = new String(bytes, nameStart, nameEnd - nameStart, StandardCharsets.UTF_8);
-                CharClass group = UnicodeGroups.lookup(name);
+                CharClass group = lookupUnicodeGroup(name);
                 if (group == null) {
                     throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
                 }
@@ -1187,11 +1187,33 @@ final class RegexpParser
             }
 
             String name = new String(bytes, nameStart, nameEnd - nameStart, StandardCharsets.UTF_8);
-            CharClass group = UnicodeGroups.lookup(name);
+            CharClass group = lookupUnicodeGroup(name);
             if (group == null) {
                 throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
             addGroup(characterClassBuilder, group, sign, parseFlags, caseFolding);
+        }
+
+        // Upstream RE2's make_unicode_groups.py makes a group of every General_Category value in
+        // UnicodeData.txt, of the union of each major class, such as L for Lu, Ll, Lt, Lm, and Lo,
+        // and of every script in Scripts.txt under its long name, and parse.cc adds Any. Lookup is
+        // an exact, case-sensitive name match. Unassigned code points are in no category, so there
+        // is no Cn group, and C is only Cc, Cf, Co, and Cs.
+        private static CharClass lookupUnicodeGroup(String name)
+        {
+            if (name.equals("Any")) {
+                return UnicodeGroups.any();
+            }
+            if (name.length() == 1) {
+                return UnicodeGroups.majorClass(name.charAt(0));
+            }
+            if (name.length() == 2) {
+                CharClass category = UnicodeGroups.generalCategories(List.of(name));
+                if (category != null) {
+                    return category;
+                }
+            }
+            return UnicodeGroups.script(name);
         }
 
         private Regexp perlDigits(int flags, boolean negate)
