@@ -1,146 +1,135 @@
-# JVM-sourced Unicode policy
+# Unicode data policy
 
-Regulator derives Java and Trino Unicode properties from the JVM running the
-application. This is an intentional difference from pinned upstream RE2,
-recorded in `REGULATOR_DECISIONS.md`. RE2 property groups and case folding in
-every language instead come from Regulator's pinned Unicode 18.0 database,
-described in
-[`tools/unicode-database/README.md`](../../tools/unicode-database/README.md).
+Every language reads its Unicode properties and case folding from Regulator's
+pinned Unicode 18.0 database, described in
+[`tools/unicode-database/README.md`](../../tools/unicode-database/README.md),
+so they are the same on every JVM. Only the match-time word boundaries of Java
+and Trino and Java's named code points still read the running JVM. This
+differs from pinned upstream RE2, whose generated tables are Unicode 15.1
+data, as `REGULATOR_DECISIONS.md` records.
 
 ## Implemented direction
 
-Java and Trino use the same JVM-backed Unicode properties. Regulator derives
-their character classes from public JVM APIs, converts them to immutable
-ranges, and caches them outside the matching hot path. RE2 property groups are
-the database's General_Category and Script values, named and grouped by the
-rule of upstream's generator, as `REGULATOR_DECISIONS.md` records. Regulator
-does not keep a copy of upstream RE2's generated category, script, or
-case-fold tables. Case folding follows each pattern's language, and every rule
-reads the pinned database: RE2 folds with its simple case folding, Java with
-its simple case mappings, and Trino with its full case folding.
+The database holds Unicode data only. Each language layers its own names on
+it:
+
+- RE2 property groups are the database's General_Category and Script values,
+  named and grouped by the rule of upstream's generator.
+- Java and Trino properties follow `java.util.regex.Pattern` and
+  `java.lang.Character`. Their categories, scripts, blocks, binary properties,
+  and `java...` properties are the database's values combined by the formulas
+  of the `Character` javadoc, under the JDK's names and aliases.
+
+Regulator does not keep a copy of upstream RE2's generated category, script,
+or case-fold tables. Case folding follows each pattern's language: RE2 folds
+with the database's simple case folding, Java with its simple case mappings,
+and Trino with its full case folding.
 
 ## Motivation
 
-A private Unicode snapshot can disagree with `java.lang.Character`,
-`java.util.regex.Pattern`, and other Trino operations when RE2 or the JDK
-updates its Unicode version. Using the running JVM for properties avoids that
-version skew.
-
-This gives Regulator:
-
-- one Unicode version for properties and other Java operations
-- automatic support for Unicode updates delivered with the JDK
-- no checked-in generated Unicode range tables; the only checked-in Unicode
-  data is the pinned database
-- a natural source for Java Unicode blocks, scripts, categories, binary
-  properties, and character names
-- no matching-loop cost after JVM data has been converted to normal character
-  classes
+Properties read from the running JVM changed with each JDK upgrade, and a JDK
+upgrade changes the Unicode version. One pinned database gives every language,
+every JVM, and every node of a distributed Trino installation the same Unicode
+results, and moves to a new Unicode version only through an explicit,
+reviewed regeneration.
 
 Trino uses Joni with `Syntax.Java`, but Joni/jcodings bundles fixed Unicode
-tables. Regulator follows the Unicode properties of the JVM running Trino, and
-the case folding of its pinned database, not that pinned table version.
+tables. Regulator follows the JDK's property names and the pinned database's
+data, not that table version.
 
-## Intentional upstream difference
+## Differences from the JDK
 
-Pinned upstream RE2 carries Unicode data generated from a particular Unicode
-release. JVM-derived data can differ for code points that were added or
-reclassified in another release. Case folding uses the pinned database
-instead, whose Unicode version is chosen by Regulator rather than by the JDK.
+Java and Trino property membership uses the JDK's formulas over the pinned
+database. Property membership therefore agrees with `Character` and `Pattern`
+on the JDK's own Unicode version, which the `Character` javadoc names: Unicode
+16.0 for Java 25 and 17.0 for Java 26. They differ for:
 
-This is an intentional Java-platform adaptation. It changes only
-Unicode-version-sensitive results; it does not justify changing RE2's matching
-algorithm, resource guarantees, byte-oriented execution, or syntax semantics.
-The implemented decision is recorded in `REGULATOR_DECISIONS.md`.
+- characters Unicode assigned after the JDK's version, and names it added,
+  such as the Unicode 18.0 scripts Jurchen and Seal and their blocks
+- U+0295 LATIN LETTER PHARYNGEAL VOICED FRICATIVE, which Unicode 17.0 changed
+  from `Ll` to `Lo`, so Regulator does not classify it as lowercase, even when
+  running on Java 25
+- 689 code points that are not emoji, such as U+2388 HELM SYMBOL and U+2605
+  BLACK STAR, from which Unicode 17.0 removed Extended_Pictographic
 
-The same library version may consequently produce different property results
-after a JDK upgrade; case folding does not change with the JDK. That is
-acceptable and consistent with other JVM Unicode APIs.
-All nodes in a distributed Trino installation should use equivalent supported
-JDK versions.
+Regulator's supported property names and case-insensitive matching can differ
+from `Pattern` independently of Unicode version.
+
+Reading the pinned database rather than the JDK's data is an intentional
+Java-platform adaptation. It changes only Unicode-version-sensitive results; it
+does not justify changing RE2's matching algorithm, resource guarantees,
+byte-oriented execution, or syntax semantics.
 
 ## Unicode data versus regex semantics
 
-The JVM supplies facts about code points. Each regex language still defines
-how its syntax uses those facts.
+The database supplies facts about code points. Each regex language still
+defines how its syntax uses those facts.
 
-Examples of JVM-owned data include:
+Examples of database data include:
 
-- general category
-- script and block membership
-- alphabetic, ideographic, whitespace, case, and related binary properties
-- character names
-- upper-case, lower-case, and title-case mappings
+- general category, script, block, and age
+- binary properties such as Extended_Pictographic, Hex_Digit, and
+  Other_Alphabetic
+- simple case mappings and case folding
 
 Examples of regex-language decisions include:
 
 - whether `\d`, `\s`, and `\w` use ASCII or Unicode definitions in a given
   syntax mode
 - which property spellings and aliases are accepted
+- how a JDK property such as `Alphabetic` or `javaWhitespace` combines the
+  data
 - the meaning of `(?U)` in RE2 syntax and Java-compatible syntax
 - malformed UTF-8 behavior
 - which unsupported Java constructs are rejected
 
 Keeping RE2's ASCII definition of a shorthand class is not a competing Unicode
 database. It is a syntax rule. An explicit Java Unicode-character-class mode
-can map the same shorthand to JVM-derived ranges.
+can map the same shorthand to Unicode ranges.
 
 ## Production design
 
-The package-private JVM Unicode registry in `io.airlift.regulator` exposes
+The package-private `UnicodeGroups` registry in `io.airlift.regulator` exposes
 immutable `CharClass` values to the parser and character-class builder.
 
 Property construction follows this flow:
 
 1. Parse and normalize the property name according to the selected regex
    syntax.
-2. Resolve the name to a JVM-backed code-point predicate.
-3. Iterate through Unicode code points using the engine's existing scalar-value
-   policy.
-4. Coalesce adjacent matches into `RuneRange` values.
-5. Cache the immutable result by canonical property identity.
-6. Compile the result through the existing character-class path.
+2. Resolve the name to the database's values, or to a combination of them.
+3. Build the class from the stored ranges, without visiting each code point.
+4. Cache the immutable result by canonical property identity.
+5. Compile the result through the existing character-class path.
 
 Character-class membership and case-fold expansions are compiled into engine
-instructions and ranges. Matching those classes does not invoke JVM property
-predicates per input code point. Language-specific word-boundary assertions are
-different: Java and Trino boundary checks can inspect input code points with
-`Character` and Unicode property predicates during matching.
+instructions and ranges. Matching those classes performs no property lookup.
+Language-specific word-boundary assertions are different: Java and Trino
+boundary checks inspect input code points with `Character` predicates during
+matching, so they follow the running JVM.
 
-### JVM sources
+### Java properties
 
-The registry uses public JVM APIs wherever they directly express the property:
-
-- `Character.getType(int)` for general categories
-- `Character.UnicodeScript.of(int)` and `forName(String)` for scripts
-- `Character.UnicodeBlock.of(int)` and `forName(String)` for blocks
-- `Character.isAlphabetic(int)`, `isIdeographic(int)`, `isLetter(int)`, and
-  related predicates for binary properties
-
-The registry contains small definitions for properties that the JVM defines but
-does not expose as one public predicate. For example,
-`Noncharacter_Code_Point` is:
-
-```java
-(codePoint & 0xfffe) == 0xfffe ||
-        (codePoint >= 0xfdd0 && codePoint <= 0xfdef)
-```
-
-Properties such as join control, hexadecimal digit, Unicode word, and some
-whitespace classes are similarly composed from public JVM predicates and small
-explicit sets. These definitions follow Java `Pattern` semantics and do not
-introduce copied Unicode range tables.
+A JDK property that Unicode does not define as one property is the formula of
+its `Character` javadoc over the database's values. For example,
+`Character.isAlphabetic` is `Lu`, `Ll`, `Lt`, `Lm`, `Lo`, `Nl`, or
+Other_Alphabetic, and `Character.isWhitespace` is a space, line, or paragraph
+separator other than the three no-break spaces, or one of U+0009 through
+U+000D and U+001C through U+001F. A choice of the JDK that is not in the
+Unicode data, such as those explicit code points or the earlier names of three
+renamed blocks, is a constant in the registry with a comment citing the
+javadoc.
 
 ### Property names and aliases
 
-Property-name parsing is language metadata rather than Unicode data. The
-registry maintains a small explicit mapping from accepted RE2, Java, and Trino
-spellings to canonical property identities.
+Property-name parsing is language metadata rather than Unicode data. Java and
+Trino spellings resolve through `UnicodeGroups.lookup`;
+`RegexpParser.lookupUnicodeGroup` applies RE2's exact category and long script
+name rules using the registry's raw values.
 
 The parser distinguishes:
 
 - general-category names and aliases
-- script names and the `Is` form
+- script names, their ISO 15924 codes, and the `Is` form
 - block names and the `In` form
 - Java binary properties
 - Trino's documented name-normalization rules
@@ -165,7 +154,8 @@ that rule. The rules are:
   that one lower-case mapping is complete. Exhaustive checks against the JVM's
   case classes and focused comparisons with case-insensitive `Pattern`
   validate the resulting equivalence classes. Case-insensitive matching built
-  on these classes is not identical to `Pattern`'s.
+  on these classes is not identical to `Pattern`'s, as
+  [Differences from the JDK](#differences-from-the-jdk) says.
 - Trino: Unicode 18.0 full case folding, `CaseFolding.txt` statuses C and F,
   the rule Joni folds with. Its simple classes are the RE2 rule's, whose tables
   it shares, so dotted capital I and dotless small i stay out of the class of
@@ -182,8 +172,10 @@ from Unicode 5.1, and U+1DF95, from Unicode 18.0.
 
 ### Initialization and caching
 
-Unicode scans happen on first use, not on every compilation:
+Unicode data is read on first use, not on every compilation:
 
+- Each section of the database is read once, on first use by a property or
+  folding rule that needs it.
 - Each property is built lazily and cached by canonical identity.
 - Published ranges are immutable and safe for concurrent compilation.
 - Each folding rule's simple case equivalence is initialized once on first
@@ -201,27 +193,31 @@ Unicode scans happen on first use, not on every compilation:
   two sets of tables.
 - Trino's multi-code-point folds are initialized once on first use by a
   frontend that enables full folding.
-- No production table is generated at build time, which would bind
-  JVM-sourced properties to the build JDK instead of the executing JDK. The
-  pinned database is generated ahead of time from pinned UCD files and depends
-  on neither JDK.
+- No production table is generated at build time. The pinned database is
+  generated ahead of time from pinned UCD files and depends on neither the
+  build JDK nor the executing JDK.
 
 ## Consumers
 
 These components use the Unicode properties of each language and its case
 folding from the pinned database:
 
-- `RegexpParser`
+- `RegexpParser`, `TrinoRegexpParser`, and `JavaRegexpParser`
 - `CharClassBuilder`
 - required-match analysis
 - single-byte matcher optimizations
+- the canonicalization of `FilteredRe2` and `Prefilter`
 
 ## Correctness contract
 
 1. Java and Trino categories, scripts, every JDK block, supported binary
-   properties, and Java properties are checked over the complete Unicode
-   code-point domain against their corresponding `Character` APIs. RE2's
-   accepted group names and syntax are checked against upstream's rule.
+   properties, and Java properties are checked against their corresponding
+   `Character` APIs at every code point that the running JDK's Unicode version
+   assigns, allowing only the cited differences above. Every script and block
+   spelling the JDK accepts must name the same class, and a name it rejects,
+   such as a script Unicode added since, must hold no character the JDK
+   assigns. RE2's accepted group names and
+   syntax are checked against upstream's rule.
 2. Canonical aliases are checked for identity, and unsupported names are
    rejected.
 3. Every rule's simple folds are checked exhaustively to form closed orbits
@@ -242,7 +238,7 @@ folding from the pinned database:
    properties and case folding.
 
 Test failures name the property or case-equivalence class that changed, so a
-JDK upgrade can be diagnosed without deciphering a range-table diff.
+JDK or Unicode upgrade can be diagnosed without deciphering a range-table diff.
 
 ## Performance requirements
 
@@ -259,7 +255,7 @@ execution.
 
 ## Related feature scope
 
-JVM-sourced data alone does not make syntax valid in a language. Each compiler
+Unicode data alone does not make syntax valid in a language. Each compiler
 decides whether to support constructs such as:
 
 - Unicode blocks and binary properties
@@ -276,10 +272,10 @@ the library's linear-time guarantee.
 
 ## Implemented components
 
-1. Exhaustive JVM-property authority and case-equivalence tests.
-2. A cached JVM property registry for categories, scripts, blocks, binary
-   properties, aliases, and Java properties.
+1. JDK agreement and case-equivalence tests.
+2. A cached property registry for categories, scripts, blocks, binary
+   properties, aliases, and Java properties, read from the pinned database.
 3. Case-equivalence classes and full case folding from the pinned database.
-4. JVM-backed parser, analysis, and specialized-matcher consumers.
+4. Database-backed parser, analysis, and specialized-matcher consumers.
 5. Removal of the generated upstream Unicode range sources.
 6. The intentional platform adaptation recorded in `REGULATOR_DECISIONS.md`.

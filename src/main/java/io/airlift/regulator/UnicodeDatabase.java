@@ -46,7 +46,11 @@ final class UnicodeDatabase
     private static final int SECTION_SIMPLE_LOWERCASE_MAPPINGS = 4;
     private static final int SECTION_GENERAL_CATEGORY = 5;
     private static final int SECTION_SCRIPT = 6;
-    private static final int SECTION_COUNT = 7;
+    private static final int SECTION_SCRIPT_SHORT_NAMES = 7;
+    private static final int SECTION_BLOCK = 8;
+    private static final int SECTION_BINARY_PROPERTIES = 9;
+    private static final int SECTION_AGE = 10;
+    private static final int SECTION_COUNT = 11;
 
     private UnicodeDatabase() {}
 
@@ -110,6 +114,45 @@ final class UnicodeDatabase
     static PropertyValues scripts()
     {
         return Scripts.VALUES;
+    }
+
+    /**
+     * Returns the short name of each script in PropertyValueAliases.txt, such as Ital, and its long
+     * name, such as Old_Italic. It lists scripts that Scripts.txt assigns no code point, such as
+     * Katakana_Or_Hiragana, and the default value, Unknown.
+     */
+    static Map<String, String> scriptShortNames()
+    {
+        return ScriptShortNames.NAMES;
+    }
+
+    /**
+     * Returns the blocks of Blocks.txt, by names such as Latin-1 Supplement, and their code
+     * points. Code points of the default value, No_Block, are in none.
+     */
+    static PropertyValues blocks()
+    {
+        return Blocks.VALUES;
+    }
+
+    /**
+     * Returns binary properties and the code points that have each: Bidi_Mirrored, the properties
+     * of emoji-data.txt, and Hex_Digit, Ideographic, Join_Control, Noncharacter_Code_Point,
+     * Other_Alphabetic, Other_ID_Continue, Other_ID_Start, Other_Lowercase, and Other_Uppercase of
+     * PropList.txt. Two properties can share code points.
+     */
+    static PropertyValues binaryProperties()
+    {
+        return BinaryProperties.VALUES;
+    }
+
+    /**
+     * Returns the Age values of DerivedAge.txt, versions such as 1.1, and their code points.
+     * Unassigned code points are in none.
+     */
+    static PropertyValues ages()
+    {
+        return Ages.VALUES;
     }
 
     /**
@@ -295,7 +338,7 @@ final class UnicodeDatabase
         for (int index = 0; index < count; index++) {
             byte[] name = reader.bytes(reader.varint());
             for (byte character : name) {
-                if (character <= ' ' || character > '~') {
+                if (character < ' ' || character > '~') {
                     throw reader.corrupt("property value name is not printable ASCII");
                 }
             }
@@ -328,6 +371,40 @@ final class UnicodeDatabase
         }
         reader.requireEnd();
         return new PropertyValues(List.of(names), Map.copyOf(ranges));
+    }
+
+    private static Map<String, String> parseScriptShortNames(Reader reader)
+    {
+        int count = reader.varint();
+        if (count > reader.remaining()) {
+            throw reader.corrupt("too many names");
+        }
+        Map<String, String> names = new HashMap<>();
+        String previous = null;
+        for (int index = 0; index < count; index++) {
+            String key = scriptName(reader);
+            if (previous != null && key.compareTo(previous) <= 0) {
+                throw reader.corrupt("names are not ascending");
+            }
+            previous = key;
+            names.put(key, scriptName(reader));
+        }
+        reader.requireEnd();
+        return Map.copyOf(names);
+    }
+
+    private static String scriptName(Reader reader)
+    {
+        byte[] name = reader.bytes(reader.varint());
+        if (name.length == 0) {
+            throw reader.corrupt("empty name");
+        }
+        for (byte character : name) {
+            if (character <= ' ' || character > '~') {
+                throw reader.corrupt("name is not printable ASCII other than space");
+            }
+        }
+        return new String(name, StandardCharsets.US_ASCII);
     }
 
     // Reads the distance to the next mapped code point, which must exceed the previous one.
@@ -529,5 +606,25 @@ final class UnicodeDatabase
     private static final class Scripts
     {
         private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_SCRIPT));
+    }
+
+    private static final class ScriptShortNames
+    {
+        private static final Map<String, String> NAMES = parseScriptShortNames(Resource.RESOURCE.section(SECTION_SCRIPT_SHORT_NAMES));
+    }
+
+    private static final class Blocks
+    {
+        private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_BLOCK));
+    }
+
+    private static final class BinaryProperties
+    {
+        private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_BINARY_PROPERTIES));
+    }
+
+    private static final class Ages
+    {
+        private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_AGE));
     }
 }

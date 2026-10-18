@@ -1464,8 +1464,8 @@ final class JavaRegexpParser
             }
             if (!name.startsWith("Is") && name.indexOf('=') < 0) {
                 String normalizedName = name.replace("_", "");
-                for (Character.UnicodeScript script : Character.UnicodeScript.values()) {
-                    if (script.name().replace("_", "").equalsIgnoreCase(normalizedName)) {
+                for (String script : UnicodeGroups.scriptNames()) {
+                    if (script.replace("_", "").equalsIgnoreCase(normalizedName)) {
                         return null;
                     }
                 }

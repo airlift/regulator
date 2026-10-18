@@ -1418,9 +1418,9 @@ final class TrinoRegexpParser
             if (group != null) {
                 return group;
             }
-            for (Character.UnicodeScript script : Character.UnicodeScript.values()) {
-                if (script.name().replace("_", "").equalsIgnoreCase(name)) {
-                    return UnicodeGroups.lookup(script.name());
+            for (String script : UnicodeGroups.scriptNames()) {
+                if (script.replace("_", "").equalsIgnoreCase(name)) {
+                    return UnicodeGroups.lookup("sc=" + script);
                 }
             }
             return null;

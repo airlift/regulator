@@ -71,10 +71,8 @@ public class TestCharClassBuilder
     @Test
     public void testUnicodeGroupReusesCachedRanges()
     {
-        assertReusesCachedRanges(
-                RegexpParser.parse(utf8Slice("\\p{L}+"), Regexp.LIKE_PERL).regexp(),
-                UnicodeGroups.generalCategories(List.of("Ll", "Lm", "Lo", "Lt", "Lu")));
         CharClass cached = UnicodeGroups.lookup("L");
+        assertReusesCachedRanges(RegexpParser.parse(utf8Slice("\\p{L}+"), Regexp.LIKE_PERL).regexp(), cached);
         assertReusesCachedRanges(TrinoRegexpParser.parse(utf8Slice("\\p{L}+"), Regexp.LIKE_PERL).regexp(), cached);
         assertReusesCachedRanges(JavaRegexpParser.parse(utf8Slice("\\p{L}+"), Regexp.LIKE_PERL).regexp(), cached);
     }

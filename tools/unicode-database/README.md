@@ -20,6 +20,13 @@ documents the format. The database holds:
 - the General_Category of every assigned code point, from `UnicodeData.txt`,
   and the Script of every code point `Scripts.txt` lists, which give RE2
   patterns their Unicode property groups
+- the short name of each script, from `PropertyValueAliases.txt`, the Block of
+  every code point `Blocks.txt` lists, Bidi_Mirrored from `UnicodeData.txt`,
+  and the binary properties of `emoji/emoji-data.txt` and the subset of
+  `PropList.txt` that Java properties read, which with the categories and
+  scripts give Java and Trino patterns their Unicode properties
+- the Age of every assigned code point, from `DerivedAge.txt`, which tells the
+  tests which code points the running JDK's Unicode version assigns
 
 ## Usage
 
@@ -65,12 +72,14 @@ Moving to a new version changes every result that depends on the database.
 
    ```bash
    version=19.0.0
-   mkdir -p target && mkdir "target/ucd-${version}"
-   for file in CaseFolding.txt Scripts.txt UnicodeData.txt; do
+   mkdir -p target && mkdir "target/ucd-${version}" "target/ucd-${version}/emoji"
+   for file in Blocks.txt CaseFolding.txt DerivedAge.txt PropList.txt \
+           PropertyValueAliases.txt Scripts.txt UnicodeData.txt \
+           emoji/emoji-data.txt; do
        curl -sSfL -o "target/ucd-${version}/${file}" \
            "https://www.unicode.org/Public/${version}/ucd/${file}"
    done
-   shasum -a 256 "target/ucd-${version}"/*
+   shasum -a 256 "target/ucd-${version}"/*.txt "target/ucd-${version}"/emoji/*
    ```
 
 2. Replace each URL and SHA-256 in `manifest.txt`.
@@ -85,7 +94,9 @@ Moving to a new version changes every result that depends on the database.
    README; `git grep -n '18\.0'` lists them.
 7. Run the complete test suite. Explain every changed result, and record the
    accepted differences in `REGULATOR_DECISIONS.md` and the language
-   references.
+   references. A change the new version makes to an older character, which
+   the JDK keeps until its own Unicode version catches up, is an expected
+   difference in `TestJdkUnicodeAgreement`.
 
 ## License
 

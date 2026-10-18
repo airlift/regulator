@@ -658,6 +658,15 @@ public class TestTrinoRegexpLanguage
         assertThat(TrinoRegexp.compile(utf8Slice("\\b中\\b")).contains(offsetInput)).isTrue();
     }
 
+    // Properties hold Unicode 18.0 data on every JVM. Unicode 18.0 added U+0558 MODIFIER LETTER
+    // ARMENIAN SMALL EH, a letter, and the Seal script, which starts at U+3D000.
+    @Test
+    public void testUnicode18Properties()
+    {
+        assertThat(TrinoRegexp.compile(utf8Slice("\\p{L}")).contains(utf8Slice("\u0558"))).isTrue();
+        assertThat(TrinoRegexp.compile(utf8Slice("\\p{Seal}")).contains(utf8Slice("\uD8B4\uDC00"))).isTrue();
+    }
+
     @Test
     public void testJvmWordClassificationIncludesPinnedJoniWordCharacters()
     {

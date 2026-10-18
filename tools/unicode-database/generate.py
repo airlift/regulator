@@ -34,8 +34,9 @@
 #   Unicode version    varint byte length, then ASCII, such as "18.0.0"
 #   generation key     32 bytes
 #   input digest       32 bytes, the SHA-256 of the input listing: one line
-#                      "<sha256 hex>  <file name>\n" per UCD file, sorted by
-#                      file name
+#                      "<sha256 hex>  <path>\n" per UCD file, where the path is
+#                      relative to the ucd/ directory, such as
+#                      emoji/emoji-data.txt, sorted by path
 #   sections           until the end of the file, each a varint section id, a
 #                      varint payload byte length, and the payload, in
 #                      ascending order of id; a reader skips a section id it
@@ -62,20 +63,43 @@
 # previous mapped code point (from 0 for the first) and the signed varint
 # distance from the mapped code point to its mapping.
 #
-# The remaining sections are property value sets: each value of a property and
-# the code points that have it. The payload is a varint value count, then per
-# value, in ascending order of name, the varint byte length of the name and the
-# name in ASCII, a varint range count, and per range, in ascending order, the
-# varint distance from the code point after the previous range (from 0 for the
-# first) to the range's first code point, and the varint count of its other
-# code points. Ranges of one value neither overlap nor touch.
+# A property value set holds each value of a property and the code points that
+# have it. Its payload is a varint value count, then per value, in ascending
+# order of name, the varint byte length of the name and the name in printable
+# ASCII, a varint range count, and per range, in ascending order, the varint
+# distance from the code point after the previous range (from 0 for the first)
+# to the range's first code point, and the varint count of its other code
+# points. Ranges of one value neither overlap nor touch.
 #
-# Section 5, General_Category: the UnicodeData.txt field 2 values, such as Lu,
-# including the code points of First and Last ranges. Unassigned code points,
-# Cn, are absent, as are the one-letter major classes.
+# Section 5, General_Category, a property value set: the UnicodeData.txt field 2
+# values, such as Lu, including the code points of First and Last ranges.
+# Unassigned code points, Cn, are absent, as are the one-letter major classes.
 #
-# Section 6, Script: the Scripts.txt values, which are long names such as
-# Old_Italic. Code points of the default value, Unknown, are absent.
+# Section 6, Script, a property value set: the Scripts.txt values, which are
+# long names such as Old_Italic. Code points of the default value, Unknown, are
+# absent.
+#
+# Section 7, Script short names: the PropertyValueAliases.txt sc rows, each a
+# short name, such as Ital, and its long name, such as Old_Italic. The payload
+# is a varint row count, then per row, in ascending order of short name, the
+# short name and the long name, each as a varint byte length and ASCII.
+#
+# Section 8, Block, a property value set: the Blocks.txt values, which are
+# names such as Latin-1 Supplement. Code points of the default value, No_Block,
+# are absent.
+#
+# Section 9, binary properties, a property value set whose values are
+# properties and their code points: Bidi_Mirrored, UnicodeData.txt field 9;
+# the Emoji, Emoji_Component, Emoji_Modifier, Emoji_Modifier_Base,
+# Emoji_Presentation, and Extended_Pictographic properties of
+# emoji/emoji-data.txt; and the Hex_Digit, Ideographic, Join_Control,
+# Noncharacter_Code_Point, Other_Alphabetic, Other_ID_Continue, Other_ID_Start,
+# Other_Lowercase, and Other_Uppercase properties of PropList.txt. Unlike the
+# values of the other sets, two properties can share code points.
+#
+# Section 10, Age, a property value set: the DerivedAge.txt values, which are
+# versions such as 1.1. Code points of the default value, Unassigned, are
+# absent.
 #
 # The generator refuses data that breaks what the readers assume: a code point
 # with two mappings of one kind, a simple fold whose target folds again, a full
@@ -83,7 +107,8 @@
 # simple case folding orbits that differ from the classes of code points with
 # equal full folding, a lowercase-of-uppercase mapping that is not idempotent,
 # a code point with two values of one single-valued property, such as two
-# scripts, and a First row without its Last row.
+# scripts, a First row without its Last row, and a binary property that one of
+# its files does not list.
 
 import argparse
 import hashlib
@@ -98,10 +123,44 @@ GENERATED = TOOL_DIR / "generated.txt"
 DOWNLOAD_ROOT = ROOT_DIR / "target/unicode-database"
 OUTPUT_DIR = ROOT_DIR / "src/main/resources/io/airlift/regulator/unicode"
 
-URL_PATTERN = re.compile(r"https://www\.unicode\.org/Public/(\d+\.\d+\.\d+)/ucd/([A-Za-z]+\.txt)")
-INPUT_FILES = ("CaseFolding.txt", "Scripts.txt", "UnicodeData.txt")
+URL_PATTERN = re.compile(r"https://www\.unicode\.org/Public/(\d+\.\d+\.\d+)/ucd/((?:emoji/)?[A-Za-z-]+\.txt)")
+INPUT_FILES = (
+    "Blocks.txt",
+    "CaseFolding.txt",
+    "DerivedAge.txt",
+    "PropList.txt",
+    "PropertyValueAliases.txt",
+    "Scripts.txt",
+    "UnicodeData.txt",
+    "emoji/emoji-data.txt",
+)
 # Files whose first line names the file and its version, such as "# Scripts-18.0.0.txt".
-VERSIONED_FILES = ("CaseFolding.txt", "Scripts.txt")
+VERSIONED_FILES = ("Blocks.txt", "CaseFolding.txt", "DerivedAge.txt", "PropList.txt", "PropertyValueAliases.txt", "Scripts.txt")
+# Files whose first line names the file, such as "# emoji-data.txt", and a later
+# header line its version, such as "# Version: 18.0.0".
+EMOJI_FILES = ("emoji/emoji-data.txt",)
+PROP_LIST_PROPERTIES = (
+    "Hex_Digit",
+    "Ideographic",
+    "Join_Control",
+    "Noncharacter_Code_Point",
+    "Other_Alphabetic",
+    "Other_ID_Continue",
+    "Other_ID_Start",
+    "Other_Lowercase",
+    "Other_Uppercase",
+)
+EMOJI_PROPERTIES = (
+    "Emoji",
+    "Emoji_Component",
+    "Emoji_Modifier",
+    "Emoji_Modifier_Base",
+    "Emoji_Presentation",
+    "Extended_Pictographic",
+)
+NAME = r"[A-Za-z0-9_]+"
+BLOCK_NAME = r"[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*"
+AGE = r"[0-9]+\.[0-9]+"
 
 MAGIC = b"RGUD"
 FORMAT_VERSION = 1
@@ -111,6 +170,10 @@ SECTION_SIMPLE_UPPERCASE_MAPPINGS = 3
 SECTION_SIMPLE_LOWERCASE_MAPPINGS = 4
 SECTION_GENERAL_CATEGORY = 5
 SECTION_SCRIPT = 6
+SECTION_SCRIPT_SHORT_NAMES = 7
+SECTION_BLOCK = 8
+SECTION_BINARY_PROPERTIES = 9
+SECTION_AGE = 10
 MAX_CODE_POINT = 0x10FFFF
 
 
@@ -158,6 +221,7 @@ def download(version, files, refresh):
     texts = {}
     for name, (url, expected) in sorted(files.items()):
         file = directory / name
+        file.parent.mkdir(parents=True, exist_ok=True)
         data = None if refresh or not file.is_file() else file.read_bytes()
         if data is None or sha256(data) != expected:
             with urllib.request.urlopen(url, timeout=60) as response:
@@ -169,6 +233,8 @@ def download(version, files, refresh):
         text = data.decode("utf-8")
         if name in VERSIONED_FILES:
             check_header(url, name, text, version)
+        if name in EMOJI_FILES:
+            check_emoji_header(url, name, text, version)
         texts[name] = text
     return texts
 
@@ -177,6 +243,20 @@ def check_header(url, name, text, version):
     expected = f"# {pathlib.PurePosixPath(name).stem}-{version}.txt"
     if text.split("\n", 1)[0].rstrip("\r") != expected:
         raise ValueError(f"{url} does not start with {expected!r}")
+
+
+def check_emoji_header(url, name, text, version):
+    lines = text.split("\n")
+    header = []
+    for line in lines:
+        if not line.startswith("#"):
+            break
+        header.append(line.rstrip("\r"))
+    # Some releases give the version without its update number, such as "17.0".
+    versions = {f"# Version: {version}", f"# Version: {version.removesuffix('.0')}"}
+    expected = f"# {pathlib.PurePosixPath(name).name}"
+    if not header or header[0] != expected or versions.isdisjoint(header):
+        raise ValueError(f"{url} does not start with {expected!r} and a '# Version: {version}' line")
 
 
 def code_point(field, name, number):
@@ -263,12 +343,14 @@ def case_folding(text):
 
 def unicode_data(text):
     # UnicodeData.txt rows have 15 fields; field 2 is the general category,
-    # field 12 the simple uppercase mapping, and field 13 the simple lowercase
-    # mapping. A range of code points, given by a First row and a Last row of
-    # the same name and category, has no mappings.
+    # field 9 Bidi_Mirrored, Y or N, field 12 the simple uppercase mapping, and
+    # field 13 the simple lowercase mapping. A range of code points, given by a
+    # First row and a Last row of the same name, category, and Bidi_Mirrored,
+    # has no mappings.
     uppercase = {}
     lowercase = {}
     categories = {}
+    mirrored = []
     previous = -1
     first = None
     for number, line in enumerate(text.split("\n"), 1):
@@ -287,18 +369,24 @@ def unicode_data(text):
         category = fields[2]
         if re.fullmatch(r"[A-Z][a-z]", category) is None or category == "Cn":
             raise ValueError(f"UnicodeData.txt:{number}: unexpected general category {category!r}")
+        if fields[9] not in ("Y", "N"):
+            raise ValueError(f"UnicodeData.txt:{number}: unexpected Bidi_Mirrored {fields[9]!r}")
         range_name = re.fullmatch(r"<(.+), (First|Last)>", fields[1])
         if first is not None:
-            if range_name is None or range_name.group(2) != "Last" or (range_name.group(1), category) != first[1:]:
+            if range_name is None or range_name.group(2) != "Last" or (range_name.group(1), category, fields[9]) != first[1:]:
                 raise ValueError(f"UnicodeData.txt:{number}: expected the Last row of {first[1]}")
-            add_range(categories, category, first[0], source)
+            low = first[0]
             first = None
         elif range_name is not None and range_name.group(2) == "First":
-            first = (source, range_name.group(1), category)
+            first = (source, range_name.group(1), category, fields[9])
         elif range_name is not None:
             raise ValueError(f"UnicodeData.txt:{number}: a Last row without its First row")
         else:
-            add_range(categories, category, source, source)
+            low = source
+        if first is None:
+            add_range(categories, category, low, source)
+            if fields[9] == "Y":
+                mirrored.append((low, source))
         for mappings, field in ((uppercase, fields[12]), (lowercase, fields[13])):
             if not field:
                 continue
@@ -321,12 +409,14 @@ def unicode_data(text):
         fold = java_fold(value)
         if java_fold(fold) != fold:
             raise ValueError(f"U+{value:04X} folds to U+{fold:04X} by lowercase of uppercase, which folds again")
-    return sorted(uppercase.items()), sorted(lowercase.items()), categories
+    return sorted(uppercase.items()), sorted(lowercase.items()), categories, mirrored
 
 
-def property_values(name, text):
+def property_values(name, text, value_pattern=NAME, single_valued=True):
     # Rows of a property file are "<code>[..<code>] ; <value>", followed by an
-    # optional "# <comment>". A code point has at most one value.
+    # optional "# <comment>". In a file of one single-valued property, a code
+    # point has at most one value; in a file of binary properties, each value
+    # is a property that its code points have.
     values = {}
     for number, line in enumerate(text.split("\n"), 1):
         row = line.split("#", 1)[0].strip()
@@ -334,15 +424,45 @@ def property_values(name, text):
             continue
         fields = [field.strip() for field in row.split(";")]
         match = re.fullmatch(r"([0-9A-F]{4,6})(?:\.\.([0-9A-F]{4,6}))?", fields[0])
-        if len(fields) != 2 or match is None or re.fullmatch(r"[A-Za-z0-9_]+", fields[1]) is None:
+        if len(fields) != 2 or match is None or re.fullmatch(value_pattern, fields[1]) is None:
             raise ValueError(f"{name}:{number}: unexpected row {line!r}")
         low = int(match.group(1), 16)
         high = int(match.group(2), 16) if match.group(2) else low
         if high < low or high > MAX_CODE_POINT:
             raise ValueError(f"{name}:{number}: bad code point range {fields[0]}")
         add_range(values, fields[1], low, high)
-    check_single_valued(name, values)
+    if single_valued:
+        check_single_valued(name, values)
     return values
+
+
+def binary_properties(name, text, properties):
+    values = property_values(name, text, single_valued=False)
+    missing = [value for value in properties if value not in values]
+    if missing:
+        raise ValueError(f"{name} does not list {', '.join(missing)}")
+    return {value: values[value] for value in properties}
+
+
+def script_short_names(text):
+    # PropertyValueAliases.txt rows are "<property> ; <short name> ; <long name>",
+    # followed by optional further aliases. Only the Script (sc) rows are read.
+    short_names = {}
+    for number, line in enumerate(text.split("\n"), 1):
+        row = line.split("#", 1)[0].strip()
+        if not row:
+            continue
+        fields = [field.strip() for field in row.split(";")]
+        if fields[0] != "sc":
+            continue
+        if len(fields) < 3 or any(re.fullmatch(NAME, field) is None for field in fields[1:]):
+            raise ValueError(f"PropertyValueAliases.txt:{number}: unexpected row {line!r}")
+        if fields[1] in short_names:
+            raise ValueError(f"PropertyValueAliases.txt:{number}: script {fields[1]} is listed twice")
+        short_names[fields[1]] = fields[2]
+    if not short_names:
+        raise ValueError("PropertyValueAliases.txt lists no script")
+    return sorted(short_names.items())
 
 
 def add_range(values, value, low, high):
@@ -432,6 +552,15 @@ def property_value_section(section_id, values):
     return section(section_id, bytes(payload))
 
 
+def name_section(section_id, pairs):
+    payload = bytearray(varint(len(pairs)))
+    for key, value in pairs:
+        for name in (key, value):
+            encoded_name = name.encode("ascii")
+            payload += varint(len(encoded_name)) + encoded_name
+    return section(section_id, bytes(payload))
+
+
 def mapping_section(section_id, mappings):
     payload = bytearray(varint(len(mappings)))
     previous_source = 0
@@ -444,8 +573,13 @@ def mapping_section(section_id, mappings):
 
 def database(version, files, texts, key):
     simple_orbits, full_folds = case_folding(texts["CaseFolding.txt"])
-    uppercase, lowercase, categories = unicode_data(texts["UnicodeData.txt"])
+    uppercase, lowercase, categories, mirrored = unicode_data(texts["UnicodeData.txt"])
     scripts = property_values("Scripts.txt", texts["Scripts.txt"])
+    blocks = property_values("Blocks.txt", texts["Blocks.txt"], BLOCK_NAME)
+    binary = {"Bidi_Mirrored": mirrored}
+    binary.update(binary_properties("emoji/emoji-data.txt", texts["emoji/emoji-data.txt"], EMOJI_PROPERTIES))
+    binary.update(binary_properties("PropList.txt", texts["PropList.txt"], PROP_LIST_PROPERTIES))
+    ages = property_values("DerivedAge.txt", texts["DerivedAge.txt"], AGE)
     encoded_version = version.encode("ascii")
     return (MAGIC
             + varint(FORMAT_VERSION)
@@ -457,7 +591,11 @@ def database(version, files, texts, key):
             + mapping_section(SECTION_SIMPLE_UPPERCASE_MAPPINGS, uppercase)
             + mapping_section(SECTION_SIMPLE_LOWERCASE_MAPPINGS, lowercase)
             + property_value_section(SECTION_GENERAL_CATEGORY, categories)
-            + property_value_section(SECTION_SCRIPT, scripts))
+            + property_value_section(SECTION_SCRIPT, scripts)
+            + name_section(SECTION_SCRIPT_SHORT_NAMES, script_short_names(texts["PropertyValueAliases.txt"]))
+            + property_value_section(SECTION_BLOCK, blocks)
+            + property_value_section(SECTION_BINARY_PROPERTIES, binary)
+            + property_value_section(SECTION_AGE, ages))
 
 
 def generated(key, data):

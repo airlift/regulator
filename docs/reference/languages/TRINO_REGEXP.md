@@ -39,7 +39,7 @@ the matcher's `start()` returns byte offset `4`.
 | Anchors | `^`, `$`, `\A`, and `\z` |
 | Boundaries | Trino-compatible Unicode `\b` and `\B` |
 | Character classes | Ranges, negation, union, intersection, subtraction, ASCII predefined classes, and Unicode POSIX classes |
-| Unicode properties | JVM-derived categories, scripts, blocks, binary properties, and `java...` properties using Trino's accepted spellings |
+| Unicode properties | Categories, scripts, blocks, binary properties, and `java...` properties from the pinned Unicode 18.0 database, using Trino's accepted spellings |
 | Escapes | Trino quoting and escape forms that identify Unicode code points |
 | Inline flags | `i`, `m`, `s`, and `x`, including scoped forms |
 
@@ -52,10 +52,15 @@ as `ß` and `SS`.
 
 ### Unicode data and case folding
 
-Case-insensitive matching uses Unicode 18.0 full case folding, `CaseFolding.txt`
-statuses C and F, from Regulator's pinned Unicode database, so the folding is
-the same on every JVM. Unicode properties and word boundaries still follow the
-running JVM.
+Unicode property membership uses the JDK's formulas over Regulator's pinned
+Unicode 18.0 database, and case-insensitive matching uses its full case
+folding, `CaseFolding.txt` statuses C and F, so both are the same on every JVM.
+Word boundaries still follow the running JVM. Property membership agrees with
+Java's `Pattern` except where Unicode changed since the JVM's Unicode version,
+as
+[`JVM_UNICODE.md`](../../integrations/JVM_UNICODE.md#differences-from-the-jdk)
+lists; the accepted property spellings keep Regulator's existing rules, which
+are not identical to `Pattern`'s.
 
 Full case folding keeps dotted capital `İ` and dotless small `ı` apart from
 `I` and `i` outside its Turkic mappings, and so does Joni: `(?i)i` matches

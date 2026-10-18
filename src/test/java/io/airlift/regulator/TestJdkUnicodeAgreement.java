@@ -16,10 +16,13 @@ package io.airlift.regulator;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.function.IntPredicate;
 import java.util.regex.Pattern;
 
@@ -28,8 +31,38 @@ import static java.util.regex.Pattern.CASE_INSENSITIVE;
 import static java.util.regex.Pattern.UNICODE_CASE;
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class TestJvmUnicodeAuthority
+/**
+ * The Java and Trino Unicode properties come from the pinned database, and agree with the running
+ * JDK at every code point except those Unicode assigned after the JDK's Unicode version.
+ */
+public class TestJdkUnicodeAgreement
 {
+    // The Age values of the database, oldest first.
+    private static final List<String> AGES = UnicodeDatabase.ages().names().stream()
+            .sorted(Comparator.comparingInt(TestJdkUnicodeAgreement::versionKey))
+            .toList();
+
+    // The Unicode version of the running JDK, which the Character javadoc names, such as 16.0 for
+    // Java SE 25 and 17.0 for Java SE 26: the newest Age whose assigned code points the JDK all
+    // defines.
+    private static final String JDK_UNICODE_VERSION = jdkUnicodeVersion();
+
+    // The code points whose Age is after the JDK's Unicode version, which the JDK does not assign.
+    private static final BitSet NEWER = codePointsOfAges(AGES.subList(AGES.indexOf(JDK_UNICODE_VERSION) + 1, AGES.size()));
+
+    // The code points whose Age is at most the JDK's Unicode version.
+    private static final BitSet ASSIGNED_BY_JDK = codePointsOfAges(AGES.subList(0, AGES.indexOf(JDK_UNICODE_VERSION) + 1));
+
+    // Changes Unicode made to older characters after the JDK's version, and how many code points
+    // each changes.
+    private static final List<ExpectedDifference> EXPECTED_DIFFERENCES = List.of(
+            // Unicode 17.0 changed U+0295 LATIN LETTER PHARYNGEAL VOICED FRICATIVE from Ll to Lo.
+            new ExpectedDifference("17.0", Set.of("Ll", "Lo", "LC", "IsLowercase", "javaLowerCase"), 1, codePoint -> codePoint == 0x0295),
+            // Unicode 17.0 removed Extended_Pictographic from 689 code points that are not emoji,
+            // such as U+2388 HELM SYMBOL and U+2605 BLACK STAR. The JDK assigns 672 of them; the
+            // other 17 were unassigned.
+            new ExpectedDifference("17.0", Set.of("IsExtended_Pictographic"), 672, codePoint -> !UnicodeGroups.lookup("IsExtended_Pictographic").contains(codePoint)));
+
     private static final List<Category> CATEGORIES = List.of(
             new Category("Cn", Character.UNASSIGNED),
             new Category("Lu", Character.UPPERCASE_LETTER),
@@ -64,6 +97,8 @@ public class TestJvmUnicodeAuthority
 
     private static final List<CategoryGroup> CATEGORY_GROUPS = List.of(
             new CategoryGroup("L", type -> type >= Character.UPPERCASE_LETTER && type <= Character.OTHER_LETTER),
+            new CategoryGroup("LC", type -> type >= Character.UPPERCASE_LETTER && type <= Character.TITLECASE_LETTER),
+            new CategoryGroup("LD", type -> type >= Character.UPPERCASE_LETTER && type <= Character.OTHER_LETTER || type == Character.DECIMAL_DIGIT_NUMBER),
             new CategoryGroup("M", type -> type >= Character.NON_SPACING_MARK && type <= Character.COMBINING_SPACING_MARK),
             new CategoryGroup("N", type -> type >= Character.DECIMAL_DIGIT_NUMBER && type <= Character.OTHER_NUMBER),
             new CategoryGroup("Z", type -> type >= Character.SPACE_SEPARATOR && type <= Character.PARAGRAPH_SEPARATOR),
@@ -84,20 +119,20 @@ public class TestJvmUnicodeAuthority
             new PropertyExpectation("IsEmoji_Modifier_Base", Character::isEmojiModifierBase),
             new PropertyExpectation("IsEmoji_Presentation", Character::isEmojiPresentation),
             new PropertyExpectation("IsExtended_Pictographic", Character::isExtendedPictographic),
-            new PropertyExpectation("IsHex_Digit", TestJvmUnicodeAuthority::isHexDigit),
+            new PropertyExpectation("IsHex_Digit", TestJdkUnicodeAgreement::isHexDigit),
             new PropertyExpectation("IsIdeographic", Character::isIdeographic),
             new PropertyExpectation("IsJoin_Control", codePoint -> codePoint == 0x200C || codePoint == 0x200D),
             new PropertyExpectation("IsLetter", Character::isLetter),
             new PropertyExpectation("IsLowercase", Character::isLowerCase),
-            new PropertyExpectation("IsNoncharacter_Code_Point", TestJvmUnicodeAuthority::isNoncharacterCodePoint),
-            new PropertyExpectation("IsPunctuation", TestJvmUnicodeAuthority::isPunctuation),
+            new PropertyExpectation("IsNoncharacter_Code_Point", TestJdkUnicodeAgreement::isNoncharacterCodePoint),
+            new PropertyExpectation("IsPunctuation", TestJdkUnicodeAgreement::isPunctuation),
             new PropertyExpectation("IsTitlecase", Character::isTitleCase),
             new PropertyExpectation("IsUppercase", Character::isUpperCase),
-            new PropertyExpectation("IsWhite_Space", TestJvmUnicodeAuthority::isWhiteSpace),
-            new PropertyExpectation("IsWord", TestJvmUnicodeAuthority::isWord),
+            new PropertyExpectation("IsWhite_Space", TestJdkUnicodeAgreement::isWhiteSpace),
+            new PropertyExpectation("IsWord", TestJdkUnicodeAgreement::isWord),
             new PropertyExpectation("IsAlnum", codePoint -> Character.isAlphabetic(codePoint) || Character.isDigit(codePoint)),
             new PropertyExpectation("IsBlank", codePoint -> Character.getType(codePoint) == Character.SPACE_SEPARATOR || codePoint == '\t'),
-            new PropertyExpectation("IsGraph", TestJvmUnicodeAuthority::isGraph),
+            new PropertyExpectation("IsGraph", TestJdkUnicodeAgreement::isGraph),
             new PropertyExpectation("IsPrint", codePoint -> isGraph(codePoint) ||
                     (Character.getType(codePoint) == Character.SPACE_SEPARATOR || codePoint == '\t') &&
                             Character.getType(codePoint) != Character.CONTROL));
@@ -123,28 +158,79 @@ public class TestJvmUnicodeAuthority
             new PropertyExpectation("javaMirrored", Character::isMirrored));
 
     @Test
-    public void testGeneralCategoriesComeFromCharacterType()
+    public void testGeneralCategoriesAgreeWithCharacterType()
     {
         for (Category category : CATEGORIES) {
-            CharClass characterClass = UnicodeGroups.lookup(category.name());
-            assertThat(characterClass).as(category.name()).isNotNull();
-            assertRanges(characterClass, codePoint -> Character.getType(codePoint) == category.type(), category.name());
+            assertRanges(UnicodeGroups.lookup(category.name()), codePoint -> Character.getType(codePoint) == category.type(), category.name());
         }
-
         for (CategoryGroup categoryGroup : CATEGORY_GROUPS) {
-            CharClass characterClass = UnicodeGroups.lookup(categoryGroup.name());
-            assertThat(characterClass).as(categoryGroup.name()).isNotNull();
-            assertRanges(characterClass, codePoint -> categoryGroup.types().test(Character.getType(codePoint)), categoryGroup.name());
+            assertRanges(UnicodeGroups.lookup(categoryGroup.name()), codePoint -> categoryGroup.types().test(Character.getType(codePoint)), categoryGroup.name());
         }
     }
 
     @Test
-    public void testScriptsComeFromCharacterUnicodeScript()
+    public void testScriptsAgreeWithCharacterUnicodeScript()
     {
         for (Character.UnicodeScript script : Character.UnicodeScript.values()) {
-            CharClass characterClass = UnicodeGroups.lookup(script.name());
-            assertThat(characterClass).as(script.name()).isNotNull();
-            assertRanges(characterClass, codePoint -> Character.UnicodeScript.of(codePoint) == script, script.name());
+            assertRanges(UnicodeGroups.lookup(script.name()), codePoint -> Character.UnicodeScript.of(codePoint) == script, script.name());
+        }
+
+        // A short or long name that UnicodeScript.forName rejects names a script Unicode added
+        // after the JDK's version.
+        List<String> names = new ArrayList<>(UnicodeGroups.scriptNames());
+        names.addAll(UnicodeDatabase.scriptShortNames().keySet());
+        for (String name : names) {
+            for (String spelling : List.of(name, name.toLowerCase(Locale.ROOT), name.replace("_", ""))) {
+                assertSameClassAsJdk(spelling, jdkScript(spelling), UnicodeGroups.lookup("script=" + spelling));
+            }
+        }
+    }
+
+    @Test
+    public void testBlocksAgreeWithCharacterUnicodeBlock()
+    {
+        List<Character.UnicodeBlock> blocks = Arrays.stream(Character.UnicodeBlock.class.getFields())
+                .filter(field -> Modifier.isStatic(field.getModifiers()))
+                .filter(field -> field.getType() == Character.UnicodeBlock.class)
+                .map(field -> {
+                    try {
+                        return (Character.UnicodeBlock) field.get(null);
+                    }
+                    catch (IllegalAccessException e) {
+                        throw new AssertionError(e);
+                    }
+                })
+                .distinct()
+                .sorted(Comparator.comparing(Object::toString))
+                .toList();
+        for (Character.UnicodeBlock block : blocks) {
+            String propertyName = "In" + block;
+            assertRanges(UnicodeGroups.lookup(propertyName), codePoint -> Character.UnicodeBlock.of(codePoint) == block, propertyName);
+        }
+
+        // A spelling of a Blocks.txt name that UnicodeBlock.forName rejects is a block Unicode added
+        // after the JDK's version, or a spelling both reject.
+        for (String name : UnicodeDatabase.blocks().names()) {
+            String uppercaseName = name.toUpperCase(Locale.ROOT);
+            for (String spelling : List.of(name, uppercaseName, name.replace(" ", ""), uppercaseName.replace(' ', '_').replace('-', '_'))) {
+                assertSameClassAsJdk(spelling, jdkBlock(spelling), UnicodeGroups.lookup("block=" + spelling));
+            }
+        }
+    }
+
+    @Test
+    public void testBinaryPropertiesAgreeWithJdkPredicates()
+    {
+        for (PropertyExpectation property : BINARY_PROPERTIES) {
+            assertRanges(UnicodeGroups.lookup(property.name()), property.predicate(), property.name());
+        }
+    }
+
+    @Test
+    public void testJavaPropertiesAgreeWithCharacterPredicates()
+    {
+        for (PropertyExpectation property : JAVA_PROPERTIES) {
+            assertRanges(UnicodeGroups.lookup(property.name()), property.predicate(), property.name());
         }
     }
 
@@ -174,49 +260,6 @@ public class TestJvmUnicodeAuthority
         assertThat(UnicodeGroups.lookup("IsWhite_Space"))
                 .isSameAs(UnicodeGroups.lookup("IsSpace"));
         assertThat(UnicodeGroups.lookup("Not_A_Unicode_Property")).isNull();
-    }
-
-    @Test
-    public void testBlocksComeFromCharacterUnicodeBlock()
-    {
-        List<Character.UnicodeBlock> blocks = Arrays.stream(Character.UnicodeBlock.class.getFields())
-                .filter(field -> Modifier.isStatic(field.getModifiers()))
-                .filter(field -> field.getType() == Character.UnicodeBlock.class)
-                .map(field -> {
-                    try {
-                        return (Character.UnicodeBlock) field.get(null);
-                    }
-                    catch (IllegalAccessException e) {
-                        throw new AssertionError(e);
-                    }
-                })
-                .distinct()
-                .sorted(Comparator.comparing(Object::toString))
-                .toList();
-
-        for (Character.UnicodeBlock block : blocks) {
-            String propertyName = "In" + block;
-            assertRanges(
-                    UnicodeGroups.lookup(propertyName),
-                    codePoint -> Character.UnicodeBlock.of(codePoint) == block,
-                    propertyName);
-        }
-    }
-
-    @Test
-    public void testBinaryPropertiesComeFromJvmPredicates()
-    {
-        for (PropertyExpectation property : BINARY_PROPERTIES) {
-            assertRanges(UnicodeGroups.lookup(property.name()), property.predicate(), property.name());
-        }
-    }
-
-    @Test
-    public void testJavaPropertiesComeFromCharacterPredicates()
-    {
-        for (PropertyExpectation property : JAVA_PROPERTIES) {
-            assertRanges(UnicodeGroups.lookup(property.name()), property.predicate(), property.name());
-        }
     }
 
     // Java folds as the JVM's case classes do, but from the database's case mappings. Unicode keeps
@@ -286,6 +329,88 @@ public class TestJvmUnicodeAuthority
         return Character.toLowerCase(Character.toUpperCase(codePoint));
     }
 
+    private static String jdkUnicodeVersion()
+    {
+        String version = null;
+        for (String age : AGES) {
+            int[] ranges = UnicodeDatabase.ages().ranges(age);
+            for (int index = 0; index < ranges.length; index += 2) {
+                for (int codePoint = ranges[index]; codePoint <= ranges[index + 1]; codePoint++) {
+                    // Noncharacters have an Age but no General_Category.
+                    if (!isNoncharacterCodePoint(codePoint) && !Character.isDefined(codePoint)) {
+                        assertThat(version).as("the JDK's Unicode version").isNotNull();
+                        return version;
+                    }
+                }
+            }
+            version = age;
+        }
+        return version;
+    }
+
+    private static BitSet codePointsOfAges(List<String> ages)
+    {
+        BitSet codePoints = new BitSet();
+        for (String age : ages) {
+            int[] ranges = UnicodeDatabase.ages().ranges(age);
+            for (int index = 0; index < ranges.length; index += 2) {
+                codePoints.set(ranges[index], ranges[index + 1] + 1);
+            }
+        }
+        return codePoints;
+    }
+
+    // Orders Age values, which are a major and a minor version, such as 15.1.
+    private static int versionKey(String version)
+    {
+        int dot = version.indexOf('.');
+        return Integer.parseInt(version.substring(0, dot)) * 1000 + Integer.parseInt(version.substring(dot + 1));
+    }
+
+    private static boolean newerThanJdk(String version)
+    {
+        return versionKey(JDK_UNICODE_VERSION) < versionKey(version);
+    }
+
+    private static Character.UnicodeScript jdkScript(String name)
+    {
+        try {
+            return Character.UnicodeScript.forName(name);
+        }
+        catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static Character.UnicodeBlock jdkBlock(String name)
+    {
+        try {
+            return Character.UnicodeBlock.forName(name);
+        }
+        catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    // A name the JDK accepts names the class of the JDK's own name for it; a name only the database
+    // knows holds no code point that the JDK's Unicode version assigns.
+    private static void assertSameClassAsJdk(String name, Object jdkValue, CharClass characterClass)
+    {
+        if (jdkValue != null) {
+            String jdkName = jdkValue instanceof Character.UnicodeBlock ? "In" + jdkValue : "sc=" + jdkValue;
+            assertThat(characterClass).as(name).isSameAs(UnicodeGroups.lookup(jdkName));
+            return;
+        }
+        if (characterClass != null) {
+            for (RuneRange range : characterClass.rangeView()) {
+                int codePoint = ASSIGNED_BY_JDK.nextSetBit(range.low());
+                if (codePoint >= 0 && codePoint <= range.high()) {
+                    throw new AssertionError(String.format(Locale.ROOT, "the JDK rejects %s, which holds U+%04X of Unicode %s", name, codePoint, JDK_UNICODE_VERSION));
+                }
+            }
+        }
+    }
+
     private static boolean isHexDigit(int codePoint)
     {
         return Character.isDigit(codePoint) ||
@@ -337,30 +462,41 @@ public class TestJvmUnicodeAuthority
                 type != Character.UNASSIGNED;
     }
 
+    // Compares a class with the JDK at every code point that is not newer than the JDK's Unicode
+    // version, apart from the expected differences of the property, each of which must excuse
+    // exactly its count of code points.
     private static void assertRanges(CharClass characterClass, IntPredicate expected, String name)
     {
-        int previousHigh = -1;
-        for (RuneRange range : characterClass.ranges()) {
-            if (range.low() <= previousHigh) {
-                throw new AssertionError(String.format(Locale.ROOT, "unordered range for %s at U+%04X", name, range.low()));
-            }
-            for (int codePoint = previousHigh + 1; codePoint < range.low(); codePoint++) {
-                if (expected.test(codePoint)) {
-                    throw new AssertionError(String.format(Locale.ROOT, "missing U+%04X from %s", codePoint, name));
+        assertThat(characterClass).as(name).isNotNull();
+        List<ExpectedDifference> differences = EXPECTED_DIFFERENCES.stream()
+                .filter(difference -> difference.properties().contains(name) && newerThanJdk(difference.since()))
+                .toList();
+        int[] excusedCounts = new int[differences.size()];
+        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
+            boolean actual = characterClass.contains(codePoint);
+            if (actual != expected.test(codePoint) && !NEWER.get(codePoint)) {
+                int difference = excusingDifference(differences, codePoint);
+                if (difference < 0) {
+                    throw new AssertionError(String.format(Locale.ROOT, "%s U+%04X %s, unlike the JDK's Unicode %s", actual ? "unexpected" : "missing", codePoint, name, JDK_UNICODE_VERSION));
                 }
-            }
-            for (int codePoint = range.low(); codePoint <= range.high(); codePoint++) {
-                if (!expected.test(codePoint)) {
-                    throw new AssertionError(String.format(Locale.ROOT, "unexpected U+%04X in %s", codePoint, name));
-                }
-            }
-            previousHigh = range.high();
-        }
-        for (int codePoint = previousHigh + 1; codePoint <= RUNEMAX; codePoint++) {
-            if (expected.test(codePoint)) {
-                throw new AssertionError(String.format(Locale.ROOT, "missing U+%04X from %s", codePoint, name));
+                excusedCounts[difference]++;
             }
         }
+        for (int difference = 0; difference < differences.size(); difference++) {
+            assertThat(excusedCounts[difference])
+                    .as("%s code points that Unicode %s changed", name, differences.get(difference).since())
+                    .isEqualTo(differences.get(difference).codePointCount());
+        }
+    }
+
+    private static int excusingDifference(List<ExpectedDifference> differences, int codePoint)
+    {
+        for (int difference = 0; difference < differences.size(); difference++) {
+            if (differences.get(difference).codePoints().test(codePoint)) {
+                return difference;
+            }
+        }
+        return -1;
     }
 
     private record Category(String name, int type) {}
@@ -368,4 +504,8 @@ public class TestJvmUnicodeAuthority
     private record CategoryGroup(String name, IntPredicate types) {}
 
     private record PropertyExpectation(String name, IntPredicate predicate) {}
+
+    // The code points of the properties that Unicode changed in the given version, and how many of
+    // them differ from an earlier JDK.
+    private record ExpectedDifference(String since, Set<String> properties, int codePointCount, IntPredicate codePoints) {}
 }
