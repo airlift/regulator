@@ -74,7 +74,6 @@ The Trino frontend implements these SQL-visible behaviors:
 - Unicode 18.0 full case folding, including multi-code-point folds
 - Trino replacement references such as `$1` and `${name}`
 - Slice-relative group offsets
-- non-strict malformed literal pattern bytes
 
 Some loops that can match empty input produce different boundaries when Joni
 revisits earlier capture history. Regulator accepts these patterns but tracks
@@ -85,8 +84,11 @@ for the exact behavior and example. A specialized capture-aware engine is
 deferred unless practical Trino workloads require exact compatibility.
 
 Trino's non-strict path assumes UTF-8 data is valid but does not validate it.
-Malformed bytes are preserved and may match byte-for-byte. This is deliberately
-garbage-in, garbage-out behavior rather than text validation.
+Regulator likewise treats malformed input as garbage in, garbage out rather
+than validating it. Patterns differ: Trino accepts a pattern that is not valid
+UTF-8 and compares its malformed bytes byte-for-byte, while Regulator rejects
+it as a syntax error, as it does for `TrinoLikePattern`, `JavaRegexp`, and
+`Re2`.
 
 Backreferences, lookaround, atomic groups, possessive quantifiers, and other
 backtracking-dependent constructs are rejected during compilation with a
@@ -149,7 +151,7 @@ Trino revision selected for the proposal. Cover:
 - empty matches and zero-length progress
 - replacement and split corner cases
 - non-zero Slice offsets
-- malformed UTF-8 patterns and inputs
+- malformed UTF-8 inputs, and rejection of malformed UTF-8 patterns
 - concurrency and memory-budget failures
 
 Joni is the compatibility oracle for supported Trino regexp behavior except for

@@ -14,7 +14,7 @@
 package io.airlift.regulator;
 
 /**
- * Thrown when a Trino LIKE pattern has invalid escape syntax.
+ * Thrown when a Trino LIKE pattern has invalid escape syntax or is not valid UTF-8.
  */
 public final class TrinoLikePatternSyntaxException
         extends IllegalArgumentException

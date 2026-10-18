@@ -29,8 +29,10 @@ import static java.util.Objects.requireNonNull;
 /**
  * A compiled Trino SQL LIKE pattern over UTF-8 bytes.
  * <p>
- * The pattern syntax and malformed UTF-8 behavior match Trino's SQL execution path. This is
- * intentionally a separate frontend from {@link Re2}; LIKE is not treated as a regex dialect.
+ * The pattern syntax and malformed UTF-8 input behavior match Trino's SQL execution path. A
+ * pattern that is not valid UTF-8 throws {@link TrinoLikePatternSyntaxException}, while Trino
+ * accepts it. This is intentionally a separate frontend from {@link Re2}; LIKE is not treated as
+ * a regex dialect.
  */
 public final class TrinoLikePattern
 {

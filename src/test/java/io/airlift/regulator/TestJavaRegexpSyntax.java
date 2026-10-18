@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slices;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -26,6 +27,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class TestJavaRegexpSyntax
 {
     private static final String SYNTAX_CASES = "/io/airlift/regulator/java-syntax-cases.tsv";
+
+    @Test
+    public void testMalformedUtf8IsRejected()
+    {
+        assertBadUtf8(new byte[] {'a', (byte) 0xE2, (byte) 0x82, 'b'}, 1);
+        assertBadUtf8(new byte[] {'a', 'b', (byte) 0xED, (byte) 0xA0, (byte) 0x80}, 2);
+        assertBadUtf8(new byte[] {(byte) 0xFF}, 0);
+    }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("syntaxCases")
@@ -77,6 +86,15 @@ public class TestJavaRegexpSyntax
                 pattern,
                 RegexpParseErrorCode.UNSUPPORTED_CONSTRUCT,
                 "unsupported regular-expression construct: " + feature + " at byte offset " + byteOffset);
+    }
+
+    private static void assertBadUtf8(byte[] pattern, int byteOffset)
+    {
+        assertThatThrownBy(() -> JavaRegexp.compile(Slices.wrappedBuffer(pattern)))
+                .isInstanceOfSatisfying(RegexpParseException.class, exception -> {
+                    assertThat(exception.errorCode()).isEqualTo(RegexpParseErrorCode.BAD_UTF8);
+                    assertThat(exception.byteOffset()).isEqualTo(byteOffset);
+                });
     }
 
     private static List<SyntaxCase> syntaxCases()

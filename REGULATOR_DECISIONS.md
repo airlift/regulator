@@ -247,10 +247,12 @@ UTF-16 code-unit offsets.
   other operation, including captures and boundaries. The matcher retained size
   is deducted from the forward-DFA budget; compilation keeps the ordinary RE2
   route when that optional allocation does not fit.
-- Patterns and inputs are not validated as UTF-8, matching Trino's
-  garbage-in/garbage-out contract. Malformed bytes in ordinary literal pattern
-  text retain one-byte identity and compare byte-for-byte. A malformed byte is
-  still an error where syntax requires a Unicode value, such as a capture name.
+- A pattern that is not valid UTF-8 throws a `BAD_UTF8` parse error at its
+  first invalid byte, as in the RE2 and Java frontends. This deliberately
+  differs from Trino, whose non-strict Joni path accepts such a pattern and
+  compares its malformed bytes byte-for-byte; that reading is unspecified, so
+  Regulator treats the pattern as a syntax error. Inputs are not validated as
+  UTF-8, matching Trino's garbage-in/garbage-out contract.
 
 Trino SQL registration, `CHAR` padding, block construction, and error-code
 translation belong in the Trino repository rather than the Regulator library.
@@ -568,8 +570,12 @@ It compiles Slice pattern bytes and matches complete Slice inputs. `%`, `_`,
 and escape semantics follow Trino's SQL execution path, using Trino
 `LikeMatcher` with optimization disabled as the semantic authority.
 
-The parser decodes pattern bytes with the JVM's UTF-8 replacement behavior
-while retaining original Slice-relative byte offsets for syntax errors.
+A pattern that is not valid UTF-8 throws `TrinoLikePatternSyntaxException` at
+its first invalid byte, as RE2 and Java regex patterns do. This deliberately
+differs from Trino, which decodes such a pattern with the JVM's replacement
+behavior; a malformed pattern has no specified meaning, so it is a syntax
+error. Syntax-error byte offsets are relative to the pattern Slice.
+
 Wildcard runs are normalized during parsing. Exact, prefix, suffix, and
 contains forms use direct byte operations. Ordered literals use the shared
 `OrderedLiteralMatcher`: fused first-byte and last-byte SWAR candidate masks
@@ -1045,9 +1051,9 @@ not apply SQL `upper`/`lower`. Those functions use Slice case conversion and
 are not regex-folding oracles. No input or pattern is converted through Java
 String to implement matching.
 
-Trino patterns and inputs are not validated as UTF-8. Malformed bytes in
-ordinary literal pattern text retain one-byte identity and compare
-byte-for-byte, matching Trino's non-strict Joni path. This does not expose a
+Trino inputs are not validated as UTF-8. Trino patterns must be valid UTF-8;
+unlike Trino's non-strict Joni path, which compares malformed literal pattern
+bytes byte-for-byte, Regulator rejects such a pattern. Neither rule exposes a
 separate Latin-1 fallback language.
 
 Pinned Joni also misses a valid empty match for a nullable expression before

@@ -29,10 +29,13 @@ public class TestTrinoRegexpSyntax
     private static final String SYNTAX_CASES = "/io/airlift/regulator/trino-syntax-cases.tsv";
 
     @Test
-    public void testMalformedUtf8InSyntaxIsRejected()
+    public void testMalformedUtf8IsRejected()
     {
         assertBadUtf8(new byte[] {'(', '?', '<', 'n', (byte) 0xFF, '>', 'x', ')'}, 4);
         assertBadUtf8(new byte[] {'[', (byte) 0xFF, ']'}, 1);
+        assertBadUtf8(new byte[] {'a', (byte) 0xE2, (byte) 0x82, 'b'}, 1);
+        assertBadUtf8(new byte[] {'a', 'b', (byte) 0xED, (byte) 0xA0, (byte) 0x80}, 2);
+        assertBadUtf8(new byte[] {(byte) 0xFF}, 0);
     }
 
     @ParameterizedTest(name = "{0}")

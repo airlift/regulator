@@ -37,8 +37,13 @@ An escape character must be followed by `%`, `_`, or itself. A trailing escape
 and any other escaped code point throw `TrinoLikePatternSyntaxException`; its
 `byteOffset()` is relative to the logical pattern Slice.
 
-The compiled pattern is immutable and safe to share across threads. Patterns
-and inputs are interpreted as UTF-8 using Trino's LIKE semantics.
+A pattern must be valid UTF-8. One that is not throws
+`TrinoLikePatternSyntaxException` at its first invalid byte, as invalid regular
+expressions do in the other frontends. This differs from Trino, which accepts
+such a pattern and replaces its malformed bytes.
+
+The compiled pattern is immutable and safe to share across threads. Inputs are
+interpreted as UTF-8 using Trino's LIKE semantics.
 
 ## Unsupported features
 

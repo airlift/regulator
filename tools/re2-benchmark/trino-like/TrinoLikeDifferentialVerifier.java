@@ -57,14 +57,12 @@ public final class TrinoLikeDifferentialVerifier
 
     private static long verifyEncodedPatterns()
     {
+        // Patterns that are not valid UTF-8 are left out: Trino accepts them, and Regulator
+        // deliberately rejects them.
         byte[][] patterns = {
                 "é%_".getBytes(UTF_8),
                 "%💰_".getBytes(UTF_8),
                 "a\\%é".getBytes(UTF_8),
-                {(byte) 0xFF, '%', '_'},
-                {'a', (byte) 0xE2, (byte) 0x82, '%'},
-                {(byte) 0xFF, '\\', '%'},
-                {(byte) 0xC0, (byte) 0xAF, '\\', '_'},
         };
 
         long comparisons = 0;

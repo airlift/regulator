@@ -946,7 +946,7 @@ public class TestTrinoRegexpFunctions
     {
         Slice malformed = Slices.wrappedBuffer(new byte[] {'A', (byte) 0xED, (byte) 0xA0, (byte) 0x80, 'B'});
 
-        assertThat(TrinoRegexp.compile(malformed).contains(malformed)).isTrue();
+        assertThat(TrinoRegexp.compile(utf8("B")).contains(malformed)).isTrue();
         assertThat(TrinoRegexp.compile(utf8("")).count(malformed)).isGreaterThan(0);
     }
 
