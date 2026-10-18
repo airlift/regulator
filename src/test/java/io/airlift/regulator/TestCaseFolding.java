@@ -17,6 +17,7 @@ import io.airlift.regulator.UnicodeDatabase.CodePointMappings;
 import org.junit.jupiter.api.Test;
 
 import java.util.Locale;
+import java.util.function.IntPredicate;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 
@@ -84,6 +85,30 @@ public class TestCaseFolding
                         throw new AssertionError(String.format(Locale.ROOT, "%s: case mapping U+%04X of U+%04X is outside its orbit", caseFolding, mapping, codePoint));
                     }
                 }
+            }
+        }
+    }
+
+    // A case-insensitive match never changes whether a character is a word character: the members
+    // of each fold orbit agree, for Java's \w and \b with UNICODE_CHARACTER_CLASS and for Trino's
+    // \b. The word characters of RE2, of Trino's \w, and of Java without UNICODE_CHARACTER_CLASS
+    // are ASCII, which the Kelvin sign's orbit leaves.
+    @Test
+    public void testWordCharactersAreClosedUnderCaseFolding()
+    {
+        assertClosedUnderCaseFolding(CaseFolding.JAVA, UnicodeGroups.lookup("IsWord")::contains, "Java \\w");
+        assertClosedUnderCaseFolding(CaseFolding.JAVA, UnicodeGroups::isWord, "Java \\b");
+        assertClosedUnderCaseFolding(CaseFolding.TRINO, EmptyOp::isUnicodeWord, "Trino \\b");
+    }
+
+    // Each orbit is a cycle, so comparing every code point with its successor compares the whole
+    // orbit.
+    private static void assertClosedUnderCaseFolding(CaseFolding caseFolding, IntPredicate wordCharacters, String name)
+    {
+        for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
+            int next = caseFolding.cycleFoldRune(codePoint);
+            if (wordCharacters.test(codePoint) != wordCharacters.test(next)) {
+                throw new AssertionError(String.format(Locale.ROOT, "%s: %s holds only one of U+%04X and U+%04X", caseFolding, name, codePoint, next));
             }
         }
     }

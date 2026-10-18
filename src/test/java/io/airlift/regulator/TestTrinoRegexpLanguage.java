@@ -653,6 +653,8 @@ public class TestTrinoRegexpLanguage
         assertThat(TrinoRegexp.compile(utf8Slice("\\b\u200C\\b")).contains(utf8Slice("\u200C"))).isFalse();
         assertThat(TrinoRegexp.compile(utf8Slice("\\B\u200C\\B")).contains(utf8Slice("\u200C"))).isTrue();
         assertThat(TrinoRegexp.compile(utf8Slice("\\B")).contains(utf8Slice("中"))).isFalse();
+        // Unicode 18.0 added the letter U+0558 MODIFIER LETTER ARMENIAN SMALL EH.
+        assertThat(TrinoRegexp.compile(utf8Slice("\\b\u0558\\b")).contains(utf8Slice("\u0558"))).isTrue();
 
         Slice offsetInput = utf8Slice("x中x").slice(1, 3);
         assertThat(TrinoRegexp.compile(utf8Slice("\\b中\\b")).contains(offsetInput)).isTrue();
@@ -668,7 +670,7 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
-    public void testJvmWordClassificationIncludesPinnedJoniWordCharacters()
+    public void testWordClassificationIncludesPinnedJoniWordCharacters()
     {
         for (int codePoint = 0; codePoint <= Character.MAX_CODE_POINT; codePoint++) {
             if (NonStrictUTF8Encoding.INSTANCE.isCodeCType(codePoint, CharacterType.WORD) &&

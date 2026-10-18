@@ -478,18 +478,70 @@ final class UnicodeGroups
         }
     }
 
-    // The word property of java.util.regex on the executing JVM, which the match-time word
-    // boundaries of Java and Trino read.
+    /**
+     * Builds the table that Java and Trino word boundaries read, if no boundary has yet, so that
+     * compiling a pattern with such a boundary, not its first match, reads the database.
+     */
+    static void initializeWordFlags()
+    {
+        requireNonNull(WordFlags.FLAGS, "word flags are null");
+    }
+
+    /**
+     * Returns whether {@code codePoint}, from 0 through {@code RUNEMAX}, is a word character of
+     * {@code java.util.regex} with {@code UNICODE_CHARACTER_CLASS}, the class of
+     * {@code \p{IsWord}}, which Java's Unicode word boundaries read.
+     */
     static boolean isWord(int codePoint)
     {
-        int type = Character.getType(codePoint);
-        return Character.isAlphabetic(codePoint) ||
-                type == Character.NON_SPACING_MARK ||
-                type == Character.ENCLOSING_MARK ||
-                type == Character.COMBINING_SPACING_MARK ||
-                type == Character.DECIMAL_DIGIT_NUMBER ||
-                type == Character.CONNECTOR_PUNCTUATION ||
-                codePoint == 0x200C || codePoint == 0x200D;
+        return (WordFlags.FLAGS.get(codePoint) & WordFlags.JAVA_WORD) != 0;
+    }
+
+    /**
+     * Returns whether {@code codePoint}, from 0 through {@code RUNEMAX}, is a word character of
+     * Trino's word boundaries.
+     */
+    static boolean isTrinoWord(int codePoint)
+    {
+        return (WordFlags.FLAGS.get(codePoint) & WordFlags.TRINO_WORD) != 0;
+    }
+
+    /**
+     * Returns whether {@code codePoint}, from 0 through {@code RUNEMAX}, is a nonspacing mark,
+     * {@code Mn}, which Java's word boundaries attach to a preceding letter or digit.
+     */
+    static boolean isNonspacingMark(int codePoint)
+    {
+        return (WordFlags.FLAGS.get(codePoint) & WordFlags.NONSPACING_MARK) != 0;
+    }
+
+    /**
+     * Returns whether {@code codePoint}, from 0 through {@code RUNEMAX}, is a letter or decimal
+     * digit, as {@code Character.isLetterOrDigit} defines it, which can give a nonspacing mark a
+     * base in Java's word boundaries.
+     */
+    static boolean isLetterOrDigit(int codePoint)
+    {
+        return (WordFlags.FLAGS.get(codePoint) & WordFlags.LETTER_OR_DIGIT) != 0;
+    }
+
+    // The classes that match-time word boundaries read for each input code point, as the flags of
+    // one table, built when the first pattern with such a boundary compiles rather than by each
+    // pattern.
+    private static final class WordFlags
+    {
+        private static final int JAVA_WORD = 1;
+        private static final int TRINO_WORD = 1 << 1;
+        private static final int NONSPACING_MARK = 1 << 2;
+        private static final int LETTER_OR_DIGIT = 1 << 3;
+
+        private static final CodePointFlags FLAGS = new CodePointFlags(List.of(
+                requireNonNull(binaryProperty("Word"), "missing Word property"),
+                // Trino's word characters are Java's without Join_Control, plus six superscript and
+                // fraction numbers that Joni's Java syntax includes.
+                union(alphabetic(), categories("Mc", "Me", "Mn", "Nd", "Pc"), codePoints(0xB2, 0xB3, 0xB9, 0xB9, 0xBC, 0xBE)),
+                categories("Mn"),
+                requireNonNull(javaProperty("javaLetterOrDigit"), "missing javaLetterOrDigit property")));
     }
 
     private static final class ScriptNames

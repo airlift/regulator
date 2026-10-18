@@ -81,23 +81,25 @@ construction fails.
 - Properties are built lazily from the database's ranges into immutable
   `CharClass` values and cached by canonical identity. Matching uses only the
   resulting ranges and compiled instructions.
-- Java and Trino match-time word boundaries, and Java's named code points,
-  still read the running JVM.
+- Java and Trino match-time word boundaries read a table of the database's
+  word characters, nonspacing marks, and letters and digits, built once, when
+  the first Java or Trino pattern with a word boundary compiles. Java's named
+  code points still read the running JVM.
 - RE2's ASCII definitions of shorthand classes remain regex-language semantics,
   not Unicode data. Java-specific shorthand modes and other syntax extensions
   require separate explicit decisions.
 
-Java and Trino properties previously came from the running JVM's `Character`
-APIs, so their results changed with each JDK upgrade. They now agree with the
-JDK at every code point its own Unicode version assigns, 16.0 on Java 25 and
-17.0 on Java 26, apart from two changes Unicode 17.0 made to older characters:
-U+0295 moved from `Ll` to `Lo`, and 689 code points that are not emoji, such
-as U+2605 BLACK STAR, lost Extended_Pictographic. Characters and names Unicode
-added after the JDK's version, such as the Unicode 18.0 scripts Jurchen and
-Seal, resolve only in Regulator. This agreement is of property membership,
-which uses the JDK's formulas over the pinned database; the accepted property
-spellings keep Regulator's existing rules, which are not identical to
-`Pattern`'s.
+Java and Trino properties and word boundaries previously came from the running
+JVM's `Character` APIs, so their results changed with each JDK upgrade. They
+now agree with the JDK at every code point its own Unicode version assigns,
+16.0 on Java 25 and 17.0 on Java 26, apart from two changes Unicode 17.0 made
+to older characters: U+0295 moved from `Ll` to `Lo`, and 689 code points that
+are not emoji, such as U+2605 BLACK STAR, lost Extended_Pictographic.
+Characters and names Unicode added after the JDK's version, such as the
+Unicode 18.0 scripts Jurchen and Seal, resolve only in Regulator. This
+agreement is of property membership, which uses the JDK's formulas over the
+pinned database; the accepted property spellings keep Regulator's existing
+rules, which are not identical to `Pattern`'s.
 
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.
@@ -176,8 +178,8 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   retains its LF-only rule, including a boundary between CR and LF.
 - Unicode character classes and properties use the pinned database, as
   described in Pinned Unicode Properties, and case folding uses its case
-  mappings, as described in Pinned Unicode Case Folding. Boundaries use the
-  executing JVM's Unicode data.
+  mappings, as described in Pinned Unicode Case Folding. Word boundaries read
+  the database's word characters, nonspacing marks, letters, and digits.
   `UNICODE_CHARACTER_CLASS` implies `UNICODE_CASE`, matching the JDK flag
   contract.
 - `JavaRegexp.Options` exposes the supported compile flags as mutable chainable

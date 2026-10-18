@@ -32,8 +32,9 @@ import static java.util.regex.Pattern.UNICODE_CASE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The Java and Trino Unicode properties come from the pinned database, and agree with the running
- * JDK at every code point except those Unicode assigned after the JDK's Unicode version.
+ * The Java and Trino Unicode properties and word boundaries come from the pinned database, and
+ * agree with the running JDK at every code point except those Unicode assigned after the JDK's
+ * Unicode version.
  */
 public class TestJdkUnicodeAgreement
 {
@@ -232,6 +233,16 @@ public class TestJdkUnicodeAgreement
         for (PropertyExpectation property : JAVA_PROPERTIES) {
             assertRanges(UnicodeGroups.lookup(property.name()), property.predicate(), property.name());
         }
+    }
+
+    // The word classes that match-time boundaries read for each input code point.
+    @Test
+    public void testWordBoundaryClassesAgreeWithCharacterPredicates()
+    {
+        assertAgreement(UnicodeGroups::isWord, TestJdkUnicodeAgreement::isWord, "Java word");
+        assertAgreement(EmptyOp::isUnicodeWord, TestJdkUnicodeAgreement::isTrinoWord, "Trino word");
+        assertAgreement(UnicodeGroups::isNonspacingMark, codePoint -> Character.getType(codePoint) == Character.NON_SPACING_MARK, "Mn");
+        assertAgreement(UnicodeGroups::isLetterOrDigit, Character::isLetterOrDigit, "javaLetterOrDigit");
     }
 
     @Test
@@ -451,6 +462,14 @@ public class TestJdkUnicodeAgreement
                 codePoint == 0x200C || codePoint == 0x200D;
     }
 
+    // Java's word characters without Join_Control, plus six superscript and fraction numbers that
+    // Joni's Java syntax includes.
+    private static boolean isTrinoWord(int codePoint)
+    {
+        return isWord(codePoint) && codePoint != 0x200C && codePoint != 0x200D ||
+                codePoint == 0xB2 || codePoint == 0xB3 || codePoint == 0xB9 || codePoint >= 0xBC && codePoint <= 0xBE;
+    }
+
     private static boolean isGraph(int codePoint)
     {
         int type = Character.getType(codePoint);
@@ -462,18 +481,23 @@ public class TestJdkUnicodeAgreement
                 type != Character.UNASSIGNED;
     }
 
-    // Compares a class with the JDK at every code point that is not newer than the JDK's Unicode
-    // version, apart from the expected differences of the property, each of which must excuse
-    // exactly its count of code points.
     private static void assertRanges(CharClass characterClass, IntPredicate expected, String name)
     {
         assertThat(characterClass).as(name).isNotNull();
+        assertAgreement(characterClass::contains, expected, name);
+    }
+
+    // Compares a set of code points with the JDK at every code point that is not newer than the
+    // JDK's Unicode version, apart from the expected differences of the property, each of which
+    // must excuse exactly its count of code points.
+    private static void assertAgreement(IntPredicate actualCodePoints, IntPredicate expected, String name)
+    {
         List<ExpectedDifference> differences = EXPECTED_DIFFERENCES.stream()
                 .filter(difference -> difference.properties().contains(name) && newerThanJdk(difference.since()))
                 .toList();
         int[] excusedCounts = new int[differences.size()];
         for (int codePoint = 0; codePoint <= RUNEMAX; codePoint++) {
-            boolean actual = characterClass.contains(codePoint);
+            boolean actual = actualCodePoints.test(codePoint);
             if (actual != expected.test(codePoint) && !NEWER.get(codePoint)) {
                 int difference = excusingDifference(differences, codePoint);
                 if (difference < 0) {
