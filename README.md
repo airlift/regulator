@@ -149,4 +149,5 @@ separate native-access and pure-Java results.
 
 Regulator is licensed under the [Apache License 2.0](LICENSE). It includes a
 Java port of RE2; the required RE2 copyright and BSD license notice are provided
-in [LICENSE-re2.txt](LICENSE-re2.txt).
+in [LICENSE-re2.txt](LICENSE-re2.txt). The notice for its Unicode data is in
+[LICENSE-unicode.txt](LICENSE-unicode.txt).

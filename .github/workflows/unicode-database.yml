@@ -1,0 +1,39 @@
+name: Unicode database
+
+# Regenerating the database downloads the pinned UCD files from unicode.org, so
+# it runs only when the generator, its manifest, or the database changes.
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/unicode-database.yml
+      - src/main/resources/io/airlift/regulator/unicode/**
+      - tools/unicode-database/**
+  pull_request:
+    paths:
+      - .github/workflows/unicode-database.yml
+      - src/main/resources/io/airlift/regulator/unicode/**
+      - tools/unicode-database/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow=${{ github.workflow }},ref=${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check generated Unicode database
+        run: python3 -I tools/unicode-database/generate.py --check

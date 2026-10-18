@@ -343,7 +343,10 @@ the Trino repository is a separate project.
 When updating upstream RE2 or the supported JDK:
 
 1. update the pinned revision or JDK contract explicitly
-2. regenerate authoritative fixtures or Unicode data
+2. regenerate authoritative fixtures or Unicode data; keep the pinned
+   database's Unicode version at least as new as every supported JDK's, and
+   when it must advance, follow the generator's
+   [version procedure](../tools/unicode-database/README.md#moving-to-a-new-unicode-version)
 3. review semantic differences before changing expected results
 4. run the complete differential suite
 5. rerun affected performance layers if code generation or tables changed
