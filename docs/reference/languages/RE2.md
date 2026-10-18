@@ -47,7 +47,11 @@ Counted repetitions reject minimum or maximum counts above 1,000. Unbounded
 forms such as `x*` and `x{3,}` remain supported.
 
 Unicode categories and scripts follow the running JVM's Unicode version,
-rather than a frozen copy of upstream RE2's tables. See
+rather than a frozen copy of upstream RE2's tables. Case-insensitive matching
+uses Unicode 18.0 simple case folding, upstream RE2's rule, on every JVM:
+`(?i)k` matches the Kelvin sign, but `(?i)i` matches neither dotted capital `İ`
+nor dotless small `ı`. Upstream's tables are Unicode 15.1 data, so characters
+added since then fold only in Regulator. See
 [`JVM_UNICODE.md`](../../integrations/JVM_UNICODE.md).
 
 ## Compilation options

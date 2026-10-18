@@ -14,10 +14,12 @@
 package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.airlift.regulator.UnicodeDatabase.CodePointMappings;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.function.IntUnaryOperator;
+import java.util.function.Supplier;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
@@ -31,7 +33,8 @@ import static java.util.Objects.requireNonNull;
  * which {@link #cycleFoldRune(int)} visits in ascending order, wrapping from the largest member to
  * the smallest. Instances are shared and immutable. On first use, a rule builds its simple folds,
  * its orbit successors, and its sorted case-folded runes together from the sparse list of code
- * points its simple fold changes; each table holds only the few dozen blocks of 256 code points
+ * points its simple fold changes, which comes from the pinned {@link UnicodeDatabase} or from a
+ * scan of the JVM's case mappings; each table holds only the few dozen blocks of 256 code points
  * that have a case partner. The multi-character folds are built separately, on first use.
  * <p>
  * Each table field is plain rather than volatile, so the compiler's fold loops read it without a
@@ -43,15 +46,16 @@ final class CaseFolding
 {
     /**
      * The JVM's case classes, {@code Character.toLowerCase(Character.toUpperCase(codePoint))}, and its
-     * multi-character {@code String} case mappings. Every language folds with this one rule, so its
+     * multi-character {@code String} case mappings. Java and Trino fold with this one rule, so its
      * tables are shared.
      */
-    private static final CaseFolding JVM = new CaseFolding("JVM case folding", CaseFolding::jvmSimpleFold, true);
+    private static final CaseFolding JVM = new CaseFolding("JVM case folding", () -> new FoldTables(scanSimpleFolds(CaseFolding::jvmSimpleFold)), true);
 
     /**
-     * The RE2 language default.
+     * RE2's simple case folding, CaseFolding.txt statuses C and S from the pinned
+     * {@link UnicodeDatabase}, as upstream RE2 folds with its own Unicode tables.
      */
-    static final CaseFolding RE2 = JVM;
+    static final CaseFolding RE2 = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " simple case folding", () -> new FoldTables(UnicodeDatabase.simpleCaseFolding()), false);
 
     /**
      * The Java language default.
@@ -64,17 +68,17 @@ final class CaseFolding
     static final CaseFolding TRINO = JVM;
 
     private final String name;
-    private final IntUnaryOperator simpleFold;
+    private final Supplier<FoldTables> tables;
     private final boolean multiCharacterFolds;
     @SuppressFBWarnings(value = "IS2_INCONSISTENT_SYNC", justification = "Each lazy table publishes through its final fields; a reader that sees null takes the synchronized path")
     private FoldTables foldTables;
     @SuppressFBWarnings(value = "IS2_INCONSISTENT_SYNC", justification = "Each lazy table publishes through its final fields; a reader that sees null takes the synchronized path")
     private UnicodeFullCaseFold fullCaseFold;
 
-    private CaseFolding(String name, IntUnaryOperator simpleFold, boolean multiCharacterFolds)
+    private CaseFolding(String name, Supplier<FoldTables> tables, boolean multiCharacterFolds)
     {
         this.name = requireNonNull(name, "name is null");
-        this.simpleFold = requireNonNull(simpleFold, "simpleFold is null");
+        this.tables = requireNonNull(tables, "tables is null");
         this.multiCharacterFolds = multiCharacterFolds;
     }
 
@@ -193,7 +197,7 @@ final class CaseFolding
     private synchronized FoldTables createFoldTables()
     {
         if (foldTables == null) {
-            foldTables = new FoldTables(scanSimpleFolds(simpleFold));
+            foldTables = tables.get();
         }
         return foldTables;
     }
@@ -224,7 +228,7 @@ final class CaseFolding
     }
 
     // One scan of every code point collects the code points the simple fold changes.
-    private static SimpleFolds scanSimpleFolds(IntUnaryOperator simpleFold)
+    private static CodePointMappings scanSimpleFolds(IntUnaryOperator simpleFold)
     {
         int[] sources = new int[1024];
         int[] targets = new int[1024];
@@ -241,14 +245,8 @@ final class CaseFolding
                 count++;
             }
         }
-        return new SimpleFolds(Arrays.copyOf(sources, count), Arrays.copyOf(targets, count));
+        return new CodePointMappings(Arrays.copyOf(sources, count), Arrays.copyOf(targets, count));
     }
-
-    /**
-     * The code points that a simple fold changes, ascending, and the code point each folds to.
-     * Every other code point folds to itself. Holders must not modify the arrays.
-     */
-    private record SimpleFolds(int[] sources, int[] targets) {}
 
     /**
      * The simple fold and orbit successor of every code point, the sorted runes whose orbit has
@@ -261,10 +259,12 @@ final class CaseFolding
         private final int[] caseFoldedRunes;
         private final byte[] asciiSimpleFolds;
 
-        private FoldTables(SimpleFolds changedFolds)
+        // The changed folds are the code points the simple fold changes, ascending, and the code
+        // point each folds to; every other code point folds to itself.
+        private FoldTables(CodePointMappings changedFolds)
         {
-            int[] sources = changedFolds.sources();
-            int[] targets = changedFolds.targets();
+            int[] sources = changedFolds.codePoints();
+            int[] targets = changedFolds.values();
             this.simpleFolds = new CodePointTable(sources, targets);
 
             // An orbit holds the sources that fold to one target, and the target itself unless it

@@ -46,6 +46,15 @@ nul_pattern	00	00	0	1	both	utf8	false	1
 nul_in_text	00	610062	0	3	unanchored	utf8	false	1
 character_class	5b612d635d2b	626163	0	3	both	utf8	false	1
 case_fold	283f6929616263	416243	0	3	both	utf8	false	1
+case_fold_iota_tonos_to_oxia	283f6929ce90	e1bf93	0	3	both	utf8	false	1
+case_fold_iota_oxia_to_tonos	283f6929e1bf93	ce90	0	2	both	utf8	false	1
+case_fold_upsilon_tonos_to_oxia	283f6929ceb0	e1bfa3	0	3	both	utf8	false	1
+case_fold_upsilon_oxia_to_tonos	283f6929e1bfa3	ceb0	0	2	both	utf8	false	1
+case_fold_long_st_ligature_to_st_ligature	283f6929efac85	efac86	0	3	both	utf8	false	1
+case_fold_st_ligature_to_long_st_ligature	283f6929efac86	efac85	0	3	both	utf8	false	1
+case_fold_i_not_dotted_capital_i	283f692969	c4b0	0	2	both	utf8	false	1
+case_fold_capital_i_not_dotless_i	283f692949	c4b1	0	2	both	utf8	false	1
+case_fold_dotless_i_not_capital_i	283f6929c4b1	49	0	1	both	utf8	false	1
 empty_window_no_match	61	61	0	0	both	utf8	false	1
 empty_window_match	612a	61	1	1	both	utf8	false	1
 sparse_multi_capture	285b612d7a5d2b292d285b302d395d2b29	2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e6162632d3132332e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e	0	87	unanchored	utf8	false	3

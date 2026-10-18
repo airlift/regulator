@@ -1,29 +1,36 @@
 # JVM-sourced Unicode policy
 
-Regulator derives Unicode data from the JVM running the application. This is
-an intentional difference from pinned upstream RE2, recorded in
-`REGULATOR_DECISIONS.md`.
+Regulator derives Unicode properties, and Java and Trino case folding, from the
+JVM running the application. This is an intentional difference from pinned
+upstream RE2, recorded in `REGULATOR_DECISIONS.md`. RE2 case folding instead
+comes from Regulator's pinned Unicode 18.0 database, described in
+[`tools/unicode-database/README.md`](../../tools/unicode-database/README.md).
 
 ## Implemented direction
 
-All regex languages use the same JVM-backed Unicode data. Regulator derives
-character classes and case relationships from public JVM APIs, converts them
-to immutable ranges, and caches them outside the matching hot path. It does
-not keep a separate copy of upstream RE2's category, script, or case-fold tables.
+All regex languages use the same JVM-backed Unicode properties. Regulator
+derives character classes from public JVM APIs, converts them to immutable
+ranges, and caches them outside the matching hot path. It does not keep a
+separate copy of upstream RE2's category, script, or case-fold tables. Case
+folding follows each pattern's language: RE2 folds with the pinned database's
+simple case folding, and Java and Trino fold with the JVM's case mappings.
 
 ## Motivation
 
 A private Unicode snapshot can disagree with `java.lang.Character`,
 `java.util.regex.Pattern`, and other Trino operations when RE2 or the JDK
-updates its Unicode version. Using the running JVM avoids that version skew.
+updates its Unicode version. Using the running JVM for properties and for Java
+and Trino case folding avoids that version skew.
 
 This gives Regulator:
 
-- one Unicode version for regex and other Java operations
+- one Unicode version for properties, Java and Trino case folding, and other
+  Java operations
 - automatic support for Unicode updates delivered with the JDK
-- no checked-in generated Unicode range tables
+- no checked-in generated Unicode range tables; the only checked-in Unicode
+  data is the pinned database
 - a natural source for Java Unicode blocks, scripts, categories, binary
-  properties, character names, and case behavior
+  properties, character names, and Java and Trino case behavior
 - no matching-loop cost after JVM data has been converted to normal character
   classes
 
@@ -35,15 +42,17 @@ pinned table version.
 
 Pinned upstream RE2 carries Unicode data generated from a particular Unicode
 release. JVM-derived data can differ for code points that were added or
-reclassified in another release.
+reclassified in another release. RE2 case folding uses the pinned database
+instead, whose Unicode version is chosen by Regulator rather than by the JDK.
 
 This is an intentional Java-platform adaptation. It changes only
 Unicode-version-sensitive results; it does not justify changing RE2's matching
 algorithm, resource guarantees, byte-oriented execution, or syntax semantics.
 The implemented decision is recorded in `REGULATOR_DECISIONS.md`.
 
-The same library version may consequently produce different results after a
-JDK upgrade. That is acceptable and consistent with other JVM Unicode APIs.
+The same library version may consequently produce different property and Java
+and Trino case-folding results after a JDK upgrade; RE2 case folding does not
+change with the JDK. That is acceptable and consistent with other JVM Unicode APIs.
 All nodes in a distributed Trino installation should use equivalent supported
 JDK versions.
 
@@ -104,8 +113,8 @@ The registry uses public JVM APIs wherever they directly express the property:
 - `Character.UnicodeBlock.of(int)` and `forName(String)` for blocks
 - `Character.isAlphabetic(int)`, `isIdeographic(int)`, `isLetter(int)`, and
   related predicates for binary properties
-- `Character.toUpperCase(int)` and `toLowerCase(int)` as the source for simple
-  case relationships
+- `Character.toUpperCase(int)` and `toLowerCase(int)` as the source for the
+  Java and Trino simple case relationships
 
 The registry contains small definitions for properties that the JVM defines but
 does not expose as one public predicate. For example,
@@ -140,15 +149,20 @@ silently reinterpret a recognized Java spelling as a different RE2 construct.
 
 ### Case folding
 
-`CaseFolding` builds JVM-derived simple case-equivalence classes instead of
-using an upstream-generated table. The parser, character-class builder,
-required-match analysis, and single-byte optimizations continue to use an
-efficient immutable cycle for each equivalence class.
+Each compiled pattern carries the `CaseFolding` rule of its language, and the
+parser, character-class builder, required-match analysis, and single-byte
+optimizations use an efficient immutable cycle for each equivalence class of
+that rule. The rules are:
 
-The canonical relation uses the JVM's upper-case mapping followed by its
-lower-case mapping rather than assuming that one `toLowerCase` call is complete.
-Exhaustive cycle checks and focused comparisons with case-insensitive
-`java.util.regex.Pattern` validate the resulting equivalence classes.
+- RE2: Unicode 18.0 simple case folding, `CaseFolding.txt` statuses C and S,
+  from the pinned database. Upstream RE2's generated tables use the same rule
+  with Unicode 15.1 data. `FilteredRe2` canonicalizes atoms and text to the
+  code point each class folds to, as upstream's prefilter does.
+- Java and Trino: the JVM's case classes. The canonical relation uses the JVM's
+  upper-case mapping followed by its lower-case mapping rather than assuming
+  that one `toLowerCase` call is complete. Exhaustive checks and focused
+  comparisons with case-insensitive `java.util.regex.Pattern` validate the
+  resulting equivalence classes.
 
 `UnicodeFullCaseFold` separately derives locale-independent multi-code-point
 mappings from the JVM's string upper-case and lower-case transformations. The
@@ -171,19 +185,24 @@ Unicode scans happen on first use, not on every compilation:
   a case-folded literal. The RE2 rule is also initialized by the first
   `FilteredRe2.Builder.add` of a UTF-8 pattern that contains a literal or a
   character class of at most ten code points, and by the first `FilteredRe2`
-  canonicalization of UTF-8 text or of a code point. A rule derives its tables
-  with one scan of every code point. Its simple folds and orbit successors are
+  canonicalization of UTF-8 text or of a code point. The RE2 rule derives its
+  tables from the database's list of folds, and the JVM rule with one scan of
+  every code point. A rule's simple folds and orbit successors are
   two-stage tables that hold only the blocks of 256 code points with a case
-  partner, about 100 KB per rule in all. Every language folds with the same
-  rule, so a process holds one rule's tables.
+  partner, about 100 KB per rule in all. RE2 has its own rule, and Java and
+  Trino share the JVM rule, so a process that folds case in RE2 and in Java or
+  Trino holds two rules' tables.
 - Full case mappings are initialized once on first use by a frontend that
   enables full folding.
-- No production table is generated at build time, which would bind behavior to
-  the build JDK instead of the executing JDK.
+- No production table is generated at build time, which would bind
+  JVM-sourced behavior to the build JDK instead of the executing JDK. The
+  pinned database is generated ahead of time from pinned UCD files and depends
+  on neither JDK.
 
 ## Consumers
 
-These components use the JVM-derived data:
+These components use the JVM-derived properties and each language's case
+folding:
 
 - `RegexpParser`
 - `CharClassBuilder`
@@ -197,7 +216,8 @@ These components use the JVM-derived data:
    their corresponding `Character` APIs.
 2. Canonical aliases are checked for identity, and unsupported names are
    rejected.
-3. The derived case-equivalence relation is validated exhaustively. Focused
+3. Every rule's simple folds are checked exhaustively to form closed orbits,
+   and the Java and Trino folds are checked against the JVM. Focused
    `Pattern` comparisons cover dotted and dotless I, long S, Kelvin sign, and
    Greek sigma.
 4. Every multi-code-point fold in pinned Joni is checked against the
@@ -206,7 +226,8 @@ These components use the JVM-derived data:
 5. Unicode-version-only upstream differences have explicit expected results
    rather than unexplained golden-test exceptions.
 6. Complete pinned-native differential, exhaustive, randomized, UTF-8,
-   Latin-1, parser, and compatibility suites pass with the JVM-backed data.
+   Latin-1, parser, and compatibility suites pass with the JVM-backed
+   properties and each language's case folding.
 
 Test failures name the property or case-equivalence class that changed, so a
 JDK upgrade can be diagnosed without deciphering a range-table diff.
@@ -246,7 +267,8 @@ the library's linear-time guarantee.
 1. Exhaustive JVM-property authority and case-equivalence tests.
 2. A cached JVM property registry for categories, scripts, blocks, binary
    properties, aliases, and Java properties.
-3. JVM-derived simple case-equivalence classes.
+3. JVM-derived simple case-equivalence classes for Java and Trino, and the
+   pinned database's simple case folding for RE2.
 4. JVM-backed parser, analysis, and specialized-matcher consumers.
 5. Removal of the generated upstream Unicode range sources.
 6. The intentional platform adaptation recorded in `REGULATOR_DECISIONS.md`.

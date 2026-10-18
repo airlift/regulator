@@ -106,9 +106,9 @@ public final class FilteredRe2
     /**
      * Returns a canonical copy of {@code text} suitable for literal searches using {@link #atoms()}.
      * <p>
-     * UTF-8 text uses {@code Character.toLowerCase(Character.toUpperCase(codePoint))} for each valid
-     * Unicode code point. Invalid UTF-8 bytes are preserved. Latin-1 text lowercases ASCII letters
-     * and preserves every other byte.
+     * UTF-8 text replaces each valid Unicode code point with its simple case fold under RE2's rule,
+     * Unicode 18.0.0 CaseFolding.txt statuses C and S. Invalid UTF-8 bytes are preserved. Latin-1
+     * text lowercases ASCII letters and preserves every other byte.
      */
     public Slice canonicalizeText(Slice text)
     {

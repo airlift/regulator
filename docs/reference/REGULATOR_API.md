@@ -26,8 +26,9 @@ bytes into strings is always the caller's choice.
 
 Regulator requires Java 25 or newer. Releases are tested on Java 25 and the
 current feature release used by Trino, including short-term-support releases.
-Unicode properties and case behavior follow the supported JVM executing the
-application.
+Unicode properties, and Java and Trino case behavior, follow the supported JVM
+executing the application. RE2 case folding uses Regulator's pinned Unicode
+18.0 data on every JVM.
 
 ## Input model
 
