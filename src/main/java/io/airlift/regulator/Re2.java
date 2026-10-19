@@ -1298,6 +1298,11 @@ public final class Re2
 
     boolean mayHaveFixedWidthByteSpanMatcher()
     {
+        // Trino compilation retains a matcher analyzed from the parsed tree, which can qualify
+        // when the simplified tree does not, such as a [Kk] class rewritten to a folded literal.
+        if (hasRetainedFixedWidthByteSpanMatcher()) {
+            return true;
+        }
         ExpressionAnalysis.LiteralSequence literalSequence = expressionAnalysis.literalSequence();
         return capturingGroupCount == 0 &&
                 MatchLength.fixed(matchLength) >= 0 &&
