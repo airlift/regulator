@@ -123,7 +123,9 @@ require exact Joni behavior for this form.
 
 `\d`, `\s`, and `\w` use their ASCII definitions. As in Trino, unknown
 alphabetic escapes are interpreted as literals. For example, `\C` matches the
-literal `C`; it is not RE2's one-byte atom.
+literal `C`; it is not RE2's one-byte atom. Inside a character class, `\p` or
+`\P` without braces is the literal letter, so `[\pL]` matches `p` or `L`; use
+`[\p{L}]` for letters.
 
 ## Operations
 
