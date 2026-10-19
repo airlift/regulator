@@ -1400,7 +1400,9 @@ final class TrinoRegexpParser
 
         private void parseUnicodeGroupInto(CharClassBuilder characterClassBuilder, int sign, int parseFlags, int sequenceStart)
         {
-            // Supports \pL and \p{...} (with optional leading '^' to invert).
+            // Supports \pL and \p{...}; inside a character class only braced names reach here. Joni
+            // has no caret inversion, so \p^ and any braced name containing ^ are unknown property
+            // names.
             if (!atEnd() && peekByte() == '{') {
                 consumeByte('{');
                 int nameStart = index;
@@ -1412,11 +1414,6 @@ final class TrinoRegexpParser
                 }
                 int nameEnd = index - 1;
 
-                if (nameEnd > nameStart && (bytes[nameStart] & 0xFF) == '^') {
-                    sign = -sign;
-                    nameStart++;
-                }
-
                 String name = new String(bytes, nameStart, nameEnd - nameStart, StandardCharsets.UTF_8);
                 CharClass group = lookupTrinoUnicodeGroup(name);
                 if (group == null) {
@@ -1427,19 +1424,9 @@ final class TrinoRegexpParser
             }
 
             int nameStart = index;
-            int rune = readRune(parseFlags);
-            int nameEnd = index;
-            if (rune == '^') {
-                sign = -sign;
-                nameStart = index;
-                if (atEnd()) {
-                    throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
-                }
-                readRune(parseFlags);
-                nameEnd = index;
-            }
+            readRune(parseFlags);
 
-            String name = new String(bytes, nameStart, nameEnd - nameStart, StandardCharsets.UTF_8);
+            String name = new String(bytes, nameStart, index - nameStart, StandardCharsets.UTF_8);
             CharClass group = lookupTrinoUnicodeGroup(name);
             if (group == null) {
                 throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));

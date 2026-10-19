@@ -49,4 +49,8 @@ REJECT	(?<1name>a)	Java capture names must begin with an ASCII letter
 REJECT	(?<na_me>a)	Java capture names contain only ASCII letters and digits
 REJECT	(?<name>a)(?<name>b)	Duplicate capture names are rejected
 REJECT	\p{Latin}	Java bare script names require the Is or script prefix
+REJECT	\p^L	Java reads \p^ as the unknown property name ^
+REJECT	[\P^L]	Java reads \P^ inside a character class as the unknown property name ^
+REJECT	\p{^Lu}	Java has no caret inversion in a property name
+REJECT	[\P{^Lu}]	Java has no caret inversion in a property name
 REJECT	\N{NOT A CHARACTER NAME}	A named code-point escape must name a character

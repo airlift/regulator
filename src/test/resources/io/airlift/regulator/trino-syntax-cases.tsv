@@ -64,3 +64,7 @@ REJECT	\uD800\uDC00	Surrogate pairs must use a braced code-point escape
 REJECT	\p{Old_Italic}	Trino Unicode property names omit underscores
 REJECT	\p{IsHiragana}	Trino scripts do not use the Is prefix
 REJECT	\p{script=Hiragana}	Trino scripts do not use a property prefix
+REJECT	\p^L	Joni reads \p^ as the unknown property name ^
+REJECT	\P^L	Joni reads \P^ as the unknown property name ^
+REJECT	\p{^Lu}	Joni has no caret inversion in a property name
+REJECT	[\P{^Lu}]	Joni has no caret inversion in a property name
