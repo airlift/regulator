@@ -931,14 +931,11 @@ final class TrinoRegexpParser
 
             List<Regexp> alternatives = new ArrayList<>();
             alternatives.add(base);
+            // As in Joni, a positive class also matches each member's multi-character fold, after
+            // its single characters and in token order, where a fold precedes any longer fold that
+            // begins with it.
             for (UnicodeFullCaseFold.FoldToken token : caseFolding.multiCharacterTokens(members)) {
-                List<Regexp> sequence = new ArrayList<>(token.foldedRunes().length);
-                for (int foldedRune : token.foldedRunes()) {
-                    sequence.add(Regexp.charClass(classFlags, caseFolding.simpleFoldClass(foldedRune)));
-                }
-                alternatives.add(sequence.size() == 1
-                        ? sequence.getFirst()
-                        : Regexp.concat(nodeFlags, sequence));
+                alternatives.add(foldSpellings(token.foldedRunes(), 0, nodeFlags, classFlags));
             }
             return alternatives.size() == 1
                     ? base
@@ -1025,6 +1022,35 @@ final class TrinoRegexpParser
             }
 
             return characterClassBuilder;
+        }
+
+        // Matches whole-character spellings of the remaining folded suffix, except the complete
+        // sequence's single-character sources, which the caller's base alternative handles. Folds
+        // are at most three runes long, so the expansion is bounded. See
+        // Compiler.fullCaseFoldLiteral for the corresponding literal expansion.
+        private Regexp foldSpellings(int[] folded, int position, int nodeFlags, int classFlags)
+        {
+            List<Regexp> branches = new ArrayList<>();
+            branches.add(spellingStep(caseFolding.simpleFoldClass(folded[position]), folded, position + 1, nodeFlags, classFlags));
+            for (UnicodeFullCaseFold.FoldToken token : caseFolding.multiCharacterTokensStartingWith(folded[position])) {
+                int next = position + token.foldedRunes().length;
+                boolean wholeSequence = position == 0 && next == folded.length;
+                if (token.matches(folded, position) && !wholeSequence) {
+                    branches.add(spellingStep(token.sourceRunes(), folded, next, nodeFlags, classFlags));
+                }
+            }
+            return branches.size() == 1
+                    ? branches.getFirst()
+                    : Regexp.alternate(nodeFlags, branches);
+        }
+
+        private Regexp spellingStep(CharClass characters, int[] folded, int next, int nodeFlags, int classFlags)
+        {
+            Regexp step = Regexp.charClass(classFlags, characters);
+            if (next == folded.length) {
+                return step;
+            }
+            return Regexp.concat(nodeFlags, List.of(step, foldSpellings(folded, next, nodeFlags, classFlags)));
         }
 
         private void skipIgnored()
