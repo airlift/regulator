@@ -1083,6 +1083,15 @@ complement. Class and property escapes outside brackets are not folded. So
 `(?i)\p{Lu}` does not match `a`, while `(?i)[\p{Lu}]` does, and
 `(?i)[a-z&&[B]]` matches neither `b` nor `B`.
 
+A positive case-insensitive class also matches every whole-character spelling
+of a member's multi-character fold, as Joni's class string alternatives do:
+`(?i)[ﬃ]` matches `ffi`, `ﬀi`, and `fﬁ`. The spelling is matched inside the
+class and never merges with adjacent pattern literals, so `(?i)[ß]s` does not
+match `sß`. A negated class consumes one character. Each spelling is built
+from plain classes rather than a full-fold literal, so a class such as
+`(?i)[ß]` keeps the reverse program and lowered program that full folding
+would disable.
+
 Full-fold source segmentation is not exactly Joni-compatible. Adjacent literals
 can merge across noncapturing groups and be refolded: `(?i:s(?:s))` matches `ß`,
 and `(?i:sß)` matches `ßs`, while pinned Joni rejects those matches. These are

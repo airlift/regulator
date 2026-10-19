@@ -13,6 +13,8 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.jcodings.Config;
+import io.airlift.jcodings.IntHolder;
 import io.airlift.jcodings.constants.CharacterType;
 import io.airlift.jcodings.specific.NonStrictUTF8Encoding;
 import io.airlift.joni.Matcher;
@@ -25,12 +27,19 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.Stream;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestTrinoRegexpLanguage
@@ -667,7 +676,6 @@ public class TestTrinoRegexpLanguage
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)\\Aﬀ\\z")).contains(utf8Slice("FF"))).isTrue();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)\\AStraße\\z")).contains(utf8Slice("STRASSE"))).isTrue();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)\\Aß+\\z")).contains(utf8Slice("SSSS"))).isTrue();
-        assertThat(TrinoRegexp.compile(utf8Slice("(?i)\\A[ß]\\z")).contains(utf8Slice("ss"))).isTrue();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)\\A[s][s]\\z")).contains(utf8Slice("ß"))).isFalse();
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)\\Assssssssssssssss\\z"))
                 .contains(utf8Slice("ßßßßßßßß")))
@@ -759,6 +767,74 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
+    public void testCaseInsensitiveClassesMatchJoniFoldSpellings()
+    {
+        // Characters whose full fold is the same in Joni's Unicode 4.1 tables and the pinned
+        // database, grouped by fold, so table differences such as capital sharp s stay out.
+        Set<Integer> candidates = new TreeSet<>();
+        for (UnicodeFullCaseFold.FoldToken token : CaseFolding.TRINO.multiCharacterTokens()) {
+            addCodePoints(candidates, token.sourceRunes());
+            for (int foldedRune : token.foldedRunes()) {
+                addCodePoints(candidates, CaseFolding.TRINO.simpleFoldClass(foldedRune));
+            }
+        }
+        Map<List<Integer>, List<Integer>> charactersByFold = new HashMap<>();
+        List<Integer> sources = new ArrayList<>();
+        for (int codePoint : candidates) {
+            int[] fold = CaseFolding.TRINO.fold(new int[] {codePoint});
+            if (Arrays.equals(fold, joniFold(codePoint))) {
+                charactersByFold.computeIfAbsent(Arrays.stream(fold).boxed().toList(), _ -> new ArrayList<>()).add(codePoint);
+                if (fold.length > 1) {
+                    sources.add(codePoint);
+                }
+            }
+        }
+        // Guard against silently omitting Joni-compatible full-fold sources from this corpus.
+        assertThat(sources).hasSize(103);
+
+        for (int source : sources) {
+            // Every whole-character spelling of the source's fold, and each without its last
+            // character.
+            Set<String> inputs = new LinkedHashSet<>();
+            addFoldSpellings(inputs, charactersByFold, CaseFolding.TRINO.fold(new int[] {source}), 0, new StringBuilder());
+            for (String spelling : List.copyOf(inputs)) {
+                inputs.add(spelling.substring(0, spelling.offsetByCodePoints(spelling.length(), -1)));
+            }
+            String member = String.format(Locale.ROOT, "\\x{%x}", source);
+            String nextMember = String.format(Locale.ROOT, "\\x{%x}", source + 1);
+            for (String pattern : List.of("(?i)[" + member + "]", "(?i)[" + member + "-" + nextMember + "]", "(?i)[^" + member + "]")) {
+                Slice patternSlice = utf8Slice(pattern);
+                Re2 regexp = TrinoRegexp.compile(patternSlice).pattern();
+                Regex joni = joniPattern(patternSlice);
+                for (String input : inputs) {
+                    Slice inputSlice = utf8Slice(input);
+                    assertThat(matchBoundaries(regexp.matcher(inputSlice)))
+                            .as("%s against %s", pattern, input.codePoints().mapToObj(codePoint -> String.format(Locale.ROOT, "U+%04X", codePoint)).toList())
+                            .isEqualTo(joniMatchBoundaries(joni, inputSlice));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testCaseInsensitiveClassFoldOrderAndBoundaries()
+    {
+        // A positive class tries its characters first and then its members' multi-character
+        // folds; a fold precedes any longer fold that begins with it. A fold never merges with
+        // adjacent pattern literals, and a negated class consumes one character.
+        assertFirstMatchBoundaryMatchesJoni("(?i)[sß]", "ss", new MatchBoundary(0, 1));
+        assertFirstMatchBoundaryMatchesJoni("(?i)[fﬃ]", "ffi", new MatchBoundary(0, 1));
+        assertFirstMatchBoundaryMatchesJoni("(?i)[ﬀﬃ]", "ffi", new MatchBoundary(0, 2));
+        assertNoMatchMatchesJoni("(?i)\\A[^sß]\\z", "ss");
+        assertNoMatchMatchesJoni("(?i)[ß]s", "sß");
+        assertNoMatchMatchesJoni("(?i)s[ß]", "ßs");
+        assertNoMatchMatchesJoni("(?i)[ß]{2}", "sßs");
+        assertNoMatchMatchesJoni("(?i)[s]", "ß");
+        assertNoMatchMatchesJoni("(?i)[ﬀ]", "ﬃ");
+        assertNoMatchMatchesJoni("(?i)\\A[fﬁ]\\z", "ffi");
+    }
+
+    @Test
     public void testSpecialSemanticsOnlyDisableIncompatibleEngines()
     {
         Re2 finalLine = TrinoRegexp.compile(utf8Slice("a$")).pattern();
@@ -773,6 +849,13 @@ public class TestTrinoRegexpLanguage
         Re2 simpleFold = TrinoRegexp.compile(utf8Slice("(?i)hello")).pattern();
         assertThat(simpleFold.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
         assertThat(simpleFold.reverseProgramSize()).isGreaterThan(0);
+
+        Re2 classFold = TrinoRegexp.compile(utf8Slice("(?i)[ﬃ]")).pattern();
+        assertThat(classFold.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
+        assertThat(classFold.reverseProgramSize()).isGreaterThan(0);
+        Re2 finalLineClassFold = TrinoRegexp.compile(utf8Slice("(?i)[ﬃ]$")).pattern();
+        assertThat(finalLineClassFold.findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
+        assertThat(finalLineClassFold.lookingAtPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
 
         Re2 nonAsciiSimpleFold = TrinoRegexp.compile(utf8Slice("(?i)seek")).pattern();
         assertThat(nonAsciiSimpleFold.regexp().requiredPrefix(nonAsciiSimpleFold.caseFolding())).isNull();
@@ -922,7 +1005,7 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("(?i)\\Aﬀ\\z", "FF", true),
                 new MatchCase("(?i)\\AStraße\\z", "STRASSE", true),
                 new MatchCase("(?i)\\Aß+\\z", "SSSS", true),
-                new MatchCase("(?i)\\A[ß]\\z", "ss", true),
+                new MatchCase("(?i)\\A[ﬃ]\\z", "fﬁ", true),
                 new MatchCase("(?i)\\A[s][s]\\z", "ß", false),
                 // Joni folds dotted capital I only to "i" with a combining dot above and gives dotless
                 // small i no fold, as Unicode full case folding does outside its Turkic mappings.
@@ -1031,6 +1114,40 @@ public class TestTrinoRegexpLanguage
             bytes[index] = (byte) values[index];
         }
         return wrappedBuffer(bytes);
+    }
+
+    // Adds every string of whole characters whose folds concatenate to fold[index..].
+    private static void addFoldSpellings(Set<String> spellings, Map<List<Integer>, List<Integer>> charactersByFold, int[] fold, int index, StringBuilder prefix)
+    {
+        if (index == fold.length) {
+            spellings.add(prefix.toString());
+            return;
+        }
+        for (int end = index + 1; end <= fold.length; end++) {
+            for (int character : charactersByFold.getOrDefault(Arrays.stream(fold, index, end).boxed().toList(), List.of())) {
+                int length = prefix.length();
+                prefix.appendCodePoint(character);
+                addFoldSpellings(spellings, charactersByFold, fold, end, prefix);
+                prefix.setLength(length);
+            }
+        }
+    }
+
+    private static void addCodePoints(Set<Integer> codePoints, CharClass characterClass)
+    {
+        for (RuneRange range : characterClass.ranges()) {
+            for (int codePoint = range.low(); codePoint <= range.high(); codePoint++) {
+                codePoints.add(codePoint);
+            }
+        }
+    }
+
+    private static int[] joniFold(int codePoint)
+    {
+        byte[] encoded = Character.toString(codePoint).getBytes(UTF_8);
+        byte[] folded = new byte[Config.ENC_MBC_CASE_FOLD_MAXLEN];
+        int length = NonStrictUTF8Encoding.INSTANCE.mbcCaseFold(Config.ENC_CASE_FOLD_DEFAULT, encoded, new IntHolder(), encoded.length, folded);
+        return new String(folded, 0, length, UTF_8).codePoints().toArray();
     }
 
     private static Regex joniPattern(Slice pattern)

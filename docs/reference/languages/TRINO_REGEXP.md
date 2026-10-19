@@ -72,6 +72,12 @@ operations, and class and property escapes outside brackets are not folded:
 `(?i)[a-z&&[B]]` matches neither `b` nor `B`. A negated class is folded before
 its complement, so `(?i)[^\P{Lu}]` matches neither `a` nor `A`.
 
+A positive case-insensitive class also matches every whole-character spelling
+of a member's multi-character fold: `(?i)[ﬃ]` matches `ffi`, `ﬀi`, and `fﬁ`.
+The spelling is matched inside the class and never merges with adjacent pattern
+literals, so `(?i)[ß]s` does not match `sß`. A negated class consumes one
+character.
+
 Folds that Unicode 18.0 adds include U+1DF95, which folds to `ss` with `ß` and
 `ẞ`, and new case pairs such as U+0277 and U+A7DD.
 
