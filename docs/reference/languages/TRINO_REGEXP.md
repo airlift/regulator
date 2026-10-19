@@ -66,6 +66,12 @@ Full case folding keeps dotted capital `İ` and dotless small `ı` apart from
 neither `İ` nor `ı`, `(?i)ı` matches only `ı`, and `(?i)İ` matches `i` followed
 by a combining dot above.
 
+As in Joni, a case-insensitive bracket class is folded once, after its set
+operations, and class and property escapes outside brackets are not folded:
+`(?i)\p{Lu}` does not match `a`, while `(?i)[\p{Lu}]` does, and
+`(?i)[a-z&&[B]]` matches neither `b` nor `B`. A negated class is folded before
+its complement, so `(?i)[^\P{Lu}]` matches neither `a` nor `A`.
+
 Folds that Unicode 18.0 adds include U+1DF95, which folds to `ss` with `ß` and
 `ẞ`, and new case pairs such as U+0277 and U+A7DD.
 

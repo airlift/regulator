@@ -902,22 +902,39 @@ final class TrinoRegexpParser
         private Regexp parseCharClass()
         {
             int nodeFlags = flags;
-            boolean negated = index + 1 < end && bytes[index + 1] == '^';
-            CharClassBuilder characterClassBuilder = parseCharClassBuilder(nodeFlags);
-            CharClass characterClass = characterClassBuilder.toCharClass();
-            Regexp base = Regexp.charClass(nodeFlags & ~(Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD), characterClass);
-            if (negated || (nodeFlags & Regexp.FOLD_CASE) == 0 || (nodeFlags & Regexp.LATIN1) != 0) {
+            int classFlags = nodeFlags & ~(Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD);
+            int classStart = index;
+            consumeByte('[');
+            boolean negated = !atEnd() && peekByte() == '^';
+            if (negated) {
+                consumeByte('^');
+            }
+
+            // Joni evaluates the members, nested classes, and set operations of a bracket class
+            // without case folding, then folds the finished class once. A negated class is folded
+            // before its complement, so (?i)[^a] rejects A.
+            CharClassBuilder characterClassBuilder = parseClassBody(classFlags, classStart);
+            boolean foldCase = (nodeFlags & Regexp.FOLD_CASE) != 0;
+            CharClass members = null;
+            if (foldCase) {
+                members = characterClassBuilder.toCharClass();
+                characterClassBuilder.addCharClass(members, nodeFlags, caseFolding);
+            }
+            if (negated) {
+                characterClassBuilder.negate();
+            }
+            characterClassBuilder.removeAbove(Regexp.maxRune(nodeFlags));
+            Regexp base = Regexp.charClass(classFlags, characterClassBuilder.toCharClass());
+            if (negated || !foldCase || (nodeFlags & Regexp.LATIN1) != 0) {
                 return base;
             }
 
             List<Regexp> alternatives = new ArrayList<>();
             alternatives.add(base);
-            for (UnicodeFullCaseFold.FoldToken token : caseFolding.multiCharacterTokens(characterClass)) {
+            for (UnicodeFullCaseFold.FoldToken token : caseFolding.multiCharacterTokens(members)) {
                 List<Regexp> sequence = new ArrayList<>(token.foldedRunes().length);
                 for (int foldedRune : token.foldedRunes()) {
-                    sequence.add(Regexp.charClass(
-                            nodeFlags & ~(Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD),
-                            caseFolding.simpleFoldClass(foldedRune)));
+                    sequence.add(Regexp.charClass(classFlags, caseFolding.simpleFoldClass(foldedRune)));
                 }
                 alternatives.add(sequence.size() == 1
                         ? sequence.getFirst()
@@ -928,23 +945,16 @@ final class TrinoRegexpParser
                     : Regexp.alternate(nodeFlags, alternatives);
         }
 
-        private CharClassBuilder parseCharClassBuilder(int nodeFlags)
+        // Parses the members and intersections of a class through its closing bracket.
+        private CharClassBuilder parseClassBody(int classFlags, int classStart)
         {
-            int classStart = index;
-            consumeByte('[');
-            boolean negate = false;
-            if (!atEnd() && peekByte() == '^') {
-                consumeByte('^');
-                negate = true;
-            }
-
-            CharClassBuilder characterClassBuilder = parseClassUnion(nodeFlags);
+            CharClassBuilder characterClassBuilder = parseClassUnion(classFlags);
             while (isClassIntersection()) {
                 index += 2;
                 if (atEnd() || peekByte() == ']') {
                     throw unsupportedConstruct("empty character-class intersection operands", index - 2, index);
                 }
-                CharClassBuilder intersection = parseClassUnion(nodeFlags);
+                CharClassBuilder intersection = parseClassUnion(classFlags);
                 characterClassBuilder.retainAll(intersection);
             }
 
@@ -952,15 +962,10 @@ final class TrinoRegexpParser
                 throw error(RegexpParseErrorCode.MISSING_BRACKET, Slices.wrappedBuffer(bytes, classStart, end - classStart));
             }
             consumeByte(']');
-
-            if (negate) {
-                characterClassBuilder.negate();
-            }
-            characterClassBuilder.removeAbove(Regexp.maxRune(nodeFlags));
             return characterClassBuilder;
         }
 
-        private CharClassBuilder parseClassUnion(int nodeFlags)
+        private CharClassBuilder parseClassUnion(int classFlags)
         {
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
             boolean first = true;
@@ -977,32 +982,46 @@ final class TrinoRegexpParser
                 }
                 first = false;
 
-                if (tryParsePosixCharClass(nodeFlags, characterClassBuilder)) {
+                if (tryParsePosixCharClass(classFlags, characterClassBuilder)) {
                     continue;
                 }
 
                 if (nextByte == '[') {
-                    characterClassBuilder.addCharClass(parseCharClassBuilder(nodeFlags));
+                    // A nested class is parsed as a plain set; only the outermost class folds.
+                    // Keep the recursive call here so each nesting level adds only parseClassBody
+                    // and parseClassUnion frames.
+                    int classStart = index;
+                    consumeByte('[');
+                    boolean negated = !atEnd() && peekByte() == '^';
+                    if (negated) {
+                        consumeByte('^');
+                    }
+                    CharClassBuilder nested = parseClassBody(classFlags, classStart);
+                    if (negated) {
+                        nested.negate();
+                    }
+                    nested.removeAbove(Regexp.maxRune(classFlags));
+                    characterClassBuilder.addCharClass(nested);
                     continue;
                 }
 
-                if (tryParseClassEscape(nodeFlags, characterClassBuilder)) {
+                if (tryParseClassEscape(classFlags, characterClassBuilder)) {
                     continue;
                 }
 
-                int low = parseClassAtomRune(nodeFlags);
+                int low = parseClassAtomRune(classFlags);
                 int high = low;
 
                 if (!atEnd() && peekByte() == '-' && lookaheadIsRangeEnd()) {
                     consumeByte('-');
-                    high = parseClassAtomRune(nodeFlags);
+                    high = parseClassAtomRune(classFlags);
                     if (high < low) {
                         throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, null);
                     }
                 }
 
                 // For explicit singletons/ranges, do not implicitly filter '\n' out.
-                characterClassBuilder.addRangeFlags(low, high, nodeFlags | Regexp.CLASS_NEWLINE, caseFolding);
+                characterClassBuilder.addRangeFlags(low, high, classFlags | Regexp.CLASS_NEWLINE, caseFolding);
             }
 
             return characterClassBuilder;
@@ -1301,10 +1320,12 @@ final class TrinoRegexpParser
                     if ((flags & Regexp.UNICODE_GROUPS) == 0) {
                         throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
                     }
+                    // Joni does not fold a property outside brackets: (?i)\p{Lu} rejects a.
+                    int classFlags = flags & ~Regexp.FOLD_CASE;
                     CharClassBuilder characterClassBuilder = new CharClassBuilder();
-                    parseUnicodeGroupInto(characterClassBuilder, (escapedByte == 'P') ? -1 : 1, flags, index - 2);
+                    parseUnicodeGroupInto(characterClassBuilder, (escapedByte == 'P') ? -1 : 1, classFlags, index - 2);
                     characterClassBuilder.removeAbove(Regexp.maxRune(flags));
-                    yield Regexp.charClass(flags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());
+                    yield Regexp.charClass(classFlags, characterClassBuilder.toCharClass());
                 }
                 case 'E' -> literalFromRune('E');
                 case 'Q' -> throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
@@ -1575,12 +1596,15 @@ final class TrinoRegexpParser
             return perlCharClass(flags, negate, perlWordCharClass(flags, false));
         }
 
+        // Joni does not fold a class escape outside brackets: (?i)\w rejects the long s and
+        // Kelvin sign.
         private Regexp perlCharClass(int flags, boolean negate, CharClass group)
         {
+            int classFlags = flags & ~Regexp.FOLD_CASE;
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            addGroup(characterClassBuilder, group, negate ? -1 : 1, flags, caseFolding);
+            addGroup(characterClassBuilder, group, negate ? -1 : 1, classFlags, caseFolding);
             characterClassBuilder.removeAbove(Regexp.maxRune(flags));
-            return Regexp.charClass(flags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());
+            return Regexp.charClass(classFlags, characterClassBuilder.toCharClass());
         }
 
         private static CharClass perlDigitsCharClass(int flags, boolean negate)
