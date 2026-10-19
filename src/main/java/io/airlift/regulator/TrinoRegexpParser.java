@@ -1112,7 +1112,8 @@ final class TrinoRegexpParser
                 return true;
             }
 
-            if (escapedByte == 'p' || escapedByte == 'P') {
+            // Only a braced \p or \P is a property here; Joni reads a brace-less one as the literal letter.
+            if ((escapedByte == 'p' || escapedByte == 'P') && index + 2 < end && bytes[index + 2] == '{') {
                 index += 2;
                 parseUnicodeGroupInto(characterClassBuilder, (escapedByte == 'P') ? -1 : 1, nodeFlags, index - 2);
                 return true;
@@ -1229,8 +1230,8 @@ final class TrinoRegexpParser
                 int sequenceStart = index;
                 consumeByte('\\');
                 int escapedByte = consumeByte();
-                // Mirror upstream ParseEscape() behavior: accept escapes for known sequences,
-                // accept escaped non-alnum ASCII as itself, otherwise error.
+                // Follow Joni: decode known escape sequences, read any other escaped ASCII character except a
+                // digit as itself, and reject the rest.
                 return switch (escapedByte) {
                     case 'b' -> '\b';
                     case 'n' -> '\n';
@@ -1250,7 +1251,14 @@ final class TrinoRegexpParser
                             flags,
                             sequenceStart,
                             false);
-                    case 'd', 'D', 's', 'S', 'w', 'W', 'p', 'P' -> throw unsupportedConstruct("character classes as range endpoints", sequenceStart, index);
+                    case 'p', 'P' -> {
+                        // Only a braced \p is a property; Joni reads a brace-less one as the letter.
+                        if (!atEnd() && peekByte() == '{') {
+                            throw unsupportedConstruct("character classes as range endpoints", sequenceStart, index);
+                        }
+                        yield escapedByte;
+                    }
+                    case 'd', 'D', 's', 'S', 'w', 'W' -> throw unsupportedConstruct("character classes as range endpoints", sequenceStart, index);
                     default -> {
                         if (isJoniLiteralEscape(escapedByte)) {
                             yield escapedByte;
@@ -1597,7 +1605,7 @@ final class TrinoRegexpParser
         private static boolean isCompleteClassEscape(int escapedByte)
         {
             return switch (escapedByte) {
-                case 'd', 'D', 's', 'S', 'w', 'W', 'p', 'P' -> true;
+                case 'd', 'D', 's', 'S', 'w', 'W' -> true;
                 default -> false;
             };
         }

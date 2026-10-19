@@ -1050,7 +1050,18 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("\\p{inBasicLatin}+", "abc", true),
                 new MatchCase("\\p{JAVALOWERCASE}+", "abc", true),
                 new MatchCase("\\p{OldItalic}", "\uD800\uDF00", true),
-                new MatchCase("\\p{InBasicLatin}+", "abc", true));
+                new MatchCase("\\p{InBasicLatin}+", "abc", true),
+                // Joni reads a brace-less \p or \P inside a class as the literal letter; a braced one stays a property.
+                new MatchCase("[\\pL]", "p", true),
+                new MatchCase("[\\pL]", "a", false),
+                new MatchCase("[^\\pL]", "a", true),
+                new MatchCase("[\\PL]", "P", true),
+                new MatchCase("[\\p^L]", "^", true),
+                new MatchCase("[\\p^L]", "1", false),
+                new MatchCase("[\\p-z]", "q", true),
+                new MatchCase("[a-\\p]", "q", false),
+                new MatchCase("(?i)[\\p]", "P", true),
+                new MatchCase("[\\p{L}]", "a", true));
     }
 
     private static boolean joniFind(Slice pattern, Slice input)
