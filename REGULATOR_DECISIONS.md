@@ -1076,6 +1076,13 @@ is linear in the folded literal length. Patterns
 that need only simple folding retain the ordinary compiler and reverse-program
 routes.
 
+Case-insensitive character classes fold in Joni's order. A bracket class's
+members, nested classes, and set operations are evaluated without folding, and
+the finished class is folded once; a negated class is folded before its
+complement. Class and property escapes outside brackets are not folded. So
+`(?i)\p{Lu}` does not match `a`, while `(?i)[\p{Lu}]` does, and
+`(?i)[a-z&&[B]]` matches neither `b` nor `B`.
+
 Full-fold source segmentation is not exactly Joni-compatible. Adjacent literals
 can merge across noncapturing groups and be refolded: `(?i:s(?:s))` matches `ß`,
 and `(?i:sß)` matches `ßs`, while pinned Joni rejects those matches. These are
