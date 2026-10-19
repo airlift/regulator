@@ -82,6 +82,19 @@ public class TestRe2CaseInsensitive
         assertThat(re2.count(latin1("ñ"))).isZero();
     }
 
+    @Test
+    public void testAsciiLetterPairsStayPairsInAlternations()
+    {
+        // Upstream RE2's alternation factoring folds a merged [Kk] by its whole orbit, so there
+        // [Kk]|x matches the Kelvin sign. Regulator merges an explicit pair as written.
+        assertThat(Re2.compile(utf8("[Kk]|x")).matches(utf8("\u212A"))).isFalse();
+        assertThat(Re2.compile(utf8("[Ss]|x")).matches(utf8("\u017F"))).isFalse();
+        // An impossible alternative leaves the explicit pair unchanged.
+        assertThat(Re2.compile(utf8("[Kk]|\\P{Any}")).matches(utf8("\u212A"))).isFalse();
+        assertThat(Re2.compile(utf8("(?i)k|x")).matches(utf8("\u212A"))).isTrue();
+        assertThat(Re2.compile(utf8("(?i:k)|[Kk]")).matches(utf8("\u212A"))).isTrue();
+    }
+
     private static Slice latin1(String value)
     {
         return Slices.wrappedBuffer(value.getBytes(StandardCharsets.ISO_8859_1));

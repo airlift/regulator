@@ -47,7 +47,8 @@ final class Regexp
     static final int NEVER_NEWLINE = 1 << 11;
     static final int NEVER_CAPTURE = 1 << 12;
 
-    // Frontend-only parser state; this is not an upstream RE2 flag.
+    // ASCII-only case folding, used by the Java parser and by alternation merging. This is not an
+    // upstream RE2 flag.
     static final int ASCII_FOLD_CASE = 1 << 14;
     static final int WAS_DOLLAR = 1 << 15;
     static final int FINAL_LINE_END = 1 << 16;
