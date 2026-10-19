@@ -40,6 +40,8 @@ public class TestRe2ErrorCode
         cases.add(new ErrorCase(utf8Bytes("kl\\x"), RegexpParseErrorCode.BAD_ESCAPE, utf8Bytes("\\x")));
         cases.add(new ErrorCase(utf8Bytes("uv\\x{0000\u263a}"), RegexpParseErrorCode.BAD_ESCAPE, utf8Bytes("\\x{0000\u263a")));
         cases.add(new ErrorCase(utf8Bytes("wx\\p{ABC"), RegexpParseErrorCode.BAD_CHAR_RANGE, utf8Bytes("\\p{ABC")));
+        cases.add(new ErrorCase(utf8Bytes("\\p^L"), RegexpParseErrorCode.BAD_CHAR_RANGE, utf8Bytes("\\p^")));
+        cases.add(new ErrorCase(utf8Bytes("[\\P^L]"), RegexpParseErrorCode.BAD_CHAR_RANGE, utf8Bytes("\\P^")));
         cases.add(new ErrorCase(utf8Bytes("[[:foo:]]"), RegexpParseErrorCode.BAD_CHAR_RANGE, utf8Bytes("[:foo:]")));
         cases.add(new ErrorCase(utf8Bytes("[[:foo1:]]"), RegexpParseErrorCode.BAD_CHAR_RANGE, utf8Bytes("[:foo1:]")));
         cases.add(new ErrorCase(utf8Bytes("[[:foo!:]]"), RegexpParseErrorCode.BAD_CHAR_RANGE, utf8Bytes("[:foo!:]")));

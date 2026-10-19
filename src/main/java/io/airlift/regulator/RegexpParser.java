@@ -1152,7 +1152,8 @@ final class RegexpParser
 
         private void parseUnicodeGroupInto(CharClassBuilder characterClassBuilder, int sign, int parseFlags, int sequenceStart)
         {
-            // Supports \pL and \p{...} (with optional leading '^' to invert).
+            // Supports \pL and \p{...}. Only a braced name takes a leading '^' to invert; a bare
+            // \p^ names the unknown group ^.
             if (!atEnd() && peekByte() == '{') {
                 consumeByte('{');
                 int nameStart = index;
@@ -1179,19 +1180,9 @@ final class RegexpParser
             }
 
             int nameStart = index;
-            int rune = readRune(parseFlags);
-            int nameEnd = index;
-            if (rune == '^') {
-                sign = -sign;
-                nameStart = index;
-                if (atEnd()) {
-                    throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
-                }
-                readRune(parseFlags);
-                nameEnd = index;
-            }
+            readRune(parseFlags);
 
-            String name = new String(bytes, nameStart, nameEnd - nameStart, StandardCharsets.UTF_8);
+            String name = new String(bytes, nameStart, index - nameStart, StandardCharsets.UTF_8);
             CharClass group = lookupUnicodeGroup(name);
             if (group == null) {
                 throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
