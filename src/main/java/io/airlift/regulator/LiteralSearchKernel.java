@@ -29,6 +29,10 @@ final class LiteralSearchKernel
     private static final VarHandle LONG_HANDLE = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
     private static final long LOW_BITS = 0x0101010101010101L;
     private static final long HIGH_BITS = 0x8080808080808080L;
+    // The search switches to KMP once failed candidates compare more bytes than the search has
+    // covered plus this budget, so candidate work stays linear in the input. Candidates that
+    // compare at most one byte per byte covered, such as "bba" over repeated "aabx", never switch,
+    // while closely spaced candidates with long partial matches switch within a few candidates.
     static final int CANDIDATE_COMPARISON_BUDGET = 64;
 
     private final byte[] literal;
@@ -76,10 +80,35 @@ final class LiteralSearchKernel
         int inputOffset = input.byteArrayOffset();
         int searchStart = inputOffset + offset;
         int searchEnd = searchStart + length;
-        int matchOffset = literal.length == 1
-                ? findSingleByte(inputBytes, searchStart, searchEnd)
-                : findFrontAndBack(inputBytes, searchStart, searchEnd);
+        int matchOffset;
+        if (literal.length == 1) {
+            matchOffset = findSingleByte(inputBytes, searchStart, searchEnd);
+        }
+        else {
+            matchOffset = findFrontAndBack(inputBytes, searchStart, searchEnd);
+            if (matchOffset < -1) {
+                matchOffset = findKmp(inputBytes, -2 - matchOffset, searchEnd);
+            }
+        }
         return matchOffset < 0 ? -1 : matchOffset - inputOffset;
+    }
+
+    /**
+     * Returns the Slice-relative offset where {@link #find} continues with KMP, or -1 when the
+     * front-and-back scan finishes, matching or not, without switching, when the range is
+     * invalid, or when the literal is a single byte; only tests call it.
+     */
+    int kmpHandoffOffsetForDiagnostics(Slice input, int offset, int length)
+    {
+        requireNonNull(input, "input is null");
+        if (offset < 0 || length < 0 || offset > input.length() - length || literal.length > length || literal.length < 2) {
+            return -1;
+        }
+
+        int inputOffset = input.byteArrayOffset();
+        int searchStart = inputOffset + offset;
+        int result = findFrontAndBack(input.byteArray(), searchStart, searchStart + length);
+        return result < -1 ? -2 - result - inputOffset : -1;
     }
 
     boolean matchesAt(Slice input, int offset)
@@ -91,14 +120,25 @@ final class LiteralSearchKernel
         return Arrays.equals(input.byteArray(), inputOffset, inputOffset + literal.length, literal, 0, literal.length);
     }
 
-    // TrinoLikeKernelGenerator emits a copy of this scan, and of findSingleByte, for each literal
-    // of a generated LIKE pattern; keep the copies in step.
+    /**
+     * Returns the match position, -1 when there is no match, or {@code -2 - resume} when the
+     * search must continue with {@link #findKmp} at {@code resume}. Returning the handoff, rather
+     * than running KMP here, lets {@link #kmpHandoffOffsetForDiagnostics} observe it.
+     * <p>
+     * TrinoLikeKernelGenerator emits a copy of this scan, and of findSingleByte, for each literal
+     * of a generated LIKE pattern; keep the copies in step. The generated copy runs KMP directly.
+     */
     private int findFrontAndBack(byte[] input, int searchStart, int searchEnd)
     {
         int candidateCount = searchEnd - searchStart - literal.length + 1;
         int wordEnd = searchStart + (candidateCount / Long.BYTES) * Long.BYTES;
         int backOffset = literal.length - 1;
-        int comparedBytes = 0;
+        // searchStart plus the failed candidates' compared bytes, minus the budget, so the search
+        // switches when it passes the candidate. It never passes the current candidate by more
+        // than the literal length, so it cannot overflow. Counting the bytes alone and comparing
+        // them with candidate - searchStart kept searchStart live in the loop, and on aarch64 C2
+        // then rebuilt the -LOW_BITS constant on every word.
+        int comparisonEnd = searchStart - CANDIDATE_COMPARISON_BUDGET;
         int position = searchStart;
 
         for (; position < wordEnd; position += Long.BYTES) {
@@ -111,9 +151,9 @@ final class LiteralSearchKernel
                 if (matchedLength == literal.length) {
                     return candidate;
                 }
-                comparedBytes += matchedLength + 1;
-                if (comparedBytes > CANDIDATE_COMPARISON_BUDGET) {
-                    return findKmp(input, candidate + 1, searchEnd);
+                comparisonEnd += matchedLength + 1;
+                if (comparisonEnd > candidate) {
+                    return -2 - (candidate + 1);
                 }
                 candidates &= candidates - 1;
             }
@@ -126,9 +166,9 @@ final class LiteralSearchKernel
                 if (matchedLength == literal.length) {
                     return position;
                 }
-                comparedBytes += matchedLength + 1;
-                if (comparedBytes > CANDIDATE_COMPARISON_BUDGET) {
-                    return findKmp(input, position + 1, searchEnd);
+                comparisonEnd += matchedLength + 1;
+                if (comparisonEnd > position) {
+                    return -2 - (position + 1);
                 }
             }
         }
