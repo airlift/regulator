@@ -55,6 +55,8 @@ case_fold_st_ligature_to_long_st_ligature	283f6929efac86	efac85	0	3	both	utf8	fa
 case_fold_i_not_dotted_capital_i	283f692969	c4b0	0	2	both	utf8	false	1
 case_fold_capital_i_not_dotless_i	283f692949	c4b1	0	2	both	utf8	false	1
 case_fold_dotless_i_not_capital_i	283f6929c4b1	49	0	1	both	utf8	false	1
+case_fold_alternation_keeps_case_sensitive_class	283f693a283f2d693a5b61625d297c283f2d693a5b43635d297b317d29	41	0	1	both	utf8	false	1
+case_fold_alternation_keeps_ascii_pair	283f693a283f2d693a5b4b6b5d297c787b317d29	e284aa	0	3	both	utf8	false	1
 empty_window_no_match	61	61	0	0	both	utf8	false	1
 empty_window_match	612a	61	1	1	both	utf8	false	1
 sparse_multi_capture	285b612d7a5d2b292d285b302d395d2b29	2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e6162632d3132332e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e	0	87	unanchored	utf8	false	3

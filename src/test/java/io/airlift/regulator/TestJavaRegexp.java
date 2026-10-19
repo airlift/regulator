@@ -185,6 +185,16 @@ public class TestJavaRegexp
                 new MatchCase("(?i)k", "K", Operation.MATCHES, false),
                 new MatchCase("(?iu)k", "K", Operation.MATCHES, true),
                 new MatchCase("(?iu)ß", "SS", Operation.MATCHES, false),
+                // Alternation preserves explicit and ASCII-only folded pairs, existing class
+                // ranges, and the full Unicode orbit of Unicode-folded literals.
+                new MatchCase("[Kk]|x", "K", Operation.MATCHES, false),
+                new MatchCase("[Ss]|x", "ſ", Operation.MATCHES, false),
+                new MatchCase("[Ii]|x", "İ", Operation.MATCHES, false),
+                new MatchCase("[Ii]|x", "ı", Operation.MATCHES, false),
+                new MatchCase("(?i)k|x", "K", Operation.MATCHES, false),
+                new MatchCase("(?iu)k|x", "K", Operation.MATCHES, true),
+                new MatchCase("(?iu:(?-i:[Kk])|x{1})", "K", Operation.MATCHES, false),
+                new MatchCase("(?:(?iu)(?:(?-i:[ab])|x{1}))y", "Ay", Operation.FIND, false),
                 new MatchCase("(?iU)é", "É", Operation.MATCHES, true),
                 new MatchCase("\\p{Lower}+", "abc", Operation.MATCHES, true),
                 new MatchCase("\\p{Lower}+", "é", Operation.MATCHES, false),

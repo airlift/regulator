@@ -591,13 +591,14 @@ final class Simplifier
                 if (!mergeableAlternateSub(scanAlternative, flags, flagsWithoutFoldCase)) {
                     break;
                 }
+                // Upstream RE2 has no such merge, so each member keeps the meaning it has alone. A
+                // class already holds its folded ranges, whatever the alternation's flags.
                 if (scanAlternative.op() == RegexpOp.LITERAL) {
-                    mergedClassBuilder.addRangeFlags(scanAlternative.rune(), scanAlternative.rune(), flags, caseFolding);
+                    addLiteral(mergedClassBuilder, scanAlternative, caseFolding);
                 }
                 else {
-                    CharClass charClass = scanAlternative.charClass();
-                    for (RuneRange runeRange : charClass.ranges()) {
-                        mergedClassBuilder.addRangeFlags(runeRange.low(), runeRange.high(), flags, caseFolding);
+                    for (RuneRange runeRange : scanAlternative.charClass().ranges()) {
+                        mergedClassBuilder.addRange(runeRange.low(), runeRange.high());
                     }
                 }
                 count++;
@@ -794,16 +795,22 @@ final class Simplifier
                     builder.addRangeFlags(runeRange.low(), runeRange.high(), mergeAlternative.parseFlags(), caseFolding);
                 }
             }
-            else if ((mergeAlternative.parseFlags() & Regexp.FOLD_CASE) != 0) {
-                CharClassBuilder foldedLiteralClass = new CharClassBuilder();
-                foldedLiteralClass.addRangeFlags(mergeAlternative.rune(), mergeAlternative.rune(), mergeAlternative.parseFlags(), caseFolding);
-                builder.addCharClass(foldedLiteralClass);
-            }
             else {
-                builder.addRangeFlags(mergeAlternative.rune(), mergeAlternative.rune(), mergeAlternative.parseFlags(), caseFolding);
+                addLiteral(builder, mergeAlternative, caseFolding);
             }
         }
         return builder.toCharClass();
+    }
+
+    // The compiler matches a literal folded without full case folding, the form [Kk] simplifies
+    // to, as its ASCII letter pair, so it merges as that pair rather than its whole orbit.
+    private static void addLiteral(CharClassBuilder builder, Regexp literal, CaseFolding caseFolding)
+    {
+        int literalFlags = literal.parseFlags();
+        if ((literalFlags & (Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD)) == Regexp.FOLD_CASE) {
+            literalFlags = (literalFlags & ~Regexp.FOLD_CASE) | Regexp.ASCII_FOLD_CASE;
+        }
+        builder.addRangeFlags(literal.rune(), literal.rune(), literalFlags, caseFolding);
     }
 
     private static Regexp alternateNoFactor(int flags, List<Regexp> alternatives)

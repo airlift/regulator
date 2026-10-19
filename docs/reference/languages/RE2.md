@@ -62,6 +62,10 @@ nor dotless small `ı`. Upstream's tables are Unicode 15.1 data, so characters
 added since then fold only in Regulator. See
 [`UNICODE.md`](../../integrations/UNICODE.md).
 
+An explicit letter pair such as `[Kk]` matches only its two letters, including
+inside an alternation. Regulator's `[Kk]|x` does not match the Kelvin sign;
+pinned upstream RE2's alternation factoring widens the pair to include it.
+
 ## Compilation options
 
 `Re2.Options.defaults()` selects UTF-8, Perl-like RE2 syntax, case-sensitive

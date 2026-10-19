@@ -194,6 +194,15 @@ Case-insensitive matching built on those classes can still differ from
 another Unicode version follows the generator's
 [version procedure](tools/unicode-database/README.md#moving-to-a-new-unicode-version).
 
+An ASCII letter pair, such as `[Kk]` or a Java letter folded without
+`UNICODE_CASE`, matches only its two letters, and every language merges it as
+written into a class with neighboring alternatives. For Java that is the JDK's
+result. Upstream RE2's alternation factoring folds the merged pair again by its
+whole orbit, so there `[Kk]|x` matches the Kelvin sign though `[Kk]` alone does
+not. Regulator departs from upstream here so that an explicit pair means the
+same thing whatever its neighbors. Unicode case-insensitive letters, such as
+RE2's `(?i)k|x` or Java's `(?iu)k|x`, keep their whole orbit.
+
 ## RE2 Unicode Property Groups
 
 RE2 `\p` and `\P` groups come from the pinned Unicode 18.0 database by the
