@@ -30,10 +30,14 @@ Public longest-match behavior is compared directly with native RE2 in the
 pinned oracle rather than through `Tester`, because longest is an execution
 option rather than a parse flag.
 
-The pinned native public oracle contains 71 byte-oriented cases. It covers
+The pinned native public oracle contains 188 byte-oriented cases. It covers
 first/longest/full, invalid UTF-8, Latin-1, `\C`, NUL, Unicode, case folding,
 empty and non-zero windows, anchors, unmatched captures, extra capture slots,
-and empty matches. Inputs and generated expectations are in:
+and empty matches. Its malformed UTF-8 cases pin which overlong, surrogate,
+out-of-range, stray, and truncated sequences the engine consumes under dot,
+delimiter runs, counted runs, trailing tails, and delimited captures, including
+unanchored searches that start past rejected bytes and strict ends after a tail.
+Inputs and generated expectations are in:
 
 - `tools/re2-golden/public-match-cases.tsv`
 - `src/test/resources/io/airlift/regulator/upstream_public_match.jsonl`
