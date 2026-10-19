@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Arrays;
 import java.util.Random;
 
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestLiteralSearchKernel
@@ -67,6 +68,36 @@ public class TestLiteralSearchKernel
         assertCandidateHeavySearch(new byte[] {'a', 'b', 'c', 'd'}, (byte) 'd');
         assertCandidateHeavySearch(new byte[] {'a', 'b', 'c', 'a'}, (byte) 'a');
         assertCandidateHeavySearch(new byte[] {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p'}, (byte) 'a');
+    }
+
+    @Test
+    public void testCandidateWorkBound()
+    {
+        // Dense candidates that fail on their second byte stay in the word scan
+        String dense = "aabx".repeat(256);
+        Slice denseInput = offsetSlice((dense + "bba").getBytes(US_ASCII));
+        LiteralSearchKernel denseKernel = kernel('b', 'b', 'a');
+        assertThat(denseKernel.kmpHandoffOffsetForDiagnostics(denseInput, 0, denseInput.length())).isEqualTo(-1);
+        assertThat(denseKernel.find(denseInput, 0, denseInput.length())).isEqualTo(dense.length());
+        assertThat(denseKernel.kmpHandoffOffsetForDiagnostics(denseInput, 0, dense.length())).isEqualTo(-1);
+        assertThat(denseKernel.find(denseInput, 0, dense.length())).isNegative();
+
+        // Long partial matches switch to KMP early, counted from where the search starts: each
+        // candidate compares eight bytes and covers one, so the tenth passes the budget
+        String periodic = "a".repeat(1024);
+        String periodicLiteral = "aaaaaaaba";
+        Slice periodicInput = offsetSlice((periodic + periodicLiteral).getBytes(US_ASCII));
+        LiteralSearchKernel periodicKernel = kernel(periodicLiteral.toCharArray());
+        assertThat(periodicKernel.kmpHandoffOffsetForDiagnostics(periodicInput, 0, periodicInput.length())).isEqualTo(10);
+        assertThat(periodicKernel.kmpHandoffOffsetForDiagnostics(periodicInput, 512, periodicInput.length() - 512)).isEqualTo(522);
+        assertThat(periodicKernel.find(periodicInput, 0, periodicInput.length())).isEqualTo(periodic.length());
+
+        // Four possible starts, fewer than a word, exercise only the byte-at-a-time loop
+        String tailLiteral = "a".repeat(38) + "ba";
+        Slice tailInput = offsetSlice(("aaa" + tailLiteral).getBytes(US_ASCII));
+        LiteralSearchKernel tailKernel = kernel(tailLiteral.toCharArray());
+        assertThat(tailKernel.kmpHandoffOffsetForDiagnostics(tailInput, 0, tailInput.length())).isEqualTo(2);
+        assertThat(tailKernel.find(tailInput, 0, tailInput.length())).isEqualTo(3);
     }
 
     @Test

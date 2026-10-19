@@ -188,38 +188,42 @@ public class TestTrinoLikeKernel
     }
 
     /**
-     * Near misses of a contained literal, whose first and last bytes match but whose middle does
-     * not, cost the candidate verification more than its comparison budget once a few repeat,
-     * and the search continues with KMP from the next candidate, finding the literal where the
-     * interpreter does. A near miss can overlap the literal, and a match can cross into the
-     * suffix.
+     * A run of the first byte of a contained literal that also ends with that byte makes every
+     * position a candidate that compares several bytes before failing, so the search switches to
+     * KMP and continues from the next position. Generated kernels find the literal where the
+     * interpreter does. The test checks results only, not whether or where the generated copy
+     * switches; TestLiteralSearchKernel checks that for the interpreted copy. The run can overlap
+     * the literal.
      */
     @Test
     public void testCandidateBudgetSwitchesToKmp()
             throws Throwable
     {
-        record Search(String pattern, List<String> nearMisses, List<String> tails) {}
+        record Search(String pattern, List<String> tails) {}
 
+        String longRun = "a".repeat(38);
         List<Search> searches = List.of(
-                new Search("%aaaaaaab%", List.of("aaa-aaab", "aaaaaa-b"), List.of("", "aaaaaaab", "aaaaaaaab", "aaa-aaab")),
-                new Search("%aaaaaaab%zz", List.of("aaa-aaab"), List.of("zz", "aaaaaaabzz", "aaaaaaazz", "aaaaaaab")),
-                new Search("%aaaaaaaaaaaaaaaaaaab%", List.of("aaaaaaaaaa-aaaaaaaab"), List.of("", "aaaaaaaaaaaaaaaaaaab", "aaaaaaaaaaaaaaaaaaaab")),
-                new Search("%aaaab%aaab%", List.of("aa-ab", "a-ab"), List.of("", "aaaab", "aaaabaaab", "aaaab-aaab", "aaaabaa-ab")),
-                new Search("%aaaab_aaab%", List.of("aa-ab"), List.of("", "aaaab-aaab", "aaaabéaaab", "aaaab-a-ab")));
+                new Search("%aaaaaaba%", List.of("", "aaaaaaba", "aaaaaab", "aaa-aaba")),
+                new Search("%aaaaaaba%zz", List.of("zz", "aaaaaabazz", "aaaaaabzz", "aaaaaaba")),
+                new Search("%aaaaaaaaaaaaaaaaaaba%", List.of("", "aaaaaaaaaaaaaaaaaaba", "aaaaaaaaaaaaaaaaaab")),
+                new Search("%" + longRun + "ba%", List.of("", longRun + "ba", "aa" + longRun + "ba", longRun + "b")),
+                new Search("%aaaba%aaba%", List.of("", "aaaba", "aaabaaaba", "aaaba-aaba", "aaabaa-ba")),
+                new Search("%aaaba_aaba%", List.of("", "aaaba-aaba", "aaabaéaaba", "aaaba-a-ba")));
         for (Search search : searches) {
             String pattern = search.pattern();
             TrinoLikePattern interpreted = TrinoLikePattern.compile(utf8Slice(pattern));
             TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), GENERATED);
             assertThat(generated.usesGeneratedBytecode()).as(pattern).isTrue();
             List<Slice> sources = new ArrayList<>();
-            // Each near miss costs at least two compared bytes, so the two larger counts overrun
-            // the budget whatever its value.
-            for (int units : new int[] {1, 9, CANDIDATE_COMPARISON_BUDGET / 2 + 1, 3 * CANDIDATE_COMPARISON_BUDGET}) {
-                for (String nearMiss : search.nearMisses()) {
-                    for (String tail : search.tails()) {
-                        sources.add(view(nearMiss.repeat(units) + tail));
-                        sources.add(view(tail + nearMiss.repeat(units) + tail));
-                    }
+            // Each run position compares at least two more bytes than it covers, so the longer
+            // runs overrun the budget. For the 40-byte literal, the one-byte run and the
+            // "aa" + literal tail make a 43-byte input with four possible starts, fewer than a
+            // word, so the byte-at-a-time loop switches to KMP just before the match.
+            for (int length : new int[] {1, 9, CANDIDATE_COMPARISON_BUDGET, 3 * CANDIDATE_COMPARISON_BUDGET}) {
+                String run = "a".repeat(length);
+                for (String tail : search.tails()) {
+                    sources.add(view(run + tail));
+                    sources.add(view(tail + run + tail));
                 }
             }
             verifySameMatches(pattern, generated, interpreted, sources);

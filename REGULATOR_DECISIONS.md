@@ -581,10 +581,11 @@ error. Syntax-error byte offsets are relative to the pattern Slice.
 Wildcard runs are normalized during parsing. Exact, prefix, suffix, and
 contains forms use direct byte operations. Ordered literals use the shared
 `OrderedLiteralMatcher`: fused first-byte and last-byte SWAR candidate masks
-find sparse candidates, and a bounded KMP fallback preserves linear progress
-after repeated partial candidates. Patterns containing `_` use a dedicated LIKE
-wildcard automaton. This frontend does not translate LIKE into a regex string
-and does not fall back to the RE2 engine.
+find sparse candidates, and a KMP fallback preserves linear progress once
+failed candidates compare more bytes than the search has covered, plus a small
+budget. Patterns containing `_` use a dedicated LIKE wildcard automaton. This
+frontend does not translate LIKE into a regex string and does not fall back to
+the RE2 engine.
 
 The LIKE and Trino-regexp parsers remain separate language frontends, but they
 share the ordered-literal execution kernel when analysis proves equivalent
@@ -1308,7 +1309,7 @@ UTF-8, which differential tests check over the corpus and seeded patterns.
 - Contained and ordered literals search with a copy of the literal search for
   each literal: the first-and-last-byte word scan, or the two-word scan of a
   single byte, with the literal's bytes and KMP shifts as constants, and the
-  same candidate comparison budget before switching to KMP. Ordered
+  same KMP handoff rule. Ordered
   literals search one after another, as the interpreter does. Generated
   contains specializes its literal with this search, while interpreted
   contains uses `Slice.indexOf`.

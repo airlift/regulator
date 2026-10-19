@@ -742,8 +742,7 @@ final class TrinoLikeKernelGenerator
 
         /**
          * A copy of {@code LiteralSearchKernel.findFrontAndBack}: candidates whose first and last
-         * bytes match, verified in order, with the same comparison budget before the search
-         * switches to KMP.
+         * bytes match, verified in order, with the same KMP handoff rule.
          */
         private void emitFindFrontAndBack(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte[] literal, int[] prefixShifts)
         {
@@ -753,7 +752,7 @@ final class TrinoLikeKernelGenerator
             Variable wordEnd = body.declare("wordEnd", start.add(end.subtract(start).subtract(constantInt(backOffset))
                     .divide(constantInt(Long.BYTES))
                     .multiply(constantInt(Long.BYTES))));
-            Variable comparedBytes = body.declare("comparedBytes", constantInt(0));
+            Variable comparisonEnd = body.declare("comparisonEnd", start.subtract(constantInt(CANDIDATE_COMPARISON_BUDGET)));
             Variable candidates = body.declare(long.class, "candidates");
             Variable frontDifference = body.declare(long.class, "frontDifference");
             Variable backDifference = body.declare(long.class, "backDifference");
@@ -774,7 +773,7 @@ final class TrinoLikeKernelGenerator
             body.mark(nextCandidate);
             body.append(ifThenJump(candidates.equal(constantLong(0)), nextWord));
             body.append(candidate.set(position.add(firstByte(candidates))));
-            emitVerifyCandidate(body, bytes, end, candidate, matchedLength, comparedBytes, literal, prefixShifts);
+            emitVerifyCandidate(body, bytes, end, candidate, matchedLength, comparisonEnd, literal, prefixShifts);
             body.append(candidates.set(candidates.bitwiseAnd(candidates.subtract(constantLong(1)))));
             body.jump(nextCandidate);
             body.mark(nextWord);
@@ -791,16 +790,16 @@ final class TrinoLikeKernelGenerator
             body.append(ifThenJump(bytes.getElement(position).cast(int.class).notEqual(constantInt(literal[0])), nextTailCandidate));
             body.append(ifThenJump(bytes.getElement(position.add(constantInt(backOffset))).cast(int.class).notEqual(constantInt(literal[backOffset])), nextTailCandidate));
             body.append(candidate.set(position));
-            emitVerifyCandidate(body, bytes, end, candidate, matchedLength, comparedBytes, literal, prefixShifts);
+            emitVerifyCandidate(body, bytes, end, candidate, matchedLength, comparisonEnd, literal, prefixShifts);
             body.mark(nextTailCandidate);
             body.append(position.set(position.add(constantInt(1))));
             body.jump(tailCandidate);
         }
 
         /**
-         * Returns {@code candidate} when the whole literal occurs there. Otherwise charges the
-         * matched bytes and the mismatch to the budget and, once it is spent, returns the KMP
-         * search from the next position.
+         * Returns {@code candidate} when the whole literal occurs there. Otherwise adds the matched
+         * bytes and the mismatch to {@code comparisonEnd} and, once that passes the candidate,
+         * returns the KMP search from the next position.
          */
         private void emitVerifyCandidate(
                 CodeBlock.Builder body,
@@ -808,7 +807,7 @@ final class TrinoLikeKernelGenerator
                 Parameter end,
                 Variable candidate,
                 Variable matchedLength,
-                Variable comparedBytes,
+                Variable comparisonEnd,
                 byte[] literal,
                 int[] prefixShifts)
         {
@@ -837,9 +836,9 @@ final class TrinoLikeKernelGenerator
                     .condition(matchedLength.equal(constantInt(length)))
                     .then(candidate.ret())
                     .build());
-            body.append(comparedBytes.set(comparedBytes.add(matchedLength).add(constantInt(1))));
+            body.append(comparisonEnd.set(comparisonEnd.add(matchedLength).add(constantInt(1))));
             body.append(IfStatement.builder()
-                    .condition(comparedBytes.greaterThan(constantInt(CANDIDATE_COMPARISON_BUDGET)))
+                    .condition(comparisonEnd.greaterThan(candidate))
                     .then(invokeStatic(
                             TrinoLikeKernelSupport.class,
                             "findKmp",

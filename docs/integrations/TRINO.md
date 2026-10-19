@@ -120,7 +120,7 @@ UTF-8 is a syntax error. See
 [UTF-8 and malformed input](../reference/languages/TRINO_LIKE.md#utf-8-and-malformed-input).
 
 Ordered LIKE patterns and eligible Trino regular expressions share a fused
-front-and-back byte scanner with a bounded KMP fallback. This is an execution
+front-and-back byte scanner with a linear KMP fallback. This is an execution
 kernel, not a shared parser or a translation between languages. Eligible patterns
 with `_` use literal-gap search; the remaining shapes use the dedicated LIKE
 wildcard matcher. Regexp operations also select specialized paths when the
