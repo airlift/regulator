@@ -129,6 +129,11 @@ an escaped character such as `\n` after it is decoded first. Inside a character
 class, `\p` or `\P` without braces is the literal letter, so `[\pL]` matches `p`
 or `L`; use `[\p{L}]` for letters.
 
+Inside a character class, a dash after a range is dropped, as in Joni, even when
+nested classes come between them, so `[a-p-z]` matches `z` but not `-`. The dash
+is kept when it ends the class or an intersection operand or when another dash
+follows, and a dropped dash must be followed by an ASCII character, not a class.
+
 ## Operations
 
 `TrinoRegexp` provides Trino-shaped contains, count, position, extraction,
@@ -179,6 +184,7 @@ currently rejected:
 - surrogate escapes and non-ASCII byte escapes
 - empty character-class intersection operands
 - character classes used as range endpoints
+- dashes between a range and a class or non-ASCII character
 - malformed POSIX classes such as `[[:a:b:]]`
 - repetitions above 1,000
 

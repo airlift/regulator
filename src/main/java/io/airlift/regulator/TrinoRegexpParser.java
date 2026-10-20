@@ -971,6 +971,7 @@ final class TrinoRegexpParser
         {
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
             boolean first = true;
+            boolean rangeCompleted = false;
             while (!atEnd()) {
                 int nextByte = peekByte();
                 if (nextByte == ']' && !first) {
@@ -985,6 +986,7 @@ final class TrinoRegexpParser
                 first = false;
 
                 if (tryParsePosixCharClass(classFlags, characterClassBuilder)) {
+                    rangeCompleted = false;
                     continue;
                 }
 
@@ -1004,8 +1006,14 @@ final class TrinoRegexpParser
                     }
                     nested.removeAbove(Regexp.maxRune(classFlags));
                     characterClassBuilder.addCharClass(nested);
+                    // Joni keeps the state of the item before a nested class, so a dash after the nested
+                    // class continues that item: it is dropped after a range.
+                    if (rangeCompleted) {
+                        dropDashAfterRange(classFlags);
+                    }
                     continue;
                 }
+                rangeCompleted = false;
 
                 if (tryParseClassEscape(classFlags, characterClassBuilder)) {
                     continue;
@@ -1020,6 +1028,8 @@ final class TrinoRegexpParser
                     if (high < low) {
                         throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, null);
                     }
+                    rangeCompleted = true;
+                    dropDashAfterRange(classFlags);
                 }
 
                 // For explicit singletons/ranges, do not implicitly filter '\n' out.
@@ -1089,9 +1099,62 @@ final class TrinoRegexpParser
             return index + 1 < end && bytes[index] == '&' && bytes[index + 1] == '&';
         }
 
-        private boolean tryParseClassEscape(int nodeFlags, CharClassBuilder characterClassBuilder)
+        private boolean isRangeDash()
+        {
+            // A dash that continues a range rather than ending the class or an intersection operand.
+            return !atEnd() && peekByte() == '-' && !dashEndsClassOperand();
+        }
+
+        private void dropDashAfterRange(int nodeFlags)
+        {
+            // Joni drops a dash after a completed range unless the dash ends the class or an intersection
+            // operand, or a second dash follows. It then misreads a class or non-ASCII character after the
+            // dropped dash, so only an ASCII character may follow.
+            if (!isRangeDash() || bytes[index + 1] == '-') {
+                return;
+            }
+            int dashStart = index;
+            consumeByte('-');
+            int tokenStart = index;
+            if (peekByte() == '[') {
+                throw unsupportedConstruct("dashes between a range and a class or non-ASCII character", dashStart, tokenStart + 1);
+            }
+            if (isClassEscape()) {
+                throw unsupportedConstruct("dashes between a range and a class or non-ASCII character", dashStart, tokenStart + 2);
+            }
+            // Decode the character only to check it is ASCII, then rewind so the union loop parses it, since
+            // it may start its own range.
+            if (parseClassAtomRune(nodeFlags) > 0x7F) {
+                throw unsupportedConstruct("dashes between a range and a class or non-ASCII character", dashStart, index);
+            }
+            index = tokenStart;
+        }
+
+        private boolean dashEndsClassOperand()
+        {
+            // Joni reads a dash before the closing bracket or an intersection operator as a literal; a dash
+            // that ends the pattern is left for the missing-bracket error.
+            return index + 1 >= end ||
+                    bytes[index + 1] == ']' ||
+                    (index + 2 < end && bytes[index + 1] == '&' && bytes[index + 2] == '&');
+        }
+
+        private boolean isClassEscape()
         {
             if (peekByte() != '\\' || index + 1 >= end) {
+                return false;
+            }
+            // Only a braced \p or \P is a property here; Joni reads a brace-less one as the literal letter.
+            return switch (bytes[index + 1] & 0xFF) {
+                case 'd', 'D', 's', 'S', 'w', 'W' -> true;
+                case 'p', 'P' -> index + 2 < end && bytes[index + 2] == '{';
+                default -> false;
+            };
+        }
+
+        private boolean tryParseClassEscape(int nodeFlags, CharClassBuilder characterClassBuilder)
+        {
+            if (!isClassEscape()) {
                 return false;
             }
 
@@ -1114,13 +1177,10 @@ final class TrinoRegexpParser
                 return true;
             }
 
-            // Only a braced \p or \P is a property here; Joni reads a brace-less one as the literal letter.
-            if ((escapedByte == 'p' || escapedByte == 'P') && index + 2 < end && bytes[index + 2] == '{') {
-                index += 2;
-                parseUnicodeGroupInto(characterClassBuilder, (escapedByte == 'P') ? -1 : 1, nodeFlags, index - 2);
-                return true;
-            }
-            return false;
+            // Otherwise isClassEscape found a braced \p or \P.
+            index += 2;
+            parseUnicodeGroupInto(characterClassBuilder, (escapedByte == 'P') ? -1 : 1, nodeFlags, index - 2);
+            return true;
         }
 
         private static CharClass buildValidCaptureNameCharClass()
