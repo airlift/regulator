@@ -1030,7 +1030,7 @@ final class TrinoRegexpParser
                 int low = parseClassAtomRune(classFlags);
                 int high = low;
 
-                if (!atEnd() && peekByte() == '-' && lookaheadIsRangeEnd()) {
+                if (isRangeDash()) {
                     consumeByte('-');
                     // Joni drops a bracket after a range dash.
                     if (peekByte() == '[') {
@@ -1316,16 +1316,6 @@ final class TrinoRegexpParser
                 return characterClassBuilder.toCharClass();
             }
             throw new RegexpParseException(RegexpParseErrorCode.BAD_CHAR_CLASS, null, -1);
-        }
-
-        private boolean lookaheadIsRangeEnd()
-        {
-            // Treat '-' as a range operator only if the following token is not ']' or end.
-            if (index + 1 >= end) {
-                return false;
-            }
-            int next = bytes[index + 1] & 0xFF;
-            return next != ']';
         }
 
         private int parseClassAtomRune(int flags)

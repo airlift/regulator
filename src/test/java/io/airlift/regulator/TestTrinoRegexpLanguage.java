@@ -1085,7 +1085,9 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("[\\d-]", "-", true),
                 new MatchCase("[[a]-z]", "-", true),
                 new MatchCase("[[a]-z]", "b", false),
-                // A dash before an intersection operator after a class item is a literal.
+                // A dash before an intersection operator after a single character or a class item is a literal.
+                new MatchCase("[!-&&!]", "#", false),
+                new MatchCase("[a-&&-]", "-", true),
                 new MatchCase("[\\d-&&-]", "-", true));
     }
 
