@@ -7,6 +7,7 @@ Regulator has a separate compiler for each pattern language:
   provides Trino's count, position, extraction, split, and replacement
   operations.
 - `JavaRegexp` compiles the documented regular subset of Java `Pattern`.
+- `RustRegexp` compiles the Rust `regex` crate's pattern language.
 - `TrinoLikePattern` compiles SQL LIKE patterns.
 
 For multi-pattern matching, use `Re2Set` or `FilteredRe2`.
@@ -16,7 +17,7 @@ languages does not mean a pattern behaves the same way in both. The
 [language overview](../integrations/REGEXP_LANGUAGES.md) links to each compiler's
 compatibility contract.
 
-The three regex compilers share Regulator's bounded matching engines. LIKE has
+The four regex compilers share Regulator's bounded matching engines. LIKE has
 its own wildcard matcher. Their compiled plans can also share specialized
 literal and literal-gap kernels where the languages behave the same way.
 
@@ -50,11 +51,12 @@ copying the input. Compilation copies pattern bytes so later caller mutation
 cannot change the compiled pattern. Match groups are zero-copy Slice views and
 therefore retain the input's backing storage.
 
-The Trino and Java compilers take the same Slice inputs:
+The Trino, Java, and Rust compilers take the same Slice inputs:
 
 ```java
 TrinoRegexp trinoPattern = TrinoRegexp.compile(patternBytes);
 JavaRegexp javaPattern = JavaRegexp.compile(patternBytes);
+RustRegexp rustPattern = RustRegexp.compile(patternBytes);
 ```
 
 ## Compiled patterns
@@ -87,16 +89,16 @@ failure.
 
 Unanchored searches for a case-sensitive literal scan for its first byte unless
 the caller chooses a byte distribution with `setByteFrequencies` on
-`Re2.Options`, `TrinoRegexp.Options`, or `JavaRegexp.Options`. The default,
-`ByteFrequencies.uniform()`, keeps first-byte scanning. A distribution that
-matches the searched data lets the search scan for a rarer byte of the literal
-instead. `Re2` and `JavaRegexp` move the scan only for a multi-byte literal
-whose first byte is ASCII; `TrinoRegexp` scan plans also move it for a plan's
-leading literal led by a non-ASCII byte. A distribution that does not match the
-data can make literal scans several times slower per byte than first-byte
-scanning, because it moves the scan onto bytes that are common in the searched
-text; it never changes what matches, and the cost stays linear in the input.
-The choices are:
+`Re2.Options`, `TrinoRegexp.Options`, `JavaRegexp.Options`, or
+`RustRegexp.Options`. The default, `ByteFrequencies.uniform()`, keeps
+first-byte scanning. A distribution that matches the searched data lets the
+search scan for a rarer byte of the literal instead. `Re2`, `JavaRegexp`, and
+`RustRegexp` move the scan only for a multi-byte literal whose first byte is
+ASCII; `TrinoRegexp` scan plans also move it for a plan's leading literal led
+by a non-ASCII byte. A distribution that does not match the data can make
+literal scans several times slower per byte than first-byte scanning, because
+it moves the scan onto bytes that are common in the searched text; it never
+changes what matches, and the cost stays linear in the input. The choices are:
 
 - `ByteFrequencies.builder()`, which learns from sample Slices of the caller's
   own data and is the most reliable choice. A few hundred kilobytes of whole
@@ -183,7 +185,7 @@ the compiled `pattern`:
 The `lookingAtInto`, `matchesInto`, `lookingAtResult`, and `matchesResult`
 methods provide the corresponding beginning-of-input and complete-input forms.
 The same boolean, caller-buffer, result, range, and reusable-matcher forms are
-available from `JavaRegexp`.
+available from `JavaRegexp` and `RustRegexp`.
 
 Use `MatchResult` when capture values are needed without repeated matching:
 
@@ -231,6 +233,8 @@ overloads are available for boolean, caller-buffer, and immutable-result
 matching. In contrast,
 `matcher.reset(input, start, end)` makes the region itself the assertion
 context, matching a logical Slice view without allocating one on DFA-only paths.
+For Rust patterns a region keeps the complete Slice as context; see
+[Rust regexp](languages/RUST_REGEXP.md#matching).
 
 `Re2Matcher` is mutable and not thread-safe. Its capture buffer and execution
 workspaces are reused across `find`, `matches`, `lookingAt`, and `reset` calls.
@@ -259,20 +263,21 @@ The APIs are familiar, but their representations and capabilities differ:
 | Captures | `String` values from a mutable `Matcher` or `MatchResult` | Zero-copy Slice views, mutable matcher state, immutable result, or caller-owned `int[]` bounds |
 | One-shot matching | Create a matcher, then call `find`, `lookingAt`, or `matches` | The same matcher form plus direct methods on the compiled `Re2` |
 | Repeated matching | Mutable `Matcher` | Mutable `Re2Matcher` with reusable captures and execution workspaces |
-| Replacement grammar | `$1`, `${name}`, and backslash escaping | Native RE2 grammar in `Re2`; Trino's Java-style grammar in `TrinoRegexp`; no replacement API in `JavaRegexp` |
+| Replacement grammar | `$1`, `${name}`, and backslash escaping | Native RE2 grammar in `Re2`; Trino's Java-style grammar in `TrinoRegexp`; no replacement API in `JavaRegexp` or `RustRegexp` |
 | Convenience adapters | Splits, streams, predicates, and `CharSequence` regions | Allocation-conscious Slice matching, caller-owned capture buffers, multi-pattern matching, and Trino operations |
 | Worst-case execution | Ordered backtracking can take exponential time | RE2 execution uses bounded memory and linear-time algorithms |
 
 ### Pattern languages
 
-`Re2`, `TrinoRegexp`, and `JavaRegexp` are separate compilers for different
-pattern languages. They use the same matching engine after compilation.
+`Re2`, `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` are separate compilers
+for different pattern languages. They use the same matching engine after
+compilation.
 
 Java `(?U)` and character-class intersection are examples of syntax whose
 meaning depends on the language. Consult the
 [RE2](languages/RE2.md), [Trino regexp](languages/TRINO_REGEXP.md),
-[Java regexp](languages/JAVA_REGEXP.md), and
-[Trino LIKE](languages/TRINO_LIKE.md) references for exact boundaries.
+[Java regexp](languages/JAVA_REGEXP.md), [Rust regexp](languages/RUST_REGEXP.md),
+and [Trino LIKE](languages/TRINO_LIKE.md) references for exact boundaries.
 
 `JavaRegexp.Options` exposes the supported Java compile flags without requiring
 an integer flag mask:
@@ -290,6 +295,11 @@ The options also cover Unix lines, comments, literal patterns, dot-all, and
 Unicode character classes. Compilation copies the pattern and snapshots the
 mutable options. Inline Java flags can still enable or disable the corresponding
 mode for the complete pattern or a scoped group.
+
+`RustRegexp.Options` exposes the crate's `RegexBuilder` settings the same way,
+with the Java names where the concept is the same, such as `setMultiline` and
+`setComments`. `RustRegexp` returns the same `Re2Matcher`, which applies the
+crate's empty-match and assertion-context rules to Rust patterns.
 
 ## Rewrites
 
