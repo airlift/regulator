@@ -1071,7 +1071,16 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("(?i)[\\p]", "P", true),
                 new MatchCase("[\\p{L}]", "a", true),
                 // Without a later :], Joni reads [: as a nested class.
-                new MatchCase("[[:a:b]]", "a", true));
+                new MatchCase("[[:a:b]]", "a", true),
+                // Joni drops a dash after a completed range unless another dash follows, even with a nested
+                // class between them.
+                new MatchCase("[a-p-z]", "-", false),
+                new MatchCase("[a-p-z]", "z", true),
+                new MatchCase("[a-c-x-z]", "y", true),
+                new MatchCase("[a-c[x]-z]", "-", false),
+                new MatchCase("[a-c[x]-z]", "z", true),
+                new MatchCase("[a-c[x]--z]", "y", true),
+                new MatchCase("[a-c-]", "-", true));
     }
 
     private static boolean joniFind(Slice pattern, Slice input)
