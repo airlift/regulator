@@ -1080,7 +1080,13 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("[a-c[x]-z]", "-", false),
                 new MatchCase("[a-c[x]-z]", "z", true),
                 new MatchCase("[a-c[x]--z]", "y", true),
-                new MatchCase("[a-c-]", "-", true));
+                new MatchCase("[a-c-]", "-", true),
+                // A dash that ends a class after a class item, or follows a leading nested class, is a literal.
+                new MatchCase("[\\d-]", "-", true),
+                new MatchCase("[[a]-z]", "-", true),
+                new MatchCase("[[a]-z]", "b", false),
+                // A dash before an intersection operator after a class item is a literal.
+                new MatchCase("[\\d-&&-]", "-", true));
     }
 
     private static boolean joniFind(Slice pattern, Slice input)
