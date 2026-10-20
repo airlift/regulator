@@ -68,3 +68,4 @@ REJECT	\p^L	Joni reads \p^ as the unknown property name ^
 REJECT	\P^L	Joni reads \P^ as the unknown property name ^
 REJECT	\p{^Lu}	Joni has no caret inversion in a property name
 REJECT	[\P{^Lu}]	Joni has no caret inversion in a property name
+REJECT	[\c\]	Joni reads \c\] as a control character, leaving the class open
