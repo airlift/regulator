@@ -123,11 +123,14 @@ require exact Joni behavior for this form.
 
 `\d`, `\s`, and `\w` use their ASCII definitions. As in Trino, unknown
 alphabetic escapes are interpreted as literals. For example, `\C` matches the
-literal `C`; it is not RE2's one-byte atom. `\c` keeps the low five bits of the
-character after it, as in Joni, so `\ca` matches U+0001 and `\c?` matches DEL;
-an escaped character such as `\n` after it is decoded first. Inside a character
-class, `\p` or `\P` without braces is the literal letter, so `[\pL]` matches `p`
-or `L`; use `[\p{L}]` for letters.
+literal `C`; it is not RE2's one-byte atom. A `\x` with neither braces nor hex
+digits, or a `\u` without hex digits, matches U+0000, as in Joni, unless it ends
+the pattern, where it is the literal letter; a malformed braced `\x{...}` is
+rejected. `\c` keeps the low five bits of the character after it, as in Joni,
+so `\ca` matches U+0001 and `\c?` matches DEL; an escaped character such as
+`\n` after it is decoded first. Inside a character class, `\p` or `\P` without
+braces is the literal letter, so `[\pL]` matches `p` or `L`; use `[\p{L}]` for
+letters.
 
 Inside a character class, a dash after a range is dropped, as in Joni, even when
 nested classes come between them, so `[a-p-z]` matches `z` but not `-`. The dash

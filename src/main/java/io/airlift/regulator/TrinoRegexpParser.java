@@ -1619,7 +1619,8 @@ final class TrinoRegexpParser
                 digits++;
             }
             if (digits == 0) {
-                return 'x';
+                // Joni reads an escape without digits as U+0000, or as the letter when it ends the pattern.
+                return atEnd() ? 'x' : 0;
             }
             if (rune > 0x7F) {
                 throw unsupportedConstruct("non-ASCII byte escapes", sequenceStart, index);
@@ -1641,7 +1642,8 @@ final class TrinoRegexpParser
                 digits++;
             }
             if (digits == 0) {
-                return 'u';
+                // Joni reads an escape without digits as U+0000, or as the letter when it ends the pattern.
+                return atEnd() ? 'u' : 0;
             }
             if (Character.isSurrogate((char) rune)) {
                 throw unsupportedConstruct("surrogate escapes", sequenceStart, index);

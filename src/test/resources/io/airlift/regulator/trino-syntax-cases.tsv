@@ -19,8 +19,8 @@ ACCEPT	\e	ASCII escape character is supported
 ACCEPT	\101	Joni interprets a numeric escape as octal when it is not a backreference
 ACCEPT	\11	Joni interprets a short numeric escape as octal when it is not a backreference
 ACCEPT	\cA	Control-character escape is supported
-ACCEPT	\x	An incomplete hex escape is literal x
-ACCEPT	\u	An incomplete Unicode escape is literal u
+ACCEPT	\x	A hex escape without digits that ends the pattern is literal x
+ACCEPT	\u	A Unicode escape without digits that ends the pattern is literal u
 ACCEPT	\u12	Joni accepts one to four Unicode hex digits
 ACCEPT	\k	k is literal without a named-reference delimiter
 ACCEPT	\q	Joni treats an unknown alphabetic escape as a literal
