@@ -17,7 +17,8 @@ import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 
 /**
- * Minimal UTF-8 decoding utilities. The core engine assumes valid UTF-8 inputs (garbage in, garbage out).
+ * Minimal UTF-8 decoding utilities. The core engine assumes valid UTF-8 inputs (garbage in, garbage out),
+ * except where a method states a rule for malformed input, as {@link #re2CharacterWidth} does.
  */
 final class Utf8
 {
@@ -144,6 +145,32 @@ final class Utf8
             return 2;
         }
         return index + 3 < end && (bytes[index + 3] & 0xC0) == 0x80 ? 4 : 3;
+    }
+
+    /**
+     * Returns the width of the non-ASCII character starting at {@code index}, which must be
+     * before {@code end}, as an RE2 class holding all of U+0080 through U+10FFFF reads it, or
+     * {@code 0} when that class rejects the bytes there. Such a class consumes a lead byte
+     * C2-DF, E0-EF, or F0-F4 followed by one, two, or three continuation bytes, so it accepts
+     * overlong three- and four-byte forms, encoded surrogates, and values above U+10FFFF. It
+     * rejects continuation bytes, C0, C1, F5-FF, and truncated sequences.
+     */
+    static int re2CharacterWidth(byte[] bytes, int index, int end)
+    {
+        int b0 = bytes[index] & 0xFF;
+        if (b0 < 0xC2 || b0 > 0xF4) {
+            return 0;
+        }
+        int width = b0 < 0xE0 ? 2 : b0 < 0xF0 ? 3 : 4;
+        if (width > end - index) {
+            return 0;
+        }
+        for (int offset = 1; offset < width; offset++) {
+            if ((bytes[index + offset] & 0xC0) != 0x80) {
+                return 0;
+            }
+        }
+        return width;
     }
 
     static int decodedWidth(long decoded)

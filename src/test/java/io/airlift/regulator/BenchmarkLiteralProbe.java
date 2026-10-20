@@ -39,7 +39,8 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 /**
  * Unanchored searches led by a literal over synthetic application or access log lines, where
  * common letters make a first-byte scan stop every few bytes. Covers the RE2 prefix-acceleration
- * scan, directly and through public operations, and the Trino scan-plan leading-literal scan,
+ * scan through {@code dfaSearch}, and the scan-plan leading-literal scan that the public RE2
+ * ({@code re2Find}, {@code re2Count}) and Trino operations run on these literal-led patterns,
  * each compiled with the distribution {@link #backgroundFrequencies()} learns from the background
  * lines, as a caller learns from its own data. {@code SERVICE} and {@code TOKEN} literals probe a
  * rarer letter than their first byte and are expected wins. The rest keep the first byte and are

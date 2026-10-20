@@ -3,7 +3,9 @@
 The scan plan recognizes a bounded family of Trino patterns and executes
 literals, deterministic character runs, and captures over Slice bytes. It
 targets `contains`, match boundaries, captures, extraction, and replacement
-through the public APIs. It does not change RE2 or Java frontend execution.
+through the public APIs. RE2 patterns select the same plans, which report the
+ordinary engine's results on malformed input too, as described in
+[RE2 patterns](#re2-patterns). Java patterns never select one.
 
 ## Coverage
 
@@ -97,10 +99,11 @@ unbounded literal sequences, nested repetitions, and other repeated
 multi-operation bodies remain unsupported.
 
 Finite bounds count characters. ASCII runs can count bytes; runs admitting
-non-ASCII characters use the shared UTF-8 decoder. An unbounded minimum such
-as `{2,}` decodes only enough characters to establish the minimum, then scans
-the remainder by bytes. Malformed input still has no promised exact result;
-the decoder is a bounded character-advancement mechanism, not a validation pass.
+non-ASCII characters in a Trino plan use the shared UTF-8 decoder. An unbounded
+minimum such as `{2,}` decodes only enough characters to establish the minimum,
+then scans the remainder by bytes. In a Trino plan, malformed input still has
+no promised exact result; the decoder is a bounded character-advancement
+mechanism, not a validation pass.
 
 `Re2` retains the immutable plan in its plan bundle and charges the
 complete plan and literal storage against the forward DFA budget. If the budget
@@ -117,8 +120,9 @@ when a plan also exists, because they answer without reading past the literal.
 Any other boolean strategy is replaced by the plan. Boundary, capture, range,
 and count calls reach the plan through its own strategy either way. Unanchored
 plans count with a loop over the plan's search that resumes at each match end,
-not the DFA count, so `count` agrees with `extract`, `position`, and
-`extractAll` on malformed bytes.
+not the DFA count. For a Trino plan this keeps `count` in agreement with
+`extract`, `position`, and `extractAll` on malformed bytes; an RE2 plan agrees
+with the DFA anyway, and its count takes the plan route as `find` does.
 
 A start-anchored plan, end-anchored or partial, matches only at the region
 start, and no `Re2Matcher.find` check runs ahead of it. Its matchers therefore
@@ -218,8 +222,8 @@ input end. Ordinary dot scans for LF; a single terminal LF is left outside the
 match for `$`, but is rejected by strict end or a full-match operation.
 Replacement preserves any unmatched suffix. Malformed input follows Trino's
 garbage-in, garbage-out contract; no UTF-8 validation pass or exact agreement on
-malformed bytes is promised. RE2's UTF-8 contract and Java's current execution
-remain unchanged.
+malformed bytes is promised. RE2 plans agree with the ordinary engine on
+malformed input, as described in [RE2 patterns](#re2-patterns).
 
 For unanchored plans that begin with a literal or with a run whose minimum is at
 least one, the executor scans for a byte that can start the leading operation
@@ -263,6 +267,89 @@ one-character resume. Optional-leading plans, and plans led by any run other
 than a single character or a delimiter complement, remain on the ordinary
 engine. A lowered final-line plan retains precedence for a run-leading
 expression; a literal-leading scan keeps its candidate-byte route.
+
+## RE2 patterns
+
+The frontend chooses a plan's language: Trino, RE2, or none. `Re2.compile`
+analyzes every pattern with the same builder, proofs, budgets, and candidate
+scans as `TrinoRegexp`, so the same shapes select a plan, ASCII-folded ones
+included, and every `Re2` operation reaches the plan through the same
+strategies with the same memory charge. Java patterns and `Re2.compileParsed`
+build no plan. RE2 also excludes longest-match patterns, whose matches a
+leftmost-first plan cannot report, and, as Trino does, Latin-1 patterns. RE2's
+`$` is the strict end, so the final-LF forms never arise, and RE2's simple case
+folding has no multi-character folds for the ASCII-fold proof to exclude. RE2
+plans never generate bytecode; only `TrinoRegexp` requests it.
+
+An RE2 plan reports exactly what the ordinary engine reports on every input,
+including malformed UTF-8. A class holding every character from U+0080 through
+U+10FFFF, as every non-ASCII run does, compiles to byte ranges that consume a
+lead byte `C2`-`DF` followed by one continuation byte, `E0`-`EF` followed by
+two, or `F0`-`F4` followed by three. They accept overlong three- and four-byte
+forms, encoded surrogates, and values above U+10FFFF, which the strict decoder
+behind Trino plans rejects, and they reject bare continuation bytes, `C0`, `C1`,
+`F5`-`FF`, and truncated sequences.
+
+Only operations that can consume a byte at or above `0x80` read input
+differently. Literals, folded literals, ASCII-only runs, capture saves, forks,
+and the end check keep their behavior and are shared. The builder then
+replaces:
+
+- Each run whose set admits non-ASCII characters with an `RE2_RUN`. It scans
+  ASCII members, with the vector scanner when the run has at most four ASCII
+  non-members, the Vector API is available, and at least a vector of input
+  remains, and otherwise by byte as Trino's run scan finishes its tail,
+  stopping at any non-ASCII byte or an ASCII non-member. It validates each
+  non-ASCII sequence by the rule above and counts bounded repetitions and
+  minimums by the same rule.
+- Each delimited capture with an `RE2_DELIMITED_CAPTURE`, which scans its run by
+  that rule and then requires the delimiter, rather than searching for the
+  delimiter byte, which could pass over a rejected sequence.
+- Each terminal tail with its run followed by the end check, so a tail stops at
+  a rejected sequence rather than jumping to the end. The operation count is the
+  one a Trino plan has.
+
+The folded executors run the same operations. The leading complement scan, such
+as that of `([^/]+)/`, still finds candidates by byte; its run may now stop at a
+rejected sequence before the delimiter, and the attempt then fails and resumes
+at the run end. Trino plans contain none of these operations, and the bytecode
+generator rejects them.
+
+Every skip proof holds under this rule:
+
+- A literal-leading candidate scan skips only positions where the literal does
+  not start. A run-leading one skips only ASCII bytes outside the run; a
+  non-ASCII run still admits every byte at or above `0x80`. Either scan visits
+  a superset of the possible starts.
+- A failed or empty attempt advances by one strictly decoded character. A
+  strictly valid sequence is one RE2 character of the same width, and a
+  continuation byte inside it starts no RE2 match, while an invalid sequence
+  advances one byte, so no start is skipped.
+- Resuming at a leading run's end, and after a leading single character, holds
+  because RE2's reading is deterministic from a character start: an attempt
+  from any byte the run consumed either starts no match at a continuation byte
+  or reaches the same run end in the same state.
+- The nullable-tail boolean exit, the required-literal check, and both handoffs
+  to the ordinary engine keep their conditions. Because the plan and the
+  ordinary engine agree on every input, a handoff never changes an RE2 result.
+
+`TestRe2ScanPlan` checks route selection and which upstream golden patterns
+select a plan, whose goldens then run on the plan. It compares the public
+matching operations of plan, forced-handoff, and no-plan compiles, including
+ranged calls, short and null group buffers, and matchers retaining a prefix of
+the groups, with malformed sequences inserted into each witness. Seeded
+generated patterns cover end-anchored, partial, unanchored, run-led, and
+trailing-run shapes and delimited captures, plain and ASCII-folded. Fixed
+patterns run under the default, case-insensitive, never-newline, and POSIX
+one-line options and add a minimum that one multibyte character does not meet,
+forked plans, and long inputs that hand off to the ordinary engine by work
+budget and by failure density. `BenchmarkRe2ScanPlan` runs the
+`BenchmarkTrinoScanPlan` patterns and rows through public RE2 operations, plus
+non-ASCII and malformed rows for the URL, unanchored URL, long-host, and
+unanchored-tail shapes. With `scanPlan=false` it compiles each pattern without
+its plan, so the same rows measure the ordinary engine. That compile is
+resolved reflectively, so the source also runs on a build without RE2 plans
+with `-p scanPlan=true`.
 
 ## Correctness and measurement
 
@@ -361,14 +448,14 @@ and `generatedNeighbors` parameters.
 
 The `containsWithoutScanPlan`, `capturesWithoutScanPlan`, and
 `extractWithoutScanPlan` methods run the same rows without the scan plan. Each
-pattern is parsed as Trino parses it and compiled with the RE2 compiler
-dialect, which builds no plan, and each method calls the `Re2` route the base
-`TrinoRegexp` takes for its operation when a pattern has no plan. For these
-patterns, which all have capturing groups and no nullable loops, both dialects
-compile the same program, so the methods measure the current ordinary engine on
-the plan's workload, without `TrinoRegexp`'s own dispatch. They do not measure
-the engine from before the plan existed, which lacked every later engine
-change.
+pattern is parsed as Trino parses it and compiled with the RE2 compiler dialect
+through `Re2.compileParsed`, which builds no plan, and each method calls the
+`Re2` route the base `TrinoRegexp` takes for its operation when a pattern has no
+plan. For these patterns, which all have capturing groups and no nullable loops,
+both dialects compile the same program, so the methods measure the current
+ordinary engine on the plan's workload, without `TrinoRegexp`'s own dispatch.
+They do not measure the engine from before the plan existed, which lacked every
+later engine change.
 
 Compare an equal-weight mean of all twelve individual-pattern timings with the
 interleaved and grouped timings. Grouping changes input order while retaining

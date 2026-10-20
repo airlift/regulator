@@ -37,7 +37,8 @@ and empty matches. Its malformed UTF-8 cases pin which overlong, surrogate,
 out-of-range, stray, and truncated sequences the engine consumes under dot,
 delimiter runs, counted runs, trailing tails, and delimited captures, including
 unanchored searches that start past rejected bytes and strict ends after a tail.
-Inputs and generated expectations are in:
+The few oracle patterns that select an RE2 scan plan run their cases on that
+plan; `TestRe2ScanPlan` lists them. Inputs and generated expectations are in:
 
 - `tools/re2-golden/public-match-cases.tsv`
 - `src/test/resources/io/airlift/regulator/upstream_public_match.jsonl`
