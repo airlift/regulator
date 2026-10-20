@@ -69,6 +69,8 @@ final class TrinoRegexpParser
     private static final class Parser
     {
         private static final int COMMENTS = 1 << 13;
+        // Joni's scan limit for the name in a POSIX class such as [:alpha:].
+        private static final int POSIX_BRACKET_NAME_LIMIT = 20;
 
         // Capture names permit Lu, Ll, Lt, Lm, Lo, Nl, Mn, Mc, Nd, and Pc categories.
         private static final CharClass VALID_CAPTURE_NAME = buildValidCaptureNameCharClass();
@@ -1160,12 +1162,12 @@ final class TrinoRegexpParser
                 break;
             }
             int nameEnd = index;
-            if (nameEnd == nameStart) {
-                index = startIndex;
-                return false;
-            }
-
-            if (atEnd() || peekByte() != ':' || index + 1 >= end || bytes[index + 1] != ']') {
+            if (nameEnd == nameStart || atEnd() || peekByte() != ':' || index + 1 >= end || bytes[index + 1] != ']') {
+                // When an unescaped :] comes before the next unescaped ], Joni reads [: as a POSIX bracket and
+                // anything but a class name and :] as an error or a literal [; otherwise [: opens a nested class.
+                if (hasPosixBracketEnd(startIndex + 2)) {
+                    throw unsupportedConstruct("malformed POSIX classes", startIndex, startIndex + 2);
+                }
                 index = startIndex;
                 return false;
             }
@@ -1173,10 +1175,32 @@ final class TrinoRegexpParser
             consumeByte(':');
             consumeByte(']');
 
+            // Joni stops looking for the end of an unknown name longer than the limit and reads a literal [.
+            if (nameEnd - nameStart > POSIX_BRACKET_NAME_LIMIT) {
+                throw unsupportedConstruct("malformed POSIX classes", startIndex, index);
+            }
+
             String name = new String(bytes, nameStart, nameEnd - nameStart, StandardCharsets.US_ASCII);
             CharClass characterClass = posixCharClass(name);
             addGroup(characterClassBuilder, characterClass, negate ? -1 : 1, parseFlags, caseFolding);
             return true;
+        }
+
+        private boolean hasPosixBracketEnd(int position)
+        {
+            for (int current = position; current < end; current++) {
+                int value = bytes[current];
+                if (value == ':' && current + 1 < end && bytes[current + 1] == ']') {
+                    return true;
+                }
+                if (value == ']') {
+                    return false;
+                }
+                if (value == '\\') {
+                    current++;
+                }
+            }
+            return false;
         }
 
         private static CharClass posixCharClass(String name)

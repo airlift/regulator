@@ -179,6 +179,7 @@ currently rejected:
 - surrogate escapes and non-ASCII byte escapes
 - empty character-class intersection operands
 - character classes used as range endpoints
+- malformed POSIX classes such as `[[:a:b:]]`
 - repetitions above 1,000
 
 Duplicate or digit-leading capture names are invalid patterns rather than

@@ -1069,7 +1069,9 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("[\\p-z]", "q", true),
                 new MatchCase("[a-\\p]", "q", false),
                 new MatchCase("(?i)[\\p]", "P", true),
-                new MatchCase("[\\p{L}]", "a", true));
+                new MatchCase("[\\p{L}]", "a", true),
+                // Without a later :], Joni reads [: as a nested class.
+                new MatchCase("[[:a:b]]", "a", true));
     }
 
     private static boolean joniFind(Slice pattern, Slice input)
