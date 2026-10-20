@@ -1,8 +1,10 @@
 # Pinned Trino/Joni comparator
 
-This comparator measures Regulator and Airlift Joni through equivalent
-Trino-shaped operations. Both implementations consume the exact workload and
-input `Slice` produced by `TestingTrinoRegexpBenchmarkInputs`.
+This comparator measures Regulator against Airlift Joni through equivalent
+Trino-shaped operations, and against Trino's LIKE functions on the normative
+LIKE rows described below. In the Joni comparison, both implementations
+consume the exact workload and input `Slice` produced by
+`TestingTrinoRegexpBenchmarkInputs`.
 
 The library-output comparisons use `JoniSliceOperations` for `extractAll`,
 `split`, and callback replacement. This adapter follows the pinned Trino search
@@ -106,5 +108,27 @@ TRINO_COMPARATOR_ROWS_CORPUS_DIRECTORY=/path/to/trino-row-corpus \
 tools/re2-benchmark/trino-joni/run-rows.sh \
     target/trino-joni-comparator/rows-results.json \
     -e 'BenchmarkTrinoRowsJoni\.(extract|split)$' \
+    -p workload=english -p literal=mid-none
+```
+
+`BenchmarkTrinoLikeRowsTrino` is the Trino LIKE twin of
+`BenchmarkTrinoLikeRows`, which matches the same rows with the LIKE pattern
+`%literal%`. It has the same parameters and one `matches` method, which calls
+Trino's `$like` function once per row, reading the pattern from the
+benchmark state where `BenchmarkTrinoLikeRows` binds it as a constant; C2
+folds none of the pattern's fields from a constant receiver, so the binding
+does not change Trino's compiled code. Trino's `$like_pattern` function
+compiles the same pattern bytes without an escape character; the setup of
+both benchmarks rejects a literal containing `_`, `%`, or `\`. The twin's
+setup checks the literal's hit rows with Trino's LIKE. Before timing, the
+verifier checks Regulator's interpreted `matches`, its generated
+`matchesGenerated`, and the timed Trino LIKE against the LIKE authority,
+Trino's `LikeMatcher` with optimization disabled, on every sampled row of
+every literal, over the same workloads as the Joni rows verifier. `run-like-rows.sh` runs it
+and passes its remaining arguments to JMH:
+
+```bash
+tools/re2-benchmark/trino-joni/run-like-rows.sh \
+    target/trino-joni-comparator/like-rows-results.json \
     -p workload=english -p literal=mid-none
 ```

@@ -1,0 +1,83 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.airlift.regulator;
+
+import io.airlift.slice.Slice;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.openjdk.jmh.annotations.Param;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.BooleanSupplier;
+
+import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
+import static org.assertj.core.api.Assertions.assertThat;
+
+public class TestBenchmarkTrinoLikeRows
+{
+    @Test
+    public void testJmhParametersMatchTrinoRows()
+            throws ReflectiveOperationException
+    {
+        // TestBenchmarkTrinoRows checks workload and literal against the manifests.
+        for (String name : List.of("workload", "literal", "corpusDirectory")) {
+            assertThat(parameter(BenchmarkTrinoLikeRows.BenchmarkData.class, name))
+                    .as(name)
+                    .isEqualTo(parameter(BenchmarkTrinoRows.BenchmarkData.class, name));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"english", "russian", "chinese"})
+    public void testEveryMethodCyclesThroughRows(String workload)
+            throws Exception
+    {
+        List<String> literals = TestingTrinoRowsBenchmarkInputs.literalIds(workload);
+        assertThat(literals).isNotEmpty();
+        BenchmarkTrinoLikeRows benchmark = new BenchmarkTrinoLikeRows();
+        for (String literal : literals) {
+            // Setup verifies the sampled rows and the literal's hit rows against the manifest.
+            BenchmarkTrinoLikeRows.BenchmarkData data = new BenchmarkTrinoLikeRows.BenchmarkData();
+            data.setWorkload(workload);
+            data.setLiteral(literal);
+            data.setCorpusDirectory(MISSING_CORPUS_DIRECTORY);
+            data.setup();
+            BenchmarkTrinoLikeRows.GeneratedData generated = new BenchmarkTrinoLikeRows.GeneratedData();
+            generated.setup(data);
+
+            TestingTrinoRowsBenchmarkInputs.Input input = TestingTrinoRowsBenchmarkInputs.create(workload, literal, MISSING_CORPUS_DIRECTORY);
+            // Each method takes one cycle through the rows, so the next method starts again at the
+            // first row. The pattern finds the literal anywhere in the row.
+            String cell = workload + "/" + literal;
+            assertEveryRow(cell, input, () -> benchmark.matches(data));
+            assertEveryRow(cell, input, () -> benchmark.matchesGenerated(data, generated));
+        }
+    }
+
+    private static void assertEveryRow(String cell, TestingTrinoRowsBenchmarkInputs.Input input, BooleanSupplier method)
+    {
+        for (int row = 0; row < input.sources().size(); row++) {
+            Slice source = input.sources().get(row);
+            assertThat(method.getAsBoolean()).as("%s row %s", cell, row).isEqualTo(source.indexOf(input.literal()) >= 0);
+        }
+    }
+
+    private static List<String> parameter(Class<?> benchmarkDataClass, String name)
+            throws ReflectiveOperationException
+    {
+        return Arrays.asList(benchmarkDataClass.getDeclaredField(name).getAnnotation(Param.class).value());
+    }
+}
