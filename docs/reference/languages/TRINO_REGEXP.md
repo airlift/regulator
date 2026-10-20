@@ -133,6 +133,9 @@ Inside a character class, a dash after a range is dropped, as in Joni, even when
 nested classes come between them, so `[a-p-z]` matches `z` but not `-`. The dash
 is kept when it ends the class or an intersection operand or when another dash
 follows, and a dropped dash must be followed by an ASCII character, not a class.
+A dash after a class escape, property, or POSIX class, or after a nested class
+that follows a single character or one of those, must end the class or an
+intersection operand, as in `[\d-]`.
 
 ## Operations
 
