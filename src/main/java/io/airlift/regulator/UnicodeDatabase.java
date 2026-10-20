@@ -57,7 +57,13 @@ final class UnicodeDatabase
     private static final int SECTION_FULL_LOWERCASE_MAPPINGS = 12;
     private static final int SECTION_NAME = 13;
     private static final int SECTION_CONTROL_NAME = 14;
-    private static final int SECTION_COUNT = 15;
+    private static final int SECTION_SCRIPT_EXTENSIONS = 15;
+    private static final int SECTION_GRAPHEME_CLUSTER_BREAK = 16;
+    private static final int SECTION_WORD_BREAK = 17;
+    private static final int SECTION_SENTENCE_BREAK = 18;
+    private static final int SECTION_PROPERTY_ALIASES = 19;
+    private static final int SECTION_PROPERTY_VALUE_ALIASES = 20;
+    private static final int SECTION_COUNT = 21;
     private static final int MAX_NAME_TOKENS = 15;
     private static final char[] HEX_DIGITS = "0123456789ABCDEF".toCharArray();
 
@@ -146,9 +152,8 @@ final class UnicodeDatabase
 
     /**
      * Returns binary properties and the code points that have each: Bidi_Mirrored, the properties
-     * of emoji-data.txt, and Hex_Digit, Ideographic, Join_Control, Noncharacter_Code_Point,
-     * Other_Alphabetic, Other_ID_Continue, Other_ID_Start, Other_Lowercase, and Other_Uppercase of
-     * PropList.txt. Two properties can share code points.
+     * of PropList.txt and emoji-data.txt, and the binary properties of DerivedCoreProperties.txt.
+     * Two properties can share code points.
      */
     static PropertyValues binaryProperties()
     {
@@ -162,6 +167,62 @@ final class UnicodeDatabase
     static PropertyValues ages()
     {
         return Ages.VALUES;
+    }
+
+    /**
+     * Returns the scripts of ScriptExtensions.txt, by short names such as Arab, and the code points
+     * whose list names each. A code point the file does not list has the extension of its Script
+     * value alone. Two scripts can share code points.
+     */
+    static PropertyValues scriptExtensions()
+    {
+        return ScriptExtensions.VALUES;
+    }
+
+    /**
+     * Returns the Grapheme_Cluster_Break values of GraphemeBreakProperty.txt, long names such as
+     * Regional_Indicator, and their code points. Code points of the default value, Other, are in
+     * none.
+     */
+    static PropertyValues graphemeClusterBreaks()
+    {
+        return GraphemeClusterBreaks.VALUES;
+    }
+
+    /**
+     * Returns the Word_Break values of WordBreakProperty.txt, long names such as ALetter, and their
+     * code points. Code points of the default value, Other, are in none.
+     */
+    static PropertyValues wordBreaks()
+    {
+        return WordBreaks.VALUES;
+    }
+
+    /**
+     * Returns the Sentence_Break values of SentenceBreakProperty.txt, long names such as ATerm, and
+     * their code points. Code points of the default value, Other, are in none.
+     */
+    static PropertyValues sentenceBreaks()
+    {
+        return SentenceBreaks.VALUES;
+    }
+
+    /**
+     * Returns the names of each property in PropertyAliases.txt, in ascending order of long name.
+     */
+    static List<Aliases> propertyAliases()
+    {
+        return PropertyAliases.ALIASES;
+    }
+
+    /**
+     * Returns the names of each value in PropertyValueAliases.txt of General_Category, Script,
+     * Age, and the three break properties, keyed by the property's short name, such as gc, and in
+     * ascending order of long name.
+     */
+    static Map<String, List<Aliases>> propertyValueAliases()
+    {
+        return PropertyValueAliases.ALIASES;
     }
 
     /**
@@ -201,6 +262,12 @@ final class UnicodeDatabase
     {
         return ControlNames.NAMES;
     }
+
+    /**
+     * The names of a property or a property value: its short name, such as WSpace, its long name,
+     * such as White_Space, and its other aliases, such as space.
+     */
+    record Aliases(String shortName, String longName, List<String> otherAliases) {}
 
     /**
      * Code points in strictly ascending order and the code point each maps to; every other code
@@ -596,15 +663,68 @@ final class UnicodeDatabase
         Map<String, String> names = new HashMap<>();
         String previous = null;
         for (int index = 0; index < count; index++) {
-            String key = scriptName(reader);
+            String key = asciiName(reader);
             if (previous != null && key.compareTo(previous) <= 0) {
                 throw reader.corrupt("names are not ascending");
             }
             previous = key;
-            names.put(key, scriptName(reader));
+            names.put(key, asciiName(reader));
         }
         reader.requireEnd();
         return Map.copyOf(names);
+    }
+
+    private static List<Aliases> parsePropertyAliases(Reader reader)
+    {
+        List<Aliases> aliases = parseAliasList(reader);
+        reader.requireEnd();
+        return aliases;
+    }
+
+    private static Map<String, List<Aliases>> parsePropertyValueAliases(Reader reader)
+    {
+        int count = reader.varint();
+        if (count > reader.remaining()) {
+            throw reader.corrupt("too many properties");
+        }
+        Map<String, List<Aliases>> properties = new HashMap<>();
+        String previous = null;
+        for (int index = 0; index < count; index++) {
+            String property = asciiName(reader);
+            if (previous != null && property.compareTo(previous) <= 0) {
+                throw reader.corrupt("properties are not ascending");
+            }
+            previous = property;
+            properties.put(property, parseAliasList(reader));
+        }
+        reader.requireEnd();
+        return Map.copyOf(properties);
+    }
+
+    private static List<Aliases> parseAliasList(Reader reader)
+    {
+        int count = reader.varint();
+        if (count > reader.remaining()) {
+            throw reader.corrupt("too many alias rows");
+        }
+        Aliases[] rows = new Aliases[count];
+        for (int index = 0; index < count; index++) {
+            String shortName = asciiName(reader);
+            String longName = asciiName(reader);
+            if (index > 0 && longName.compareTo(rows[index - 1].longName()) <= 0) {
+                throw reader.corrupt("long names are not ascending");
+            }
+            int aliasCount = reader.varint();
+            if (aliasCount > reader.remaining()) {
+                throw reader.corrupt("too many aliases of " + longName);
+            }
+            String[] otherAliases = new String[aliasCount];
+            for (int alias = 0; alias < aliasCount; alias++) {
+                otherAliases[alias] = asciiName(reader);
+            }
+            rows[index] = new Aliases(shortName, longName, List.of(otherAliases));
+        }
+        return List.of(rows);
     }
 
     private static CharacterNames parseCharacterNames(Reader reader)
@@ -681,7 +801,7 @@ final class UnicodeDatabase
         return new CharacterNames(Arrays.copyOf(words, length), wordEnds, frequentWordCount, codePoints, tokenEnds, Arrays.copyOf(tokens, tokenCount));
     }
 
-    private static String scriptName(Reader reader)
+    private static String asciiName(Reader reader)
     {
         byte[] name = reader.bytes(reader.varint());
         if (name.length == 0) {
@@ -917,6 +1037,36 @@ final class UnicodeDatabase
     private static final class Ages
     {
         private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_AGE));
+    }
+
+    private static final class ScriptExtensions
+    {
+        private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_SCRIPT_EXTENSIONS));
+    }
+
+    private static final class GraphemeClusterBreaks
+    {
+        private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_GRAPHEME_CLUSTER_BREAK));
+    }
+
+    private static final class WordBreaks
+    {
+        private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_WORD_BREAK));
+    }
+
+    private static final class SentenceBreaks
+    {
+        private static final PropertyValues VALUES = parsePropertyValues(Resource.RESOURCE.section(SECTION_SENTENCE_BREAK));
+    }
+
+    private static final class PropertyAliases
+    {
+        private static final List<Aliases> ALIASES = parsePropertyAliases(Resource.RESOURCE.section(SECTION_PROPERTY_ALIASES));
+    }
+
+    private static final class PropertyValueAliases
+    {
+        private static final Map<String, List<Aliases>> ALIASES = parsePropertyValueAliases(Resource.RESOURCE.section(SECTION_PROPERTY_VALUE_ALIASES));
     }
 
     private static final class FullUppercaseMappings

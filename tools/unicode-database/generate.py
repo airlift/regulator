@@ -90,12 +90,10 @@
 #
 # Section 9, binary properties, a property value set whose values are
 # properties and their code points: Bidi_Mirrored, UnicodeData.txt field 9;
-# the Emoji, Emoji_Component, Emoji_Modifier, Emoji_Modifier_Base,
-# Emoji_Presentation, and Extended_Pictographic properties of
-# emoji/emoji-data.txt; and the Hex_Digit, Ideographic, Join_Control,
-# Noncharacter_Code_Point, Other_Alphabetic, Other_ID_Continue, Other_ID_Start,
-# Other_Lowercase, and Other_Uppercase properties of PropList.txt. Unlike the
-# values of the other sets, two properties can share code points.
+# every property of PropList.txt and of emoji/emoji-data.txt; and the binary
+# properties of DerivedCoreProperties.txt, which is every property it lists but
+# the enumerated Indic_Conjunct_Break. Two properties can share code points, as
+# two Script_Extensions values can, unlike the values of the other sets.
 #
 # Section 10, Age, a property value set: the DerivedAge.txt values, which are
 # versions such as 1.1. Code points of the default value, Unassigned, are
@@ -129,18 +127,49 @@
 # UnicodeData.txt field 10, of each row labeled <control> that has one, such
 # as LINE FEED (LF).
 #
+# Section 15, Script_Extensions, a property value set whose values are script
+# short names, such as Arab: the code points whose ScriptExtensions.txt list
+# names each script. A code point the file does not list has the extension of
+# its Script value alone. Two scripts can share code points.
+#
+# Sections 16, 17, and 18, Grapheme_Cluster_Break, Word_Break, and
+# Sentence_Break, property value sets: the values of
+# auxiliary/GraphemeBreakProperty.txt, auxiliary/WordBreakProperty.txt, and
+# auxiliary/SentenceBreakProperty.txt, which are long names such as
+# Regional_Indicator. Code points of the default value, Other, are absent.
+#
+# An alias list holds the names of each property or each value of one: a varint
+# row count, then per row, in ascending order of long name, the short name, the
+# long name, a varint count of the other aliases, and each other alias, every
+# name as a varint byte length and ASCII letters, digits, underscores, and
+# periods.
+#
+# Section 19, property aliases, an alias list: the PropertyAliases.txt rows,
+# such as WSpace, White_Space, and space.
+#
+# Section 20, property value aliases: the PropertyValueAliases.txt rows of
+# General_Category, Script, Age, and the three break properties. The payload is
+# a varint property count, then per property, in ascending order of its short
+# name, such as gc, the short name as a varint byte length and ASCII, and the
+# alias list of its values, such as Nd, Decimal_Number, and digit.
+#
 # The generator refuses data that breaks what the readers assume: a code point
 # with two mappings of one kind, a simple fold whose target folds again, a full
 # fold whose result folds again, a status S mapping without a status F one,
 # simple case folding orbits that differ from the classes of code points with
 # equal full folding, a lowercase-of-uppercase mapping that is not idempotent,
 # a code point with two values of one single-valued property, such as two
-# scripts, a First row without its Last row, a binary property that one of its
-# files does not list, an unconditional special casing to one code point that
-# differs from the simple mapping, two code points with one name, two controls
-# with one control name, and a name with characters other than uppercase
-# letters, digits, hyphens, and parentheses, with spaces other than single ones
-# between words, or with more than 15 tokens.
+# scripts, a First row without its Last row, a file of binary properties that
+# adds a property the generator does not expect or omits one it does, a binary
+# property that two files define, an unconditional special casing to one code
+# point that differs from the simple mapping, two code points with one name,
+# two controls with one control name, a name with characters other than
+# uppercase letters, digits, hyphens, and parentheses, with spaces other than
+# single ones between words, or with more than 15 tokens, a script extension
+# that is not a script short name, a Script_Extensions list that names a script
+# twice, a property of VALUE_ALIAS_PROPERTIES with no value aliases, and two
+# alias rows of one list with one long name or with names that match loosely by
+# UAX #44 rule UAX44-LM3.
 
 import argparse
 import hashlib
@@ -155,16 +184,22 @@ GENERATED = TOOL_DIR / "generated.txt"
 DOWNLOAD_ROOT = ROOT_DIR / "target/unicode-database"
 OUTPUT_DIR = ROOT_DIR / "src/main/resources/io/airlift/regulator/unicode"
 
-URL_PATTERN = re.compile(r"https://www\.unicode\.org/Public/(\d+\.\d+\.\d+)/ucd/((?:emoji/)?[A-Za-z-]+\.txt)")
+URL_PATTERN = re.compile(r"https://www\.unicode\.org/Public/(\d+\.\d+\.\d+)/ucd/((?:auxiliary/|emoji/)?[A-Za-z-]+\.txt)")
 INPUT_FILES = (
     "Blocks.txt",
     "CaseFolding.txt",
     "DerivedAge.txt",
+    "DerivedCoreProperties.txt",
     "PropList.txt",
+    "PropertyAliases.txt",
     "PropertyValueAliases.txt",
+    "ScriptExtensions.txt",
     "Scripts.txt",
     "SpecialCasing.txt",
     "UnicodeData.txt",
+    "auxiliary/GraphemeBreakProperty.txt",
+    "auxiliary/SentenceBreakProperty.txt",
+    "auxiliary/WordBreakProperty.txt",
     "emoji/emoji-data.txt",
 )
 # Files whose first line names the file and its version, such as "# Scripts-18.0.0.txt".
@@ -172,25 +207,84 @@ VERSIONED_FILES = (
     "Blocks.txt",
     "CaseFolding.txt",
     "DerivedAge.txt",
+    "DerivedCoreProperties.txt",
     "PropList.txt",
+    "PropertyAliases.txt",
     "PropertyValueAliases.txt",
+    "ScriptExtensions.txt",
     "Scripts.txt",
     "SpecialCasing.txt",
+    "auxiliary/GraphemeBreakProperty.txt",
+    "auxiliary/SentenceBreakProperty.txt",
+    "auxiliary/WordBreakProperty.txt",
 )
 # Files whose first line names the file, such as "# emoji-data.txt", and a later
 # header line its version, such as "# Version: 18.0.0".
 EMOJI_FILES = ("emoji/emoji-data.txt",)
 PROP_LIST_PROPERTIES = (
+    "ASCII_Hex_Digit",
+    "Bidi_Control",
+    "Dash",
+    "Deprecated",
+    "Diacritic",
+    "Extender",
     "Hex_Digit",
+    "Hyphen",
+    "IDS_Binary_Operator",
+    "IDS_Trinary_Operator",
+    "IDS_Unary_Operator",
+    "ID_Compat_Math_Continue",
+    "ID_Compat_Math_Start",
     "Ideographic",
     "Join_Control",
+    "Logical_Order_Exception",
+    "Modifier_Combining_Mark",
     "Noncharacter_Code_Point",
     "Other_Alphabetic",
+    "Other_Default_Ignorable_Code_Point",
+    "Other_Grapheme_Extend",
     "Other_ID_Continue",
     "Other_ID_Start",
     "Other_Lowercase",
+    "Other_Math",
     "Other_Uppercase",
+    "Pattern_Syntax",
+    "Pattern_White_Space",
+    "Prepended_Concatenation_Mark",
+    "Quotation_Mark",
+    "Radical",
+    "Regional_Indicator",
+    "Sentence_Terminal",
+    "Soft_Dotted",
+    "Terminal_Punctuation",
+    "Unified_Ideograph",
+    "Variation_Selector",
+    "White_Space",
 )
+DERIVED_CORE_PROPERTIES = (
+    "Alphabetic",
+    "Case_Ignorable",
+    "Cased",
+    "Changes_When_Casefolded",
+    "Changes_When_Casemapped",
+    "Changes_When_Lowercased",
+    "Changes_When_Titlecased",
+    "Changes_When_Uppercased",
+    "Default_Ignorable_Code_Point",
+    "Grapheme_Base",
+    "Grapheme_Extend",
+    "Grapheme_Link",
+    "ID_Continue",
+    "ID_Start",
+    "Lowercase",
+    "Math",
+    "Uppercase",
+    "XID_Continue",
+    "XID_Start",
+)
+# DerivedCoreProperties.txt also lists an enumerated property, in rows
+# "<code>[..<code>] ; <property> ; <value>".
+DERIVED_CORE_ENUMERATED_PROPERTIES = ("InCB",)
 EMOJI_PROPERTIES = (
     "Emoji",
     "Emoji_Component",
@@ -199,7 +293,11 @@ EMOJI_PROPERTIES = (
     "Emoji_Presentation",
     "Extended_Pictographic",
 )
+# The properties whose value aliases section 20 holds, by short name.
+VALUE_ALIAS_PROPERTIES = ("GCB", "SB", "WB", "age", "gc", "sc")
 NAME = r"[A-Za-z0-9_]+"
+# An alias is a name or a version, such as the Age value 1.1.
+ALIAS = r"[A-Za-z0-9_.]+"
 BLOCK_NAME = r"[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*"
 AGE = r"[0-9]+\.[0-9]+"
 # A character name is words of letters, digits, hyphens, and parentheses, separated by single
@@ -227,6 +325,12 @@ SECTION_FULL_UPPERCASE_MAPPINGS = 11
 SECTION_FULL_LOWERCASE_MAPPINGS = 12
 SECTION_NAME = 13
 SECTION_CONTROL_NAME = 14
+SECTION_SCRIPT_EXTENSIONS = 15
+SECTION_GRAPHEME_CLUSTER_BREAK = 16
+SECTION_WORD_BREAK = 17
+SECTION_SENTENCE_BREAK = 18
+SECTION_PROPERTY_ALIASES = 19
+SECTION_PROPERTY_VALUE_ALIASES = 20
 MAX_CODE_POINT = 0x10FFFF
 
 
@@ -521,17 +625,20 @@ def special_casing(text, uppercase, lowercase):
     return sorted(full_uppercase.items()), sorted(full_lowercase.items())
 
 
-def property_values(name, text, value_pattern=NAME, single_valued=True):
+def property_values(name, text, value_pattern=NAME, single_valued=True, enumerated=()):
     # Rows of a property file are "<code>[..<code>] ; <value>", followed by an
     # optional "# <comment>". In a file of one single-valued property, a code
     # point has at most one value; in a file of binary properties, each value
-    # is a property that its code points have.
+    # is a property that its code points have, and the rows of the enumerated
+    # properties it also lists are skipped.
     values = {}
     for number, line in enumerate(text.split("\n"), 1):
         row = line.split("#", 1)[0].strip()
         if not row:
             continue
         fields = [field.strip() for field in row.split(";")]
+        if len(fields) == 3 and fields[1] in enumerated:
+            continue
         match = re.fullmatch(r"([0-9A-F]{4,6})(?:\.\.([0-9A-F]{4,6}))?", fields[0])
         if len(fields) != 2 or match is None or re.fullmatch(value_pattern, fields[1]) is None:
             raise ValueError(f"{name}:{number}: unexpected row {line!r}")
@@ -545,33 +652,105 @@ def property_values(name, text, value_pattern=NAME, single_valued=True):
     return values
 
 
-def binary_properties(name, text, properties):
-    values = property_values(name, text, single_valued=False)
-    missing = [value for value in properties if value not in values]
-    if missing:
-        raise ValueError(f"{name} does not list {', '.join(missing)}")
-    return {value: values[value] for value in properties}
+def binary_properties(name, text, properties, enumerated=()):
+    # A file must list exactly the expected properties, so a property that a
+    # new version adds is a reviewed change to the generator.
+    values = property_values(name, text, single_valued=False, enumerated=enumerated)
+    missing = sorted(set(properties) - set(values))
+    unexpected = sorted(set(values) - set(properties))
+    if missing or unexpected:
+        raise ValueError(f"{name} omits the expected properties {missing} and lists the unexpected ones {unexpected}")
+    return values
 
 
-def script_short_names(text):
-    # PropertyValueAliases.txt rows are "<property> ; <short name> ; <long name>",
-    # followed by optional further aliases. Only the Script (sc) rows are read.
-    short_names = {}
+def add_binary_properties(binary, properties):
+    for value, ranges in properties.items():
+        if value in binary:
+            raise ValueError(f"binary property {value} is listed by two files")
+        binary[value] = ranges
+
+
+def script_extensions(text, short_names):
+    # ScriptExtensions.txt rows are "<code>[..<code>] ; <short names>", the
+    # script short names separated by single spaces, followed by an optional
+    # "# <comment>". Each value of the result is one script.
+    extensions = {}
+    for value, ranges in property_values("ScriptExtensions.txt", text, rf"{NAME}(?: {NAME})*").items():
+        scripts = value.split(" ")
+        if len(set(scripts)) != len(scripts):
+            raise ValueError(f"ScriptExtensions.txt: {value} names a script twice")
+        for script in scripts:
+            if script not in short_names:
+                raise ValueError(f"ScriptExtensions.txt: {script} is not a script short name")
+            for low, high in ranges:
+                add_range(extensions, script, low, high)
+    return extensions
+
+
+def property_aliases(text):
+    # PropertyAliases.txt rows are "<short name> ; <long name>", followed by
+    # optional further aliases.
+    rows = []
     for number, line in enumerate(text.split("\n"), 1):
         row = line.split("#", 1)[0].strip()
         if not row:
             continue
         fields = [field.strip() for field in row.split(";")]
-        if fields[0] != "sc":
+        if len(fields) < 2 or any(re.fullmatch(NAME, field) is None for field in fields):
+            raise ValueError(f"PropertyAliases.txt:{number}: unexpected row {line!r}")
+        rows.append(tuple(fields))
+    return alias_list("PropertyAliases.txt", rows)
+
+
+def property_value_aliases(text):
+    # PropertyValueAliases.txt rows are
+    # "<property> ; <short name> ; <long name>", followed by optional further
+    # aliases and an optional "# <comment>". Only the rows of
+    # VALUE_ALIAS_PROPERTIES are read.
+    rows = {}
+    for number, line in enumerate(text.split("\n"), 1):
+        row = line.split("#", 1)[0].strip()
+        if not row:
             continue
-        if len(fields) < 3 or any(re.fullmatch(NAME, field) is None for field in fields[1:]):
+        fields = [field.strip() for field in row.split(";")]
+        if fields[0] not in VALUE_ALIAS_PROPERTIES:
+            continue
+        if len(fields) < 3 or any(re.fullmatch(ALIAS, field) is None for field in fields[1:]):
             raise ValueError(f"PropertyValueAliases.txt:{number}: unexpected row {line!r}")
-        if fields[1] in short_names:
-            raise ValueError(f"PropertyValueAliases.txt:{number}: script {fields[1]} is listed twice")
-        short_names[fields[1]] = fields[2]
-    if not short_names:
-        raise ValueError("PropertyValueAliases.txt lists no script")
-    return sorted(short_names.items())
+        rows.setdefault(fields[0], []).append(tuple(fields[1:]))
+    missing = [prop for prop in VALUE_ALIAS_PROPERTIES if prop not in rows]
+    if missing:
+        raise ValueError(f"PropertyValueAliases.txt lists no value of {', '.join(missing)}")
+    return {prop: alias_list(f"PropertyValueAliases.txt {prop}", prop_rows) for prop, prop_rows in rows.items()}
+
+
+def alias_list(name, rows):
+    # Rows are (short name, long name, other aliases...), returned in ascending
+    # order of long name. UAX44-LM3 matches names ignoring case, spaces,
+    # underscores, hyphens, and an initial "is", and no two rows may share a
+    # long name or a name by that rule.
+    by_long_name = {}
+    loose_names = {}
+    for row in rows:
+        if row[1] in by_long_name:
+            raise ValueError(f"{name}: {row[1]} is listed twice")
+        by_long_name[row[1]] = row
+        for alias in row:
+            key = re.sub(r"[ _-]", "", alias).lower()
+            key = key[2:] if key.startswith("is") else key
+            if loose_names.setdefault(key, row[1]) != row[1]:
+                raise ValueError(f"{name}: {alias} of {row[1]} matches a name of {loose_names[key]}")
+    return [by_long_name[long_name] for long_name in sorted(by_long_name)]
+
+
+def script_short_names(value_aliases):
+    # The short and long name of each script, from the Script (sc) value
+    # aliases, in ascending order of short name. Unlike an Age value, a script
+    # name holds no period.
+    for row in value_aliases["sc"]:
+        if any(re.fullmatch(NAME, name) is None for name in row):
+            raise ValueError(f"PropertyValueAliases.txt: unexpected script names {row!r}")
+    return sorted((row[0], row[1]) for row in value_aliases["sc"])
 
 
 def add_range(values, value, low, high):
@@ -649,9 +828,8 @@ def multi_character_section(section_id, mappings):
 def property_value_section(section_id, values):
     payload = bytearray(varint(len(values)))
     for name in sorted(values):
-        encoded_name = name.encode("ascii")
         ranges = coalesce(values[name])
-        payload += varint(len(encoded_name)) + encoded_name
+        payload += ascii_name(name)
         payload += varint(len(ranges))
         next_code_point = 0
         for low, high in ranges:
@@ -664,10 +842,29 @@ def property_value_section(section_id, values):
 def name_section(section_id, pairs):
     payload = bytearray(varint(len(pairs)))
     for key, value in pairs:
-        for name in (key, value):
-            encoded_name = name.encode("ascii")
-            payload += varint(len(encoded_name)) + encoded_name
+        payload += ascii_name(key) + ascii_name(value)
     return section(section_id, bytes(payload))
+
+
+def alias_list_payload(rows):
+    payload = bytearray(varint(len(rows)))
+    for short_name, long_name, *aliases in rows:
+        payload += ascii_name(short_name) + ascii_name(long_name) + varint(len(aliases))
+        for alias in aliases:
+            payload += ascii_name(alias)
+    return bytes(payload)
+
+
+def property_value_alias_section(section_id, properties):
+    payload = bytearray(varint(len(properties)))
+    for prop in sorted(properties):
+        payload += ascii_name(prop) + alias_list_payload(properties[prop])
+    return section(section_id, bytes(payload))
+
+
+def ascii_name(name):
+    encoded = name.encode("ascii")
+    return varint(len(encoded)) + encoded
 
 
 def mapping_section(section_id, mappings):
@@ -740,10 +937,17 @@ def database(version, files, texts, key):
     full_uppercase, full_lowercase = special_casing(texts["SpecialCasing.txt"], dict(uppercase), dict(lowercase))
     scripts = property_values("Scripts.txt", texts["Scripts.txt"])
     blocks = property_values("Blocks.txt", texts["Blocks.txt"], BLOCK_NAME)
+    value_aliases = property_value_aliases(texts["PropertyValueAliases.txt"])
+    short_names = script_short_names(value_aliases)
     binary = {"Bidi_Mirrored": mirrored}
-    binary.update(binary_properties("emoji/emoji-data.txt", texts["emoji/emoji-data.txt"], EMOJI_PROPERTIES))
-    binary.update(binary_properties("PropList.txt", texts["PropList.txt"], PROP_LIST_PROPERTIES))
+    add_binary_properties(binary, binary_properties("emoji/emoji-data.txt", texts["emoji/emoji-data.txt"], EMOJI_PROPERTIES))
+    add_binary_properties(binary, binary_properties("PropList.txt", texts["PropList.txt"], PROP_LIST_PROPERTIES))
+    add_binary_properties(binary, binary_properties("DerivedCoreProperties.txt", texts["DerivedCoreProperties.txt"], DERIVED_CORE_PROPERTIES, DERIVED_CORE_ENUMERATED_PROPERTIES))
     ages = property_values("DerivedAge.txt", texts["DerivedAge.txt"], AGE)
+    extensions = script_extensions(texts["ScriptExtensions.txt"], dict(short_names))
+    grapheme_cluster_breaks = property_values("auxiliary/GraphemeBreakProperty.txt", texts["auxiliary/GraphemeBreakProperty.txt"])
+    word_breaks = property_values("auxiliary/WordBreakProperty.txt", texts["auxiliary/WordBreakProperty.txt"])
+    sentence_breaks = property_values("auxiliary/SentenceBreakProperty.txt", texts["auxiliary/SentenceBreakProperty.txt"])
     encoded_version = version.encode("ascii")
     return (MAGIC
             + varint(FORMAT_VERSION)
@@ -756,14 +960,20 @@ def database(version, files, texts, key):
             + mapping_section(SECTION_SIMPLE_LOWERCASE_MAPPINGS, lowercase)
             + property_value_section(SECTION_GENERAL_CATEGORY, categories)
             + property_value_section(SECTION_SCRIPT, scripts)
-            + name_section(SECTION_SCRIPT_SHORT_NAMES, script_short_names(texts["PropertyValueAliases.txt"]))
+            + name_section(SECTION_SCRIPT_SHORT_NAMES, short_names)
             + property_value_section(SECTION_BLOCK, blocks)
             + property_value_section(SECTION_BINARY_PROPERTIES, binary)
             + property_value_section(SECTION_AGE, ages)
             + multi_character_section(SECTION_FULL_UPPERCASE_MAPPINGS, full_uppercase)
             + multi_character_section(SECTION_FULL_LOWERCASE_MAPPINGS, full_lowercase)
             + character_name_section(SECTION_NAME, names)
-            + character_name_section(SECTION_CONTROL_NAME, control_names))
+            + character_name_section(SECTION_CONTROL_NAME, control_names)
+            + property_value_section(SECTION_SCRIPT_EXTENSIONS, extensions)
+            + property_value_section(SECTION_GRAPHEME_CLUSTER_BREAK, grapheme_cluster_breaks)
+            + property_value_section(SECTION_WORD_BREAK, word_breaks)
+            + property_value_section(SECTION_SENTENCE_BREAK, sentence_breaks)
+            + section(SECTION_PROPERTY_ALIASES, alias_list_payload(property_aliases(texts["PropertyAliases.txt"])))
+            + property_value_alias_section(SECTION_PROPERTY_VALUE_ALIASES, value_aliases))
 
 
 def generated(key, data):

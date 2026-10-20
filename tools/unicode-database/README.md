@@ -32,6 +32,12 @@ documents the format. The database holds:
   Unicode_1_Name of every control, which give Java's `\N{name}` its names
 - the Age of every assigned code point, from `DerivedAge.txt`, which tells the
   tests which code points the running JDK's Unicode version assigns
+- every binary property of `PropList.txt` and `DerivedCoreProperties.txt`, the
+  Script_Extensions of `ScriptExtensions.txt`, the Grapheme_Cluster_Break,
+  Word_Break, and Sentence_Break of the `auxiliary/` break property files, the
+  names of every property, from `PropertyAliases.txt`, and the names of the
+  General_Category, Script, Age, and break property values, from
+  `PropertyValueAliases.txt`, which a language can name its properties by
 
 ## Usage
 
@@ -77,21 +83,28 @@ Moving to a new version changes every result that depends on the database.
 
    ```bash
    version=19.0.0
-   mkdir -p target && mkdir "target/ucd-${version}" "target/ucd-${version}/emoji"
-   for file in Blocks.txt CaseFolding.txt DerivedAge.txt PropList.txt \
-           PropertyValueAliases.txt Scripts.txt SpecialCasing.txt \
-           UnicodeData.txt emoji/emoji-data.txt; do
+   mkdir -p target && mkdir "target/ucd-${version}" \
+           "target/ucd-${version}/auxiliary" "target/ucd-${version}/emoji"
+   for file in Blocks.txt CaseFolding.txt DerivedAge.txt \
+           DerivedCoreProperties.txt PropList.txt PropertyAliases.txt \
+           PropertyValueAliases.txt ScriptExtensions.txt Scripts.txt \
+           SpecialCasing.txt UnicodeData.txt \
+           auxiliary/GraphemeBreakProperty.txt \
+           auxiliary/SentenceBreakProperty.txt \
+           auxiliary/WordBreakProperty.txt emoji/emoji-data.txt; do
        curl -sSfL -o "target/ucd-${version}/${file}" \
            "https://www.unicode.org/Public/${version}/ucd/${file}"
    done
-   shasum -a 256 "target/ucd-${version}"/*.txt "target/ucd-${version}"/emoji/*
+   shasum -a 256 "target/ucd-${version}"/*.txt \
+           "target/ucd-${version}"/auxiliary/* "target/ucd-${version}"/emoji/*
    ```
 
 2. Replace each URL and SHA-256 in `manifest.txt`.
 3. Run the generator. A row that no longer parses, a new status, or data that
    breaks an assumption the comment at the top of `generate.py` lists fails the
-   generator. Change the parser only for a documented change in the UCD file
-   format.
+   generator, as does a binary property file that adds or drops a property;
+   review a new property before adding it to the generator's list. Change the
+   parser only for a documented change in the UCD file format.
 4. Delete the previous `unicode-<version>.bin`, and set
    `UnicodeDatabase.UNICODE_VERSION` to the new version.
 5. Set the version stated in both copies of `LICENSE-unicode.txt`.
