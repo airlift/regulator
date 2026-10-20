@@ -9,7 +9,7 @@
 
 The inputs are synthetic. This is a diagnostic benchmark, not the full SQL query,
 not a reproduction of ClickHouse's published speedup, and not part of the frozen
-dashboard dataset. It measures the RE2 frontend, which does not use the Trino
+dashboard dataset. It measures the RE2 frontend, which runs this pattern on a
 scan plan.
 
 ## Semantics and cases
@@ -52,10 +52,11 @@ stages: subtracting two rows does not isolate capture recovery or allocation.
 The fixed-input rows diagnose scaling and routes; they do not model production
 branch profiles.
 
-## Trino specialized execution
+## Scan-plan execution
 
-The [Trino scan-plan guide](TRINO_SCAN_PLAN.md) describes specialized Trino
-execution of this pattern and its benchmark, including normal-dot semantics.
+The [scan-plan guide](TRINO_SCAN_PLAN.md) describes the scan plan that runs this
+pattern in the RE2 and Trino frontends and its benchmarks, including Trino's
+normal-dot semantics.
 
 ## ClickHouse reference
 

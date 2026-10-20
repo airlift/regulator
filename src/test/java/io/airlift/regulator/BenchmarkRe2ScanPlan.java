@@ -29,6 +29,9 @@ import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 
 import java.io.ByteArrayOutputStream;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -44,6 +47,10 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * and malformed UTF-8 rows for its URL, UNANCHORED_URL, LONG_HOST, and UNANCHORED_TAIL_4096
  * workloads, whose delimiter runs and tails cross that text. The patterns keep their Trino text, so
  * {@code $} is RE2's strict end. No compilation cache is involved.
+ * <p>
+ * With {@code scanPlan=false}, every pattern compiles without its scan plan, so the methods time the
+ * ordinary engine on the same rows. That compile is resolved reflectively, so this source also runs
+ * against a build without RE2 scan plans when given {@code -p scanPlan=true}.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -136,8 +143,12 @@ public class BenchmarkRe2ScanPlan
         @Param({"true", "false"})
         public boolean dotAll;
 
+        @Param({"true", "false"})
+        public boolean scanPlan;
+
         Slice[] expressions;
         private Re2.Options options;
+        private MethodHandle compiler;
         Re2[] patterns;
         private Re2Matcher[] matchers;
         private int[] bounds;
@@ -156,6 +167,7 @@ public class BenchmarkRe2ScanPlan
             source.setup();
 
             options = Re2.Options.defaults();
+            compiler = compiler(scanPlan);
             expressions = source.expressions;
             int count = expressions.length;
             patterns = new Re2[count];
@@ -164,7 +176,7 @@ public class BenchmarkRe2ScanPlan
             extractionGroups = new int[count];
             rewrites = new Slice[count];
             for (int index = 0; index < count; index++) {
-                patterns[index] = Re2.compile(expressions[index], options);
+                patterns[index] = compile(compiler, expressions[index], options);
                 matchers[index] = patterns[index].matcher(EMPTY_SLICE);
                 extractionGroups[index] = patterns[index].capturingGroupCount() == 0 ? 0 : 1;
                 rewrites[index] = utf8Slice("\\" + extractionGroups[index]);
@@ -246,7 +258,34 @@ public class BenchmarkRe2ScanPlan
     public Re2 compile(BenchmarkData data)
     {
         data.next();
-        return Re2.compile(data.expressions[data.patternIndex], data.options);
+        return compile(data.compiler, data.expressions[data.patternIndex], data.options);
+    }
+
+    /**
+     * Returns the handle that compiles a pattern through the public API, or through the compiler
+     * that disables scan plans.
+     */
+    private static MethodHandle compiler(boolean scanPlan)
+    {
+        MethodType type = MethodType.methodType(Re2.class, Slice.class, Re2.Options.class);
+        try {
+            return scanPlan
+                    ? MethodHandles.publicLookup().findStatic(Re2.class, "compile", type)
+                    : MethodHandles.lookup().findStatic(Re2.class, "compileWithoutScanPlanForTesting", type);
+        }
+        catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Cannot find Re2." + (scanPlan ? "compile" : "compileWithoutScanPlanForTesting"), e);
+        }
+    }
+
+    private static Re2 compile(MethodHandle compiler, Slice expression, Re2.Options options)
+    {
+        try {
+            return (Re2) compiler.invokeExact(expression, options);
+        }
+        catch (Throwable throwable) {
+            throw new IllegalStateException("Cannot compile " + expression.toStringUtf8(), throwable);
+        }
     }
 
     /**

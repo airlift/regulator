@@ -507,7 +507,7 @@ public final class Re2
     static Re2 compile(Slice pattern, int flags)
     {
         requireNonNull(pattern, "pattern is null");
-        return compile(pattern.copy(), flags, Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), false);
+        return compile(pattern.copy(), flags, Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), false, TrinoScanPlan.Language.RE2, false);
     }
 
     /**
@@ -517,7 +517,35 @@ public final class Re2
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
-        return compile(pattern.copy(), options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.longestMatch());
+        return compile(pattern.copy(), options, TrinoScanPlan.Language.RE2, false);
+    }
+
+    /**
+     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but without a scan plan,
+     * so tests and benchmarks can compare a plan with the ordinary engine.
+     */
+    static Re2 compileWithoutScanPlanForTesting(Slice pattern, Options options)
+    {
+        requireNonNull(pattern, "pattern is null");
+        requireNonNull(options, "options is null");
+        return compile(pattern.copy(), options, TrinoScanPlan.Language.NONE, false);
+    }
+
+    /**
+     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but a scan plan
+     * continues every unanchored search on the ordinary engine before its first attempt.
+     */
+    static Re2 compileForcingScanPlanHandoffForTesting(Slice pattern, Options options)
+    {
+        requireNonNull(pattern, "pattern is null");
+        requireNonNull(options, "options is null");
+        return compile(pattern.copy(), options, TrinoScanPlan.Language.RE2, true);
+    }
+
+    private static Re2 compile(Slice pattern, Options options, TrinoScanPlan.Language scanPlanLanguage, boolean forceScanPlanHandoff)
+    {
+        requireNonNull(options, "options is null");
+        return compile(pattern, options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.longestMatch(), scanPlanLanguage, forceScanPlanHandoff);
     }
 
     /**
@@ -689,11 +717,18 @@ public final class Re2
         return out.slice();
     }
 
-    private static Re2 compile(Slice pattern, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean longestMatch)
+    private static Re2 compile(
+            Slice pattern,
+            int flags,
+            long maxMemory,
+            ByteFrequencies byteFrequencies,
+            boolean longestMatch,
+            TrinoScanPlan.Language scanPlanLanguage,
+            boolean forceScanPlanHandoff)
     {
         requireNonNull(pattern, "pattern is null");
         ParseResult parsed = RegexpParser.parse(pattern, flags);
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, scanPlanLanguage, forceScanPlanHandoff);
     }
 
     /**
@@ -723,7 +758,7 @@ public final class Re2
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.NONE, false);
     }
 
     /**
@@ -790,7 +825,7 @@ public final class Re2
                         null);
             }
         }
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, forceScanPlanHandoff);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, TrinoScanPlan.Language.TRINO, forceScanPlanHandoff);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)
@@ -804,11 +839,6 @@ public final class Re2
                 regexp.requiredPrefix(parsed.caseFolding()) == null;
     }
 
-    private static Re2 build(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean longestMatch)
-    {
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, false);
-    }
-
     private static Re2 build(
             Slice pattern,
             ParseResult parsed,
@@ -817,6 +847,7 @@ public final class Re2
             ByteFrequencies byteFrequencies,
             boolean longestMatch,
             Compiler.Dialect compilerDialect,
+            TrinoScanPlan.Language scanPlanLanguage,
             boolean forceScanPlanHandoff)
     {
         long reverseMemory = Math.max(1, maxMemory / 3);
@@ -911,8 +942,10 @@ public final class Re2
                 exactLiteral == null ? -1 : exactLiteral.length(),
                 requiredPrefix,
                 semanticProgram);
-        TrinoScanPlan trinoScanPlan = compilerDialect == Compiler.Dialect.TRINO && !expressionAnalysis.canMatchEmpty()
-                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount, forceScanPlanHandoff, caseFolding, byteFrequencies)
+        // The frontend chooses the plan's language. A plan reports leftmost-first matches, so a
+        // longest-match pattern has none.
+        TrinoScanPlan trinoScanPlan = scanPlanLanguage != TrinoScanPlan.Language.NONE && !longestMatch && !expressionAnalysis.canMatchEmpty()
+                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount, scanPlanLanguage, forceScanPlanHandoff, caseFolding, byteFrequencies)
                 : null;
         // Anchored and literal-led plans take precedence over a lowered boolean program. A run-led
         // unanchored plan yields to one, which keeps the lowered final-line route.
@@ -1989,8 +2022,9 @@ public final class Re2
     long countMatches(Slice text)
     {
         requireNonNull(text, "text is null");
-        // An unanchored plan gives malformed UTF-8 bytes the membership find gives them, which
-        // the DFA count would reject. Count through the plan so both agree.
+        // Count through an unanchored plan so that count agrees with find. A Trino plan gives
+        // malformed UTF-8 bytes the membership find gives them, which the DFA count would reject.
+        // An RE2 plan agrees with the DFA, and its count takes the plan route as find does.
         if (trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_TRINO_SCAN) {
             return countUnanchoredTrinoScanMatches(text, false);
         }

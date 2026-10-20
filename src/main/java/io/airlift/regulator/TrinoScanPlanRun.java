@@ -30,6 +30,7 @@ final class TrinoScanPlanRun
     static final int CANDIDATE_SCAN_NIBBLE_TABLE = 3;
     private static final int MAX_VECTOR_CANDIDATE_BYTES = 64;
     static final int SCALAR_CANDIDATE_PREFIX_BYTES = 16;
+    static final int RE2_RUN_STOP_MINIMUM_BYTES = 16;
 
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoScanPlanRun.class);
     private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.LATIN1;
@@ -376,6 +377,99 @@ final class TrinoScanPlanRun
             cursor += matchesNonAscii ? Utf8.decodedWidth(Utf8.decode(input, cursor, end)) : 1;
         }
         return cursor;
+    }
+
+    /**
+     * The RE2 version of {@link #match}, for a run that matches every non-ASCII character. It
+     * reads characters as RE2 does (see {@link Utf8#re2CharacterWidth}), so a rejected sequence
+     * ends the run like a non-member byte, and it counts characters for every bound.
+     */
+    int re2Match(byte[] input, int cursor, int end)
+    {
+        if (maximum < 0 && minimum <= 1) {
+            int stop = re2Scan(input, cursor, end);
+            return stop - cursor >= minimum ? stop : -1;
+        }
+        int count = 0;
+        int limit = maximum < 0 ? minimum : maximum;
+        int width;
+        while (count < limit && (width = re2MemberWidth(input, cursor, end)) != 0) {
+            cursor += width;
+            count++;
+        }
+        if (count < minimum) {
+            return -1;
+        }
+        return maximum < 0 ? re2Scan(input, cursor, end) : cursor;
+    }
+
+    /**
+     * The RE2 version of {@link #matchMinimum}: the position after the run's minimum
+     * characters as {@link #re2Match} reads them, or {@code -1} when they are absent.
+     */
+    int re2MatchMinimum(byte[] input, int cursor, int end)
+    {
+        for (int count = 0; count < minimum; count++) {
+            int width = re2MemberWidth(input, cursor, end);
+            if (width == 0) {
+                return -1;
+            }
+            cursor += width;
+        }
+        return cursor;
+    }
+
+    /**
+     * Returns the position of {@code delimiter} after an {@link #re2Match} of this run, which
+     * stops only at that byte among ASCII bytes, or {@code -1} when the run fails or stops
+     * elsewhere.
+     */
+    int re2MatchBefore(byte[] input, int cursor, int end, byte delimiter)
+    {
+        int stop = re2Match(input, cursor, end);
+        return stop >= 0 && stop < end && input[stop] == delimiter ? stop : -1;
+    }
+
+    private int re2MemberWidth(byte[] input, int cursor, int end)
+    {
+        if (cursor >= end) {
+            return 0;
+        }
+        int value = input[cursor];
+        if (value < 0) {
+            return Utf8.re2CharacterWidth(input, cursor, end);
+        }
+        return members[value] ? 1 : 0;
+    }
+
+    private int re2Scan(byte[] input, int cursor, int end)
+    {
+        while (true) {
+            // Find the first non-member ASCII byte or non-ASCII byte, then consume the
+            // non-ASCII characters there. Less than a vector of input is scanned by byte, as
+            // Trino's run scan does for its tail.
+            if (needles != null && end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES && VectorSupport.isAvailable()) {
+                cursor = VectorTrinoScanner.findRe2RunStop(input, cursor, end, needles);
+            }
+            else if (needles != null && needles.length == 0) {
+                // Every ASCII byte is a member.
+                while (cursor < end && input[cursor] >= 0) {
+                    cursor++;
+                }
+            }
+            else {
+                while (cursor < end && input[cursor] >= 0 && members[input[cursor]]) {
+                    cursor++;
+                }
+            }
+            int width;
+            while (cursor < end && input[cursor] < 0 && (width = Utf8.re2CharacterWidth(input, cursor, end)) != 0) {
+                cursor += width;
+            }
+            if (cursor >= end || input[cursor] < 0 || !members[input[cursor]]) {
+                return cursor;
+            }
+        }
     }
 
     // Copied as TrinoScanKernelSupport.runScan; keep the copy in step.

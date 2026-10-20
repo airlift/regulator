@@ -167,9 +167,13 @@ final class CaseFolding
         return fullCaseFold().multiCharacterTokens(characterClass);
     }
 
+    /**
+     * Returns whether matching {@code runes} needs a multi-character fold. A folding without
+     * multi-character folds never does.
+     */
     boolean requiresFullCaseFold(int[] runes)
     {
-        return fullCaseFold().requiresFullCaseFold(runes);
+        return multiCharacterFolds && fullCaseFold().requiresFullCaseFold(runes);
     }
 
     UnicodeFullCaseFold.ByteLength byteLength(int[] runes)

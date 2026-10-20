@@ -1558,7 +1558,6 @@ public class TestTrinoScanPlan
             assertThat(TrinoRegexp.compile(utf8Slice(expression)).pattern().usesTrinoScanPlanForDiagnostics())
                     .as(expression).isFalse();
         }
-        assertThat(Re2.compile(utf8Slice("(?s)" + URL)).usesTrinoScanPlanForDiagnostics()).isFalse();
     }
 
     @Test
@@ -2540,7 +2539,7 @@ public class TestTrinoScanPlan
         disableOrdinaryEngine(regexp.pattern());
     }
 
-    private static void disableOrdinaryEngine(Re2 pattern)
+    static void disableOrdinaryEngine(Re2 pattern)
     {
         // Instruction zero is FAIL.
         Prog semantic = pattern.forwardProgramForDiagnostics();

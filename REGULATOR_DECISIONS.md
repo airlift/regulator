@@ -890,11 +890,11 @@ distribution built from byte counts with `fromCounts`, or one learned from
 sample data with `builder()`. A compiled pattern keeps only the chosen offsets.
 
 Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
-first byte, and multi-byte leading literals in Trino scan plans, scan for one
-probe byte. Every distribution follows one rule: the probe is the rarest byte
-after the first, earliest on ties, used only when its estimated probability is
-less than a quarter of the first byte's; otherwise the probe remains offset 0.
-The factor keeps the first byte when the estimate is close, because an
+first byte, and multi-byte leading literals in scan plans (Trino and RE2), scan
+for one probe byte. Every distribution follows one rule: the probe is the rarest
+byte after the first, earliest on ties, used only when its estimated probability
+is less than a quarter of the first byte's; otherwise the probe remains
+offset 0. The factor keeps the first byte when the estimate is close, because an
 estimate is not the searched text. Each probe hit is shifted back to its
 candidate start and confirmed with the complete literal. The RE2 prefix scan
 checks the farther literal end before the full comparison. The Trino scan
@@ -940,12 +940,13 @@ reformatted document does not count twice, and so are `github_events.json` and
 an array of random numbers. A JSON preset that pooled all bytes, so that large
 files dominate, agreed on only 83.3% of GH Archive rows. The presets may probe
 any ASCII byte. Bytes at or above `0x80` are pinned to the most common ASCII
-value, so no preset probes them. `Re2`, `JavaRegexp`, and `RustRegexp` scans
-move the probe only for multi-byte, case-sensitive literals with an ASCII first
-byte, so a literal led by encoded text keeps first-byte scanning there. Trino
-scan plans move a plan's leading literal, including one led by encoded text, to
-a rarer ASCII byte. `tools/byte-frequencies` pins every source of both preset
-tables and regenerates them exactly; only the derived numbers are committed.
+value, so no preset probes them. `JavaRegexp` and `RustRegexp` scans, and `Re2`
+scans outside a scan plan, move the probe only for multi-byte, case-sensitive
+literals with an ASCII first byte, so a literal led by encoded text keeps
+first-byte scanning there. Scan plans (Trino and RE2) move a plan's leading
+literal, including one led by encoded text, to a rarer ASCII byte.
+`tools/byte-frequencies` pins every source of both preset tables and regenerates
+them exactly; only the derived numbers are committed.
 
 Counts and learned distributions are add-one smoothed:
 `(count + 1) / (total + 256)`. They measure the data they were built from, so
@@ -1311,10 +1312,12 @@ The Trino frontend may select a bounded scan plan for literals, deterministic
 character runs, optional bodies, nested captures, and terminal tails. Preserve
 specified matching and capture behavior on valid UTF-8. Malformed Trino input
 has a garbage-in, garbage-out contract, while bounded input access and normal
-matcher lifecycle behavior remain required. This does not relax RE2 or Java
-semantics or authorize a public malformed-input opt-in. By default the plan
-performs no runtime code generation; an experimental option may compile the
-plan into its own class, as described in
+matcher lifecycle behavior remain required. This does not relax Java semantics
+or authorize a public malformed-input opt-in. RE2 patterns select the same
+plans, which report the ordinary engine's results on malformed input too, as
+described in [RE2 Scan Plans](#re2-scan-plans). By default the plan performs no
+runtime code generation; an experimental option may compile the plan into its
+own class, as described in
 [Generated Trino Scan Kernels](#generated-trino-scan-kernels). The ordinary
 semantic program remains the fallback. The
 [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md) describes candidate
@@ -1436,6 +1439,49 @@ Other protected controls retain unresolved differences. These are not accepted
 release trade-offs and require qualification before broad adoption. The
 development campaign evidence is in the private archive; see the
 [archive index](docs/benchmarks/trino-scan-plan-archives.json).
+
+## RE2 Scan Plans
+
+RE2 patterns select the same scan plans as Trino patterns: the same eligible
+shapes, ASCII-folded ones included, reached by the same operations with the
+same memory charge, and on by default. Trino captures and extraction run about
+eight times faster on a plan than on the ordinary engine, and nothing in those
+shapes is specific to Trino. The frontend chooses a plan's language explicitly,
+so Java patterns and `Re2.compileParsed` build none.
+
+- An RE2 plan reports exactly what the ordinary engine reports on every input,
+  including malformed UTF-8; RE2 has no garbage-in, garbage-out contract. Only
+  operations that can consume a byte at or above `0x80` read input differently:
+  runs admitting non-ASCII characters, with their bounded counts and minimums,
+  delimited captures, and terminal tails. They consume a non-ASCII character as
+  the ordinary engine's byte ranges do, accepting overlong three- and four-byte
+  forms, encoded surrogates, and values above U+10FFFF, and rejecting bare
+  continuation bytes, `C0`, `C1`, `F5`-`FF`, and truncated sequences. Trino plans
+  are unchanged.
+- The analysis, builder, proofs, budgets, candidate scans, and routing stay
+  shared, so a coverage change reaches both frontends. Every skip proof holds
+  under the RE2 rule, as the
+  [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md#re2-patterns) restates.
+- Longest-match patterns build no plan, because a plan reports leftmost-first
+  matches, and Latin-1 patterns build none, as in Trino.
+- RE2 plans never generate bytecode.
+- A plan must not be slower than the same pattern without it. On R9g, R8g, and
+  R8i, RE2 `BenchmarkClickBenchRegexp` `contains` takes 0.09 to 0.84 times the
+  time of a build without RE2 plans on every `HTTP`, `WWW`, `LONG_HOST`, and
+  `NEWLINE_PATH` row and on Graviton's `OPTIONAL_FALLBACK` rows. On R8i,
+  `OPTIONAL_FALLBACK` with dotAll is within noise, and without dotAll it takes
+  1.08 times, 44.7 ns against 41.4 ns. That row is accepted as a known
+  exception: each losing row retries the optional `www.`, which the DFA never
+  does, and removing that retry would change Trino plans too.
+- A run scan with less than a vector of input left scans by byte, as Trino's
+  run scan finishes its tail, and reads the member table only when the run
+  excludes an ASCII byte. On R8i this takes ClickBench `NEWLINE_PATH` without
+  dotAll from 1.22 to 0.84 times the build without RE2 plans and
+  `OPTIONAL_FALLBACK` from 1.25 to 1.08. On Graviton it makes
+  `BenchmarkRe2ScanPlan` `URL_MALFORMED` `contains`, whose runs stop every few
+  bytes at a malformed sequence, take 1.06 to 1.14 times its time with the
+  vector scan, up to 11 ns per row; that slowdown on malformed rows is
+  accepted.
 
 ## Generated Trino Scan Kernels
 
