@@ -977,6 +977,11 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("\\x", "x", true),
                 new MatchCase("\\u", "u", true),
                 new MatchCase("\\u12", "\u0012", true),
+                // Joni reads an unbraced hex or Unicode escape without hex digits as U+0000 unless it ends the pattern.
+                new MatchCase("[\\x]", "\u0000", true),
+                new MatchCase("[a-c-\\x]", "\u0000", true),
+                new MatchCase("\\A\\xg\\z", "\u0000g", true),
+                new MatchCase("\\A\\ug\\z", "\u0000g", true),
                 new MatchCase("\\k", "k", true),
                 new MatchCase("[\\101]", "A", true),
                 new MatchCase("[\\cA]", "\u0001", true),
