@@ -29,11 +29,14 @@ fallback semantics.
   and numeric conversion.
 - `Re2Matcher` owns one reusable capture buffer for repeated matching. Callers
   may retain only group zero and a requested prefix of explicit captures when
-  complete capture extraction is unnecessary. It advances empty UTF-8 matches
-  by one code point, permits one terminal empty match, and exposes zero-copy
-  Slice group views. All public offsets are relative to the complete logical
-  input Slice, including matchers restricted to a region. Matchers are mutable
-  and not thread-safe; compiled `Re2` instances remain thread-safe.
+  complete capture extraction is unnecessary. It advances empty UTF-8 matches by
+  one code point, permits one terminal empty match, and exposes zero-copy Slice
+  group views. A Rust pattern follows the crate instead and skips only an empty
+  match that ends where the previous match ended or inside a character; see
+  [Rust Frontend](#rust-frontend). All public offsets are relative to the
+  complete logical input Slice, including matchers restricted to a region.
+  Matchers are mutable and not thread-safe; compiled `Re2` instances remain
+  thread-safe.
 - No-match is represented by `false` or `null`, depending on the method. Numeric
   conversion failures use `NumberFormatException`.
 
@@ -77,13 +80,14 @@ construction fails.
   `In`, `gc=`, `sc=`, and `blk=` forms, binary properties, `java...`
   properties, and POSIX classes. A JDK property that Unicode does not define
   as one property is the formula of its `Character` javadoc, and a JDK choice
-  that is not Unicode data is a constant citing that javadoc.
+  that is not Unicode data is a constant citing that javadoc. Rust layers the
+  regex crate's names on it, as Rust Frontend describes.
 - Properties are built lazily from the database's ranges into immutable
   `CharClass` values and cached by canonical identity. Matching uses only the
   resulting ranges and compiled instructions.
-- Java and Trino match-time word boundaries read a table of the database's
-  word characters, nonspacing marks, and letters and digits, built once, when
-  the first Java or Trino pattern with a word boundary compiles.
+- Java, Trino, and Rust match-time word boundaries read a table of the
+  database's word characters, nonspacing marks, and letters and digits, built
+  once, when the first pattern with such a word boundary compiles.
 - Java's `\N{name}` accepts the names `Character.codePointOf` accepts, built
   from the database's character names, the earlier Unicode names of controls,
   and blocks by the JDK's rule. The JDK's two choices for controls that are not
@@ -128,6 +132,7 @@ RE2 patterns and `FilteredRe2` canonicalization fold with Unicode 18.0 simple
 case folding (`CaseFolding.txt` statuses C and S). This is the rule of
 upstream RE2's generated tables, so upstream tests that expect it, such as
 `(?i)i` not matching dotted capital `İ` or dotless small `ı`, apply unchanged.
+Rust patterns fold with the same rule, which is the regex crate's.
 
 Pinned upstream's tables are Unicode 15.1 data. From 15.1 to 18.0, simple case
 folding only gained folds for characters added after 15.1. Most form new
@@ -204,6 +209,53 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
 
 Java match positions remain UTF-8 byte offsets over `Slice`, not the JDK's
 UTF-16 code-unit offsets.
+
+## Rust Frontend
+
+- `RustRegexp` is a separate compiler for the pattern language of the pinned
+  Rust `regex` crate. Its results must match the crate's on valid UTF-8 input,
+  except for Unicode property names and characters that differ between the
+  crate's Unicode 16.0 tables and the pinned Unicode 18.0 database; see the
+  [Rust language reference](docs/reference/languages/RUST_REGEXP.md#unicode-properties).
+  The pinned crate is the authority, recorded in committed fixtures; the crate
+  never runs in the Maven build.
+- `RustRegexpParser` builds a private syntax tree shaped like the crate's and
+  checks the nest limit before translating, so the crate's error precedence is
+  preserved. Each crate error kind maps to a `RegexpParseErrorCode`, and the
+  message names the kind.
+- Rust patterns use the shared `Re2Matcher`. A pattern-level search flag makes
+  it skip empty matches that split a UTF-8 character or end where the previous
+  match ended, and makes ranges and regions keep the whole Slice as assertion
+  context, as the crate's `Input::range` does. There is no Rust-specific
+  matcher type.
+- Inputs are not validated. The crate's `Regex` only accepts valid UTF-8, so
+  results on malformed input are unspecified rather than an error, and valid
+  input pays no validation scan.
+- CRLF multi-line anchors and the start, end, and half word boundaries are
+  Rust-only empty-width predicates, evaluated only when a program contains
+  one. Like Java's text-dependent assertions, they keep a program on BitState
+  or NFA; DFA transition loops do not contain Rust-language branches. Plain
+  `\b` and `\B` reuse the RE2 ASCII and Java Unicode boundaries.
+- Unicode properties, `\d`, `\s`, `\w`, and Unicode word boundaries read the
+  pinned database, as Pinned Unicode Properties describes. `\w` and the word
+  boundaries use the database's word characters, the UTS #18 class that Java's
+  `IsWord` also is. Case-insensitive patterns use the database's simple case
+  folding, the RE2 rule, as Pinned Unicode Case Folding describes.
+- Property names follow the crate's rules rather than the names the other
+  languages layer on the database. They are built from the database's property
+  and value aliases by the naming rules of the crate's table generator, so a
+  name Unicode added after the crate's tables, such as `Age=17.0`, is accepted
+  ahead of the crate. The database holds every property the crate supports,
+  so none is rejected or approximated.
+- Repetition counts above 1,000, including nested repetitions whose counts
+  multiply past 1,000, are rejected, keeping the existing program-size bound.
+  Any non-negative nest limit is accepted, because parsing, the nest-limit
+  check, and translation all walk the syntax tree with explicit stacks.
+- The crate's 10 MiB compiled-size limit is not reproduced, because an
+  approximation of the crate's size estimate would disagree near the limit.
+  Compilation is bounded by `maxMemory` instead; the
+  [Rust language reference](docs/reference/languages/RUST_REGEXP.md#compilation-options)
+  describes the patterns this accepts.
 
 ## Trino Compatibility Adapter
 
@@ -722,12 +774,12 @@ keeps preprocessing bounded and the integrated scanner compact.
 
 Like upstream, a case-sensitive literal prefix scan searches for the literal's
 first byte by default. Probing a rarer byte is an opt-in deviation. The `Re2`,
-`TrinoRegexp`, and `JavaRegexp` compile options take a `ByteFrequencies`
-distribution, which defaults to `ByteFrequencies.uniform()`; it gives every
-byte the same probability and so keeps first-byte scanning. A caller can
-instead choose the `englishText()` or `json()` preset, a distribution built
-from byte counts with `fromCounts`, or one learned from sample data with
-`builder()`. A compiled pattern keeps only the chosen offsets.
+`TrinoRegexp`, `JavaRegexp`, and `RustRegexp` compile options take a
+`ByteFrequencies` distribution, which defaults to `ByteFrequencies.uniform()`;
+it gives every byte the same probability and so keeps first-byte scanning. A
+caller can instead choose the `englishText()` or `json()` preset, a
+distribution built from byte counts with `fromCounts`, or one learned from
+sample data with `builder()`. A compiled pattern keeps only the chosen offsets.
 
 Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
 first byte, and multi-byte leading literals in Trino scan plans, scan for one
@@ -780,12 +832,12 @@ reformatted document does not count twice, and so are `github_events.json` and
 an array of random numbers. A JSON preset that pooled all bytes, so that large
 files dominate, agreed on only 83.3% of GH Archive rows. The presets may probe
 any ASCII byte. Bytes at or above `0x80` are pinned to the most common ASCII
-value, so no preset probes them. `Re2` and `JavaRegexp` scans move the probe
-only for multi-byte, case-sensitive literals with an ASCII first byte, so a
-literal led by encoded text keeps first-byte scanning there. Trino scan plans
-move a plan's leading literal, including one led by encoded text, to a rarer
-ASCII byte. `tools/byte-frequencies` pins every source of both preset tables and
-regenerates them exactly; only the derived numbers are committed.
+value, so no preset probes them. `Re2`, `JavaRegexp`, and `RustRegexp` scans
+move the probe only for multi-byte, case-sensitive literals with an ASCII first
+byte, so a literal led by encoded text keeps first-byte scanning there. Trino
+scan plans move a plan's leading literal, including one led by encoded text, to
+a rarer ASCII byte. `tools/byte-frequencies` pins every source of both preset
+tables and regenerates them exactly; only the derived numbers are committed.
 
 Counts and learned distributions are add-one smoothed:
 `(count + 1) / (total + 256)`. They measure the data they were built from, so
@@ -898,7 +950,8 @@ Slice without constructing a Slice view. Public matcher and snapshot offsets
 remain relative to the complete logical Slice, consistent with Java Matcher and
 the one-shot APIs. DFA start-state analysis treats the region boundaries exactly
 like the boundaries of an actual Slice view. This is required for anchors, empty
-matches, word boundaries, and malformed or split UTF-8 input.
+matches, word boundaries, and malformed or split UTF-8 input. Rust patterns are
+the exception; see [Rust Frontend](#rust-frontend).
 
 The region is represented only in matcher and DFA setup state; protected DFA
 transition loops remain unchanged. A real Slice view is constructed lazily only

@@ -9,9 +9,9 @@ support would require.
 Regulator's shared engine matches in linear time with bounded memory. It avoids
 the catastrophic worst cases of general ordered-backtracking engines.
 
-`Re2`, `TrinoRegexp`, and `JavaRegexp` reject recognized unsupported constructs
-at compilation. They do not retry with another language or silently switch to
-an engine with different resource guarantees.
+`Re2`, `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` reject recognized
+unsupported constructs at compilation. They do not retry with another language
+or silently switch to an engine with different resource guarantees.
 
 ## Why features are unsupported
 
@@ -79,4 +79,5 @@ guarantees.
 - [RE2 Pattern Language](RE2.md)
 - [Trino Regular-Expression Language](TRINO_REGEXP.md)
 - [Java Regular-Expression Language](JAVA_REGEXP.md)
+- [Rust Regular-Expression Language](RUST_REGEXP.md)
 - [Trino SQL LIKE Language](TRINO_LIKE.md)

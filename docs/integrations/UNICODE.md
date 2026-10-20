@@ -20,11 +20,16 @@ it:
   of the `Character` javadoc, under the JDK's names and aliases.
 - Java's `\N{name}` accepts the names of `Character.codePointOf`, built from
   the database's character names and blocks by the JDK's rule.
+- Rust properties use the regex crate's names and loose matching, built from
+  the database's property and value aliases by the naming rules of the crate's
+  table generator; see the
+  [Rust regexp reference](../reference/languages/RUST_REGEXP.md#unicode-properties),
+  which explains how the crate's 16.0 tables and the database differ.
 
 Regulator does not keep a copy of upstream RE2's generated category, script,
-or case-fold tables. Case folding follows each pattern's language: RE2 folds
-with the database's simple case folding, Java with its simple case mappings,
-and Trino with its full case folding.
+or case-fold tables. Case folding follows each pattern's language: RE2 and Rust
+fold with the database's simple case folding, Java with its simple case
+mappings, and Trino with its full case folding.
 
 ## Motivation
 
@@ -114,12 +119,13 @@ Property construction follows this flow:
 
 Character-class membership and case-fold expansions are compiled into engine
 instructions and ranges. Matching those classes performs no property lookup.
-Language-specific word-boundary assertions are different: Java and Trino
-boundary checks classify input code points during matching. They read one
-table of flags, built from the database's classes by the same formulas as the
-properties: Java's word characters, the class of `\p{IsWord}`; Trino's, which
-are Java's without Join_Control plus the six superscript and fraction numbers
-of Latin-1 that Joni's Java syntax includes; nonspacing marks; and
+Language-specific word-boundary assertions are different: Java, Trino, and Rust
+boundary checks classify input code points during matching. They read one table
+of flags, built from the database's classes by the same formulas as the
+properties: Java's word characters, the class of `\p{IsWord}`, which are also
+the UTS #18 word characters of Rust's Unicode `\w`; Trino's, which are Java's
+without Join_Control plus the six superscript and fraction numbers of Latin-1
+that Joni's Java syntax includes; nonspacing marks; and
 `Character.isLetterOrDigit`, which gives a Java boundary's nonspacing mark its
 base.
 
@@ -140,7 +146,10 @@ the javadoc.
 Property-name parsing is language metadata rather than Unicode data. Java and
 Trino spellings resolve through `JavaUnicodeProperties.lookup`;
 `RegexpParser.lookupUnicodeGroup` applies RE2's exact category and long script
-name rules using the registry's raw values.
+name rules using the registry's raw values. Rust names come from
+`RustUnicodePropertyTables`, built from the database's property and value
+aliases by the naming rules of the crate's table generator, because the crate
+accepts hundreds of Unicode aliases.
 
 The parser distinguishes:
 
@@ -202,6 +211,9 @@ that rule. The rules are:
   from the pinned database. Upstream RE2's generated tables use the same rule
   with Unicode 15.1 data. `FilteredRe2` canonicalizes atoms and text to the
   code point each class folds to, as upstream's prefilter does.
+- Rust: the RE2 rule, which is the regex crate's. The crate's tables are
+  Unicode 16.0 data, and every simple fold Unicode added since involves a
+  character added since.
 - Java: the case classes of `java.util.regex.Pattern`. The canonical relation
   is the simple upper-case mapping followed by the simple lower-case mapping,
   read from the database's `UnicodeData.txt` mappings, rather than assuming
@@ -252,13 +264,13 @@ Unicode data is read on first use, not on every compilation:
   names, which are most of it. They are decoded into arrays of words, code
   points, and word indexes, with a hash table of the names, about 1 MB in
   all.
-- The word-boundary flags are built once, when the first Java or Trino pattern
-  with a word boundary compiles, not per pattern. They are a two-stage table
-  of one flag byte per code point: each block of 256 code points points to its
-  flags, and blocks with equal flags are stored once, so the 4,352 blocks share
-  135 stored ones, about 52 KB in all. Latin-1 is the first stored block, so a
-  Latin-1 code point needs no block lookup. RE2's ASCII word boundary reads no
-  table.
+- The word-boundary flags are built once, when the first Java, Trino, or Rust
+  pattern with a word boundary that reads them compiles, not per pattern. They
+  are a two-stage table of one flag byte per code point: each block of 256 code
+  points points to its flags, and blocks with equal flags are stored once, so
+  the 4,352 blocks share 135 stored ones, about 52 KB in all. Latin-1 is the
+  first stored block, so a Latin-1 code point needs no block lookup. RE2's
+  ASCII word boundary reads no table.
 - No production table is generated at build time. The pinned database is
   generated ahead of time from pinned UCD files and depends on neither the
   build JDK nor the executing JDK.
@@ -268,11 +280,12 @@ Unicode data is read on first use, not on every compilation:
 These components use the Unicode properties of each language and its case
 folding from the pinned database:
 
-- `RegexpParser`, `TrinoRegexpParser`, and `JavaRegexpParser`
+- `RegexpParser`, `TrinoRegexpParser`, `JavaRegexpParser`, and
+  `RustRegexpParser`
 - `CharClassBuilder`
 - required-match analysis
 - single-byte matcher optimizations
-- the Java and Trino word boundaries of `EmptyOp`
+- the Java, Trino, and Rust word boundaries of `EmptyOp`
 - the Java and Trino property-name normalization, Java's `\N{name}`, and
   Trino's capture names
 - the canonicalization of `FilteredRe2` and `Prefilter`
