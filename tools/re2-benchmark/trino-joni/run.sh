@@ -24,5 +24,6 @@ java \
     org.openjdk.jmh.Main \
     '^io\.trino\.operator\.scalar\.BenchmarkTrinoJoniComparator\..*$' \
     -rf json \
+    -foe true \
     -rff "${RESULT_FILE}" \
     "$@"

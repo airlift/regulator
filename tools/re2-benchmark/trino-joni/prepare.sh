@@ -115,7 +115,9 @@ javac \
     "${SCRIPT_DIR}/src/RebarJoniRunner.java" \
     "${SCRIPT_DIR}/src/TrinoJoniComparatorVerifier.java" \
     "${SCRIPT_DIR}/src/BenchmarkTrinoRowsJoni.java" \
-    "${SCRIPT_DIR}/src/TrinoRowsJoniVerifier.java"
+    "${SCRIPT_DIR}/src/TrinoRowsJoniVerifier.java" \
+    "${SCRIPT_DIR}/src/BenchmarkTrinoLikeRowsTrino.java" \
+    "${SCRIPT_DIR}/src/TrinoLikeRowsTrinoVerifier.java"
 
 printf '%s' "${COMPARATOR_CLASSPATH}" > "${WORK_DIR}/classpath.txt"
 printf '%s\n' "${joni_jar}" > "${WORK_DIR}/joni-jar.path"
@@ -130,6 +132,8 @@ printf '%s\n' "${joni_jar}" > "${WORK_DIR}/joni-jar.path"
     printf 'everyday_verifier_source_sha256=%s\n' "$(sha256 "${SCRIPT_DIR}/src/EverydayTrinoJoniVerifier.java")"
     printf 'rows_benchmark_source_sha256=%s\n' "$(sha256 "${SCRIPT_DIR}/src/BenchmarkTrinoRowsJoni.java")"
     printf 'rows_verifier_source_sha256=%s\n' "$(sha256 "${SCRIPT_DIR}/src/TrinoRowsJoniVerifier.java")"
+    printf 'like_rows_benchmark_source_sha256=%s\n' "$(sha256 "${SCRIPT_DIR}/src/BenchmarkTrinoLikeRowsTrino.java")"
+    printf 'like_rows_verifier_source_sha256=%s\n' "$(sha256 "${SCRIPT_DIR}/src/TrinoLikeRowsTrinoVerifier.java")"
     printf 'rebar_runner_source_sha256=%s\n' "$(sha256 "${SCRIPT_DIR}/src/RebarJoniRunner.java")"
     printf 'benchmark_source_sha256=%s\n' "$(sha256 "${SCRIPT_DIR}/src/BenchmarkTrinoJoniComparator.java")"
     printf 'verifier_source_sha256=%s\n' "$(sha256 "${SCRIPT_DIR}/src/TrinoJoniComparatorVerifier.java")"

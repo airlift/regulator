@@ -40,12 +40,13 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 
 /**
- * The rows and literals of the normative Trino row workloads, shared by {@code BenchmarkTrinoRows}
- * and its Joni twin so both time the same cells. Each workload's rows and literals come from
- * {@code trino-row-workloads.tsv} and {@code trino-row-literals.tsv}, which
- * {@code tools/re2-benchmark/trino-rows/trino_rows.py} generates from pinned corpora; see its README
- * for the sampling and literal rules. The OpenSubtitles workloads read test resources; the others
- * read a corpus directory provisioned by the generator's {@code fetch} command.
+ * The rows and literals of the normative Trino row workloads, shared by {@code BenchmarkTrinoRows},
+ * {@code BenchmarkTrinoLikeRows}, and their Joni and Trino LIKE twins so all of them time the same
+ * cells. Each workload's rows and literals come from {@code trino-row-workloads.tsv} and
+ * {@code trino-row-literals.tsv}, which {@code tools/re2-benchmark/trino-rows/trino_rows.py}
+ * generates from pinned corpora; see its README for the sampling and literal rules. The
+ * OpenSubtitles workloads read test resources; the others read a corpus directory provisioned by
+ * the generator's {@code fetch} command.
  */
 public final class TestingTrinoRowsBenchmarkInputs
 {
@@ -81,9 +82,9 @@ public final class TestingTrinoRowsBenchmarkInputs
     }
 
     /**
-     * Returns the literal's pattern and the workload's sampled rows, verified against the manifest's
-     * population sizes and checksum, shuffled and laid out back to back in one buffer, as a Trino
-     * block holds them. A cell without a literal fails.
+     * Returns the literal, its pattern, and the workload's sampled rows, verified against the
+     * manifest's population sizes and checksum, shuffled and laid out back to back in one buffer, as
+     * a Trino block holds them. A cell without a literal fails.
      */
     public static Input create(String workload, String literalId, String corpusDirectory)
             throws IOException
@@ -104,14 +105,29 @@ public final class TestingTrinoRowsBenchmarkInputs
         return new Input(
                 workload,
                 literalId,
+                Slices.utf8Slice(literalRow.get("literal")),
                 Slices.utf8Slice(literalRow.get("pattern")),
                 List.copyOf(sources),
                 Long.parseLong(literalRow.get("hit_rows")),
                 Long.parseLong(literalRow.get("matches")));
     }
 
-    public record Input(String workload, String literalId, Slice pattern, List<Slice> sources, long hitRows, long matches)
+    public record Input(String workload, String literalId, Slice literal, Slice pattern, List<Slice> sources, long hitRows, long matches)
     {
+        /**
+         * Returns the LIKE pattern {@code %literal%}, which finds the literal anywhere in a row
+         * without an escape character. A literal containing {@code _}, {@code %}, or {@code \}
+         * fails, because the pattern would need an escape character.
+         */
+        public Slice likePattern()
+        {
+            String text = literal.toStringUtf8();
+            if (text.chars().anyMatch(character -> character == '_' || character == '%' || character == '\\')) {
+                throw new IllegalArgumentException("Literal %s/%s, %s, contains a LIKE metacharacter".formatted(workload, literalId, text));
+            }
+            return Slices.utf8Slice("%" + text + "%");
+        }
+
         /**
          * Checks that an engine finds the literal in the manifest's number of rows, with its
          * number of non-overlapping matches.
@@ -127,6 +143,17 @@ public final class TestingTrinoRowsBenchmarkInputs
             if (actualHitRows != hitRows || actualMatches != matches) {
                 throw new IllegalStateException("Literal %s/%s found %s rows and %s matches, expected %s and %s".formatted(
                         workload, literalId, actualHitRows, actualMatches, hitRows, matches));
+            }
+        }
+
+        /**
+         * Checks that a LIKE pattern finds the literal in the manifest's number of rows.
+         */
+        public void verifyHitRows(Predicate<Slice> like)
+        {
+            long actualHitRows = sources.stream().filter(like).count();
+            if (actualHitRows != hitRows) {
+                throw new IllegalStateException("Literal %s/%s found %s rows, expected %s".formatted(workload, literalId, actualHitRows, hitRows));
             }
         }
     }

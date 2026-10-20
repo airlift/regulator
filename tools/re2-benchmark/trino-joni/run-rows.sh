@@ -20,5 +20,6 @@ java \
     org.openjdk.jmh.Main \
     '^io\.trino\.operator\.scalar\.BenchmarkTrinoRowsJoni\..*$' \
     -rf json \
+    -foe true \
     -rff "${OUTPUT}" \
     "$@"

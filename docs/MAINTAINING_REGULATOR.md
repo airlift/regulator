@@ -197,11 +197,24 @@ reviewer decides. GH Archive's long rows are a normative workload, not an edge
 control. Hand-picked query literals are reported as their own flagged group and
 never enter a geomean.
 
-The edge controls are `BenchmarkTrinoRegexp`'s `literalSparse` cases, which
-search long inputs, and `BenchmarkEverydayTrinoRegexp`'s `trinoLiteral`. Judge
-them the same way, outside the geomean. An edge loss that grows with input size
-fails the gate. Record any accepted edge loss, with its cause, in
-`REGULATOR_DECISIONS.md`. An edge win never offsets a normative loss.
+Judge a change to a LIKE path Trino calls once per row, such as the contains
+search, the same way on the
+[normative Trino LIKE rows](benchmarks/METHODOLOGY.md#normative-trino-rows),
+with Trino's LIKE measured on the same rows in place of Joni. Both Regulator
+methods, interpreted `matches` and generated `matchesGenerated`, are held to
+the two rules separately: each has its own workload geomeans over the grid
+literals, and neither may turn a cell from a win against Trino's LIKE into a
+loss.
+
+The edge controls of a regexp change are `BenchmarkTrinoRegexp`'s
+`literalSparse` cases, which search long inputs, and
+`BenchmarkEverydayTrinoRegexp`'s `trinoLiteral`. The edge controls of a LIKE
+change are `BenchmarkTrinoLike`'s `CONTAINS_ABSENT`, `CONTAINS_LATE`,
+`ORDERED_LATE`, and `WILDCARD_CHAIN` scenarios and `BenchmarkTrinoLikeTpch`'s
+`Q13_ORDER_COMMENT`, each judged separately for interpreted and generated
+execution. Judge them the same way, outside the geomean. An edge loss that grows
+with input size fails the gate. Record any accepted edge loss, with its cause,
+in `REGULATOR_DECISIONS.md`. An edge win never offsets a normative loss.
 
 ## Validating a performance change
 
