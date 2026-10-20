@@ -13,8 +13,11 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.UnicodeDatabase.Aliases;
 import io.airlift.regulator.UnicodeDatabase.CodePointMappings;
 import io.airlift.regulator.UnicodeDatabase.MultiCharacterMappings;
+import io.airlift.regulator.UnicodeDatabase.PropertyValues;
+import org.assertj.core.api.AbstractBooleanAssert;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -26,6 +29,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -89,6 +93,60 @@ public class TestUnicodeDatabase
         assertThat(UnicodeDatabase.simpleUppercaseMappings().map(0xDF)).isEqualTo(0xDF);
         assertThat(UnicodeDatabase.simpleLowercaseMappings().map(0x130)).isEqualTo('i');
         assertThat(UnicodeDatabase.simpleLowercaseMappings().map(0x13A0)).isEqualTo(0xAB70);
+    }
+
+    // The property value sets hold every binary property of PropList.txt, DerivedCoreProperties.txt,
+    // and emoji-data.txt, each script a ScriptExtensions.txt list names, and the break properties,
+    // and the alias sections hold the PropertyAliases.txt rows and the PropertyValueAliases.txt
+    // rows of six properties.
+    @Test
+    public void testSectionsHoldUnicodeProperties()
+    {
+        PropertyValues binaryProperties = UnicodeDatabase.binaryProperties();
+        assertMembership(binaryProperties, "White_Space", ' ').isTrue();
+        assertMembership(binaryProperties, "ID_Start", 'a').isTrue();
+        assertMembership(binaryProperties, "ID_Start", '1').isFalse();
+        assertMembership(binaryProperties, "Changes_When_Casefolded", 'A').isTrue();
+        assertMembership(binaryProperties, "Changes_When_Casefolded", 'a').isFalse();
+        assertMembership(binaryProperties, "Extended_Pictographic", 0x1F600).isTrue();
+        assertThat(binaryProperties.names()).doesNotContain("InCB", "Indic_Conjunct_Break");
+
+        // U+0640 ARABIC TATWEEL is Common, and its extension names Arabic and Syriac among others.
+        assertMembership(UnicodeDatabase.scriptExtensions(), "Arab", 0x640).isTrue();
+        assertMembership(UnicodeDatabase.scriptExtensions(), "Syrc", 0x640).isTrue();
+        assertMembership(UnicodeDatabase.scriptExtensions(), "Latn", 'a').isFalse();
+
+        assertThat(UnicodeDatabase.graphemeClusterBreaks().ranges("CR")).containsExactly('\r', '\r');
+        assertMembership(UnicodeDatabase.wordBreaks(), "ALetter", 'a').isTrue();
+        assertMembership(UnicodeDatabase.sentenceBreaks(), "ATerm", '.').isTrue();
+        assertThat(UnicodeDatabase.sentenceBreaks().ranges("Other")).isNull();
+
+        assertThat(UnicodeDatabase.propertyAliases()).contains(
+                new Aliases("WSpace", "White_Space", List.of("space")),
+                new Aliases("gc", "General_Category", List.of()));
+        Map<String, List<Aliases>> valueAliases = UnicodeDatabase.propertyValueAliases();
+        assertThat(valueAliases).containsOnlyKeys("GCB", "SB", "WB", "age", "gc", "sc");
+        assertThat(valueAliases.get("gc")).contains(new Aliases("Nd", "Decimal_Number", List.of("digit")));
+        assertThat(valueAliases.get("sc")).contains(new Aliases("Zinh", "Inherited", List.of("Qaai")));
+        assertThat(valueAliases.get("age")).contains(new Aliases("1.1", "V1_1", List.of()));
+        assertThat(valueAliases.get("WB")).contains(new Aliases("LE", "ALetter", List.of()));
+    }
+
+    private static AbstractBooleanAssert<?> assertMembership(PropertyValues values, String name, int codePoint)
+    {
+        return assertThat(contains(values, name, codePoint)).as("%s contains U+%04X", name, codePoint);
+    }
+
+    private static boolean contains(PropertyValues values, String name, int codePoint)
+    {
+        int[] ranges = values.ranges(name);
+        assertThat(ranges).as(name).isNotNull();
+        for (int index = 0; index < ranges.length; index += 2) {
+            if (ranges[index] <= codePoint && codePoint <= ranges[index + 1]) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String sha256Hex(byte[] data)

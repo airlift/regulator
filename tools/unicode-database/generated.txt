@@ -1,4 +1,4 @@
 # Written by generate.py; do not edit. TestUnicodeDatabase checks these
 # values against the committed generator, manifest, and database.
-generation-key 675095b7bc24f6b4a8760ed26f19ce7c4adf9e8f7b27aa537bf6ff320882712f
-database-sha256 c32dfa1d038beb26b7995cd59fc2224fd367af7b30b6233f773842120a846da9
+generation-key 2eec14bf8cfe3c49ba5efca91772356e4180a2d549a4e5d8ca08cfcc4baae8ce
+database-sha256 87db31f76c7a6ca6d873725173b48c7c657048275bea4ce696010920a6f31bde

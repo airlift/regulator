@@ -4,9 +4,15 @@
 a58f8d322f3c5e254f9f97b1cbf76a454a7e02de6ac35619a5e4f27aaabfd553  https://www.unicode.org/Public/18.0.0/ucd/Blocks.txt
 a004797658a457bec4dc11683e39f69249ea3b595b752dbea6721c4c9f587b0d  https://www.unicode.org/Public/18.0.0/ucd/CaseFolding.txt
 58b04334e3a31f9612694bbc3f6bff4a302b7d424565bca9c47e30aa74f8dbac  https://www.unicode.org/Public/18.0.0/ucd/DerivedAge.txt
+09c928886a178fcafd93c29e4bd59073a058e5a100b716d425cb563ab50f68c9  https://www.unicode.org/Public/18.0.0/ucd/DerivedCoreProperties.txt
 f438f532e8737bb8a2702126cdf9c4af5e357c58c7acf9d9eb2fc7c1a1d955d6  https://www.unicode.org/Public/18.0.0/ucd/PropList.txt
+83b8df695f9da543dba02b0be2b8bd72f0b52836ad264be113c6d285021ef025  https://www.unicode.org/Public/18.0.0/ucd/PropertyAliases.txt
 06c4c8eaf7b0bf34abe73b113da1215bd784ac254d4c223600b90267caa4bbbd  https://www.unicode.org/Public/18.0.0/ucd/PropertyValueAliases.txt
+5c9d34a922f687726f2a8bcf57d49f905987e51f1b21b58c95a00fbe255cec23  https://www.unicode.org/Public/18.0.0/ucd/ScriptExtensions.txt
 0071fd81b6aeae25f6e8bce8efec3066a6476a91b49bdb2f52dc76e817862a6a  https://www.unicode.org/Public/18.0.0/ucd/Scripts.txt
 8538dea57c184f1ef3783885ea79677b10f6efa06423717157e63712f14d1ad2  https://www.unicode.org/Public/18.0.0/ucd/SpecialCasing.txt
 0736451de439ae7baf1425136617da495e09ee5afbe6e394374db7009ea08950  https://www.unicode.org/Public/18.0.0/ucd/UnicodeData.txt
+0839dcb79e4ac639ecd538b1abf7c9d22e3f9dd265b7e182d33627aa4d75b45a  https://www.unicode.org/Public/18.0.0/ucd/auxiliary/GraphemeBreakProperty.txt
+0ac10c9d6dca3b33ac695ff0968f26356465a51626950c463b3dce8fa07e61cc  https://www.unicode.org/Public/18.0.0/ucd/auxiliary/SentenceBreakProperty.txt
+8dbfa17063e11084201f33c3e76d485d3b9166930c71db8e39ed1c9234171aec  https://www.unicode.org/Public/18.0.0/ucd/auxiliary/WordBreakProperty.txt
 80d00f8e616a0ef27fd6b8de3b758c06383b5d917e2977709578e68baf733bf1  https://www.unicode.org/Public/18.0.0/ucd/emoji/emoji-data.txt
