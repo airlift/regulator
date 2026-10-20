@@ -83,6 +83,8 @@ public class TestTrinoRegexpSyntax
                 unsupported("[&&a]", "empty character-class intersection operands", 1),
                 unsupported("[a-\\d]", "character classes as range endpoints", 3),
                 unsupported("[a-\\p{L}]", "character classes as range endpoints", 3),
+                unsupported("[[:a:b:]]", "malformed POSIX classes", 1),
+                unsupported("[[:abcdefghijklmnopqrstu:]]", "malformed POSIX classes", 1),
                 unsupported("\\xE9", "non-ASCII byte escapes", 0),
                 unsupported("\\351", "non-ASCII byte escapes", 0),
                 unsupported("\\uD800", "surrogate escapes", 0),
