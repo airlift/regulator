@@ -51,6 +51,17 @@ public class TestRegexpParser
     }
 
     @Test
+    public void testDeeplyNestedClassesAreStackSafe()
+    {
+        Slice pattern = Slices.utf8Slice("[".repeat(100_000) + "a" + "]".repeat(100_000));
+        Slice expected = Slices.utf8Slice("[a]");
+        assertThat(TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp())
+                .isEqualTo(TrinoRegexpParser.parse(expected, Regexp.LIKE_PERL).regexp());
+        assertThat(JavaRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp())
+                .isEqualTo(JavaRegexpParser.parse(expected, Regexp.LIKE_PERL).regexp());
+    }
+
+    @Test
     public void testMaximumCapturesAreStackSafe()
             throws InterruptedException
     {

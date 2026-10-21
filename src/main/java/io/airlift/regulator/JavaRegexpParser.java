@@ -815,83 +815,86 @@ final class JavaRegexpParser
             return Regexp.charClass(nodeFlags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());
         }
 
+        // Nested classes keep their state on an explicit stack, as groups do in parseExpression,
+        // so nesting depth is not limited by the Java stack. A nested class opens and closes only
+        // outside a quote, so every level shares one atom cursor.
         private CharClassBuilder parseCharClassBuilder(int nodeFlags)
+        {
+            ClassAtomCursor atomCursor = new ClassAtomCursor();
+            Deque<ClassFrame> classes = new ArrayDeque<>();
+            classes.push(openClass(atomCursor));
+            while (true) {
+                ClassFrame frame = classes.peek();
+                if (parseClassUnion(nodeFlags, frame, atomCursor)) {
+                    classes.push(openClass(atomCursor));
+                    continue;
+                }
+
+                frame.finishUnion();
+                if (atomCursor.isIntersection()) {
+                    atomCursor.consumeIntersection();
+                    if (!atomCursor.atEnd() && !atomCursor.isClassEnd(false, true)) {
+                        frame.startIntersectionOperand();
+                        continue;
+                    }
+                }
+
+                if (atomCursor.atEnd() || !atomCursor.isClassEnd(false, false)) {
+                    throw error(RegexpParseErrorCode.MISSING_BRACKET, Slices.wrappedBuffer(bytes, frame.classStart, end - frame.classStart));
+                }
+                consumeByte(']');
+
+                if (!frame.hasClassAtom) {
+                    throw error(RegexpParseErrorCode.BAD_CHAR_CLASS, Slices.wrappedBuffer(bytes, frame.classStart, index - frame.classStart));
+                }
+                CharClassBuilder characterClassBuilder = frame.characterClassBuilder;
+                if (frame.negated) {
+                    characterClassBuilder.negate();
+                }
+                characterClassBuilder.removeAbove(Regexp.maxRune(nodeFlags));
+                classes.pop();
+                if (classes.isEmpty()) {
+                    return characterClassBuilder;
+                }
+                ClassFrame parent = classes.peek();
+                parent.union.addCharClass(characterClassBuilder);
+                parent.unionHasClassAtom = true;
+            }
+        }
+
+        private ClassFrame openClass(ClassAtomCursor atomCursor)
         {
             int classStart = index;
             consumeByte('[');
-            ClassAtomCursor atomCursor = new ClassAtomCursor();
-            boolean negate = false;
-            if (atomCursor.tryConsumeNegation()) {
-                negate = true;
-            }
-
-            ClassUnionResult firstUnion = parseClassUnion(nodeFlags, false, atomCursor);
-            CharClassBuilder characterClassBuilder = firstUnion.characterClassBuilder();
-            boolean hasClassAtom = firstUnion.hasClassAtom();
-            boolean hasIntersectionBase = hasClassAtom;
-            while (atomCursor.isIntersection()) {
-                atomCursor.consumeIntersection();
-                if (atomCursor.atEnd() || atomCursor.isClassEnd(false, true)) {
-                    break;
-                }
-                ClassUnionResult intersectionUnion = parseClassUnion(nodeFlags, true, atomCursor);
-                CharClassBuilder intersection = intersectionUnion.characterClassBuilder();
-                hasClassAtom |= intersectionUnion.hasClassAtom();
-                if (!intersectionUnion.hasClassAtom()) {
-                    continue;
-                }
-                if (!hasIntersectionBase) {
-                    characterClassBuilder.addCharClass(intersection);
-                    hasIntersectionBase = true;
-                }
-                else {
-                    characterClassBuilder.retainAll(intersection);
-                }
-            }
-
-            if (atomCursor.atEnd() || !atomCursor.isClassEnd(false, false)) {
-                throw error(RegexpParseErrorCode.MISSING_BRACKET, Slices.wrappedBuffer(bytes, classStart, end - classStart));
-            }
-            consumeByte(']');
-
-            if (!hasClassAtom) {
-                throw error(RegexpParseErrorCode.BAD_CHAR_CLASS, Slices.wrappedBuffer(bytes, classStart, index - classStart));
-            }
-            if (negate) {
-                characterClassBuilder.negate();
-            }
-            characterClassBuilder.removeAbove(Regexp.maxRune(nodeFlags));
-            return characterClassBuilder;
+            return new ClassFrame(classStart, atomCursor.tryConsumeNegation());
         }
 
-        private ClassUnionResult parseClassUnion(int nodeFlags, boolean intersectionOperand, ClassAtomCursor atomCursor)
+        // Adds members to the frame's current union until the union ends, or returns true at the
+        // '[' of a nested class.
+        private boolean parseClassUnion(int nodeFlags, ClassFrame frame, ClassAtomCursor atomCursor)
         {
-            CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            boolean first = true;
-            boolean hasClassAtom = false;
+            CharClassBuilder characterClassBuilder = frame.union;
             while (!atomCursor.atEnd()) {
-                if (atomCursor.isClassEnd(first, intersectionOperand)) {
+                if (atomCursor.isClassEnd(frame.first, frame.intersectionOperand)) {
                     break;
                 }
                 if (atomCursor.isIntersection()) {
                     break;
                 }
-                first = false;
+                frame.first = false;
 
                 if (atomCursor.isNestedClass()) {
-                    characterClassBuilder.addCharClass(parseCharClassBuilder(nodeFlags));
-                    hasClassAtom = true;
-                    continue;
+                    return true;
                 }
 
                 if (!atomCursor.isQuoted() && tryParseClassEscape(nodeFlags, characterClassBuilder)) {
-                    hasClassAtom = true;
+                    frame.unionHasClassAtom = true;
                     continue;
                 }
 
                 int low = atomCursor.parseLiteralRune(nodeFlags);
                 int high = low;
-                hasClassAtom = true;
+                frame.unionHasClassAtom = true;
 
                 if (atomCursor.tryConsumeRangeOperator()) {
                     high = atomCursor.parseLiteralRune(nodeFlags);
@@ -903,8 +906,58 @@ final class JavaRegexpParser
                 // For explicit singletons/ranges, do not implicitly filter '\n' out.
                 characterClassBuilder.addRangeFlags(low, high, nodeFlags | Regexp.CLASS_NEWLINE, caseFolding);
             }
+            return false;
+        }
 
-            return new ClassUnionResult(characterClassBuilder, hasClassAtom);
+        // One open bracket level: the intersection of its finished operands and the union of
+        // the operand being read. Java skips an operand without atoms, and the first operand
+        // with atoms becomes the base the later ones intersect.
+        private static final class ClassFrame
+        {
+            private final int classStart;
+            private final boolean negated;
+            private CharClassBuilder characterClassBuilder;
+            private boolean hasClassAtom;
+            private boolean hasIntersectionBase;
+            private boolean intersectionOperand;
+            private CharClassBuilder union = new CharClassBuilder();
+            private boolean first = true;
+            private boolean unionHasClassAtom;
+
+            ClassFrame(int classStart, boolean negated)
+            {
+                this.classStart = classStart;
+                this.negated = negated;
+            }
+
+            void finishUnion()
+            {
+                if (!intersectionOperand) {
+                    characterClassBuilder = union;
+                    hasClassAtom = unionHasClassAtom;
+                    hasIntersectionBase = hasClassAtom;
+                    return;
+                }
+                hasClassAtom |= unionHasClassAtom;
+                if (!unionHasClassAtom) {
+                    return;
+                }
+                if (!hasIntersectionBase) {
+                    characterClassBuilder.addCharClass(union);
+                    hasIntersectionBase = true;
+                }
+                else {
+                    characterClassBuilder.retainAll(union);
+                }
+            }
+
+            void startIntersectionOperand()
+            {
+                intersectionOperand = true;
+                union = new CharClassBuilder();
+                first = true;
+                unionHasClassAtom = false;
+            }
         }
 
         private final class ClassAtomCursor
@@ -1045,8 +1098,6 @@ final class JavaRegexpParser
                 }
             }
         }
-
-        private record ClassUnionResult(CharClassBuilder characterClassBuilder, boolean hasClassAtom) {}
 
         private boolean tryParseClassEscape(int nodeFlags, CharClassBuilder characterClassBuilder)
         {
