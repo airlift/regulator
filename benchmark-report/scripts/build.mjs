@@ -51,6 +51,9 @@ await build({
 
 await cp(resolve(reportRoot, "src/styles.css"), resolve(outputRoot, "styles.css"));
 await cp(resolve(reportRoot, "../docs/benchmarks/MEASUREMENT_QUALITY.md"), resolve(outputRoot, "measurement-quality.txt"));
+await cp(resolve(reportRoot, "../docs/logo/regulator-favicon.svg"), resolve(outputRoot, "favicon.svg"));
+await cp(resolve(reportRoot, "../docs/logo/regulator-favicon.ico"), resolve(outputRoot, "favicon.ico"));
+await cp(resolve(reportRoot, "../docs/logo/regulator-apple-touch-icon.png"), resolve(outputRoot, "apple-touch-icon.png"));
 await mkdir(resolve(outputRoot, "data"));
 // Retain only versioned public captures in the site artifact. Complete campaign
 // diagnostics live in the separately indexed private evidence archive.
@@ -93,6 +96,9 @@ await writeFile(resolve(outputRoot, "index.html"), `<!doctype html>
     <meta name="description" content="Regulator benchmark report">
     <title>Regulator benchmark report</title>
     <link rel="stylesheet" href="./styles.css">
+    <link rel="icon" href="./favicon.ico" sizes="32x32">
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png">
   </head>
   <body>
     <div id="root"><main class="loading-page">Loading benchmark results…</main></div>
@@ -114,11 +120,12 @@ const compiled = await build({
   write: false,
 });
 const styles = await readFile(resolve(reportRoot, "src/styles.css"), "utf8");
+const favicon = await readFile(resolve(reportRoot, "../docs/logo/regulator-favicon.svg"), "utf8");
 // The standalone file is intentionally self-contained, including downloadable evidence.
 const embedded = JSON.stringify(data).replaceAll("<", "\\u003c");
 const standalone = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Regulator benchmark report</title><style>${styles}</style></head>
+<title>Regulator benchmark report</title><link rel="icon" href="data:image/svg+xml,${encodeURIComponent(favicon)}"><style>${styles}</style></head>
 <body><div id="root"></div><script type="application/json" id="report-data">${embedded}</script>
 <script>window.__REGULATOR_REPORT__=JSON.parse(document.getElementById("report-data").textContent);</script>
 <script>${compiled.outputFiles[0].text.replaceAll("</script", "<\\/script")}</script></body></html>\n`;
