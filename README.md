@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo/regulator-dark.svg">
+  <img src="docs/logo/regulator-light.svg" alt="Regulator logo" width="120">
+</picture>
+
 # Regulator
 
 Regulator is a high-performance regular-expression engine for UTF-8
