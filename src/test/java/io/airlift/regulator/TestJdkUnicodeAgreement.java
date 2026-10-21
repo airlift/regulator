@@ -64,7 +64,7 @@ public class TestJdkUnicodeAgreement
             // Unicode 17.0 removed Extended_Pictographic from 689 code points that are not emoji,
             // such as U+2388 HELM SYMBOL and U+2605 BLACK STAR. The JDK assigns 672 of them; the
             // other 17 were unassigned.
-            new ExpectedDifference("17.0", Set.of("IsExtended_Pictographic"), 672, codePoint -> !UnicodeGroups.lookup("IsExtended_Pictographic").contains(codePoint)));
+            new ExpectedDifference("17.0", Set.of("IsExtended_Pictographic"), 672, codePoint -> !JavaUnicodeProperties.lookup("IsExtended_Pictographic").contains(codePoint)));
 
     private static final List<Category> CATEGORIES = List.of(
             new Category("Cn", Character.UNASSIGNED),
@@ -164,10 +164,10 @@ public class TestJdkUnicodeAgreement
     public void testGeneralCategoriesAgreeWithCharacterType()
     {
         for (Category category : CATEGORIES) {
-            assertRanges(UnicodeGroups.lookup(category.name()), codePoint -> Character.getType(codePoint) == category.type(), category.name());
+            assertRanges(JavaUnicodeProperties.lookup(category.name()), codePoint -> Character.getType(codePoint) == category.type(), category.name());
         }
         for (CategoryGroup categoryGroup : CATEGORY_GROUPS) {
-            assertRanges(UnicodeGroups.lookup(categoryGroup.name()), codePoint -> categoryGroup.types().test(Character.getType(codePoint)), categoryGroup.name());
+            assertRanges(JavaUnicodeProperties.lookup(categoryGroup.name()), codePoint -> categoryGroup.types().test(Character.getType(codePoint)), categoryGroup.name());
         }
     }
 
@@ -175,16 +175,16 @@ public class TestJdkUnicodeAgreement
     public void testScriptsAgreeWithCharacterUnicodeScript()
     {
         for (Character.UnicodeScript script : Character.UnicodeScript.values()) {
-            assertRanges(UnicodeGroups.lookup(script.name()), codePoint -> Character.UnicodeScript.of(codePoint) == script, script.name());
+            assertRanges(JavaUnicodeProperties.lookup(script.name()), codePoint -> Character.UnicodeScript.of(codePoint) == script, script.name());
         }
 
         // A short or long name that UnicodeScript.forName rejects names a script Unicode added
         // after the JDK's version.
-        List<String> names = new ArrayList<>(UnicodeGroups.scriptNames());
+        List<String> names = new ArrayList<>(JavaUnicodeProperties.scriptNames());
         names.addAll(UnicodeDatabase.scriptShortNames().keySet());
         for (String name : names) {
             for (String spelling : List.of(name, name.toLowerCase(Locale.ROOT), name.replace("_", ""))) {
-                assertSameClassAsJdk(spelling, jdkScript(spelling), UnicodeGroups.lookup("script=" + spelling));
+                assertSameClassAsJdk(spelling, jdkScript(spelling), JavaUnicodeProperties.lookup("script=" + spelling));
             }
         }
     }
@@ -208,7 +208,7 @@ public class TestJdkUnicodeAgreement
                 .toList();
         for (Character.UnicodeBlock block : blocks) {
             String propertyName = "In" + block;
-            assertRanges(UnicodeGroups.lookup(propertyName), codePoint -> Character.UnicodeBlock.of(codePoint) == block, propertyName);
+            assertRanges(JavaUnicodeProperties.lookup(propertyName), codePoint -> Character.UnicodeBlock.of(codePoint) == block, propertyName);
         }
 
         // A spelling of a Blocks.txt name that UnicodeBlock.forName rejects is a block Unicode added
@@ -216,7 +216,7 @@ public class TestJdkUnicodeAgreement
         for (String name : UnicodeDatabase.blocks().names()) {
             String uppercaseName = name.toUpperCase(Locale.ROOT);
             for (String spelling : List.of(name, uppercaseName, name.replace(" ", ""), uppercaseName.replace(' ', '_').replace('-', '_'))) {
-                assertSameClassAsJdk(spelling, jdkBlock(spelling), UnicodeGroups.lookup("block=" + spelling));
+                assertSameClassAsJdk(spelling, jdkBlock(spelling), JavaUnicodeProperties.lookup("block=" + spelling));
             }
         }
     }
@@ -225,7 +225,7 @@ public class TestJdkUnicodeAgreement
     public void testBinaryPropertiesAgreeWithJdkPredicates()
     {
         for (PropertyExpectation property : BINARY_PROPERTIES) {
-            assertRanges(UnicodeGroups.lookup(property.name()), property.predicate(), property.name());
+            assertRanges(JavaUnicodeProperties.lookup(property.name()), property.predicate(), property.name());
         }
     }
 
@@ -233,7 +233,7 @@ public class TestJdkUnicodeAgreement
     public void testJavaPropertiesAgreeWithCharacterPredicates()
     {
         for (PropertyExpectation property : JAVA_PROPERTIES) {
-            assertRanges(UnicodeGroups.lookup(property.name()), property.predicate(), property.name());
+            assertRanges(JavaUnicodeProperties.lookup(property.name()), property.predicate(), property.name());
         }
     }
 
@@ -347,29 +347,29 @@ public class TestJdkUnicodeAgreement
     @Test
     public void testJavaPropertyAliases()
     {
-        assertThat(UnicodeGroups.lookup("InBasic_Latin"))
-                .isSameAs(UnicodeGroups.lookup("block=Basic_Latin"));
-        assertThat(UnicodeGroups.lookup("Greek"))
-                .isSameAs(UnicodeGroups.lookup("script=Greek"))
-                .isSameAs(UnicodeGroups.lookup("IsGreek"));
-        assertThat(UnicodeGroups.lookup("Lu"))
-                .isSameAs(UnicodeGroups.lookup("Uppercase_Letter"))
-                .isSameAs(UnicodeGroups.lookup("general_category=Lu"));
-        assertThat(UnicodeGroups.lookup("IsAlphabetic"))
-                .isSameAs(UnicodeGroups.lookup("IsAlpha"));
-        assertThat(UnicodeGroups.lookup("IsControl"))
-                .isSameAs(UnicodeGroups.lookup("IsCntrl"));
-        assertThat(UnicodeGroups.lookup("IsHex_Digit"))
-                .isSameAs(UnicodeGroups.lookup("IsXDigit"));
-        assertThat(UnicodeGroups.lookup("IsLowercase"))
-                .isSameAs(UnicodeGroups.lookup("IsLower"));
-        assertThat(UnicodeGroups.lookup("IsPunctuation"))
-                .isSameAs(UnicodeGroups.lookup("IsPunct"));
-        assertThat(UnicodeGroups.lookup("IsUppercase"))
-                .isSameAs(UnicodeGroups.lookup("IsUpper"));
-        assertThat(UnicodeGroups.lookup("IsWhite_Space"))
-                .isSameAs(UnicodeGroups.lookup("IsSpace"));
-        assertThat(UnicodeGroups.lookup("Not_A_Unicode_Property")).isNull();
+        assertThat(JavaUnicodeProperties.lookup("InBasic_Latin"))
+                .isSameAs(JavaUnicodeProperties.lookup("block=Basic_Latin"));
+        assertThat(JavaUnicodeProperties.lookup("Greek"))
+                .isSameAs(JavaUnicodeProperties.lookup("script=Greek"))
+                .isSameAs(JavaUnicodeProperties.lookup("IsGreek"));
+        assertThat(JavaUnicodeProperties.lookup("Lu"))
+                .isSameAs(JavaUnicodeProperties.lookup("Uppercase_Letter"))
+                .isSameAs(JavaUnicodeProperties.lookup("general_category=Lu"));
+        assertThat(JavaUnicodeProperties.lookup("IsAlphabetic"))
+                .isSameAs(JavaUnicodeProperties.lookup("IsAlpha"));
+        assertThat(JavaUnicodeProperties.lookup("IsControl"))
+                .isSameAs(JavaUnicodeProperties.lookup("IsCntrl"));
+        assertThat(JavaUnicodeProperties.lookup("IsHex_Digit"))
+                .isSameAs(JavaUnicodeProperties.lookup("IsXDigit"));
+        assertThat(JavaUnicodeProperties.lookup("IsLowercase"))
+                .isSameAs(JavaUnicodeProperties.lookup("IsLower"));
+        assertThat(JavaUnicodeProperties.lookup("IsPunctuation"))
+                .isSameAs(JavaUnicodeProperties.lookup("IsPunct"));
+        assertThat(JavaUnicodeProperties.lookup("IsUppercase"))
+                .isSameAs(JavaUnicodeProperties.lookup("IsUpper"));
+        assertThat(JavaUnicodeProperties.lookup("IsWhite_Space"))
+                .isSameAs(JavaUnicodeProperties.lookup("IsSpace"));
+        assertThat(JavaUnicodeProperties.lookup("Not_A_Unicode_Property")).isNull();
     }
 
     // Java folds as the JVM's case classes do, but from the database's case mappings. Unicode keeps
@@ -508,7 +508,7 @@ public class TestJdkUnicodeAgreement
     {
         if (jdkValue != null) {
             String jdkName = jdkValue instanceof Character.UnicodeBlock ? "In" + jdkValue : "sc=" + jdkValue;
-            assertThat(characterClass).as(name).isSameAs(UnicodeGroups.lookup(jdkName));
+            assertThat(characterClass).as(name).isSameAs(JavaUnicodeProperties.lookup(jdkName));
             return;
         }
         if (characterClass != null) {

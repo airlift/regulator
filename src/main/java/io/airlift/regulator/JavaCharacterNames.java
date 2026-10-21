@@ -52,16 +52,16 @@ final class JavaCharacterNames
         if (name != null) {
             return name;
         }
-        if (UnicodeGroups.lookup("Cc").contains(codePoint)) {
+        if (UnicodeGroups.generalCategory("Cc").contains(codePoint)) {
             name = controlName(codePoint);
             if (name != null) {
                 return name;
             }
         }
-        if (UnicodeGroups.lookup("Cn").contains(codePoint)) {
+        if (UnicodeGroups.generalCategory("Cn").contains(codePoint)) {
             return null;
         }
-        String block = UnicodeGroups.javaBlockIdentifier(codePoint);
+        String block = JavaUnicodeProperties.javaBlockIdentifier(codePoint);
         String hex = UnicodeCase.toUpperCase(Integer.toHexString(codePoint));
         return block == null ? hex : block.replace('_', ' ') + " " + hex;
     }
@@ -88,7 +88,7 @@ final class JavaCharacterNames
         if (codePoint >= 0) {
             return codePoint;
         }
-        for (RuneRange range : UnicodeGroups.lookup("Cc").rangeView()) {
+        for (RuneRange range : UnicodeGroups.generalCategory("Cc").rangeView()) {
             for (int control = range.low(); control <= range.high(); control++) {
                 if (key.equals(controlName(control))) {
                     return control;

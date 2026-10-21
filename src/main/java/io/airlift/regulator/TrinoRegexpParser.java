@@ -70,7 +70,7 @@ final class TrinoRegexpParser
         // Capture names permit Lu, Ll, Lt, Lm, Lo, Nl, Mn, Mc, Nd, and Pc categories.
         private static final CharClass VALID_CAPTURE_NAME = buildValidCaptureNameCharClass();
         // A capture name must not start with a decimal digit, Nd.
-        private static final CharClass DECIMAL_DIGIT = requireNonNull(UnicodeGroups.lookup("Nd"), "missing Unicode group: Nd");
+        private static final CharClass DECIMAL_DIGIT = requireNonNull(JavaUnicodeProperties.lookup("Nd"), "missing Unicode group: Nd");
         private static final CharClass PERL_DIGITS_CLASS = buildPerlDigitsCharClass();
 
         private final byte[] bytes;
@@ -1122,7 +1122,7 @@ final class TrinoRegexpParser
             CharClassBuilder captureNameClassBuilder = new CharClassBuilder();
             // As in upstream, these are added with NoParseFlags (0).
             for (String group : new String[] {"Lu", "Ll", "Lt", "Lm", "Lo", "Nl", "Mn", "Mc", "Nd", "Pc"}) {
-                CharClass characterClass = UnicodeGroups.lookup(group);
+                CharClass characterClass = JavaUnicodeProperties.lookup(group);
                 if (characterClass == null) {
                     throw new IllegalStateException("missing Unicode group: " + group);
                 }
@@ -1194,7 +1194,7 @@ final class TrinoRegexpParser
                 default -> null;
             };
             if (property != null) {
-                CharClass characterClass = UnicodeGroups.lookup("Is" + property);
+                CharClass characterClass = JavaUnicodeProperties.lookup("Is" + property);
                 if (characterClass != null) {
                     return characterClass;
                 }
@@ -1444,24 +1444,24 @@ final class TrinoRegexpParser
                 return null;
             }
             if (name.length() >= 2 && UnicodeCase.equalsIgnoreCase(name.substring(0, 2), "In")) {
-                CharClass block = UnicodeGroups.lookup("In" + name.substring(2));
+                CharClass block = JavaUnicodeProperties.lookup("In" + name.substring(2));
                 if (block != null) {
                     return block;
                 }
             }
             String javaProperty = canonicalJavaProperty(name);
             if (javaProperty != null) {
-                return UnicodeGroups.lookup(javaProperty);
+                return JavaUnicodeProperties.lookup(javaProperty);
             }
-            CharClass group = UnicodeGroups.lookup(name);
+            CharClass group = JavaUnicodeProperties.lookup(name);
             if (group != null) {
                 return group;
             }
             if (name.length() == 1) {
-                group = UnicodeGroups.lookup(UnicodeCase.toUpperCase(name));
+                group = JavaUnicodeProperties.lookup(UnicodeCase.toUpperCase(name));
             }
             else if (name.length() == 2) {
-                group = UnicodeGroups.lookup(new StringBuilder()
+                group = JavaUnicodeProperties.lookup(new StringBuilder()
                         .appendCodePoint(UnicodeCase.toUpperCase(name.charAt(0)))
                         .append(UnicodeCase.toLowerCase(name.substring(1)))
                         .toString());
@@ -1469,13 +1469,13 @@ final class TrinoRegexpParser
             if (group != null) {
                 return group;
             }
-            group = UnicodeGroups.lookup("Is" + name);
+            group = JavaUnicodeProperties.lookup("Is" + name);
             if (group != null) {
                 return group;
             }
-            for (String script : UnicodeGroups.scriptNames()) {
+            for (String script : JavaUnicodeProperties.scriptNames()) {
                 if (UnicodeCase.equalsIgnoreCase(script.replace("_", ""), name)) {
-                    return UnicodeGroups.lookup("sc=" + script);
+                    return JavaUnicodeProperties.lookup("sc=" + script);
                 }
             }
             return null;
