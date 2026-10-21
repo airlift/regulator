@@ -1357,7 +1357,7 @@ final class JavaRegexpParser
             }
 
             return switch (property) {
-                case "Lu", "Ll", "Lt", "Uppercase_Letter", "Lowercase_Letter", "Titlecase_Letter" -> UnicodeGroups.lookup("LC");
+                case "Lu", "Ll", "Lt", "Uppercase_Letter", "Lowercase_Letter", "Titlecase_Letter" -> JavaUnicodeProperties.lookup("LC");
                 case "javaLowerCase", "javaUpperCase", "javaTitleCase" -> CasedPropertyHolder.CHARACTER_CLASS;
                 case "Lower", "Upper" -> (equals < 0 && (flags & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0)
                         ? CasedPropertyHolder.CHARACTER_CLASS
@@ -1373,9 +1373,9 @@ final class JavaRegexpParser
             private static CharClass casedProperty()
             {
                 CharClassBuilder builder = new CharClassBuilder();
-                builder.addCharClass(UnicodeGroups.lookup("javaLowerCase"), 0, CaseFolding.JAVA);
-                builder.addCharClass(UnicodeGroups.lookup("javaUpperCase"), 0, CaseFolding.JAVA);
-                builder.addCharClass(UnicodeGroups.lookup("javaTitleCase"), 0, CaseFolding.JAVA);
+                builder.addCharClass(JavaUnicodeProperties.lookup("javaLowerCase"), 0, CaseFolding.JAVA);
+                builder.addCharClass(JavaUnicodeProperties.lookup("javaUpperCase"), 0, CaseFolding.JAVA);
+                builder.addCharClass(JavaUnicodeProperties.lookup("javaTitleCase"), 0, CaseFolding.JAVA);
                 return builder.toCharClass();
             }
         }
@@ -1414,7 +1414,7 @@ final class JavaRegexpParser
                     name = name.substring(equals + 1);
                     flags &= ~Regexp.JAVA_UNICODE_CHARACTER_CLASS;
                     if (name.startsWith("java")) {
-                        return UnicodeGroups.lookup(name);
+                        return JavaUnicodeProperties.lookup(name);
                     }
                 }
             }
@@ -1438,7 +1438,7 @@ final class JavaRegexpParser
                     default -> null;
                 };
                 if (unicodeName != null) {
-                    return UnicodeGroups.lookup(unicodeName);
+                    return JavaUnicodeProperties.lookup(unicodeName);
                 }
             }
             String posixName = switch (name) {
@@ -1463,13 +1463,13 @@ final class JavaRegexpParser
             }
             if (!name.startsWith("Is") && name.indexOf('=') < 0) {
                 String normalizedName = name.replace("_", "");
-                for (String script : UnicodeGroups.scriptNames()) {
+                for (String script : JavaUnicodeProperties.scriptNames()) {
                     if (UnicodeCase.equalsIgnoreCase(script.replace("_", ""), normalizedName)) {
                         return null;
                     }
                 }
             }
-            return UnicodeGroups.lookup(originalName);
+            return JavaUnicodeProperties.lookup(originalName);
         }
 
         private static final class Latin1PropertyHolder
@@ -1519,7 +1519,7 @@ final class JavaRegexpParser
 
         private Regexp unicodePredefinedClass(int flags, String name, boolean negate)
         {
-            CharClass group = requireNonNull(UnicodeGroups.lookup(name), "Unicode group is missing: " + name);
+            CharClass group = requireNonNull(JavaUnicodeProperties.lookup(name), "Unicode group is missing: " + name);
             return perlCharClass(flags, negate, group);
         }
 
@@ -1596,7 +1596,7 @@ final class JavaRegexpParser
         private CharClass predefinedCharClass(int flags, boolean negate, String unicodeName, CharClass asciiClass)
         {
             CharClass group = (flags & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0
-                    ? requireNonNull(UnicodeGroups.lookup(unicodeName), "Unicode group is missing: " + unicodeName)
+                    ? requireNonNull(JavaUnicodeProperties.lookup(unicodeName), "Unicode group is missing: " + unicodeName)
                     : asciiClass;
             if (!negate) {
                 return group;

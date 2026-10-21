@@ -98,7 +98,10 @@ can map the same shorthand to Unicode ranges.
 ## Production design
 
 The package-private `UnicodeGroups` registry in `io.airlift.regulator` exposes
-immutable `CharClass` values to the parser and character-class builder.
+immutable `CharClass` values to the parser and character-class builder. It
+holds the Unicode lookups every language shares, such as General_Category
+values by their Unicode names; each language resolves its own property names
+to them in its own class, such as `JavaUnicodeProperties` for Java and Trino.
 
 Property construction follows this flow:
 
@@ -129,13 +132,13 @@ Other_Alphabetic, and `Character.isWhitespace` is a space, line, or paragraph
 separator other than the three no-break spaces, or one of U+0009 through
 U+000D and U+001C through U+001F. A choice of the JDK that is not in the
 Unicode data, such as those explicit code points or the earlier names of three
-renamed blocks, is a constant in the registry with a comment citing the
-javadoc.
+renamed blocks, is a constant in `JavaUnicodeProperties` with a comment citing
+the javadoc.
 
 ### Property names and aliases
 
 Property-name parsing is language metadata rather than Unicode data. Java and
-Trino spellings resolve through `UnicodeGroups.lookup`;
+Trino spellings resolve through `JavaUnicodeProperties.lookup`;
 `RegexpParser.lookupUnicodeGroup` applies RE2's exact category and long script
 name rules using the registry's raw values.
 

@@ -71,7 +71,7 @@ public class TestCharClassBuilder
     @Test
     public void testUnicodeGroupReusesCachedRanges()
     {
-        CharClass cached = UnicodeGroups.lookup("L");
+        CharClass cached = UnicodeGroups.generalCategory("L");
         assertReusesCachedRanges(RegexpParser.parse(utf8Slice("\\p{L}+"), Regexp.LIKE_PERL).regexp(), cached);
         assertReusesCachedRanges(TrinoRegexpParser.parse(utf8Slice("\\p{L}+"), Regexp.LIKE_PERL).regexp(), cached);
         assertReusesCachedRanges(JavaRegexpParser.parse(utf8Slice("\\p{L}+"), Regexp.LIKE_PERL).regexp(), cached);
@@ -135,8 +135,8 @@ public class TestCharClassBuilder
     @Test
     public void testAddCharClassMergesLargeClasses()
     {
-        CharClass upper = UnicodeGroups.lookup("Lu");
-        CharClass lower = UnicodeGroups.lookup("Ll");
+        CharClass upper = UnicodeGroups.generalCategory("Lu");
+        CharClass lower = UnicodeGroups.generalCategory("Ll");
 
         CharClassBuilder merged = new CharClassBuilder();
         merged.addCharClass(upper, Regexp.LIKE_PERL, CaseFolding.RE2);

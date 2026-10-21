@@ -96,7 +96,7 @@ public class TestCaseFolding
     @Test
     public void testWordCharactersAreClosedUnderCaseFolding()
     {
-        assertClosedUnderCaseFolding(CaseFolding.JAVA, UnicodeGroups.lookup("IsWord")::contains, "Java \\w");
+        assertClosedUnderCaseFolding(CaseFolding.JAVA, JavaUnicodeProperties.lookup("IsWord")::contains, "Java \\w");
         assertClosedUnderCaseFolding(CaseFolding.JAVA, UnicodeGroups::isWord, "Java \\b");
         assertClosedUnderCaseFolding(CaseFolding.TRINO, EmptyOp::isUnicodeWord, "Trino \\b");
     }
