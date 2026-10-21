@@ -1121,75 +1121,90 @@ final class TrinoRegexpParser
                     : Regexp.alternate(nodeFlags, alternatives);
         }
 
-        // Parses the members and intersections of a class through its closing bracket.
+        // Parses the members and intersections of a class through its closing bracket. Nested
+        // classes keep their state on an explicit stack, as groups do in parseExpression, so
+        // nesting depth is not limited by the Java stack.
         private CharClassBuilder parseClassBody(int classFlags, int classStart)
         {
-            CharClassBuilder characterClassBuilder = parseClassUnion(classFlags);
-            while (isClassIntersection()) {
-                index += 2;
-                if (atEnd() || peekByte() == ']') {
-                    throw unsupportedConstruct("empty character-class intersection operands", index - 2, index);
-                }
-                CharClassBuilder intersection = parseClassUnion(classFlags);
-                characterClassBuilder.retainAll(intersection);
-            }
-
-            if (atEnd() || peekByte() != ']') {
-                throw error(RegexpParseErrorCode.MISSING_BRACKET, Slices.wrappedBuffer(bytes, classStart, end - classStart));
-            }
-            consumeByte(']');
-            return characterClassBuilder;
-        }
-
-        private CharClassBuilder parseClassUnion(int classFlags)
-        {
-            CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            boolean first = true;
-            boolean rejectDashAfterNestedClass = false;
-            while (!atEnd()) {
-                int nextByte = peekByte();
-                if (nextByte == ']' && !first) {
-                    break;
-                }
-                if (first && isClassIntersection()) {
-                    throw unsupportedConstruct("empty character-class intersection operands", index, index + 2);
-                }
-                if (!first && isClassIntersection()) {
-                    break;
-                }
-                first = false;
-
-                if (tryParsePosixCharClass(classFlags, characterClassBuilder)) {
-                    rejectDashAfterNestedClass = true;
-                    continue;
-                }
-
-                if (nextByte == '[') {
+            Deque<ClassFrame> classes = new ArrayDeque<>();
+            // The root frame is not negated: parseCharClass negates the class after folding it.
+            classes.push(new ClassFrame(classStart, false));
+            while (true) {
+                ClassFrame frame = classes.peek();
+                if (parseClassUnion(classFlags, frame)) {
                     // A nested class is parsed as a plain set; only the outermost class folds.
-                    // Keep the recursive call here so each nesting level adds only parseClassBody
-                    // and parseClassUnion frames.
-                    int classStart = index;
+                    int nestedStart = index;
                     consumeByte('[');
                     boolean negated = !atEnd() && peekByte() == '^';
                     if (negated) {
                         consumeByte('^');
                     }
-                    CharClassBuilder nested = parseClassBody(classFlags, classStart);
-                    if (negated) {
-                        nested.negate();
-                    }
-                    nested.removeAbove(Regexp.maxRune(classFlags));
-                    characterClassBuilder.addCharClass(nested);
-                    // Modern Joni keeps the state of the item before a nested class, so a dash after the
-                    // nested class continues that item: it is a literal after a range and starts a range
-                    // otherwise. The dash is also literal when no other item precedes the nested class or
-                    // when it ends the operand.
-                    if (rejectDashAfterNestedClass) {
-                        rejectDashAfterClassItem(classStart);
-                    }
+                    classes.push(new ClassFrame(nestedStart, negated));
                     continue;
                 }
-                rejectDashAfterNestedClass = true;
+
+                frame.finishUnion();
+                if (isClassIntersection()) {
+                    index += 2;
+                    if (atEnd() || peekByte() == ']') {
+                        throw unsupportedConstruct("empty character-class intersection operands", index - 2, index);
+                    }
+                    frame.startIntersectionOperand();
+                    continue;
+                }
+
+                if (atEnd() || peekByte() != ']') {
+                    throw error(RegexpParseErrorCode.MISSING_BRACKET, Slices.wrappedBuffer(bytes, frame.classStart, end - frame.classStart));
+                }
+                consumeByte(']');
+                classes.pop();
+                CharClassBuilder characterClassBuilder = frame.characterClassBuilder;
+                if (classes.isEmpty()) {
+                    return characterClassBuilder;
+                }
+                if (frame.negated) {
+                    characterClassBuilder.negate();
+                }
+                characterClassBuilder.removeAbove(Regexp.maxRune(classFlags));
+                ClassFrame parent = classes.peek();
+                parent.union.addCharClass(characterClassBuilder);
+                // Modern Joni keeps the state of the item before a nested class, so a dash after the
+                // nested class continues that item: it is a literal after a range and starts a range
+                // otherwise. The dash is also literal when no other item precedes the nested class or
+                // when it ends the operand.
+                if (parent.rejectDashAfterNestedClass) {
+                    rejectDashAfterClassItem(frame.classStart);
+                }
+            }
+        }
+
+        // Adds members to the frame's current union until the union ends, or returns true at the
+        // '[' of a nested class.
+        private boolean parseClassUnion(int classFlags, ClassFrame frame)
+        {
+            CharClassBuilder characterClassBuilder = frame.union;
+            while (!atEnd()) {
+                int nextByte = peekByte();
+                if (nextByte == ']' && !frame.first) {
+                    break;
+                }
+                if (frame.first && isClassIntersection()) {
+                    throw unsupportedConstruct("empty character-class intersection operands", index, index + 2);
+                }
+                if (!frame.first && isClassIntersection()) {
+                    break;
+                }
+                frame.first = false;
+
+                if (tryParsePosixCharClass(classFlags, characterClassBuilder)) {
+                    frame.rejectDashAfterNestedClass = true;
+                    continue;
+                }
+
+                if (nextByte == '[') {
+                    return true;
+                }
+                frame.rejectDashAfterNestedClass = true;
 
                 if (tryParseClassEscape(classFlags, characterClassBuilder)) {
                     continue;
@@ -1210,14 +1225,48 @@ final class TrinoRegexpParser
                     }
                     // As in modern Joni, a dash after a range is not a range operator; the next item reads it
                     // as a literal, even after a nested class.
-                    rejectDashAfterNestedClass = false;
+                    frame.rejectDashAfterNestedClass = false;
                 }
 
                 // For explicit singletons/ranges, do not implicitly filter '\n' out.
                 characterClassBuilder.addRangeFlags(low, high, classFlags | Regexp.CLASS_NEWLINE, caseFolding);
             }
+            return false;
+        }
 
-            return characterClassBuilder;
+        // One open bracket level: the intersection of its finished operands and the union of
+        // the operand being read.
+        private static final class ClassFrame
+        {
+            private final int classStart;
+            private final boolean negated;
+            private CharClassBuilder characterClassBuilder;
+            private CharClassBuilder union = new CharClassBuilder();
+            private boolean first = true;
+            private boolean rejectDashAfterNestedClass;
+
+            ClassFrame(int classStart, boolean negated)
+            {
+                this.classStart = classStart;
+                this.negated = negated;
+            }
+
+            void finishUnion()
+            {
+                if (characterClassBuilder == null) {
+                    characterClassBuilder = union;
+                }
+                else {
+                    characterClassBuilder.retainAll(union);
+                }
+            }
+
+            void startIntersectionOperand()
+            {
+                union = new CharClassBuilder();
+                first = true;
+                rejectDashAfterNestedClass = false;
+            }
         }
 
         // Matches whole-character spellings of the remaining folded suffix, except the complete
