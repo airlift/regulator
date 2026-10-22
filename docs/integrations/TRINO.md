@@ -83,6 +83,12 @@ a documented incompatibility, not an unsupported pattern. See the
 for the exact behavior and example. A specialized capture-aware engine is
 deferred unless practical Trino workloads require exact compatibility.
 
+Where Trino's pinned Joni, `io.airlift:joni:2.1.5.3`, and modern Joni disagree,
+each behavior is judged a bug or intended Trino behavior. A bug is replaced with
+the rule modern Joni and Oniguruma settled on, intended behavior stays, and the
+[Trino language reference](../reference/languages/TRINO_REGEXP.md) records each
+call.
+
 Trino's non-strict path assumes UTF-8 data is valid but does not validate it.
 Regulator likewise treats malformed input as garbage in, garbage out rather
 than validating it. Patterns differ: Trino accepts a pattern that is not valid

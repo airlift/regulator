@@ -1122,8 +1122,7 @@ final class TrinoRegexpParser
         {
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
             boolean first = true;
-            boolean nonNestedItemSeen = false;
-            boolean rangeCompleted = false;
+            boolean rejectDashAfterNestedClass = false;
             while (!atEnd()) {
                 int nextByte = peekByte();
                 if (nextByte == ']' && !first) {
@@ -1138,8 +1137,7 @@ final class TrinoRegexpParser
                 first = false;
 
                 if (tryParsePosixCharClass(classFlags, characterClassBuilder)) {
-                    nonNestedItemSeen = true;
-                    rangeCompleted = false;
+                    rejectDashAfterNestedClass = true;
                     continue;
                 }
 
@@ -1159,20 +1157,16 @@ final class TrinoRegexpParser
                     }
                     nested.removeAbove(Regexp.maxRune(classFlags));
                     characterClassBuilder.addCharClass(nested);
-                    // Joni keeps the state of the item before a nested class, so a dash after the nested
-                    // class continues that item: it is dropped after a range and starts a range otherwise.
-                    // The dash is literal when no other item precedes the nested class or when it ends
-                    // the operand.
-                    if (rangeCompleted) {
-                        dropDashAfterRange(classFlags);
-                    }
-                    else if (nonNestedItemSeen) {
+                    // Modern Joni keeps the state of the item before a nested class, so a dash after the
+                    // nested class continues that item: it is a literal after a range and starts a range
+                    // otherwise. The dash is also literal when no other item precedes the nested class or
+                    // when it ends the operand.
+                    if (rejectDashAfterNestedClass) {
                         rejectDashAfterClassItem(classStart);
                     }
                     continue;
                 }
-                nonNestedItemSeen = true;
-                rangeCompleted = false;
+                rejectDashAfterNestedClass = true;
 
                 if (tryParseClassEscape(classFlags, characterClassBuilder)) {
                     continue;
@@ -1191,8 +1185,9 @@ final class TrinoRegexpParser
                     if (high < low) {
                         throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, null);
                     }
-                    rangeCompleted = true;
-                    dropDashAfterRange(classFlags);
+                    // As in modern Joni, a dash after a range is not a range operator; the next item reads it
+                    // as a literal, even after a nested class.
+                    rejectDashAfterNestedClass = false;
                 }
 
                 // For explicit singletons/ranges, do not implicitly filter '\n' out.
@@ -1266,31 +1261,6 @@ final class TrinoRegexpParser
         {
             // A dash that continues a range rather than ending the class or an intersection operand.
             return !atEnd() && peekByte() == '-' && !dashEndsClassOperand();
-        }
-
-        private void dropDashAfterRange(int nodeFlags)
-        {
-            // Joni drops a dash after a completed range unless the dash ends the class or an intersection
-            // operand, or a second dash follows. It then misreads a class or non-ASCII character after the
-            // dropped dash, so only an ASCII character may follow.
-            if (!isRangeDash() || bytes[index + 1] == '-') {
-                return;
-            }
-            int dashStart = index;
-            consumeByte('-');
-            int tokenStart = index;
-            if (peekByte() == '[') {
-                throw unsupportedConstruct("dashes between a range and a class or non-ASCII character", dashStart, tokenStart + 1);
-            }
-            if (isClassEscape()) {
-                throw unsupportedConstruct("dashes between a range and a class or non-ASCII character", dashStart, tokenStart + 2);
-            }
-            // Decode the character only to check it is ASCII, then rewind so the union loop parses it, since
-            // it may start its own range.
-            if (parseClassAtomRune(nodeFlags) > 0x7F) {
-                throw unsupportedConstruct("dashes between a range and a class or non-ASCII character", dashStart, index);
-            }
-            index = tokenStart;
         }
 
         private boolean dashEndsClassOperand()

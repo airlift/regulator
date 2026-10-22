@@ -4,7 +4,11 @@
 
 `TrinoRegexp` supports the regular subset of Trino's regular-expression
 language. Trino uses a fork of Joni's Java-syntax language, so its syntax and
-behavior differ from both stock Joni and Java `Pattern`.
+behavior differ from both stock Joni and Java `Pattern`. Where Trino's pinned
+Joni, `io.airlift:joni:2.1.5.3`, and modern Joni disagree, each behavior is
+judged a bug or intended Trino behavior. `TrinoRegexp` follows the rule modern
+Joni and Oniguruma settled on in place of a bug, keeps intended behavior, and
+this reference notes each call.
 
 Patterns, inputs, and text results are UTF-8 `Slice` values. Matcher `start` and
 `end` return zero-based byte offsets relative to the logical Slice, with an
@@ -81,11 +85,10 @@ character.
 Folds that Unicode 18.0 adds include U+1DF95, which folds to `ss` with `ß` and
 `ẞ`, and new case pairs such as U+0277 and U+A7DD.
 
-Trino's pinned Joni dependency, `io.airlift:joni:2.1.5.3`, instead bundles fixed
-fold tables built from Unicode 4.1 data through jcodings, so mappings added or
-changed in Unicode since then differ between Regulator and Joni, in both
-directions. For example,
-Regulator's `(?i:ss)` matches capital `ẞ`, while that Joni version does not. The
+Trino's pinned Joni instead bundles fixed fold tables built from Unicode 4.1
+data through jcodings, so mappings added or changed in Unicode since then differ
+between Regulator and Joni, in both directions. For example,
+Regulator's `(?i:ss)` matches capital `ẞ`, while pinned Joni does not. The
 `ẞ` to `ss` full fold is defined in
 [Unicode 5.1](https://www.unicode.org/Public/5.1.0/ucd/CaseFolding.txt), released
 in 2008; it is not a Regulator-specific equivalence. In the other direction,
@@ -135,24 +138,34 @@ a documented Joni incompatibility, not a compile-time rejection. A specialized
 capture-aware engine is intentionally deferred unless practical Trino workloads
 require exact Joni behavior for this form.
 
-`\d`, `\s`, and `\w` use their ASCII definitions. As in Trino, unknown
-alphabetic escapes are interpreted as literals. For example, `\C` matches the
-literal `C`; it is not RE2's one-byte atom. A `\x` with neither braces nor hex
-digits, or a `\u` without hex digits, matches U+0000, as in Joni, unless it ends
-the pattern, where it is the literal letter; a malformed braced `\x{...}` is
-rejected. `\c` keeps the low five bits of the character after it, as in Joni,
-so `\ca` matches U+0001 and `\c?` matches DEL; an escaped character such as
-`\n` after it is decoded first. Inside a character class, `\p` or `\P` without
-braces is the literal letter, so `[\pL]` matches `p` or `L`; use `[\p{L}]` for
-letters.
+Modern Joni's Java syntax changed three behaviors that Trino's pinned Joni
+and Java's `Pattern` share. They are intended Trino behavior, so `TrinoRegexp`
+keeps them: `\d`, `\s`, and `\w` are ASCII, while modern Joni makes them
+Unicode; braced `\x{41}` is `A`, while modern Joni no longer reads the braced
+form; and outside a class `\pL` is the letter property, while modern Joni
+reads it as `p` followed by `L`.
 
-Inside a character class, a dash after a range is dropped, as in Joni, even when
-nested classes come between them, so `[a-p-z]` matches `z` but not `-`. The dash
-is kept when it ends the class or an intersection operand or when another dash
-follows, and a dropped dash must be followed by an ASCII character, not a class.
-A dash after a class escape, property, or POSIX class, or after a nested class
-that follows a single character or one of those, must end the class or an
-intersection operand, as in `[\d-]`.
+As in Trino, unknown alphabetic escapes are interpreted as literals. For
+example, `\C` matches the literal `C`; it is not RE2's one-byte atom. A `\x`
+with neither braces nor hex digits, or a `\u` without hex digits, matches
+U+0000, as in Joni, unless it ends the pattern, where it is the literal letter;
+a malformed braced `\x{...}` is rejected. `\c` keeps the low five bits of the
+character after it, as in Joni, so `\ca` matches U+0001 and `\c?` matches DEL;
+an escaped character such as `\n` after it is decoded first. Inside a character
+class, `\p` or `\P` without braces is the literal letter, so `[\pL]` matches `p`
+or `L`; use `[\p{L}]` for letters.
+
+Inside a character class, a dash after a range is a literal, as in modern Joni
+and Oniguruma, even when nested classes come between them, so `[a-zA-Z0-9-_]`
+and `[a-c[x]-z]` match `-`. A second dash, unless it ends the class or an
+intersection operand, makes that literal the start of a range, so `[a-c--x]`
+matches `-` through `x`. A dash after a class escape, property, or POSIX class,
+or after a nested class that follows a single character or one of those, must
+end the class or an intersection operand, as in `[\d-]`. Trino's pinned Joni
+differs: it drops a dash after a range unless the dash ends the class or an
+intersection operand, or another dash follows, so in Trino `[a-zA-Z0-9-_]` does
+not match `-`. It also reads the `[` in `[a-c-[x]]` as a literal, so that class
+matches `[`, and it fails on `[a-c-\d]`.
 
 ## Operations
 
@@ -204,7 +217,6 @@ currently rejected:
 - surrogate escapes and non-ASCII byte escapes
 - empty character-class intersection operands
 - character classes used as range endpoints
-- dashes between a range and a class or non-ASCII character
 - malformed POSIX classes such as `[[:a:b:]]`
 - repetitions above 1,000
 
