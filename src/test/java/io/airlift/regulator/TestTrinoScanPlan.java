@@ -2267,6 +2267,15 @@ public class TestTrinoScanPlan
             assertThat(trino.usesOrdinaryShortBooleanMatchForDiagnostics()).as(route.expression()).isEqualTo(route.trinoOrdinary());
         }
 
+        // Boolean find and count that reach a forked start-anchored plan run its boolean plan, the
+        // same operations without the capture saves. A plan without a fork is its own.
+        TrinoScanPlan forked = requireNonNull(analyze("^(a)?(b)?abcd([0-9]+)/$"));
+        List<String> operations = List.of(forked.operationsForDiagnostics().split(","));
+        assertThat(operations).contains("FORK", "SAVE");
+        assertThat(forked.booleanPlan().operationsForDiagnostics().split(",")).containsExactlyElementsOf(operations.stream().filter(kind -> !kind.equals("SAVE")).toList());
+        TrinoScanPlan forkFree = requireNonNull(analyze("^https?://([^/]+)/"));
+        assertThat(forkFree.booleanPlan()).isSameAs(forkFree);
+
         // Without a working ordinary engine, only calls that reach the plan can match: boolean
         // find and count over more than 48 bytes, and calls that report boundaries.
         Slice shortInput = view("aabcd" + "1".repeat(42) + "/");

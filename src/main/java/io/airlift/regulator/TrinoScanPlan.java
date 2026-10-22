@@ -125,6 +125,13 @@ final class TrinoScanPlan
     // Indexed by operation. A set entry marks a run whose continuation succeeds on every
     // suffix, so a capture-free partial match is proven once the run's minimum is present.
     private final boolean[] booleanTails;
+    // The plan that boolean calls of this plan run, or this plan. A start-anchored plan with a
+    // fork keeps capture saves that compaction would remove, and a call that reports no positions
+    // would still dispatch each one, so its boolean plan has the same operations without them.
+    // Boolean entry points run that plan with the same executors, so no method that reports
+    // positions changes: choosing an operation array inside the shared executors slowed capture
+    // calls.
+    private final TrinoScanPlan booleanPlan;
     private final boolean finalLineEnd;
     private final boolean partialMatch;
     private final boolean anchoredStart;
@@ -157,14 +164,16 @@ final class TrinoScanPlan
     // from the same search positions, so find, boundaries, captures, and count still report one
     // match sequence.
     private final boolean allowsOrdinaryBooleanSearch;
-    // Set when a boolean match of a start-anchored plan on a short input may run on the ordinary
-    // engine instead. A fork retries its continuation, and the capture saves it keeps from
-    // compaction are dispatched even when no positions are requested, so on a short input the
-    // plan dispatches more operations than the DFA makes transitions, and its faster run scans
-    // cannot repay them. Without a boolean tail the attempt reads as far as the DFA does. The
-    // input's length picks the engine, so as for the density handoff both engines must agree on
-    // every input: an RE2 plan always does, and a Trino plan does when it consumes only ASCII
-    // bytes. Calls that report boundaries or captures always run the plan.
+    // Set when a boolean match of a start-anchored plan on a short input (see
+    // Re2.MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES) may run on the ordinary engine instead. A fork
+    // retries its continuation, dispatching the continuation's operations again even in the
+    // boolean plan without capture saves, so on a short input the plan dispatches more operations
+    // than the DFA makes transitions, and its faster run scans cannot repay them. A plan with a
+    // boolean tail keeps the plan, since its attempt stops at the run's minimum; without one the
+    // attempt reads as far as the DFA does. The input's length picks the engine, so as for the
+    // density handoff both engines must agree on every input: an RE2 plan always does, and a
+    // Trino plan does when it consumes only ASCII bytes. Calls that report boundaries or captures
+    // always run the plan.
     private final boolean allowsOrdinaryShortBooleanMatch;
     // WORK_BUDGET_BYTES, or a negative value with which every unanchored search hands off
     // before its first attempt. Only tests select the negative value.
@@ -185,9 +194,12 @@ final class TrinoScanPlan
         this.leadingProbeOffset = wholeLiteralCandidates ? byteFrequencies.probeOffset(leading.literal) : 0;
         this.usesAsciiFoldedExecutor = hasAsciiFoldedOperation(this.steps);
         this.allowsOrdinaryBooleanSearch = !anchoredStart && !isLiteralLeading() && consumesOnlyAscii(this.steps);
-        this.allowsOrdinaryShortBooleanMatch = anchoredStart && hasFork(this.steps) && !hasBooleanTail(booleanTails) &&
-                (re2 || consumesOnlyAscii(this.steps));
+        boolean anchoredFork = anchoredStart && hasFork(this.steps);
+        this.allowsOrdinaryShortBooleanMatch = anchoredFork && !hasBooleanTail(booleanTails) && (re2 || consumesOnlyAscii(this.steps));
         this.workBudgetBytes = workBudgetBytes;
+        this.booleanPlan = anchoredFork && hasSave(this.steps)
+                ? new TrinoScanPlan(withoutSaves(this.steps), finalLineEnd, partialMatch, anchoredStart, re2, workBudgetBytes, byteFrequencies)
+                : this;
     }
 
     static boolean isRun(Step step)
@@ -293,6 +305,39 @@ final class TrinoScanPlan
             break;
         }
         return leadingOperation;
+    }
+
+    /**
+     * Returns the operations without capture saves, each fork targeting the first retained
+     * operation at or after its target.
+     */
+    private static List<Step> withoutSaves(Step[] steps)
+    {
+        // remaining[index] counts the operations before index that are not saves.
+        int[] remaining = new int[steps.length + 1];
+        for (int index = 0; index < steps.length; index++) {
+            remaining[index + 1] = remaining[index] + (steps[index].kind == Kind.SAVE ? 0 : 1);
+        }
+        List<Step> operations = new ArrayList<>(remaining[steps.length]);
+        for (Step step : steps) {
+            if (step.kind == Kind.FORK) {
+                operations.add(Step.fork(remaining[step.branch.target()], step.branch.captureMask()));
+            }
+            else if (step.kind != Kind.SAVE) {
+                operations.add(step);
+            }
+        }
+        return operations;
+    }
+
+    private static boolean hasSave(Step[] steps)
+    {
+        for (Step step : steps) {
+            if (step.kind == Kind.SAVE) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean hasFork(Step[] steps)
@@ -454,6 +499,15 @@ final class TrinoScanPlan
         return anchoredStart;
     }
 
+    /**
+     * Returns the plan whose executors answer a call of this plan that reports no positions:
+     * for a start-anchored plan with a fork, the same operations without capture saves.
+     */
+    TrinoScanPlan booleanPlan()
+    {
+        return booleanPlan;
+    }
+
     boolean isLiteralLeading()
     {
         return steps[leadingOperation].kind == Kind.LITERAL || steps[leadingOperation].kind == Kind.ASCII_FOLDED_LITERAL;
@@ -537,6 +591,15 @@ final class TrinoScanPlan
             }
             if (step.branch != null) {
                 size += Branch.INSTANCE_SIZE;
+            }
+        }
+        if (booleanPlan != this) {
+            // The boolean plan shares every operation except its forks.
+            size += INSTANCE_SIZE + SizeOf.sizeOf(booleanPlan.steps) + SizeOf.sizeOf(booleanPlan.booleanTails);
+            for (Step step : booleanPlan.steps) {
+                if (step.kind == Kind.FORK) {
+                    size += Step.INSTANCE_SIZE + Branch.INSTANCE_SIZE;
+                }
             }
         }
         return size;
