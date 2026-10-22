@@ -85,6 +85,10 @@ import static java.util.Objects.requireNonNull;
  * operation the pattern routes to the plan. The class implements {@link CompiledTrinoScan} by
  * delegating to those entries, so a caller can also bind an entry directly.
  * <p>
+ * An RE2 pattern, a {@link Re2} compiled in the RE2 dialect, gets a smaller class from the same
+ * attempt loop: an RE2 executor class, which implements {@link CompiledRe2Scan} with the plan
+ * methods it replaces, while the pattern keeps its own routing.
+ * <p>
  * Setting the system property {@value #DUMP_DIRECTORY_PROPERTY} writes each generated class to
  * that directory before it is defined.
  */
@@ -106,11 +110,13 @@ final class TrinoScanKernelGenerator
 
         private final String name;
         private final String className;
+        private final String re2ClassName;
 
         Attempt(String name, String classPrefix)
         {
             this.name = name;
             this.className = CompiledTrinoScan.class.getPackageName() + "." + classPrefix + "CompiledTrinoScan";
+            this.re2ClassName = CompiledRe2Scan.class.getPackageName() + "." + classPrefix + "CompiledRe2Scan";
         }
 
         static Attempt of(TrinoScanPlan plan)
@@ -244,21 +250,10 @@ final class TrinoScanKernelGenerator
 
     private static ReportedScan generate(Routes routes)
     {
-        Attempt attempt = Attempt.of(routes.plan());
         HiddenClassDefiner definer = HiddenClassDefiner.builder(MethodHandles.lookup()).build();
-        CompiledUnit unit = compile(definer, routes, attempt);
-        if (DUMP_DIRECTORY != null) {
-            dump(unit);
-        }
-        DefinedUnit defined = definer.defineUnit(unit);
-        Class<? extends CompiledTrinoScan> scanClass = defined.primaryClass(CompiledTrinoScan.class);
-        CompiledTrinoScan scan;
-        try {
-            scan = scanClass.getConstructor().newInstance();
-        }
-        catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("cannot instantiate generated scan class", e);
-        }
+        CompiledUnit unit = compile(definer, ScanEmitter.forTrino(routes));
+        Class<? extends CompiledTrinoScan> scanClass = define(definer, unit, CompiledTrinoScan.class);
+        CompiledTrinoScan scan = newInstance(scanClass);
         MethodType extract = MethodType.methodType(Slice.class, Slice.class, int.class);
         MethodType extractAll = MethodType.methodType(List.class, Slice.class, int.class);
         CompiledScan compiled = new CompiledScan(
@@ -289,14 +284,53 @@ final class TrinoScanKernelGenerator
      */
     static byte[] classfileForDiagnostics(Routes routes)
     {
-        CompiledUnit unit = compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), routes, Attempt.of(routes.plan()));
+        CompiledUnit unit = compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), ScanEmitter.forTrino(routes));
         return unit.classfile(unit.primaryType());
     }
 
-    private static CompiledUnit compile(HiddenClassDefiner definer, Routes routes, Attempt attempt)
+    /**
+     * Generates and defines the executor class of an RE2 pattern for its case-sensitive scan
+     * {@code plan}, with a {@code searchBeforeHandoff} entry when {@code ordinaryHandoff} says that
+     * full-Slice find hands off to the ordinary engine. Failures propagate.
+     */
+    static CompiledRe2Scan generateCompiledRe2Scan(TrinoScanPlan plan, boolean ordinaryHandoff)
     {
-        return ClassCompiler.forTarget(definer.compilationTarget())
-                .compileUnit(new ScanEmitter(routes, attempt).define());
+        HiddenClassDefiner definer = HiddenClassDefiner.builder(MethodHandles.lookup()).build();
+        CompiledUnit unit = compile(definer, ScanEmitter.forRe2(plan, ordinaryHandoff));
+        return newInstance(define(definer, unit, CompiledRe2Scan.class));
+    }
+
+    /**
+     * Returns the RE2 executor class file that {@link #generateCompiledRe2Scan} would define.
+     */
+    static byte[] re2ClassfileForDiagnostics(TrinoScanPlan plan, boolean ordinaryHandoff)
+    {
+        CompiledUnit unit = compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), ScanEmitter.forRe2(plan, ordinaryHandoff));
+        return unit.classfile(unit.primaryType());
+    }
+
+    private static CompiledUnit compile(HiddenClassDefiner definer, ScanEmitter emitter)
+    {
+        return ClassCompiler.forTarget(definer.compilationTarget()).compileUnit(emitter.define());
+    }
+
+    private static <T> Class<? extends T> define(HiddenClassDefiner definer, CompiledUnit unit, Class<T> type)
+    {
+        if (DUMP_DIRECTORY != null) {
+            dump(unit);
+        }
+        DefinedUnit defined = definer.defineUnit(unit);
+        return defined.primaryClass(type);
+    }
+
+    private static <T> T newInstance(Class<? extends T> scanClass)
+    {
+        try {
+            return scanClass.getConstructor().newInstance();
+        }
+        catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("cannot instantiate generated scan class", e);
+        }
     }
 
     private static MethodHandle findStatic(Class<?> type, String name, MethodType methodType)
@@ -381,12 +415,11 @@ final class TrinoScanKernelGenerator
         {
             Step step = plan.step(index);
             boolean supported = switch (step.kind()) {
-                case LITERAL, OPTIONAL, RUN, SAVE, FORK -> true;
+                case LITERAL, OPTIONAL, RUN, RE2_RUN, SAVE, FORK -> true;
                 case END -> attempt != Attempt.PARTIAL;
-                case DELIMITED_CAPTURE -> attempt != Attempt.UNANCHORED;
+                case DELIMITED_CAPTURE, RE2_DELIMITED_CAPTURE -> attempt != Attempt.UNANCHORED;
                 case DOT_ALL_TAIL, LINE_TAIL -> attempt == Attempt.END_ANCHORED;
-                // RE2 plans never reach the generator.
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL, RE2_RUN, RE2_DELIMITED_CAPTURE -> false;
+                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> false;
             };
             if (!supported) {
                 throw new IllegalArgumentException("%s scan kernel cannot run %s".formatted(attempt, step.kind()));
@@ -506,6 +539,15 @@ final class TrinoScanKernelGenerator
                     emitCapture(step.slot());
                     body.append(cursor.set(stop.add(constantInt(1))));
                 }
+                case RE2_DELIMITED_CAPTURE -> {
+                    // The run validates the characters it skips, and the minimum counts characters.
+                    BytecodeExpression run = boundConstant(step.run(), TrinoScanPlanRun.class);
+                    BytecodeExpression delimiter = constantInt(step.delimiter()).cast(byte.class);
+                    body.append(stop.set(invokeStatic(TrinoScanKernelSupport.class, "re2RunMatchBefore", int.class, run, bytes, cursor, end, delimiter)));
+                    body.append(ifThenJump(stop.lessThan(constantInt(0)), fail));
+                    emitCapture(step.slot());
+                    body.append(cursor.set(stop.add(constantInt(1))));
+                }
                 case DOT_ALL_TAIL -> body.append(anchoredSuccess(end.subtract(base)));
                 case LINE_TAIL -> {
                     body.append(stop.set(findByte((byte) '\n')));
@@ -534,23 +576,30 @@ final class TrinoScanKernelGenerator
                             .build());
                     body.jump(fail);
                 }
-                case RUN -> emitRun(index, step);
+                case RUN -> emitRun(index, step, "runMatch", "runMatchMinimum");
+                case RE2_RUN -> emitRun(index, step, "re2RunMatch", "re2RunMatchMinimum");
                 case SAVE -> body.append(IfStatement.builder()
                         .condition(groups.isNotNull().and(constantInt(step.slot()).lessThan(groups.length())))
                         .then(groups.setElement(constantInt(step.slot()), cursor.subtract(base)))
                         .build());
                 case FORK -> emitPush(index);
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL, RE2_RUN, RE2_DELIMITED_CAPTURE -> throw new IllegalStateException("unexpected " + step.kind());
+                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> throw new IllegalStateException("unexpected " + step.kind());
             }
         }
 
-        private void emitRun(int index, Step step)
+        /**
+         * Emits a run that calls the {@link TrinoScanKernelSupport} methods named {@code match} and
+         * {@code matchMinimum}: {@code runMatch} and {@code runMatchMinimum} for a {@code RUN}, and
+         * {@code re2RunMatch} and {@code re2RunMatchMinimum}, which read characters as RE2 does,
+         * for an {@code RE2_RUN}.
+         */
+        private void emitRun(int index, Step step, String match, String matchMinimum)
         {
             BytecodeExpression run = boundConstant(step.run(), TrinoScanPlanRun.class);
             if (attempt != Attempt.END_ANCHORED && plan.isBooleanTail(index)) {
                 // The continuation cannot fail, so the run's minimum decides this path.
                 CodeBlock.Builder tail = CodeBlock.blockBuilder();
-                BytecodeExpression minimum = invokeStatic(TrinoScanKernelSupport.class, "runMatchMinimum", int.class, run, bytes, cursor, end);
+                BytecodeExpression minimum = invokeStatic(TrinoScanKernelSupport.class, matchMinimum, int.class, run, bytes, cursor, end);
                 if (attempt == Attempt.PARTIAL) {
                     tail.append(IfStatement.builder()
                             .condition(minimum.greaterThanOrEqual(constantInt(0)))
@@ -570,7 +619,7 @@ final class TrinoScanKernelGenerator
                         .then(tail.build())
                         .build());
             }
-            body.append(stop.set(invokeStatic(TrinoScanKernelSupport.class, "runMatch", int.class, run, bytes, cursor, end)));
+            body.append(stop.set(invokeStatic(TrinoScanKernelSupport.class, match, int.class, run, bytes, cursor, end)));
             body.append(ifThenJump(stop.lessThan(constantInt(0)), fail));
             if (attempt == Attempt.UNANCHORED) {
                 body.append(scanned.set(invokeStatic(Math.class, "max", int.class, scanned, stop)));
@@ -774,18 +823,24 @@ final class TrinoScanKernelGenerator
     }
 
     /**
-     * Emits the class of one pattern: the attempt loop, the search driver of an unanchored plan,
-     * and a static entry for each operation that reaches the plan, named for the operation with an
-     * {@code Entry} suffix. The class implements {@link CompiledTrinoScan} with one-line delegates
-     * to those entries. A plan never matches empty, so every match loop resumes at the previous
-     * match end, as a matcher does. Scans call the copies in {@link TrinoScanKernelSupport}, not the
-     * interpreter's helpers; other shared code is reached only through static calls or calls on
-     * class-data constants.
+     * Emits the class of one pattern. The class of a Trino pattern holds the attempt loop, the
+     * search driver of an unanchored plan, and a static entry for each operation that reaches the
+     * plan, named for the operation with an {@code Entry} suffix; it implements
+     * {@link CompiledTrinoScan} with one-line delegates to those entries. An RE2 executor class
+     * holds the attempt loop and the searches of an unanchored plan, and implements
+     * {@link CompiledRe2Scan}. A plan never matches empty, so every match loop resumes at the
+     * previous match end, as a matcher does. Scans call the copies in
+     * {@link TrinoScanKernelSupport}, not the interpreter's helpers; other shared code is reached
+     * only through static calls or calls on class-data constants.
      */
     private static final class ScanEmitter
     {
+        // Whether this emits an RE2 executor class rather than the class of a Trino pattern.
+        private final boolean re2;
+        // Null for an RE2 executor class.
         private final Routes routes;
         private final TrinoScanPlan plan;
+        private final boolean ordinaryHandoff;
         private final Attempt attempt;
         private final boolean anchored;
         private final Map<String, MethodDefinition> entries = new HashMap<>();
@@ -796,28 +851,74 @@ final class TrinoScanKernelGenerator
         private MethodDefinition searchBeforeHandoff;
         private MethodDefinition find;
 
-        private ScanEmitter(Routes routes, Attempt attempt)
+        /**
+         * The context and attempt arguments of a region search. A search without one covers the
+         * whole input, unanchored and without a full-match requirement.
+         */
+        private record Region(Parameter contextStart, Parameter contextEnd, Parameter anchored, Parameter fullMatch) {}
+
+        private ScanEmitter(boolean re2, Routes routes, TrinoScanPlan plan, boolean ordinaryHandoff)
         {
+            this.re2 = re2;
             this.routes = routes;
-            this.plan = routes.plan();
-            this.attempt = attempt;
+            this.plan = requireNonNull(plan, "plan is null");
+            this.ordinaryHandoff = ordinaryHandoff;
+            this.attempt = Attempt.of(plan);
             this.anchored = attempt != Attempt.UNANCHORED;
+        }
+
+        private static ScanEmitter forTrino(Routes routes)
+        {
+            return new ScanEmitter(false, routes, routes.plan(), routes.ordinaryHandoff());
+        }
+
+        private static ScanEmitter forRe2(TrinoScanPlan plan, boolean ordinaryHandoff)
+        {
+            return new ScanEmitter(true, null, plan, ordinaryHandoff);
         }
 
         private ClassModel define()
         {
+            return re2 ? defineRe2() : defineTrino();
+        }
+
+        private void defineClass(String className, Class<?> type)
+        {
             if (plan.usesAsciiFoldedExecutor()) {
                 throw new IllegalArgumentException("ASCII-folded scan plans have no generated class");
             }
-            definition = ClassDefinition.define(ClassDesc.of(attempt.className))
-                    .access(PUBLIC, FINAL)
-                    .addInterface(CompiledTrinoScan.class);
+            definition = ClassDefinition.define(ClassDesc.of(className)).access(PUBLIC, FINAL).addInterface(type);
             definition.defaultConstructor().access(PUBLIC);
-
             attemptLoop = new KernelEmitter(plan, attempt).defineAttempt(definition);
+        }
+
+        /**
+         * The RE2 executor class: the attempt loop of a start-anchored plan, or the region search
+         * of an unanchored one, each with the signature of the plan method it replaces. The pattern
+         * keeps its own routing and finishes a search that handed off.
+         */
+        private ClassModel defineRe2()
+        {
+            defineClass(attempt.re2ClassName, CompiledRe2Scan.class);
+            if (anchored) {
+                entries.put(key("match", attempt.type()), attemptLoop);
+            }
+            else {
+                defineRegionSearch();
+                if (ordinaryHandoff) {
+                    defineSearchBeforeHandoff();
+                }
+            }
+            defineInterface(CompiledRe2Scan.class);
+            return definition.build();
+        }
+
+        private ClassModel defineTrino()
+        {
+            defineClass(attempt.className, CompiledTrinoScan.class);
             if (!anchored) {
                 search = defineSearch();
-                if (routes.ordinaryHandoff()) {
+                if (ordinaryHandoff) {
                     searchBeforeHandoff = defineSearchBeforeHandoff();
                 }
             }
@@ -832,7 +933,7 @@ final class TrinoScanKernelGenerator
             defineExtractAll();
             defineReplace();
             defineReplaceWithCallback();
-            defineInterface();
+            defineInterface(CompiledTrinoScan.class);
             return definition.build();
         }
 
@@ -847,28 +948,50 @@ final class TrinoScanKernelGenerator
             Parameter groups = arg("groups", int[].class);
             MethodDefinition method = definition.method("search", int.class, input, start, groups)
                     .access(PRIVATE, STATIC);
-            emitCandidateLoop(method.body(), input, start, groups, false);
+            emitCandidateLoop(method.body(), input, null, start, groups, false);
             return method;
         }
 
         /**
+         * The search of {@link TrinoScanPlan#search} over a region, with the same arguments and
+         * results, as the {@code search} entry of an RE2 executor class.
+         */
+        private void defineRegionSearch()
+        {
+            Parameter input = arg("input", Slice.class);
+            Parameter contextStart = arg("contextStart", int.class);
+            Parameter contextEnd = arg("contextEnd", int.class);
+            Parameter start = arg("start", int.class);
+            Parameter anchoredSearch = arg("anchored", boolean.class);
+            Parameter fullMatch = arg("fullMatch", boolean.class);
+            Parameter groups = arg("groups", int[].class);
+            MethodType type = MethodType.methodType(int.class, Slice.class, int.class, int.class, int.class, boolean.class, boolean.class, int[].class);
+            MethodDefinition method = entry("search", type, input, contextStart, contextEnd, start, anchoredSearch, fullMatch, groups);
+            emitCandidateLoop(method.body(), input, new Region(contextStart, contextEnd, anchoredSearch, fullMatch), start, groups, false);
+        }
+
+        /**
          * The capture-free search of {@link TrinoScanPlan#searchBeforeHandoff} over the whole
-         * input, with the same results.
+         * input, with the same results. An RE2 executor class makes it the
+         * {@code searchBeforeHandoff} entry.
          */
         private MethodDefinition defineSearchBeforeHandoff()
         {
             Parameter input = arg("input", Slice.class);
-            MethodDefinition method = definition.method("searchBeforeHandoff", int.class, input)
-                    .access(PRIVATE, STATIC);
-            emitCandidateLoop(method.body(), input, null, constantNull(int[].class), true);
+            MethodDefinition method = re2
+                    ? entry("searchBeforeHandoff", MethodType.methodType(int.class, Slice.class), input)
+                    : definition.method("searchBeforeHandoff", int.class, input).access(PRIVATE, STATIC);
+            emitCandidateLoop(method.body(), input, null, null, constantNull(int[].class), true);
             return method;
         }
 
-        private void emitCandidateLoop(CodeBlock.Builder body, Parameter input, Parameter start, BytecodeExpression groups, boolean beforeHandoff)
+        private void emitCandidateLoop(CodeBlock.Builder body, Parameter input, Region region, Parameter start, BytecodeExpression groups, boolean beforeHandoff)
         {
             Variable bytes = body.declare("bytes", input.invoke("byteArray", byte[].class));
             Variable offset = body.declare("offset", input.invoke("byteArrayOffset", int.class));
-            Variable end = body.declare("end", offset.add(input.invoke("length", int.class)));
+            BytecodeExpression base = region == null ? offset : body.declare("base", offset.add(region.contextStart()));
+            Variable end = body.declare("end", offset.add(region == null ? input.invoke("length", int.class) : region.contextEnd()));
+            BytecodeExpression fullMatch = region == null ? constantFalse() : region.fullMatch();
             Variable searchStart = body.declare("searchStart", start == null ? offset : offset.add(start));
             Variable candidate = body.declare("candidate", searchStart);
             // A plan led by a whole literal has no separate required literal.
@@ -883,7 +1006,20 @@ final class TrinoScanKernelGenerator
             Variable failedRunEnd = body.declare(int.class, "failedRunEnd");
             CodeLabel loop = body.label("loop");
             CodeLabel done = body.label("done");
+            BytecodeExpression attemptAtCandidate = invokeStatic(attemptLoop, bytes, base, end, candidate, fullMatch, groups);
 
+            if (region != null) {
+                // An anchored search makes at most one attempt and never hands off.
+                body.append(IfStatement.builder()
+                        .condition(region.anchored())
+                        .then(CodeBlock.block(
+                                IfStatement.builder()
+                                        .condition(candidate.lessThan(end).and(attemptAtCandidate.greaterThanOrEqual(constantLong(0))))
+                                        .then(constantInt(TrinoScanPlan.SEARCH_MATCHED).ret())
+                                        .build(),
+                                CodeBlock.blockBuilder().jump(done).build()))
+                        .build());
+            }
             body.mark(loop);
             body.append(ifThenJump(candidate.greaterThanOrEqual(end), done));
             BytecodeExpression handOff = failedWork
@@ -907,7 +1043,7 @@ final class TrinoScanKernelGenerator
                     .build());
 
             emitNextCandidate(body, wholeLiteral, bytes, candidate, end, done);
-            body.append(result.set(invokeStatic(attemptLoop, bytes, offset, end, candidate, constantFalse(), groups)));
+            body.append(result.set(attemptAtCandidate));
             body.append(IfStatement.builder()
                     .condition(result.greaterThanOrEqual(constantLong(0)))
                     .then(constantInt(TrinoScanPlan.SEARCH_MATCHED).ret())
@@ -969,7 +1105,7 @@ final class TrinoScanKernelGenerator
             else if (leading.kind() == Kind.LITERAL) {
                 next = invokeStatic(TrinoScanKernelSupport.class, "findByte", int.class, bytes, candidate, end, constantInt(leading.literal[0]).cast(byte.class));
             }
-            else if (leading.kind() == Kind.RUN && leading.run().minimum() > 0) {
+            else if (TrinoScanPlan.isRun(leading) && leading.run().minimum() > 0) {
                 next = invokeStatic(TrinoScanKernelSupport.class, "runFindCandidate", int.class, boundConstant(leading.run(), TrinoScanPlanRun.class), bytes, candidate, end);
             }
             else {
@@ -984,7 +1120,7 @@ final class TrinoScanKernelGenerator
          */
         private BytecodeExpression resumeAfterFailedAttempt(Variable bytes, Variable candidate, Variable end)
         {
-            if (plan.step(plan.leadingOperation()).kind() == Kind.RUN) {
+            if (TrinoScanPlan.isRun(plan.step(plan.leadingOperation()))) {
                 // A failed minimum-width check must not retry from a continuation byte of
                 // otherwise valid UTF-8.
                 BytecodeExpression decoded = invokeStatic(TrinoScanKernelSupport.class, "decode", long.class, bytes, candidate, end);
@@ -1244,9 +1380,9 @@ final class TrinoScanKernelGenerator
             body.ret(output.invoke("slice", Slice.class));
         }
 
-        private void defineInterface()
+        private void defineInterface(Class<?> type)
         {
-            Method[] methods = CompiledTrinoScan.class.getDeclaredMethods();
+            Method[] methods = type.getDeclaredMethods();
             Arrays.sort(methods, Comparator.comparing(Method::toString));
             for (Method method : methods) {
                 Class<?>[] types = method.getParameterTypes();

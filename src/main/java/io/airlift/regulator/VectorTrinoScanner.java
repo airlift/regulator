@@ -61,8 +61,9 @@ final class VectorTrinoScanner
 
     /**
      * Returns the first byte at or after {@code cursor} that is non-ASCII or equals one of
-     * {@code needles}, or {@code end} when none remains. {@code needles} holds zero to four
-     * ASCII bytes. RE2 runs validate the non-ASCII bytes this stops at.
+     * {@code needles}, or {@code end} when none remains. {@code needles} holds the RE2 run's
+     * ASCII non-members, zero to four bytes. RE2 runs validate the non-ASCII bytes this stops at.
+     * Copied as {@code VectorTrinoScanKernelSupport.findRe2RunStop}; keep the copy in step.
      */
     static int findRe2RunStop(byte[] input, int cursor, int end, byte[] needles)
     {

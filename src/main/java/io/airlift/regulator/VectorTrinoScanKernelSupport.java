@@ -63,6 +63,35 @@ final class VectorTrinoScanKernelSupport
     }
 
     /**
+     * A copy of {@code VectorTrinoScanner.findRe2RunStop}.
+     */
+    static int findRe2RunStop(byte[] input, int cursor, int end, byte[] needles)
+    {
+        for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
+            ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
+            VectorMask<Byte> stops = bytes.compare(VectorOperators.LT, (byte) 0);
+            for (byte needle : needles) {
+                stops = stops.or(bytes.compare(VectorOperators.EQ, needle));
+            }
+            if (stops.anyTrue()) {
+                return cursor + stops.firstTrue();
+            }
+        }
+        for (; cursor < end; cursor++) {
+            byte value = input[cursor];
+            if (value < 0) {
+                return cursor;
+            }
+            for (byte needle : needles) {
+                if (value == needle) {
+                    return cursor;
+                }
+            }
+        }
+        return end;
+    }
+
+    /**
      * A copy of {@code VectorTrinoScanner.findRunCandidate}.
      */
     static int findRunCandidate(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)

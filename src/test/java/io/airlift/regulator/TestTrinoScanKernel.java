@@ -82,6 +82,9 @@ public class TestTrinoScanKernel
             "TrinoScanKernelSupport.findByte",
             "TrinoScanKernelSupport.findLiteral",
             "TrinoScanKernelSupport.literalMatches",
+            "TrinoScanKernelSupport.re2RunMatch",
+            "TrinoScanKernelSupport.re2RunMatchBefore",
+            "TrinoScanKernelSupport.re2RunMatchMinimum",
             "TrinoScanKernelSupport.readInt",
             "TrinoScanKernelSupport.readLong",
             "TrinoScanKernelSupport.readShort",
@@ -109,6 +112,7 @@ public class TestTrinoScanKernel
             "VectorTrinoScanKernelSupport.findByteSet",
             "VectorTrinoScanKernelSupport.findNibbleTable",
             "VectorTrinoScanKernelSupport.findRange",
+            "VectorTrinoScanKernelSupport.findRe2RunStop",
             "VectorTrinoScanKernelSupport.findRunCandidate",
             "VectorTrinoScanKernelSupport.findRunStop");
 
@@ -196,8 +200,8 @@ public class TestTrinoScanKernel
      * minimum, both tails, END with and without the final line terminator, capture-free boolean
      * tails, saves, forks that clear skipped captures, retries late in the plan, and the range,
      * byte-set, and nibble-table candidate scans of a leading run, on views and exact-length
-     * copies. In this package, the generated classes and the helpers they call invoke only
-     * {@link #GENERATED_CODE_CALLS}.
+     * copies. In this package, the generated Trino and RE2 classes and the helpers they call
+     * invoke only {@link #GENERATED_CODE_CALLS}.
      */
     @Test
     public void testEveryOperationShape()
@@ -270,6 +274,17 @@ public class TestTrinoScanKernel
             verifySameOperations(expression, generated, TrinoRegexp.compile(utf8Slice(expression)), sources, true);
         }
         assertThat(kinds).contains("LITERAL", "OPTIONAL", "DELIMITED_CAPTURE", "DOT_ALL_TAIL", "LINE_TAIL", "END", "RUN", "SAVE", "FORK");
+        // The RE2 executor class of each attempt kind, whose run steps read characters as RE2 does.
+        // TestRe2ScanPlan compares their results with the ordinary engine.
+        Set<String> re2Kinds = new LinkedHashSet<>();
+        for (String expression : List.of("^https?://([^/]+)/.*$", "^https?://([^/]+)/", "^x([^/]+)", "x([^/]+)", "([^:]+):")) {
+            Re2 re2 = Re2.compile(utf8Slice(expression), Re2.Options.defaults().setGenerateBytecode(true));
+            assertThat(re2.usesGeneratedBytecode()).as(expression).isTrue();
+            boolean ordinaryHandoff = re2.usesTrinoScanPlanForFindForDiagnostics() && re2.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
+            invoked.addAll(invokedMethods(TrinoScanKernelGenerator.re2ClassfileForDiagnostics(re2.caseSensitiveTrinoScanPlan(), ordinaryHandoff)));
+            re2Kinds.addAll(List.of(re2.caseSensitiveTrinoScanPlan().operationsForDiagnostics().split(",")));
+        }
+        assertThat(re2Kinds).contains("RE2_RUN", "RE2_DELIMITED_CAPTURE");
         assertThat(leadingRun("[a-z]([0-9]*)!").candidateScan()).isEqualTo(TrinoScanPlanRun.CANDIDATE_SCAN_RANGE);
         TrinoScanPlanRun threeBytes = leadingRun("[abc]([0-9]*)!");
         assertThat(threeBytes.candidateScan()).isEqualTo(TrinoScanPlanRun.CANDIDATE_SCAN_SMALL_SET);

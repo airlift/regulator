@@ -153,7 +153,9 @@ final class Utf8
      * {@code 0} when that class rejects the bytes there. Such a class consumes a lead byte
      * C2-DF, E0-EF, or F0-F4 followed by one, two, or three continuation bytes, so it accepts
      * overlong three- and four-byte forms, encoded surrogates, and values above U+10FFFF. It
-     * rejects continuation bytes, C0, C1, F5-FF, and truncated sequences.
+     * rejects bare continuation bytes, C0, C1, F5-FF, and sequences that a non-continuation byte
+     * or {@code end} cuts short.
+     * Copied as {@code TrinoScanKernelSupport.re2CharacterWidth}; keep the copy in step.
      */
     static int re2CharacterWidth(byte[] bytes, int index, int end)
     {

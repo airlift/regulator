@@ -246,8 +246,8 @@ final class TrinoScanPlanRun
         return minimum;
     }
 
-    // These accessors serve the copies of match, matchMinimum, and findCandidate in
-    // TrinoScanKernelSupport.
+    // These accessors serve the copies of match, matchMinimum, findCandidate, and the RE2 run
+    // helpers in TrinoScanKernelSupport.
 
     int maximum()
     {
@@ -382,7 +382,8 @@ final class TrinoScanPlanRun
     /**
      * The RE2 version of {@link #match}, for a run that matches every non-ASCII character. It
      * reads characters as RE2 does (see {@link Utf8#re2CharacterWidth}), so a rejected sequence
-     * ends the run like a non-member byte, and it counts characters for every bound.
+     * ends the run like a non-member byte.
+     * Copied as {@code TrinoScanKernelSupport.re2RunMatch}; keep the copy in step.
      */
     int re2Match(byte[] input, int cursor, int end)
     {
@@ -406,6 +407,7 @@ final class TrinoScanPlanRun
     /**
      * The RE2 version of {@link #matchMinimum}: the position after the run's minimum
      * characters as {@link #re2Match} reads them, or {@code -1} when they are absent.
+     * Copied as {@code TrinoScanKernelSupport.re2RunMatchMinimum}; keep the copy in step.
      */
     int re2MatchMinimum(byte[] input, int cursor, int end)
     {
@@ -420,9 +422,10 @@ final class TrinoScanPlanRun
     }
 
     /**
-     * Returns the position of {@code delimiter} after an {@link #re2Match} of this run, which
-     * stops only at that byte among ASCII bytes, or {@code -1} when the run fails or stops
-     * elsewhere.
+     * For a run of every character except the ASCII {@code delimiter}: returns the position
+     * where {@link #re2Match} stops when {@code delimiter} is there, or {@code -1} when the run
+     * fails or stops at a rejected sequence or the end.
+     * Copied as {@code TrinoScanKernelSupport.re2RunMatchBefore}; keep the copy in step.
      */
     int re2MatchBefore(byte[] input, int cursor, int end, byte delimiter)
     {
@@ -430,6 +433,7 @@ final class TrinoScanPlanRun
         return stop >= 0 && stop < end && input[stop] == delimiter ? stop : -1;
     }
 
+    // Copied as TrinoScanKernelSupport.re2RunMemberWidth; keep the copy in step.
     private int re2MemberWidth(byte[] input, int cursor, int end)
     {
         if (cursor >= end) {
@@ -442,6 +446,7 @@ final class TrinoScanPlanRun
         return members[value] ? 1 : 0;
     }
 
+    // Copied as TrinoScanKernelSupport.re2RunScan; keep the copy in step.
     private int re2Scan(byte[] input, int cursor, int end)
     {
         while (true) {
