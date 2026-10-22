@@ -171,8 +171,8 @@ final class LiteralSearchKernel
      * search must continue with {@link #findKmp} at {@code resume}. Returning the handoff, rather
      * than running KMP here, lets {@link #kmpHandoffOffsetForDiagnostics} observe it.
      * <p>
-     * TrinoLikeKernelGenerator emits a copy of this scan, and of findSingleByte, for each literal
-     * of a generated LIKE pattern; keep the copies in step. The generated copy runs KMP directly.
+     * {@link #verifyContainsCandidates} verifies as this scan does; keep the two in step: the
+     * candidates they verify, the order they verify them in, and the KMP handoff rule.
      */
     private int findFrontAndBack(byte[] input, int searchStart, int searchEnd)
     {
@@ -222,10 +222,11 @@ final class LiteralSearchKernel
     }
 
     /**
-     * Skips to the first word, or tail position, holding a candidate whose first and last bytes
-     * match, and returns {@link #verifyContainsCandidates} from there, or -1. The word loop holds
-     * no call and no inner loop, so C2 keeps it innermost and unrolls it, and it reads LOW_BITS
-     * from a field.
+     * Skips to the first word, or tail position, holding a possible candidate, and returns
+     * {@link #verifyContainsCandidates} from there, or -1. The word loop makes no call until it
+     * finds a possible candidate and has no inner loop, so C2 keeps it innermost and unrolls it,
+     * and it reads LOW_BITS from {@link #lowBits}. TrinoLikeKernelGenerator emits a copy of this
+     * scan; keep the copies in step.
      */
     private int skipToContainsCandidate(byte[] input, int searchStart, int searchEnd)
     {
@@ -260,7 +261,8 @@ final class LiteralSearchKernel
      * {@link #skipToContainsCandidate} found the first one, scanning on as
      * {@link #findFrontAndBack} does, and returns as it does. The KMP handoff counts from
      * {@code searchStart}, because the bytes skipped to reach {@code verifyStart} count as
-     * covered. The word loop reads LOW_BITS from a field, as the scan does.
+     * covered. The word loop reads LOW_BITS from {@link #lowBits}, as the scan does.
+     * TrinoLikeKernelGenerator emits a copy of this method; keep the copies in step.
      */
     private int verifyContainsCandidates(byte[] input, int searchStart, int verifyStart, int searchEnd)
     {

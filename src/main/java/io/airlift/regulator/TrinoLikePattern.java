@@ -54,6 +54,9 @@ public sealed class TrinoLikePattern
     private static final byte SHORT_EQUALS = 8;
     private static final byte SHORT_STARTS_WITH = 9;
     private static final byte SHORT_ENDS_WITH = 10;
+    // Whether this JVM runs on aarch64. Generated LIKE picks how its literal searches hold their
+    // constants by architecture, from the AWS measurements recorded in REGULATOR_DECISIONS.md.
+    static final boolean AARCH64 = "aarch64".equals(System.getProperty("os.arch"));
 
     enum Plan
     {
@@ -74,6 +77,7 @@ public sealed class TrinoLikePattern
     public static final class Options
     {
         private boolean generateBytecode;
+        private boolean aarch64 = AARCH64;
 
         private Options() {}
 
@@ -98,6 +102,22 @@ public sealed class TrinoLikePattern
         public Options setGenerateBytecode(boolean generateBytecode)
         {
             this.generateBytecode = generateBytecode;
+            return this;
+        }
+
+        boolean aarch64()
+        {
+            return aarch64;
+        }
+
+        /**
+         * Generates bytecode as on aarch64 when {@code aarch64} is true and as on every other
+         * architecture when it is false, whatever this JVM runs on; it takes effect only with
+         * {@link #setGenerateBytecode(boolean)}, and only tests call it.
+         */
+        Options setAarch64ForTesting(boolean aarch64)
+        {
+            this.aarch64 = aarch64;
             return this;
         }
     }
@@ -351,7 +371,7 @@ public sealed class TrinoLikePattern
         requireNonNull(options, "options is null");
         TrinoLikePattern compiled = compile(pattern, escapeCodePoint);
         if (options.generateBytecode()) {
-            TrinoLikePattern generated = CompiledTrinoLikePattern.create(compiled);
+            TrinoLikePattern generated = CompiledTrinoLikePattern.create(compiled, options.aarch64());
             if (generated != null) {
                 return generated;
             }
@@ -567,15 +587,16 @@ public sealed class TrinoLikePattern
         }
 
         /**
-         * Returns {@code pattern} with a generated class, or {@code null} when the class cannot
-         * be generated or a method of it would be too large for HotSpot to compile. The declared
-         * type keeps verification of the base class from loading this class.
+         * Returns {@code pattern} with a generated class, generated as on aarch64 when
+         * {@code aarch64} is true, or {@code null} when the class cannot be generated or a method
+         * of it would be too large for HotSpot to compile. The declared type keeps verification
+         * of the base class from loading this class.
          */
-        static TrinoLikePattern create(TrinoLikePattern pattern)
+        static TrinoLikePattern create(TrinoLikePattern pattern, boolean aarch64)
         {
             TrinoLikeKernelGenerator.CompiledLike generated;
             try {
-                generated = TrinoLikeKernelGenerator.generate(kernel(pattern));
+                generated = TrinoLikeKernelGenerator.generate(kernel(pattern), aarch64);
             }
             catch (RuntimeException | LinkageError ignored) {
                 // Linking the generator fails here only if a consumer excluded the classfile

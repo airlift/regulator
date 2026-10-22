@@ -723,11 +723,15 @@ measured:
   by both ends, lost Chinese short rows on r9g by up to 1.47x and won less
   overall, 0.61x on r8i and 0.56x on r9g.
 
-Ordered literals and Trino regexp `contains` still search with the ordered
-loop. The same call-free loop with field constants took 0.34x the time of the
-ordered loop on r9g regexp rows, but splitting verification from the scan
-costs on short rows with frequent candidates, such as TPC-H Q13, so that
-follow-up needs a choice per caller.
+Interpreted ordered literals and Trino regexp `contains` search with the
+ordered loop, which verifies in line. The same call-free loop with field
+constants took 0.34x the time of the ordered loop on r9g regexp rows, but
+splitting verification from the scan costs on short rows with frequent
+candidates, such as TPC-H Q13, so these callers keep verifying in line.
+Generated LIKE emits one search for contained and ordered literals alike, so
+its ordered searches split too and accept 1.06x to 1.07x on Q13 for the
+split's gain on the normative rows; see [generated Trino LIKE
+kernels](#generated-trino-like-kernels).
 
 The LIKE and Trino-regexp parsers remain separate language frontends, but they
 share the ordered-literal execution kernel when analysis proves equivalent
@@ -1498,6 +1502,36 @@ UTF-8, which differential tests check over the corpus and seeded patterns.
   literals search one after another, as the interpreter does. Generated
   contains specializes its literal with this search, as interpreted contains
   does with the kernel's contains search for a literal of two or more bytes.
+- Each search of a literal of two or more bytes splits that loop as
+  interpreted contains does: a call-free word scan finds the first candidate
+  and calls a separate generated method that verifies candidates from there,
+  with the KMP handoff counted from where the search started. Verifying in
+  line kept the word loop from being innermost, because C2 never inlined the
+  rarely run check, so the loop was never unrolled. Both loops read the SWAR
+  constant from a static field that is not final, so on aarch64 C2 keeps it in
+  a register. On aarch64 only, they also read the literal's front and back
+  broadcasts from such fields; elsewhere the broadcasts are constants. On the
+  normative rows gate the split took 0.775x the time of verifying in line on
+  r8i and 0.799x on r9g, and turned no win against Trino's LIKE into a loss.
+  r8i accepts 1.06x on TPC-H Q13 and 1.19x on Russian `mid-selective`, 22.41
+  to 26.76 ns per row; r9g accepts 1.07x on Q13, 1.06x on `WILDCARD_CHAIN`,
+  and 1.13x on Apache `high-none`, 40.81 to 46.06 ns per row. The
+  `WILDCARD_CHAIN` loss is the residue left after the broadcast fields, and
+  its cause is not established; like the interpreted contains edge losses, it
+  is an accepted exception on a synthetic input filled with one byte.
+- The broadcast fields are a measured platform trade. With constant
+  broadcasts, r9g lost on synthetic inputs filled with `x` except for one late
+  match: `CONTAINS_LATE` 1.46x (2,570 to 3,762 ns per 32 KiB),
+  `WILDCARD_CHAIN` 1.24x, `ORDERED_LATE` 1.20x, and `MIXED_LATE` 1.21x. The
+  fields bring these to 0.99x, 1.06x, 0.99x, and 1.01x, and the r9g grid from
+  0.882x to 0.799x. On r8i the fields left the grid at 0.775x but lost 10
+  cells to constants and won 7, and took GH Archive `"PullRequestEvent"` from
+  549 ns per row with constant broadcasts to 726 ns (1.32x), 1.27x the 573 ns
+  of verifying in line, so x86-64 keeps constants. The reason is inferred, not
+  seen in assembly: aarch64 cannot encode most of these 64-bit constants as
+  immediates and has 31 registers to hold them, while x86-64 has 16, so
+  holding the broadcasts in registers costs it more than the `movabs`
+  constants they replace.
 - A literal-gap plan searches for its first literal with the same generated
   search, steps each gap a character at a time by the interpreter's character
   width, inline for ASCII, compares each later literal as a constant, and

@@ -22,6 +22,7 @@ import io.airlift.classfile.CodeLabel;
 import io.airlift.classfile.CompilationReport;
 import io.airlift.classfile.CompiledUnit;
 import io.airlift.classfile.DefinedUnit;
+import io.airlift.classfile.FieldDefinition;
 import io.airlift.classfile.HiddenClassDefiner;
 import io.airlift.classfile.IfStatement;
 import io.airlift.classfile.MethodDefinition;
@@ -36,6 +37,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -45,7 +47,9 @@ import static io.airlift.classfile.BytecodeExpressions.constantFalse;
 import static io.airlift.classfile.BytecodeExpressions.constantInt;
 import static io.airlift.classfile.BytecodeExpressions.constantLong;
 import static io.airlift.classfile.BytecodeExpressions.constantTrue;
+import static io.airlift.classfile.BytecodeExpressions.getStatic;
 import static io.airlift.classfile.BytecodeExpressions.invokeStatic;
+import static io.airlift.classfile.BytecodeExpressions.setStatic;
 import static io.airlift.classfile.Parameter.arg;
 import static io.airlift.regulator.LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET;
 import static io.airlift.regulator.TrinoLikeWildcardMatcher.MATCH_ANY;
@@ -170,10 +174,11 @@ final class TrinoLikeKernelGenerator
     }
 
     /**
-     * Generates and defines the class for {@code kernel}, or returns {@code null} when a method of
-     * the class would exceed {@link #HUGE_METHOD_LIMIT}. Other failures propagate.
+     * Generates and defines the class for {@code kernel}, searching literals as on aarch64 when
+     * {@code aarch64} is true, or returns {@code null} when a method of the class would exceed
+     * {@link #HUGE_METHOD_LIMIT}. Other failures propagate.
      */
-    static CompiledLike generate(Kernel kernel)
+    static CompiledLike generate(Kernel kernel, boolean aarch64)
     {
         // Building the class of a large pattern costs time and memory that grow with the
         // pattern, so a pattern certain to exceed the limit is rejected before it is built.
@@ -181,7 +186,7 @@ final class TrinoLikeKernelGenerator
             return null;
         }
         HiddenClassDefiner definer = HiddenClassDefiner.builder(MethodHandles.lookup()).build();
-        CompiledUnit unit = compile(definer, kernel);
+        CompiledUnit unit = compile(definer, kernel, aarch64);
         if (largestMethodBytes(unit.report()) > HUGE_METHOD_LIMIT) {
             return null;
         }
@@ -205,21 +210,22 @@ final class TrinoLikeKernelGenerator
     }
 
     /**
-     * Returns the class file generated for {@code kernel}, without defining it or checking its
-     * method sizes.
+     * Returns the class file generated for {@code kernel}, as {@link #generate} generates it for
+     * {@code aarch64}, without defining it or checking its method sizes.
      */
-    static byte[] classfileForDiagnostics(Kernel kernel)
+    static byte[] classfileForDiagnostics(Kernel kernel, boolean aarch64)
     {
-        CompiledUnit unit = compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), kernel);
+        CompiledUnit unit = compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), kernel, aarch64);
         return unit.classfile(unit.primaryType());
     }
 
     /**
-     * Returns the size in bytecode bytes of the largest method generated for {@code kernel}.
+     * Returns the size in bytecode bytes of the largest method generated for {@code kernel}, as
+     * {@link #generate} generates it for {@code aarch64}.
      */
-    static int largestMethodBytesForDiagnostics(Kernel kernel)
+    static int largestMethodBytesForDiagnostics(Kernel kernel, boolean aarch64)
     {
-        return largestMethodBytes(compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), kernel).report());
+        return largestMethodBytes(compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), kernel, aarch64).report());
     }
 
     /**
@@ -281,10 +287,10 @@ final class TrinoLikeKernelGenerator
         return region.exact();
     }
 
-    private static CompiledUnit compile(HiddenClassDefiner definer, Kernel kernel)
+    private static CompiledUnit compile(HiddenClassDefiner definer, Kernel kernel, boolean aarch64)
     {
         return ClassCompiler.forTarget(definer.compilationTarget())
-                .compileUnit(new LikeEmitter(kernel).define());
+                .compileUnit(new LikeEmitter(kernel, aarch64).define());
     }
 
     private static int largestMethodBytes(CompilationReport report)
@@ -299,18 +305,26 @@ final class TrinoLikeKernelGenerator
     }
 
     /**
-     * Emits the class of one pattern: {@code matchesEntry}, the method of its middle, and a search
-     * method for each literal the middle searches for.
+     * Emits the class of one pattern: {@code matchesEntry}, the method of its middle, a search
+     * method for each literal the middle searches for, a method that verifies the candidates of
+     * each search of a literal of two or more bytes, and a class initializer that sets the
+     * constant fields those searches read.
      */
     private static final class LikeEmitter
     {
         private final Kernel kernel;
+        private final boolean aarch64;
+        // Constants the first-and-last-byte searches read from static fields, by field name, set
+        // by the class initializer that define writes last.
+        private final Map<String, ConstantField> constantFields = new LinkedHashMap<>();
+
         private ClassDefinition definition;
         private int labels;
 
-        private LikeEmitter(Kernel kernel)
+        private LikeEmitter(Kernel kernel, boolean aarch64)
         {
             this.kernel = requireNonNull(kernel, "kernel is null");
+            this.aarch64 = aarch64;
         }
 
         private ClassModel define()
@@ -333,6 +347,13 @@ final class TrinoLikeKernelGenerator
                     .access(PUBLIC)
                     .body()
                     .ret(invokeStatic(entry, input));
+            if (!constantFields.isEmpty()) {
+                CodeBlock.Builder initializer = definition.classInitializer().body();
+                for (ConstantField constant : constantFields.values()) {
+                    initializer.append(setStatic(constant.field(), constantLong(constant.value())));
+                }
+                initializer.ret();
+            }
             return definition.build();
         }
 
@@ -662,10 +683,12 @@ final class TrinoLikeKernelGenerator
         }
 
         /**
-         * Defines a search method for each of {@code literals}, numbered in order, each a copy of
-         * {@code LiteralSearchKernel.find} for its literal. A search takes the backing array and
-         * the absolute range to search, and returns the absolute position of the first
-         * occurrence or {@code -1}.
+         * Defines a search method for each of {@code literals}, numbered in order: a copy of
+         * {@code LiteralSearchKernel.findSingleByte} for a one-byte literal, and for a literal of
+         * two or more bytes, a copy of {@code LiteralSearchKernel.skipToContainsCandidate} with a
+         * method that copies {@code verifyContainsCandidates} to verify its candidates. A search
+         * takes the backing array and the absolute range to search, and returns the absolute
+         * position of the first occurrence or {@code -1}.
          */
         private List<MethodDefinition> defineSearches(List<LiteralSearchKernel> literals)
         {
@@ -686,7 +709,11 @@ final class TrinoLikeKernelGenerator
                     emitFindSingleByte(body, bytes, start, end, literalBytes[0]);
                 }
                 else {
-                    emitFindFrontAndBack(body, bytes, start, end, literalBytes, literal.prefixShifts());
+                    // The search splits the interpreter's loop, as interpreted contains does: a
+                    // word scan that makes no call until it finds a possible candidate, and a
+                    // separate method that verifies candidates from there.
+                    MethodDefinition verifyCandidates = defineVerifyCandidates(searches.size(), literalBytes, literal.prefixShifts());
+                    emitSkipToCandidate(body, bytes, start, end, literalBytes, verifyCandidates);
                 }
                 searches.add(method);
             }
@@ -741,17 +768,24 @@ final class TrinoLikeKernelGenerator
         }
 
         /**
-         * A copy of {@code LiteralSearchKernel.findFrontAndBack}: candidates whose first and last
-         * bytes match, verified in order, with the same KMP handoff rule.
+         * A copy of {@code LiteralSearchKernel.verifyContainsCandidates}, which verifies as
+         * {@code findFrontAndBack} does: candidates whose first and last bytes match, verified in
+         * order, with the same KMP handoff rule. Verification begins at {@code verifyStart}, where
+         * the word scan found the first candidate, but the words and the KMP handoff count from
+         * {@code start}, because the bytes skipped count as covered. The word loop reads LOW_BITS
+         * and the literal's broadcasts as the scan does.
          */
-        private void emitFindFrontAndBack(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte[] literal, int[] prefixShifts)
+        private void emitVerifyCandidates(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter verifyStart, Parameter end, byte[] literal, int[] prefixShifts)
         {
             int length = literal.length;
             int backOffset = length - 1;
-            Variable position = body.declare("position", start);
+            Variable position = body.declare("position", verifyStart);
             Variable wordEnd = body.declare("wordEnd", start.add(end.subtract(start).subtract(constantInt(backOffset))
                     .divide(constantInt(Long.BYTES))
                     .multiply(constantInt(Long.BYTES))));
+            Variable lowBits = body.declare("lowBits", getStatic(lowBitsField()));
+            BytecodeExpression front = broadcastOperand(body, "front", literal[0]);
+            BytecodeExpression back = broadcastOperand(body, "back", literal[backOffset]);
             Variable comparisonEnd = body.declare("comparisonEnd", start.subtract(constantInt(CANDIDATE_COMPARISON_BUDGET)));
             Variable candidates = body.declare(long.class, "candidates");
             Variable frontDifference = body.declare(long.class, "frontDifference");
@@ -767,9 +801,9 @@ final class TrinoLikeKernelGenerator
 
             body.mark(word);
             body.append(ifThenJump(position.greaterThanOrEqual(wordEnd), tail));
-            body.append(frontDifference.set(readLong(bytes, position).bitwiseXor(constantLong(broadcast(literal[0])))));
-            body.append(backDifference.set(readLong(bytes, position.add(constantInt(backOffset))).bitwiseXor(constantLong(broadcast(literal[backOffset])))));
-            body.append(candidates.set(bothZeroByteMask(frontDifference, backDifference)));
+            body.append(frontDifference.set(readLong(bytes, position).bitwiseXor(front)));
+            body.append(backDifference.set(readLong(bytes, position.add(constantInt(backOffset))).bitwiseXor(back)));
+            body.append(candidates.set(bothZeroByteMask(frontDifference, backDifference, lowBits)));
             body.mark(nextCandidate);
             body.append(ifThenJump(candidates.equal(constantLong(0)), nextWord));
             body.append(candidate.set(position.add(firstByte(candidates))));
@@ -794,6 +828,120 @@ final class TrinoLikeKernelGenerator
             body.mark(nextTailCandidate);
             body.append(position.set(position.add(constantInt(1))));
             body.jump(tailCandidate);
+        }
+
+        /**
+         * A copy of {@code LiteralSearchKernel.skipToContainsCandidate}, the word scan of a
+         * search: skips to the first word, or tail position, holding a possible candidate, and
+         * returns {@code verifyCandidates} from there. The scan makes no call until it finds a
+         * possible candidate and has no inner loop, so C2 keeps it innermost and unrolls it. It
+         * reads LOW_BITS from {@link #lowBitsField}, and the literal's broadcasts as
+         * {@link #broadcastOperand} provides them.
+         */
+        private void emitSkipToCandidate(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte[] literal, MethodDefinition verifyCandidates)
+        {
+            int backOffset = literal.length - 1;
+            Variable position = body.declare("position", start);
+            Variable wordEnd = body.declare("wordEnd", start.add(end.subtract(start).subtract(constantInt(backOffset))
+                    .divide(constantInt(Long.BYTES))
+                    .multiply(constantInt(Long.BYTES))));
+            Variable lowBits = body.declare("lowBits", getStatic(lowBitsField()));
+            BytecodeExpression front = broadcastOperand(body, "front", literal[0]);
+            BytecodeExpression back = broadcastOperand(body, "back", literal[backOffset]);
+            Variable frontDifference = body.declare(long.class, "frontDifference");
+            Variable backDifference = body.declare(long.class, "backDifference");
+            CodeLabel word = body.label("word");
+            CodeLabel tail = body.label("tail");
+            CodeLabel tailCandidate = body.label("tailCandidate");
+            CodeLabel nextTailCandidate = body.label("nextTailCandidate");
+
+            body.mark(word);
+            body.append(ifThenJump(position.greaterThanOrEqual(wordEnd), tail));
+            body.append(frontDifference.set(readLong(bytes, position).bitwiseXor(front)));
+            body.append(backDifference.set(readLong(bytes, position.add(constantInt(backOffset))).bitwiseXor(back)));
+            body.append(IfStatement.builder()
+                    .condition(bothZeroByteMask(frontDifference, backDifference, lowBits).notEqual(constantLong(0)))
+                    .then(invokeStatic(verifyCandidates, bytes, start, position, end).ret())
+                    .build());
+            body.append(position.set(position.add(constantInt(Long.BYTES))));
+            body.jump(word);
+
+            body.mark(tail);
+            Variable candidateEnd = body.declare("candidateEnd", end.subtract(constantInt(backOffset)));
+            body.mark(tailCandidate);
+            body.append(IfStatement.builder()
+                    .condition(position.greaterThanOrEqual(candidateEnd))
+                    .then(constantInt(-1).ret())
+                    .build());
+            body.append(ifThenJump(bytes.getElement(position).cast(int.class).notEqual(constantInt(literal[0])), nextTailCandidate));
+            body.append(ifThenJump(bytes.getElement(position.add(constantInt(backOffset))).cast(int.class).notEqual(constantInt(literal[backOffset])), nextTailCandidate));
+            body.append(invokeStatic(verifyCandidates, bytes, start, position, end).ret());
+            body.mark(nextTailCandidate);
+            body.append(position.set(position.add(constantInt(1))));
+            body.jump(tailCandidate);
+        }
+
+        /**
+         * Returns the static field holding LOW_BITS, declaring it on first use. On aarch64 C2
+         * cannot encode -LOW_BITS as an immediate, and rebuilt the constant with four instructions
+         * every word; read from the field, it stays in a register.
+         */
+        private FieldDefinition lowBitsField()
+        {
+            return constantField("lowBits", LOW_BITS);
+        }
+
+        /**
+         * Returns {@code value} in every byte, for a first-and-last-byte search to compare words
+         * with. On aarch64 the search reads it once from a static field into a local named
+         * {@code name}, as it reads LOW_BITS; elsewhere it is a constant. REGULATOR_DECISIONS.md
+         * records the measurements behind this platform trade.
+         */
+        private BytecodeExpression broadcastOperand(CodeBlock.Builder body, String name, byte value)
+        {
+            if (!aarch64) {
+                return constantLong(broadcast(value));
+            }
+            return body.declare(name, getStatic(broadcastField(value)));
+        }
+
+        /**
+         * Returns the static field holding {@code value} in every byte, declaring it on first use.
+         */
+        private FieldDefinition broadcastField(byte value)
+        {
+            return constantField("broadcast" + HexFormat.of().toHexDigits(value), broadcast(value));
+        }
+
+        /**
+         * Returns the static field named {@code name}, declaring it on first use. The field is not
+         * final, so C2 reads it rather than folding it; the class initializer sets it.
+         */
+        private FieldDefinition constantField(String name, long value)
+        {
+            ConstantField constant = constantFields.computeIfAbsent(name, _ -> new ConstantField(
+                    definition.field(name, long.class)
+                            .access(PRIVATE, STATIC)
+                            .build(),
+                    value));
+            return constant.field();
+        }
+
+        /**
+         * Defines the method that verifies the candidates of a search, numbered as its search,
+         * which takes the backing array, the start of the search, the position to verify from,
+         * and the end of the search.
+         */
+        private MethodDefinition defineVerifyCandidates(int index, byte[] literal, int[] prefixShifts)
+        {
+            Parameter bytes = arg("bytes", byte[].class);
+            Parameter start = arg("start", int.class);
+            Parameter verifyStart = arg("verifyStart", int.class);
+            Parameter end = arg("end", int.class);
+            MethodDefinition method = definition.method("verifyCandidates" + index, int.class, bytes, start, verifyStart, end)
+                    .access(PRIVATE, STATIC);
+            emitVerifyCandidates(method.body(), bytes, start, verifyStart, end, literal, prefixShifts);
+            return method;
         }
 
         /**
@@ -855,6 +1003,8 @@ final class TrinoLikeKernelGenerator
         {
             return name + labels++;
         }
+
+        private record ConstantField(FieldDefinition field, long value) {}
     }
 
     /**
@@ -952,12 +1102,12 @@ final class TrinoLikeKernelGenerator
     /**
      * {@code zeroByteMask(first) & zeroByteMask(second)}, the bytes that are zero in both,
      * including the bits each sets above its lowest zero byte, in one expression with a single
-     * and-not, for the same reason as {@link #zeroByteMask}.
+     * and-not, for the same reason as {@link #zeroByteMask}. {@code lowBits} holds LOW_BITS.
      */
-    private static BytecodeExpression bothZeroByteMask(Variable first, Variable second)
+    private static BytecodeExpression bothZeroByteMask(Variable first, Variable second, Variable lowBits)
     {
-        return first.subtract(constantLong(LOW_BITS))
-                .bitwiseAnd(second.subtract(constantLong(LOW_BITS)))
+        return first.subtract(lowBits)
+                .bitwiseAnd(second.subtract(lowBits))
                 .bitwiseAnd(first.bitwiseOr(second).bitwiseXor(constantLong(-1)))
                 .bitwiseAnd(constantLong(HIGH_BITS));
     }
