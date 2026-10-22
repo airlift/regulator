@@ -730,7 +730,7 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testRepetitionPreservesFullCaseFolding()
     {
-        for (String body : List.of("s{1}ss", "s+ss", "s?ss", "s*ss", "f{1}ff", "f+ff", "f?ff", "f*ff")) {
+        for (String body : List.of("s{1}ss", "s+ss", "s?ss", "s*ss", "f{1}ff", "f+ff", "f?ff", "f*ff", "ff{1}|fx")) {
             for (String input : List.of("sß", "Sß", "sss", "SSS", "ß", "ss", "x", "fﬀ", "Fﬀ", "fff", "ﬀ")) {
                 assertFirstMatchMatchesJoni("(?i:" + body + ")", input);
                 assertFirstMatchMatchesJoni("(?i:(" + body + "))", input);
@@ -746,8 +746,13 @@ public class TestTrinoRegexpLanguage
         assertThat(pattern.forwardProgramForDiagnostics().hasFullCaseFold()).isTrue();
         assertThat(Nfa.fullMatch(pattern.forwardProgramForDiagnostics(), utf8Slice("sß"))).isTrue();
         assertFirstMatchMatchesJoni("(".repeat(270) + "(?i:s+ss)" + ")".repeat(270), "sß");
+        assertNoMatchMatchesJoni("(".repeat(270) + "(?i)s{2}ss" + ")".repeat(270), "sßs");
         assertFirstMatchMatchesJoni("(?i:s{1})(?-i:ss)", "Sss");
         assertFirstMatchMatchesJoni("(?i:s{1})(?-i:ss)", "SSS");
+        // Anchors expose the old required-prefix split; these inputs already matched without them.
+        assertFirstMatchMatchesJoni("\\A(?i:ff{1})\\z", "ﬀ");
+        assertFirstMatchMatchesJoni("\\A(?i:ff{1}?)\\z", "ﬀ");
+        assertFirstMatchMatchesJoni("\\A(?i:ff{1,1})\\z", "ﬀ");
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:a+aa)")).pattern().forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
         // Capital sharp S joined Unicode in 5.1; pinned Joni's fold tables are Unicode 4.1 data,
         // so it does not fold it. Regulator follows its pinned Unicode full case folding.
@@ -756,13 +761,49 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
-    public void testDocumentedFullFoldSourceBoundaries()
+    public void testFullFoldSpansLiteralRuns()
     {
-        // These source-boundary differences are retained, unlike destructive repetition coalescing.
-        for (String[] example : List.of(new String[] {"(?i:s(?:s))", "ß"}, new String[] {"(?i:sß)", "ßs"})) {
+        // Literals written next to each other under the same case-insensitivity fold as one
+        // sequence, through escapes, quotes, extended-mode whitespace and comments, {1}, other
+        // flag changes, and the bounds of unquantified noncapturing groups, whatever those groups
+        // contain. Pinned Joni ends a run where its tokenization splits the source.
+        for (String[] example : List.of(
+                new String[] {"(?i:s(?:s))", "ß"},
+                new String[] {"(?i:sß)", "ßs"},
+                new String[] {"(?i:f{1}f)", "ﬀ"},
+                new String[] {"(?i:\\x66f)", "ﬀ"},
+                new String[] {"(?i:\\Qf\\Ef)", "ﬀ"},
+                new String[] {"(?i:f\\Q\\Ef)", "ﬀ"},
+                new String[] {"(?i:f(?s)f)", "ﬀ"},
+                new String[] {"(?i)aaİ", "aaİ"},
+                // Anchors expose the old required-prefix split; this input already matched
+                // without them.
+                new String[] {"\\A(?i:f(?:f(?i)){1})\\z", "ﬀ"},
+                new String[] {"(?i:f(?:f(?i)){1}|fx)", "ﬀ"},
+                new String[] {"(?i)(?:[a]s)s", "aß"},
+                new String[] {"(?i)s(?:s[a])", "ßa"},
+                new String[] {"(?i)(?:x(?-i)(?i)s)s", "xß"})) {
             Slice input = utf8Slice(example[1]);
-            assertThat(TrinoRegexp.compile(utf8Slice(example[0])).extract(input)).isEqualTo(input);
-            assertThat(joniMatchBoundaries(joniPattern(utf8Slice(example[0])), input)).isEmpty();
+            assertThat(TrinoRegexp.compile(utf8Slice(example[0])).extract(input)).as(example[0]).isEqualTo(input);
+            assertThat(joniMatchBoundaries(joniPattern(utf8Slice(example[0])), input)).as(example[0]).isEmpty();
+        }
+        assertFirstMatchBoundaryMatchesJoni("(?ix)f # comment\nf", "ﬀ", new MatchBoundary(0, 3));
+        // Pinned Joni rewrites an exact repeat into one string, so its (?i)ß{2} matches sßs.
+        Slice sharpSInput = utf8Slice("sßs");
+        assertThat(TrinoRegexp.compile(utf8Slice("(?i)ß{2}")).extract(sharpSInput)).isNull();
+        assertThat(joniMatchBoundaries(joniPattern(utf8Slice("(?i)ß{2}")), sharpSInput)).containsExactly(new MatchBoundary(0, 4));
+        // Any other construct ends the run, even one that matches only the empty string or cannot
+        // match at all, and so does any change of case-insensitivity.
+        for (String[] example : List.of(
+                new String[] {"(?i)s{2}ss", "sßs"},
+                new String[] {"(?i)f{2}i", "fﬁ"},
+                new String[] {"(?i)ff{0}f", "ﬀ"},
+                new String[] {"(?i)f(?:)*f", "ﬀ"},
+                new String[] {"(?i)f(?:f|[a&&b])", "ﬀ"},
+                new String[] {"(?i)f\\Bf", "ﬀ"},
+                new String[] {"(?i)s(?-i)(?i)s", "ß"},
+                new String[] {"(?i)s(s)", "ß"})) {
+            assertNoMatchMatchesJoni(example[0], example[1]);
         }
     }
 
@@ -926,6 +967,8 @@ public class TestTrinoRegexpLanguage
         assertFirstMatchBoundaryMatchesJoni("(?x)a+\\Q\\E+", "aaa", greedyMatch);
         assertFirstMatchBoundaryMatchesJoni("(?x)a+\\Q\\E{2}", "aaa", greedyMatch);
         assertFirstMatchBoundaryMatchesJoni("(?x)a+\\Qx\\E*", "aaaxx", new MatchBoundary(0, 5));
+        assertFirstMatchBoundaryMatchesJoni("(?x)(?:ab)* ?", "abab", new MatchBoundary(0, 4));
+        assertFirstMatchBoundaryMatchesJoni("(?x)(?:ab){1} *", "abab", new MatchBoundary(0, 4));
 
         assertFirstMatchBoundaryMatchesJoni("(?x)a*?", "aaa", new MatchBoundary(0, 0));
     }

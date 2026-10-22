@@ -30,7 +30,6 @@ import static io.airlift.regulator.Regexp.MAX_REPEAT;
 import static io.airlift.regulator.RegexpParserSupport.addFoldedRangeLatin1;
 import static io.airlift.regulator.RegexpParserSupport.addGroup;
 import static io.airlift.regulator.RegexpParserSupport.decodeHexDigit;
-import static io.airlift.regulator.RegexpParserSupport.makeLiteralString;
 import static io.airlift.regulator.RegexpParserSupport.wouldExceedRepeatLimit;
 import static java.util.Objects.requireNonNull;
 
@@ -85,6 +84,8 @@ final class TrinoRegexpParser
         private int index;
 
         private int flags;
+        // Incremented at each change of case-insensitivity; a literal run never spans two scopes.
+        private int foldCaseScope;
         private int capturingGroupCount;
         private boolean inQuote;
         private final Set<String> captureNames = new HashSet<>();
@@ -176,7 +177,7 @@ final class TrinoRegexpParser
             }
             ExpressionBuilder expression = new ExpressionBuilder(flags);
             while (!atEnd()) {
-                expression.add(parseLiteral());
+                expression.add(parseLiteral(), foldCaseScope);
             }
             return expression.build();
         }
@@ -193,7 +194,7 @@ final class TrinoRegexpParser
                 }
                 GroupFrame group = groups.peek();
                 if (tryConsumeEmptyQuoteAtom()) {
-                    group.expression().add(parseRepeatSuffix(Regexp.emptyMatch(flags)));
+                    group.expression().add(parseRepeatSuffix(Regexp.emptyMatch(flags)), foldCaseScope);
                     continue;
                 }
                 if (tryConsumeQuoteDirective()) {
@@ -214,21 +215,34 @@ final class TrinoRegexpParser
 
                     consumeByte(')');
                     GroupFrame completed = groups.pop();
-                    Regexp atom = completed.expression().build();
-                    flags = completed.restoreFlags();
-                    if (completed.capturing()) {
-                        atom = Regexp.capture(completed.groupFlags(), atom, completed.captureIndex(), completed.name());
+                    ExpressionBuilder content = completed.expression();
+                    setFlags(completed.restoreFlags());
+                    Regexp atom;
+                    if (!completed.capturing() && !content.hasAlternation()) {
+                        // A noncapturing group without alternation only groups, so its contents
+                        // act as if written in its place. Its elements are already in the
+                        // enclosing sequence and stay there unless a quantifier other than {1}
+                        // follows.
+                        atom = parseRepeatSuffix(null, content);
                     }
-                    groups.peek().expression().add(parseRepeatSuffix(atom));
+                    else {
+                        atom = content.build();
+                        if (completed.capturing()) {
+                            atom = Regexp.capture(completed.groupFlags(), atom, completed.captureIndex(), completed.name());
+                        }
+                        atom = parseRepeatSuffix(atom);
+                    }
+                    if (atom != null) {
+                        groups.peek().expression().add(atom, foldCaseScope);
+                    }
                     continue;
                 }
 
                 if (!inQuote && nextByte == '(') {
-                    GroupFrame opened = parseGroupStart();
-                    if (opened == null) {
-                        group.expression().add(Regexp.emptyMatch(flags));
-                    }
-                    else {
+                    // A flag directive adds no atom; within a fully folded literal run, only a
+                    // change of case-insensitivity ends the run.
+                    GroupFrame opened = parseGroupStart(group.expression());
+                    if (opened != null) {
                         groups.push(opened);
                     }
                     continue;
@@ -236,7 +250,7 @@ final class TrinoRegexpParser
 
                 Regexp atom = parseRepeat();
                 if (atom != null) {
-                    group.expression().add(atom);
+                    group.expression().add(atom, foldCaseScope);
                 }
             }
 
@@ -246,83 +260,184 @@ final class TrinoRegexpParser
             return groups.pop().expression().build();
         }
 
+        // The alternatives of one group, or of the whole pattern, written into a sequence. A
+        // noncapturing group shares the sequence of the expression around it and marks where its
+        // content starts, so it takes that content out into one atom only when it must: at its
+        // alternation, or when a quantifier other than {1} follows it.
         private static final class ExpressionBuilder
         {
+            private final Sequence sequence;
+            private final int elementMark;
+            private final int runeMark;
             private final int expressionFlags;
             private int concatenationFlags;
-            private final List<Regexp> alternatives = new ArrayList<>();
-            private final List<Regexp> concatenation = new ArrayList<>();
-            // Pending literal runes, flushed into one literal string node. Kept as a plain
-            // array so accumulating a long literal does not box each rune.
-            private int[] literalRunes = new int[16];
-            private int literalRuneCount;
-            private int literalFlags;
+            private List<Regexp> alternatives;
 
             ExpressionBuilder(int flags)
             {
+                this(new Sequence(), flags);
+            }
+
+            // A noncapturing group shares the enclosing sequence and marks where its content
+            // begins.
+            ExpressionBuilder(ExpressionBuilder enclosing, int flags)
+            {
+                this(enclosing.sequence, flags);
+            }
+
+            private ExpressionBuilder(Sequence sequence, int flags)
+            {
+                this.sequence = sequence;
+                this.elementMark = sequence.elementCount();
+                this.runeMark = sequence.runeCount();
                 this.expressionFlags = flags;
                 this.concatenationFlags = flags;
             }
 
-            void add(Regexp atom)
+            void add(Regexp atom, int foldCaseScope)
             {
-                if (atom.op() == RegexpOp.LITERAL) {
-                    if (literalRuneCount > 0 && literalFlags != atom.parseFlags()) {
-                        flushLiterals();
-                    }
-                    if (literalRuneCount == 0) {
-                        literalFlags = atom.parseFlags();
-                    }
-                    if (literalRuneCount == literalRunes.length) {
-                        literalRunes = Arrays.copyOf(literalRunes, literalRuneCount * 2);
-                    }
-                    literalRunes[literalRuneCount++] = atom.rune();
-                    return;
-                }
+                sequence.add(atom, foldCaseScope);
+            }
 
-                flushLiterals();
-                concatenation.add(atom);
+            // Whether the expression has alternation; without it, its elements can stay in an
+            // enclosing sequence.
+            boolean hasAlternation()
+            {
+                return alternatives != null;
             }
 
             void nextAlternative(int flags)
             {
-                alternatives.add(buildConcatenation());
+                if (alternatives == null) {
+                    alternatives = new ArrayList<>();
+                }
+                alternatives.add(sequence.removeFrom(elementMark, runeMark, concatenationFlags));
                 concatenationFlags = flags;
             }
 
             Regexp build()
             {
-                alternatives.add(buildConcatenation());
-                if (alternatives.size() == 1) {
-                    return alternatives.getFirst();
+                Regexp concatenation = sequence.removeFrom(elementMark, runeMark, concatenationFlags);
+                if (alternatives == null) {
+                    return concatenation;
                 }
+                alternatives.add(concatenation);
                 return Regexp.alternate(expressionFlags, alternatives);
             }
+        }
 
-            private Regexp buildConcatenation()
+        // The elements of one capture, or of the whole pattern, including those of the
+        // noncapturing groups inside it. A literal run stays a range of pending runes until its
+        // elements are removed into a node, so each rune and element is materialized once, however
+        // deeply groups nest.
+        private static final class Sequence
+        {
+            // A null element is the literal run of runes [runStarts[i], runEnds[i]), written in
+            // fold-case scope runScopes[i].
+            private final List<Regexp> elements = new ArrayList<>();
+            private int[] runStarts = new int[16];
+            private int[] runEnds = new int[16];
+            private int[] runScopes = new int[16];
+            // Each rune keeps the flags of the literal it came from. Kept as plain arrays so
+            // accumulating a long literal does not box each rune.
+            private int[] runes = new int[16];
+            private int[] runeFlags = new int[16];
+            private int runeCount;
+
+            int elementCount()
             {
-                flushLiterals();
-                Regexp result;
-                if (concatenation.isEmpty()) {
-                    result = Regexp.emptyMatch(concatenationFlags);
-                }
-                else if (concatenation.size() == 1) {
-                    result = concatenation.getFirst();
-                }
-                else {
-                    result = Regexp.concat(concatenationFlags, List.copyOf(concatenation));
-                }
-                concatenation.clear();
-                return result;
+                return elements.size();
             }
 
-            private void flushLiterals()
+            int runeCount()
             {
-                if (literalRuneCount == 0) {
+                return runeCount;
+            }
+
+            // Literals written next to each other, including through escapes, quotes, {1}, and the
+            // boundaries of noncapturing groups with no alternation and no quantifier other than
+            // {1}, form one run, which full case folding matches as one sequence. Such a group's
+            // contents act as if written in its place. Only the parser builds these runs; the
+            // simplifier joins two only when no fold can cross their boundary.
+            void add(Regexp atom, int foldCaseScope)
+            {
+                if (atom.op() == RegexpOp.EMPTY_MATCH) {
+                    // An empty quote consumes no text, so it does not end a run.
                     return;
                 }
-                concatenation.add(makeLiteralString(literalFlags, literalRunes, literalRuneCount));
-                literalRuneCount = 0;
+                if (atom.op() != RegexpOp.LITERAL) {
+                    elements.add(atom);
+                    return;
+                }
+
+                int last = elements.size() - 1;
+                if (last < 0 || elements.get(last) != null || runScopes[last] != foldCaseScope || !sameLiteralFlags(runeFlags[runStarts[last]], atom.parseFlags())) {
+                    last++;
+                    if (last >= runStarts.length) {
+                        int capacity = Math.max(last + 1, runStarts.length * 2);
+                        runStarts = Arrays.copyOf(runStarts, capacity);
+                        runEnds = Arrays.copyOf(runEnds, capacity);
+                        runScopes = Arrays.copyOf(runScopes, capacity);
+                    }
+                    elements.add(null);
+                    runStarts[last] = runeCount;
+                    runScopes[last] = foldCaseScope;
+                }
+                appendRune(atom.rune(), atom.parseFlags());
+                runEnds[last] = runeCount;
+            }
+
+            // Removes the elements and runes written since the marks into one node. A literal run
+            // that crosses the rune mark keeps its earlier runes.
+            Regexp removeFrom(int elementMark, int runeMark, int concatenationFlags)
+            {
+                List<Regexp> removed = new ArrayList<>(elements.size() - elementMark + 1);
+                int crossing = elementMark - 1;
+                if (crossing >= 0 && elements.get(crossing) == null) {
+                    if (runEnds[crossing] > runeMark) {
+                        removed.add(literal(runeMark, runEnds[crossing]));
+                    }
+                    runEnds[crossing] = runeMark;
+                }
+                for (int i = elementMark; i < elements.size(); i++) {
+                    Regexp element = elements.get(i);
+                    removed.add(element == null ? literal(runStarts[i], runEnds[i]) : element);
+                }
+                elements.subList(elementMark, elements.size()).clear();
+                runeCount = runeMark;
+
+                if (removed.isEmpty()) {
+                    return Regexp.emptyMatch(concatenationFlags);
+                }
+                if (removed.size() == 1) {
+                    return removed.getFirst();
+                }
+                return Regexp.concat(concatenationFlags, removed);
+            }
+
+            private Regexp literal(int start, int end)
+            {
+                if (end - start == 1) {
+                    return Regexp.literal(runeFlags[start], runes[start]);
+                }
+                return Regexp.literalString(runeFlags[start], Arrays.copyOfRange(runes, start, end));
+            }
+
+            private void appendRune(int rune, int flags)
+            {
+                if (runeCount == runes.length) {
+                    runes = Arrays.copyOf(runes, runeCount * 2);
+                    runeFlags = Arrays.copyOf(runeFlags, runeCount * 2);
+                }
+                runes[runeCount] = rune;
+                runeFlags[runeCount] = flags;
+                runeCount++;
+            }
+
+            // Within one fold-case scope, only full-fold literals may ignore other flag changes.
+            private static boolean sameLiteralFlags(int runFlags, int atomFlags)
+            {
+                return runFlags == atomFlags || (runFlags & atomFlags & Regexp.FULL_CASE_FOLD) != 0;
             }
         }
 
@@ -347,6 +462,15 @@ final class TrinoRegexpParser
         }
 
         private Regexp parseRepeatSuffix(Regexp atom)
+        {
+            return parseRepeatSuffix(atom, null);
+        }
+
+        // When grouping is non-null, atom is null and the group's contents remain in the enclosing
+        // sequence. Return null unless a quantifier other than an exact repeat of one turns those
+        // contents into an atom. When grouping is null, apply quantifiers to the supplied atom and
+        // return the result.
+        private Regexp parseRepeatSuffix(Regexp atom, ExpressionBuilder grouping)
         {
             boolean appliedRepeat = false;
             boolean separatedFromPreviousRepeat = false;
@@ -381,7 +505,10 @@ final class TrinoRegexpParser
                     if (appliedRepeat && !separatedFromPreviousRepeat && (flags & Regexp.PERL_EXTENSIONS) != 0) {
                         throw error(RegexpParseErrorCode.BAD_REPEAT_OP, errorArgAtCurrent());
                     }
-                    atom = applyRepeat(atom);
+                    atom = applyRepeat(atom, grouping);
+                    if (atom != null) {
+                        grouping = null;
+                    }
                     appliedRepeat = true;
                     separatedFromPreviousRepeat = false;
                     continue;
@@ -443,9 +570,13 @@ final class TrinoRegexpParser
             return separatorByte == '}';
         }
 
-        private Regexp applyRepeat(Regexp atom)
+        // When grouping is non-null, atom is null and the group's contents remain in the enclosing
+        // sequence. Return null if the quantifier is an exact repeat of one, which leaves them
+        // there; otherwise turn those contents into the repeated atom. When grouping is null,
+        // apply the quantifier to the supplied atom and return the result.
+        private Regexp applyRepeat(Regexp atom, ExpressionBuilder grouping)
         {
-            if (atom == null) {
+            if (atom == null && grouping == null) {
                 throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, errorArgAtCurrent());
             }
 
@@ -485,6 +616,17 @@ final class TrinoRegexpParser
             }
             else if ((flags & Regexp.PERL_EXTENSIONS) != 0 && !atEnd() && peekByte() == '+') {
                 throw unsupportedConstruct("possessive quantifiers", index, index + 1);
+            }
+
+            // A literal, an empty atom, or a group's contents repeated exactly once stays part of
+            // its literal run, so full case folding sees the whole sequence: (?i:ff{1}) matches
+            // U+FB00.
+            if (repetitionOperator == RepetitionOperator.REPEAT && min == 1 && max == 1 &&
+                    (grouping != null || atom.op() == RegexpOp.LITERAL || atom.op() == RegexpOp.EMPTY_MATCH)) {
+                return atom;
+            }
+            if (grouping != null) {
+                atom = grouping.build();
             }
 
             int nodeFlags = nonGreedy ? (flags | Regexp.NON_GREEDY) : (flags & ~Regexp.NON_GREEDY);
@@ -741,7 +883,7 @@ final class TrinoRegexpParser
                     bytes[index + 3] == 'E';
         }
 
-        private GroupFrame parseGroupStart()
+        private GroupFrame parseGroupStart(ExpressionBuilder enclosing)
         {
             int groupFlags = flags;
             int groupStart = index;
@@ -791,7 +933,7 @@ final class TrinoRegexpParser
                 else {
                     // Inline flags like (?m), (?-m), (?s:...), (?U:...), ...
                     int saved = flags;
-                    flags = parseInlineFlags(saved, groupStart);
+                    setFlags(parseInlineFlags(saved, groupStart));
 
                     if (atEnd()) {
                         throw error(RegexpParseErrorCode.MISSING_PAREN, errorArgAll());
@@ -805,7 +947,7 @@ final class TrinoRegexpParser
                         throw error(RegexpParseErrorCode.BAD_PERL_OP, errorArgAtCurrent());
                     }
                     consumeByte(':');
-                    return new GroupFrame(new ExpressionBuilder(flags), saved, groupFlags, false, -1, null);
+                    return new GroupFrame(new ExpressionBuilder(enclosing, flags), saved, groupFlags, false, -1, null);
                 }
             }
 
@@ -813,7 +955,8 @@ final class TrinoRegexpParser
                 capturingGroupCount++;
                 captureIndex = capturingGroupCount;
             }
-            return new GroupFrame(new ExpressionBuilder(flags), groupFlags, groupFlags, capturing, captureIndex, name);
+            ExpressionBuilder expression = capturing ? new ExpressionBuilder(flags) : new ExpressionBuilder(enclosing, flags);
+            return new GroupFrame(expression, groupFlags, groupFlags, capturing, captureIndex, name);
         }
 
         private int parseInlineFlags(int base, int groupStart)
@@ -845,6 +988,14 @@ final class TrinoRegexpParser
             }
 
             return inlineFlags;
+        }
+
+        private void setFlags(int newFlags)
+        {
+            if (((flags ^ newFlags) & Regexp.FOLD_CASE) != 0) {
+                foldCaseScope++;
+            }
+            flags = newFlags;
         }
 
         private Slice parseCaptureName(int groupStart, int endDelimiter)

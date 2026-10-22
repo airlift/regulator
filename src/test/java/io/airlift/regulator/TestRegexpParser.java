@@ -90,8 +90,8 @@ public class TestRegexpParser
             assertThat(regexp.runes()).containsExactly(expected);
         }
 
-        // A literal that is interrupted flushes exactly the runes seen so far, and the buffer
-        // starts over for the literal that follows.
+        // A literal that is interrupted ends with exactly the runes seen so far, and the literal
+        // that follows starts a new string.
         Slice interrupted = Slices.wrappedBuffer("abc(d)ef".getBytes(StandardCharsets.UTF_8));
         for (Regexp regexp : List.of(
                 RegexpParser.parse(interrupted, Regexp.LIKE_PERL).regexp(),

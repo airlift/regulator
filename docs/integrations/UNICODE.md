@@ -232,13 +232,13 @@ that rule. The rules are:
   I.
 
 The Trino rule's multi-code-point folds are the database's status F mappings,
-which the Trino frontend uses for Joni-compatible case-insensitive literals
-and positive character classes. Dotted capital I keeps its fold to i followed
-by a combining dot above. Full-fold literals compile to a shared-suffix program
-graph rather than enumerating every expanded pattern. The table covers every
-multi-code-point mapping in pinned Joni and adds two folds to `ss` that Joni
-lacks because its fold tables are Unicode 4.1 data: U+1E9E capital sharp S,
-from Unicode 5.1, and U+1DF95, from Unicode 18.0.
+which the Trino frontend uses for the full case folding of case-insensitive
+literal runs and positive character classes. Dotted capital I keeps its fold to
+i followed by a combining dot above. Full-fold literals compile to a
+shared-suffix program graph rather than enumerating every expanded pattern. The
+table covers every multi-code-point mapping in pinned Joni and adds two folds
+to `ss` that Joni lacks because its fold tables are Unicode 4.1 data: U+1E9E
+capital sharp S, from Unicode 5.1, and U+1DF95, from Unicode 18.0.
 
 ### Initialization and caching
 
