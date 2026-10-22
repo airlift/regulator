@@ -316,7 +316,7 @@ UTF-16 code-unit offsets.
 - `TrinoRegexpParser` compiles the supported Trino/Joni regular subset directly
   rather than routing syntax through the RE2 parser or a dialect enum.
   Unsupported constructs and same-text/different-meaning collisions are
-  rejected explicitly.
+  rejected explicitly, apart from the documented differences below.
 - Greedy unbounded repetition of a nullable body uses a Trino-only input-progress
   lowering: once an iteration succeeds without consuming input, the repetition
   stops instead of reconsidering lower-priority alternatives. The lowering
@@ -347,6 +347,15 @@ UTF-16 code-unit offsets.
   compares its malformed bytes byte-for-byte; that reading is unspecified, so
   Regulator treats the pattern as a syntax error. Inputs are not validated as
   UTF-8, matching Trino's garbage-in/garbage-out contract.
+- Where Trino's pinned Joni, `io.airlift:joni:2.1.5.3`, and modern Joni
+  disagree, the behavior is judged a bug or intended Trino behavior, as
+  [Language Authorities](#language-authorities) describes. A bug is not copied;
+  the Trino language follows the rule modern Joni and Oniguruma settled on
+  instead, so `[a-zA-Z0-9-_]` matches `-`, which pinned Joni drops. Intended
+  behavior stays even where modern Joni changed it, as with the ASCII `\d`,
+  `\s`, and `\w`. The
+  [Trino language reference](docs/reference/languages/TRINO_REGEXP.md) records
+  each call.
 
 Trino SQL registration, `CHAR` padding, block construction, and error-code
 translation belong in the Trino repository rather than the Regulator library.

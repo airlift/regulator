@@ -41,6 +41,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestTrinoRegexpLanguage
 {
@@ -808,6 +809,32 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
+    public void testDocumentedDifferencesFromPinnedJoni()
+    {
+        // Trino's pinned Joni drops a dash after a completed class range, and reads a bracket after that
+        // dash as a literal; modern Joni reads the dash as a literal and the bracket as a nested class.
+        for (MatchCase matchCase : List.of(
+                new MatchCase("[a-zA-Z0-9-_]", "-", true),
+                new MatchCase("[a-c[x]-z]", "-", true),
+                new MatchCase("[a-c-é]", "-", true),
+                new MatchCase("[a-c-[x]]", "-", true),
+                new MatchCase("[a-c-[x]]", "[", false),
+                new MatchCase("(?i)[a-c-e]", "-", true),
+                new MatchCase("[^a-c-e]", "-", false))) {
+            Slice pattern = utf8Slice(matchCase.pattern());
+            Slice input = utf8Slice(matchCase.input());
+            assertThat(TrinoRegexp.compile(pattern).contains(input))
+                    .as("%s against %s", matchCase.pattern(), matchCase.input())
+                    .isEqualTo(matchCase.expected())
+                    .isNotEqualTo(joniFind(pattern, input));
+        }
+        // Pinned Joni fails on a class escape after such a dash.
+        assertThat(TrinoRegexp.compile(utf8Slice("[a-c-\\d]")).contains(utf8Slice("-"))).isTrue();
+        assertThat(TrinoRegexp.compile(utf8Slice("[a-c-\\d]")).contains(utf8Slice("5"))).isTrue();
+        assertThatThrownBy(() -> joniPattern(utf8Slice("[a-c-\\d]"))).isInstanceOf(ArrayIndexOutOfBoundsException.class);
+    }
+
+    @Test
     public void testCaseInsensitiveClassesMatchJoniFoldSpellings()
     {
         // Characters whose full fold is the same in Joni's Unicode 4.1 tables and the pinned
@@ -1022,7 +1049,6 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("\\u12", "\u0012", true),
                 // Joni reads an unbraced hex or Unicode escape without hex digits as U+0000 unless it ends the pattern.
                 new MatchCase("[\\x]", "\u0000", true),
-                new MatchCase("[a-c-\\x]", "\u0000", true),
                 new MatchCase("\\A\\xg\\z", "\u0000g", true),
                 new MatchCase("\\A\\ug\\z", "\u0000g", true),
                 new MatchCase("\\k", "k", true),
@@ -1127,16 +1153,16 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("[\\p{L}]", "a", true),
                 // Without a later :], Joni reads [: as a nested class.
                 new MatchCase("[[:a:b]]", "a", true),
-                // Joni drops a dash after a completed range unless another dash follows, even with a nested
-                // class between them.
-                new MatchCase("[a-p-z]", "-", false),
+                // A dash after a completed range, even with a nested class between them, is not a range
+                // operator, but a second dash after it is.
                 new MatchCase("[a-p-z]", "z", true),
                 new MatchCase("[a-c-x-z]", "y", true),
-                new MatchCase("[a-c[x]-z]", "-", false),
                 new MatchCase("[a-c[x]-z]", "z", true),
                 new MatchCase("[a-c[x]--z]", "y", true),
                 new MatchCase("[a-c-]", "-", true),
                 // A dash that ends a class after a class item, or follows a leading nested class, is a literal.
+                // Pinned Joni reads the bracket here as a literal rather than a nested class, but both match x.
+                new MatchCase("[a-c-[x]]", "x", true),
                 new MatchCase("[\\d-]", "-", true),
                 new MatchCase("[[a]-z]", "-", true),
                 new MatchCase("[[a]-z]", "b", false),
