@@ -75,6 +75,7 @@ public class TestTrinoRegexpSyntax
                 unsupported("x*+", "possessive quantifiers", 2),
                 unsupported("x?+", "possessive quantifiers", 2),
                 unsupported("x{1,2}+", "possessive quantifiers", 6),
+                unsupported("x{1}+", "possessive quantifiers", 4),
                 unsupported("(x)\\1", "backreferences", 3),
                 unsupported("(?<name>x)\\k<name>", "backreferences", 10),
                 unsupported("\\G", "previous-match boundary \\G", 0),

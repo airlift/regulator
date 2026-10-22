@@ -99,12 +99,26 @@ String uppercasing with the root locale produces `SS`.
 
 ### Other matching differences from Joni
 
-Regulator can merge noncapturing literal groups and apply full case folding to
-the combined sequence. Joni preserves some of those boundaries. As a result,
-Regulator's `(?i:s(?:s))` matches `ß`, and `(?i:sß)` matches `ßs`, while pinned
-Joni does not. This difference comes from literal normalization, not Unicode
-versions. These patterns remain supported with the behavior described here.
-Exact Joni source-boundary behavior is deferred unless real workloads need it.
+Literal characters written next to each other under the same
+case-insensitivity form one run, which full case folding matches as one
+sequence, including through escapes, quotes, extended-mode whitespace and
+comments, an exact repeat of one, such as `{1}`, `{1,1}`, or `{1}?`, and flag
+changes other than `i`. A noncapturing group without a quantifier does not end
+a run; its contents act as if written in its place. Any other construct ends
+the run, as does any change of `i`. For example, Regulator's `(?i:s(?:s))`
+matches `ß` and `(?i:f(?s)f)` matches `ﬀ`, while pinned Joni does not, and
+`(?i)ff{0}f` does not match `ﬀ` in either.
+
+Regulator does not follow these results of pinned Joni's tokenization:
+
+- separate strings for escapes and quotes
+- a limit on case-fold expansion, under which `(?i:sß)` rejects `ßs` but
+  `(?i)xyzsß` accepts `xyzßs`
+- the rewrite of exact repeats, under which `(?i)ß{2}` matches `sßs`
+- the split of strings of mixed UTF-8 width, under which `(?i)aaİ` does not
+  match `aaİ`
+
+These differences do not come from Unicode versions.
 
 For greedy unbounded repetition of a nullable expression, matching stops when
 the selected iteration succeeds without consuming input. Directly nested common

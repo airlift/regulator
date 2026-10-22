@@ -161,7 +161,7 @@ final class Simplifier
                 case PLUS -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.PLUS, regexp);
                 case QUEST -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.QUEST, regexp);
                 case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifiedChildren.getFirst());
-                case CONCAT -> simplifyConcat(flags, regexp, simplifiedChildren);
+                case CONCAT -> simplifyConcat(flags, regexp, simplifiedChildren, caseFolding);
                 case ALTERNATE -> simplifyAlternate(mode, caseFolding, flags, simplifiedChildren);
                 case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
             };
@@ -304,7 +304,7 @@ final class Simplifier
         return true;
     }
 
-    private static Regexp simplifyConcat(int flags, Regexp regexp, List<Regexp> children)
+    private static Regexp simplifyConcat(int flags, Regexp regexp, List<Regexp> children, CaseFolding caseFolding)
     {
         List<Regexp> simplifiedChildren = new ArrayList<>();
         for (Regexp simplifiedChild : children) {
@@ -320,9 +320,8 @@ final class Simplifier
             else {
                 // Merge adjacent literal/literal-string nodes into a single literal string,
                 // matching upstream parse_test.cc expectations like (?:ab)(?:cd) -> str{abcd}.
-                if (!simplifiedChildren.isEmpty() && isLiteralOrLiteralString(simplifiedChildren.getLast()) && isLiteralOrLiteralString(simplifiedChild) &&
-                        simplifiedChildren.getLast().parseFlags() == simplifiedChild.parseFlags()) {
-                    Regexp merged = mergeAdjacentLiterals(simplifiedChildren.getLast(), simplifiedChild);
+                Regexp merged = simplifiedChildren.isEmpty() ? null : tryMergeAdjacentLiterals(simplifiedChildren.getLast(), simplifiedChild, caseFolding);
+                if (merged != null) {
                     simplifiedChildren.set(simplifiedChildren.size() - 1, merged);
                 }
                 else {
@@ -357,13 +356,14 @@ final class Simplifier
             if (simplifiedChild.op() == RegexpOp.CONCAT) {
                 simplifiedChildren.addAll(simplifiedChild.children());
             }
-            else if (!simplifiedChildren.isEmpty() && isLiteralOrLiteralString(simplifiedChildren.getLast()) && isLiteralOrLiteralString(simplifiedChild) &&
-                    simplifiedChildren.getLast().parseFlags() == simplifiedChild.parseFlags()) {
-                Regexp merged = mergeAdjacentLiterals(simplifiedChildren.getLast(), simplifiedChild);
-                simplifiedChildren.set(simplifiedChildren.size() - 1, merged);
-            }
             else {
-                simplifiedChildren.add(simplifiedChild);
+                Regexp merged = simplifiedChildren.isEmpty() ? null : tryMergeAdjacentLiterals(simplifiedChildren.getLast(), simplifiedChild, caseFolding);
+                if (merged != null) {
+                    simplifiedChildren.set(simplifiedChildren.size() - 1, merged);
+                }
+                else {
+                    simplifiedChildren.add(simplifiedChild);
+                }
             }
         }
 
@@ -390,6 +390,22 @@ final class Simplifier
             }
         }
         return true;
+    }
+
+    // The Trino parser builds each run of fully folded literals, which full case folding matches
+    // as one sequence. Two fully folded runs stay apart whenever their combined text contains a
+    // multi-character fold, including one entirely within either run. Joining the copies of
+    // (?i)s{2} would match ß.
+    private static Regexp tryMergeAdjacentLiterals(Regexp left, Regexp right, CaseFolding caseFolding)
+    {
+        if (!isLiteralOrLiteralString(left) || !isLiteralOrLiteralString(right) || left.parseFlags() != right.parseFlags()) {
+            return null;
+        }
+        Regexp merged = mergeAdjacentLiterals(left, right);
+        if (requiresFullCaseFold(merged.parseFlags(), merged.runes(), caseFolding)) {
+            return null;
+        }
+        return merged;
     }
 
     private static boolean isLiteralOrLiteralString(Regexp regexp)

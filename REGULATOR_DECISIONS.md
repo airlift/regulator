@@ -1187,14 +1187,40 @@ from plain classes rather than a full-fold literal, so a class such as
 `(?i)[ß]` keeps the reverse program and lowered program that full folding
 would disable.
 
-Full-fold source segmentation is not exactly Joni-compatible. Adjacent literals
-can merge across noncapturing groups and be refolded: `(?i:s(?:s))` matches `ß`,
-and `(?i:sß)` matches `ßs`, while pinned Joni rejects those matches. These are
-normalization differences, separate from the Unicode-table difference above.
-Keep this behavior documented rather than adding a source-history representation
-or another engine without practical demand. This does not permit optimizations
-to destroy supported folds: repetition coalescing and alternation factoring
-must keep multi-character-foldable literal segments intact.
+A run of literal characters written next to each other under the same
+case-insensitivity folds as one sequence: its Unicode 18.0 full case folding
+is compared with the text's. Escapes, `\Q...\E` quotes, extended-mode
+whitespace and comments, an exact repeat of one, such as `{1}`, `{1,1}`, or
+`{1}?`, and flag changes other than `i` do not end a run, so `(?i:\x66f)` and
+`(?i:f(?s)f)` match `ﬀ`, and `(?i:sß)` matches `ßs`. Nor does a noncapturing
+group without a quantifier; its contents act as if written in its place, so
+`(?i:s(?:s))` matches `ß` and `(?i)(?:[a]s)s` matches `aß`. Captures,
+alternation, every other quantifier, assertions, and classes end a run, even
+when they match only the empty string or cannot match at all, so `(?i)ff{0}f`
+does not match `ﬀ`. Any change of `i` also ends a run, so `(?i)s(?-i)(?i)s`
+does not match `ß`. Simplification respects the runs the parser builds:
+repetition expansion, coalescing, alternation factoring, and the removal of
+empty or impossible nodes never split a run, and join two runs only when no
+fold can cross their boundary.
+
+Trino's
+[regexp documentation](https://github.com/trinodb/trino/blob/c7503d170344c4e266f03fdb39e53c82aa7e3594/docs/src/main/sphinx/functions/regexp.md)
+does not describe case folding, so for it Regulator reads
+[Oniguruma's `doc/RE`](https://github.com/kkos/oniguruma/blob/4ef89209a239c1aea328cf13c05a2807e5c146d1/doc/RE),
+whose rules Joni implements, together with what a user can predict from the
+pattern. The run rule meets that test. The results below depend instead on how
+pinned Joni tokenizes the pattern, so Regulator treats them as bugs of the fork
+rather than Trino's intent, the judgment Language Authorities reserves for
+Trino. Regulator does not follow these results of pinned Joni's tokenization:
+
+- separate string nodes for escapes and quotes
+- a limit on case-fold expansion: `(?i:sß)` rejects `ßs`, but `(?i)xyzsß`
+  accepts `xyzßs`
+- the rewrite of an exact repeat such as `(?i)ß{2}`, which then matches `sßs`
+- the split of strings of mixed UTF-8 width: `(?i)aaİ` does not match its own
+  text
+
+These differences are separate from the Unicode-table difference above.
 
 Trino's Joni regex functions pass the original Slice bytes to Joni; they do
 not apply SQL `upper`/`lower`. Those functions use Slice case conversion and
