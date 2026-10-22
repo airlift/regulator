@@ -847,18 +847,22 @@ final class JavaRegexpParser
                 if (!frame.hasClassAtom) {
                     throw error(RegexpParseErrorCode.BAD_CHAR_CLASS, Slices.wrappedBuffer(bytes, frame.classStart, index - frame.classStart));
                 }
-                CharClassBuilder characterClassBuilder = frame.characterClassBuilder;
-                if (frame.negated) {
-                    characterClassBuilder.negate();
-                }
-                characterClassBuilder.removeAbove(Regexp.maxRune(nodeFlags));
                 classes.pop();
                 if (classes.isEmpty()) {
+                    CharClassBuilder characterClassBuilder = frame.toCharClassBuilder();
+                    if (frame.negated) {
+                        characterClassBuilder.negate();
+                    }
+                    characterClassBuilder.removeAbove(Regexp.maxRune(nodeFlags));
                     return characterClassBuilder;
                 }
+                RuneRangeSet characterClass = frame.toRuneRangeSet();
+                if (frame.negated) {
+                    characterClass.negate();
+                }
+                characterClass.removeAbove(Regexp.maxRune(nodeFlags));
                 ClassFrame parent = classes.peek();
-                parent.union.addCharClass(characterClassBuilder);
-                parent.unionHasClassAtom = true;
+                parent.addNestedClass(characterClass);
             }
         }
 
@@ -911,16 +915,23 @@ final class JavaRegexpParser
 
         // One open bracket level: the intersection of its finished operands and the union of
         // the operand being read. Java skips an operand without atoms, and the first operand
-        // with atoms becomes the base the later ones intersect.
+        // with atoms becomes the base the later ones intersect. Nested classes and
+        // intersections combine as rune range sets, which pass to the enclosing class without
+        // copying. An outermost class with neither returns the builder of its members.
         private static final class ClassFrame
         {
             private final int classStart;
             private final boolean negated;
-            private CharClassBuilder characterClassBuilder;
+            // The intersection of the finished operands. Null until a union containing nested
+            // classes finishes or an intersection operand starts; until then the class is in
+            // union.
+            private RuneRangeSet intersection;
             private boolean hasClassAtom;
             private boolean hasIntersectionBase;
             private boolean intersectionOperand;
             private CharClassBuilder union = new CharClassBuilder();
+            // The union of the nested classes of the operand being read, or null.
+            private RuneRangeSet nestedClasses;
             private boolean first = true;
             private boolean unionHasClassAtom;
 
@@ -930,10 +941,18 @@ final class JavaRegexpParser
                 this.negated = negated;
             }
 
+            void addNestedClass(RuneRangeSet nestedClass)
+            {
+                nestedClasses = (nestedClasses == null) ? nestedClass : nestedClasses.union(nestedClass);
+                unionHasClassAtom = true;
+            }
+
             void finishUnion()
             {
                 if (!intersectionOperand) {
-                    characterClassBuilder = union;
+                    if (nestedClasses != null) {
+                        intersection = finishOperand();
+                    }
                     hasClassAtom = unionHasClassAtom;
                     hasIntersectionBase = hasClassAtom;
                     return;
@@ -943,20 +962,41 @@ final class JavaRegexpParser
                     return;
                 }
                 if (!hasIntersectionBase) {
-                    characterClassBuilder.addCharClass(union);
+                    // No earlier operand had an atom, so intersection is an empty placeholder.
+                    intersection = finishOperand();
                     hasIntersectionBase = true;
                 }
                 else {
-                    characterClassBuilder.retainAll(union);
+                    intersection = intersection.intersection(finishOperand());
                 }
+            }
+
+            private RuneRangeSet finishOperand()
+            {
+                RuneRangeSet operand = (nestedClasses == null) ? RuneRangeSet.of(union) : nestedClasses.union(union);
+                nestedClasses = null;
+                return operand;
             }
 
             void startIntersectionOperand()
             {
+                if (intersection == null) {
+                    intersection = RuneRangeSet.of(union);
+                }
                 intersectionOperand = true;
                 union = new CharClassBuilder();
                 first = true;
                 unionHasClassAtom = false;
+            }
+
+            RuneRangeSet toRuneRangeSet()
+            {
+                return (intersection == null) ? RuneRangeSet.of(union) : intersection;
+            }
+
+            CharClassBuilder toCharClassBuilder()
+            {
+                return (intersection == null) ? union : intersection.toCharClassBuilder();
             }
         }
 

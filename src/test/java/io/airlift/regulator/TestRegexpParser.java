@@ -76,6 +76,23 @@ public class TestRegexpParser
     }
 
     @Test
+    public void testNestedClassSetsCombineWithoutCopying()
+    {
+        // About 200 KB each: a large set nested deeply, negated at every level, intersected again
+        // and again, and negated at every level under case-insensitive matching.
+        String runes = separateRunes(0x10000, 2, 30_000);
+        for (String pattern : List.of(
+                "[".repeat(20_000) + runes + "]".repeat(20_000),
+                "[^".repeat(14_000) + runes + "]".repeat(14_000),
+                "[" + runes + "&&[^a]".repeat(14_000) + "]",
+                "(?i)" + "[^".repeat(14_000) + runes + "]".repeat(14_000))) {
+            assertParseAllocationPerByte(pattern, 500, Frontend.TRINO, Frontend.JAVA, Frontend.RUST);
+        }
+        // Rust's symmetric difference, again and again with [^a], a nearly full set.
+        assertParseAllocationPerByte("[" + runes + "~~[^a]".repeat(14_000) + "]", 500, Frontend.RUST);
+    }
+
+    @Test
     public void testMaximumCapturesAreStackSafe()
             throws InterruptedException
     {
