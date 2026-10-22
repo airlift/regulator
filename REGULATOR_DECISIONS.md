@@ -1378,13 +1378,36 @@ and keep each search linear in its input:
   least 256 bytes remain. Both engines make the same existence decision for
   such a plan on any input. The plan answers sparse and early matches without
   DFA setup, and the ordinary engine avoids trying each dense candidate.
+- Boolean `find` and `count` of a start-anchored plan with an optional fork and
+  no boolean tail run on the ordinary engine's DFA over inputs of at most 48
+  bytes, when both engines agree on every input and the pattern's boolean route
+  without a plan is the DFA. A fork retries its continuation and keeps capture
+  saves that are dispatched even when no positions are requested, and without a
+  boolean tail the attempt reads as far as the DFA, so on short rows the plan
+  only adds dispatch. In the RE2 scan-plan campaign, `OPTIONALS` and
+  `OPTIONAL_RETRY` rows of up to 40 bytes took 1.05 to 1.96 times the DFA's
+  time, while 64-byte `RETRY_64` rows were faster on Graviton and even on R8i.
+  The 48-byte limit sits between them. `OPTIONAL_MIXED` depended on the host:
+  it took 1.84 to 2.37 times the DFA's time on R8i and 0.96 to 1.06 times on
+  R8g, and was already faster on R9g, at 0.88 to 0.98 times. On R9g, R8g, and
+  R8i the routed `OPTIONALS` and `OPTIONAL_RETRY` rows now take
+  0.99 to 1.03 times the DFA's time, and against the plan they replace,
+  `OPTIONAL_RETRY` takes 0.51 to 0.87 times its time, `OPTIONALS` 0.64 to 0.94,
+  and `OPTIONAL_MIXED` 0.39 to 0.98. No row of `BenchmarkRe2ScanPlan`,
+  `BenchmarkTrinoScanPlan`, `BenchmarkTrinoScanProfiles`, or
+  `BenchmarkClickBenchRegexp` became slower on any host. `RETRY_64` and the longer retry rows,
+  which keep the plan, are unchanged, and on R8i `RETRY_64` breaks even with
+  the DFA, which supports the 48-byte limit. A Trino plan qualifies
+  only when it consumes only ASCII bytes and does not end with a final-line
+  end, which the DFA cannot evaluate, so no Trino benchmark plan takes this
+  route. Calls that report boundaries or captures run the plan.
 
 On malformed input, a search that hands off may report the ordinary engine's
 match instead of the plan's. Every operation applies the same budget from the
-same search positions, and the density handoff and ranged boolean `find` use
-the ordinary engine only where both engines agree, so `find`, `count`,
-`extract`, `position`, `extractAll`, replacement, and split report one match
-sequence.
+same search positions, and the density handoff, the short boolean route, and
+ranged boolean `find` use the ordinary engine only where both engines agree, so
+`find`, `count`, `extract`, `position`, `extractAll`, replacement, and split
+report one match sequence.
 
 Retain restricted ASCII case folding when every Unicode fold cycle remains in
 ASCII and requires no full multi-character fold. Folded plans use separate
@@ -1412,9 +1435,18 @@ remain about ten times faster than Joni.
 Rejected development alternatives are recorded to prevent repeating them
 without new evidence:
 
-- Separate boolean operation arrays regressed the URL and mixed controls.
+- Separate boolean operation arrays regressed the URL and mixed controls. A
+  save-free boolean array for forked start-anchored plans, chosen inside the
+  shared executors, was re-measured in 2026-10. Its boolean wins were real,
+  but it again slowed calls that report positions: RE2 `OPTIONAL_MIXED`
+  extraction took 1.37 to 1.38 times its time on Graviton, and Trino URL
+  extraction 1.13 times on R8g.
 - Selecting the ordinary boolean route by optional count and short input length
-  regressed the targeted retry workload.
+  regressed the targeted retry workload, the four-optional `OPTIONAL_RETRY` and
+  `RETRY_*` rows. The narrower form above, selected by forks without a boolean
+  tail and limited to 48 bytes, is adopted instead: on all three target hosts
+  it made the routed rows as fast as the DFA, slowed no row, and left
+  `RETRY_64` and the longer retry rows unchanged.
 - Fusing captured runs in richer plans improved isolated cases but regressed
   the representative interleaved mix on all three target hosts. Keep explicit
   capture saves outside compacted linear plans.
@@ -1482,6 +1514,11 @@ so Java patterns and `Re2.compileParsed` build none.
   bytes at a malformed sequence, take 1.06 to 1.14 times its time with the
   vector scan, up to 11 ns per row; that slowdown on malformed rows is
   accepted.
+- The short boolean route to the DFA described in
+  [Trino Specialized Byte Scans](#trino-specialized-byte-scans) applies to an
+  RE2 plan whatever bytes it consumes, because an RE2 plan agrees with the
+  ordinary engine on every input. `OPTIONALS`, `OPTIONAL_RETRY`, and the forked
+  `OPTIONAL_MIXED` plans take it.
 
 ## Generated Trino Scan Kernels
 
@@ -1501,7 +1538,9 @@ operation by operation.
   operation keeps the route it has without the option, decided once when the
   pattern compiles: an operation that would run the case-sensitive plan runs
   the generated class, and one that would run other Java, such as a retained
-  literal kernel for `contains`, still runs that Java.
+  literal kernel for `contains`, still runs that Java. Short boolean calls that
+  the interpreter hands to the ordinary engine still run the generated class,
+  which has no operation dispatch for that route to avoid.
 - A pattern is eligible when it would compile to the base `TrinoRegexp` class
   with a case-sensitive plan that every operation but `contains` reaches. Any
   other pattern, including one with an ASCII-folded plan, compiles exactly as

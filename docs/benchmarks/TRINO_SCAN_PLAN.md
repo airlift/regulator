@@ -131,6 +131,24 @@ skips building a matcher. This removes the shared path's out-of-line calls
 from the capture path. Matchers given a single-byte matcher, `matches`,
 `lookingAt`, and unanchored plans keep shared capture matching.
 
+Boolean `find` and `count` of a start-anchored plan run on the ordinary engine's
+DFA instead of the plan when the input is at most 48 bytes and the plan has an
+optional fork and no boolean tail. A fork retries its continuation, and the
+capture saves it keeps are dispatched even when no positions are requested.
+Without a boolean tail the attempt reads as far as the DFA, so on a short input
+the plan only adds dispatch. Longer inputs, and calls that return boundaries or
+captures, run the plan. Because the input length picks the engine, both engines
+must agree on every input, as for the density handoff below: an RE2 plan always
+does, and a Trino plan does when every consuming operation accepts only ASCII
+bytes. The pattern's boolean route without a plan must also be the DFA, so a
+Trino final-line end, which the DFA cannot evaluate, keeps the plan. In
+`BenchmarkRe2ScanPlan`, `OPTIONALS`, `OPTIONAL_RETRY`, and the forked
+`OPTIONAL_MIXED` plans take this route on every row; no `BenchmarkTrinoScanPlan`
+or ClickBench plan does. On R9g, R8g, and R8i the routed `OPTIONALS` and
+`OPTIONAL_RETRY` rows take 0.99 to 1.03 times the `scanPlan=false` time.
+`RETRY_64`, the first row above the limit, is unchanged, and on R8i it breaks
+even with `scanPlan=false`.
+
 Boolean unanchored search may continue on the ordinary engine when the plan
 does not begin with a literal and every consuming operation accepts only ASCII
 bytes. No match of such a plan in either engine can include a byte at or above
@@ -466,6 +484,15 @@ and extraction consume their results separately. `BenchmarkTrinoScanPlan`'s
 benchmark caller can change the compiled code and the size of the observed
 regression.
 
+Forked workloads such as `OPTIONAL_MIXED` and `OPTIONAL_RETRY` are often
+bimodal across forks. Forcing the interpreter's run and byte scans out of line
+with `-XX:CompileCommand=dontinline` made Trino `OPTIONAL_MIXED` unimodal and up
+to 20% faster on Graviton, but no forced shape won every RE2 workload: out of
+line suited `OPTIONAL_MIXED` and slowed `OPTIONAL_RETRY` on R8i. HotSpot's
+logged inline tree does not differ between fast and slow forks, and plain Java
+cannot pin an inlining decision, so call boundaries are controlled in
+[generated kernels](#generated-kernels) rather than in the interpreter.
+
 Development measurements, rejected candidates, and raw evidence for this
 design are in the private archive; see the
 [archive index](trino-scan-plan-archives.json). Accepted trade-offs and rejected
@@ -507,7 +534,9 @@ class cannot be defined compile as they do without the option.
 Each operation keeps the route it has without the option, decided once at
 compile time. `contains` runs the generated class when full-Slice `find` runs
 the plan, and otherwise keeps its retained literal kernel. Every other
-operation and every matcher runs the generated class. A pattern with a
+operation and every matcher runs the generated class. Short boolean calls that
+the interpreter hands to the ordinary engine also run the generated class,
+which has no operation dispatch for that route to avoid. A pattern with a
 single-byte matcher, which group-zero operations ask before the plan, or with
 a count that skips the plan, is not eligible. Such a pattern has no scan plan
 today, so the check only keeps a future change from routing it to generated

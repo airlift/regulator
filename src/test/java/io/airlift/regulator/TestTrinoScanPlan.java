@@ -100,6 +100,8 @@ public class TestTrinoScanPlan
 
     private record BooleanSearchRoute(String expression, boolean ordinarySearch) {}
 
+    private record ShortBooleanMatchRoute(String expression, boolean re2Ordinary, boolean trinoOrdinary) {}
+
     private record RequiredLiteral(String expression, String literal) {}
 
     private record BooleanTailShape(String expression, String text, int attemptEnd) {}
@@ -2230,6 +2232,57 @@ public class TestTrinoScanPlan
         // Longer leading runs keep the ordinary engine for every call.
         for (String expression : List.of("(\\d+)zz", "([0-9]+)a", "(\\w+)@(\\w+)", "([a-c]{2,}):", "(?i)(\\d+)zz", "(\\d+)(?:abc)?z", "(\\d+)é", "(\\d+)zz(é)")) {
             assertThat(TrinoRegexp.compile(utf8Slice(expression)).pattern().usesTrinoScanPlanForDiagnostics()).as(expression).isFalse();
+        }
+    }
+
+    @Test
+    public void testOrdinaryShortBooleanMatchRoutes()
+    {
+        // Boolean find and count of a start-anchored plan with a fork and no boolean tail run on
+        // the ordinary engine's DFA over short inputs when both engines agree on every input:
+        // always for RE2, and for Trino when the plan consumes only ASCII bytes. A Trino
+        // final-line end, which the DFA cannot evaluate, keeps the plan.
+        List<ShortBooleanMatchRoute> routes = List.of(
+                new ShortBooleanMatchRoute("^((a)?(b)?(c)?(d)?)abcd([^/]+)/$", true, false),
+                new ShortBooleanMatchRoute("^https?://(www\\.)?([^/:]+)(?::([0-9]{1,5}))?/.*$", true, false),
+                new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)/$", true, false),
+                new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)/\\z", true, true),
+                new ShortBooleanMatchRoute("^(a)?(b)?abcd([^/]+)/\\z", true, false),
+                new ShortBooleanMatchRoute("(?i)^(a)?(b)?abcd([0-9]+)/\\z", true, true),
+                new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)/", true, true),
+                new ShortBooleanMatchRoute("(?i)^(a)?(b)?abcd([0-9]+)/", true, true),
+                // A boolean tail ends the attempt early, optional literals need no fork, the
+                // pattern's boolean route with planning disabled uses a literal kernel, and
+                // unanchored plans have their own ordinary boolean search.
+                new ShortBooleanMatchRoute("^(a)?(b)?abcd([0-9]+)", false, false),
+                new ShortBooleanMatchRoute("^https?://(?:www\\.)?([^/]+)/.*$", false, false),
+                new ShortBooleanMatchRoute("^(?:a{0})?(abc)\\z", false, false),
+                new ShortBooleanMatchRoute("https?://(www\\.)?([0-9]+)/", false, false));
+        for (ShortBooleanMatchRoute route : routes) {
+            Re2 re2 = Re2.compile(utf8Slice(route.expression()));
+            Re2 trino = TrinoRegexp.compile(utf8Slice(route.expression())).pattern();
+            assertThat(re2.usesTrinoScanPlanForDiagnostics()).as(route.expression()).isTrue();
+            assertThat(trino.usesTrinoScanPlanForDiagnostics()).as(route.expression()).isTrue();
+            assertThat(re2.usesOrdinaryShortBooleanMatchForDiagnostics()).as(route.expression()).isEqualTo(route.re2Ordinary());
+            assertThat(trino.usesOrdinaryShortBooleanMatchForDiagnostics()).as(route.expression()).isEqualTo(route.trinoOrdinary());
+        }
+
+        // Without a working ordinary engine, only calls that reach the plan can match: boolean
+        // find and count over more than 48 bytes, and calls that report boundaries.
+        Slice shortInput = view("aabcd" + "1".repeat(42) + "/");
+        Slice longInput = view("aabcd" + "1".repeat(43) + "/");
+        assertThat(shortInput.length()).isEqualTo(48);
+        int[] bounds = new int[2];
+        for (String expression : List.of("^(a)?(b)?abcd([0-9]+)/\\z", "(?i)^(a)?(b)?abcd([0-9]+)/")) {
+            for (Re2 pattern : List.of(Re2.compile(utf8Slice(expression)), TrinoRegexp.compile(utf8Slice(expression)).pattern())) {
+                disableOrdinaryEngine(pattern);
+                assertThat(pattern.find(shortInput)).as(expression).isFalse();
+                assertThat(pattern.find(shortInput, 0, shortInput.length())).as(expression).isFalse();
+                assertThat(pattern.count(shortInput)).as(expression).isZero();
+                assertThat(pattern.findInto(shortInput, bounds)).as(expression).isTrue();
+                assertThat(pattern.find(longInput)).as(expression).isTrue();
+                assertThat(pattern.count(longInput)).as(expression).isEqualTo(1);
+            }
         }
     }
 
