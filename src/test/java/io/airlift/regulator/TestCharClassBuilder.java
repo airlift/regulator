@@ -15,6 +15,7 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Random;
@@ -157,6 +158,27 @@ public class TestCharClassBuilder
         fromBuilder.addRange('a', 'c');
         fromBuilder.addCharClass(merged);
         assertThat(fromBuilder.toCharClass()).isEqualTo(merged.toCharClass());
+
+        // Trimming below 'z' leaves the letter bitmasks stale, so a class that a long list would
+        // otherwise defer merges right away and recomputes them.
+        CharClassBuilder trimmed = new CharClassBuilder();
+        CharClassBuilder eager = new CharClassBuilder();
+        trimmed.addRange('A', 'Z');
+        trimmed.addRange('a', 'z');
+        trimmed.removeAbove('a');
+        eager.addRange('A', 'Z');
+        eager.addRange('a', 'a');
+        for (int rune = 0x100; rune < 0x300; rune += 2) {
+            trimmed.addRange(rune, rune);
+            eager.addRange(rune, rune);
+        }
+        CharClassBuilder small = new CharClassBuilder();
+        for (int rune = 0x1000; rune < 0x1000 + 2 * 9; rune += 2) {
+            small.addRange(rune, rune);
+            eager.addRange(rune, rune);
+        }
+        trimmed.addCharClass(small);
+        assertThat(trimmed.foldsAscii()).isEqualTo(eager.foldsAscii());
     }
 
     @Test
@@ -164,23 +186,47 @@ public class TestCharClassBuilder
     {
         Random random = new Random(42);
         for (int iteration = 0; iteration < 200; iteration++) {
-            CharClassBuilder existing = randomBuilder(random, 1 + random.nextInt(40));
-            CharClassBuilder source = randomBuilder(random, 1 + random.nextInt(40));
+            // Sources range from a few ranges to property-sized ones and are added to classes that
+            // may be much larger.
+            CharClassBuilder existing = randomBuilder(random, 1 + random.nextInt(random.nextBoolean() ? 40 : 3000));
+            List<CharClassBuilder> sources = new ArrayList<>();
+            for (int sourceIndex = random.nextInt(8); sourceIndex >= 0; sourceIndex--) {
+                sources.add(randomBuilder(random, 1 + random.nextInt(random.nextBoolean() ? 40 : 400)));
+            }
+
+            // Each source is unread until it is added, so the first overload to read it sees its
+            // out-of-order ranges unmerged: even sources go to the class overload first, and odd
+            // ones to the builder overload first.
+            CharClassBuilder viaBuilder = existing.copy();
+            CharClassBuilder viaClass = existing.copy();
+            for (int sourceIndex = 0; sourceIndex < sources.size(); sourceIndex++) {
+                CharClassBuilder source = sources.get(sourceIndex);
+                if (sourceIndex % 2 == 0) {
+                    viaClass.addCharClass(source.toCharClass(), Regexp.CLASS_NEWLINE, CaseFolding.RE2);
+                    viaBuilder.addCharClass(source);
+                }
+                else {
+                    viaBuilder.addCharClass(source);
+                    viaClass.addCharClass(source.toCharClass(), Regexp.CLASS_NEWLINE, CaseFolding.RE2);
+                }
+            }
 
             BitSet model = new BitSet();
             for (int index = 0; index < existing.rangeCount(); index++) {
                 model.set(existing.range(index).low(), existing.range(index).high() + 1);
             }
-            for (int index = 0; index < source.rangeCount(); index++) {
-                model.set(source.range(index).low(), source.range(index).high() + 1);
+            for (CharClassBuilder source : sources) {
+                for (int index = 0; index < source.rangeCount(); index++) {
+                    model.set(source.range(index).low(), source.range(index).high() + 1);
+                }
+            }
+            boolean foldsAscii = true;
+            for (int letter = 'A'; letter <= 'Z'; letter++) {
+                foldsAscii &= model.get(letter) == model.get(letter - 'A' + 'a');
             }
 
-            CharClassBuilder viaBuilder = existing.copy();
-            viaBuilder.addCharClass(source);
-            CharClassBuilder viaClass = existing.copy();
-            viaClass.addCharClass(source.toCharClass(), Regexp.CLASS_NEWLINE, CaseFolding.RE2);
-
             for (CharClassBuilder builder : new CharClassBuilder[] {viaBuilder, viaClass}) {
+                assertThat(builder.foldsAscii()).as("iteration %s", iteration).isEqualTo(foldsAscii);
                 assertThat(builder.runeCount()).as("iteration %s", iteration).isEqualTo(model.cardinality());
                 int expectedRanges = 0;
                 for (int bit = model.nextSetBit(0); bit >= 0; bit = model.nextSetBit(model.nextClearBit(bit))) {
@@ -227,7 +273,7 @@ public class TestCharClassBuilder
     {
         CharClassBuilder builder = new CharClassBuilder();
         for (int index = 0; index < rangeCount; index++) {
-            int low = random.nextInt(400);
+            int low = random.nextInt(Math.max(400, rangeCount * 8));
             builder.addRange(low, low + random.nextInt(6));
         }
         return builder;
