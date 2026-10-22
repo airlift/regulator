@@ -147,13 +147,16 @@ reads it as `p` followed by `L`.
 
 As in Trino, unknown alphabetic escapes are interpreted as literals. For
 example, `\C` matches the literal `C`; it is not RE2's one-byte atom. A `\x`
-with neither braces nor hex digits, or a `\u` without hex digits, matches
-U+0000, as in Joni, unless it ends the pattern, where it is the literal letter;
-a malformed braced `\x{...}` is rejected. `\c` keeps the low five bits of the
-character after it, as in Joni, so `\ca` matches U+0001 and `\c?` matches DEL;
-an escaped character such as `\n` after it is decoded first. Inside a character
-class, `\p` or `\P` without braces is the literal letter, so `[\pL]` matches `p`
-or `L`; use `[\p{L}]` for letters.
+with neither braces nor hex digits matches U+0000, as in Joni, unless it ends
+the pattern, where it is the literal letter; a malformed braced `\x{...}` is
+rejected. A bare `\u` at the end of the pattern is the letter `u`; any other
+`\u` needs four hex digits, as in modern Joni and Oniguruma, so `\u12` and
+`[\u]` are rejected. Trino's pinned Joni differs: it reads `\u12` as U+0012 and
+`[\u]` as U+0000. `\c` keeps the low five bits of the character after it, as in
+Joni, so `\ca` matches U+0001 and `\c?` matches DEL; an escaped character such
+as `\n` after it is decoded first. Inside a character class, `\p` or `\P`
+without braces is the literal letter, so `[\pL]` matches `p` or `L`; use
+`[\p{L}]` for letters.
 
 Inside a character class, a dash after a range is a literal, as in modern Joni
 and Oniguruma, even when nested classes come between them, so `[a-zA-Z0-9-_]`

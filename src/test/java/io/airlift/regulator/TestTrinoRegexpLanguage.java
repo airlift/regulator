@@ -832,6 +832,12 @@ public class TestTrinoRegexpLanguage
         assertThat(TrinoRegexp.compile(utf8Slice("[a-c-\\d]")).contains(utf8Slice("-"))).isTrue();
         assertThat(TrinoRegexp.compile(utf8Slice("[a-c-\\d]")).contains(utf8Slice("5"))).isTrue();
         assertThatThrownBy(() -> joniPattern(utf8Slice("[a-c-\\d]"))).isInstanceOf(ArrayIndexOutOfBoundsException.class);
+
+        // Pinned Joni reads \\u12 as U+0012 and [\\u] as U+0000; modern Joni rejects both.
+        assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice("\\u12"))).isInstanceOf(RegexpParseException.class);
+        assertThat(joniFind(utf8Slice("\\u12"), utf8Slice("\u0012"))).isTrue();
+        assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice("[\\u]"))).isInstanceOf(RegexpParseException.class);
+        assertThat(joniFind(utf8Slice("[\\u]"), utf8Slice("\u0000"))).isTrue();
     }
 
     @Test
@@ -1046,11 +1052,9 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("\\cA", "\u0001", true),
                 new MatchCase("\\x", "x", true),
                 new MatchCase("\\u", "u", true),
-                new MatchCase("\\u12", "\u0012", true),
-                // Joni reads an unbraced hex or Unicode escape without hex digits as U+0000 unless it ends the pattern.
+                // Joni reads an unbraced hex escape without hex digits as U+0000 unless it ends the pattern.
                 new MatchCase("[\\x]", "\u0000", true),
                 new MatchCase("\\A\\xg\\z", "\u0000g", true),
-                new MatchCase("\\A\\ug\\z", "\u0000g", true),
                 new MatchCase("\\k", "k", true),
                 new MatchCase("[\\101]", "A", true),
                 new MatchCase("[\\cA]", "\u0001", true),
@@ -1160,9 +1164,9 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("[a-c[x]-z]", "z", true),
                 new MatchCase("[a-c[x]--z]", "y", true),
                 new MatchCase("[a-c-]", "-", true),
-                // A dash that ends a class after a class item, or follows a leading nested class, is a literal.
                 // Pinned Joni reads the bracket here as a literal rather than a nested class, but both match x.
                 new MatchCase("[a-c-[x]]", "x", true),
+                // A dash that ends a class after a class item, or follows a leading nested class, is a literal.
                 new MatchCase("[\\d-]", "-", true),
                 new MatchCase("[[a]-z]", "-", true),
                 new MatchCase("[[a]-z]", "b", false),

@@ -21,7 +21,6 @@ ACCEPT	\11	Joni interprets a short numeric escape as octal when it is not a back
 ACCEPT	\cA	Control-character escape is supported
 ACCEPT	\x	A hex escape without digits that ends the pattern is literal x
 ACCEPT	\u	A Unicode escape without digits that ends the pattern is literal u
-ACCEPT	\u12	Joni accepts one to four Unicode hex digits
 ACCEPT	\k	k is literal without a named-reference delimiter
 ACCEPT	\q	Joni treats an unknown alphabetic escape as a literal
 ACCEPT	\X	Joni treats this escape as literal X
@@ -59,6 +58,10 @@ REJECT	[a-\d]	A complete character class cannot be a range endpoint
 REJECT	(?U)a+	Joni rejects Java Unicode-character-class mode
 REJECT	(?u)a+	Joni rejects explicit Unicode-case mode
 REJECT	(?d)a	Joni rejects Unix-lines mode
+REJECT	\u123	A Unicode escape needs four hex digits, as in modern Joni
+REJECT	\ug	A Unicode escape without digits is rejected unless it ends the pattern
+REJECT	[\u12]	A Unicode escape in a class needs four hex digits
+REJECT	[\u]	A Unicode escape without digits in a class is rejected
 REJECT	\uD800	Surrogate escapes are not supported
 REJECT	\uD800\uDC00	Surrogate pairs must use a braced code-point escape
 REJECT	\p{Old_Italic}	Trino Unicode property names omit underscores
