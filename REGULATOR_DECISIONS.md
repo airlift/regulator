@@ -1381,26 +1381,46 @@ and keep each search linear in its input:
 - Boolean `find` and `count` of a start-anchored plan with an optional fork and
   no boolean tail run on the ordinary engine's DFA over inputs of at most 48
   bytes, when both engines agree on every input and the pattern's boolean route
-  without a plan is the DFA. A fork retries its continuation and keeps capture
-  saves that are dispatched even when no positions are requested, and without a
-  boolean tail the attempt reads as far as the DFA, so on short rows the plan
-  only adds dispatch. In the RE2 scan-plan campaign, `OPTIONALS` and
-  `OPTIONAL_RETRY` rows of up to 40 bytes took 1.05 to 1.96 times the DFA's
-  time, while 64-byte `RETRY_64` rows were faster on Graviton and even on R8i.
-  The 48-byte limit sits between them. `OPTIONAL_MIXED` depended on the host:
-  it took 1.84 to 2.37 times the DFA's time on R8i and 0.96 to 1.06 times on
-  R8g, and was already faster on R9g, at 0.88 to 0.98 times. On R9g, R8g, and
-  R8i the routed `OPTIONALS` and `OPTIONAL_RETRY` rows now take
-  0.99 to 1.03 times the DFA's time, and against the plan they replace,
-  `OPTIONAL_RETRY` takes 0.51 to 0.87 times its time, `OPTIONALS` 0.64 to 0.94,
-  and `OPTIONAL_MIXED` 0.39 to 0.98. No row of `BenchmarkRe2ScanPlan`,
-  `BenchmarkTrinoScanPlan`, `BenchmarkTrinoScanProfiles`, or
-  `BenchmarkClickBenchRegexp` became slower on any host. `RETRY_64` and the longer retry rows,
-  which keep the plan, are unchanged, and on R8i `RETRY_64` breaks even with
-  the DFA, which supports the 48-byte limit. A Trino plan qualifies
-  only when it consumes only ASCII bytes and does not end with a final-line
-  end, which the DFA cannot evaluate, so no Trino benchmark plan takes this
-  route. Calls that report boundaries or captures run the plan.
+  without a plan is the DFA. A boolean tail is a run whose continuation succeeds
+  on every suffix, so a boolean call succeeds once the run's minimum is
+  present. A fork retries its continuation, dispatching the continuation's
+  operations again even in the boolean plan without capture saves, and without
+  a boolean tail the attempt reads as far as the DFA, so on short rows the plan
+  only adds dispatch. On the plan, `OPTIONALS` and `OPTIONAL_RETRY` rows of up
+  to 40 bytes took 1.05 to 1.96 times the DFA's time, while 64-byte `RETRY_64`
+  rows were faster on Graviton and broke even on R8i. The 48-byte limit sits
+  between them. `OPTIONAL_MIXED` depended on the host: it took 1.84 to 2.37
+  times the DFA's time on R8i and 0.96 to 1.06 times on R8g, and was already
+  faster on R9g, at 0.88 to 0.98 times. On R9g, R8g, and R8i the routed
+  `OPTIONALS` and `OPTIONAL_RETRY` rows now take 0.99 to 1.03 times the DFA's
+  time, and against the plan they replace, `OPTIONAL_RETRY` takes 0.51 to 0.87
+  times its time, `OPTIONALS` 0.64 to 0.94, and `OPTIONAL_MIXED` 0.39 to 0.98.
+  No row of `BenchmarkRe2ScanPlan`, `BenchmarkTrinoScanPlan`,
+  `BenchmarkTrinoScanProfiles`, or `BenchmarkClickBenchRegexp` became slower on
+  any host, and `RETRY_64` and the longer retry rows, which keep the plan, are
+  unchanged. A Trino plan qualifies only when it consumes only ASCII bytes and
+  has no final-line end, which the DFA cannot evaluate, so no Trino benchmark
+  plan takes this route. Calls that report boundaries or captures run the plan.
+- A start-anchored plan with a fork and capture saves keeps a boolean plan, the
+  same operations without the saves, which the pattern resolves when it
+  compiles. Only full-Slice boolean `find` and the count of a start-anchored
+  plan, which makes one attempt, run it, through the same executors, so no
+  method that reports positions changes. On the four-optional retry rows an
+  attempt dispatches 28 operations instead of 50. On R9g, R8g, and R8i, RE2
+  `RETRY_64` `contains` takes 0.75 to 0.94 times its time with saves, where
+  R8i's 0.938 is within noise and a rebuild of the same source measured 0.913,
+  and Trino `OPTIONALS` `contains` 0.80 to 0.84 times. Trino `OPTIONAL_MIXED`
+  `contains` takes 0.59 times on R8i and 0.77 to 0.85 times, within noise, on
+  Graviton, and on R8i `BenchmarkTrinoScanProfiles` `contains` takes 0.53 to
+  0.66 times, which turns a 1.55 to 1.75 times loss against the rows without a
+  plan into 0.93 to 1.05 times; `GROUPED`, at 1.047 times, remains a loss.
+  Plans that are their own boolean plan are within noise: RE2 `ANCHORED_HOST`
+  `contains` takes 0.998, 0.998, and 1.013 times its time without the boolean
+  plan, ClickBench `HTTP` 0.990 to 1.000 times, and Trino `URL` 0.997 to 1.000
+  times; ClickBench `WWW` is bimodal and within noise. Running the count's
+  attempt as a boolean `find` keeps the RE2 `RETRY_64` `count` win, 0.77, 0.76,
+  and 0.93 times, and makes RE2 `ANCHORED_HOST` and `ANCHORED_QUERY` `count`
+  take 0.95 to 0.97 times.
 
 On malformed input, a search that hands off may report the ordinary engine's
 match instead of the plan's. Every operation applies the same budget from the
@@ -1439,8 +1459,15 @@ without new evidence:
   save-free boolean array for forked start-anchored plans, chosen inside the
   shared executors, was re-measured in 2026-10. Its boolean wins were real,
   but it again slowed calls that report positions: RE2 `OPTIONAL_MIXED`
-  extraction took 1.37 to 1.38 times its time on Graviton, and Trino URL
-  extraction 1.13 times on R8g.
+  extraction took 1.37 to 1.38 times its time on Graviton, Trino URL
+  extraction 1.13 times on R8g, and Trino `OPTIONAL_RETRY` `count` 1.42 times
+  on R8i. With the separate boolean plan adopted above, measured on a build
+  that looked it up on every call, those rows take 0.96 to 1.02, 0.985 to
+  1.01, and 1.015 times their time, within noise.
+- Looking the boolean plan up on every call made short `contains` rows of
+  start-anchored plans that are their own boolean plan, RE2 `ANCHORED_HOST`,
+  ClickBench `HTTP` and `WWW`, and Trino `URL`, take 1 to 2.5 ns longer, so
+  the pattern resolves it when it compiles.
 - Selecting the ordinary boolean route by optional count and short input length
   regressed the targeted retry workload, the four-optional `OPTIONAL_RETRY` and
   `RETRY_*` rows. The narrower form above, selected by forks without a boolean

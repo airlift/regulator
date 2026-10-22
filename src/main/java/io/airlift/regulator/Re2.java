@@ -1093,7 +1093,7 @@ public final class Re2
         BooleanPartialMatchStrategy partialMatchStrategy = find == BooleanPlanKind.LOWERED_PROGRAM
                 ? BooleanPartialMatchStrategy.LOWERED_PROGRAM
                 : plans.partialMatchStrategy();
-        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.trinoScanPlan());
+        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.trinoScanPlan(), plans.trinoScanBooleanPlan());
     }
 
     private static boolean requiresProgramExecution(BooleanPlanKind plan)
@@ -1505,16 +1505,19 @@ public final class Re2
     }
 
     /**
-     * Answers full-Slice {@link #find(Slice)} with the scan plan. It is out of line so that find
-     * stays small enough for C2 to inline into its callers.
+     * Answers full-Slice {@link #find(Slice)}, and the count of a start-anchored plan, with the
+     * scan plan. It is out of line so that find stays small enough for C2 to inline into its
+     * callers. A short input of a plan that allows it runs on the ordinary engine; any other runs
+     * the plan's {@link TrinoScanPlan#booleanPlan()}, resolved at compile time. Calls that report
+     * positions never come here.
      */
     private boolean findWithTrinoScanPlan(Slice input, byte strategy)
     {
-        TrinoScanPlan plan = booleanPlans.trinoScanPlan();
         int length = input.length();
-        if (length <= MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES && ordinaryShortBooleanMatch) {
+        if (ordinaryShortBooleanMatch && length <= MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES) {
             return matchInto(input, Anchor.UNANCHORED, null);
         }
+        TrinoScanPlan plan = booleanPlans.trinoScanBooleanPlan();
         return switch (strategy) {
             case BOOLEAN_FIND_TRINO_SCAN -> plan.matchEndAnchored(input, 0, length, false, null);
             case BOOLEAN_FIND_PARTIAL_TRINO_SCAN -> plan.matchPartial(input, 0, length, false, null);
@@ -2086,6 +2089,12 @@ public final class Re2
         // A required prefix is stripped from the forward program, and a globally
         // anchored program can produce at most one non-empty match.
         if (requiredPrefix != null || partialProg.anchorStart()) {
+            if (startAnchoredTrinoScanPlan() != null) {
+                // The attempt matchInternal would make, run as a boolean find, so a plan with
+                // capture saves runs its save-free plan. matchInternal serves calls that report
+                // positions, so it keeps the plan itself.
+                return findWithTrinoScanPlan(text, trinoScanStrategy) ? 1 : 0;
+            }
             return matchInternal(partialProg, text, 0, text.length(), Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES) ? 1 : 0;
         }
 
@@ -3013,7 +3022,7 @@ public final class Re2
             case ENDS_WITH_FINAL_LINE -> BooleanPlanKind.ENDS_WITH_FINAL_LINE;
             case LOWERED_PROGRAM -> BooleanPlanKind.LOWERED_PROGRAM;
         };
-        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null);
+        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null, null);
     }
 
     private static BooleanPartialMatchStrategy selectBooleanPartialMatchStrategy(
@@ -3165,31 +3174,35 @@ public final class Re2
             WordRunMatcher wordRunMatcher,
             WholeInputCapturePlan wholeInputCapturePlan,
             DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher,
-            TrinoScanPlan trinoScanPlan)
+            TrinoScanPlan trinoScanPlan,
+            // The scan plan's boolean plan, resolved here so that full-Slice boolean find loads
+            // it as directly as it would load the plan.
+            TrinoScanPlan trinoScanBooleanPlan)
     {
         private BooleanPlans withTrinoScanPlan(TrinoScanPlan trinoScanPlan)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
+            TrinoScanPlan trinoScanBooleanPlan = trinoScanPlan == null ? null : trinoScanPlan.booleanPlan();
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
         }
 
         private BooleanPlans withTaggedAlternationProgram(TaggedAlternationProgram taggedAlternationProgram)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
         }
 
         private BooleanPlans withWordRunMatcher(WordRunMatcher wordRunMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
         }
 
         private BooleanPlans withWholeInputCapturePlan(WholeInputCapturePlan wholeInputCapturePlan)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
         }
 
         private BooleanPlans withDisjointSuffixRepeatMatcher(DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
         }
     }
 

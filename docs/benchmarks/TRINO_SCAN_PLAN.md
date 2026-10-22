@@ -133,21 +133,22 @@ from the capture path. Matchers given a single-byte matcher, `matches`,
 
 Boolean `find` and `count` of a start-anchored plan run on the ordinary engine's
 DFA instead of the plan when the input is at most 48 bytes and the plan has an
-optional fork and no boolean tail. A fork retries its continuation, and the
-capture saves it keeps are dispatched even when no positions are requested.
-Without a boolean tail the attempt reads as far as the DFA, so on a short input
-the plan only adds dispatch. Longer inputs, and calls that return boundaries or
-captures, run the plan. Because the input length picks the engine, both engines
-must agree on every input, as for the density handoff below: an RE2 plan always
-does, and a Trino plan does when every consuming operation accepts only ASCII
-bytes. The pattern's boolean route without a plan must also be the DFA, so a
-Trino final-line end, which the DFA cannot evaluate, keeps the plan. In
-`BenchmarkRe2ScanPlan`, `OPTIONALS`, `OPTIONAL_RETRY`, and the forked
-`OPTIONAL_MIXED` plans take this route on every row; no `BenchmarkTrinoScanPlan`
-or ClickBench plan does. On R9g, R8g, and R8i the routed `OPTIONALS` and
-`OPTIONAL_RETRY` rows take 0.99 to 1.03 times the `scanPlan=false` time.
-`RETRY_64`, the first row above the limit, is unchanged, and on R8i it breaks
-even with `scanPlan=false`.
+optional fork and no boolean tail, a run whose continuation succeeds on every
+suffix. A fork retries its continuation, and each retry dispatches the
+continuation's operations again, even in the boolean plan without capture saves
+described below. Without a boolean tail the attempt reads as far as the DFA, so
+on a short input the plan only adds dispatch. Longer inputs, and calls that
+return boundaries or captures, run the plan. Because the input length picks the
+engine, both engines must agree on every input, as for the density handoff
+below: an RE2 plan always does, and a Trino plan does when every consuming
+operation accepts only ASCII bytes. The pattern's boolean route without a plan
+must also be the DFA, so a Trino final-line end, which the DFA cannot evaluate,
+keeps the plan. In `BenchmarkRe2ScanPlan`, `OPTIONALS`, `OPTIONAL_RETRY`, and
+the forked `OPTIONAL_MIXED` plans take this route on every row; no
+`BenchmarkTrinoScanPlan` or ClickBench plan does. On R9g, R8g, and R8i the
+routed `OPTIONALS` and `OPTIONAL_RETRY` rows take 0.99 to 1.03 times the
+`scanPlan=false` time. `RETRY_64`, the first row above the limit, is unchanged,
+and on R8i it breaks even with `scanPlan=false`.
 
 Boolean unanchored search may continue on the ordinary engine when the plan
 does not begin with a literal and every consuming operation accepts only ASCII
@@ -226,6 +227,31 @@ combinations, independent of input length. The builder also limits nesting depth
 to sixteen and operations to thirty-two plus one terminal operation. Failed
 calls clear caller-provided capture offsets. A compile-time nullability check
 excludes whole-pattern empty matching.
+
+A start-anchored plan with a fork also keeps a boolean plan, the same operations
+without the saves, with fork targets and boolean-tail marks recomputed, which
+the pattern resolves when it compiles. Full-Slice boolean `find` and the count
+of a start-anchored plan, which makes one attempt, run it through the same
+executors, so no method that reports positions changes. On the four-optional
+retry rows that still run the plan, Trino ones and RE2 ones over 48 bytes, an
+attempt dispatches 28 operations instead of 50 on a retried row and 12 instead
+of 24 on a direct one. On R9g, R8g, and R8i, RE2 `RETRY_64` `contains` takes
+0.75 to 0.94 times its time with saves, where R8i's 0.938 is within noise and a
+rebuild of the same source measured 0.913, and Trino `OPTIONALS` `contains`
+0.80 to 0.84 times. Trino `OPTIONAL_MIXED` `contains` takes 0.59 times on R8i
+and 0.77 to 0.85 times, within noise, on Graviton. On R8i,
+`BenchmarkTrinoScanProfiles` `contains` takes 0.53 to 0.66 times its time,
+which turns a 1.55 to 1.75 times loss against the same rows without the plan
+into 0.93 to 1.05 times; `GROUPED`, at 1.047 times, remains a loss. No row that
+reports positions changed on Graviton; on R8i, RE2 `LONG_RETRY` extraction took
+1.05 times its time on bytecode-identical code. Plans that are their own
+boolean plan are within noise: on R9g, R8g, and R8i, RE2 `ANCHORED_HOST`
+`contains` takes 0.998, 0.998, and 1.013 times its time without the boolean
+plan, ClickBench `HTTP` 0.990 to 1.000 times, and Trino `URL` 0.997 to 1.000
+times; ClickBench `WWW` is bimodal and within noise. Running the count's attempt
+as a boolean `find` keeps the RE2 `RETRY_64` `count` win, 0.77, 0.76, and 0.93
+times, and makes RE2 `ANCHORED_HOST` and `ANCHORED_QUERY` `count` take 0.95 to
+0.97 times.
 
 An expression without an end assertion omits the end operation. The partial
 executor reports its cursor after the last operation for `find` and `lookingAt`;
