@@ -17,8 +17,18 @@ import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
+import java.lang.classfile.ClassFile;
+import java.lang.classfile.ClassModel;
+import java.lang.classfile.CodeElement;
+import java.lang.classfile.MethodModel;
+import java.lang.classfile.Opcode;
+import java.lang.classfile.instruction.FieldInstruction;
+import java.lang.classfile.instruction.InvokeInstruction;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
@@ -27,11 +37,13 @@ import java.util.List;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import static io.airlift.regulator.LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET;
 import static io.airlift.regulator.TestTrinoScanKernel.classfile;
 import static io.airlift.regulator.TestTrinoScanKernel.invokedMethods;
 import static io.airlift.regulator.TrinoLikeKernelGenerator.HUGE_METHOD_LIMIT;
+import static io.airlift.regulator.TrinoLikePattern.AARCH64;
 import static io.airlift.regulator.TrinoLikePattern.Plan.CONTAINS;
 import static io.airlift.regulator.TrinoLikePattern.Plan.EMPTY;
 import static io.airlift.regulator.TrinoLikePattern.Plan.ENDS_WITH;
@@ -79,7 +91,9 @@ public class TestTrinoLikeKernel
      * points. Each runs on a generated class whose handle has the type and result of
      * {@link TrinoLikePattern#matches(Slice)}, and the same pattern compiled without the option
      * keeps no generated code. In this package, the generated classes and the helpers they call
-     * invoke only {@link #GENERATED_CODE_CALLS}.
+     * invoke only {@link #GENERATED_CODE_CALLS}. Each runs with both emitter variants, and each
+     * search of a literal of two or more bytes verifies its candidates in a separate method and
+     * reads its broadcasts from fields only as on aarch64.
      */
     @Test
     public void testEveryPlanShape()
@@ -124,6 +138,7 @@ public class TestTrinoLikeKernel
                 new Shape("x%a_%b_c", TRINO_WILDCARD));
         Set<String> invoked = new LinkedHashSet<>(invokedMethods(classfile(TrinoLikeKernelSupport.class)));
         Random random = new Random(20261016);
+        int splitSearches = 0;
         for (Shape shape : shapes) {
             String pattern = shape.pattern();
             TrinoLikePattern interpreted = TrinoLikePattern.compile(utf8Slice(pattern));
@@ -131,13 +146,27 @@ public class TestTrinoLikeKernel
             assertThat(interpreted.usesGeneratedBytecode()).as(pattern).isFalse();
             assertThat(interpreted.generatedMatches()).as(pattern).isEmpty();
 
-            TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), GENERATED);
-            assertThat(generated.usesGeneratedBytecode()).as(pattern).isTrue();
-            MethodHandle handle = generated.generatedMatches().orElseThrow();
-            assertThat(handle.type()).as(pattern).isEqualTo(MATCHES);
-            invoked.addAll(invokedMethods(TrinoLikeKernelGenerator.classfileForDiagnostics(generated.kernelForDiagnostics())));
-            verifySameMatches(pattern, generated, interpreted, sources(random, pattern, 200));
+            List<Slice> sources = sources(random, pattern, 200);
+            for (boolean aarch64 : new boolean[] {false, true}) {
+                TrinoLikePattern.Options options = TrinoLikePattern.Options.defaults().setGenerateBytecode(true).setAarch64ForTesting(aarch64);
+                TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), options);
+                assertThat(generated.usesGeneratedBytecode()).as(pattern).isTrue();
+                MethodHandle handle = generated.generatedMatches().orElseThrow();
+                assertThat(handle.type()).as(pattern).isEqualTo(MATCHES);
+                byte[] classfile = TrinoLikeKernelGenerator.classfileForDiagnostics(generated.kernelForDiagnostics(), aarch64);
+                invoked.addAll(invokedMethods(classfile));
+                int patternSplitSearches = assertSplitSearches(pattern, classfile, generated.kernelForDiagnostics(), aarch64);
+                splitSearches += patternSplitSearches;
+                // The defined class declares broadcast fields exactly when the options ask for
+                // aarch64 searches.
+                Field[] fields = MethodHandles.reflectAs(Method.class, handle).getDeclaringClass().getDeclaredFields();
+                assertThat(Arrays.stream(fields).anyMatch(field -> field.getName().startsWith("broadcast")))
+                        .as("%s aarch64=%s", pattern, aarch64)
+                        .isEqualTo(aarch64 && patternSplitSearches > 0);
+                verifySameMatches(pattern, generated, interpreted, sources);
+            }
         }
+        assertThat(splitSearches).isPositive();
         assertThat(invoked.stream().filter(method -> !method.startsWith("java.") && !method.startsWith("jdk.") && !method.startsWith("io.airlift.slice.")))
                 .containsExactlyInAnyOrderElementsOf(GENERATED_CODE_CALLS);
     }
@@ -193,7 +222,7 @@ public class TestTrinoLikeKernel
      * KMP and continues from the next position. Generated kernels find the literal where the
      * interpreter does. The test checks results only, not whether or where the generated copy
      * switches; TestLiteralSearchKernel checks that for the interpreted copy. The run can overlap
-     * the literal.
+     * the literal. Each runs with both emitter variants.
      */
     @Test
     public void testCandidateBudgetSwitchesToKmp()
@@ -212,8 +241,6 @@ public class TestTrinoLikeKernel
         for (Search search : searches) {
             String pattern = search.pattern();
             TrinoLikePattern interpreted = TrinoLikePattern.compile(utf8Slice(pattern));
-            TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), GENERATED);
-            assertThat(generated.usesGeneratedBytecode()).as(pattern).isTrue();
             List<Slice> sources = new ArrayList<>();
             // Each run position compares at least two more bytes than it covers, so the longer
             // runs overrun the budget. For the 40-byte literal, the one-byte run and the
@@ -226,7 +253,12 @@ public class TestTrinoLikeKernel
                     sources.add(view(tail + run + tail));
                 }
             }
-            verifySameMatches(pattern, generated, interpreted, sources);
+            for (boolean aarch64 : new boolean[] {false, true}) {
+                TrinoLikePattern.Options options = TrinoLikePattern.Options.defaults().setGenerateBytecode(true).setAarch64ForTesting(aarch64);
+                TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), options);
+                assertThat(generated.usesGeneratedBytecode()).as(pattern).isTrue();
+                verifySameMatches(pattern, generated, interpreted, sources);
+            }
         }
     }
 
@@ -240,7 +272,7 @@ public class TestTrinoLikeKernel
     {
         String large = wildcardOfDistinctCodePoints(0x4E00, 1_000);
         TrinoLikePattern interpreted = TrinoLikePattern.compile(utf8Slice(large));
-        assertThat(TrinoLikeKernelGenerator.largestMethodBytesForDiagnostics(interpreted.kernelForDiagnostics())).isGreaterThan(HUGE_METHOD_LIMIT);
+        assertThat(TrinoLikeKernelGenerator.largestMethodBytesForDiagnostics(interpreted.kernelForDiagnostics(), AARCH64)).isGreaterThan(HUGE_METHOD_LIMIT);
         TrinoLikePattern fallback = TrinoLikePattern.compile(utf8Slice(large), GENERATED);
         assertThat(fallback.usesGeneratedBytecode()).isFalse();
         assertThat(fallback.generatedMatches()).isEmpty();
@@ -249,7 +281,7 @@ public class TestTrinoLikeKernel
         String small = wildcardOfDistinctCodePoints(0x4E00, 200);
         TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(small), GENERATED);
         assertThat(generated.usesGeneratedBytecode()).isTrue();
-        assertThat(TrinoLikeKernelGenerator.largestMethodBytesForDiagnostics(generated.kernelForDiagnostics())).isLessThanOrEqualTo(HUGE_METHOD_LIMIT);
+        assertThat(TrinoLikeKernelGenerator.largestMethodBytesForDiagnostics(generated.kernelForDiagnostics(), AARCH64)).isLessThanOrEqualTo(HUGE_METHOD_LIMIT);
         Slice match = view("x" + small.substring(2, small.length() - 1));
         assertThat(generated.matches(match)).isTrue();
         List<Slice> sources = new ArrayList<>(sources(new Random(200), small, 100));
@@ -278,7 +310,7 @@ public class TestTrinoLikeKernel
                 () -> {
                     try {
                         TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), GENERATED);
-                        methodBytes.set(TrinoLikeKernelGenerator.largestMethodBytesForDiagnostics(generated.kernelForDiagnostics()));
+                        methodBytes.set(TrinoLikeKernelGenerator.largestMethodBytesForDiagnostics(generated.kernelForDiagnostics(), AARCH64));
                         compiled.set(generated);
                     }
                     catch (Throwable e) {
@@ -327,6 +359,70 @@ public class TestTrinoLikeKernel
             pattern.appendCodePoint(first + index);
         }
         return pattern.append('%').toString();
+    }
+
+    /**
+     * Requires each search of a literal of two or more bytes in {@code classfile} to call the
+     * method that verifies its candidates, and the search and that method to read broadcast fields
+     * exactly when {@code aarch64} is true, and returns the number of such searches. A one-byte
+     * search has no candidates to verify.
+     */
+    private static int assertSplitSearches(String pattern, byte[] classfile, TrinoLikeKernelGenerator.Kernel kernel, boolean aarch64)
+    {
+        ClassModel model = ClassFile.of().parse(classfile);
+        List<LiteralSearchKernel> literals = searchedLiterals(kernel);
+        int splitSearches = 0;
+        for (int index = 0; index < literals.size(); index++) {
+            if (literals.get(index).literalLength() < 2) {
+                continue;
+            }
+            String description = "%s aarch64=%s".formatted(pattern, aarch64);
+            MethodModel search = method(model, "find" + index);
+            String verifyName = "verifyCandidates" + index;
+            MethodModel verifyCandidates = method(model, verifyName);
+            assertThat(code(search)
+                    .filter(InvokeInstruction.class::isInstance)
+                    .map(InvokeInstruction.class::cast)
+                    .anyMatch(invoke -> invoke.owner().equals(model.thisClass()) && invoke.name().equalsString(verifyName)))
+                    .as("%s %s", description, search.methodName().stringValue())
+                    .isTrue();
+            for (MethodModel method : List.of(search, verifyCandidates)) {
+                assertThat(code(method)
+                        .filter(FieldInstruction.class::isInstance)
+                        .map(FieldInstruction.class::cast)
+                        .anyMatch(field -> field.opcode() == Opcode.GETSTATIC && field.name().stringValue().startsWith("broadcast")))
+                        .as("%s %s", description, method.methodName().stringValue())
+                        .isEqualTo(aarch64);
+            }
+            splitSearches++;
+        }
+        return splitSearches;
+    }
+
+    /**
+     * Returns the literals the generated class of {@code kernel} has a search method for, in the
+     * order of their numbers.
+     */
+    private static List<LiteralSearchKernel> searchedLiterals(TrinoLikeKernelGenerator.Kernel kernel)
+    {
+        return switch (kernel.region()) {
+            case TrinoLikeKernelGenerator.OrderedLiterals ordered -> ordered.literals();
+            case TrinoLikeKernelGenerator.LiteralGaps gaps -> gaps.literals().subList(0, 1);
+            case null, default -> List.of();
+        };
+    }
+
+    private static MethodModel method(ClassModel model, String name)
+    {
+        return model.methods().stream()
+                .filter(method -> method.methodName().equalsString(name))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("generated class lacks " + name));
+    }
+
+    private static Stream<CodeElement> code(MethodModel method)
+    {
+        return method.code().orElseThrow().elementStream();
     }
 
     /**
