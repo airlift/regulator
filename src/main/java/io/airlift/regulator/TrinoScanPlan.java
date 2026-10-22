@@ -157,11 +157,20 @@ final class TrinoScanPlan
     // from the same search positions, so find, boundaries, captures, and count still report one
     // match sequence.
     private final boolean allowsOrdinaryBooleanSearch;
+    // Set when a boolean match of a start-anchored plan on a short input may run on the ordinary
+    // engine instead. A fork retries its continuation, and the capture saves it keeps from
+    // compaction are dispatched even when no positions are requested, so on a short input the
+    // plan dispatches more operations than the DFA makes transitions, and its faster run scans
+    // cannot repay them. Without a boolean tail the attempt reads as far as the DFA does. The
+    // input's length picks the engine, so as for the density handoff both engines must agree on
+    // every input: an RE2 plan always does, and a Trino plan does when it consumes only ASCII
+    // bytes. Calls that report boundaries or captures always run the plan.
+    private final boolean allowsOrdinaryShortBooleanMatch;
     // WORK_BUDGET_BYTES, or a negative value with which every unanchored search hands off
     // before its first attempt. Only tests select the negative value.
     private final int workBudgetBytes;
 
-    private TrinoScanPlan(List<Step> steps, boolean finalLineEnd, boolean partialMatch, boolean anchoredStart, int workBudgetBytes, ByteFrequencies byteFrequencies)
+    private TrinoScanPlan(List<Step> steps, boolean finalLineEnd, boolean partialMatch, boolean anchoredStart, boolean re2, int workBudgetBytes, ByteFrequencies byteFrequencies)
     {
         this.steps = steps.toArray(Step[]::new);
         this.booleanTails = partialMatch ? findBooleanTails(this.steps) : new boolean[this.steps.length];
@@ -176,6 +185,8 @@ final class TrinoScanPlan
         this.leadingProbeOffset = wholeLiteralCandidates ? byteFrequencies.probeOffset(leading.literal) : 0;
         this.usesAsciiFoldedExecutor = hasAsciiFoldedOperation(this.steps);
         this.allowsOrdinaryBooleanSearch = !anchoredStart && !isLiteralLeading() && consumesOnlyAscii(this.steps);
+        this.allowsOrdinaryShortBooleanMatch = anchoredStart && hasFork(this.steps) && !hasBooleanTail(booleanTails) &&
+                (re2 || consumesOnlyAscii(this.steps));
         this.workBudgetBytes = workBudgetBytes;
     }
 
@@ -282,6 +293,26 @@ final class TrinoScanPlan
             break;
         }
         return leadingOperation;
+    }
+
+    private static boolean hasFork(Step[] steps)
+    {
+        for (Step step : steps) {
+            if (step.kind == Kind.FORK) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasBooleanTail(boolean[] booleanTails)
+    {
+        for (boolean booleanTail : booleanTails) {
+            if (booleanTail) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean hasAsciiFoldedOperation(Step[] steps)
@@ -436,6 +467,11 @@ final class TrinoScanPlan
     boolean allowsOrdinaryBooleanSearch()
     {
         return allowsOrdinaryBooleanSearch;
+    }
+
+    boolean allowsOrdinaryShortBooleanMatch()
+    {
+        return allowsOrdinaryShortBooleanMatch;
     }
 
     Step step(int operation)
@@ -2084,6 +2120,7 @@ final class TrinoScanPlan
                     anchoredEnd && (sequence.getLast().parseFlags() & Regexp.FINAL_LINE_END) != 0,
                     !anchoredEnd,
                     anchoredStart,
+                    re2,
                     workBudgetBytes,
                     byteFrequencies);
         }

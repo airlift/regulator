@@ -133,8 +133,11 @@ final class TrinoScanKernelGenerator
     /**
      * Where each Trino operation of a pattern runs, decided once when the pattern compiles. An
      * operation runs on the generated class exactly when {@link TrinoRegexp} would run it on the
-     * case-sensitive scan plan. Only {@code contains} can keep another route, a retained literal
-     * kernel; every other operation reaches the plan.
+     * case-sensitive scan plan, or would hand a short boolean {@code contains} or {@code count} to
+     * the ordinary engine (see {@link Re2#usesOrdinaryShortBooleanMatchForDiagnostics()}), a route
+     * that avoids the interpreter's per-operation dispatch, which the generated class does not
+     * have. Only {@code contains} can keep another route, a retained literal kernel; every other
+     * operation reaches the plan.
      *
      * @param contains whether full-Slice find reaches the plan rather than a retained literal kernel
      * @param count how count reaches the plan

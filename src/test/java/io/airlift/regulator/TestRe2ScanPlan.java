@@ -72,7 +72,8 @@ public class TestRe2ScanPlan
             new PlanCase("x([^/]{2,})/", "xé/"),
             // An unanchored run that stops at a rejected sequence before its delimiter.
             new PlanCase("[?&]([^=]+)=END", HexFormat.of().parseHex("3f61c080623d654e64")),
-            // Forked start-anchored plans.
+            // Forked start-anchored plans, whose boolean find and count run on the ordinary engine
+            // up to 48 bytes.
             new PlanCase("^(a)?(b)?abcd([0-9]+)/$", "aabcd" + "1".repeat(42) + "/"),
             new PlanCase("^(a)?(b)?abcd([0-9]+)/$", "aabcd" + "1".repeat(43) + "/"),
             new PlanCase("^(a)?(b)?abcd([^/]+)/", "aabcd" + "é".repeat(21) + "/"),

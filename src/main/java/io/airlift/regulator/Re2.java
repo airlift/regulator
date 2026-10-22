@@ -69,7 +69,8 @@ public final class Re2
         // countMatches loops over the plan's search, or declines so that the caller counts with
         // a group-zero matcher, whose finds reach the plan.
         SEARCH_LOOP,
-        // countMatches makes one start-anchored boolean attempt.
+        // countMatches makes one start-anchored boolean attempt, which runs on the ordinary
+        // engine over a short input when the plan allows it.
         SINGLE_ATTEMPT,
         // countMatches answers without the plan.
         OTHER,
@@ -98,6 +99,11 @@ public final class Re2
 
     // Leave large inputs to the DFA's selective byte scans instead of a scalar table walk.
     private static final int MAX_DIRECT_BYTE_SCAN_BYTES = 64;
+    // Boolean matches of a plan that allows it run on the ordinary engine up to this input
+    // length. The forked OPTIONALS and OPTIONAL_RETRY plans lost to the ordinary engine on every
+    // target host on rows of up to 40 bytes, and won on Graviton and broke even on Intel at 64
+    // bytes.
+    private static final int MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES = 48;
 
     // Internal construction metadata, stored outside the parser flag range to preserve Re2's
     // compact object layout. It is consulted only by lazy reverse-program compilation.
@@ -395,6 +401,10 @@ public final class Re2
     // the ordinary engine. Calls that report match boundaries start on the plan and continue on
     // the ordinary engine only as every plan search does, past the plan's work budget.
     private final boolean ordinaryUnanchoredBooleanSearch;
+    // Set when unanchored boolean calls of a start-anchored plan run on the ordinary engine over
+    // at most MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES. Longer inputs, and calls that report
+    // positions, run the plan.
+    private final boolean ordinaryShortBooleanMatch;
 
     private volatile Prog reverseProg;
     private volatile boolean reverseProgComputed;
@@ -466,6 +476,7 @@ public final class Re2
         }
         byte scanStrategy = BOOLEAN_FIND_GENERAL;
         boolean ordinaryBooleanSearch = false;
+        boolean ordinaryShortMatch = false;
         TrinoScanPlan scanPlan = booleanPlans.trinoScanPlan();
         if (scanPlan != null) {
             if (!scanPlan.isAnchoredStart()) {
@@ -478,6 +489,9 @@ public final class Re2
                 scanStrategy = scanPlan.isPartialMatch()
                         ? (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN : BOOLEAN_FIND_PARTIAL_TRINO_SCAN)
                         : (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN : BOOLEAN_FIND_TRINO_SCAN);
+                // The short route is the ordinary engine's general search, which must run the
+                // DFA. A Trino final-line end, which the DFA cannot evaluate, keeps the plan.
+                ordinaryShortMatch = scanPlan.allowsOrdinaryShortBooleanMatch() && findStrategy == BOOLEAN_FIND_GENERAL && !partialProg.hasDfaUnsupportedAssertions();
             }
             // Literal kernels answer existence without reading past the literal; keep them for
             // full-Slice find. Every other strategy that can coexist with a plan is replaced.
@@ -491,6 +505,7 @@ public final class Re2
         this.booleanFindStrategy = findStrategy;
         this.trinoScanStrategy = scanStrategy;
         this.ordinaryUnanchoredBooleanSearch = ordinaryBooleanSearch;
+        this.ordinaryShortBooleanMatch = ordinaryShortMatch;
         this.capturingGroupCount = capturingGroupCount;
         this.capturingGroupNames = requireNonNull(capturingGroupNames, "capturingGroupNames is null");
         this.boundedCharacterClassCounter = compactBoundedCharacterClass;
@@ -1249,6 +1264,15 @@ public final class Re2
         return ordinaryUnanchoredBooleanSearch;
     }
 
+    /**
+     * Returns whether unanchored boolean calls of a start-anchored plan run on the ordinary
+     * engine over short inputs although calls that report positions use the plan.
+     */
+    boolean usesOrdinaryShortBooleanMatchForDiagnostics()
+    {
+        return ordinaryShortBooleanMatch;
+    }
+
     boolean usesTaggedAlternationForDiagnostics()
     {
         return booleanPlans.taggedAlternationProgram() != null;
@@ -1488,6 +1512,9 @@ public final class Re2
     {
         TrinoScanPlan plan = booleanPlans.trinoScanPlan();
         int length = input.length();
+        if (length <= MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES && ordinaryShortBooleanMatch) {
+            return matchInto(input, Anchor.UNANCHORED, null);
+        }
         return switch (strategy) {
             case BOOLEAN_FIND_TRINO_SCAN -> plan.matchEndAnchored(input, 0, length, false, null);
             case BOOLEAN_FIND_PARTIAL_TRINO_SCAN -> plan.matchPartial(input, 0, length, false, null);
@@ -2538,6 +2565,15 @@ public final class Re2
                 true);
     }
 
+    /**
+     * Returns whether an unanchored boolean call over {@code length} bytes of a start-anchored
+     * plan skips the plan for the ordinary engine. See {@link #ordinaryShortBooleanMatch}.
+     */
+    private boolean matchesShortBooleanOnOrdinaryEngine(int length, Anchor anchor, int[] groupOffsets)
+    {
+        return ordinaryShortBooleanMatch && groupOffsets == null && anchor == Anchor.UNANCHORED && length <= MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES;
+    }
+
     // scanPlanSearch is false only when continuing an unanchored scan-plan search that handed
     // off; the unanchored plan strategies then take the ordinary route below. No other plan
     // strategy hands off, so none is reached with the flag cleared.
@@ -2564,11 +2600,13 @@ public final class Re2
 
         Anchor anchorMode = (anchor == null) ? Anchor.UNANCHORED : anchor;
 
-        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_TRINO_SCAN && end == contextEnd) {
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_TRINO_SCAN && end == contextEnd &&
+                !matchesShortBooleanOnOrdinaryEngine(contextEnd - start, anchorMode, groupOffsets)) {
             return start == contextStart && booleanPlans.trinoScanPlan().matchEndAnchored(
                     text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
         }
-        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_PARTIAL_TRINO_SCAN && end == contextEnd) {
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_PARTIAL_TRINO_SCAN && end == contextEnd &&
+                !matchesShortBooleanOnOrdinaryEngine(contextEnd - start, anchorMode, groupOffsets)) {
             return start == contextStart && booleanPlans.trinoScanPlan().matchPartial(
                     text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
         }
@@ -2584,11 +2622,13 @@ public final class Re2
                     groupOffsets);
             return finishTrinoScanSearch(text, contextStart, contextEnd, result, anchorMode, groupOffsets, workspaces);
         }
-        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN && end == contextEnd) {
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN && end == contextEnd &&
+                !matchesShortBooleanOnOrdinaryEngine(contextEnd - start, anchorMode, groupOffsets)) {
             return start == contextStart && booleanPlans.trinoScanPlan().matchAsciiFoldedEndAnchored(
                     text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
         }
-        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN && end == contextEnd) {
+        if (prog == partialProg && trinoScanStrategy == BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN && end == contextEnd &&
+                !matchesShortBooleanOnOrdinaryEngine(contextEnd - start, anchorMode, groupOffsets)) {
             return start == contextStart && booleanPlans.trinoScanPlan().matchAsciiFoldedPartial(
                     text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
         }

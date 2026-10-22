@@ -1733,8 +1733,9 @@ public sealed class TrinoRegexp
      * A pattern whose case-sensitive scan plan was compiled to its own hidden class. Each
      * operation keeps the route it has without the class, decided once when the pattern compiles:
      * one that would run the plan calls the generated class once, and any other runs the inherited
-     * Java route. Callers that never enable {@link Options#setGenerateBytecode(boolean)} never load
-     * this class.
+     * Java route. Short boolean calls that the interpreter hands to the ordinary engine to avoid
+     * its operation dispatch also stay on the generated class. Callers that never enable
+     * {@link Options#setGenerateBytecode(boolean)} never load this class.
      */
     private static final class CompiledScanTrinoRegexp
             extends TrinoRegexp
