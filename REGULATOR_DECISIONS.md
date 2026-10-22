@@ -681,14 +681,53 @@ differs from Trino, which decodes such a pattern with the JVM's replacement
 behavior; a malformed pattern has no specified meaning, so it is a syntax
 error. Syntax-error byte offsets are relative to the pattern Slice.
 
-Wildcard runs are normalized during parsing. Exact, prefix, suffix, and
-contains forms use direct byte operations. Ordered literals use the shared
+Wildcard runs are normalized during parsing. Exact, prefix, and suffix forms
+use direct byte operations. Ordered literals use the shared
 `OrderedLiteralMatcher`: fused first-byte and last-byte SWAR candidate masks
 find sparse candidates, and a KMP fallback preserves linear progress once
 failed candidates compare more bytes than the search has covered, plus a small
 budget. Patterns containing `_` use a dedicated LIKE wildcard automaton. This
 frontend does not translate LIKE into a regex string and does not fall back to
 the RE2 engine.
+
+Contains of a literal of two or more bytes scans for the literal's first and
+last bytes together, in a call-free word loop that stops at the first possible
+candidate, then verifies candidates out of line with the shared kernel's KMP
+handoff, counted from where the search started; a one-byte literal uses
+`Slice.indexOf`. The pair scan beats a first-byte scan when the literal's
+first byte is common and costs a little when it is rare. On aarch64 C2 cannot
+encode the SWAR constant `-0x0101010101010101` as an immediate and rebuilt it
+every word, so both loops read the positive `0x0101010101010101` from a field,
+which C2 keeps in a register. On the normative rows gate it took 0.40x the
+time of `Slice.indexOf` on r8i and 0.43x on r9g, and beat Trino's LIKE in 51
+and 48 of 55 grid cells, against 16 and 18 for `Slice.indexOf`, with no major
+regression; r8i accepts English `low-selective`, 17.82 to 21.49 ns per row
+(1.21x).
+
+r8i also accepts two edge losses on 32 KiB synthetic inputs filled with one
+byte, both still over 5x faster than Trino's LIKE, as exceptions to the gate's
+edge rule. On `CONTAINS_ABSENT`, 1.12x, the input is all `x`, so the literal's
+first byte never appears and the pair scan does more work per word than a
+first-byte scan. The rest of the 1.31x on `CONTAINS_LATE` appeared with the
+verification loop reading the SWAR constant from a field, and only when the
+scan reaches a candidate; its mechanism is not established. Alternatives
+measured:
+
+- `Slice.indexOf` stops at every occurrence of the literal's first byte, so it
+  lost to Trino's LIKE when that byte was common.
+- The shared kernel's ordered loop checks candidates inside its word loop,
+  which C2 then neither keeps innermost nor unrolls; on x86-64 it took 1.97x
+  the time of `Slice.indexOf` on long GH Archive rows whose first byte is
+  rare.
+- An adaptive scan, by first byte until failed candidates grow dense and then
+  by both ends, lost Chinese short rows on r9g by up to 1.47x and won less
+  overall, 0.61x on r8i and 0.56x on r9g.
+
+Ordered literals and Trino regexp `contains` still search with the ordered
+loop. The same call-free loop with field constants took 0.34x the time of the
+ordered loop on r9g regexp rows, but splitting verification from the scan
+costs on short rows with frequent candidates, such as TPC-H Q13, so that
+follow-up needs a choice per caller.
 
 The LIKE and Trino-regexp parsers remain separate language frontends, but they
 share the ordered-literal execution kernel when analysis proves equivalent
@@ -1457,8 +1496,8 @@ UTF-8, which differential tests check over the corpus and seeded patterns.
   single byte, with the literal's bytes and KMP shifts as constants, and the
   same KMP handoff rule. Ordered
   literals search one after another, as the interpreter does. Generated
-  contains specializes its literal with this search, while interpreted
-  contains uses `Slice.indexOf`.
+  contains specializes its literal with this search, as interpreted contains
+  does with the kernel's contains search for a literal of two or more bytes.
 - A literal-gap plan searches for its first literal with the same generated
   search, steps each gap a character at a time by the interpreter's character
   width, inline for ASCII, compares each later literal as a constant, and

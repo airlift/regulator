@@ -364,6 +364,21 @@ public class TestTrinoLikeCorpus
     }
 
     @Test
+    public void testContainsSearchRoute()
+    {
+        TrinoLikePattern pattern = TrinoLikePattern.compile(Slices.utf8Slice("%needle%"));
+        assertThat(pattern.planForDiagnostics()).isEqualTo(CONTAINS);
+        assertThat(pattern.usesContainsSearchForDiagnostics()).isTrue();
+        // A one-byte literal searches with Slice.indexOf.
+        assertThat(TrinoLikePattern.compile(Slices.utf8Slice("%x%")).usesContainsSearchForDiagnostics()).isFalse();
+
+        byte[] bytes = {'!', '!', (byte) 0xFF, 'x', 'n', 'e', 'e', 'd', 'l', 'e', (byte) 0xC0, '!', '!'};
+        Slice input = Slices.wrappedBuffer(bytes).slice(2, bytes.length - 4);
+        assertThat(pattern.matches(input)).isTrue();
+        assertThat(pattern.matches(Slices.utf8Slice("needl-needlx"))).isFalse();
+    }
+
+    @Test
     public void testLiteralGapSharedSearchRoute()
     {
         TrinoLikePattern pattern = TrinoLikePattern.compile(Slices.utf8Slice("%alpha_bravo_charlie%"));

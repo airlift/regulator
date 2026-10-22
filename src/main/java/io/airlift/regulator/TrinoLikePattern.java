@@ -417,6 +417,11 @@ public sealed class TrinoLikePattern
         return matcher instanceof LiteralGapPlanMatcher;
     }
 
+    boolean usesContainsSearchForDiagnostics()
+    {
+        return matcher instanceof ContainsMatcher contains && contains.search != null;
+    }
+
     static boolean usesSimpleAsciiConstructionForDiagnostics(Slice pattern)
     {
         requireNonNull(pattern, "pattern is null");
@@ -516,11 +521,15 @@ public sealed class TrinoLikePattern
             implements Matcher
     {
         private final Slice literal;
+        // Scans a literal of two or more bytes for its first and last bytes together; a one-byte
+        // literal searches with Slice.indexOf.
+        private final LiteralSearchKernel search;
         private final boolean exact;
 
         private ContainsMatcher(Slice literal, boolean exact)
         {
             this.literal = requireNonNull(literal, "literal is null");
+            this.search = literal.length() > 1 ? new LiteralSearchKernel(literal) : null;
             this.exact = exact;
         }
 
@@ -531,7 +540,7 @@ public sealed class TrinoLikePattern
             if (offset == end) {
                 return false;
             }
-            int matchOffset = LiteralMatchKernel.find(input, literal, offset);
+            int matchOffset = search == null ? LiteralMatchKernel.find(input, literal, offset) : search.findContains(input, offset, length);
             if (matchOffset < 0 || matchOffset + literal.length() > end) {
                 return false;
             }
@@ -585,7 +594,7 @@ public sealed class TrinoLikePattern
             TrinoLikeKernelGenerator.Region region = switch (pattern.matcher) {
                 case null -> null;
                 case ContainsMatcher contains -> new TrinoLikeKernelGenerator.OrderedLiterals(
-                        List.of(new LiteralSearchKernel(contains.literal)));
+                        List.of(contains.search == null ? new LiteralSearchKernel(contains.literal) : contains.search));
                 case OrderedMatcher ordered -> new TrinoLikeKernelGenerator.OrderedLiterals(
                         ordered.matcher().literals());
                 case LiteralGapPlanMatcher gaps -> new TrinoLikeKernelGenerator.LiteralGaps(

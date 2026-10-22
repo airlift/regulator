@@ -39,6 +39,11 @@ final class LiteralSearchKernel
     private final int[] prefixShifts;
     private final long frontBroadcast;
     private final long backBroadcast;
+    // LOW_BITS, read from a field so the word loops of the contains search hold it in a register:
+    // on aarch64 C2 cannot encode -LOW_BITS as an immediate, and rebuilt the constant with four
+    // instructions every word. The constructor assigns it, because an initializer would make it a
+    // compile-time constant that javac inlines.
+    private final long lowBits;
 
     LiteralSearchKernel(Slice literal)
     {
@@ -47,6 +52,7 @@ final class LiteralSearchKernel
         this.prefixShifts = computePrefixShifts(this.literal);
         this.frontBroadcast = broadcast(this.literal[0]);
         this.backBroadcast = broadcast(this.literal[this.literal.length - 1]);
+        this.lowBits = LOW_BITS;
     }
 
     int literalLength()
@@ -94,6 +100,29 @@ final class LiteralSearchKernel
     }
 
     /**
+     * Returns the Slice-relative offset of the first occurrence of the literal in the range, or
+     * -1, for a literal of at least two bytes and a valid range; Trino LIKE contains calls it. Its
+     * word scan makes no call until it finds a possible candidate and verifies candidates out of
+     * line, a split that costs short rows with frequent candidates, so {@link #find}, which
+     * ordered literals call, keeps verifying in line.
+     */
+    int findContains(Slice input, int offset, int length)
+    {
+        if (literal.length > length) {
+            return -1;
+        }
+        byte[] inputBytes = input.byteArray();
+        int inputOffset = input.byteArrayOffset();
+        int searchStart = inputOffset + offset;
+        int searchEnd = searchStart + length;
+        int matchOffset = skipToContainsCandidate(inputBytes, searchStart, searchEnd);
+        if (matchOffset < -1) {
+            matchOffset = findKmp(inputBytes, -2 - matchOffset, searchEnd);
+        }
+        return matchOffset < 0 ? -1 : matchOffset - inputOffset;
+    }
+
+    /**
      * Returns the Slice-relative offset where {@link #find} continues with KMP, or -1 when the
      * front-and-back scan finishes, matching or not, without switching, when the range is
      * invalid, or when the literal is a single byte; only tests call it.
@@ -108,6 +137,23 @@ final class LiteralSearchKernel
         int inputOffset = input.byteArrayOffset();
         int searchStart = inputOffset + offset;
         int result = findFrontAndBack(input.byteArray(), searchStart, searchStart + length);
+        return result < -1 ? -2 - result - inputOffset : -1;
+    }
+
+    /**
+     * Returns the Slice-relative offset where {@link #findContains} continues with KMP, or -1,
+     * as {@link #kmpHandoffOffsetForDiagnostics} does for {@link #find}; only tests call it.
+     */
+    int containsKmpHandoffOffsetForDiagnostics(Slice input, int offset, int length)
+    {
+        requireNonNull(input, "input is null");
+        if (offset < 0 || length < 0 || offset > input.length() - length || literal.length > length || literal.length < 2) {
+            return -1;
+        }
+
+        int inputOffset = input.byteArrayOffset();
+        int searchStart = inputOffset + offset;
+        int result = skipToContainsCandidate(input.byteArray(), searchStart, searchStart + length);
         return result < -1 ? -2 - result - inputOffset : -1;
     }
 
@@ -145,6 +191,90 @@ final class LiteralSearchKernel
             long frontDifference = ((long) LONG_HANDLE.get(input, position)) ^ frontBroadcast;
             long backDifference = ((long) LONG_HANDLE.get(input, position + backOffset)) ^ backBroadcast;
             long candidates = zeroByteMask(frontDifference) & zeroByteMask(backDifference);
+            while (candidates != 0) {
+                int candidate = position + (Long.numberOfTrailingZeros(candidates) >>> 3);
+                int matchedLength = matchingPrefixLength(input, candidate);
+                if (matchedLength == literal.length) {
+                    return candidate;
+                }
+                comparisonEnd += matchedLength + 1;
+                if (comparisonEnd > candidate) {
+                    return -2 - (candidate + 1);
+                }
+                candidates &= candidates - 1;
+            }
+        }
+
+        int candidateEnd = searchEnd - literal.length + 1;
+        for (; position < candidateEnd; position++) {
+            if (input[position] == literal[0] && input[position + backOffset] == literal[backOffset]) {
+                int matchedLength = matchingPrefixLength(input, position);
+                if (matchedLength == literal.length) {
+                    return position;
+                }
+                comparisonEnd += matchedLength + 1;
+                if (comparisonEnd > position) {
+                    return -2 - (position + 1);
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Skips to the first word, or tail position, holding a candidate whose first and last bytes
+     * match, and returns {@link #verifyContainsCandidates} from there, or -1. The word loop holds
+     * no call and no inner loop, so C2 keeps it innermost and unrolls it, and it reads LOW_BITS
+     * from a field.
+     */
+    private int skipToContainsCandidate(byte[] input, int searchStart, int searchEnd)
+    {
+        int backOffset = literal.length - 1;
+        int wordEnd = searchStart + ((searchEnd - searchStart - backOffset) / Long.BYTES) * Long.BYTES;
+        long front = frontBroadcast;
+        long back = backBroadcast;
+        long lowBits = this.lowBits;
+        int position = searchStart;
+
+        for (; position < wordEnd; position += Long.BYTES) {
+            long frontDifference = ((long) LONG_HANDLE.get(input, position)) ^ front;
+            long backDifference = ((long) LONG_HANDLE.get(input, position + backOffset)) ^ back;
+            if ((((frontDifference - lowBits) & ~frontDifference) & ((backDifference - lowBits) & ~backDifference) & HIGH_BITS) != 0) {
+                return verifyContainsCandidates(input, searchStart, position, searchEnd);
+            }
+        }
+
+        int candidateEnd = searchEnd - backOffset;
+        byte first = literal[0];
+        byte last = literal[backOffset];
+        for (; position < candidateEnd; position++) {
+            if (input[position] == first && input[position + backOffset] == last) {
+                return verifyContainsCandidates(input, searchStart, position, searchEnd);
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Verifies candidates in order from {@code verifyStart}, the word or tail position where
+     * {@link #skipToContainsCandidate} found the first one, scanning on as
+     * {@link #findFrontAndBack} does, and returns as it does. The KMP handoff counts from
+     * {@code searchStart}, because the bytes skipped to reach {@code verifyStart} count as
+     * covered. The word loop reads LOW_BITS from a field, as the scan does.
+     */
+    private int verifyContainsCandidates(byte[] input, int searchStart, int verifyStart, int searchEnd)
+    {
+        int candidateCount = searchEnd - searchStart - literal.length + 1;
+        int wordEnd = searchStart + (candidateCount / Long.BYTES) * Long.BYTES;
+        int backOffset = literal.length - 1;
+        long lowBits = this.lowBits;
+        int comparisonEnd = searchStart - CANDIDATE_COMPARISON_BUDGET;
+        int position = verifyStart;
+
+        for (; position < wordEnd; position += Long.BYTES) {
+            long frontDifference = ((long) LONG_HANDLE.get(input, position)) ^ frontBroadcast;
+            long backDifference = ((long) LONG_HANDLE.get(input, position + backOffset)) ^ backBroadcast;
+            long candidates = ((frontDifference - lowBits) & ~frontDifference) & ((backDifference - lowBits) & ~backDifference) & HIGH_BITS;
             while (candidates != 0) {
                 int candidate = position + (Long.numberOfTrailingZeros(candidates) >>> 3);
                 int matchedLength = matchingPrefixLength(input, candidate);
