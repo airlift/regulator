@@ -1762,9 +1762,17 @@ final class TrinoRegexpParser
                 rune = (rune << 4) | digit;
                 digits++;
             }
-            if (digits == 0) {
-                // Joni reads an escape without digits as U+0000, or as the letter when it ends the pattern.
-                return atEnd() ? 'u' : 0;
+            if (digits == 0 && atEnd()) {
+                // Joni reads the escape as the letter when it is bare and ends the pattern.
+                return 'u';
+            }
+            if (digits < 4) {
+                // As in modern Joni, the escape otherwise needs four hex digits. Report the character
+                // that stopped it, as the braced \x form does.
+                if (!atEnd()) {
+                    readRune(flags);
+                }
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
             if (Character.isSurrogate((char) rune)) {
                 throw unsupportedConstruct("surrogate escapes", sequenceStart, index);
