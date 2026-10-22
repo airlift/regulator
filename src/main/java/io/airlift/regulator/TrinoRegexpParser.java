@@ -1158,16 +1158,16 @@ final class TrinoRegexpParser
                 }
                 consumeByte(']');
                 classes.pop();
-                CharClassBuilder characterClassBuilder = frame.characterClassBuilder;
                 if (classes.isEmpty()) {
-                    return characterClassBuilder;
+                    return frame.toCharClassBuilder();
                 }
+                RuneRangeSet characterClass = frame.toRuneRangeSet();
                 if (frame.negated) {
-                    characterClassBuilder.negate();
+                    characterClass.negate();
                 }
-                characterClassBuilder.removeAbove(Regexp.maxRune(classFlags));
+                characterClass.removeAbove(Regexp.maxRune(classFlags));
                 ClassFrame parent = classes.peek();
-                parent.union.addCharClass(characterClassBuilder);
+                parent.addNestedClass(characterClass);
                 // Modern Joni keeps the state of the item before a nested class, so a dash after the
                 // nested class continues that item: it is a literal after a range and starts a range
                 // otherwise. The dash is also literal when no other item precedes the nested class or
@@ -1235,13 +1235,20 @@ final class TrinoRegexpParser
         }
 
         // One open bracket level: the intersection of its finished operands and the union of
-        // the operand being read.
+        // the operand being read. Nested classes and intersections combine as rune range sets,
+        // which pass to the enclosing class without copying. An outermost class with neither
+        // returns the builder of its members.
         private static final class ClassFrame
         {
             private final int classStart;
             private final boolean negated;
-            private CharClassBuilder characterClassBuilder;
+            // The intersection of the finished operands. Null until a union containing nested
+            // classes finishes or an intersection operand starts; until then the class is in
+            // union.
+            private RuneRangeSet intersection;
             private CharClassBuilder union = new CharClassBuilder();
+            // The union of the nested classes of the operand being read, or null.
+            private RuneRangeSet nestedClasses;
             private boolean first = true;
             private boolean rejectDashAfterNestedClass;
 
@@ -1251,21 +1258,45 @@ final class TrinoRegexpParser
                 this.negated = negated;
             }
 
+            void addNestedClass(RuneRangeSet nestedClass)
+            {
+                nestedClasses = (nestedClasses == null) ? nestedClass : nestedClasses.union(nestedClass);
+            }
+
             void finishUnion()
             {
-                if (characterClassBuilder == null) {
-                    characterClassBuilder = union;
+                if (intersection == null && nestedClasses == null) {
+                    return;
                 }
-                else {
-                    characterClassBuilder.retainAll(union);
-                }
+                RuneRangeSet operand = finishOperand();
+                intersection = (intersection == null) ? operand : intersection.intersection(operand);
+            }
+
+            private RuneRangeSet finishOperand()
+            {
+                RuneRangeSet operand = (nestedClasses == null) ? RuneRangeSet.of(union) : nestedClasses.union(union);
+                nestedClasses = null;
+                return operand;
             }
 
             void startIntersectionOperand()
             {
+                if (intersection == null) {
+                    intersection = RuneRangeSet.of(union);
+                }
                 union = new CharClassBuilder();
                 first = true;
                 rejectDashAfterNestedClass = false;
+            }
+
+            RuneRangeSet toRuneRangeSet()
+            {
+                return (intersection == null) ? RuneRangeSet.of(union) : intersection;
+            }
+
+            CharClassBuilder toCharClassBuilder()
+            {
+                return (intersection == null) ? union : intersection.toCharClassBuilder();
             }
         }
 

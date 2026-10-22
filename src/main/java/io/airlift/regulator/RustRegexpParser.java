@@ -455,12 +455,16 @@ final class RustRegexpParser
         }
     }
 
-    // A class node in translation: its operands translate in order, then the node completes.
+    // A bracket, union or set operation in translation: its operands translate in order, then
+    // the node completes. Operands combine as rune range sets, which pass to the enclosing node
+    // without copying, except that a union collects its single items in one builder.
     private static final class ClassFrame
     {
         private final ClassSet set;
         private final List<? extends ClassSet> children;
-        private final List<CharClassBuilder> childValues;
+        private final List<RuneRangeSet> childValues;
+        private final CharClassBuilder unionItems;
+        private RuneRangeSet unionNested;
         private int nextChildIndex;
 
         ClassFrame(ClassSet set)
@@ -470,9 +474,35 @@ final class RustRegexpParser
                 case BracketedAst bracketed -> List.of(bracketed.kind());
                 case ClassUnion union -> union.items();
                 case ClassBinaryOp operation -> List.of(operation.lhs(), operation.rhs());
-                default -> List.of();
+                default -> throw new IllegalArgumentException("not a nested class node: " + set);
             };
-            this.childValues = new ArrayList<>(children.size());
+            this.childValues = (set instanceof ClassUnion) ? List.of() : new ArrayList<>(children.size());
+            this.unionItems = (set instanceof ClassUnion) ? new CharClassBuilder() : null;
+        }
+
+        static boolean isNested(ClassSet set)
+        {
+            return set instanceof BracketedAst || set instanceof ClassUnion || set instanceof ClassBinaryOp;
+        }
+
+        void addItem(CharClassBuilder item)
+        {
+            if (unionItems != null) {
+                unionItems.addCharClass(item);
+            }
+            else {
+                childValues.add(RuneRangeSet.of(item));
+            }
+        }
+
+        void addNested(RuneRangeSet nested)
+        {
+            if (unionItems != null) {
+                unionNested = (unionNested == null) ? nested : unionNested.union(nested);
+            }
+            else {
+                childValues.add(nested);
+            }
         }
     }
 
@@ -1787,6 +1817,10 @@ final class RustRegexpParser
         }
 
         // Translates a class in the crate's post-order with an explicit stack, like the syntax tree.
+        // Case folding is a closure over case orbits, so folding each item once gives the same
+        // class as the crate's folding at every bracket and set operation: the fold of a union is
+        // the union of the folds, and complements, intersections and differences of folded sets
+        // are folded already.
         private CharClassBuilder bracketedClass(BracketedAst root)
         {
             Deque<ClassFrame> stack = new ArrayDeque<>();
@@ -1794,37 +1828,54 @@ final class RustRegexpParser
             while (true) {
                 ClassFrame frame = stack.getLast();
                 if (frame.nextChildIndex < frame.children.size()) {
-                    stack.addLast(new ClassFrame(frame.children.get(frame.nextChildIndex++)));
+                    ClassSet child = frame.children.get(frame.nextChildIndex++);
+                    if (ClassFrame.isNested(child)) {
+                        stack.addLast(new ClassFrame(child));
+                    }
+                    else {
+                        frame.addItem(classItem(child));
+                    }
                     continue;
                 }
                 stack.removeLast();
-                CharClassBuilder builder = exitClass(frame);
+                RuneRangeSet characterClass = exitClass(frame);
                 if (stack.isEmpty()) {
-                    return builder;
+                    return characterClass.toCharClassBuilder();
                 }
-                stack.getLast().childValues.add(builder);
+                stack.getLast().addNested(characterClass);
             }
         }
 
-        private CharClassBuilder exitClass(ClassFrame frame)
+        private RuneRangeSet exitClass(ClassFrame frame)
         {
-            List<CharClassBuilder> children = frame.childValues;
+            List<RuneRangeSet> children = frame.childValues;
             return switch (frame.set) {
-                case BracketedAst bracketed -> foldAndNegate(children.getFirst(), bracketed.negated(), bracketed.start(), bracketed.end());
-                case ClassUnion _ -> {
-                    CharClassBuilder builder = new CharClassBuilder();
-                    for (CharClassBuilder member : children) {
-                        builder.addCharClass(member);
+                case BracketedAst bracketed -> {
+                    RuneRangeSet characterClass = children.getFirst();
+                    if (bracketed.negated()) {
+                        characterClass.negate();
                     }
-                    yield builder;
+                    if (!enabled(UNICODE)) {
+                        requireAsciiOutsideByteMode(characterClass, bracketed.start(), bracketed.end());
+                    }
+                    yield characterClass;
                 }
+                case ClassUnion _ -> (frame.unionNested == null) ? RuneRangeSet.of(frame.unionItems) : frame.unionNested.union(frame.unionItems);
                 case ClassBinaryOp operation -> setOperation(operation.operation(), children.get(0), children.get(1));
+                default -> throw new IllegalArgumentException("not a nested class node: " + frame.set);
+            };
+        }
+
+        // Returns a class item, folded when case-insensitive.
+        private CharClassBuilder classItem(ClassSet item)
+        {
+            return switch (item) {
                 case ClassEmpty _ -> new CharClassBuilder();
                 case LiteralAst literal -> {
                     int codePoint = enabled(UNICODE) ? literal.codePoint() : classLiteralByte(literal);
                     CharClassBuilder builder = new CharClassBuilder();
                     builder.addRange(codePoint, codePoint);
-                    yield builder;
+                    yield foldIfCaseInsensitive(builder);
                 }
                 case ClassRange range -> {
                     CharClassBuilder builder = new CharClassBuilder();
@@ -1836,7 +1887,7 @@ final class RustRegexpParser
                         int high = classLiteralByte(range.last());
                         builder.addRange(low, high);
                     }
-                    yield builder;
+                    yield foldIfCaseInsensitive(builder);
                 }
                 case ClassAscii ascii -> {
                     CharClassBuilder builder = new CharClassBuilder();
@@ -1844,32 +1895,21 @@ final class RustRegexpParser
                     yield foldAndNegate(builder, ascii.negated(), ascii.start(), ascii.end());
                 }
                 case UnicodeClassAst unicode -> unicodeClass(unicode);
-                case PerlClassAst perl -> perlClass(perl);
+                case PerlClassAst perl -> foldIfCaseInsensitive(perlClass(perl));
+                default -> throw new IllegalArgumentException("not a class item: " + item);
             };
         }
 
-        private CharClassBuilder setOperation(SetOperation operation, CharClassBuilder lhs, CharClassBuilder rhs)
+        private RuneRangeSet setOperation(SetOperation operation, RuneRangeSet lhs, RuneRangeSet rhs)
         {
-            if (enabled(CASE_INSENSITIVE)) {
-                rhs = caseFold(rhs);
-                lhs = caseFold(lhs);
-            }
-            switch (operation) {
-                case INTERSECTION -> lhs.retainAll(rhs);
+            return switch (operation) {
+                case INTERSECTION -> lhs.intersection(rhs);
                 case DIFFERENCE -> {
-                    CharClassBuilder excluded = rhs.copy();
-                    excluded.negate();
-                    lhs.retainAll(excluded);
+                    rhs.negate();
+                    yield lhs.intersection(rhs);
                 }
-                case SYMMETRIC_DIFFERENCE -> {
-                    CharClassBuilder common = lhs.copy();
-                    common.retainAll(rhs);
-                    common.negate();
-                    lhs.addCharClass(rhs);
-                    lhs.retainAll(common);
-                }
-            }
-            return lhs;
+                case SYMMETRIC_DIFFERENCE -> lhs.symmetricDifference(rhs);
+            };
         }
 
         // A byte class names a non-ASCII byte only with a two-digit \xNN escape, and only in the
@@ -1889,12 +1929,11 @@ final class RustRegexpParser
             throw parser.error(ErrorKind.UNICODE_NOT_ALLOWED, literal.start(), literal.end());
         }
 
-        // Case folding precedes negation, so (?i)[^x] excludes both cases of x.
+        // Case folding precedes negation, so (?i)[[:^lower:]] excludes both cases of each
+        // lowercase letter.
         private CharClassBuilder foldAndNegate(CharClassBuilder builder, boolean negated, int start, int end)
         {
-            if (enabled(CASE_INSENSITIVE)) {
-                builder = caseFold(builder);
-            }
+            builder = foldIfCaseInsensitive(builder);
             if (negated) {
                 builder.negate();
             }
@@ -1910,6 +1949,18 @@ final class RustRegexpParser
             if (utf8 && rangeCount > 0 && builder.range(rangeCount - 1).high() > 0x7F) {
                 throw parser.error(ErrorKind.INVALID_UTF8, start, end);
             }
+        }
+
+        private void requireAsciiOutsideByteMode(RuneRangeSet characterClass, int start, int end)
+        {
+            if (utf8 && characterClass.containsRuneAbove(0x7F)) {
+                throw parser.error(ErrorKind.INVALID_UTF8, start, end);
+            }
+        }
+
+        private CharClassBuilder foldIfCaseInsensitive(CharClassBuilder builder)
+        {
+            return enabled(CASE_INSENSITIVE) ? caseFold(builder) : builder;
         }
 
         private CharClassBuilder caseFold(CharClassBuilder builder)

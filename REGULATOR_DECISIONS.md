@@ -322,6 +322,9 @@ UTF-16 code-unit offsets.
   multiply past 1,000, are rejected, keeping the existing program-size bound.
   Any non-negative nest limit is accepted, because parsing, the nest-limit
   check, and translation all walk the syntax tree with explicit stacks.
+  Above the default limit, classes keep two parse costs that `RuneRangeSet`
+  accepts: n log² n for nested unions whose operand weights stay just past its
+  balanced-merge ratio, and the class size per `~~` toggle of wide ranges.
 - The crate's 10 MiB compiled-size limit is not reproduced, because an
   approximation of the crate's size estimate would disagree near the limit.
   Compilation is bounded by `maxMemory` instead; the
