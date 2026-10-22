@@ -13,10 +13,13 @@
  */
 package io.airlift.regulator;
 
+import com.sun.management.ThreadMXBean;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -59,6 +62,17 @@ public class TestRegexpParser
                 .isEqualTo(TrinoRegexpParser.parse(expected, Regexp.LIKE_PERL).regexp());
         assertThat(JavaRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp())
                 .isEqualTo(JavaRegexpParser.parse(expected, Regexp.LIKE_PERL).regexp());
+    }
+
+    @Test
+    @Timeout(30)
+    public void testCharacterClassesBuildInNLogNTime()
+    {
+        // About 1 MB: a property added to a large class again and again.
+        assertParseAllocationPerByte("[" + separateRunes(0x10000, 2, 230_000) + "\\p{Lu}".repeat(20_000) + "]", 1_000, Frontend.values());
+        // About 1 MB of runes in descending order. Only the timeout guards this case, since the old
+        // cost was shifting the class's ranges, which allocates nothing.
+        assertParsesInEveryFrontend("[" + new StringBuilder(separateRunes(0x10000, 2, 230_000)).reverse() + "]");
     }
 
     @Test
@@ -284,5 +298,77 @@ public class TestRegexpParser
         // Verify non-ASCII bytes are excluded
         assertThat(re.charClass().contains(0x80)).isFalse();
         assertThat(re.charClass().contains(0xFF)).isFalse();
+    }
+
+    // These inputs expose repeated copying through allocation, so a bound on the bytes a parse
+    // allocates per pattern byte catches a parse that has become superlinear without timing it.
+    private static void assertParseAllocationPerByte(String pattern, int maxBytesPerPatternByte, Frontend... frontends)
+    {
+        Slice slice = Slices.utf8Slice(pattern);
+        String description = pattern.substring(0, Math.min(pattern.length(), 40));
+        ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
+        assertThat(threadBean.isThreadAllocatedMemorySupported()).isTrue();
+        threadBean.setThreadAllocatedMemoryEnabled(true);
+        long threadId = Thread.currentThread().threadId();
+        for (Frontend frontend : frontends) {
+            long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+            frontend.parse(slice);
+            long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+            assertThat(allocatedBytes).as("%s %s", frontend, description).isLessThan((long) maxBytesPerPatternByte * slice.length());
+        }
+    }
+
+    private static void assertParsesInEveryFrontend(String pattern)
+    {
+        Slice slice = Slices.utf8Slice(pattern);
+        String description = pattern.substring(0, Math.min(pattern.length(), 40));
+        for (Frontend frontend : Frontend.values()) {
+            assertThatCode(() -> frontend.parse(slice)).as("%s %s", frontend, description).doesNotThrowAnyException();
+        }
+    }
+
+    private enum Frontend
+    {
+        RE2 {
+            @Override
+            Regexp parse(Slice pattern)
+            {
+                return RegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp();
+            }
+        },
+        TRINO {
+            @Override
+            Regexp parse(Slice pattern)
+            {
+                return TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp();
+            }
+        },
+        JAVA {
+            @Override
+            Regexp parse(Slice pattern)
+            {
+                return JavaRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp();
+            }
+        },
+        // With the nesting limit lifted for deeply nested patterns.
+        RUST {
+            @Override
+            Regexp parse(Slice pattern)
+            {
+                return RustRegexpParser.parse(pattern, RustRegexp.Options.defaults().syntaxFlags(), Integer.MAX_VALUE).regexp();
+            }
+        };
+
+        abstract Regexp parse(Slice pattern);
+    }
+
+    // Runes no two of which are adjacent, so each is its own range in a class.
+    private static String separateRunes(int first, int step, int count)
+    {
+        StringBuilder builder = new StringBuilder();
+        for (int index = 0; index < count; index++) {
+            builder.appendCodePoint(first + index * step);
+        }
+        return builder.toString();
     }
 }
