@@ -49,8 +49,10 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * {@code $} is RE2's strict end. No compilation cache is involved.
  * <p>
  * With {@code scanPlan=false}, every pattern compiles without its scan plan, so the methods time the
- * ordinary engine on the same rows. That compile is resolved reflectively, so this source also runs
- * against a build without RE2 scan plans when given {@code -p scanPlan=true}.
+ * ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
+ * {@code -p scanPlan=true} this source also times a build without RE2 scan plans. With
+ * {@code generateBytecode=true}, each pattern with a case-sensitive plan runs a class generated for
+ * it; that option is also set reflectively, and only then.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -146,6 +148,11 @@ public class BenchmarkRe2ScanPlan
         @Param({"true", "false"})
         public boolean scanPlan;
 
+        // Experimental per-pattern scan kernels; false compiles every pattern as it would without
+        // the option.
+        @Param("false")
+        public boolean generateBytecode;
+
         Slice[] expressions;
         private Re2.Options options;
         private MethodHandle compiler;
@@ -166,7 +173,7 @@ public class BenchmarkRe2ScanPlan
             source.dotAll = dotAll;
             source.setup();
 
-            options = Re2.Options.defaults();
+            options = generateBytecode ? generatingOptions() : Re2.Options.defaults();
             compiler = compiler(scanPlan);
             expressions = source.expressions;
             int count = expressions.length;
@@ -276,6 +283,22 @@ public class BenchmarkRe2ScanPlan
         catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Cannot find Re2." + (scanPlan ? "compile" : "compileWithoutScanPlanForTesting"), e);
         }
+    }
+
+    /**
+     * Returns default options that generate bytecode, resolved reflectively so that this source
+     * also runs against a build without the option when it is not requested.
+     */
+    private static Re2.Options generatingOptions()
+    {
+        Re2.Options options = Re2.Options.defaults();
+        try {
+            Re2.Options.class.getMethod("setGenerateBytecode", boolean.class).invoke(options, true);
+        }
+        catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Cannot find Re2.Options.setGenerateBytecode", e);
+        }
+        return options;
     }
 
     private static Re2 compile(MethodHandle compiler, Slice expression, Re2.Options options)

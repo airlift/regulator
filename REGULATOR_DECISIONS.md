@@ -1523,7 +1523,9 @@ so Java patterns and `Re2.compileParsed` build none.
   [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md#re2-patterns) restates.
 - Longest-match patterns build no plan, because a plan reports leftmost-first
   matches, and Latin-1 patterns build none, as in Trino.
-- RE2 plans never generate bytecode.
+- An experimental option compiles a case-sensitive RE2 plan into its own
+  class, as described in
+  [Generated RE2 Scan Kernels](#generated-re2-scan-kernels).
 - A plan must not be slower than the same pattern without it. On R9g, R8g, and
   R8i, RE2 `BenchmarkClickBenchRegexp` `contains` takes 0.09 to 0.84 times the
   time of a build without RE2 plans on every `HTTP`, `WWW`, `LONG_HOST`, and
@@ -1602,6 +1604,66 @@ operation by operation.
   retained heap, and the class lives in metaspace and the code cache, which the
   heap estimate cannot measure. A caller compiling many distinct patterns with
   the option bounds that cost by bounding the patterns it retains.
+
+## Generated RE2 Scan Kernels
+
+`Re2.Options.setGenerateBytecode` is an experimental opt-in, disabled by
+default, that compiles the case-sensitive scan plan of an RE2 pattern with the
+generator of [Generated Trino Scan Kernels](#generated-trino-scan-kernels),
+under its rules: generation happens once at compilation, a pattern whose class
+cannot be generated or defined is silently interpreted, nothing generated
+loads without the option, generated code calls its own copies of the
+interpreter's helpers, and the class is defined in Regulator's package and is
+not charged to the memory budget. RE2 runs and delimited captures call copies
+of the RE2 run reader and its vector stop scan, so a generated plan reports
+what the ordinary engine reports on every input, malformed UTF-8 included.
+
+- The class is an executor, not a set of operation entries. It replaces the
+  plan's attempt, or an unanchored plan's region search, with the same
+  signature and results, and `Re2` keeps its strategy dispatch, argument
+  checks, and ordinary-engine handoff in Java. `Re2` has far more public
+  operations than Trino, and they all reach the plan through four calls, so
+  overriding those calls keeps every operation's route without a generated
+  entry per operation.
+- `Re2` is sealed rather than final, permitting one private subclass that
+  overrides those four package-private calls; callers still cannot extend it.
+  The subclass holds the generated executor, so `Re2`'s own fields, and its
+  guarded object layout, do not change. Released versions had a final `Re2`;
+  the LIKE generator made the same change to `TrinoLikePattern`.
+- Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
+  stays interpreted, as in Trino. Unlike Trino, a single-byte matcher or a
+  count that skips the plan does not exclude a pattern, because only the calls
+  that reach the plan change.
+- Short boolean calls that the interpreter hands to the DFA stay on the
+  generated class, as in Trino. Boolean calls of a start-anchored plan run its
+  full plan rather than the save-free boolean plan: a capture save without
+  groups is one null check in generated code, not an operation dispatch.
+- `Re2` exposes no generated method handles. Trino exposes them so that a
+  caller holding a constant pattern, such as Trino's own generated code, can
+  bind an operation directly; no `Re2` caller does that, so only
+  `usesGeneratedBytecode()` is public.
+- A generated plan must not be slower than the interpreted plan. Measured on
+  a build that looked the boolean plan up on every call, the matching rows of
+  `BenchmarkRe2ScanPlan` with `generateBytecode=true` on R9g, R8g, and R8i take
+  a geometric mean of 0.60, 0.58, and 0.60 times the interpreted plan's time
+  and 0.12, 0.12, and 0.13 times the ordinary engine's. The geometric means
+  pool 114 rows on R9g and 96 on R8g and R8i, whose runs dropped most
+  non-ASCII and malformed workloads and the `RETRY_128` and `RETRY_256`
+  workloads, and exclude compilation and the ASCII-folded `FOLDED_MIXED`
+  control. No matching row is slower than the ordinary engine.
+- Two workloads fail that bar, and both are accepted as known exceptions. On
+  R8i `LONG_HOST`, every method takes 1.05 to 1.14 times the interpreted time,
+  `contains` 493 ns against 440 ns, while the same rows take 0.83 to 0.96
+  times on Graviton. On R9g, `UNANCHORED_TAIL_4096_NON_ASCII` `replace` takes
+  1.07 to 1.09 times, 2730 ns against 2544 ns. Both slowdowns repeated on an
+  identical rebuild. Each exceeds the host's A/A spread, the largest difference
+  between two builds of the same source, over rows with one mode, but not its
+  spread over all rows.
+- Compilation is reported separately from matching. With generation it takes
+  0.44 to 0.70 ms per pattern on R9g and 0.69 to 1.55 ms on R8g and R8i,
+  against 3.6 to 16 us for the interpreted plan, and up to about 353 times the
+  ordinary engine's compilation, on R8i `UNANCHORED_TAIL_4096`. With the option
+  off, sealing `Re2` changed no row on any host.
 
 ## Generated Trino LIKE Kernels
 

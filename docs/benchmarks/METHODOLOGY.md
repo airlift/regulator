@@ -145,7 +145,7 @@ Representative JMH classes include:
 | `BenchmarkTrinoScanPlan` | [Trino scan-plan integration](TRINO_SCAN_PLAN.md): public operations, mixed plans, suffix semantics, and fallback controls |
 | `BenchmarkTrinoScanProfiles` | The twelve plans of the `BenchmarkTrinoScanPlan` `OPTIONAL_MIXED` workload, run individually, interleaved, or grouped to investigate shared execution profiles, with and without [generated kernels](TRINO_SCAN_PLAN.md#benchmarks), and the same rows without the scan plan |
 | `BenchmarkTrinoScanKernelDispatch` | A constant pattern's operations bound as handles, interpreted or [generated](TRINO_SCAN_PLAN.md#benchmarks) |
-| `BenchmarkRe2ScanPlan` | The `BenchmarkTrinoScanPlan` patterns and rows through public RE2 operations, where `$` is a strict end, plus non-ASCII and malformed UTF-8 rows for its URL, unanchored URL, long-host, and unanchored-tail shapes, [with and without the scan plan](TRINO_SCAN_PLAN.md#re2-patterns) |
+| `BenchmarkRe2ScanPlan` | The `BenchmarkTrinoScanPlan` patterns and rows through public RE2 operations, where `$` is a strict end, plus non-ASCII and malformed UTF-8 rows for its URL, unanchored URL, long-host, and unanchored-tail shapes, [with and without the scan plan](TRINO_SCAN_PLAN.md#re2-patterns) and with [generated executor classes](TRINO_SCAN_PLAN.md#re2-executor-classes) |
 | `BenchmarkClickBenchRegexp` | [ClickBench URL pattern](CLICKBENCH_REGEXP.md): dot-all matching, capture, replacement, and host/path scaling |
 | `BenchmarkExpressionPlans` | Direct expression plans and general controls |
 | `BenchmarkEverydayTrinoRegexp` | Application-shaped Trino operations over rotating Slice values |

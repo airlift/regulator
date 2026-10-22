@@ -23,6 +23,7 @@ import java.util.Arrays;
 import static io.airlift.regulator.TrinoScanPlanRun.CANDIDATE_SCAN_NIBBLE_TABLE;
 import static io.airlift.regulator.TrinoScanPlanRun.CANDIDATE_SCAN_RANGE;
 import static io.airlift.regulator.TrinoScanPlanRun.CANDIDATE_SCAN_SMALL_SET;
+import static io.airlift.regulator.TrinoScanPlanRun.RE2_RUN_STOP_MINIMUM_BYTES;
 import static io.airlift.regulator.TrinoScanPlanRun.SCALAR_CANDIDATE_PREFIX_BYTES;
 
 /**
@@ -225,6 +226,101 @@ final class TrinoScanKernelSupport
         return cursor;
     }
 
+    /**
+     * A copy of {@code TrinoScanPlanRun.re2Match}.
+     */
+    static int re2RunMatch(TrinoScanPlanRun run, byte[] input, int cursor, int end)
+    {
+        int minimum = run.minimum();
+        int maximum = run.maximum();
+        if (maximum < 0 && minimum <= 1) {
+            int stop = re2RunScan(run, input, cursor, end);
+            return stop - cursor >= minimum ? stop : -1;
+        }
+        int count = 0;
+        int limit = maximum < 0 ? minimum : maximum;
+        int width;
+        while (count < limit && (width = re2RunMemberWidth(run, input, cursor, end)) != 0) {
+            cursor += width;
+            count++;
+        }
+        if (count < minimum) {
+            return -1;
+        }
+        return maximum < 0 ? re2RunScan(run, input, cursor, end) : cursor;
+    }
+
+    /**
+     * A copy of {@code TrinoScanPlanRun.re2MatchMinimum}.
+     */
+    static int re2RunMatchMinimum(TrinoScanPlanRun run, byte[] input, int cursor, int end)
+    {
+        int minimum = run.minimum();
+        for (int count = 0; count < minimum; count++) {
+            int width = re2RunMemberWidth(run, input, cursor, end);
+            if (width == 0) {
+                return -1;
+            }
+            cursor += width;
+        }
+        return cursor;
+    }
+
+    /**
+     * A copy of {@code TrinoScanPlanRun.re2MatchBefore}.
+     */
+    static int re2RunMatchBefore(TrinoScanPlanRun run, byte[] input, int cursor, int end, byte delimiter)
+    {
+        int stop = re2RunMatch(run, input, cursor, end);
+        return stop >= 0 && stop < end && input[stop] == delimiter ? stop : -1;
+    }
+
+    // A copy of TrinoScanPlanRun.re2MemberWidth.
+    private static int re2RunMemberWidth(TrinoScanPlanRun run, byte[] input, int cursor, int end)
+    {
+        if (cursor >= end) {
+            return 0;
+        }
+        int value = input[cursor];
+        if (value < 0) {
+            return re2CharacterWidth(input, cursor, end);
+        }
+        return run.members()[value] ? 1 : 0;
+    }
+
+    // A copy of TrinoScanPlanRun.re2Scan.
+    private static int re2RunScan(TrinoScanPlanRun run, byte[] input, int cursor, int end)
+    {
+        byte[] needles = run.needles();
+        boolean[] members = run.members();
+        while (true) {
+            // Find the first non-member ASCII byte or non-ASCII byte, then consume the
+            // non-ASCII characters there. Less than a vector of input is scanned by byte, as
+            // Trino's run scan does for its tail.
+            if (needles != null && end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES && VectorSupport.isAvailable()) {
+                cursor = VectorTrinoScanKernelSupport.findRe2RunStop(input, cursor, end, needles);
+            }
+            else if (needles != null && needles.length == 0) {
+                // Every ASCII byte is a member.
+                while (cursor < end && input[cursor] >= 0) {
+                    cursor++;
+                }
+            }
+            else {
+                while (cursor < end && input[cursor] >= 0 && members[input[cursor]]) {
+                    cursor++;
+                }
+            }
+            int width;
+            while (cursor < end && input[cursor] < 0 && (width = re2CharacterWidth(input, cursor, end)) != 0) {
+                cursor += width;
+            }
+            if (cursor >= end || input[cursor] < 0 || !members[input[cursor]]) {
+                return cursor;
+            }
+        }
+    }
+
     // A copy of TrinoScanPlanRun.scan.
     private static int runScan(TrinoScanPlanRun run, byte[] input, int cursor, int end)
     {
@@ -376,6 +472,25 @@ final class TrinoScanKernelSupport
         }
 
         return pack(Utf8.RUNE_ERROR, 1);
+    }
+
+    // A copy of Utf8.re2CharacterWidth.
+    private static int re2CharacterWidth(byte[] bytes, int index, int end)
+    {
+        int b0 = bytes[index] & 0xFF;
+        if (b0 < 0xC2 || b0 > 0xF4) {
+            return 0;
+        }
+        int width = b0 < 0xE0 ? 2 : b0 < 0xF0 ? 3 : 4;
+        if (width > end - index) {
+            return 0;
+        }
+        for (int offset = 1; offset < width; offset++) {
+            if ((bytes[index + offset] & 0xC0) != 0x80) {
+                return 0;
+            }
+        }
+        return width;
     }
 
     // A copy of Utf8.pack.

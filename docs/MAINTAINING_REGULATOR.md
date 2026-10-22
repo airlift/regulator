@@ -26,8 +26,10 @@ Treat these as performance-sensitive unless analysis proves otherwise:
 - candidate-byte and literal scanners
 - engine selection and capture-boundary recovery
 - Slice range and UTF-8 decoding paths used by matching
-- generated Trino scan kernels, their search driver and operation entries, the
-  scan helper copies they call, and the code that emits them
+- generated Trino scan kernels and RE2 executor classes, their search driver,
+  the operation entries of a Trino kernel, the scan helper copies they call, the
+  code that emits them, and the `Re2` calls that the generated `Re2` subclass
+  overrides
 - generated Trino LIKE kernels, the helper copies they call, and the code that
   emits them
 
@@ -38,10 +40,10 @@ code and running the relevant benchmarks.
 
 When changing a helper marked "Copied as", change the copy it names. When that
 copy is in `TrinoScanKernelSupport` or `VectorTrinoScanKernelSupport`, also run
-`TestTrinoScanKernel`; when it is in `TrinoLikeKernelSupport`, run
-`TestTrinoLikeKernel` and `TestTrinoLikeCorpus`. Code whose comment names
-`TrinoLikeKernelGenerator` has its copy in the emitter rather than in Java
-source; change the emitter with it and run the same tests.
+`TestTrinoScanKernel` and `TestRe2ScanPlan`; when it is in
+`TrinoLikeKernelSupport`, run `TestTrinoLikeKernel` and `TestTrinoLikeCorpus`.
+Code whose comment names `TrinoLikeKernelGenerator` has its copy in the emitter
+rather than in Java source; change the emitter with it and run the same tests.
 
 ## Parser frontends
 

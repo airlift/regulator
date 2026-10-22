@@ -30,7 +30,8 @@ import static java.util.Objects.requireNonNull;
  * offsets are byte offsets relative to the logical Slice, not its backing array.
  */
 @SuppressWarnings("CharUsedInArithmeticContext")
-public final class Re2
+public sealed class Re2
+        permits Re2.CompiledScanRe2
 {
     enum BooleanPartialMatchStrategy
     {
@@ -162,6 +163,7 @@ public final class Re2
 
         private long maxMemory = DEFAULT_MAX_MEMORY;
         private ByteFrequencies byteFrequencies = ByteFrequencies.uniform();
+        private boolean generateBytecode;
         private Encoding encoding = Encoding.UTF8;
         private boolean posixSyntax;
         private boolean longestMatch;
@@ -210,6 +212,7 @@ public final class Re2
             Options copy = new Options();
             copy.maxMemory = maxMemory;
             copy.byteFrequencies = byteFrequencies;
+            copy.generateBytecode = generateBytecode;
             copy.encoding = encoding;
             copy.posixSyntax = posixSyntax;
             copy.longestMatch = longestMatch;
@@ -254,6 +257,25 @@ public final class Re2
         public Options setByteFrequencies(ByteFrequencies byteFrequencies)
         {
             this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");
+            return this;
+        }
+
+        boolean generateBytecode()
+        {
+            return generateBytecode;
+        }
+
+        /**
+         * Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
+         * so each operation that would run its specialized scan runs dedicated bytecode instead.
+         * Operations that take another route keep it. Patterns that are not eligible, or whose
+         * class cannot be generated, compile as they do without this option. Disabled by default.
+         *
+         * @see Re2#usesGeneratedBytecode()
+         */
+        public Options setGenerateBytecode(boolean generateBytecode)
+        {
+            this.generateBytecode = generateBytecode;
             return this;
         }
 
@@ -411,6 +433,7 @@ public final class Re2
     private volatile BoundedCharacterClassCounter boundedCharacterClassCounter;
     private volatile SingleByteMatcher singleByteMatcher;
 
+    @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
     private Re2(
             int flags,
             long maxMemory,
@@ -512,6 +535,39 @@ public final class Re2
     }
 
     /**
+     * Copies every field of {@code pattern}, which the caller then discards, except the named
+     * group map, which is computed on first use. Rerunning the main constructor would reserve
+     * its pattern's DFA memory a second time.
+     */
+    private Re2(Re2 pattern)
+    {
+        this.flags = pattern.flags;
+        this.maxMemory = pattern.maxMemory;
+        this.pattern = pattern.pattern;
+        this.regexp = pattern.regexp;
+        this.expressionAnalysis = pattern.expressionAnalysis;
+        this.partialProg = pattern.partialProg;
+        this.longestMatch = pattern.longestMatch;
+        this.capturingGroupCount = pattern.capturingGroupCount;
+        this.capturingGroupNames = pattern.capturingGroupNames;
+        this.suffixRegexpOrFixedWidthMatcher = pattern.suffixRegexpOrFixedWidthMatcher;
+        this.normalizedReverseRegexp = pattern.normalizedReverseRegexp;
+        this.requiredPrefix = pattern.requiredPrefix;
+        this.requiredPrefixFoldCase = pattern.requiredPrefixFoldCase;
+        this.matchLength = pattern.matchLength;
+        this.exactLiteralLength = pattern.exactLiteralLength;
+        this.booleanPlans = pattern.booleanPlans;
+        this.booleanFindStrategy = pattern.booleanFindStrategy;
+        this.trinoScanStrategy = pattern.trinoScanStrategy;
+        this.ordinaryUnanchoredBooleanSearch = pattern.ordinaryUnanchoredBooleanSearch;
+        this.ordinaryShortBooleanMatch = pattern.ordinaryShortBooleanMatch;
+        this.reverseProg = pattern.reverseProg;
+        this.reverseProgComputed = pattern.reverseProgComputed;
+        this.boundedCharacterClassCounter = pattern.boundedCharacterClassCounter;
+        this.singleByteMatcher = pattern.singleByteMatcher;
+    }
+
+    /**
      * Compiles a copied snapshot of {@code pattern} with {@link Options#defaults()}.
      */
     public static Re2 compile(Slice pattern)
@@ -559,8 +615,24 @@ public final class Re2
 
     private static Re2 compile(Slice pattern, Options options, TrinoScanPlan.Language scanPlanLanguage, boolean forceScanPlanHandoff)
     {
-        requireNonNull(options, "options is null");
-        return compile(pattern, options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.longestMatch(), scanPlanLanguage, forceScanPlanHandoff);
+        Re2 compiled = compile(pattern, options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.longestMatch(), scanPlanLanguage, forceScanPlanHandoff);
+        if (options.generateBytecode()) {
+            Re2 generated = CompiledScanRe2.create(compiled);
+            if (generated != null) {
+                return generated;
+            }
+        }
+        return compiled;
+    }
+
+    /**
+     * Returns whether this compiled pattern has a class generated for it, which only
+     * {@link Options#setGenerateBytecode(boolean)} enables. Each operation of such a pattern that
+     * would run its specialized scan runs the generated class.
+     */
+    public boolean usesGeneratedBytecode()
+    {
+        return false;
     }
 
     /**
@@ -1511,7 +1583,7 @@ public final class Re2
      * the plan's {@link TrinoScanPlan#booleanPlan()}, resolved at compile time. Calls that report
      * positions never come here.
      */
-    private boolean findWithTrinoScanPlan(Slice input, byte strategy)
+    boolean findWithTrinoScanPlan(Slice input, byte strategy)
     {
         int length = input.length();
         if (ordinaryShortBooleanMatch && length <= MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES) {
@@ -2116,8 +2188,9 @@ public final class Re2
      * search starts on the plan with its own work budget, and one that hands off finds its
      * match on the ordinary engine.
      */
-    private long countUnanchoredTrinoScanMatches(Slice text, boolean asciiFolded)
+    long countUnanchoredTrinoScanMatches(Slice text, boolean asciiFolded)
     {
+        // CompiledScanRe2 copies this loop; keep in step.
         TrinoScanPlan plan = booleanPlans.trinoScanPlan();
         int[] groups = new int[2];
         int length = text.length();
@@ -2550,7 +2623,7 @@ public final class Re2
                 workspaces);
     }
 
-    private boolean matchInternal(
+    boolean matchInternal(
             Prog prog,
             Slice text,
             int contextStart,
@@ -2598,6 +2671,8 @@ public final class Re2
             MatchWorkspaces workspaces,
             boolean scanPlanSearch)
     {
+        // CompiledScanRe2.matchInternal makes the same checks and inverts the plan-route
+        // conditions below; keep in step.
         requireNonNull(text, "text is null");
         if (contextStart < 0 || contextEnd < contextStart || contextEnd > text.length() ||
                 start < contextStart || end < start || end > contextEnd) {
@@ -3519,5 +3594,139 @@ public final class Re2
             return;
         }
         out.writeBytes(bytes, offset, length);
+    }
+
+    /**
+     * A pattern whose case-sensitive scan plan was compiled to its own hidden class. Each call
+     * keeps the route it has without the class, decided once when the pattern compiles: one that
+     * would run the plan runs the generated class instead, and any other runs the inherited route.
+     * Short boolean calls that the interpreter hands to the ordinary engine to avoid its operation
+     * dispatch also stay on the generated class. A start-anchored plan runs its full plan rather
+     * than the save-free boolean plan, since the generated class guards each save with one branch
+     * on whether the caller asked for that group. Callers that never enable
+     * {@link Options#setGenerateBytecode(boolean)} never load this class.
+     */
+    private static final class CompiledScanRe2
+            extends Re2
+    {
+        private final CompiledRe2Scan scan;
+        // Whether the plan is start-anchored, so its attempt runs alone; otherwise it searches.
+        private final boolean anchored;
+        // Whether full-Slice find hands off to the ordinary engine, so it runs the capture-free
+        // search before the handoff.
+        private final boolean ordinaryHandoff;
+
+        private CompiledScanRe2(Re2 pattern, boolean anchored, boolean ordinaryHandoff, CompiledRe2Scan scan)
+        {
+            super(pattern);
+            this.scan = scan;
+            this.anchored = anchored;
+            this.ordinaryHandoff = ordinaryHandoff;
+        }
+
+        /**
+         * Returns a copy of {@code pattern} with a generated class, or {@code null} when the
+         * pattern is not eligible or the class cannot be generated. The declared type keeps
+         * verification of the base class from loading this class.
+         */
+        static Re2 create(Re2 pattern)
+        {
+            TrinoScanPlan plan = pattern.caseSensitiveTrinoScanPlan();
+            if (plan == null) {
+                return null;
+            }
+            // Full-Slice find hands off to the ordinary engine only when it reaches the plan.
+            boolean ordinaryHandoff = pattern.usesTrinoScanPlanForFindForDiagnostics() && pattern.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
+            CompiledRe2Scan scan;
+            try {
+                scan = TrinoScanKernelGenerator.generateCompiledRe2Scan(plan, ordinaryHandoff);
+            }
+            catch (RuntimeException | LinkageError ignored) {
+                // Linking the generator fails here only if a consumer excluded the classfile
+                // library, and defining the class can fail too; either leaves the pattern
+                // interpreted.
+                return null;
+            }
+            return new CompiledScanRe2(pattern, plan.isAnchoredStart(), ordinaryHandoff, scan);
+        }
+
+        @Override
+        public boolean usesGeneratedBytecode()
+        {
+            return true;
+        }
+
+        // Short boolean calls run the generated class rather than the ordinary engine.
+        @Override
+        boolean usesOrdinaryShortBooleanMatchForDiagnostics()
+        {
+            return false;
+        }
+
+        @Override
+        boolean findWithTrinoScanPlan(Slice input, byte strategy)
+        {
+            int length = input.length();
+            if (anchored) {
+                return scan.match(input, 0, length, false, null);
+            }
+            int result = ordinaryHandoff ? scan.searchBeforeHandoff(input) : scan.search(input, 0, length, 0, false, false, null);
+            return super.finishTrinoScanSearch(input, 0, length, result, Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
+        }
+
+        // The loop of Re2.countUnanchoredTrinoScanMatches; keep in step. A case-sensitive plan
+        // never counts ASCII-folded.
+        @Override
+        long countUnanchoredTrinoScanMatches(Slice text, boolean asciiFolded)
+        {
+            int[] groups = new int[2];
+            int length = text.length();
+            long count = 0;
+            int start = 0;
+            while (start < length) {
+                int result = scan.search(text, 0, length, start, false, false, groups);
+                if (!super.finishTrinoScanSearch(text, 0, length, result, Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES)) {
+                    break;
+                }
+                count++;
+                start = groups[1];
+            }
+            return count;
+        }
+
+        @Override
+        boolean findWithStartAnchoredTrinoScanPlan(TrinoScanPlan plan, Slice text, int contextStart, int contextEnd, int[] groups)
+        {
+            Arrays.fill(groups, -1);
+            return scan.match(text, contextStart, contextEnd, false, groups);
+        }
+
+        /**
+         * Runs the plan route of the base method on the generated class. Every other call,
+         * including an unanchored boolean search that the base method keeps on the ordinary
+         * engine, runs the base method.
+         */
+        @Override
+        boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
+        {
+            Anchor anchorMode = (anchor == null) ? Anchor.UNANCHORED : anchor;
+            // The inverse of the base method's plan-route conditions; keep in step.
+            if (prog != super.partialProg || end != contextEnd || (!anchored && groupOffsets == null && anchorMode == Anchor.UNANCHORED && super.ordinaryUnanchoredBooleanSearch)) {
+                return super.matchInternal(prog, text, contextStart, contextEnd, start, end, anchor, groupOffsets, workspaces);
+            }
+            // The same checks as the base method; keep in step.
+            requireNonNull(text, "text is null");
+            if (contextStart < 0 || contextEnd < contextStart || contextEnd > text.length() || start < contextStart || end < start || end > contextEnd) {
+                return false;
+            }
+            if (groupOffsets != null && (groupOffsets.length % 2) != 0) {
+                throw new IllegalArgumentException("groupOffsets length must be even: " + groupOffsets.length);
+            }
+            if (anchored) {
+                return start == contextStart && scan.match(text, contextStart, contextEnd, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
+            }
+            int result = scan.search(text, contextStart, contextEnd, start, anchorMode != Anchor.UNANCHORED, anchorMode == Anchor.ANCHOR_BOTH, groupOffsets);
+            return super.finishTrinoScanSearch(text, contextStart, contextEnd, result, anchorMode, groupOffsets, workspaces);
+        }
     }
 }
