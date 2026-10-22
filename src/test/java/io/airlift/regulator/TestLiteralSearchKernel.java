@@ -31,15 +31,15 @@ public class TestLiteralSearchKernel
         Slice input = offsetSlice(new byte[] {'x', 'a', 'b', 'c', 'x', 'a', 'b', 'c', 'x'});
         LiteralSearchKernel kernel = kernel('a', 'b', 'c');
 
-        assertThat(kernel.find(input, 0, input.length())).isEqualTo(1);
-        assertThat(kernel.find(input, 2, input.length() - 2)).isEqualTo(5);
-        assertThat(kernel.find(input, 0, 3)).isNegative();
-        assertThat(kernel.find(input, 1, 3)).isEqualTo(1);
-        assertThat(kernel.find(input, 2, 3)).isNegative();
-        assertThat(kernel.find(input, 5, 3)).isEqualTo(5);
-        assertThat(kernel.find(input, 6, 3)).isNegative();
-        assertThat(kernel.find(input, input.length(), 0)).isNegative();
-        assertThat(kernel.find(input, 0, 0)).isNegative();
+        assertSearch(kernel, input, 0, input.length(), -1, 1);
+        assertSearch(kernel, input, 2, input.length() - 2, -1, 5);
+        assertSearch(kernel, input, 0, 3, -1, -1);
+        assertSearch(kernel, input, 1, 3, -1, 1);
+        assertSearch(kernel, input, 2, 3, -1, -1);
+        assertSearch(kernel, input, 5, 3, -1, 5);
+        assertSearch(kernel, input, 6, 3, -1, -1);
+        assertSearch(kernel, input, input.length(), 0, -1, -1);
+        assertSearch(kernel, input, 0, 0, -1, -1);
     }
 
     @Test
@@ -77,10 +77,8 @@ public class TestLiteralSearchKernel
         String dense = "aabx".repeat(256);
         Slice denseInput = offsetSlice((dense + "bba").getBytes(US_ASCII));
         LiteralSearchKernel denseKernel = kernel('b', 'b', 'a');
-        assertThat(denseKernel.kmpHandoffOffsetForDiagnostics(denseInput, 0, denseInput.length())).isEqualTo(-1);
-        assertThat(denseKernel.find(denseInput, 0, denseInput.length())).isEqualTo(dense.length());
-        assertThat(denseKernel.kmpHandoffOffsetForDiagnostics(denseInput, 0, dense.length())).isEqualTo(-1);
-        assertThat(denseKernel.find(denseInput, 0, dense.length())).isNegative();
+        assertSearch(denseKernel, denseInput, 0, denseInput.length(), -1, dense.length());
+        assertSearch(denseKernel, denseInput, 0, dense.length(), -1, -1);
 
         // Long partial matches switch to KMP early, counted from where the search starts: each
         // candidate compares eight bytes and covers one, so the tenth passes the budget
@@ -88,16 +86,20 @@ public class TestLiteralSearchKernel
         String periodicLiteral = "aaaaaaaba";
         Slice periodicInput = offsetSlice((periodic + periodicLiteral).getBytes(US_ASCII));
         LiteralSearchKernel periodicKernel = kernel(periodicLiteral.toCharArray());
-        assertThat(periodicKernel.kmpHandoffOffsetForDiagnostics(periodicInput, 0, periodicInput.length())).isEqualTo(10);
-        assertThat(periodicKernel.kmpHandoffOffsetForDiagnostics(periodicInput, 512, periodicInput.length() - 512)).isEqualTo(522);
-        assertThat(periodicKernel.find(periodicInput, 0, periodicInput.length())).isEqualTo(periodic.length());
+        assertSearch(periodicKernel, periodicInput, 0, periodicInput.length(), 10, periodic.length());
+        assertSearch(periodicKernel, periodicInput, 512, periodicInput.length() - 512, 522, periodic.length());
+
+        // Text without candidates counts as covered, including the text the contains search skips
+        // before it verifies its first candidate, so the 83rd candidate passes the budget
+        String skipped = "x".repeat(512);
+        Slice skippedInput = offsetSlice((skipped + periodic + periodicLiteral).getBytes(US_ASCII));
+        assertSearch(periodicKernel, skippedInput, 0, skippedInput.length(), 595, skipped.length() + periodic.length());
 
         // Four possible starts, fewer than a word, exercise only the byte-at-a-time loop
         String tailLiteral = "a".repeat(38) + "ba";
         Slice tailInput = offsetSlice(("aaa" + tailLiteral).getBytes(US_ASCII));
         LiteralSearchKernel tailKernel = kernel(tailLiteral.toCharArray());
-        assertThat(tailKernel.kmpHandoffOffsetForDiagnostics(tailInput, 0, tailInput.length())).isEqualTo(2);
-        assertThat(tailKernel.find(tailInput, 0, tailInput.length())).isEqualTo(3);
+        assertSearch(tailKernel, tailInput, 0, tailInput.length(), 2, 3);
     }
 
     @Test
@@ -139,7 +141,25 @@ public class TestLiteralSearchKernel
             assertThat(kernel.find(input, offset, length))
                     .as("iteration %s, offset %s, length %s, literal length %s", iteration, offset, length, literalLength)
                     .isEqualTo(expected);
+            if (literalLength >= 2) {
+                assertThat(kernel.findContains(input, offset, length))
+                        .as("contains iteration %s, offset %s, length %s, literal length %s", iteration, offset, length, literalLength)
+                        .isEqualTo(expected);
+            }
         }
+    }
+
+    /**
+     * Requires {@link LiteralSearchKernel#find} and {@link LiteralSearchKernel#findContains} to
+     * switch to KMP at {@code kmpHandoff}, or not at all when it is -1, and to find the literal at
+     * {@code match}, or nowhere when it is -1.
+     */
+    private static void assertSearch(LiteralSearchKernel kernel, Slice input, int offset, int length, int kmpHandoff, int match)
+    {
+        assertThat(kernel.kmpHandoffOffsetForDiagnostics(input, offset, length)).isEqualTo(kmpHandoff);
+        assertThat(kernel.containsKmpHandoffOffsetForDiagnostics(input, offset, length)).isEqualTo(kmpHandoff);
+        assertThat(kernel.find(input, offset, length)).isEqualTo(match);
+        assertThat(kernel.findContains(input, offset, length)).isEqualTo(match);
     }
 
     private static void assertCandidateHeavySearch(byte[] literal, byte fill)
