@@ -794,7 +794,8 @@ public class TestTrinoRegexpLanguage
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)ß{2}")).extract(sharpSInput)).isNull();
         assertThat(joniMatchBoundaries(joniPattern(utf8Slice("(?i)ß{2}")), sharpSInput)).containsExactly(new MatchBoundary(0, 4));
         // Any other construct ends the run, even one that matches only the empty string or cannot
-        // match at all, and so does any change of case-insensitivity.
+        // match at all, and so does any change of case-insensitivity. An isolated option followed
+        // by | is a group holding alternation.
         for (String[] example : List.of(
                 new String[] {"(?i)s{2}ss", "sßs"},
                 new String[] {"(?i)f{2}i", "fﬁ"},
@@ -803,7 +804,8 @@ public class TestTrinoRegexpLanguage
                 new String[] {"(?i)f(?:f|[a&&b])", "ﬀ"},
                 new String[] {"(?i)f\\Bf", "ﬀ"},
                 new String[] {"(?i)s(?-i)(?i)s", "ß"},
-                new String[] {"(?i)s(s)", "ß"})) {
+                new String[] {"(?i)s(s)", "ß"},
+                new String[] {"(?i)s(?s)s|x", "ß"})) {
             assertNoMatchMatchesJoni(example[0], example[1]);
         }
     }
@@ -1101,6 +1103,25 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("[Ss]|x", "ſ", false),
                 new MatchCase("(?i)k|x", "K", true),
                 new MatchCase("(?i:(?-i:[Kk])|(?-i:[Xx]){1})", "K", false),
+                // An isolated option "makes a group to the next ')' or end of the pattern", so a
+                // later | separates alternatives inside that group, after the text before the flag:
+                // ab(?i)c|def is ab(?i:c|def).
+                // https://github.com/kkos/oniguruma/blob/4ef89209a239c1aea328cf13c05a2807e5c146d1/doc/RE
+                new MatchCase("ab(?i)|cd", "CD", false),
+                new MatchCase("x|ab(?i)c|def|gh", "GH", false),
+                new MatchCase("x|ab(?i)c|def|gh", "abGH", true),
+                new MatchCase("x|ab(?i)c|def|gh", "X", false),
+                new MatchCase("(a(?i)b|c)d", "Cd", false),
+                new MatchCase("(a(?i)b|c)d", "aCD", false),
+                new MatchCase("(?:a(?i)b|c)d", "Cd", false),
+                new MatchCase("(?:a(?i)b|c)d", "aCD", false),
+                new MatchCase("(?:a(?i)b|c){2}", "aBaC", true),
+                new MatchCase("(?i)a(?-i)b|c", "c", false),
+                new MatchCase("(?i)a(?-i)b|c", "AC", false),
+                new MatchCase("a(?x)b|c d", "cd", false),
+                new MatchCase("a(?x)b|c d", "acd", true),
+                new MatchCase("a(?s)b|.", "\n", false),
+                new MatchCase("a(?s)b|.", "a\n", true),
                 new MatchCase("\\u0041+", "AAA", true),
                 new MatchCase("a{01,003}", "aa", true),
                 new MatchCase("(?'name'x)", "x", true),
