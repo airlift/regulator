@@ -176,6 +176,11 @@ final class CaseFolding
         return multiCharacterFolds && fullCaseFold().requiresFullCaseFold(runes);
     }
 
+    int maximumTokenLength()
+    {
+        return fullCaseFold().maximumTokenLength();
+    }
+
     UnicodeFullCaseFold.ByteLength byteLength(int[] runes)
     {
         return fullCaseFold().byteLength(runes);

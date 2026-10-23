@@ -22,8 +22,10 @@ import org.junit.jupiter.api.Timeout;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
@@ -90,6 +92,19 @@ public class TestRegexpParser
         }
         // Rust's symmetric difference, again and again with [^a], a nearly full set.
         assertParseAllocationPerByte("[" + runes + "~~[^a]".repeat(14_000) + "]", 500, Frontend.RUST);
+    }
+
+    @Test
+    public void testParsedPatternsSimplifyWithoutRecopying()
+    {
+        // About 200 KB each: deeply nested concatenations, and two alternatives sharing a long
+        // prefix, which factoring removes one class at a time.
+        String prefix = "[ac]".repeat(25_000);
+        for (String pattern : List.of(
+                "a(?:".repeat(40_000) + "b" + ")".repeat(40_000),
+                prefix + "x|" + prefix + "y")) {
+            assertParseAllocationPerByte(pattern, 1_000, Frontend.values());
+        }
     }
 
     @Test
@@ -169,6 +184,24 @@ public class TestRegexpParser
         assertThat(re.op()).isEqualTo(RegexpOp.CHAR_CLASS);
         assertThat(re.charClass().contains('a')).isTrue();
         assertThat(re.charClass().contains('b')).isTrue();
+    }
+
+    @Test
+    public void testFactoringRemovesClassLeftByRemovedPrefix()
+    {
+        // Removing the shared a(?i:x) leaves [bc] first in each alternative, which the next round
+        // removes in turn.
+        Slice pattern = Slices.utf8Slice("(?:a(?i:x)b|a(?i:x)c)y|(?:a(?i:x)b|a(?i:x)c)z");
+        for (Map.Entry<Slice, String> testCase : List.of(
+                entry(pattern, "cat{lit{a}cat{litfold{x}cat{cc{0x62-0x63}cc{0x79-0x7a}}}}"),
+                entry(Slices.utf8Slice("(?:a(?i:x)b|a(?i:x)c)y|(?:a(?i:x)b|a(?i:x)c)"), "cat{lit{a}cat{litfold{x}cat{cc{0x62-0x63}alt{lit{y}emp{}}}}}"))) {
+            for (Frontend frontend : Frontend.values()) {
+                assertThat(RegexpDump.dump(frontend.parse(testCase.getKey()))).as(frontend.name()).isEqualTo(testCase.getValue());
+            }
+        }
+        // Compiling simplifies the parsed tree again in full mode; the program's size checks that
+        // second pass.
+        assertThat(Compiler.compile(RegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp()).size()).isEqualTo(8);
     }
 
     @Test

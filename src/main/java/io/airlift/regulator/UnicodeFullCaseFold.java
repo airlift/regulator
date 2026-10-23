@@ -127,6 +127,14 @@ final class UnicodeFullCaseFold
         return data.multiCharacterTokens.subList(start, end);
     }
 
+    /**
+     * Returns the length of the longest folded sequence of a multi-character token.
+     */
+    int maximumTokenLength()
+    {
+        return data.maximumTokenLength;
+    }
+
     boolean requiresFullCaseFold(int[] runes)
     {
         int[] folded = fold(runes);
@@ -283,6 +291,7 @@ final class UnicodeFullCaseFold
         private final int[] tokenMinimumLengths;
         private final int[] tokenMaximumLengths;
         private final CharClass allSourceRunes;
+        private final int maximumTokenLength;
 
         private Data(MultiCharacterMappings multiCharacterFolds, List<FoldToken> multiCharacterTokens)
         {
@@ -293,8 +302,10 @@ final class UnicodeFullCaseFold
             tokenFirstRunes = new int[tokens.length];
             tokenMinimumLengths = new int[tokens.length];
             tokenMaximumLengths = new int[tokens.length];
+            int maximumTokenLength = 0;
             for (int index = 0; index < tokens.length; index++) {
                 tokenFirstRunes[index] = tokens[index].foldedRunes()[0];
+                maximumTokenLength = Math.max(maximumTokenLength, tokens[index].foldedRunes().length);
                 tokenMinimumLengths[index] = minimumUtf8Length(tokens[index].sourceRunes());
                 tokenMaximumLengths[index] = maximumUtf8Length(tokens[index].sourceRunes());
             }
@@ -304,6 +315,7 @@ final class UnicodeFullCaseFold
                 sources.addRange(rune, rune);
             }
             allSourceRunes = sources.toCharClass();
+            this.maximumTokenLength = maximumTokenLength;
         }
 
         private int[] mapping(int rune)
