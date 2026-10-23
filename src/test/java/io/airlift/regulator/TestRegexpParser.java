@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -138,27 +139,57 @@ public class TestRegexpParser
     }
 
     @Test
+    public void testNestedAlternationsFactorOnce()
+    {
+        // Roughly 140 to 550 KB each: alternations nested in their last alternative, whose
+        // alternatives stay apart or merge into one class that grows level after level, or whose
+        // innermost is a long case-insensitive literal.
+        int depth = 20_000;
+        for (String pattern : List.of(
+                "a+|(?:".repeat(depth) + "b+" + ")".repeat(depth),
+                "a|(?:".repeat(depth) + "[" + separateRunes(0x10000, 2, depth) + "]" + ")".repeat(depth),
+                "(?i)" + "a+|(?:".repeat(depth / 2) + "b".repeat(100_000) + ")".repeat(depth / 2),
+                "a+|(?:(?:".repeat(depth) + "b+" + ")(?:))(?:)".repeat(depth),
+                "a+|(?:(?:".repeat(depth) + "b+" + ")[^\\s\\S]*)[^\\s\\S]*".repeat(depth),
+                classesRevisitedAtEveryLevel(8_192))) {
+            assertParseAllocationPerByte(pattern, 1_000, Frontend.values());
+        }
+        // Trino isolates a lone inline flag in a group of its own, nested once per alternative.
+        for (String pattern : List.of(
+                "(?i)ss|".repeat(30_000) + "x",
+                "(?i)|".repeat(40_000) + "x",
+                "(?i)(a)|".repeat(25_000) + "x")) {
+            assertParseAllocationPerByte(pattern, 1_000, Frontend.TRINO);
+        }
+    }
+
+    @Test
     public void testMaximumCapturesAreStackSafe()
             throws InterruptedException
     {
         int captureCount = 10_000;
         String pattern = "(".repeat(captureCount) + "a" + ")".repeat(captureCount) + "{2}";
-        AtomicReference<ParseResult> result = new AtomicReference<>();
-        AtomicReference<Throwable> failure = new AtomicReference<>();
-        Thread parserThread = new Thread(null, () -> {
-            try {
-                result.set(RegexpParser.parse(Slices.wrappedBuffer(pattern.getBytes(StandardCharsets.UTF_8)), 0));
-            }
-            catch (Throwable throwable) {
-                failure.set(throwable);
-            }
-        }, "regexp-parser-small-stack", 256 * 1024);
+        ParseResult result = onSmallStack(() -> RegexpParser.parse(Slices.wrappedBuffer(pattern.getBytes(StandardCharsets.UTF_8)), 0));
+        assertThat(result.capturingGroupCount()).isEqualTo(captureCount);
+    }
 
-        parserThread.start();
-        parserThread.join();
-
-        assertThat(failure.get()).isNull();
-        assertThat(result.get().capturingGroupCount()).isEqualTo(captureCount);
+    @Test
+    public void testNestedAlternativesAreStackSafe()
+            throws InterruptedException
+    {
+        // Alternations nested in concatenations past the depth where simplification walks
+        // iteratively. Each is compiled once first, which loads and initializes the classes
+        // compilation uses, so that only the compile itself runs on the small stack.
+        Slice pattern = Slices.utf8Slice("(?:x|y(?:".repeat(300) + "z" + "))".repeat(300));
+        List<Supplier<Object>> compilers = List.of(
+                () -> Re2.compile(pattern),
+                () -> TrinoRegexp.compile(pattern),
+                () -> JavaRegexp.compile(pattern),
+                () -> RustRegexp.compile(pattern, RustRegexp.Options.defaults().setNestLimit(10_000)));
+        for (Supplier<Object> compiler : compilers) {
+            assertThat(compiler.get()).isNotNull();
+            assertThat(onSmallStack(compiler)).isNotNull();
+        }
     }
 
     @Test
@@ -232,6 +263,18 @@ public class TestRegexpParser
         // Compiling simplifies the parsed tree again in full mode; the program's size checks that
         // second pass.
         assertThat(Compiler.compile(RegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp()).size()).isEqualTo(8);
+    }
+
+    @Test
+    public void testFactoringRevisitsMergedClassThatTookInNoRunes()
+    {
+        // The innermost a|c merges into [ac], and the a after it merges in without adding runes, yet
+        // the merged class is still reconsidered in the enclosing alternation, where it factors
+        // with [ac]x.
+        Slice pattern = Slices.utf8Slice("(?:(?:zz|a|c)|a|[ac]x|ww)|vv");
+        for (Frontend frontend : Frontend.values()) {
+            assertThat(RegexpDump.dump(frontend.parse(pattern))).as(frontend.name()).isEqualTo("alt{str{zz}cat{cc{0x61 0x63}alt{emp{}lit{x}}}str{ww}str{vv}}");
+        }
     }
 
     @Test
@@ -398,6 +441,28 @@ public class TestRegexpParser
         }
     }
 
+    // Runs the action on a thread with a 256 KB stack.
+    private static <T> T onSmallStack(Supplier<T> action)
+            throws InterruptedException
+    {
+        AtomicReference<T> result = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread thread = new Thread(null, () -> {
+            try {
+                result.set(action.get());
+            }
+            catch (Throwable throwable) {
+                failure.set(throwable);
+            }
+        }, "regexp-parser-small-stack", 256 * 1024);
+
+        thread.start();
+        thread.join();
+
+        assertThat(failure.get()).isNull();
+        return result.get();
+    }
+
     private static void assertParsesInEveryFrontend(String pattern)
     {
         Slice slice = Slices.utf8Slice(pattern);
@@ -440,6 +505,16 @@ public class TestRegexpParser
         };
 
         abstract Regexp parse(Slice pattern);
+    }
+
+    // Two classes of one size and range count that differ in their last rune, followed by
+    // alternatives that merge into the first class without changing it at each enclosing level.
+    private static String classesRevisitedAtEveryLevel(int depth)
+    {
+        String shared = separateRunes(0x20000, 2, depth - 1);
+        String first = "[" + shared + Character.toString(0x20000 + 2 * (depth - 1)) + "]";
+        String second = "[" + shared + Character.toString(0x20000 + 2 * depth) + "]";
+        return "(?:".repeat(depth) + first + "x|" + second + (")|" + Character.toString(0x20000)).repeat(depth);
     }
 
     // Runes no two of which are adjacent, so each is its own range in a class.
