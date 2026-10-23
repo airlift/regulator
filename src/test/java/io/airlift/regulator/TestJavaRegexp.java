@@ -185,6 +185,9 @@ public class TestJavaRegexp
                 new MatchCase("(?i)k", "K", Operation.MATCHES, false),
                 new MatchCase("(?iu)k", "K", Operation.MATCHES, true),
                 new MatchCase("(?iu)ß", "SS", Operation.MATCHES, false),
+                // The | after a directive still splits the whole pattern, so c stands alone;
+                // Trino's Joni reads a(?i)b|c as a(?i:b|c), which requires the a.
+                new MatchCase("a(?i)b|c", "C", Operation.MATCHES, true),
                 // Alternation preserves explicit and ASCII-only folded pairs, existing class
                 // ranges, and the full Unicode orbit of Unicode-folded literals.
                 new MatchCase("[Kk]|x", "K", Operation.MATCHES, false),

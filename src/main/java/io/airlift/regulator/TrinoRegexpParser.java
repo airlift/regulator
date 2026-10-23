@@ -216,6 +216,7 @@ final class TrinoRegexpParser
                 }
 
                 if (!inQuote && nextByte == ')') {
+                    closeIsolatedOptions(groups);
                     if (groups.size() == 1) {
                         break;
                     }
@@ -246,12 +247,7 @@ final class TrinoRegexpParser
                 }
 
                 if (!inQuote && nextByte == '(') {
-                    // A flag directive adds no atom; within a fully folded literal run, only a
-                    // change of case-insensitivity ends the run.
-                    GroupFrame opened = parseGroupStart(group.expression());
-                    if (opened != null) {
-                        groups.push(opened);
-                    }
+                    groups.push(parseGroupStart(group.expression()));
                     continue;
                 }
 
@@ -261,10 +257,27 @@ final class TrinoRegexpParser
                 }
             }
 
+            closeIsolatedOptions(groups);
             if (groups.size() != 1) {
                 throw error(RegexpParseErrorCode.MISSING_PAREN, errorArgAll());
             }
             return groups.pop().expression().build();
+        }
+
+        // Ends the groups opened by isolated options, such as (?i), at the end of their enclosing
+        // group or of the pattern. They close without restoring flags, because the enclosing
+        // group's ) restores them, or the pattern ends. Without alternation, their contents already
+        // stay in the enclosing sequence, so within a fully folded literal run only a change of
+        // case-insensitivity ends the run. A group holding alternation becomes one alternation,
+        // which ends the run.
+        private void closeIsolatedOptions(Deque<GroupFrame> groups)
+        {
+            while (groups.peek().isolatedOption()) {
+                ExpressionBuilder content = groups.pop().expression();
+                if (content.hasAlternation()) {
+                    groups.peek().expression().add(content.build(), foldCaseScope);
+                }
+            }
         }
 
         // The alternatives of one group, or of the whole pattern, written into a sequence. A
@@ -454,11 +467,12 @@ final class TrinoRegexpParser
                 int groupFlags,
                 boolean capturing,
                 int captureIndex,
-                Slice name)
+                Slice name,
+                boolean isolatedOption)
         {
             static GroupFrame root(int flags)
             {
-                return new GroupFrame(new ExpressionBuilder(flags), flags, flags, false, -1, null);
+                return new GroupFrame(new ExpressionBuilder(flags), flags, flags, false, -1, null, false);
             }
         }
 
@@ -946,15 +960,17 @@ final class TrinoRegexpParser
                         throw error(RegexpParseErrorCode.MISSING_PAREN, errorArgAll());
                     }
                     if (peekByte() == ')') {
-                        // Directive: update flags for remainder of the current parse scope.
+                        // An isolated option opens a noncapturing group that runs to the end of
+                        // its enclosing group or the pattern, so a later | separates alternatives
+                        // inside it, after the text before the flag: ab(?i)c|def is ab(?i:c|def).
                         consumeByte(')');
-                        return null;
+                        return new GroupFrame(new ExpressionBuilder(enclosing, flags), saved, groupFlags, false, -1, null, true);
                     }
                     if (peekByte() != ':') {
                         throw error(RegexpParseErrorCode.BAD_PERL_OP, errorArgAtCurrent());
                     }
                     consumeByte(':');
-                    return new GroupFrame(new ExpressionBuilder(enclosing, flags), saved, groupFlags, false, -1, null);
+                    return new GroupFrame(new ExpressionBuilder(enclosing, flags), saved, groupFlags, false, -1, null, false);
                 }
             }
 
@@ -963,7 +979,7 @@ final class TrinoRegexpParser
                 captureIndex = capturingGroupCount;
             }
             ExpressionBuilder expression = capturing ? new ExpressionBuilder(flags) : new ExpressionBuilder(enclosing, flags);
-            return new GroupFrame(expression, groupFlags, groupFlags, capturing, captureIndex, name);
+            return new GroupFrame(expression, groupFlags, groupFlags, capturing, captureIndex, name, false);
         }
 
         private int parseInlineFlags(int base, int groupStart)

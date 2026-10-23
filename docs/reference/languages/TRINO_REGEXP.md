@@ -46,6 +46,13 @@ the matcher's `start()` returns byte offset `4`.
 | Escapes | Trino quoting and escape forms that identify Unicode code points |
 | Inline flags | `i`, `m`, `s`, and `x`, including scoped forms |
 
+As in Joni, a flag written alone, such as `(?i)`, which Oniguruma calls an
+isolated option, opens a group that runs to the end of its enclosing group or of
+the pattern. A later `|` separates alternatives inside that group, so the text
+before the flag is required in each: `ab(?i)c|def` means `ab(?i:c|def)` and
+matches `abDEF` but not `def`. Java's `Pattern` instead reads it as
+`ab(?i:c)|(?i:def)`.
+
 Repetition counts are limited to 1,000. The default `$` assertion matches at
 the end of input or before one final LF, and multiline mode recognizes LF as
 the line terminator. Multiline `^` matches at the start of input and after an

@@ -114,6 +114,10 @@ public class TestRe2Match
         Re2 unscoped = Re2.compile(utf8("(?i)ab"), Re2.Options.defaults());
         assertThat(unscoped.matches(utf8("AB"))).isTrue();
 
+        // As in Perl, the | after a directive still splits the whole pattern, so c stands alone;
+        // Trino's Joni reads a(?i)b|c as a(?i:b|c), which requires the a.
+        assertThat(Re2.compile(utf8("a(?i)b|c"), Re2.Options.defaults()).matches(utf8("C"))).isTrue();
+
         assertThat(Re2.compile(utf8("(?-i)a"), Re2.Options.defaults()).matches(utf8("A"))).isFalse();
         assertThat(Re2.compile(utf8("(?i-m:a)"), Re2.Options.defaults()).matches(utf8("A"))).isTrue();
         assertThat(Re2.compile(utf8("(?i-i)a"), Re2.Options.defaults()).matches(utf8("A"))).isFalse();
