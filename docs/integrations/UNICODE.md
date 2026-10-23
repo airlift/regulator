@@ -18,7 +18,8 @@ it:
   `java.lang.Character`. Their categories, scripts, blocks, binary properties,
   and `java...` properties are the database's values combined as the JDK's
   `Pattern` and `Character` code combines them, under the JDK's names and
-  aliases.
+  aliases. Trino's POSIX names instead use the definitions of Trino's pinned
+  Joni, as Pinned Unicode Properties in `REGULATOR_DECISIONS.md` records.
 - Java's `\N{name}` accepts the names of `Character.codePointOf`, built from
   the database's character names and blocks by the JDK's rule.
 - Rust properties use the regex crate's names and loose matching, built from
@@ -41,17 +42,17 @@ results, and moves to a new Unicode version only through an explicit,
 reviewed regeneration.
 
 Trino uses Joni with `Syntax.Java`, but Joni/jcodings bundles fixed Unicode
-tables. Regulator follows the JDK's property names and the pinned database's
-data, not that table version.
+tables. Regulator uses the pinned database's data rather than that table
+version.
 
 ## Differences from the JDK
 
-Java and Trino property membership uses the JDK's formulas over the pinned
-database. Property membership, Java's character names, and the case
-conversions that normalize property and character names therefore agree with
-`Character`, `String`, and `Pattern` on the JDK's own Unicode version, which
-the `Character` javadoc names: Unicode 16.0 for Java 25 and 17.0 for Java 26.
-They differ for:
+Java and Trino property membership, other than Trino's POSIX names, uses the
+JDK's formulas over the pinned database. Property membership, Java's character
+names, and the case conversions that normalize property and character names
+therefore agree with `Character`, `String`, and `Pattern` on the JDK's own
+Unicode version, which the `Character` javadoc names: Unicode 16.0 for Java 25
+and 17.0 for Java 26. They differ for:
 
 - characters Unicode assigned after the JDK's version, and names it added,
   such as the Unicode 18.0 scripts Jurchen and Seal and their blocks, and the
@@ -107,7 +108,8 @@ The package-private `UnicodeGroups` registry in `io.airlift.regulator` exposes
 immutable `CharClass` values to the parser and character-class builder. It
 holds the Unicode lookups every language shares, such as General_Category
 values by their Unicode names; each language resolves its own property names
-to them in its own class, such as `JavaUnicodeProperties` for Java and Trino.
+to them in its own class, such as `JavaUnicodeProperties` for Java and Trino;
+Trino's POSIX names resolve in `TrinoRegexpParser`.
 
 Property construction follows this flow:
 
@@ -148,7 +150,8 @@ with a comment citing the JDK.
 ### Property names and aliases
 
 Property-name parsing is language metadata rather than Unicode data. Java and
-Trino spellings resolve through `JavaUnicodeProperties.lookup`;
+Trino spellings resolve through `JavaUnicodeProperties.lookup`, except
+Trino's POSIX names, which follow Joni's definitions;
 `RegexpParser.lookupUnicodeGroup` applies RE2's exact category and long script
 name rules using the registry's raw values. Rust names come from
 `RustUnicodePropertyTables`, built from the database's property and value

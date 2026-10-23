@@ -110,11 +110,22 @@ construction fails.
   RE2 Unicode Property Groups describes. Java and Trino layer the JDK's names
   on it: categories with their long names and `LC`, `LD`, and `Cn`, scripts
   with their ISO 15924 codes, blocks with the JDK's identifiers, the `In`
-  form, binary properties, `java...` properties, and POSIX classes; Java also
-  layers the `Is`, `gc=`, `sc=`, and `blk=` forms. Each JDK property is the
-  JDK's own computation over the database, as Language Authorities describes,
-  and a JDK choice that is not Unicode data is a constant citing the JDK. Rust
-  layers the regex crate's names on it, as Rust Frontend describes.
+  form, binary properties, and `java...` properties; Java also layers the
+  `Is`, `gc=`, `sc=`, and `blk=` forms and its POSIX classes. Each JDK
+  property is the JDK's own computation over the database, as Language
+  Authorities describes, and a JDK choice that is not Unicode data is a
+  constant citing the JDK. Rust layers the regex crate's names on it, as Rust
+  Frontend describes.
+- Trino's POSIX names, such as `\p{Alpha}` and `[[:alpha:]]`, use the
+  definitions of Trino's pinned Joni over the database, such as Alphabetic
+  for alpha. Pinned Joni's bracket punct is Unicode punctuation alone, so
+  `[[:punct:]]` rejects ASCII symbols such as `$` that POSIX `punct` includes
+  and a user expects it to match. That omission is a bug, as Trino
+  Compatibility Adapter describes, so the Trino language adds the nine ASCII
+  symbols ``$+<=>^`|~``, as modern Joni does from 2.1.14; non-ASCII symbols
+  stay out, as in both Jonis. `\p{Word}` and `[[:word:]]` keep pinned Joni's
+  definition as intended behavior, without the Join_Control that modern Joni
+  adds from 2.2.7; Oniguruma's `doc/RE` gives the same definition.
 - Properties are built lazily from the database's ranges into immutable
   `CharClass` values and cached by canonical identity. Matching uses only the
   resulting ranges and compiled instructions.
@@ -137,20 +148,22 @@ construction fails.
 
 Java and Trino properties, word boundaries, and name normalization, and Java's
 character names, previously came from the running JVM's `Character` and
-`String` APIs, so their results changed with each JDK upgrade. They
-now agree with the JDK at every code point its own Unicode version assigns,
-16.0 on Java 25 and 17.0 on Java 26, apart from two changes Unicode 17.0 made
-to older characters: U+0295 moved from `Ll` to `Lo`, and 689 code points that
-are not emoji, such as U+2605 BLACK STAR, lost Extended_Pictographic.
+`String` APIs, so their results changed with each JDK upgrade. Except for
+Trino's POSIX names, they now agree with the JDK at every code point its own
+Unicode version assigns, 16.0 on Java 25 and 17.0 on Java 26, apart from two
+changes Unicode 17.0 made to older characters: U+0295 moved from `Ll` to `Lo`,
+and 689 code points that are not emoji, such as U+2605 BLACK STAR, lost
+Extended_Pictographic.
 Name case conversions agree where their input and output contain only
 characters assigned in the JDK's Unicode version; Unicode 18.0 also uppercases
 some older characters to newer ones, such as U+0277 to U+A7DD, but neither is
 ASCII, so no name resolves differently. Characters and names Unicode added
 after the JDK's version, such as the Unicode 18.0 scripts Jurchen and Seal and
 the names of their characters, resolve only in Regulator. This agreement is of
-property membership, which uses the JDK's formulas over the pinned database.
-Java's accepted property spellings keep Regulator's existing rules, which are
-not identical to `Pattern`'s, and Trino's are Joni's ASCII-only names.
+property membership, which, outside Trino's POSIX names, uses the JDK's
+formulas over the pinned database. Java's accepted property spellings keep
+Regulator's existing rules, which are not identical to `Pattern`'s, and
+Trino's are Joni's ASCII-only names.
 
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.

@@ -31,6 +31,11 @@ import static io.airlift.regulator.RegexpParserSupport.addFoldedRangeLatin1;
 import static io.airlift.regulator.RegexpParserSupport.addGroup;
 import static io.airlift.regulator.RegexpParserSupport.decodeHexDigit;
 import static io.airlift.regulator.RegexpParserSupport.wouldExceedRepeatLimit;
+import static io.airlift.regulator.UnicodeGroups.binary;
+import static io.airlift.regulator.UnicodeGroups.cached;
+import static io.airlift.regulator.UnicodeGroups.codePoints;
+import static io.airlift.regulator.UnicodeGroups.generalCategory;
+import static io.airlift.regulator.UnicodeGroups.union;
 import static java.util.Objects.requireNonNull;
 
 final class TrinoRegexpParser
@@ -1387,6 +1392,9 @@ final class TrinoRegexpParser
 
             String name = new String(bytes, nameStart, nameEnd - nameStart, StandardCharsets.US_ASCII);
             CharClass characterClass = posixCharClass(name);
+            if (characterClass == null) {
+                throw error(RegexpParseErrorCode.BAD_CHAR_CLASS, Slices.wrappedBuffer(bytes, startIndex, index - startIndex));
+            }
             addGroup(characterClassBuilder, characterClass, negate ? -1 : 1, parseFlags, caseFolding);
             rejectDashAfterClassItem(startIndex);
             return true;
@@ -1411,34 +1419,50 @@ final class TrinoRegexpParser
 
         private static CharClass posixCharClass(String name)
         {
-            String property = switch (name) {
-                case "alnum" -> "Alnum";
-                case "alpha" -> "Alphabetic";
-                case "blank" -> "Blank";
-                case "cntrl" -> "Control";
-                case "digit" -> "Digit";
-                case "graph" -> "Graph";
-                case "lower" -> "Lowercase";
-                case "print" -> "Print";
-                case "punct" -> "Punctuation";
-                case "space" -> "Whitespace";
-                case "upper" -> "Uppercase";
-                case "word" -> "Word";
-                case "xdigit" -> "HexDigit";
+            // A POSIX bracket takes only the lowercase names of Joni's POSIX brackets. Its punct adds
+            // the nine ASCII symbols Trino's pinned Joni omits, a bug modern Joni fixed in 2.1.14.
+            return switch (name) {
+                case "punct" -> cached("trino:BracketPunct", () -> union(
+                        generalCategory("P"),
+                        codePoints('$', '$', '+', '+', '<', '>', '^', '^', '`', '`', '|', '|', '~', '~')));
+                case "hexdigit" -> null;
+                default -> posixProperty(name);
+            };
+        }
+
+        // Joni's definitions of its POSIX names by lowercase name, including the hexdigit that only
+        // \p{...} takes. Java's sets for the same names do not apply.
+        private static CharClass posixProperty(String name)
+        {
+            return switch (name) {
+                case "alnum" -> cached("trino:Alnum", () -> union(binary("Alphabetic"), generalCategory("Nd")));
+                case "alpha" -> binary("Alphabetic");
+                case "blank" -> cached("trino:Blank", () -> union(generalCategory("Zs"), codePoints(0x09, 0x09)));
+                case "cntrl" -> generalCategory("Cc");
+                case "digit" -> generalCategory("Nd");
+                case "graph" -> posixGraph();
+                case "lower" -> binary("Lowercase");
+                case "print" -> cached("trino:Print", () -> union(posixGraph(), generalCategory("Zs")));
+                case "punct" -> generalCategory("P");
+                case "space" -> binary("White_Space");
+                case "upper" -> binary("Uppercase");
+                // Oniguruma's word characters, without the Join_Control that Joni 2.2.7 adds.
+                case "word" -> cached("trino:Word", () -> union(binary("Alphabetic"), generalCategory("M"), generalCategory("Nd"), generalCategory("Pc")));
+                case "xdigit" -> cached("trino:XDigit", () -> codePoints('0', '9', 'A', 'F', 'a', 'f'));
+                case "hexdigit" -> binary("Hex_Digit");
+                case "ascii" -> cached("trino:ASCII", () -> codePoints(0x00, 0x7F));
                 default -> null;
             };
-            if (property != null) {
-                CharClass characterClass = JavaUnicodeProperties.lookup("Is" + property);
-                if (characterClass != null) {
-                    return characterClass;
-                }
-            }
-            if (name.equals("ascii")) {
-                CharClassBuilder characterClassBuilder = new CharClassBuilder();
-                characterClassBuilder.addRange(0x00, 0x7F);
-                return characterClassBuilder.toCharClass();
-            }
-            throw new RegexpParseException(RegexpParseErrorCode.BAD_CHAR_CLASS, null, -1);
+        }
+
+        // Every code point that is not White_Space, Cc, Cs, or Cn.
+        private static CharClass posixGraph()
+        {
+            return cached("trino:Graph", () -> {
+                CharClassBuilder builder = UnicodeGroups.builder(union(binary("White_Space"), generalCategory("Cc"), generalCategory("Cs"), generalCategory("Cn")));
+                builder.negate();
+                return builder.toCharClass();
+            });
         }
 
         private int parseClassAtomRune(int flags)
@@ -1660,13 +1684,19 @@ final class TrinoRegexpParser
                     return null;
                 }
             }
+            String lowerCaseName = UnicodeCase.toLowerCase(name);
+            // Joni finds its POSIX names in any ASCII casing.
+            CharClass posixClass = posixProperty(lowerCaseName);
+            if (posixClass != null) {
+                return posixClass;
+            }
             if (name.length() >= 2 && UnicodeCase.equalsIgnoreCase(name.substring(0, 2), "In")) {
                 CharClass block = JavaUnicodeProperties.lookup("In" + name.substring(2));
                 if (block != null) {
                     return block;
                 }
             }
-            String javaProperty = canonicalJavaProperty(name);
+            String javaProperty = canonicalJavaProperty(lowerCaseName);
             if (javaProperty != null) {
                 return JavaUnicodeProperties.lookup(javaProperty);
             }
@@ -1698,9 +1728,9 @@ final class TrinoRegexpParser
             return null;
         }
 
-        private static String canonicalJavaProperty(String name)
+        private static String canonicalJavaProperty(String lowerCaseName)
         {
-            return switch (UnicodeCase.toLowerCase(name)) {
+            return switch (lowerCaseName) {
                 case "javalowercase" -> "javaLowerCase";
                 case "javauppercase" -> "javaUpperCase";
                 case "javaalphabetic" -> "javaAlphabetic";
