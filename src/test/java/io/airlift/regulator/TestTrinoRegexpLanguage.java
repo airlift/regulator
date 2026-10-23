@@ -838,6 +838,15 @@ public class TestTrinoRegexpLanguage
         assertThat(joniFind(utf8Slice("\\u12"), utf8Slice("\u0012"))).isTrue();
         assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice("[\\u]"))).isInstanceOf(RegexpParseException.class);
         assertThat(joniFind(utf8Slice("[\\u]"), utf8Slice("\u0000"))).isTrue();
+
+        // Pinned Joni wraps an octal escape above \377 to a byte, so \400 matches NUL; modern Joni rejects it.
+        assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice("\\400"))).isInstanceOf(RegexpParseException.class);
+        assertThat(joniFind(utf8Slice("\\400"), utf8Slice("\u0000"))).isTrue();
+
+        // Both Jonis wrap a decimal escape that overflows an int, so \\8589934593 is a backreference to group 1;
+        // Oniguruma reads it as digits.
+        assertThat(TrinoRegexp.compile(utf8Slice("(a)\\8589934593")).contains(utf8Slice("a8589934593"))).isTrue();
+        assertThat(joniFind(utf8Slice("(a)\\8589934593"), utf8Slice("aa"))).isTrue();
     }
 
     @Test
@@ -1057,6 +1066,13 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("\\A\\xg\\z", "\u0000g", true),
                 new MatchCase("\\k", "k", true),
                 new MatchCase("[\\101]", "A", true),
+                // Outside a class, a digit escape is a backreference when its number is at most 9 or at most the
+                // groups before it. Otherwise, and always in a class, it is an octal escape or the digit 8 or 9.
+                new MatchCase("(a)[\\1]", "a\u0001", true),
+                new MatchCase("[\\8]", "8", true),
+                new MatchCase("\\18", "\u00018", true),
+                new MatchCase("\\81", "81", true),
+                new MatchCase("(a)\\10", "a\u0008", true),
                 new MatchCase("[\\cA]", "\u0001", true),
                 // Joni keeps the low five bits after \c, maps \c? to DEL, and decodes an escape first.
                 new MatchCase("\\ca", "\u0001", true),
