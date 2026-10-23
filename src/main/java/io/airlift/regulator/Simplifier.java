@@ -13,8 +13,11 @@
  */
 package io.airlift.regulator;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 
@@ -61,7 +64,7 @@ final class Simplifier
     private static Regexp simplifyRecursive(Regexp regexp, Mode mode, CaseFolding caseFolding, int depth)
     {
         if (depth == MAX_RECURSIVE_DEPTH) {
-            return new SimplifyWalker(mode, caseFolding).walk(regexp, null);
+            return (Regexp) new SimplifyWalker(mode, caseFolding).walk(regexp, null);
         }
 
         int flags = regexp.parseFlags();
@@ -96,14 +99,20 @@ final class Simplifier
             case PLUS -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.PLUS, regexp);
             case QUEST -> simplifyUnary(flags, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1), UnaryOp.QUEST, regexp);
             case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifyRecursive(regexp.child(0), mode, caseFolding, depth + 1));
-            case CONCAT -> simplifyConcatRecursive(mode, caseFolding, flags, regexp, depth);
+            case CONCAT -> {
+                // Set up here rather than in a helper, so each nesting level takes no extra frame.
+                ConcatBuilder builder = new ConcatBuilder(caseFolding);
+                yield addConcatChildrenRecursive(builder, regexp, mode, caseFolding, depth) ? builder.build(flags, regexp) : Regexp.noMatch(flags);
+            }
             case ALTERNATE -> simplifyAlternateRecursive(mode, caseFolding, flags, regexp, depth);
             case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
         };
     }
 
+    // Values are simplified regexps, except that a concatenation directly inside another one
+    // yields a NestedConcat, which the enclosing concatenation adds in place.
     private static final class SimplifyWalker
-            extends RegexpWalker<Regexp>
+            extends RegexpWalker<Object>
     {
         private final Mode mode;
         private final CaseFolding caseFolding;
@@ -115,19 +124,21 @@ final class Simplifier
         }
 
         @Override
-        protected PreVisitResult<Regexp> preVisit(Regexp regexp, Regexp parentValue)
+        protected PreVisitResult<Object> preVisit(Regexp regexp, Object parentValue)
         {
+            // Children receive their parent node as their parent value.
             return new PreVisitResult<>(regexp, false);
         }
 
         @Override
-        protected Regexp shortVisit(Regexp regexp, Regexp parentValue)
+        protected Object shortVisit(Regexp regexp, Object parentValue)
         {
             throw new IllegalStateException("Simplifier should not short-visit");
         }
 
         @Override
-        protected Regexp postVisit(Regexp regexp, Regexp parentValue, Regexp preValue, List<Regexp> simplifiedChildren)
+        @SuppressWarnings("unchecked")
+        protected Object postVisit(Regexp regexp, Object parentValue, Object preValue, List<Object> simplifiedChildren)
         {
             int flags = regexp.parseFlags();
 
@@ -154,19 +165,28 @@ final class Simplifier
                 }
 
                 case CAPTURE -> {
-                    Regexp child = simplifiedChildren.getFirst();
+                    Regexp child = (Regexp) simplifiedChildren.getFirst();
                     yield child == regexp.child(0) ? regexp : Regexp.capture(flags, child, regexp.captureIndex(), regexp.name());
                 }
-                case STAR -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.STAR, regexp);
-                case PLUS -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.PLUS, regexp);
-                case QUEST -> simplifyUnary(flags, simplifiedChildren.getFirst(), UnaryOp.QUEST, regexp);
-                case REPEAT -> simplifyRepeat(mode, flags, regexp, simplifiedChildren.getFirst());
-                case CONCAT -> simplifyConcat(flags, regexp, simplifiedChildren, caseFolding);
-                case ALTERNATE -> simplifyAlternate(mode, caseFolding, flags, simplifiedChildren);
+                case STAR -> simplifyUnary(flags, (Regexp) simplifiedChildren.getFirst(), UnaryOp.STAR, regexp);
+                case PLUS -> simplifyUnary(flags, (Regexp) simplifiedChildren.getFirst(), UnaryOp.PLUS, regexp);
+                case QUEST -> simplifyUnary(flags, (Regexp) simplifiedChildren.getFirst(), UnaryOp.QUEST, regexp);
+                case REPEAT -> simplifyRepeat(mode, flags, regexp, (Regexp) simplifiedChildren.getFirst());
+                case CONCAT -> {
+                    if (parentValue instanceof Regexp parent && parent.op() == RegexpOp.CONCAT) {
+                        yield new NestedConcat(simplifiedChildren);
+                    }
+                    yield simplifyConcat(flags, regexp, simplifiedChildren, caseFolding);
+                }
+                // Only a concatenation's children can be nested concatenations.
+                case ALTERNATE -> simplifyAlternate(mode, caseFolding, flags, (List<Regexp>) (List<?>) simplifiedChildren);
                 case CHAR_CLASS -> simplifyCharClass(mode, flags, regexp.charClass(), regexp);
             };
         }
     }
+
+    // The simplified children of a concatenation inside another one, not yet added to it.
+    private record NestedConcat(List<Object> simplifiedChildren) {}
 
     private enum UnaryOp
     {
@@ -304,79 +324,365 @@ final class Simplifier
         return true;
     }
 
-    private static Regexp simplifyConcat(int flags, Regexp regexp, List<Regexp> children, CaseFolding caseFolding)
+    private static Regexp simplifyConcat(int flags, Regexp regexp, List<Object> simplifiedChildren, CaseFolding caseFolding)
     {
-        List<Regexp> simplifiedChildren = new ArrayList<>();
-        for (Regexp simplifiedChild : children) {
-            if (simplifiedChild.op() == RegexpOp.NO_MATCH) {
-                return Regexp.noMatch(flags);
-            }
-            if (simplifiedChild.op() == RegexpOp.EMPTY_MATCH) {
+        ConcatBuilder builder = new ConcatBuilder(caseFolding);
+        // Nested concatenations add their children in place, so a deep nesting is not flattened
+        // again at every level.
+        Deque<Iterator<Object>> enclosing = new ArrayDeque<>();
+        Iterator<Object> children = simplifiedChildren.iterator();
+        while (true) {
+            if (!children.hasNext()) {
+                if (enclosing.isEmpty()) {
+                    break;
+                }
+                builder.endNested();
+                children = enclosing.pop();
                 continue;
             }
-            if (simplifiedChild.op() == RegexpOp.CONCAT) {
-                simplifiedChildren.addAll(simplifiedChild.children());
+            Object child = children.next();
+            if (child instanceof NestedConcat nested) {
+                builder.beginNested();
+                enclosing.push(children);
+                children = nested.simplifiedChildren().iterator();
             }
-            else {
-                // Merge adjacent literal/literal-string nodes into a single literal string,
-                // matching upstream parse_test.cc expectations like (?:ab)(?:cd) -> str{abcd}.
-                Regexp merged = simplifiedChildren.isEmpty() ? null : tryMergeAdjacentLiterals(simplifiedChildren.getLast(), simplifiedChild, caseFolding);
-                if (merged != null) {
-                    simplifiedChildren.set(simplifiedChildren.size() - 1, merged);
-                }
-                else {
-                    simplifiedChildren.add(simplifiedChild);
-                }
+            else if (!builder.add((Regexp) child)) {
+                return Regexp.noMatch(flags);
             }
         }
-
-        if (simplifiedChildren.isEmpty()) {
-            return Regexp.emptyMatch(flags);
-        }
-        if (simplifiedChildren.size() == 1) {
-            return simplifiedChildren.getFirst();
-        }
-        if (sameChildren(regexp, simplifiedChildren)) {
-            return regexp;
-        }
-        return Regexp.concat(flags, simplifiedChildren);
+        return builder.build(flags, regexp);
     }
 
-    private static Regexp simplifyConcatRecursive(Mode mode, CaseFolding caseFolding, int flags, Regexp regexp, int depth)
+    // Adds the simplified children of a concatenation. A concatenation child within the recursion
+    // limit adds its own children in place, so a deep nesting is not flattened again at every level.
+    private static boolean addConcatChildrenRecursive(ConcatBuilder builder, Regexp regexp, Mode mode, CaseFolding caseFolding, int depth)
     {
-        List<Regexp> simplifiedChildren = new ArrayList<>();
-        for (Regexp child : regexp.children()) {
-            Regexp simplifiedChild = simplifyRecursive(child, mode, caseFolding, depth + 1);
-            if (simplifiedChild.op() == RegexpOp.NO_MATCH) {
-                return Regexp.noMatch(flags);
-            }
-            if (simplifiedChild.op() == RegexpOp.EMPTY_MATCH) {
-                continue;
-            }
-            if (simplifiedChild.op() == RegexpOp.CONCAT) {
-                simplifiedChildren.addAll(simplifiedChild.children());
-            }
-            else {
-                Regexp merged = simplifiedChildren.isEmpty() ? null : tryMergeAdjacentLiterals(simplifiedChildren.getLast(), simplifiedChild, caseFolding);
-                if (merged != null) {
-                    simplifiedChildren.set(simplifiedChildren.size() - 1, merged);
+        for (int childIndex = 0; childIndex < regexp.childCount(); childIndex++) {
+            Regexp child = regexp.child(childIndex);
+            if (child.op() == RegexpOp.CONCAT && depth + 1 < MAX_RECURSIVE_DEPTH) {
+                builder.beginNested();
+                if (!addConcatChildrenRecursive(builder, child, mode, caseFolding, depth + 1)) {
+                    return false;
                 }
-                else {
-                    simplifiedChildren.add(simplifiedChild);
+                builder.endNested();
+            }
+            else if (!builder.add(simplifyRecursive(child, mode, caseFolding, depth + 1))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Builds a simplified concatenation from simplified children. Empty matches are dropped, a
+     * child concatenation contributes its children, and adjacent literals with equal flags merge
+     * into one literal string, so {@code (?:ab)(?:cd)} becomes {@code str{abcd}} as in upstream
+     * parse_test.cc.
+     * <p>
+     * The Trino parser builds each run of fully folded literals, which full case folding matches
+     * as one sequence. Two fully folded runs stay apart whenever their joined text contains a
+     * multi-character fold, including one entirely within either run. Joining the copies of
+     * {@code (?i)s{2}} would match {@code ß}.
+     * <p>
+     * Merging literals one at a time would recopy the growing string for each literal. Instead the
+     * open run of literals collects its runes in one buffer and becomes a node once it closes.
+     * <p>
+     * A nested concatenation's children are added between {@link #beginNested()} and
+     * {@link #endNested()}, with the same result as simplifying the nested concatenation and then
+     * adding it: its first child does not merge with an earlier literal, but a lone remaining child
+     * merges as any child does, and a later literal can merge with its last child.
+     */
+    private static final class ConcatBuilder
+    {
+        // Slots of an enclosing concatenation's frame in the enclosing stack.
+        private static final int FRAME_NESTED_START = 0;
+        private static final int FRAME_RUN_INDEX = 1;
+        private static final int FRAME_RUN_NODES = 2;
+        private static final int FRAME_RUN_START = 3;
+        private static final int FRAME_RUN_END = 4;
+        private static final int FRAME_SIZE = 5;
+
+        private final CaseFolding caseFolding;
+        private final List<Regexp> children = new ArrayList<>();
+
+        // Runes of buffered literal runs. The open run, when buffered, ends the buffer, and each
+        // buffered run of an enclosing concatenation precedes the runes buffered inside it.
+        private int[] runes = new int[16];
+        private int runeCount;
+        // The open run is the last child, which a following literal with the same flags extends.
+        // It holds its first literal node until a second literal joins it, or until it encloses
+        // buffered runes; only then are its runes buffered.
+        private int runIndex = -1;
+        private int runNodes;
+        private int runStart = -1;
+        // Index of the current nested concatenation's first child; its children cannot merge
+        // with anything before it.
+        private int nestedStart;
+        // Per enclosing concatenation: its first child, and its open run's index, node count,
+        // buffer start and buffer end. The run's start is negative until it is buffered.
+        private int[] enclosing = new int[0];
+        private int enclosingCount;
+        // The enclosing concatenations from this frame on may hold runs not yet buffered; those
+        // before it hold none.
+        private int firstUnbufferedFrame;
+
+        private ConcatBuilder(CaseFolding caseFolding)
+        {
+            this.caseFolding = caseFolding;
+        }
+
+        // Returns false when the child never matches, which makes the whole concatenation a
+        // no-match.
+        boolean add(Regexp child)
+        {
+            switch (child.op()) {
+                case NO_MATCH -> {
+                    return false;
                 }
+                case EMPTY_MATCH -> {}
+                case CONCAT -> {
+                    closeOpenRun();
+                    children.addAll(child.children());
+                    if (isLiteralOrLiteralString(children.getLast())) {
+                        openRun();
+                    }
+                }
+                case LITERAL, LITERAL_STRING -> {
+                    if (runIndex >= 0 && children.get(runIndex).parseFlags() == child.parseFlags() &&
+                            !joinRequiresFullCaseFold(children.get(runIndex), runNodes, runStart, runeCount, child, 1, -1, -1)) {
+                        bufferOpenRun();
+                        appendRunes(child);
+                        runNodes++;
+                    }
+                    else {
+                        closeOpenRun();
+                        children.add(child);
+                        openRun();
+                    }
+                }
+                default -> {
+                    closeOpenRun();
+                    children.add(child);
+                }
+            }
+            return true;
+        }
+
+        void beginNested()
+        {
+            // The open run may absorb the nested concatenation's lone child. It stays unbuffered
+            // until a merge or nested buffering first needs it, and bufferEnclosingRuns then copies
+            // it ahead of the runes buffered inside.
+            if (enclosingCount + FRAME_SIZE > enclosing.length) {
+                enclosing = Arrays.copyOf(enclosing, Math.max(4 * FRAME_SIZE, enclosing.length * 2));
+            }
+            enclosing[enclosingCount + FRAME_NESTED_START] = nestedStart;
+            enclosing[enclosingCount + FRAME_RUN_INDEX] = runIndex;
+            enclosing[enclosingCount + FRAME_RUN_NODES] = runNodes;
+            enclosing[enclosingCount + FRAME_RUN_START] = runStart;
+            enclosing[enclosingCount + FRAME_RUN_END] = runeCount;
+            enclosingCount += FRAME_SIZE;
+            nestedStart = children.size();
+            runIndex = -1;
+            runNodes = 0;
+            runStart = -1;
+        }
+
+        void endNested()
+        {
+            enclosingCount -= FRAME_SIZE;
+            int enclosingRunIndex = enclosing[enclosingCount + FRAME_RUN_INDEX];
+            int enclosingRunNodes = enclosing[enclosingCount + FRAME_RUN_NODES];
+            int enclosingRunStart = enclosing[enclosingCount + FRAME_RUN_START];
+            int enclosingRunEnd = enclosing[enclosingCount + FRAME_RUN_END];
+            int nestedChildCount = children.size() - nestedStart;
+            nestedStart = enclosing[enclosingCount + FRAME_NESTED_START];
+            firstUnbufferedFrame = Math.min(firstUnbufferedFrame, enclosingCount / FRAME_SIZE);
+
+            if (nestedChildCount == 0) {
+                // Simplified to an empty match, which adds nothing.
+                runIndex = enclosingRunIndex;
+                runNodes = enclosingRunNodes;
+                runStart = enclosingRunStart;
+                return;
+            }
+            if (nestedChildCount == 1 && runIndex >= 0 && enclosingRunIndex >= 0 &&
+                    children.get(enclosingRunIndex).parseFlags() == children.get(runIndex).parseFlags() &&
+                    !joinRequiresFullCaseFold(
+                            children.get(enclosingRunIndex),
+                            enclosingRunNodes,
+                            enclosingRunStart,
+                            enclosingRunEnd,
+                            children.get(runIndex),
+                            runNodes,
+                            runStart,
+                            runeCount)) {
+                // A lone literal merges into the enclosing run. A buffered lone run follows that
+                // run's buffered runes directly, since buffering it buffered the enclosing runs
+                // first and nothing else stayed buffered since. Otherwise the lone literal, and the
+                // enclosing run if not yet buffered, are copied now.
+                Regexp literal = children.removeLast();
+                int loneNodes = runNodes;
+                boolean loneBuffered = runStart >= 0;
+                runIndex = enclosingRunIndex;
+                runNodes = enclosingRunNodes;
+                runStart = enclosingRunStart;
+                if (!loneBuffered) {
+                    bufferOpenRun();
+                    appendRunes(literal);
+                }
+                runNodes += loneNodes;
+                return;
+            }
+            // The enclosing run is no longer last. The nested concatenation's open run, if any,
+            // stays open: a later literal merges with the last child of a flattened concatenation.
+            closeRun(enclosingRunIndex, enclosingRunNodes, enclosingRunStart, enclosingRunEnd);
+        }
+
+        Regexp build(int flags, Regexp original)
+        {
+            closeOpenRun();
+            if (children.isEmpty()) {
+                return Regexp.emptyMatch(flags);
+            }
+            if (children.size() == 1) {
+                return children.getFirst();
+            }
+            if (sameChildren(original, children)) {
+                return original;
+            }
+            return Regexp.concat(flags, children);
+        }
+
+        // Whether joining two runs with equal flags would give text that needs full case folding.
+        // A run is its first node, or, once buffered (start not negative), its complete runes in
+        // the buffer from start to end.
+        //
+        // Checking the whole joined text at every join would cost the run's length per literal.
+        // The check is exact without that: the joined text needs full folding exactly when the
+        // left run does, the right run does, or a multi-character token crosses the boundary.
+        // Folding maps each rune on its own, so the fold of the joined text is the left fold
+        // followed by the right fold, and a crossing token of n folded runes reaches at most
+        // n - 1 of them on either side. Each rune folds to at least one rune, so those lie within
+        // the fold of the left run's last and the right run's first maximumTokenLength() - 1 runes,
+        // and a token in the fold of those runes is in the fold of the joined text. A run of
+        // several nodes was checked when it joined, so only a run of one node is checked whole,
+        // which happens at most twice per node: once as the right run and once as the left. A run
+        // no longer than the boundary window lies wholly within it and needs no check of its own.
+        private boolean joinRequiresFullCaseFold(Regexp left, int leftNodes, int leftStart, int leftEnd, Regexp right, int rightNodes, int rightStart, int rightEnd)
+        {
+            if ((left.parseFlags() & Regexp.FULL_CASE_FOLD) == 0) {
+                return false;
+            }
+            int reach = caseFolding.maximumTokenLength() - 1;
+            int leftLength = leftStart < 0 ? literalLength(left) : leftEnd - leftStart;
+            int rightLength = rightStart < 0 ? literalLength(right) : rightEnd - rightStart;
+            if ((leftNodes == 1 && leftLength > reach && caseFolding.requiresFullCaseFold(literalRunes(left))) ||
+                    (rightNodes == 1 && rightLength > reach && caseFolding.requiresFullCaseFold(literalRunes(right)))) {
+                return true;
+            }
+            int leftCount = Math.min(reach, leftLength);
+            int rightCount = Math.min(reach, rightLength);
+            int[] boundary = new int[leftCount + rightCount];
+            for (int offset = 0; offset < leftCount; offset++) {
+                int index = leftLength - leftCount + offset;
+                boundary[offset] = leftStart < 0 ? literalRune(left, index) : runes[leftStart + index];
+            }
+            for (int offset = 0; offset < rightCount; offset++) {
+                boundary[leftCount + offset] = rightStart < 0 ? literalRune(right, offset) : runes[rightStart + offset];
+            }
+            return caseFolding.requiresFullCaseFold(boundary);
+        }
+
+        private void openRun()
+        {
+            runIndex = children.size() - 1;
+            runNodes = 1;
+            runStart = -1;
+        }
+
+        private void bufferOpenRun()
+        {
+            if (runStart < 0) {
+                bufferEnclosingRuns();
+                runStart = runeCount;
+                appendRunes(children.get(runIndex));
             }
         }
 
-        if (simplifiedChildren.isEmpty()) {
-            return Regexp.emptyMatch(flags);
+        // Buffers the enclosing runs not yet buffered, outermost first, so that each precedes the
+        // runes of the concatenations nested in it. Each run is copied once, when the first rune
+        // after it is buffered; copying them after the nested runes would shift those at every
+        // level of a deep nesting.
+        private void bufferEnclosingRuns()
+        {
+            int frameCount = enclosingCount / FRAME_SIZE;
+            for (int frame = firstUnbufferedFrame; frame < frameCount; frame++) {
+                int frameStart = frame * FRAME_SIZE;
+                int frameRunIndex = enclosing[frameStart + FRAME_RUN_INDEX];
+                if (frameRunIndex >= 0 && enclosing[frameStart + FRAME_RUN_START] < 0) {
+                    enclosing[frameStart + FRAME_RUN_START] = runeCount;
+                    appendRunes(children.get(frameRunIndex));
+                    enclosing[frameStart + FRAME_RUN_END] = runeCount;
+                }
+            }
+            firstUnbufferedFrame = frameCount;
         }
-        if (simplifiedChildren.size() == 1) {
-            return simplifiedChildren.getFirst();
+
+        private void closeOpenRun()
+        {
+            closeRun(runIndex, runNodes, runStart, runeCount);
+            runIndex = -1;
         }
-        if (sameChildren(regexp, simplifiedChildren)) {
-            return regexp;
+
+        private void closeRun(int index, int nodes, int start, int end)
+        {
+            if (index < 0) {
+                return;
+            }
+            if (nodes > 1) {
+                Regexp first = children.get(index);
+                children.set(index, Regexp.literalString(first.parseFlags(), Arrays.copyOfRange(runes, start, end)));
+            }
+            if (start >= 0 && end == runeCount) {
+                runeCount = start;
+            }
         }
-        return Regexp.concat(flags, simplifiedChildren);
+
+        private static int[] literalRunes(Regexp literal)
+        {
+            return literal.op() == RegexpOp.LITERAL ? new int[] {literal.rune()} : literal.runes();
+        }
+
+        private static int literalLength(Regexp literal)
+        {
+            return literal.op() == RegexpOp.LITERAL ? 1 : literal.runes().length;
+        }
+
+        private static int literalRune(Regexp literal, int index)
+        {
+            return literal.op() == RegexpOp.LITERAL ? literal.rune() : literal.runes()[index];
+        }
+
+        private void appendRunes(Regexp literal)
+        {
+            if (literal.op() == RegexpOp.LITERAL) {
+                ensureRuneCapacity(1);
+                runes[runeCount++] = literal.rune();
+                return;
+            }
+            int[] literalRunes = literal.runes();
+            ensureRuneCapacity(literalRunes.length);
+            System.arraycopy(literalRunes, 0, runes, runeCount, literalRunes.length);
+            runeCount += literalRunes.length;
+        }
+
+        private void ensureRuneCapacity(int additional)
+        {
+            if (runeCount + additional > runes.length) {
+                runes = Arrays.copyOf(runes, Math.max(runes.length * 2, runeCount + additional));
+            }
+        }
     }
 
     private static boolean sameChildren(Regexp regexp, List<Regexp> children)
@@ -392,39 +698,9 @@ final class Simplifier
         return true;
     }
 
-    // The Trino parser builds each run of fully folded literals, which full case folding matches
-    // as one sequence. Two fully folded runs stay apart whenever their combined text contains a
-    // multi-character fold, including one entirely within either run. Joining the copies of
-    // (?i)s{2} would match ß.
-    private static Regexp tryMergeAdjacentLiterals(Regexp left, Regexp right, CaseFolding caseFolding)
-    {
-        if (!isLiteralOrLiteralString(left) || !isLiteralOrLiteralString(right) || left.parseFlags() != right.parseFlags()) {
-            return null;
-        }
-        Regexp merged = mergeAdjacentLiterals(left, right);
-        if (requiresFullCaseFold(merged.parseFlags(), merged.runes(), caseFolding)) {
-            return null;
-        }
-        return merged;
-    }
-
     private static boolean isLiteralOrLiteralString(Regexp regexp)
     {
         return regexp.op() == RegexpOp.LITERAL || regexp.op() == RegexpOp.LITERAL_STRING;
-    }
-
-    private static Regexp mergeAdjacentLiterals(Regexp left, Regexp right)
-    {
-        int[] leftRunes = (left.op() == RegexpOp.LITERAL) ? new int[] {left.rune()} : left.runes();
-        int[] rightRunes = (right.op() == RegexpOp.LITERAL) ? new int[] {right.rune()} : right.runes();
-        int[] merged = new int[leftRunes.length + rightRunes.length];
-        System.arraycopy(leftRunes, 0, merged, 0, leftRunes.length);
-        System.arraycopy(rightRunes, 0, merged, leftRunes.length, rightRunes.length);
-
-        if (merged.length == 1) {
-            return Regexp.literal(left.parseFlags(), merged[0]);
-        }
-        return Regexp.literalString(left.parseFlags(), merged);
     }
 
     private static Regexp simplifyAlternate(Mode mode, CaseFolding caseFolding, int flags, List<Regexp> children)
@@ -645,118 +921,169 @@ final class Simplifier
         return false;
     }
 
-    private record LeadingString(int[] runes, int flags) {}
-
+    /**
+     * Factors common prefixes out of an alternation in three rounds, as upstream parse.cc does:
+     * literal prefixes, then leading regexps, then runs of literals and classes merged into one
+     * class. Each prefix found factors its suffixes again, so a long shared prefix nests one
+     * factoring inside another per prefix piece. The nested factorings wait on an explicit stack,
+     * so their depth is not limited by the thread stack.
+     */
     private static List<Regexp> factorAlternationForParse(List<Regexp> subs, int flags, CaseFolding caseFolding)
     {
-        List<Regexp> round1 = factorAlternationRound1(subs, flags, caseFolding);
-        List<Regexp> round2 = factorAlternationRound2(round1, flags, caseFolding);
-        return factorAlternationRound3(round2, flags, caseFolding);
-    }
-
-    private static List<Regexp> factorAlternationRound1(List<Regexp> alternatives, int flags, CaseFolding caseFolding)
-    {
-        ArrayList<Regexp> factoredAlternatives = new ArrayList<>(alternatives.size());
-        int alternativeIndex = 0;
-        while (alternativeIndex < alternatives.size()) {
-            LeadingString base = leadingString(alternatives.get(alternativeIndex));
-            if (base == null || base.runes.length == 0 || requiresFullCaseFold(base.flags, base.runes, caseFolding)) {
-                factoredAlternatives.add(alternatives.get(alternativeIndex));
-                alternativeIndex++;
+        List<Alternative> alternatives = new ArrayList<>(subs.size());
+        for (Regexp sub : subs) {
+            alternatives.add(Alternative.of(sub));
+        }
+        Deque<FactorTask> waiting = new ArrayDeque<>();
+        FactorTask task = new FactorTask(alternatives);
+        while (true) {
+            FactorTask suffixTask = task.secondRound ? factorAlternationRound2(task) : factorAlternationRound1(task, caseFolding);
+            if (suffixTask != null) {
+                waiting.push(task);
+                task = suffixTask;
                 continue;
             }
-
-            int startIndex = alternativeIndex;
-            int commonLen = base.runes.length;
-            int endIndex = alternativeIndex + 1;
-            for (; endIndex < alternatives.size(); endIndex++) {
-                LeadingString next = leadingString(alternatives.get(endIndex));
-                if (next == null || next.flags != base.flags || requiresFullCaseFold(next.flags, next.runes, caseFolding)) {
-                    break;
-                }
-                int same = commonPrefixLength(base.runes, next.runes, commonLen);
-                if (same <= 0) {
-                    break;
-                }
-                commonLen = same;
+            if (!task.secondRound) {
+                task.startSecondRound();
+                continue;
             }
-
-            if ((endIndex - startIndex) > 1 && commonLen > 0) {
-                int[] prefixRunes = Arrays.copyOf(base.runes, commonLen);
-                Regexp prefix = (prefixRunes.length == 1)
-                        ? Regexp.literal(base.flags, prefixRunes[0])
-                        : Regexp.literalString(base.flags, prefixRunes);
-
-                ArrayList<Regexp> suffixes = new ArrayList<>(endIndex - startIndex);
-                for (int suffixIndex = startIndex; suffixIndex < endIndex; suffixIndex++) {
-                    suffixes.add(removeLeadingString(alternatives.get(suffixIndex), commonLen));
-                }
-
-                List<Regexp> factoredSuffixes = factorAlternationForParse(suffixes, flags, caseFolding);
-                Regexp suffix = alternateNoFactor(flags, factoredSuffixes);
-                factoredAlternatives.add(Regexp.concat(flags, List.of(prefix, suffix)));
+            List<Regexp> factored = factorAlternationRound3(task.factored, flags, caseFolding);
+            if (waiting.isEmpty()) {
+                return factored;
             }
-            else {
-                for (int copyIndex = startIndex; copyIndex < endIndex; copyIndex++) {
-                    factoredAlternatives.add(alternatives.get(copyIndex));
-                }
-            }
+            task = waiting.pop();
+            Regexp suffix = alternateNoFactor(flags, factored);
+            task.factored.add(Alternative.of(Regexp.concat(flags, List.of(task.prefix, suffix))));
+        }
+    }
 
-            alternativeIndex = endIndex;
+    // One factoring of an alternation, paused while the suffixes of a prefix it found are factored.
+    private static final class FactorTask
+    {
+        private List<Alternative> alternatives;
+        private List<Alternative> factored;
+        private boolean secondRound;
+        private int index;
+        // The prefix whose suffixes are being factored.
+        private Regexp prefix;
+
+        private FactorTask(List<Alternative> alternatives)
+        {
+            this.alternatives = alternatives;
+            this.factored = new ArrayList<>(alternatives.size());
         }
 
-        return factoredAlternatives;
+        private void startSecondRound()
+        {
+            alternatives = factored;
+            factored = new ArrayList<>(alternatives.size());
+            secondRound = true;
+            index = 0;
+        }
     }
 
-    private static List<Regexp> factorAlternationRound2(List<Regexp> alternatives, int flags, CaseFolding caseFolding)
+    // Round 1: factor out common literal prefixes. Returns the factoring of the next run's
+    // suffixes, or null when the round is done.
+    private static FactorTask factorAlternationRound1(FactorTask task, CaseFolding caseFolding)
     {
-        ArrayList<Regexp> factoredAlternatives = new ArrayList<>(alternatives.size());
-        int alternativeIndex = 0;
-        while (alternativeIndex < alternatives.size()) {
-            Regexp firstPrefix = leadingRegexp(alternatives.get(alternativeIndex));
-            if (firstPrefix == null || !isRound2PrefixCandidate(firstPrefix)) {
-                factoredAlternatives.add(alternatives.get(alternativeIndex));
-                alternativeIndex++;
+        List<Alternative> alternatives = task.alternatives;
+        while (task.index < alternatives.size()) {
+            int startIndex = task.index;
+            Alternative alternative = alternatives.get(startIndex);
+            LeadingString base = leadingString(alternative);
+            if (base == null || base.length() == 0 || requiresFullCaseFold(base, caseFolding)) {
+                task.factored.add(alternative);
+                task.index++;
                 continue;
             }
 
-            int startIndex = alternativeIndex;
-            int endIndex = alternativeIndex + 1;
+            // A run continues while the next leading string shares the first rune. Its common
+            // prefix is then the longest prefix of base that every member shares. Most
+            // alternatives start no run, so the members' leading strings are kept only once the
+            // run is known.
+            int endIndex = startIndex + 1;
+            while (endIndex < alternatives.size() && continuesRun(base, alternatives.get(endIndex), caseFolding)) {
+                endIndex++;
+            }
+            task.index = endIndex;
+            if (endIndex == startIndex + 1) {
+                task.factored.add(alternative);
+                continue;
+            }
+            List<LeadingString> members = new ArrayList<>(endIndex - startIndex - 1);
+            for (int memberIndex = startIndex + 1; memberIndex < endIndex; memberIndex++) {
+                members.add(leadingString(alternatives.get(memberIndex)));
+            }
+
+            int commonLength = commonPrefixLength(base.runes(), base.start(), base.length(), members);
+            int[] prefixRunes = Arrays.copyOfRange(base.runes(), base.start(), base.start() + commonLength);
+            task.prefix = (prefixRunes.length == 1)
+                    ? Regexp.literal(base.flags(), prefixRunes[0])
+                    : Regexp.literalString(base.flags(), prefixRunes);
+
+            List<Alternative> suffixes = new ArrayList<>(endIndex - startIndex);
+            for (int suffixIndex = startIndex; suffixIndex < endIndex; suffixIndex++) {
+                suffixes.add(removeLeadingString(alternatives.get(suffixIndex), commonLength));
+            }
+            return new FactorTask(suffixes);
+        }
+        return null;
+    }
+
+    private static boolean continuesRun(LeadingString base, Alternative alternative, CaseFolding caseFolding)
+    {
+        LeadingString next = leadingString(alternative);
+        return next != null && next.flags() == base.flags() && !requiresFullCaseFold(next, caseFolding) &&
+                next.length() > 0 && next.rune(0) == base.rune(0);
+    }
+
+    // Round 2: factor out common simple leading regexps. Returns the factoring of the next run's
+    // suffixes, or null when the round is done.
+    private static FactorTask factorAlternationRound2(FactorTask task)
+    {
+        List<Alternative> alternatives = task.alternatives;
+        while (task.index < alternatives.size()) {
+            int startIndex = task.index;
+            Alternative alternative = alternatives.get(startIndex);
+            Regexp firstPrefix = leadingRegexp(alternative);
+            if (firstPrefix == null || !isRound2PrefixCandidate(firstPrefix)) {
+                task.factored.add(alternative);
+                task.index++;
+                continue;
+            }
+
+            int endIndex = startIndex + 1;
             for (; endIndex < alternatives.size(); endIndex++) {
                 Regexp nextPrefix = leadingRegexp(alternatives.get(endIndex));
-                if (nextPrefix == null || !isRound2PrefixCandidate(firstPrefix) || !Objects.equals(firstPrefix, nextPrefix)) {
+                if (nextPrefix == null || !Objects.equals(firstPrefix, nextPrefix)) {
                     break;
                 }
             }
-
-            if ((endIndex - startIndex) > 1) {
-                ArrayList<Regexp> suffixes = new ArrayList<>(endIndex - startIndex);
-                for (int suffixIndex = startIndex; suffixIndex < endIndex; suffixIndex++) {
-                    suffixes.add(removeLeadingRegexp(alternatives.get(suffixIndex)));
-                }
-
-                List<Regexp> factoredSuffixes = factorAlternationForParse(suffixes, flags, caseFolding);
-                Regexp suffix = alternateNoFactor(flags, factoredSuffixes);
-                factoredAlternatives.add(Regexp.concat(flags, List.of(firstPrefix, suffix)));
-            }
-            else {
-                factoredAlternatives.add(alternatives.get(startIndex));
+            task.index = endIndex;
+            if (endIndex - startIndex == 1) {
+                task.factored.add(alternative);
+                continue;
             }
 
-            alternativeIndex = endIndex;
+            task.prefix = firstPrefix;
+            List<Alternative> suffixes = new ArrayList<>(endIndex - startIndex);
+            for (int suffixIndex = startIndex; suffixIndex < endIndex; suffixIndex++) {
+                suffixes.add(removeLeadingRegexp(alternatives.get(suffixIndex)));
+            }
+            return new FactorTask(suffixes);
         }
-
-        return factoredAlternatives;
+        return null;
     }
 
-    private static List<Regexp> factorAlternationRound3(List<Regexp> alternatives, int flags, CaseFolding caseFolding)
+    // Round 3: merge runs of literals and classes into one class. Returns the finished alternatives.
+    private static List<Regexp> factorAlternationRound3(List<Alternative> alternatives, int flags, CaseFolding caseFolding)
     {
         ArrayList<Regexp> factoredAlternatives = new ArrayList<>(alternatives.size());
         int alternativeIndex = 0;
         while (alternativeIndex < alternatives.size()) {
-            Regexp alternative = alternatives.get(alternativeIndex);
+            Alternative alternative = alternatives.get(alternativeIndex);
             if (!isRound3CharClassCandidate(alternative, flags, caseFolding)) {
-                factoredAlternatives.add(alternative);
+                factoredAlternatives.add(alternative.toRegexp());
                 alternativeIndex++;
                 continue;
             }
@@ -764,7 +1091,7 @@ final class Simplifier
             int startIndex = alternativeIndex;
             int endIndex = alternativeIndex + 1;
             while (endIndex < alternatives.size()) {
-                Regexp scanAlternative = alternatives.get(endIndex);
+                Alternative scanAlternative = alternatives.get(endIndex);
                 if (isRound3CharClassCandidate(scanAlternative, flags, caseFolding)) {
                     endIndex++;
                 }
@@ -778,11 +1105,17 @@ final class Simplifier
                 factoredAlternatives.add(Regexp.charClass(flags & ~Regexp.FOLD_CASE, charClass));
             }
             else {
-                factoredAlternatives.add(alternative);
+                factoredAlternatives.add(alternative.regexp());
             }
             alternativeIndex = endIndex;
         }
         return factoredAlternatives;
+    }
+
+    // A remainder of a literal string or concatenation is neither a literal nor a class.
+    private static boolean isRound3CharClassCandidate(Alternative alternative, int flags, CaseFolding caseFolding)
+    {
+        return alternative.isWhole() && isRound3CharClassCandidate(alternative.regexp(), flags, caseFolding);
     }
 
     private static boolean isRound3CharClassCandidate(Regexp regexp, int flags, CaseFolding caseFolding)
@@ -793,6 +1126,17 @@ final class Simplifier
                         !caseFolding.requiresFullCaseFold(new int[] {regexp.rune()}));
     }
 
+    private static boolean requiresFullCaseFold(LeadingString leadingString, CaseFolding caseFolding)
+    {
+        // A remainder of a leading string that was checked when its prefix was removed: the fold
+        // of a suffix is a suffix of the fold, so it cannot contain a multi-character token
+        // either.
+        if (leadingString.start() > 0) {
+            return false;
+        }
+        return requiresFullCaseFold(leadingString.flags(), leadingString.runes(), caseFolding);
+    }
+
     private static boolean requiresFullCaseFold(int flags, int[] runes, CaseFolding caseFolding)
     {
         // Full folds can consume multiple code points, including across a new factored
@@ -800,11 +1144,11 @@ final class Simplifier
         return (flags & Regexp.FULL_CASE_FOLD) != 0 && caseFolding.requiresFullCaseFold(runes);
     }
 
-    private static CharClass mergeAlternativesIntoCharClass(List<Regexp> alternatives, int startIndex, int endIndex, CaseFolding caseFolding)
+    private static CharClass mergeAlternativesIntoCharClass(List<Alternative> alternatives, int startIndex, int endIndex, CaseFolding caseFolding)
     {
         CharClassBuilder builder = new CharClassBuilder();
         for (int mergeIndex = startIndex; mergeIndex < endIndex; mergeIndex++) {
-            Regexp mergeAlternative = alternatives.get(mergeIndex);
+            Regexp mergeAlternative = alternatives.get(mergeIndex).regexp();
             if (mergeAlternative.op() == RegexpOp.CHAR_CLASS) {
                 CharClass charClass = mergeAlternative.charClass();
                 for (RuneRange runeRange : charClass.ranges()) {
@@ -853,24 +1197,137 @@ final class Simplifier
         };
     }
 
-    private static LeadingString leadingString(Regexp regexp)
+    /**
+     * An alternative during factoring: a whole node, or what remains of one after factoring
+     * removed a leading string or regexp. Removing a prefix makes a view instead of copying the
+     * remaining runes or children, so removing prefix after prefix from one long alternative costs
+     * time linear in its length. A view becomes a node once, when factoring is done with it.
+     * <p>
+     * A view of a literal string starts at rune {@code start} and keeps at least two runes. A
+     * view of a concatenation starts at child {@code start} and keeps at least two children; a
+     * non-null {@code head} replaces that child when part of its leading string was removed.
+     * Smaller remainders are whole nodes.
+     */
+    private record Alternative(Regexp regexp, int start, Alternative head)
     {
-        Regexp cursor = regexp;
-        while (cursor.op() == RegexpOp.CONCAT && cursor.childCount() > 0) {
-            cursor = cursor.child(0);
+        static Alternative of(Regexp regexp)
+        {
+            return new Alternative(regexp, 0, null);
         }
-        int runeFlags = cursor.parseFlags() & (Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD | Regexp.LATIN1);
-        if (cursor.op() == RegexpOp.LITERAL) {
-            return new LeadingString(new int[] {cursor.rune()}, runeFlags);
+
+        boolean isWhole()
+        {
+            return start == 0 && head == null;
         }
-        if (cursor.op() == RegexpOp.LITERAL_STRING) {
-            return new LeadingString(cursor.runes(), runeFlags);
+
+        // The remaining children without their first, or the lone remaining child.
+        Alternative withoutFirstChild()
+        {
+            if (regexp.childCount() - start == 2) {
+                return of(regexp.child(start + 1));
+            }
+            return new Alternative(regexp, start + 1, null);
+        }
+
+        Regexp toRegexp()
+        {
+            if (isWhole()) {
+                return regexp;
+            }
+            // Build the innermost replaced head first, so a chain of heads needs no recursion.
+            List<Alternative> enclosing = new ArrayList<>();
+            Alternative cursor = this;
+            while (cursor.head != null) {
+                enclosing.add(cursor);
+                cursor = cursor.head;
+            }
+            Regexp result;
+            if (cursor.start == 0) {
+                result = cursor.regexp;
+            }
+            else if (cursor.regexp.op() == RegexpOp.LITERAL_STRING) {
+                int[] runes = cursor.regexp.runes();
+                result = Regexp.literalString(cursor.regexp.parseFlags(), Arrays.copyOfRange(runes, cursor.start, runes.length));
+            }
+            else {
+                result = Regexp.concat(cursor.regexp.parseFlags(), cursor.regexp.children().subList(cursor.start, cursor.regexp.childCount()));
+            }
+            for (int index = enclosing.size() - 1; index >= 0; index--) {
+                Alternative concat = enclosing.get(index);
+                List<Regexp> children = new ArrayList<>(concat.regexp.childCount() - concat.start);
+                children.add(result);
+                children.addAll(concat.regexp.children().subList(concat.start + 1, concat.regexp.childCount()));
+                result = Regexp.concat(concat.regexp.parseFlags(), children);
+            }
+            return result;
+        }
+    }
+
+    // The leading literal runes of an alternative: runes[start, start + length).
+    private record LeadingString(int[] runes, int start, int length, int flags)
+    {
+        int rune(int index)
+        {
+            return runes[start + index];
+        }
+    }
+
+    private static LeadingString leadingString(Alternative alternative)
+    {
+        Alternative cursor = alternative;
+        while (cursor.regexp().op() == RegexpOp.CONCAT && cursor.regexp().childCount() > 0) {
+            cursor = (cursor.head() != null) ? cursor.head() : Alternative.of(cursor.regexp().child(cursor.start()));
+        }
+        Regexp regexp = cursor.regexp();
+        int runeFlags = regexp.parseFlags() & (Regexp.FOLD_CASE | Regexp.FULL_CASE_FOLD | Regexp.LATIN1);
+        if (regexp.op() == RegexpOp.LITERAL) {
+            return new LeadingString(new int[] {regexp.rune()}, 0, 1, runeFlags);
+        }
+        if (regexp.op() == RegexpOp.LITERAL_STRING) {
+            int[] runes = regexp.runes();
+            return new LeadingString(runes, cursor.start(), runes.length - cursor.start(), runeFlags);
         }
         return null;
     }
 
-    private static Regexp leadingRegexp(Regexp regexp)
+    // Every member shares the first rune of the base string, runes[start, start + length).
+    // Comparing all members one position at a time stops at the first position any of them
+    // differs, so the cost is the runes the prefix removes from each member plus one comparison
+    // each, and runes already removed are never compared again by the suffixes' factoring. The
+    // base string comes as its parts because passing the record measured more allocation on
+    // keyword lists.
+    private static int commonPrefixLength(int[] runes, int start, int length, List<LeadingString> members)
     {
+        int commonLength = 1;
+        while (commonLength < length) {
+            int rune = runes[start + commonLength];
+            for (int memberIndex = 0; memberIndex < members.size(); memberIndex++) {
+                LeadingString member = members.get(memberIndex);
+                if (commonLength >= member.length() || member.rune(commonLength) != rune) {
+                    return commonLength;
+                }
+            }
+            commonLength++;
+        }
+        return commonLength;
+    }
+
+    private static Regexp leadingRegexp(Alternative alternative)
+    {
+        Regexp regexp = alternative.regexp();
+        if (!alternative.isWhole()) {
+            // A replaced first child that is a whole node leads, as it does in the concatenation
+            // the view stands for. A remainder of a literal string or of a leading string is never
+            // a round 2 prefix, and no prefix equals one, so it is treated as having none.
+            if (alternative.head() != null) {
+                return alternative.head().isWhole() ? alternative.head().regexp() : null;
+            }
+            if (regexp.op() != RegexpOp.CONCAT) {
+                return null;
+            }
+            Regexp first = regexp.child(alternative.start());
+            return (first.op() == RegexpOp.EMPTY_MATCH) ? null : first;
+        }
         if (regexp.op() == RegexpOp.EMPTY_MATCH) {
             return null;
         }
@@ -884,76 +1341,63 @@ final class Simplifier
         return regexp;
     }
 
-    private static Regexp removeLeadingRegexp(Regexp regexp)
+    // Removes the prefix that leadingRegexp returned.
+    private static Alternative removeLeadingRegexp(Alternative alternative)
     {
+        Regexp regexp = alternative.regexp();
         if (regexp.op() == RegexpOp.EMPTY_MATCH) {
-            return regexp;
+            return alternative;
         }
         if (regexp.op() == RegexpOp.CONCAT && regexp.childCount() >= 2) {
-            List<Regexp> children = regexp.children();
-            if (children.getFirst().op() == RegexpOp.EMPTY_MATCH) {
-                return regexp;
+            Regexp first = (alternative.head() != null) ? alternative.head().regexp() : regexp.child(alternative.start());
+            if (first.op() == RegexpOp.EMPTY_MATCH) {
+                return alternative;
             }
-            List<Regexp> remaining = new ArrayList<>(children.size() - 1);
-            for (int index = 1; index < children.size(); index++) {
-                remaining.add(children.get(index));
-            }
-            if (remaining.size() == 1) {
-                return remaining.getFirst();
-            }
-            return Regexp.concat(regexp.parseFlags(), remaining);
+            return alternative.withoutFirstChild();
         }
-        return Regexp.emptyMatch(regexp.parseFlags());
+        return Alternative.of(Regexp.emptyMatch(regexp.parseFlags()));
     }
 
-    private static int commonPrefixLength(int[] left, int[] right, int max)
-    {
-        int limit = Math.min(Math.min(left.length, right.length), max);
-        int same = 0;
-        while (same < limit && left[same] == right[same]) {
-            same++;
-        }
-        return same;
-    }
-
-    private static Regexp removeLeadingString(Regexp regexp, int prefixLength)
+    // Removes prefixLength runes from the leading string that leadingString returned.
+    private static Alternative removeLeadingString(Alternative alternative, int prefixLength)
     {
         if (prefixLength <= 0) {
-            return regexp;
+            return alternative;
         }
 
-        return switch (regexp.op()) {
-            case LITERAL -> Regexp.emptyMatch(regexp.parseFlags());
+        // Descend through leading concatenations to the literal, then replace each
+        // concatenation's first child on the way back up.
+        List<Alternative> enclosing = new ArrayList<>();
+        Alternative cursor = alternative;
+        while (cursor.regexp().op() == RegexpOp.CONCAT) {
+            enclosing.add(cursor);
+            cursor = (cursor.head() != null) ? cursor.head() : Alternative.of(cursor.regexp().child(cursor.start()));
+        }
+
+        Regexp literal = cursor.regexp();
+        Alternative result = switch (literal.op()) {
+            case LITERAL -> Alternative.of(Regexp.emptyMatch(literal.parseFlags()));
             case LITERAL_STRING -> {
-                int[] runes = regexp.runes();
-                if (prefixLength >= runes.length) {
-                    yield Regexp.emptyMatch(regexp.parseFlags());
+                int[] runes = literal.runes();
+                int remaining = runes.length - cursor.start();
+                if (prefixLength >= remaining) {
+                    yield Alternative.of(Regexp.emptyMatch(literal.parseFlags()));
                 }
-                if (prefixLength == runes.length - 1) {
-                    yield Regexp.literal(regexp.parseFlags(), runes[runes.length - 1]);
+                if (prefixLength == remaining - 1) {
+                    yield Alternative.of(Regexp.literal(literal.parseFlags(), runes[runes.length - 1]));
                 }
-                yield Regexp.literalString(regexp.parseFlags(), Arrays.copyOfRange(runes, prefixLength, runes.length));
+                yield new Alternative(literal, cursor.start() + prefixLength, null);
             }
-            case CONCAT -> {
-                List<Regexp> children = regexp.children();
-                Regexp firstChild = removeLeadingString(children.getFirst(), prefixLength);
-                ArrayList<Regexp> newChildren = new ArrayList<>(children.size());
-                if (firstChild.op() != RegexpOp.EMPTY_MATCH) {
-                    newChildren.add(firstChild);
-                }
-                for (int index = 1; index < children.size(); index++) {
-                    newChildren.add(children.get(index));
-                }
-                if (newChildren.isEmpty()) {
-                    yield Regexp.emptyMatch(regexp.parseFlags());
-                }
-                if (newChildren.size() == 1) {
-                    yield newChildren.getFirst();
-                }
-                yield Regexp.concat(regexp.parseFlags(), newChildren);
-            }
-            default -> regexp;
+            default -> cursor;
         };
+
+        for (int index = enclosing.size() - 1; index >= 0; index--) {
+            Alternative concat = enclosing.get(index);
+            result = (result.regexp().op() == RegexpOp.EMPTY_MATCH)
+                    ? concat.withoutFirstChild()
+                    : new Alternative(concat.regexp(), concat.start(), result);
+        }
+        return result;
     }
 
     static final class Coalescer
