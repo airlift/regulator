@@ -2,7 +2,7 @@
 
 **Compiler:** `JavaRegexp.compile(pattern)`
 
-`JavaRegexp` supports the regular subset of Java 25's
+`JavaRegexp` supports the regular subset of the current JDK release's
 `java.util.regex.Pattern` language. It is not a drop-in replacement for
 `Pattern`. Patterns and inputs are UTF-8 `Slice` values, and positions are byte
 offsets rather than UTF-16 indexes.

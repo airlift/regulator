@@ -7,12 +7,12 @@ regular expressions, and Trino SQL LIKE.
 
 ## Key Principle
 
-**Follow upstream RE2 behavior by default.** When deviating, document in `REGULATOR_DECISIONS.md`.
+**Follow each language's authority.** RE2 and the shared matching engines follow upstream RE2 by default; the other languages follow the authorities in Language Authorities of `REGULATOR_DECISIONS.md`. When deviating, document in `REGULATOR_DECISIONS.md`.
 
 ## Documentation
 
 **Root directory (frequently used):**
-- `REGULATOR_DECISIONS.md` -- Documented deviations from upstream RE2
+- `REGULATOR_DECISIONS.md` -- Language authorities and documented deviations from them
 
 **docs/ directory (reference):**
 - `docs/README.md` -- Documentation index and authority rules
