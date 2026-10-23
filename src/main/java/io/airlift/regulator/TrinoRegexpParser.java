@@ -70,6 +70,8 @@ final class TrinoRegexpParser
         private static final int COMMENTS = 1 << 13;
         // Joni's scan limit for the name in a POSIX class such as [:alpha:].
         private static final int POSIX_BRACKET_NAME_LIMIT = 20;
+        // Joni's largest backreference number; a larger digit escape is never a backreference.
+        private static final int BACKREFERENCE_NUMBER_LIMIT = 1000;
 
         // Capture names permit Lu, Ll, Lt, Lm, Lo, Nl, Mn, Mc, Nd, and Pc categories.
         private static final CharClass VALID_CAPTURE_NAME = buildValidCaptureNameCharClass();
@@ -1448,8 +1450,9 @@ final class TrinoRegexpParser
                 int sequenceStart = index;
                 consumeByte('\\');
                 int escapedByte = consumeByte();
-                // Follow Joni: decode known escape sequences, read any other escaped ASCII character except a
-                // digit as itself, and reject the rest.
+                // Follow Joni: decode known escape sequences, read any other escaped ASCII character as itself,
+                // and reject the rest. No backreference can appear here, so every octal digit starts an octal
+                // escape, and \8 and \9 are the digits.
                 return switch (escapedByte) {
                     case 'b' -> '\b';
                     case 'n' -> '\n';
@@ -1463,12 +1466,8 @@ final class TrinoRegexpParser
                     case 'c' -> parseControlEscape(sequenceStart);
                     case 'x' -> parseTrinoHexEscape(flags, sequenceStart);
                     case 'u' -> parseTrinoUnicodeEscape(flags, sequenceStart);
-                    case '0' -> parseTrinoOctalEscape(escapedByte, flags, sequenceStart);
-                    case '1', '2', '3', '4', '5', '6', '7' -> parseTrinoNumericEscape(
-                            escapedByte,
-                            flags,
-                            sequenceStart,
-                            false);
+                    case '0', '1', '2', '3', '4', '5', '6', '7' -> parseTrinoOctalEscape(escapedByte, sequenceStart);
+                    case '8', '9' -> escapedByte;
                     case 'p', 'P' -> {
                         // Only a braced \p is a property; Joni reads a brace-less one as the letter.
                         if (!atEnd() && peekByte() == '{') {
@@ -1593,12 +1592,8 @@ final class TrinoRegexpParser
                 case 'c' -> literalFromRune(parseControlEscape(sequenceStart));
                 case 'x' -> literalFromRune(parseTrinoHexEscape(flags, sequenceStart));
                 case 'u' -> literalFromRune(parseTrinoUnicodeEscape(flags, sequenceStart));
-                case '0' -> literalFromRune(parseTrinoOctalEscape(escapedByte, flags, sequenceStart));
-                case '1', '2', '3', '4', '5', '6', '7' -> literalFromRune(parseTrinoNumericEscape(
-                        escapedByte,
-                        flags,
-                        sequenceStart,
-                        true));
+                case '0' -> literalFromRune(parseTrinoOctalEscape(escapedByte, sequenceStart));
+                case '1', '2', '3', '4', '5', '6', '7', '8', '9' -> literalFromRune(parseTrinoNumericEscape(escapedByte, sequenceStart));
                 case 'k' -> {
                     if (!atEnd() && (peekByte() == '<' || peekByte() == '\'')) {
                         throw unsupportedConstruct("backreferences", sequenceStart, index);
@@ -1783,26 +1778,56 @@ final class TrinoRegexpParser
             return rune;
         }
 
-        private int parseTrinoOctalEscape(int escapedByte, int flags, int sequenceStart)
+        private int parseTrinoOctalEscape(int firstDigit, int sequenceStart)
         {
-            int rune = parseOctalEscape(escapedByte, flags, sequenceStart);
-            if (rune > 0x7F) {
+            int code = firstDigit - '0';
+            for (int i = 0; i < 2; i++) {
+                if (atEnd()) {
+                    break;
+                }
+                int c = peekByte();
+                if (c < '0' || c > '7') {
+                    break;
+                }
+                consumeByte();
+                code = (code * 8) + (c - '0');
+            }
+            if (code > 0xFF) {
+                // As in modern Joni; Trino's pinned Joni wraps the value to a byte.
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+            }
+            if (code > 0x7F) {
                 throw unsupportedConstruct("non-ASCII byte escapes", sequenceStart, index);
             }
-            return rune;
+            return code;
         }
 
-        private int parseTrinoNumericEscape(int firstDigit, int flags, int sequenceStart, boolean rejectBackreference)
+        private int parseTrinoNumericEscape(int firstDigit, int sequenceStart)
         {
-            int group = firstDigit - '0';
-            if (rejectBackreference && group <= capturingGroupCount) {
+            // As in Joni, read the whole decimal number. It is a backreference when it is at most 9 or at most
+            // the number of groups opened so far.
+            int firstDigitEnd = index;
+            int number = firstDigit - '0';
+            while (!atEnd() && peekByte() >= '0' && peekByte() <= '9') {
+                int digit = consumeByte() - '0';
+                if (number <= BACKREFERENCE_NUMBER_LIMIT) {
+                    number = (number * 10) + digit;
+                }
+            }
+            if (number <= BACKREFERENCE_NUMBER_LIMIT && number <= capturingGroupCount) {
                 throw unsupportedConstruct("backreferences", sequenceStart, index);
             }
-            int rune = parseOctalEscape(firstDigit, flags, sequenceStart);
-            if (rune > 0x7F) {
-                throw unsupportedConstruct("non-ASCII byte escapes", sequenceStart, index);
+            if (number <= 9) {
+                // A backreference to a group that does not exist, which Joni rejects.
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
-            return rune;
+            // Otherwise the escape starts over at its first digit: an 8 or 9 is that digit, and the digits after it
+            // are ordinary characters, while any other digit starts an octal escape.
+            index = firstDigitEnd;
+            if (firstDigit == '8' || firstDigit == '9') {
+                return firstDigit;
+            }
+            return parseTrinoOctalEscape(firstDigit, sequenceStart);
         }
 
         private int parseControlEscape(int sequenceStart)
@@ -1975,35 +2000,6 @@ final class TrinoRegexpParser
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
             return value;
-        }
-
-        private int parseOctalEscape(int firstDigit, int flags, int sequenceStart)
-        {
-            // A single non-zero octal digit would be a backreference (unsupported here),
-            // so require at least one more octal digit for '1'..'7'.
-            if (firstDigit != '0') {
-                if (atEnd() || peekByte() < '0' || peekByte() > '7') {
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
-                }
-            }
-
-            int runeMax = Regexp.maxRune(flags);
-            int code = firstDigit - '0';
-            for (int i = 0; i < 2; i++) {
-                if (atEnd()) {
-                    break;
-                }
-                int c = peekByte();
-                if (c < '0' || c > '7') {
-                    break;
-                }
-                consumeByte();
-                code = (code * 8) + (c - '0');
-            }
-            if (code > runeMax) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
-            }
-            return code;
         }
 
         private Regexp parseLiteral()
