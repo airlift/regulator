@@ -20,6 +20,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -27,6 +28,54 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestRustRegexp
 {
+    @Test
+    public void testParse()
+    {
+        assertThat(RustRegexp.parse(utf8Slice("plain"))).isEqualTo(new PatternInfo(0, Map.of()));
+
+        Slice pattern = utf8Slice("(?<word>\\w+)(b)?(?P<never>[^\\s\\S])");
+        PatternInfo info = RustRegexp.parse(pattern);
+        assertThat(info).isEqualTo(new PatternInfo(3, Map.of("word", 1, "never", 3)));
+
+        RustRegexp compiled = RustRegexp.compile(pattern);
+        assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
+        assertThat(info.namedCapturingGroups()).isEqualTo(compiled.namedCapturingGroups());
+
+        pattern.setByte(3, 'X');
+        assertThat(info.namedCapturingGroups()).containsOnlyKeys("word", "never");
+
+        assertThatThrownBy(() -> info.namedCapturingGroups().put("other", 4))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    public void testParseOptionsAndErrors()
+    {
+        assertThat(RustRegexp.parse(utf8Slice("#(ignored)\n(a)"), RustRegexp.Options.defaults().setComments(true)))
+                .isEqualTo(new PatternInfo(1, Map.of()));
+
+        assertThat(RustRegexp.parse(utf8Slice("a"), RustRegexp.Options.defaults().setMaxMemory(1)))
+                .isEqualTo(new PatternInfo(0, Map.of()));
+
+        assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("(?=a)")))
+                .isInstanceOf(RegexpParseException.class)
+                .hasMessage("unsupported regular-expression construct: UnsupportedLookAround at byte offset 0");
+
+        assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("a{1001}")))
+                .isInstanceOf(RegexpParseException.class);
+
+        assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("(a)"), RustRegexp.Options.defaults().setNestLimit(0)))
+                .isInstanceOf(RegexpParseException.class);
+
+        assertThatThrownBy(() -> RustRegexp.parse(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("pattern is null");
+
+        assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("a"), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("options is null");
+    }
+
     @Test
     public void testPublicApiMatchesJavaRegexp()
     {
