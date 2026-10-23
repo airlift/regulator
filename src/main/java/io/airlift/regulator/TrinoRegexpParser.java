@@ -96,6 +96,13 @@ final class TrinoRegexpParser
         private int capturingGroupCount;
         private boolean inQuote;
         private final Set<String> captureNames = new HashSet<>();
+        // The last POSIX bracket end scan that found none: where it started, and the ']' where it
+        // stopped, or a position at or beyond the pattern end. A later "[:" before that stop is on
+        // the scan's path, because the scan steps over only the byte after a backslash, so it
+        // reaches the '[' or the ':' and then the byte after the colon. A scan from there follows
+        // the same path to the same stop.
+        private int failedPosixBracketScanStart;
+        private int failedPosixBracketScanStop = -1;
 
         Parser(Slice pattern, int flags, CaseFolding caseFolding)
         {
@@ -1498,18 +1505,22 @@ final class TrinoRegexpParser
 
         private boolean hasPosixBracketEnd(int position)
         {
-            for (int current = position; current < end; current++) {
+            if (failedPosixBracketScanStart <= position && position <= failedPosixBracketScanStop) {
+                return false;
+            }
+            int current = position;
+            while (current < end) {
                 int value = bytes[current];
                 if (value == ':' && current + 1 < end && bytes[current + 1] == ']') {
                     return true;
                 }
                 if (value == ']') {
-                    return false;
+                    break;
                 }
-                if (value == '\\') {
-                    current++;
-                }
+                current += value == '\\' ? 2 : 1;
             }
+            failedPosixBracketScanStart = position;
+            failedPosixBracketScanStop = current;
             return false;
         }
 
