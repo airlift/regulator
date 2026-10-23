@@ -49,13 +49,14 @@ Repetition counts are limited to 1,000. The implementation preserves Java's
 final-terminator behavior, multiline CRLF handling, Unix-lines mode, Unicode
 case folding, and Unicode character classes.
 
-Unicode property membership uses the JDK's formulas over Regulator's pinned
+Unicode property membership is the JDK's computation over Regulator's pinned
 Unicode 18.0 database, so it is the same on every JVM. Unicode case folding
 uses Java's rule, which puts code points whose upper case has the same lower
 case in one class, applied to the database's simple case mappings. Word
 boundaries read the database's word characters, nonspacing marks, letters, and
-digits by the same formulas. Named code points `\N{name}` accept the names of
-`Character.codePointOf`, built from the database's character names and blocks.
+digits by the same computations. Named code points `\N{name}` accept the names
+of `Character.codePointOf`, built from the database's character names and
+blocks.
 
 On a JVM with an older Unicode version, characters that Unicode added since
 then, and the case partners they joined, have properties, folds, and word

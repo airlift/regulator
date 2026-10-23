@@ -47,12 +47,12 @@ version.
 
 ## Differences from the JDK
 
-Java and Trino property membership, other than Trino's POSIX names, uses the
-JDK's formulas over the pinned database. Property membership, Java's character
-names, and the case conversions that normalize property and character names
-therefore agree with `Character`, `String`, and `Pattern` on the JDK's own
-Unicode version, which the `Character` javadoc names: Unicode 16.0 for Java 25
-and 17.0 for Java 26. They differ for:
+Java and Trino property membership, other than Trino's POSIX names, is the
+JDK's computation over the pinned database. Property membership, Java's
+character names, and the case conversions that normalize property and character
+names therefore agree with `Character`, `String`, and `Pattern` on the JDK's
+own Unicode version, which the `Character` javadoc names: Unicode 16.0 for
+Java 25 and 17.0 for Java 26. They differ for:
 
 - characters Unicode assigned after the JDK's version, and names it added,
   such as the Unicode 18.0 scripts Jurchen and Seal and their blocks, and the
@@ -124,7 +124,7 @@ Character-class membership and case-fold expansions are compiled into engine
 instructions and ranges. Matching those classes performs no property lookup.
 Language-specific word-boundary assertions are different: Java, Trino, and Rust
 boundary checks classify input code points during matching. They read one table
-of flags, built from the database's classes by the same formulas as the
+of flags, built from the database's classes by the same computations as the
 properties: Java's word characters, the class of `\p{IsWord}`, which are also
 the UTS #18 word characters of Rust's Unicode `\w`; Trino's, which are Java's
 without Join_Control plus the six superscript and fraction numbers of Latin-1
