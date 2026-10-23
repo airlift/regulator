@@ -129,6 +129,15 @@ public class TestRegexpParser
     }
 
     @Test
+    @Timeout(30)
+    public void testPatternsWithOverAMillionNodesParse()
+    {
+        // More than a million nodes below the depth where simplification walks iteratively. The
+        // groups capture, since Trino flattens noncapturing groups while parsing.
+        assertParsesInEveryFrontend("(a".repeat(300) + ".".repeat(1_100_000) + ")".repeat(300));
+    }
+
+    @Test
     public void testMaximumCapturesAreStackSafe()
             throws InterruptedException
     {

@@ -22,8 +22,6 @@ import static java.util.Objects.requireNonNull;
 
 abstract class RegexpWalker<T>
 {
-    private static final int DEFAULT_MAX_VISITS = 1_000_000;
-
     /**
      * Called before children are visited. May signal {@code stop=true} to bypass recursion.
      */
@@ -44,9 +42,14 @@ abstract class RegexpWalker<T>
      */
     protected abstract T shortVisit(Regexp regexp, T parentValue);
 
+    /**
+     * Visits every node once per reference to it, with no visit limit. Parse output is a tree, and
+     * simplification adds references only by expanding counted repetitions, which the parsers'
+     * repetition limits keep within a constant factor of the pattern, so the visits stay linear.
+     */
     final T walk(Regexp regexp, T initialValue)
     {
-        return walkInternal(regexp, initialValue, true, false, DEFAULT_MAX_VISITS);
+        return walkInternal(regexp, initialValue, true, 0);
     }
 
     final T walkExponential(Regexp regexp, T initialValue, int maxVisits)
@@ -54,10 +57,12 @@ abstract class RegexpWalker<T>
         if (maxVisits <= 0) {
             throw new IllegalArgumentException("maxVisits must be > 0");
         }
-        return walkInternal(regexp, initialValue, false, true, maxVisits);
+        return walkInternal(regexp, initialValue, false, maxVisits);
     }
 
-    private T walkInternal(Regexp regexp, T initialValue, boolean copyDuplicateSiblings, boolean allowVisitLimitFallback, int maxVisits)
+    // A maxVisits of zero disables the visit limit; otherwise nodes past the limit are
+    // short-visited.
+    private T walkInternal(Regexp regexp, T initialValue, boolean copyDuplicateSiblings, int maxVisits)
     {
         requireNonNull(regexp, "regexp is null");
 
@@ -68,10 +73,7 @@ abstract class RegexpWalker<T>
         while (!stack.isEmpty()) {
             State<T> state = stack.getLast();
             if (!state.preVisitCompleted) {
-                if (++visitCount > maxVisits) {
-                    if (!allowVisitLimitFallback) {
-                        throw new IllegalStateException("RegexpWalker exceeded maxVisits: " + maxVisits);
-                    }
+                if (maxVisits > 0 && ++visitCount > maxVisits) {
                     state.result = shortVisit(state.regexp, state.parentValue);
                     stack.removeLast();
                     if (stack.isEmpty()) {
