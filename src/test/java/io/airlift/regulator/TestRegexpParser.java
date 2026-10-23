@@ -117,6 +117,18 @@ public class TestRegexpParser
     }
 
     @Test
+    @Timeout(30)
+    public void testPosixClassTerminatorsFoundInLinearTime()
+    {
+        // About 1 MB: every "[:" could open a POSIX class, but no ":]" ever closes one. The old
+        // scan for a terminator allocated nothing, so only the timeout guards this case.
+        int count = 330_000;
+        Slice pattern = Slices.utf8Slice("[" + "[:".repeat(count) + "x" + "]".repeat(count + 1));
+        assertThatCode(() -> RegexpParser.parse(pattern, Regexp.LIKE_PERL)).doesNotThrowAnyException();
+        assertThatCode(() -> TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL)).doesNotThrowAnyException();
+    }
+
+    @Test
     public void testMaximumCapturesAreStackSafe()
             throws InterruptedException
     {

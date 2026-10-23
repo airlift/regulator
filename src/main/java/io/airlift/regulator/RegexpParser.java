@@ -80,6 +80,9 @@ final class RegexpParser
         private int capturingGroupCount;
         private boolean hasCaptureNames;
         private boolean inQuote;
+        // No ":]" starts at or after this position: a POSIX class lookahead searched from here and
+        // found none. A later lookahead would search the same exhausted suffix.
+        private int posixTerminatorAbsentFrom = Integer.MAX_VALUE;
 
         Parser(Slice pattern, int flags, CaseFolding caseFolding)
         {
@@ -923,15 +926,20 @@ final class RegexpParser
             }
 
             int startIndex = index;
-            int terminatorIndex = startIndex + 2;
+            int searchStart = startIndex + 2;
+            if (searchStart >= posixTerminatorAbsentFrom) {
+                return false;
+            }
+            int terminatorIndex = searchStart;
             while (terminatorIndex + 1 < end && (bytes[terminatorIndex] != ':' || bytes[terminatorIndex + 1] != ']')) {
                 terminatorIndex++;
             }
             if (terminatorIndex + 1 >= end) {
+                posixTerminatorAbsentFrom = searchStart;
                 return false;
             }
 
-            int nameStart = startIndex + 2;
+            int nameStart = searchStart;
             boolean negate = nameStart < terminatorIndex && bytes[nameStart] == '^';
             if (negate) {
                 nameStart++;
