@@ -35,11 +35,12 @@ import static io.airlift.regulator.UnicodeGroups.word;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Resolves the Unicode property names of Java and Trino patterns to the classes
- * {@link UnicodeGroups} builds from the pinned {@link UnicodeDatabase}. The names cover aliases,
- * blocks, binary properties, and the properties of {@link Character}; each property is computed
- * as the JDK computes it. A Java pattern must give the JDK's results, so keep the JDK's
- * computation even where the database stores a Unicode property of the same name.
+ * Resolves the Unicode property names of Java patterns to the classes {@link UnicodeGroups}
+ * builds from the pinned {@link UnicodeDatabase}; {@link TrinoRegexpParser} maps its names other
+ * than the POSIX ones onto them. The names cover aliases, blocks, binary properties, and the
+ * properties of {@link Character}; each property is computed as the JDK computes it. A Java
+ * pattern must give the JDK's results, so keep the JDK's computation even where the database
+ * stores a Unicode property of the same name.
  */
 final class JavaUnicodeProperties
 {
@@ -71,8 +72,9 @@ final class JavaUnicodeProperties
     }
 
     /**
-     * Returns the class of a Java or Trino property name, such as Lu, IsGreek, InBasicLatin,
-     * script=Greek, IsAlphabetic, or javaLowerCase, or null if the name is not one.
+     * Returns the class of a Java property name, such as Lu, IsGreek, InBasicLatin, script=Greek,
+     * IsAlphabetic, or javaLowerCase, or null if the name is not one. {@link TrinoRegexpParser}
+     * maps its names other than the POSIX ones onto these.
      */
     public static CharClass lookup(String name)
     {

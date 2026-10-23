@@ -26,7 +26,8 @@ import static java.util.Objects.requireNonNull;
  * Builds Unicode property classes from the pinned {@link UnicodeDatabase} and caches them as
  * immutable range sets. These are the Unicode lookups every language shares; each language
  * resolves its own property names to them. RE2 reads the raw property values of the database,
- * {@link JavaUnicodeProperties} resolves the Java and Trino property names, and
+ * {@link JavaUnicodeProperties} resolves the Java and Trino property names other than Trino's
+ * POSIX names, which {@link TrinoRegexpParser} resolves itself, and
  * {@link RustUnicodeProperties} resolves the Rust names to the raw values of the database's
  * binary properties, Age, Script_Extensions, and break properties.
  */

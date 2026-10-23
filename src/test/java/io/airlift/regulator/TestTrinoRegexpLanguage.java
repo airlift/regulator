@@ -811,9 +811,13 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testDocumentedDifferencesFromPinnedJoni()
     {
-        // Trino's pinned Joni drops a dash after a completed class range, and reads a bracket after that
-        // dash as a literal; modern Joni reads the dash as a literal and the bracket as a nested class.
         for (MatchCase matchCase : List.of(
+                // Trino's pinned Joni omits the nine ASCII symbols $+<=>^`|~ from bracket punct; modern Joni
+                // includes them.
+                new MatchCase("\\A[[:punct:]]+\\z", "$+<=>^`|~", true),
+                new MatchCase("[[:^punct:]]", "$", false),
+                // Trino's pinned Joni drops a dash after a completed class range, and reads a bracket after that
+                // dash as a literal; modern Joni reads the dash as a literal and the bracket as a nested class.
                 new MatchCase("[a-zA-Z0-9-_]", "-", true),
                 new MatchCase("[a-c[x]-z]", "-", true),
                 new MatchCase("[a-c-é]", "-", true),
@@ -1160,6 +1164,34 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("\\p{JAVALOWERCASE}+", "abc", true),
                 new MatchCase("\\p{OldItalic}", "\uD800\uDF00", true),
                 new MatchCase("\\p{InBasicLatin}+", "abc", true),
+                // Joni defines each POSIX name by one Unicode table, and \p{...} takes the name in any ASCII casing.
+                new MatchCase("\\A\\p{Alpha}\\z", "\u0345", true),
+                new MatchCase("\\A\\p{Alnum}\\z", "\u00AA", true),
+                new MatchCase("\\A\\p{Lower}\\z", "\u00AA", true),
+                new MatchCase("\\A\\p{Upper}\\z", "\u24B6", true),
+                new MatchCase("\\A\\p{Blank}\\z", "\u00A0", true),
+                new MatchCase("\\A\\p{Print}\\z", "\u00A0", true),
+                new MatchCase("\\A\\p{Cntrl}\\z", "\u0080", true),
+                new MatchCase("\\A\\p{Digit}\\z", "\u0660", true),
+                new MatchCase("\\A\\p{Graph}\\z", "\u00A1", true),
+                new MatchCase("\\A\\p{Graph}\\z", "\u0378", false),
+                new MatchCase("\\A\\p{Punct}\\z", "\u00A1", true),
+                new MatchCase("[[:punct:]]", "\u00A1", true),
+                new MatchCase("\\A\\p{Space}\\z", "\u0085", true),
+                new MatchCase("\\p{Punct}", "$", false),
+                new MatchCase("\\A[\\p{Alpha}]\\z", "\u0345", true),
+                new MatchCase("\\A\\P{Alpha}\\z", "\u0345", false),
+                new MatchCase("\\A\\p{xdigit}+\\z", "0Af", true),
+                new MatchCase("\\A\\p{xdigit}\\z", "\uFF21", false),
+                new MatchCase("[[:xdigit:]]", "\u0660", false),
+                new MatchCase("\\A[[:xdigit:]]\\z", "\uFF21", false),
+                new MatchCase("\\p{HexDigit}", "\u0660", false),
+                new MatchCase("\\A\\p{HexDigit}\\z", "\uFF21", true),
+                new MatchCase("[[:word:]]", "\u200C", false),
+                new MatchCase("\\p{WORD}", "\u200C", false),
+                new MatchCase("\\p{Word}", "\u0300", true),
+                new MatchCase("\\p{Word}", "\u203F", true),
+                new MatchCase("\\A\\p{ascii}\\z", "a", true),
                 // Joni reads a brace-less \p or \P inside a class as the literal letter; a braced one stays a property.
                 new MatchCase("[\\pL]", "p", true),
                 new MatchCase("[\\pL]", "a", false),

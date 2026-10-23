@@ -55,15 +55,27 @@ as `ß` and `SS`.
 
 ### Unicode data and case folding
 
-Unicode property membership uses the JDK's formulas over Regulator's pinned
-Unicode 18.0 database, case-insensitive matching uses its full case folding,
-`CaseFolding.txt` statuses C and F, and word boundaries use its word
-characters, so all three are the same on every JVM. Property membership agrees
-with Java's `Pattern` except where Unicode changed since the JDK's Unicode
-version, as
+Unicode property membership, apart from the POSIX names described below,
+uses the JDK's formulas over Regulator's pinned Unicode 18.0 database,
+case-insensitive matching uses its full case folding, `CaseFolding.txt`
+statuses C and F, and word boundaries use its word characters, so all three
+are the same on every JVM. That membership agrees with Java's `Pattern` except
+where Unicode changed since the JDK's Unicode version, as
 [`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) lists.
 Property names are ASCII only, without `_`, `=`, or an `Is` prefix, as in
 Joni.
+
+The POSIX names, such as `\p{Alpha}` and `[[:alpha:]]`, use the Unicode
+definitions of Trino's pinned Joni over the same database. `\p{...}` takes these
+names in any ASCII casing, and a bracket only lowercase names. Trino's pinned
+Joni omits the nine ASCII symbols ``$+<=>^`|~`` from `[[:punct:]]`, while modern
+Joni, from 2.1.14, includes them. That omission is a bug, so `[[:punct:]]`
+matches `$`, unlike Trino. Modern Joni, from 2.2.7, adds Join_Control to
+`\p{Word}` and `[[:word:]]`, while Trino's pinned Joni and Oniguruma's `doc/RE`
+leave it out. `TrinoRegexp` keeps the pinned definition as intended behavior,
+so they do not match U+200C. `\p{HexDigit}` is Unicode's Hex_Digit, without the
+decimal digits Java's `\p{HexDigit}` adds, so it does not match `٠` U+0660, and
+xdigit is ASCII `[0-9A-Fa-f]`.
 
 Full case folding keeps dotted capital `İ` and dotless small `ı` apart from
 `I` and `i` outside its Turkic mappings, and so does Joni: `(?i)i` matches

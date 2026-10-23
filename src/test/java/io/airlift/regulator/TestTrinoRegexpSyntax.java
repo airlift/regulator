@@ -127,7 +127,7 @@ public class TestTrinoRegexpSyntax
 
     private static List<SyntaxCase> syntaxCases()
     {
-        return TsvTestData.load(SYNTAX_CASES, 3, 75).stream()
+        return TsvTestData.load(SYNTAX_CASES, 3, 78).stream()
                 .map(row -> new SyntaxCase(row.field(1), Expected.valueOf(row.field(0)), row.field(2)))
                 .toList();
     }

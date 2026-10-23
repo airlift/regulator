@@ -36,6 +36,7 @@ ACCEPT	\p{Alphabetic}	Direct binary Unicode properties are supported
 ACCEPT	\p{lu}	Unicode category names are case-insensitive
 ACCEPT	\p{inBasicLatin}	Unicode block prefixes are case-insensitive
 ACCEPT	\p{JAVALOWERCASE}	Java property names are case-insensitive
+ACCEPT	\p{Ascii}	POSIX property names are case-insensitive
 ACCEPT	[\p^]	Joni reads a brace-less \p in a class as the literal p
 ACCEPT	[\p-z]	A brace-less \p in a class can be a range endpoint
 REJECT	(?P<name>x)	RE2 named capture syntax is not Trino Java syntax
@@ -73,4 +74,6 @@ REJECT	\p{^Lu}	Joni has no caret inversion in a property name
 REJECT	[\P{^Lu}]	Joni has no caret inversion in a property name
 REJECT	\p{xdıgıt}	Joni rejects property names with non-ASCII characters
 REJECT	\p{ınBasicLatin}	Joni rejects property names with non-ASCII characters
+REJECT	[[:hexdigit:]]	Joni has no hexdigit POSIX bracket
+REJECT	[[:Alpha:]]	Joni POSIX bracket names are lowercase
 REJECT	[\c\]	Joni reads \c\] as a control character, leaving the class open
