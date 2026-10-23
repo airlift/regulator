@@ -36,9 +36,10 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * Resolves the Unicode property names of Java and Trino patterns to the classes
- * {@link UnicodeGroups} builds from the pinned {@link UnicodeDatabase}. The names add aliases,
- * blocks, binary properties, and the properties of {@link Character}, rebuilt from the formulas
- * its documentation gives.
+ * {@link UnicodeGroups} builds from the pinned {@link UnicodeDatabase}. The names cover aliases,
+ * blocks, binary properties, and the properties of {@link Character}; each property is computed
+ * as the JDK computes it. A Java pattern must give the JDK's results, so keep the JDK's
+ * computation even where the database stores a Unicode property of the same name.
  */
 final class JavaUnicodeProperties
 {
@@ -167,7 +168,8 @@ final class JavaUnicodeProperties
         return cached("blk:" + block, () -> codePoints(UnicodeDatabase.blocks().ranges(block)));
     }
 
-    // The Unicode properties of java.util.regex, defined in CharPredicates.
+    // The Unicode properties of java.util.regex, computed as CharPredicates computes them, even
+    // where the database stores a property of the same name.
     private static CharClass binaryProperty(String name)
     {
         String normalizedName = UnicodeCase.toUpperCase(name.replace("_", ""));
@@ -201,7 +203,7 @@ final class JavaUnicodeProperties
         };
     }
 
-    // The predicates of Character, from the formulas of their javadoc.
+    // The predicates of Character, computed as the JDK computes them.
     private static CharClass javaProperty(String name)
     {
         return switch (name) {

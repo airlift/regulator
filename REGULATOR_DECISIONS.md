@@ -1,13 +1,46 @@
 # Regulator design decisions
 
-This file records accepted design decisions and intentional differences from
-pinned upstream RE2. Describe the current design, not the sequence of experiments
-that led to it. Keep measurements or generated-code evidence when they explain
-a performance trade-off or why a tested alternative was rejected.
+This file records accepted design decisions, each language's authority, and
+intentional differences from those authorities. Describe the current design,
+not the sequence of experiments that led to it. Keep measurements or
+generated-code evidence when they explain a performance trade-off or why a
+tested alternative was rejected.
 
-The default rule is to preserve upstream behavior. A Java adaptation must not
+For RE2 and the shared matching engines, the default rule is to preserve
+upstream RE2 behavior; the other languages follow their own authorities, as
+Language Authorities describes. A Java adaptation must not
 change which byte strings match, capture boundaries, parse behavior, or resource
 fallback semantics.
+
+## Language Authorities
+
+Each language has one authority, and they differ in how much they leave to
+judgment:
+
+- Java: the code of the current JDK release is the specification. A
+  supported Java pattern gives that release's results, computed with the JDK's
+  own code, such as `Pattern`'s `CharPredicates` and the `Character`
+  predicates, applied to the pinned Unicode database. Match positions are byte
+  offsets, as Java Regular-Subset Frontend records, and
+  [Differences from the JDK](docs/integrations/UNICODE.md#differences-from-the-jdk)
+  lists the other exceptions. Where `Pattern`'s javadoc and the JDK's code disagree, the code wins.
+  A Java property is computed as the JDK computes it even where the database
+  stores a Unicode property of the same name with the same members today,
+  such as White_Space or Alphabetic.
+- RE2: pinned upstream RE2, through its code and the goldens generated from
+  it. Regulator departs from it only where this file records a decision.
+- Rust: the pinned `regex` crate, through the goldens generated from it.
+  Regulator departs from it only where Rust Frontend records a decision.
+- Trino: Trino's Joni fork. Unlike the others, it is old and has known bugs,
+  so deciding whether a fork behavior is a bug or Trino's intent is a
+  judgment, made per case and recorded in this file and
+  [`TRINO_REGEXP.md`](docs/reference/languages/TRINO_REGEXP.md). That judgment
+  does not extend to the other languages.
+- Trino LIKE: Trino's `LikeMatcher` with optimization disabled. Regulator
+  departs from it only where Trino LIKE Frontend records a decision.
+
+Every language reads the pinned Unicode 18.0 database instead of its
+authority's Unicode data, as Pinned Unicode Properties describes.
 
 ## Byte-Oriented Java API
 
@@ -78,9 +111,9 @@ construction fails.
   on it: categories with their long names and `LC`, `LD`, and `Cn`, scripts
   with their ISO 15924 codes, blocks with the JDK's identifiers, the `Is`,
   `In`, `gc=`, `sc=`, and `blk=` forms, binary properties, `java...`
-  properties, and POSIX classes. A JDK property that Unicode does not define
-  as one property is the formula of its `Character` javadoc, and a JDK choice
-  that is not Unicode data is a constant citing that javadoc. Rust layers the
+  properties, and POSIX classes. Each JDK property is the JDK's own
+  computation over the database, as Language Authorities describes, and a JDK
+  choice that is not Unicode data is a constant citing the JDK. Rust layers the
   regex crate's names on it, as Rust Frontend describes.
 - Properties are built lazily from the database's ranges into immutable
   `CharClass` values and cached by canonical identity. Matching uses only the

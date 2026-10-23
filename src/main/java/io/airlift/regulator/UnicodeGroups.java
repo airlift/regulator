@@ -220,7 +220,10 @@ final class UnicodeGroups
 
     /**
      * Returns the Alphabetic code points by the formula of {@code Character.isAlphabetic}: Lu, Ll,
-     * Lt, Lm, Lo, Nl, or Other_Alphabetic.
+     * Lt, Lm, Lo, Nl, or Other_Alphabetic. Java patterns must give the JDK's results, so this keeps
+     * the JDK's formula rather than reading the database's Alphabetic. Rust's {@code \w} and word
+     * boundaries, and Trino's word boundaries, build their word characters from this set because
+     * it equals the database's Alphabetic; recheck that when moving to a new Unicode version.
      */
     static CharClass alphabetic()
     {

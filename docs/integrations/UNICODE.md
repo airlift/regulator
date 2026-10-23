@@ -16,8 +16,9 @@ it:
   named and grouped by the rule of upstream's generator.
 - Java and Trino properties follow `java.util.regex.Pattern` and
   `java.lang.Character`. Their categories, scripts, blocks, binary properties,
-  and `java...` properties are the database's values combined by the formulas
-  of the `Character` javadoc, under the JDK's names and aliases.
+  and `java...` properties are the database's values combined as the JDK's
+  `Pattern` and `Character` code combines them, under the JDK's names and
+  aliases.
 - Java's `\N{name}` accepts the names of `Character.codePointOf`, built from
   the database's character names and blocks by the JDK's rule.
 - Rust properties use the regex crate's names and loose matching, built from
@@ -131,15 +132,18 @@ base.
 
 ### Java properties
 
-A JDK property that Unicode does not define as one property is the formula of
-its `Character` javadoc over the database's values. For example,
-`Character.isAlphabetic` is `Lu`, `Ll`, `Lt`, `Lm`, `Lo`, `Nl`, or
-Other_Alphabetic, and `Character.isWhitespace` is a space, line, or paragraph
-separator other than the three no-break spaces, or one of U+0009 through
-U+000D and U+001C through U+001F. A choice of the JDK that is not in the
-Unicode data, such as those explicit code points or the earlier names of three
-renamed blocks, is a constant in `JavaUnicodeProperties` with a comment citing
-the javadoc.
+A Java pattern gives the JDK's results, so each JDK property is the JDK's own
+computation over the database's values, even where the database stores a
+Unicode property of the same name. `\p{IsWhite_Space}` is `CharPredicates`'
+space, line, or paragraph separator, U+0009 through U+000D, or U+0085,
+computed rather than read from the database's White_Space, which has the same
+members today. Likewise, `Character.isAlphabetic` is `Lu`, `Ll`,
+`Lt`, `Lm`, `Lo`, `Nl`, or Other_Alphabetic, and `Character.isWhitespace` is a
+space, line, or paragraph separator other than the three no-break spaces, or
+one of U+0009 through U+000D and U+001C through U+001F. A choice of the JDK
+that is not in the Unicode data, such as those explicit code points or the
+earlier names of three renamed blocks, is a constant in `JavaUnicodeProperties`
+with a comment citing the JDK.
 
 ### Property names and aliases
 
