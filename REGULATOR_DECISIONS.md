@@ -160,8 +160,8 @@ some older characters to newer ones, such as U+0277 to U+A7DD, but neither is
 ASCII, so no name resolves differently. Characters and names Unicode added
 after the JDK's version, such as the Unicode 18.0 scripts Jurchen and Seal and
 the names of their characters, resolve only in Regulator. This agreement is of
-property membership, which, outside Trino's POSIX names, uses the JDK's
-formulas over the pinned database. Java's accepted property spellings keep
+property membership, which, outside Trino's POSIX names, is the JDK's
+computation over the pinned database. Java's accepted property spellings keep
 Regulator's existing rules, which are not identical to `Pattern`'s, and
 Trino's are Joni's ASCII-only names.
 

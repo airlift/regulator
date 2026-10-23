@@ -55,8 +55,8 @@ as `ß` and `SS`.
 
 ### Unicode data and case folding
 
-Unicode property membership, apart from the POSIX names described below,
-uses the JDK's formulas over Regulator's pinned Unicode 18.0 database,
+Unicode property membership, apart from the POSIX names described below, is
+the JDK's computation over Regulator's pinned Unicode 18.0 database,
 case-insensitive matching uses its full case folding, `CaseFolding.txt`
 statuses C and F, and word boundaries use its word characters, so all three
 are the same on every JVM. That membership agrees with Java's `Pattern` except
