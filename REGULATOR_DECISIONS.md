@@ -109,12 +109,12 @@ construction fails.
 - The database holds only Unicode data. RE2 names it by upstream's rule, as
   RE2 Unicode Property Groups describes. Java and Trino layer the JDK's names
   on it: categories with their long names and `LC`, `LD`, and `Cn`, scripts
-  with their ISO 15924 codes, blocks with the JDK's identifiers, the `Is`,
-  `In`, `gc=`, `sc=`, and `blk=` forms, binary properties, `java...`
-  properties, and POSIX classes. Each JDK property is the JDK's own
-  computation over the database, as Language Authorities describes, and a JDK
-  choice that is not Unicode data is a constant citing the JDK. Rust layers the
-  regex crate's names on it, as Rust Frontend describes.
+  with their ISO 15924 codes, blocks with the JDK's identifiers, the `In`
+  form, binary properties, `java...` properties, and POSIX classes; Java also
+  layers the `Is`, `gc=`, `sc=`, and `blk=` forms. Each JDK property is the
+  JDK's own computation over the database, as Language Authorities describes,
+  and a JDK choice that is not Unicode data is a constant citing the JDK. Rust
+  layers the regex crate's names on it, as Rust Frontend describes.
 - Properties are built lazily from the database's ranges into immutable
   `CharClass` values and cached by canonical identity. Matching uses only the
   resulting ranges and compiled instructions.
@@ -126,10 +126,11 @@ construction fails.
   and blocks by the JDK's rule. The JDK's two choices for controls that are not
   Unicode data are constants citing the JDK's build tool. The names are read on
   the first `\N{name}`.
-- Java and Trino normalize property and character names with the database's
-  case mappings, including the unconditional mappings of `SpecialCasing.txt`,
-  as the JDK's `String` and `Character` conversions do, and Trino's capture
-  names cannot start with the database's decimal digits.
+- Java normalizes property and character names with the database's case
+  mappings, including the unconditional mappings of `SpecialCasing.txt`, as
+  the JDK's `String` and `Character` conversions do. Trino, as Joni does,
+  accepts only ASCII property names, so they fold by ASCII case alone, and
+  Trino's capture names cannot start with the database's decimal digits.
 - RE2's ASCII definitions of shorthand classes remain regex-language semantics,
   not Unicode data. Java-specific shorthand modes and other syntax extensions
   require separate explicit decisions.
@@ -147,9 +148,9 @@ some older characters to newer ones, such as U+0277 to U+A7DD, but neither is
 ASCII, so no name resolves differently. Characters and names Unicode added
 after the JDK's version, such as the Unicode 18.0 scripts Jurchen and Seal and
 the names of their characters, resolve only in Regulator. This agreement is of
-property membership, which uses the JDK's formulas over the pinned database;
-the accepted property spellings keep Regulator's existing rules, which are not
-identical to `Pattern`'s.
+property membership, which uses the JDK's formulas over the pinned database.
+Java's accepted property spellings keep Regulator's existing rules, which are
+not identical to `Pattern`'s, and Trino's are Joni's ASCII-only names.
 
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.

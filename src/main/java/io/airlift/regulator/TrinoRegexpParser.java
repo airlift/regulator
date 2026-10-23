@@ -1649,10 +1649,16 @@ final class TrinoRegexpParser
 
         private static CharClass lookupTrinoUnicodeGroup(String name)
         {
+            // Joni rejects these spellings, and any property name with a character outside ASCII.
             if (name.indexOf('_') >= 0 ||
                     name.indexOf('=') >= 0 ||
                     name.startsWith("Is")) {
                 return null;
+            }
+            for (int i = 0; i < name.length(); i++) {
+                if (name.charAt(i) >= 0x80) {
+                    return null;
+                }
             }
             if (name.length() >= 2 && UnicodeCase.equalsIgnoreCase(name.substring(0, 2), "In")) {
                 CharClass block = JavaUnicodeProperties.lookup("In" + name.substring(2));

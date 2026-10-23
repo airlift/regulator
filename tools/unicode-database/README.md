@@ -17,8 +17,8 @@ documents the format. The database holds:
   gives Trino patterns their multi-code-point folds
 - the simple uppercase and lowercase mappings of `UnicodeData.txt`, from which
   Java patterns fold, and the unconditional multi-character mappings of
-  `SpecialCasing.txt`, which with them normalize Java and Trino property and
-  character names
+  `SpecialCasing.txt`, which with them normalize Java property and character
+  names
 - the General_Category of every assigned code point, from `UnicodeData.txt`,
   and the Script of every code point `Scripts.txt` lists, which give RE2
   patterns their Unicode property groups

@@ -168,15 +168,16 @@ silently reinterpret a recognized Java spelling as a different RE2 construct.
 
 ### Name normalization
 
-Java and Trino resolve property names, and Java resolves character names, with
-the JDK's case conversions, such as uppercasing a script name or comparing it
-ignoring case. A name in a pattern can hold any text, and these conversions
-take some non-ASCII characters to ASCII, such as the long s to S, the Kelvin
-sign to k, and sharp s to SS, so they read the database rather than `String`:
-its simple case mappings and the unconditional mappings of `SpecialCasing.txt`.
-Lowercasing omits the one condition that applies without a locale,
-Final_Sigma, which chooses between two non-ASCII sigmas that no name holds.
-Trino's capture names cannot start with a decimal digit, the database's `Nd`.
+Java resolves property and character names with the JDK's case conversions,
+such as uppercasing a script name or comparing it ignoring case. A name in a
+pattern can hold any text, and these conversions take some non-ASCII
+characters to ASCII, such as the long s to S, the Kelvin sign to k, and sharp
+s to SS, so they read the database rather than `String`: its simple case
+mappings and the unconditional mappings of `SpecialCasing.txt`. Lowercasing
+omits the one condition that applies without a locale, Final_Sigma, which
+chooses between two non-ASCII sigmas that no name holds. Trino, as Joni does,
+accepts only ASCII property names, so they fold by ASCII case alone. Trino's
+capture names cannot start with a decimal digit, the database's `Nd`.
 
 ### Character names
 
