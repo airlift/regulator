@@ -61,9 +61,9 @@ Unicode 18.0 database, case-insensitive matching uses its full case folding,
 characters, so all three are the same on every JVM. Property membership agrees
 with Java's `Pattern` except where Unicode changed since the JDK's Unicode
 version, as
-[`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) lists;
-the accepted property spellings keep Regulator's existing rules, which are not
-identical to `Pattern`'s.
+[`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) lists.
+Property names are ASCII only, without `_`, `=`, or an `Is` prefix, as in
+Joni.
 
 Full case folding keeps dotted capital `İ` and dotless small `ı` apart from
 `I` and `i` outside its Turkic mappings, and so does Joni: `(?i)i` matches
