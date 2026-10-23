@@ -77,7 +77,10 @@ public class TestJavaRegexpSyntax
                 unsupported("(?<name>x)\\k<name>", "backreferences", 10),
                 unsupported("\\G", "previous-match boundary \\G", 0),
                 unsupported("\\R", "linebreak escape \\R", 0),
-                unsupported("(a?)*", "nullable repeated captures", 4));
+                unsupported("(a?)*", "nullable repeated captures", 4),
+                unsupported("((a)*)+", "nullable repeated captures", 6),
+                unsupported("(a{0,2}){2}", "nullable repeated captures", 8),
+                unsupported("(?:x|(a)?)+", "nullable repeated captures", 10));
     }
 
     private static UnsupportedFeature unsupported(String pattern, String feature, int byteOffset)

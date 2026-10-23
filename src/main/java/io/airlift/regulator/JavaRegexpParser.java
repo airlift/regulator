@@ -20,8 +20,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -80,6 +82,9 @@ final class JavaRegexpParser
         private int capturingGroupCount;
         private boolean inQuote;
         private final Set<String> captureNames = new HashSet<>();
+        // The repetitions with a minimum of one or more whose atom a check found cannot match the
+        // empty string, so that later checks need not walk them again; see canMatchEmpty.
+        private Set<Regexp> nonEmptyRepetitions;
 
         Parser(Slice pattern, int flags, CaseFolding caseFolding)
         {
@@ -198,7 +203,8 @@ final class JavaRegexpParser
                     if (completed.capturing()) {
                         atom = Regexp.capture(completed.groupFlags(), atom, completed.captureIndex(), completed.name());
                     }
-                    groups.peek().expression().add(parseRepeatSuffix(atom));
+                    boolean atomHasCaptures = capturingGroupCount > completed.capturesBefore();
+                    groups.peek().expression().add(parseRepeatSuffix(atom, atomHasCaptures));
                     continue;
                 }
 
@@ -305,27 +311,30 @@ final class JavaRegexpParser
             }
         }
 
+        // capturesBefore is the number of capturing groups opened before this group.
         private record GroupFrame(
                 ExpressionBuilder expression,
                 int restoreFlags,
                 int groupFlags,
                 boolean capturing,
                 int captureIndex,
-                Slice name)
+                Slice name,
+                int capturesBefore)
         {
             static GroupFrame root(int flags)
             {
-                return new GroupFrame(new ExpressionBuilder(flags), flags, flags, false, -1, null);
+                return new GroupFrame(new ExpressionBuilder(flags), flags, flags, false, -1, null, 0);
             }
         }
 
         // repeat := atom (('*' | '+' | '?' | '{m,n}') '?'?)*
         private Regexp parseRepeat()
         {
-            return parseRepeatSuffix(parseAtom());
+            // Only a group can hold a capture.
+            return parseRepeatSuffix(parseAtom(), false);
         }
 
-        private Regexp parseRepeatSuffix(Regexp atom)
+        private Regexp parseRepeatSuffix(Regexp atom, boolean atomHasCaptures)
         {
             boolean appliedRepeat = false;
 
@@ -352,7 +361,7 @@ final class JavaRegexpParser
                     if (appliedRepeat && (flags & Regexp.PERL_EXTENSIONS) != 0) {
                         throw error(RegexpParseErrorCode.BAD_REPEAT_OP, errorArgAtCurrent());
                     }
-                    atom = applyRepeat(atom);
+                    atom = applyRepeat(atom, atomHasCaptures);
                     appliedRepeat = true;
                     continue;
                 }
@@ -417,7 +426,7 @@ final class JavaRegexpParser
             return separatorByte == '}';
         }
 
-        private Regexp applyRepeat(Regexp atom)
+        private Regexp applyRepeat(Regexp atom, boolean atomHasCaptures)
         {
             if (atom == null) {
                 throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, errorArgAtCurrent());
@@ -464,14 +473,12 @@ final class JavaRegexpParser
             }
 
             int nodeFlags = nonGreedy ? (flags | Regexp.NON_GREEDY) : (flags & ~Regexp.NON_GREEDY);
-            if (max != 1) {
-                ExpressionAnalysis analysis = ExpressionAnalysis.analyzeNormalized(atom, caseFolding);
-                if (analysis.hasCaptures() && analysis.canMatchEmpty()) {
-                    throw unsupportedConstruct("nullable repeated captures", repetitionStart, index);
-                }
+            boolean checked = max != 1 && atomHasCaptures;
+            if (checked && canMatchEmpty(atom)) {
+                throw unsupportedConstruct("nullable repeated captures", repetitionStart, index);
             }
 
-            return switch (repetitionOperator) {
+            Regexp repetition = switch (repetitionOperator) {
                 case STAR -> Regexp.star(nodeFlags, atom);
                 case PLUS -> Regexp.plus(nodeFlags, atom);
                 case QUEST -> Regexp.quest(nodeFlags, atom);
@@ -484,11 +491,94 @@ final class JavaRegexpParser
                     yield Regexp.repeat(nodeFlags, atom, min, max);
                 }
             };
+            if (checked && min > 0) {
+                // The atom cannot match the empty string, so neither can the repetition.
+                if (nonEmptyRepetitions == null) {
+                    nonEmptyRepetitions = Collections.newSetFromMap(new IdentityHashMap<>());
+                }
+                nonEmptyRepetitions.add(repetition);
+            }
+            return repetition;
         }
 
         private enum RepetitionOperator
         {
             STAR, PLUS, QUEST, REPEAT
+        }
+
+        /**
+         * Whether a repeated atom that holds a capture can match the empty string, which makes the
+         * repetition a nullable repeated capture. Must agree with ExpressionAnalysis.canMatchEmpty
+         * for parse trees. The walk reads each node's children in order up to the first that
+         * decides it, and stops at the repetitions earlier checks recorded. Every walk starts at
+         * the atom of a repetition being checked, and once checked that repetition is recorded or
+         * matches the empty string, so a later walk stops there and never enters a node an earlier
+         * walk entered. The checks therefore stay linear in the pattern.
+         */
+        private boolean canMatchEmpty(Regexp atom)
+        {
+            // The nodes whose value waits on a child, with the index of that child.
+            Regexp[] path = new Regexp[8];
+            int[] childIndexes = new int[8];
+            int depth = 0;
+            Regexp node = atom;
+            while (true) {
+                EmptyMatch emptyMatch = emptyMatchWithoutChildren(node);
+                if (emptyMatch == EmptyMatch.DEPENDS_ON_CHILDREN) {
+                    if (depth == path.length) {
+                        path = Arrays.copyOf(path, depth * 2);
+                        childIndexes = Arrays.copyOf(childIndexes, depth * 2);
+                    }
+                    path[depth] = node;
+                    childIndexes[depth] = 0;
+                    depth++;
+                    node = node.child(0);
+                    continue;
+                }
+                // A decided child decides its parent with the same value, unless the parent
+                // needs its next child.
+                boolean matchesEmpty = emptyMatch == EmptyMatch.CAN_MATCH_EMPTY;
+                while (true) {
+                    if (depth == 0) {
+                        return matchesEmpty;
+                    }
+                    Regexp parent = path[depth - 1];
+                    int nextChildIndex = childIndexes[depth - 1] + 1;
+                    boolean needsNextChild = nextChildIndex < parent.childCount() &&
+                            ((parent.op() == RegexpOp.CONCAT && matchesEmpty) || (parent.op() == RegexpOp.ALTERNATE && !matchesEmpty));
+                    if (needsNextChild) {
+                        childIndexes[depth - 1] = nextChildIndex;
+                        node = parent.child(nextChildIndex);
+                        break;
+                    }
+                    depth--;
+                }
+            }
+        }
+
+        private enum EmptyMatch
+        {
+            CAN_MATCH_EMPTY, CANNOT_MATCH_EMPTY, DEPENDS_ON_CHILDREN
+        }
+
+        // Whether a node can match the empty string, as far as the node alone decides it.
+        private EmptyMatch emptyMatchWithoutChildren(Regexp regexp)
+        {
+            return switch (regexp.op()) {
+                case NO_MATCH, LITERAL, LITERAL_STRING, CHAR_CLASS, ANY_CHAR, ANY_BYTE -> EmptyMatch.CANNOT_MATCH_EMPTY;
+                case EMPTY_MATCH, BEGIN_LINE, END_LINE, WORD_BOUNDARY, NO_WORD_BOUNDARY, BEGIN_TEXT, END_TEXT, HAVE_MATCH -> EmptyMatch.CAN_MATCH_EMPTY;
+                case STAR, QUEST -> EmptyMatch.CAN_MATCH_EMPTY;
+                case CONCAT -> (regexp.childCount() == 0) ? EmptyMatch.CAN_MATCH_EMPTY : EmptyMatch.DEPENDS_ON_CHILDREN;
+                case ALTERNATE -> (regexp.childCount() == 0) ? EmptyMatch.CANNOT_MATCH_EMPTY : EmptyMatch.DEPENDS_ON_CHILDREN;
+                case CAPTURE -> EmptyMatch.DEPENDS_ON_CHILDREN;
+                case PLUS -> nonEmptyRepetitionEmptyMatch(regexp);
+                case REPEAT -> (regexp.min() == 0) ? EmptyMatch.CAN_MATCH_EMPTY : nonEmptyRepetitionEmptyMatch(regexp);
+            };
+        }
+
+        private EmptyMatch nonEmptyRepetitionEmptyMatch(Regexp repetition)
+        {
+            return (nonEmptyRepetitions != null && nonEmptyRepetitions.contains(repetition)) ? EmptyMatch.CANNOT_MATCH_EMPTY : EmptyMatch.DEPENDS_ON_CHILDREN;
         }
 
         private int[] parseRepetitionCounts()
@@ -682,15 +772,16 @@ final class JavaRegexpParser
                         throw error(RegexpParseErrorCode.BAD_PERL_OP, errorArgAtCurrent());
                     }
                     consumeByte(':');
-                    return new GroupFrame(new ExpressionBuilder(flags), saved, groupFlags, false, -1, null);
+                    return new GroupFrame(new ExpressionBuilder(flags), saved, groupFlags, false, -1, null, capturingGroupCount);
                 }
             }
 
+            int capturesBefore = capturingGroupCount;
             if (capturing) {
                 capturingGroupCount++;
                 captureIndex = capturingGroupCount;
             }
-            return new GroupFrame(new ExpressionBuilder(flags), groupFlags, groupFlags, capturing, captureIndex, name);
+            return new GroupFrame(new ExpressionBuilder(flags), groupFlags, groupFlags, capturing, captureIndex, name, capturesBefore);
         }
 
         private int parseInlineFlags(int base, int groupStart)
