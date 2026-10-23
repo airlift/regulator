@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
@@ -258,6 +259,25 @@ public final class RustRegexp
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
         this.bytes = (pattern.flags() & Regexp.LATIN1) != 0;
+    }
+
+    /// Validates a pattern and returns its capture metadata without constructing a matching
+    /// engine. Parse errors and capture numbering are the same as for [#compile(Slice)];
+    /// compilation memory limits are not checked.
+    public static PatternInfo parse(Slice pattern)
+    {
+        return parse(pattern, Options.defaults());
+    }
+
+    /// Parses with the current syntax options without retaining the pattern or options.
+    public static PatternInfo parse(Slice pattern, Options options)
+    {
+        requireNonNull(pattern, "pattern is null");
+        requireNonNull(options, "options is null");
+        ParseResult parsed = RustRegexpParser.parse(pattern, options.syntaxFlags(), options.nestLimit());
+        Map<String, Integer> names = new HashMap<>();
+        parsed.capturingGroupNames().forEach((group, name) -> names.put(name, group));
+        return new PatternInfo(parsed.capturingGroupCount(), names);
     }
 
     public static RustRegexp compile(Slice pattern)

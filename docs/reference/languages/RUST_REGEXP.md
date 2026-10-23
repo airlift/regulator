@@ -26,6 +26,23 @@ if (matcher.find()) {
 }
 ```
 
+## Pattern validation and capture metadata
+
+Use `RustRegexp.parse(pattern)` to check a pattern without building a matching
+engine. It calls the same parser as `compile` and returns immutable metadata:
+
+```java
+PatternInfo info = RustRegexp.parse(Slices.utf8Slice("(?<word>\\w+)([0-9]+)"));
+int groups = info.capturingGroupCount(); // 2, excluding the whole-match group 0
+Map<String, Integer> names = info.namedCapturingGroups(); // {word=1}
+```
+
+The overload `parse(pattern, options)` uses the current syntax options. Both
+methods throw `RegexpParseException` for invalid syntax and unsupported pattern
+constructs, with the same error codes and UTF-8 byte offsets as `compile`.
+The returned metadata retains neither the input Slice nor a matching engine.
+Parsing does not check the memory needed to compile or execute a pattern.
+
 ## Matching
 
 The compiled-pattern operations have the same signatures as `JavaRegexp`:
