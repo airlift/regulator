@@ -108,6 +108,15 @@ public class TestRegexpParser
     }
 
     @Test
+    public void testNullableRepeatedCapturesCheckInLinearTime()
+    {
+        // About 40 KB: quantified groups nested in quantified groups, each starting with the one
+        // below and holding the innermost capture, so every quantifier is checked.
+        int depth = 7_000;
+        assertParseAllocationPerByte("(?:".repeat(depth) + "(a.)+" + "a)+".repeat(depth), 1_000, Frontend.JAVA);
+    }
+
+    @Test
     public void testMaximumCapturesAreStackSafe()
             throws InterruptedException
     {
