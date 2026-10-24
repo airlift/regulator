@@ -53,12 +53,18 @@ CloudTrail launch/shutdown events and verified cleanup. Wrapper lifetimes
 include local preparation and recovery; they are not exact billed running
 time. Saved price estimates are not a reconciled AWS invoice.
 
-A Spot launch that finds no capacity in its zone tries each other zone of its
-region that offers the type before it fails. When several regions are allowed,
-a Spot launch that found no capacity in any zone first retries Spot in the next
-allowed region it has not tried, in placement order, and moves to On-Demand
-only after every allowed region has failed. These region moves do not count
-against the job's replacement allowance.
+Without `--spot-only`, a job whose Spot host is reclaimed, or that cannot get
+Spot capacity, retries on the same On-Demand instance type; any other
+retryable failure gets one more Spot attempt first. A Spot launch that finds
+no capacity in its zone tries each other zone of its region that offers the
+type before it fails. When several regions are allowed, a Spot launch that
+found no capacity in any zone first retries Spot in the next allowed region it
+has not tried, in placement order, and moves to On-Demand only after every
+allowed region has failed. These region moves do not count against the job's
+replacement allowance. Once the unaccepted jobs number at most 10% of the
+phase's jobs, rounded up, the remaining launches use On-Demand, so a phase's
+last hosts do not wait on Spot capacity. Budget these hours at On-Demand
+prices.
 
 Use `--spot-only` to prohibit On-Demand workers and fallback. Preserve
 interrupted attempts and retry on fresh Spot hosts within the frozen retry
@@ -73,9 +79,10 @@ capacity.
 ## Shared fleet budget
 
 Run both collectors on one persistent coordinator filesystem with renewable
-AWS credentials. Supply the same `--fleet-budget PATH` and `--spot-only` to
-every phase. Set `--spot-vcpu-reserve` to the policy's reserved headroom and
-use `--release-version 1.0` when reproducing the published release.
+AWS credentials. Supply the same `--fleet-budget PATH` to every phase, with
+`--spot-only` unless the policy allows On-Demand. Set `--spot-vcpu-reserve` to
+the policy's reserved headroom and use `--release-version 1.0` when
+reproducing the published release.
 
 The policy records the expected AWS account and home region, resource and
 spending ceilings, and hourly price ceilings for each selected worker type.
@@ -90,11 +97,32 @@ launch elsewhere adds a `regions` object naming each other region's own
 ```
 
 Admission counts each region's quota, reserve, vCPU limit, and pending
-launches against that region's instances and reservations. Each reservation
-records its region. Hosts, machine hours, spending, and the launch interval
-remain fleet-wide. The hourly price ceilings apply in every region, so set them
-for the most expensive allowed region. Policies without `regions` keep their
-single-region meaning. The worker types remain those in `platforms.tsv`.
+launches against that region's instances and reservations in the same market.
+Each reservation records its region and market. Hosts, machine hours,
+spending, and the launch interval remain fleet-wide. The hourly price ceilings
+apply in every region, so set them for the most expensive allowed region.
+Policies without `regions` keep their single-region meaning. The worker types
+remain those in `platforms.tsv`.
+
+A policy without `on_demand_max_vcpus` refuses On-Demand, so its campaigns
+require `--spot-only`. To allow On-Demand replacements and phase tails, set
+`on_demand_max_vcpus` at the top level for the home region, or in a region's
+entry for that region, and give every worker type an `on_demand_total` hourly
+cost:
+
+```json
+"on_demand_max_vcpus": 400,
+"regions": {"eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 16, "on_demand_max_vcpus": 16}}
+```
+
+The allowance bounds only the fleet's own On-Demand vCPUs in that region.
+Other workloads' On-Demand use and a 32-vCPU safety reserve come out of the
+region's On-Demand quota, which admission checks the same way as Spot quota.
+On-Demand hosts count against the same host, machine-hour, and spending
+ceilings, at their `on_demand_total` rate. Regions without an allowance launch
+only Spot, and an On-Demand launch takes the first allowed region that admits
+it. Without `--spot-only`, each worker type needs an allowance in an allowed
+region that holds its image in `platform-regions.tsv`.
 
 For example, a policy for at most 16 ordinary workers could contain:
 
@@ -121,10 +149,11 @@ For example, a policy for at most 16 ordinary workers could contain:
 ```
 
 Replace the example account, limits, and rates with the selected campaign
-values. Include `.2xlarge` price ceilings when running multicore shards.
-`spot` is the maximum Spot bid; `total` includes storage and other hourly
-costs. The controller validates the policy when loading it. Freeze it with
-the job inventory; changing it requires a new campaign rather than a resume.
+values. Include `.2xlarge` price ceilings when running multicore shards. `spot`
+is the maximum Spot bid; `total` includes storage and other hourly costs, and
+`on_demand_total` is that hourly total for an On-Demand host. The controller
+validates the policy when loading it. Freeze it with the job inventory; changing
+it requires a new campaign rather than a resume.
 
 The neighboring `fleet-state.json` coordinates both collectors with `flock`.
 It counts instances, outstanding requests, and launches not yet visible to
@@ -273,7 +302,8 @@ Use `--smoke-protocol qualification` for baseline duration qualification. The
 default `smoke` protocol shortens timings and cannot establish a full shard's
 duration. The selection is frozen on execution and cannot change on resume.
 Spot jobs wait when quota or capacity prevents a launch. An interrupted job
-restarts on a fresh Spot host after verified cleanup.
+restarts after verified cleanup: on a fresh Spot host with `--spot-only`, and
+otherwise On-Demand.
 
 Set `AWS_PROFILE` before any execution command when selecting a named profile;
 otherwise the AWS CLI uses its standard credential chain. `TRINO_DIR` is

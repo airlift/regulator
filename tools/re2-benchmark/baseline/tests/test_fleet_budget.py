@@ -200,6 +200,54 @@ class TestFleetBudget(unittest.TestCase):
         with self.assertRaises(fleet_budget.BudgetError):
             fleet_budget.validate_policy(self.policy)
 
+    def test_on_demand_allowance_admits_against_each_regions_quota_headroom(self):
+        self.policy["on_demand_max_vcpus"] = 400
+        self.policy["regions"] = {"eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 8},
+                                  "ap-south-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0}}
+        for rates in self.policy["hourly_rates"].values():
+            rates["on_demand_total"] = 2 * rates["total"]
+        self.path.write_text(json.dumps(self.policy))
+        self.budget = fleet_budget.FleetBudget(self.path)
+        # Other workloads leave Oregon 16 vCPUs of On-Demand headroom after the safety reserve.
+        snapshots = {("us-west-2", "on-demand"): {"quota": 1000, "instances": [{"id": "i-other", "vcpus": 952}],
+                                                  "requests": []},
+                     ("eu-west-1", "on-demand"): {"quota": 1000, "instances": [], "requests": []},
+                     ("us-west-2", "spot"): self.snapshot}
+
+        def reserve(epoch, region, market="on-demand"):
+            job = self.job(epoch, large=True)
+            job.market, job.region = market, region
+            return self.budget.reserve("baseline", job, self.root / "baseline",
+                                       lambda: snapshots[(region, market)], 1000)[0]
+
+        # Spot reservations take no On-Demand headroom.
+        self.assertTrue(reserve(1, "us-west-2", "spot"))
+        self.assertTrue(reserve(2, "us-west-2"))
+        self.assertTrue(reserve(3, "us-west-2"))
+        self.assertFalse(reserve(4, "us-west-2"))
+        # Ireland's own allowance binds before its quota, and Mumbai has none.
+        self.assertTrue(reserve(4, "eu-west-1"))
+        self.assertFalse(reserve(5, "eu-west-1"))
+        self.assertFalse(reserve(5, "ap-south-1"))
+        reservations = json.loads(self.budget.state_path.read_text())["reservations"]
+        self.assertEqual({key: (item["market"], item["hourly_rate"]) for key, item in reservations.items()},
+                         {"baseline/1": ("spot", 0.30), "baseline/2": ("on-demand", 0.60),
+                          "baseline/3": ("on-demand", 0.60), "baseline/4": ("on-demand", 0.60)})
+
+    def test_on_demand_allowance_is_positive_and_prices_every_worker_types_on_demand_hour(self):
+        policy = copy.deepcopy(self.policy)
+        policy["on_demand_max_vcpus"] = 8
+        for rates in policy["hourly_rates"].values():
+            rates["on_demand_total"] = 2 * rates["total"]
+        fleet_budget.validate_policy(policy)
+        for value in (0, -1, True, 1.5):
+            with self.subTest(on_demand_max_vcpus=value):
+                with self.assertRaisesRegex(fleet_budget.BudgetError, "On-Demand vCPU allowance"):
+                    fleet_budget.validate_policy({**policy, "on_demand_max_vcpus": value})
+        del policy["hourly_rates"]["r8i.large"]["on_demand_total"]
+        with self.assertRaisesRegex(fleet_budget.BudgetError, "hourly price"):
+            fleet_budget.validate_policy(policy)
+
     def test_configured_account_region_and_limits_allow_another_campaign(self):
         self.policy.update(account="234567890123", region="us-east-2",
                            max_vcpus=1024, max_hosts=512, max_pending_launches=40,
@@ -252,7 +300,9 @@ class TestFleetBudget(unittest.TestCase):
                    "regions": [[], {}, {"us-west-2": {"max_vcpus": 8, "spot_vcpu_reserve": 0}},
                                {"bad region": {"max_vcpus": 8, "spot_vcpu_reserve": 0}},
                                {"eu-west-1": {"max_vcpus": 0, "spot_vcpu_reserve": 0}},
-                               {"eu-west-1": {"max_vcpus": 8}}]}
+                               {"eu-west-1": {"max_vcpus": 8}},
+                               {"eu-west-1": {"max_vcpus": 8, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 0}},
+                               {"eu-west-1": {"max_vcpus": 8, "spot_vcpu_reserve": 0, "vcpus": 8}}]}
         for name, values in invalid.items():
             for value in values:
                 with self.subTest(name=name, value=value):
