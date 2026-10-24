@@ -17,6 +17,7 @@ DISPATCH="${SCRIPT_DIR}/shard-dispatch.tsv"
 RESULT_TOOL="${SCRIPT_DIR}/shard_results.py"
 PROTOCOL_REPRESENTATIVES="${SCRIPT_DIR}/protocol-representatives.tsv"
 FULL_PROTOCOL_BENCHMARKS="${SCRIPT_DIR}/full-protocol-benchmarks.tsv"
+ROW_PROTOCOL="${SCRIPT_DIR}/row-protocol.tsv"
 PLAN_ONLY=${BASELINE_PLAN_ONLY:-false}
 DEFER_ACCEPTANCE=${BASELINE_DEFER_ACCEPTANCE:-false}
 PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
@@ -33,7 +34,6 @@ CPU_LIST=${BASELINE_CPU_LIST:-0}
 HEAP_SIZE=${BASELINE_HEAP_SIZE:-8g}
 MAVEN_ARGS=(-Dmaven.gitcommitid.skip=true)
 maximum_route_seconds=5400
-bounded_protocol_row_threshold=30
 PROTOCOL_QUALIFICATION_PROCESS_COUNT=5
 JONI_JMH_FORKS=1
 protocol_qualification_estimate_seconds=0
@@ -187,6 +187,34 @@ python3 "${RESULT_TOOL}" expected \
     --systems "${systems}" \
     --output "${RESULT_DIR}/expected-rows.tsv"
 
+# Prints the frozen protocol fields shared by the selected expected rows.
+frozen_protocol()
+{
+    python3 "${RESULT_TOOL}" frozen-protocol \
+        --row-protocol "${ROW_PROTOCOL}" \
+        --expected "${RESULT_DIR}/expected-rows.tsv" \
+        "$@"
+}
+
+# The plan's frozen-protocol answers, from one load of the row protocol.
+frozen_route_protocol=$(python3 "${RESULT_TOOL}" frozen-route-protocol \
+    --row-protocol "${ROW_PROTOCOL}" \
+    --expected "${RESULT_DIR}/expected-rows.tsv" \
+    --system "${candidate_system}" \
+    --representatives "${PROTOCOL_REPRESENTATIVES}")
+
+# Prints the plan's frozen fields for a key, and for a row ID when the key is per row.
+frozen_route_value()
+{
+    awk -F '\t' -v key="$1" -v row_id="${2-}" '
+        $1 == key && (row_id == "" || $2 == row_id) {
+            sub(/^[^\t]*\t/, "")
+            if (row_id != "") sub(/^[^\t]*\t/, "")
+            print
+            exit
+        }' <<<"${frozen_route_protocol}"
+}
+
 full_protocol_benchmarks()
 {
     awk -F '\t' -v shard="${SHARD_ID}" -v route="${ROUTE}" \
@@ -230,21 +258,6 @@ is_full_protocol_benchmark()
     full_protocol_benchmarks | cut -f 1 | grep -Fqx "${target_benchmark}"
 }
 
-is_full_protocol_row()
-{
-    local target_benchmark=$1
-    local target_parameters=$2
-    local full_protocol_benchmark
-    local full_parameters
-    while IFS=$'\t' read -r full_protocol_benchmark full_parameters _; do
-        [[ "${full_protocol_benchmark}" == "${target_benchmark}" ]] || continue
-        if parameters_match_selection "${full_parameters}" "${target_parameters}"; then
-            return 0
-        fi
-    done < <(full_protocol_benchmarks)
-    return 1
-}
-
 while IFS=$'\t' read -r full_protocol_benchmark full_parameters _; do
     manifest_benchmark=$(manifest_benchmark_for_jmh_benchmark "${full_protocol_benchmark}")
     matching_row_count=0
@@ -262,6 +275,11 @@ while IFS=$'\t' read -r full_protocol_benchmark full_parameters _; do
     fi
     full_protocol_row_count=$((full_protocol_row_count + matching_row_count))
 done < <(full_protocol_benchmarks)
+frozen_full_protocol_row_count=$(frozen_route_value full-protocol-rows)
+if [[ ${frozen_full_protocol_row_count} -ne ${full_protocol_row_count} ]]; then
+    echo "Frozen row protocols select ${frozen_full_protocol_row_count} full-protocol rows, not ${full_protocol_row_count}" >&2
+    exit 1
+fi
 if [[ "${PROTOCOL}" == qualification ]]; then
     # Five forks, each with ten one-second warmups and measurements, plus process startup.
     full_protocol_estimate_seconds=$((full_protocol_row_count * 110))
@@ -407,19 +425,42 @@ if [[ "${handler}" == memory-census ]]; then
         -v allowance="${retained_memory_census_allowance_seconds_per_process}" \
         'BEGIN {printf "%.17g", count * allowance}')
 fi
+# Every row's qualification protocol is frozen in row-protocol.tsv. A route
+# still runs its JMH process rows together, so they share one measurement window.
+frozen_process_protocol=$(frozen_route_value process)
+bounded_jmh_protocol=false
+if [[ -n "${frozen_process_protocol}" ]]; then
+    IFS=$'\t' read -r frozen_process_count frozen_warmup_iterations frozen_measurement_iterations \
+        frozen_process_time frozen_process_seconds frozen_maximum_relative_standard_error \
+        <<<"${frozen_process_protocol}"
+    if [[ "${frozen_maximum_relative_standard_error}" != - ]]; then
+        bounded_jmh_protocol=true
+    fi
+fi
+frozen_joni_protocol=$(frozen_route_value joni)
+if [[ -n "${frozen_joni_protocol}" ]]; then
+    IFS=$'\t' read -r JONI_JMH_FORKS frozen_joni_time <<<"${frozen_joni_protocol}"
+fi
 protocol_qualification_required=false
 protocol_representative_count=0
-if [[ ${jmh_row_count} -gt ${bounded_protocol_row_threshold} && "${PROTOCOL_QUALIFICATION}" == true ]]; then
+if [[ "${bounded_jmh_protocol}" == true && "${PROTOCOL_QUALIFICATION}" == true ]]; then
     protocol_replica_id=${CAMPAIGN_REPLICA_ID}
     if [[ "${protocol_replica_id}" == 4 ]]; then
         protocol_replica_id=1
     fi
     while IFS=$'\t' read -r representative_shard representative_replica representative_route \
-            _ _ representative_benchmark representative_parameters _; do
+            _ representative_row_id _; do
         [[ "${representative_shard}" == "${SHARD_ID}" ]] || continue
         [[ "${representative_replica}" == "${protocol_replica_id}" ]] || continue
         [[ "${representative_route}" == "${ROUTE}" ]] || continue
-        if ! is_full_protocol_row "${representative_benchmark}" "${representative_parameters}"; then
+        # The comparison is with a ten-by-one-second reference, so rows frozen
+        # at one-second windows have nothing to compare.
+        representative_time=$(frozen_route_value representative "${representative_row_id}")
+        if [[ -z "${representative_time}" ]]; then
+            echo "Protocol representative has no frozen route protocol: ${representative_row_id}" >&2
+            exit 1
+        fi
+        if [[ "${representative_time}" != 1s ]]; then
             protocol_representative_count=$((protocol_representative_count + 1))
         fi
     done < <(tail -n +2 "${PROTOCOL_REPRESENTATIVES}")
@@ -450,18 +491,27 @@ if [[ "${PROTOCOL}" == smoke ]]; then
     jmh_iteration_seconds=0.02
     JMH_EXECUTION_PROTOCOL=multi-row-process-smoke
 else
+    # Routes without JMH process rows keep the inert one-second labels.
     JMH_PROCESS_COUNT=5
     JMH_PROCESS_WARMUP_ITERATIONS=10
     JMH_PROCESS_MEASUREMENT_ITERATIONS=10
-    if [[ ${jmh_row_count} -le ${bounded_protocol_row_threshold} ]]; then
-        JMH_PROCESS_TIME=1s
-        jmh_iteration_seconds=1
-        JMH_EXECUTION_PROTOCOL=multi-row-process-full
-    else
-        JMH_PROCESS_TIME=50ms
-        jmh_iteration_seconds=0.05
+    JMH_PROCESS_TIME=1s
+    jmh_iteration_seconds=1
+    JMH_EXECUTION_PROTOCOL=multi-row-process-full
+    if [[ -n "${frozen_process_protocol}" ]]; then
+        JMH_PROCESS_COUNT=${frozen_process_count}
+        JMH_PROCESS_WARMUP_ITERATIONS=${frozen_warmup_iterations}
+        JMH_PROCESS_MEASUREMENT_ITERATIONS=${frozen_measurement_iterations}
+        JMH_PROCESS_TIME=${frozen_process_time}
+        jmh_iteration_seconds=${frozen_process_seconds}
+    fi
+    if [[ "${bounded_jmh_protocol}" == true ]]; then
         JMH_EXECUTION_PROTOCOL=multi-row-process-bounded
     fi
+fi
+JONI_JMH_TIME=${JMH_PROCESS_TIME}
+if [[ "${PROTOCOL}" == qualification && -n "${frozen_joni_protocol}" ]]; then
+    JONI_JMH_TIME=${frozen_joni_time}
 fi
 EXTENDED_WARMUP_TIME=300ms
 EXTENDED_WARMUP_SECONDS=0.3
@@ -488,7 +538,7 @@ if [[ "${PROTOCOL}" != smoke && "${JMH_EXECUTION_PROTOCOL}" == multi-row-process
 fi
 precision_arguments=()
 if [[ "${JMH_EXECUTION_PROTOCOL}" == multi-row-process-bounded ]]; then
-    precision_arguments=(--maximum-relative-standard-error 0.05)
+    precision_arguments=(--maximum-relative-standard-error "${frozen_maximum_relative_standard_error}")
 fi
 jmh_startup_seconds=2
 calibration_iteration_seconds=1
@@ -590,6 +640,10 @@ if [[ "${PLAN_ONLY}" == true ]]; then
     exit 0
 fi
 
+# A run refuses a row protocol table that differs from its frozen rules before
+# any JVM starts. A plan skips this, since the offline gate checks the table.
+python3 "${SCRIPT_DIR}/validate-row-protocol.py"
+
 command -v taskset >/dev/null || {
     echo "taskset is required for baseline execution" >&2
     exit 1
@@ -665,6 +719,7 @@ manifest_sha256=$(sha256sum "${MANIFEST}" | awk '{print $1}')
     printf 'jmh_row_count=%s\n' "${jmh_row_count}"
     printf 'jmh_process_count=%s\n' "${JMH_PROCESS_COUNT}"
     printf 'joni_jmh_forks=%s\n' "${JONI_JMH_FORKS}"
+    printf 'baseline_joni_jmh_time=%s\n' "${BASELINE_JONI_JMH_TIME:-default}"
     printf 'candidate_jmh_row_count=%s\n' "${candidate_jmh_row_count}"
     printf 'joni_jmh_row_count=%s\n' "${joni_jmh_row_count}"
     printf 'jmh_invocation_count=%s\n' "${jmh_invocation_count}"
@@ -1208,7 +1263,9 @@ run_protocol_qualification()
         [[ "${representative_shard}" == "${SHARD_ID}" ]] || continue
         [[ "${representative_replica}" == "${protocol_replica_id}" ]] || continue
         [[ "${representative_route}" == "${ROUTE}" ]] || continue
-        is_full_protocol_row "${benchmark}" "${parameters}" && continue
+        local representative_time
+        representative_time=$(frozen_route_value representative "${manifest_row_id}")
+        [[ "${representative_time}" != 1s ]] || continue
         representative_index=$((representative_index + 1))
 
         if ! awk -F '\t' -v row_id="${manifest_row_id}" -v target_system="${representative_system}" \
@@ -1316,6 +1373,16 @@ PY
     if [[ ${representative_index} -ne ${protocol_representative_count} ]]; then
         echo "Protocol representative count changed during execution: expected ${protocol_representative_count}, found ${representative_index}" >&2
         exit 1
+    fi
+}
+
+# Qualification reads an invocation's warmup window from its rows' frozen protocol.
+jmh_warmup_time()
+{
+    if [[ "${PROTOCOL}" == smoke ]]; then
+        printf '%s\n' "${JMH_PROCESS_TIME}"
+    else
+        frozen_protocol --execution jmh-processes --field warmup_time "$@"
     fi
 }
 
@@ -1456,7 +1523,7 @@ run_joni_jmh_with_classpath()
     local filter=$2
     local output=$3
     shift 3
-    local joni_time=${BASELINE_JONI_JMH_TIME:-${JMH_PROCESS_TIME}}
+    local joni_time=${BASELINE_JONI_JMH_TIME:-${JONI_JMH_TIME}}
     taskset --cpu-list "${CPU_LIST}" \
         java "${jmh_launcher_jvm_arguments[@]}" \
         -cp "${classpath}" \
@@ -1528,14 +1595,10 @@ run_generic_jmh_shard()
         if [[ "${parameters}" != - ]]; then
             extra_arguments+=(-p "${parameters}")
         fi
-        if [[ ("${suite}" == compile || "${suite}" == public-compile) && "${PROTOCOL}" != smoke ]]; then
-            JMH_PROCESS_WARMUP_TIME_OVERRIDE=${EXTENDED_WARMUP_TIME} \
-                run_jmh "${filter}" "${output}" "${extra_arguments[@]}" |
-                tee "${RESULT_DIR}/logs/${suite}-${ROUTE}.log"
-        else
+        warmup_time=$(jmh_warmup_time --suite "${suite}" --system "${candidate_system}")
+        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
             run_jmh "${filter}" "${output}" "${extra_arguments[@]}" |
-                tee "${RESULT_DIR}/logs/${suite}-${ROUTE}.log"
-        fi
+            tee "${RESULT_DIR}/logs/${suite}-${ROUTE}.log"
         set_jmh_input_files "${output}"
         normalized="${RESULT_DIR}/normalized/${suite}-${candidate_system}.tsv"
         python3 "${RESULT_TOOL}" normalize-jmh \
@@ -1615,7 +1678,10 @@ run_traditional_shard()
             extended_selection+=(--include-benchmark-prefix "${benchmark_prefix}")
         done
 
-        run_jmh "${regular_filter}" "${regular_output}" |
+        local warmup_time
+        warmup_time=$(jmh_warmup_time --system "${candidate_system}" "${regular_selection[@]}")
+        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+            run_jmh "${regular_filter}" "${regular_output}" |
             tee "${RESULT_DIR}/logs/traditional-regular-${ROUTE}.log"
         set_jmh_input_files "${regular_output}"
         python3 "${RESULT_TOOL}" normalize-jmh \
@@ -1633,7 +1699,12 @@ run_traditional_shard()
             --output "${regular_normalized}"
         normalized_files+=("${regular_normalized}")
 
-        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${EXTENDED_WARMUP_TIME} \
+        # Smoke has always given these rows the extended warmup window too.
+        warmup_time=${EXTENDED_WARMUP_TIME}
+        if [[ "${PROTOCOL}" == qualification ]]; then
+            warmup_time=$(jmh_warmup_time --system "${candidate_system}" "${extended_selection[@]}")
+        fi
+        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
             run_jmh "${extended_filter}" "${extended_output}" |
             tee "${RESULT_DIR}/logs/traditional-extended-${ROUTE}.log"
         set_jmh_input_files "${extended_output}"
@@ -1651,7 +1722,10 @@ run_traditional_shard()
             --output "${extended_normalized}"
         normalized_files+=("${extended_normalized}")
     else
-        run_jmh "${filter}" "${java_output}" |
+        local warmup_time
+        warmup_time=$(jmh_warmup_time --system "${candidate_system}")
+        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+            run_jmh "${filter}" "${java_output}" |
             tee "${RESULT_DIR}/logs/traditional-${ROUTE}.log"
         set_jmh_input_files "${java_output}"
         python3 "${RESULT_TOOL}" normalize-jmh \
@@ -1774,8 +1848,11 @@ run_trino_operations_candidate()
     local system=$1
     local normalized="${RESULT_DIR}/normalized/trino-operations-${system}.tsv"
     local process_arguments=("${mixed_process_arguments[@]}")
+    local warmup_time
+    warmup_time=$(jmh_warmup_time --system "${system}")
     if [[ "${jmh_invocation_per_workload}" == true ]]; then
-        run_jmh_per_workload "${JMH_SUITE_ORDER}" in-process "${CLASSPATH}" trino-operations "${system}" -
+        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+            run_jmh_per_workload "${JMH_SUITE_ORDER}" in-process "${CLASSPATH}" trino-operations "${system}" -
         process_arguments=("${JMH_PROCESS_ARGUMENTS[@]}")
     else
         local filter
@@ -1784,7 +1861,8 @@ run_trino_operations_candidate()
             --manifest "${MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system "${system}")
-        run_jmh "${filter}" "${output}" |
+        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+            run_jmh "${filter}" "${output}" |
             tee "${RESULT_DIR}/logs/trino-operations-${system}.log"
         set_jmh_input_files "${output}"
     fi
@@ -1902,7 +1980,10 @@ run_final_line_candidate()
     local filter='^io\.trino\.operator\.scalar\.BenchmarkTrinoFinalLine\.(containsRegulator|countRegulator|positionRegulator|extractRegulator|extractAllRegulator|splitRegulator|replaceRegulator|replaceLambdaRegulator)$'
     local output="${RESULT_DIR}/raw/trino-final-line-${candidate_system}.json"
     local normalized="${RESULT_DIR}/normalized/trino-final-line-${candidate_system}.tsv"
-    run_jmh_with_classpath "${SPECIAL_CLASSPATH}" "${filter}" "${output}" |
+    local warmup_time
+    warmup_time=$(jmh_warmup_time --system "${candidate_system}")
+    JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+        run_jmh_with_classpath "${SPECIAL_CLASSPATH}" "${filter}" "${output}" |
         tee "${RESULT_DIR}/logs/trino-final-line-${candidate_system}.log"
     set_jmh_input_files "${output}"
     python3 "${RESULT_TOOL}" normalize-mapped-jmh \
@@ -1967,9 +2048,12 @@ run_trino_like_system()
         suite=trino-like-specialized
     fi
     local normalized="${RESULT_DIR}/normalized/trino-like-${system}.tsv"
+    local warmup_time
+    warmup_time=$(jmh_warmup_time --system "${system}")
     if [[ "${jmh_invocation_per_workload}" == true ]]; then
         # The benchmark declares microseconds; the report keeps nanoseconds.
-        run_jmh_per_workload "${JMH_SUITE_ORDER}" in-process "${SPECIAL_CLASSPATH}" trino-like "${system}" \
+        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+            run_jmh_per_workload "${JMH_SUITE_ORDER}" in-process "${SPECIAL_CLASSPATH}" trino-like "${system}" \
             "${benchmark_class}.${method}" -tu ns
         process_arguments=("${JMH_PROCESS_ARGUMENTS[@]}")
     else
@@ -1979,7 +2063,8 @@ run_trino_like_system()
         fi
         local filter="^${benchmark_class//./\\.}\\.${method}$"
         local output="${RESULT_DIR}/raw/trino-like-${system}.json"
-        run_jmh_with_classpath "${SPECIAL_CLASSPATH}" "${filter}" "${output}" "${scenario_arguments[@]}" |
+        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+            run_jmh_with_classpath "${SPECIAL_CLASSPATH}" "${filter}" "${output}" "${scenario_arguments[@]}" |
             tee "${RESULT_DIR}/logs/trino-like-${system}.log"
         set_jmh_input_files "${output}"
     fi
@@ -2045,7 +2130,10 @@ run_lifecycle_candidate()
         --shard "${SHARD_ID}" \
         --suite lifecycle \
         --system "${candidate_system}")
-    run_jmh "${filter}" "${output}" |
+    local warmup_time
+    warmup_time=$(jmh_warmup_time --suite lifecycle --system "${candidate_system}")
+    JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+        run_jmh "${filter}" "${output}" |
         tee "${RESULT_DIR}/logs/lifecycle-${candidate_system}.log"
     set_jmh_input_files "${output}"
     python3 "${RESULT_TOOL}" normalize-jmh \

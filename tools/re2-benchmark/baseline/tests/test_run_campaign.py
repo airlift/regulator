@@ -2053,9 +2053,8 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         self.assertIn("EXTENDED_WARMUP_SECONDS=0.3", source)
         self.assertIn('$3 == "compile" || $3 == "public-compile"', source)
         self.assertIn('BenchmarkRe2Practical[.]compilePhase', source)
-        self.assertIn('${suite}" == compile || "${suite}" == public-compile', source)
         self.assertIn(
-            'JMH_PROCESS_WARMUP_TIME_OVERRIDE=${EXTENDED_WARMUP_TIME}',
+            'frozen_protocol --execution jmh-processes --field warmup_time "$@"',
             source)
         self.assertIn(
             'specialized_warmup_time=${EXTENDED_WARMUP_TIME}',

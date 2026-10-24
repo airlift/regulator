@@ -53,20 +53,36 @@ iteration counts while avoiding a new forked JVM for every row:
   the bounded Regulator process set. Rows over the 5% relative standard-error
   ceiling remain explicitly precision-rejected and are candidates for a
   targeted longer-protocol rerun.
-- Routes with at most 30 JMH rows retain one-second iterations. Larger routes
-  use 50 ms iterations across five independent JVM processes. Every exact row
-  in that five-process set has 50 measurement samples and is rejected when its
-  relative standard error exceeds 5%.
+- Each row's qualification protocol is frozen in `row-protocol.tsv`: how it
+  executes (`jmh-processes`, `jmh-forks`, `native-bracket`, `rebar`, or
+  `memory-census`), its process or fork count, warmup and measurement
+  iteration counts and windows, and its relative standard-error ceiling.
+  `run-shard.sh` reads these fields instead of deriving them, so a row keeps
+  its protocol however its route is divided. `generate-row-protocol.py`
+  derives the file from the rules hosts applied when each host measured whole
+  routes, and `validate-row-protocol.py` regenerates and compares it, in the
+  offline gate and in each real run before any JVM starts. A route whose
+  candidate and Joni rows number at most 30 keeps one-second iterations.
+  Larger routes use 50 ms iterations across five independent JVM processes;
+  every row in that five-process set has 50 measurement samples and is
+  rejected when its relative standard error exceeds 5%. Smoke keeps its single
+  fixed protocol.
+- The route count includes only the candidate system and Joni, except in the
+  LIKE construction shards, which count every row. `trino-like` measures the
+  `regulator` and Trino systems, so it counts none of its 36 rows and all of
+  them keep the one-second protocol. Its static estimate also charges none of
+  their 3,600 seconds of iterations.
 - The first process records GC allocation metrics. The other four processes do
   not run the GC profiler because its in-process instrumentation perturbs the
   primary timing score. All five processes contribute primary timing samples.
 - Compiler rows use 300 ms warmup iterations because their C2 transition is
   later than the matching loops. The additional warmup is charged to the host
   duration budget.
-- Every route that uses the 50 ms protocol compares checked-in representative
-  rows with a full five-fork, ten-by-one-second protocol on every replica. The
+- Every representative whose row is frozen with 50 ms windows is compared with
+  a full five-fork, ten-by-one-second protocol on every replica. The
   specialized side uses five independent JVMs with the same JMH compiler
-  controls for this equivalence check.
+  controls for this equivalence check. The `trino-like` entries in the matrix
+  never run, because their rows keep one-second windows.
   `protocol-representatives.tsv` covers every bounded route on every replica
   and distributes every benchmark-family, system, and route combination across
   the three primary replicas. Confirmation reuses replica 1's matrix. Each

@@ -9,6 +9,8 @@ import re
 import statistics
 from pathlib import Path
 
+import row_protocol
+
 
 MANIFEST_FIELDS = (
     "row_id",
@@ -38,6 +40,7 @@ REBAR_OUTCOME_FIELDS = (
 SEMANTIC_FIELDS = ("route", "tests", "outcome", "semantic_result_digest")
 DURATION_PATTERN = re.compile(r"^([0-9]+(?:\.[0-9]+)?)(s|ms|us|ns)$")
 DURATION_TO_NS = {"s": 1_000_000_000, "ms": 1_000_000, "us": 1_000, "ns": 1}
+FROZEN_PROTOCOL_SECONDS = {"warmup_seconds": "warmup_time", "measurement_seconds": "measurement_time"}
 
 
 def canonical_parameters(parameters):
@@ -962,6 +965,67 @@ def estimate_jmh_runtime(arguments):
     print(format_number(seconds))
 
 
+def print_frozen_protocol(arguments):
+    protocols = row_protocol.load(arguments.row_protocol)
+    rows = load_manifest(arguments.expected)
+    if arguments.system:
+        rows = [row for row in rows if row["system"] == arguments.system]
+    if arguments.suite:
+        rows = [row for row in rows if row["suite"] == arguments.suite]
+    if arguments.include_benchmark_prefix:
+        rows = [row for row in rows if row["benchmark"].startswith(tuple(arguments.include_benchmark_prefix))]
+    if arguments.exclude_benchmark_prefix:
+        rows = [row for row in rows if not row["benchmark"].startswith(tuple(arguments.exclude_benchmark_prefix))]
+    selected = frozen_selection(protocols, rows, arguments.execution)
+    if arguments.count:
+        print(len(selected))
+        return
+    if not selected:
+        raise ValueError("Frozen protocol selection has no rows")
+    print("\t".join(frozen_fields(selected, arguments.field)))
+
+
+def frozen_selection(protocols, rows, execution=None):
+    selected = [protocols[row["row_id"]] for row in rows]
+    return [protocol for protocol in selected if execution is None or protocol["execution"] == execution]
+
+
+def frozen_fields(selected, fields):
+    values = []
+    for field in fields:
+        source = FROZEN_PROTOCOL_SECONDS.get(field, field)
+        distinct = {protocol[source] for protocol in selected}
+        if len(distinct) != 1:
+            raise ValueError(f"Selected rows do not share one frozen {source}: {sorted(distinct)}")
+        value = distinct.pop()
+        values.append(f"{row_protocol.seconds(value):g}" if field in FROZEN_PROTOCOL_SECONDS else value)
+    return values
+
+
+FROZEN_PROCESS_FIELDS = (
+    "processes", "warmup_iterations", "measurement_iterations",
+    "measurement_time", "measurement_seconds", "maximum_relative_standard_error")
+
+
+def print_frozen_route_protocol(arguments):
+    """Answers every frozen-protocol question a route plan asks, from one load of the protocol."""
+    protocols = row_protocol.load(arguments.row_protocol)
+    rows = load_manifest(arguments.expected)
+    candidate_rows = [row for row in rows if row["system"] == arguments.system]
+    print(f"full-protocol-rows\t{len(frozen_selection(protocols, candidate_rows, 'jmh-forks'))}")
+    processes = frozen_selection(protocols, rows, "jmh-processes")
+    if processes:
+        print("\t".join(["process", *frozen_fields(processes, FROZEN_PROCESS_FIELDS)]))
+    joni = frozen_selection(protocols, [row for row in rows if row["system"] == "joni"], "jmh-forks")
+    if joni:
+        print("\t".join(["joni", *frozen_fields(joni, ("processes", "measurement_time"))]))
+    with arguments.representatives.open(newline="", encoding="utf-8") as input_file:
+        representatives = {row["manifest_row_id"] for row in csv.DictReader(input_file, delimiter="\t")}
+    for row in rows:
+        if row["row_id"] in representatives:
+            print(f"representative\t{row['row_id']}\t{protocols[row['row_id']]['measurement_time']}")
+
+
 def parser():
     argument_parser = argparse.ArgumentParser()
     subparsers = argument_parser.add_subparsers(dest="command", required=True)
@@ -981,6 +1045,28 @@ def parser():
         filter_parser.add_argument("--suite")
         filter_parser.add_argument("--rebar-outcomes", type=Path)
         filter_parser.set_defaults(function=function)
+
+    frozen_parser = subparsers.add_parser("frozen-protocol")
+    frozen_parser.add_argument("--row-protocol", type=Path, required=True)
+    frozen_parser.add_argument("--expected", type=Path, required=True)
+    frozen_parser.add_argument("--system")
+    frozen_parser.add_argument("--suite")
+    benchmark_prefixes = frozen_parser.add_mutually_exclusive_group()
+    benchmark_prefixes.add_argument("--include-benchmark-prefix", action="append")
+    benchmark_prefixes.add_argument("--exclude-benchmark-prefix", action="append")
+    frozen_parser.add_argument("--execution", choices=row_protocol.EXECUTIONS)
+    frozen_output = frozen_parser.add_mutually_exclusive_group(required=True)
+    frozen_output.add_argument("--count", action="store_true")
+    # run-shard.sh asks only for the process warmup window; every other answer comes from frozen-route-protocol.
+    frozen_output.add_argument("--field", action="append", choices=("warmup_time",))
+    frozen_parser.set_defaults(function=print_frozen_protocol)
+
+    frozen_route_parser = subparsers.add_parser("frozen-route-protocol")
+    frozen_route_parser.add_argument("--row-protocol", type=Path, required=True)
+    frozen_route_parser.add_argument("--expected", type=Path, required=True)
+    frozen_route_parser.add_argument("--system", required=True)
+    frozen_route_parser.add_argument("--representatives", type=Path, required=True)
+    frozen_route_parser.set_defaults(function=print_frozen_route_protocol)
 
     rebar_filter_parser = subparsers.add_parser("rebar-filter")
     rebar_filter_parser.add_argument("--manifest", type=Path, required=True)
