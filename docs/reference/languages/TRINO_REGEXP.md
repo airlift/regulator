@@ -70,7 +70,12 @@ are the same on every JVM. That membership agrees with Java's `Pattern` except
 where Unicode changed since the JDK's Unicode version, as
 [`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) lists.
 Property names are ASCII only, without `_`, `=`, or an `Is` prefix, as in
-Joni.
+Joni. Modern Joni also ignores spaces, `-`, and `_` in a name and accepts
+aliases such as `wspace` and `ahex`; `TrinoRegexp` keeps the pinned Joni's
+stricter spelling as intended behavior. Word boundaries also count `²`, `³`,
+`¹`, `¼`, `½`, and `¾` as word characters, though `\p{Word}` does not contain
+them, as every Joni and Oniguruma does through a shared Latin-1 character
+table.
 
 The POSIX names, such as `\p{Alpha}` and `[[:alpha:]]`, use the Unicode
 definitions of Trino's pinned Joni over the same database. `\p{...}` takes these

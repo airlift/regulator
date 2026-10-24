@@ -128,7 +128,7 @@ of flags, built from the database's classes by the same computations as the
 properties: Java's word characters, the class of `\p{IsWord}`, which are also
 the UTS #18 word characters of Rust's Unicode `\w`; Trino's, which are Java's
 without Join_Control plus the six superscript and fraction numbers of Latin-1
-that Joni's Java syntax includes; nonspacing marks; and
+that Joni's Latin-1 character table includes; nonspacing marks; and
 `Character.isLetterOrDigit`, which gives a Java boundary's nonspacing mark its
 base.
 
