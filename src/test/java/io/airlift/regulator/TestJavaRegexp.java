@@ -173,6 +173,9 @@ public class TestJavaRegexp
                 new MatchCase("abc$", "abc\nx", Operation.FIND, false),
                 new MatchCase("abc\\Z", "abc\r\n", Operation.FIND, true),
                 new MatchCase("abc\\Z", "abc\nx", Operation.FIND, false),
+                // A final terminator is CR LF as a whole, so neither matches between its two bytes.
+                new MatchCase("a\\r$", "a\r\n", Operation.FIND, false),
+                new MatchCase("a\\r\\Z", "a\r\n", Operation.FIND, false),
                 new MatchCase("(?m)^b$", "a\u2028b\u2029c", Operation.FIND, true),
                 new MatchCase("(?m)^b$", "a\r\nb\r\nc", Operation.FIND, true),
                 new MatchCase("(?m)^", "", Operation.FIND, false),
