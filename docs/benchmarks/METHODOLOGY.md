@@ -116,7 +116,9 @@ Current language comparisons use these work contracts:
 - Rust counts, span sums, and capture counts follow the crate's iteration on
   both sides, which skips an empty match ending where the previous match ended.
   The crate side makes one call per input from C++ into the pinned `regex`
-  crate's `str` API and reuses its capture locations across matches.
+  crate's `str` API, or its bytes API where Regulator uses byte mode (a source
+  that turns Unicode off, or a haystack that is not UTF-8), and reuses its
+  capture locations across matches.
 - LIKE construction uses prepared Slice patterns on Regulator and prepared String
   patterns on Trino LikeMatcher. This is a compiler-API comparison, not complete
   Slice-to-Trino-SQL conversion. JDK regex similarly receives prepared Strings.

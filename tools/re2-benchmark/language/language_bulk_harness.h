@@ -16,6 +16,7 @@
 // compile (returning a pattern with ok() and error()), check, which rejects inputs
 // the engine cannot accept, groups, which allocates per-search state outside
 // timing, and execute, which runs one Rebar model and optionally writes its trace.
+// A comparator with several adapters picks one from the inputs with run_selected.
 
 #include <benchmark/benchmark.h>
 
@@ -98,52 +99,64 @@ void write_group(std::string_view source, std::string_view value) {
     std::cout.put(';');
 }
 
+// Runs the workload with one adapter; the caller reports failures.
 template <typename Engine>
-int run(int argc, char** argv) {
+int run_engine(int argc, char** argv, bool verify, const Inputs& inputs) {
+    Engine::check(inputs);
+    std::cerr << "phase=compile\n";
+    auto pattern = Engine::compile(inputs);
+    if (!pattern.ok()) throw std::runtime_error(pattern.error());
+    auto sources = inputs.sources();
+    auto groups = Engine::groups(inputs, pattern);
+    if (verify) {
+        if (inputs.model == "compile") std::cout << "compiled\n";
+        else {
+            std::cerr << "phase=execution\n";
+            bool trace = std::string(argv[1]) == "--trace";
+            int64_t result = Engine::execute(inputs, pattern, sources, groups, trace);
+            if (!trace) std::cout << result << '\n';
+        }
+        return 0;
+    }
+    std::string operation = argv[2];
+    if (operation != (inputs.model == "compile" ? "compile" : "execute")) throw std::runtime_error("operation/model mismatch");
+    benchmark::RegisterBenchmark(operation.c_str(), [&](benchmark::State& state) {
+        if (operation == "compile") {
+            for (auto _ : state) {
+                auto compiled = Engine::compile(inputs);
+                benchmark::DoNotOptimize(compiled);
+            }
+        }
+        else {
+            for (auto _ : state) benchmark::DoNotOptimize(Engine::execute(inputs, pattern, sources, groups, false));
+        }
+    });
+    for (int i = 3; i < argc; ++i) argv[i - 2] = argv[i];
+    argc -= 2;
+    benchmark::Initialize(&argc, argv);
+    if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
+    benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
+    return 0;
+}
+
+// Reads the workload and passes it to select(verify, inputs), which chooses an
+// adapter before any timing and runs the workload with run_engine.
+template <typename Select>
+int run_selected(int argc, char** argv, Select select) {
     try {
         if (argc < 3) throw std::runtime_error("usage: --trace|--execute <workload> or <workload> <compile|execute> [benchmark flags]");
         bool verify = std::string(argv[1]) == "--trace" || std::string(argv[1]) == "--execute";
-        Inputs inputs = read_inputs(argv[verify ? 2 : 1]);
-        Engine::check(inputs);
-        std::cerr << "phase=compile\n";
-        auto pattern = Engine::compile(inputs);
-        if (!pattern.ok()) throw std::runtime_error(pattern.error());
-        auto sources = inputs.sources();
-        auto groups = Engine::groups(inputs, pattern);
-        if (verify) {
-            if (inputs.model == "compile") std::cout << "compiled\n";
-            else {
-                std::cerr << "phase=execution\n";
-                bool trace = std::string(argv[1]) == "--trace";
-                int64_t result = Engine::execute(inputs, pattern, sources, groups, trace);
-                if (!trace) std::cout << result << '\n';
-            }
-            return 0;
-        }
-        std::string operation = argv[2];
-        if (operation != (inputs.model == "compile" ? "compile" : "execute")) throw std::runtime_error("operation/model mismatch");
-        benchmark::RegisterBenchmark(operation.c_str(), [&](benchmark::State& state) {
-            if (operation == "compile") {
-                for (auto _ : state) {
-                    auto compiled = Engine::compile(inputs);
-                    benchmark::DoNotOptimize(compiled);
-                }
-            }
-            else {
-                for (auto _ : state) benchmark::DoNotOptimize(Engine::execute(inputs, pattern, sources, groups, false));
-            }
-        });
-        for (int i = 3; i < argc; ++i) argv[i - 2] = argv[i];
-        argc -= 2;
-        benchmark::Initialize(&argc, argv);
-        if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
-        benchmark::RunSpecifiedBenchmarks();
-        benchmark::Shutdown();
-        return 0;
+        return select(verify, read_inputs(argv[verify ? 2 : 1]));
     }
     catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
     }
+}
+
+template <typename Engine>
+int run(int argc, char** argv) {
+    return run_selected(argc, argv, [&](bool verify, const Inputs& inputs) { return run_engine<Engine>(argc, argv, verify, inputs); });
 }
 } // namespace

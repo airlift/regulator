@@ -16,33 +16,63 @@
 #include <memory>
 
 namespace {
-struct FreeCaptureLocations {
-    void operator()(LanguageRustCaptureLocations* locations) const { language_rust_regex_free_capture_locations(locations); }
+// The entry points of the crate's two APIs. The runner picks one before any timing,
+// so every timed call goes straight to the crate's public work for that API.
+struct StrApi {
+    using Regex = RustRegex;
+    using Locations = LanguageRustCaptureLocations;
+    static constexpr auto capture_locations = language_rust_regex_capture_locations;
+    static constexpr auto free_capture_locations = language_rust_regex_free_capture_locations;
+    static constexpr auto is_match = language_rust_regex_is_match;
+    static constexpr auto count = language_rust_regex_count;
+    static constexpr auto count_spans = language_rust_regex_count_spans;
+    static constexpr auto count_captures = language_rust_regex_count_captures;
+    static constexpr auto trace = language_rust_regex_trace;
 };
 
-using CaptureLocations = std::unique_ptr<LanguageRustCaptureLocations, FreeCaptureLocations>;
+struct BytesApi {
+    using Regex = RustBytesRegex;
+    using Locations = LanguageRustBytesCaptureLocations;
+    static constexpr auto capture_locations = language_rust_bytes_regex_capture_locations;
+    static constexpr auto free_capture_locations = language_rust_bytes_regex_free_capture_locations;
+    static constexpr auto is_match = language_rust_bytes_regex_is_match;
+    static constexpr auto count = language_rust_bytes_regex_count;
+    static constexpr auto count_spans = language_rust_bytes_regex_count_spans;
+    static constexpr auto count_captures = language_rust_bytes_regex_count_captures;
+    static constexpr auto trace = language_rust_bytes_regex_trace;
+};
 
+template <typename Api>
+struct FreeCaptureLocations {
+    void operator()(typename Api::Locations* locations) const { Api::free_capture_locations(locations); }
+};
+
+template <typename Api>
+using CaptureLocations = std::unique_ptr<typename Api::Locations, FreeCaptureLocations<Api>>;
+
+template <typename Api>
 struct RustEngine {
-    static RustRegex compile(const Inputs& inputs) { return RustRegex(inputs.pattern, inputs.unicode, inputs.insensitive); }
+    using Regex = typename Api::Regex;
 
-    // The crate matches only text, so check every input before any timing.
+    static Regex compile(const Inputs& inputs) { return Regex(inputs.pattern, inputs.unicode, inputs.insensitive); }
+
+    // Both APIs parse the pattern as text, so check it before any timing.
     static void check(const Inputs& inputs) {
         if (!valid_utf8(inputs.pattern)) throw std::runtime_error("pattern is not UTF-8");
-        if (inputs.model != "compile" && !valid_utf8(inputs.haystack)) throw std::runtime_error("haystack is not UTF-8");
     }
 
-    static CaptureLocations groups(const Inputs& inputs, const RustRegex& pattern) {
-        return CaptureLocations(inputs.captures() ? language_rust_regex_capture_locations(pattern.get()) : nullptr);
+    static CaptureLocations<Api> groups(const Inputs& inputs, const Regex& pattern) {
+        return CaptureLocations<Api>(inputs.captures() ? Api::capture_locations(pattern.get()) : nullptr);
     }
 
-    static int64_t execute(const Inputs& inputs, const RustRegex& pattern, const std::vector<std::string_view>& sources,
-                           CaptureLocations& groups, bool trace) {
+    static int64_t execute(const Inputs& inputs, const Regex& pattern, const std::vector<std::string_view>& sources,
+                           CaptureLocations<Api>& groups, bool trace) {
         bool captures = inputs.captures();
         int64_t result = 0;
         for (std::string_view source : sources) {
             if (trace) std::cout << "source\n";
             if (inputs.model == "grep") {
-                bool found = language_rust_regex_is_match(pattern.get(), source.data(), source.size());
+                bool found = Api::is_match(pattern.get(), source.data(), source.size());
                 result += found;
                 if (trace) std::cout << (found ? "1\n" : "0\n");
                 continue;
@@ -51,14 +81,14 @@ struct RustEngine {
                 write_trace(pattern, source, captures);
                 continue;
             }
-            if (captures) result += language_rust_regex_count_captures(pattern.get(), groups.get(), source.data(), source.size());
-            else if (inputs.model == "count-spans") result += language_rust_regex_count_spans(pattern.get(), source.data(), source.size());
-            else result += language_rust_regex_count(pattern.get(), source.data(), source.size());
+            if (captures) result += Api::count_captures(pattern.get(), groups.get(), source.data(), source.size());
+            else if (inputs.model == "count-spans") result += Api::count_spans(pattern.get(), source.data(), source.size());
+            else result += Api::count(pattern.get(), source.data(), source.size());
         }
         return result;
     }
 
-    static void write_trace(const RustRegex& pattern, std::string_view source, bool captures) {
+    static void write_trace(const Regex& pattern, std::string_view source, bool captures) {
         auto write = [](void* context, const size_t* spans, size_t groups) {
             std::string_view source = *static_cast<std::string_view*>(context);
             for (size_t group = 0; group < groups; ++group) {
@@ -67,13 +97,21 @@ struct RustEngine {
             }
             std::cout.put('\n');
         };
-        if (!language_rust_regex_trace(pattern.get(), source.data(), source.size(), captures, write, &source)) {
+        if (!Api::trace(pattern.get(), source.data(), source.size(), captures, write, &source)) {
             throw std::runtime_error("timed iteration differs from the crate's iteration");
         }
     }
 };
+
+// As RE2's runner switches to Latin-1 when the source turns Unicode off, Rust uses the
+// bytes API then, and for a haystack that is not UTF-8. This choice is what keeps such a
+// haystack away from the str API, which borrows it as text without checking.
+bool bytes_api(const Inputs& inputs) { return !inputs.unicode || !valid_utf8(inputs.haystack); }
 } // namespace
 
 int main(int argc, char** argv) {
-    return run<RustEngine>(argc, argv);
+    return run_selected(argc, argv, [&](bool verify, const Inputs& inputs) {
+        return bytes_api(inputs) ? run_engine<RustEngine<BytesApi>>(argc, argv, verify, inputs)
+                                 : run_engine<RustEngine<StrApi>>(argc, argv, verify, inputs);
+    });
 }

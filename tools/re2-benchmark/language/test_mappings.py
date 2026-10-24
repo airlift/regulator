@@ -22,8 +22,13 @@ class TestMappings(unittest.TestCase):
             self.assertIsNone(mappings.translate(identity, "trino", pattern)[0])
             self.assertEqual(mappings.translate(identity, "java", pattern)[0], pattern)
         self.assertIsNone(mappings.translate("reported/i13-subset-regex/huge-ascii-nosuffixlit", "java", b"unused")[0])
+        # Rust's byte mode reads the raw-byte escapes as RE2's Latin-1 mode does.
+        self.assertEqual(mappings.translate("reported/i13-subset-regex/huge-ascii-nosuffixlit", "rust",
+                                           mappings.I13_PATTERN)[0], mappings.I13_PATTERN)
+        with self.assertRaisesRegex(ValueError, "source pattern changed"):
+            mappings.translate("reported/i13-subset-regex/huge-ascii-nosuffixlit", "rust", b"different")
         self.assertEqual(mappings.translate("reported/i13-subset-regex/huge-unicode-nosuffixlit", "trino",
-                                           rb"[a-q][^u-z]{80}[x\xE0-\xFF]")[0],
+                                           mappings.I13_PATTERN)[0],
                          rb"[a-q][^u-z]{80}[x\x{E0}-\x{FF}]")
 
     def test_pinned_unicode_classes_are_identical_in_all_languages(self):
@@ -61,14 +66,7 @@ class TestMappings(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source pattern changed"):
             mappings.translate_lifecycle("everyday/whitespace", "rust", r"\s*")
 
-    def test_rust_excludes_byte_patterns_its_empty_match_rule_and_its_size_limit(self):
-        for identity, pattern in (("imported/rsc/not-literal", rb".y"), ("curated/14-quadratic/1x", rb".*[^A-Z]|[A-Z]")):
-            self.assertIsNone(mappings.translate(identity, "rust", pattern)[0])
-            self.assertEqual(mappings.translate(identity, "java", pattern)[0], pattern)
-        # Pin both the source pattern and its Unicode-off flag.
-        for pattern, unicode in ((rb".z", False), (rb".y", True)):
-            with self.assertRaisesRegex(ValueError, "source pattern or Unicode flag changed"):
-                mappings.translate("imported/rsc/not-literal", "rust", pattern, unicode=unicode)
+    def test_rust_excludes_its_empty_match_rule_and_its_size_limit(self):
         for cases in (mappings.RUST_EMPTY_MATCH_CASES, mappings.RUST_SIZE_CASES):
             for identity, pattern in cases.items():
                 self.assertIsNone(mappings.translate(identity, "rust", pattern)[0])

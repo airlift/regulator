@@ -784,10 +784,10 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
     <nav className="language-tabs" aria-label="Pattern API">{languageOrder(data).map(id => <button key={id} className={id === language ? "active" : ""} onClick={() => select({ language: id })}>{data.languages[id].label}</button>)}</nav>
     <div className="comparison-intro">
       <h2 className="comparison-heading">Regulator vs {comparator}</h2>
-      {language === "re2" && <><p>Regulator receives UTF-8 input in Slice.</p><p>Native RE2 receives the same UTF-8 bytes.</p></>}
+      {language === "re2" && <><p>Regulator receives the input bytes in Slice.</p><p>Native RE2 receives the same bytes.</p></>}
       {language === "java" && <><p>Regulator receives UTF-8 input in Slice.</p><p>JDK Pattern receives precomputed UTF-16 Java strings. Input conversion is outside the timings.</p></>}
       {language === "trino" && <><p>Regulator receives prepared UTF-8 input in Slice.</p><p>Trino's Joni library receives the same UTF-8 bytes.</p></>}
-      {language === "rust" && <><p>Regulator receives UTF-8 input in Slice.</p><p>The Rust regex crate receives the same UTF-8 bytes as str. UTF-8 validation is outside the timings.</p></>}
+      {language === "rust" && <><p>Regulator receives the input bytes in Slice.</p><p>When the source turns Unicode off or the input is not valid UTF-8, the crate uses its bytes API and Regulator uses byte mode. Otherwise the crate receives the same bytes as str. UTF-8 validation is outside the timings.</p></>}
       {language === "like" && <><p>Regulator receives UTF-8 input and patterns in Slice.</p><p>Trino LikeMatcher receives UTF-8 input bytes and patterns as Java strings.</p></>}
     </div>
     <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} releaseVersion={data.sources.releaseVersion} />

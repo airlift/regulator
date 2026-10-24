@@ -5,8 +5,8 @@ benchmark report. The build writes a Pages-ready site to
 `target/benchmark-report/benchmarks/`.
 
 Each language page compares its Regulator API with the corresponding library:
-native RE2, JDK `Pattern`, Joni, the pinned Rust `regex` crate on validated
-UTF-8 `str` input, or Trino's SQL LIKE route. The default uses
+native RE2, JDK `Pattern`, Joni, the pinned Rust `regex` crate through its
+`str` and bytes APIs, or Trino's SQL LIKE route. The default uses
 native memory on R9g for released-artifact captures or C9g for historical
 captures. The URL fragment stores the language, CPU, and memory
 selection, even when opening a local file.

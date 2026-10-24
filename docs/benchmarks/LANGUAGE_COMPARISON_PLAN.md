@@ -20,7 +20,7 @@ separate.
 | RE2 | `Re2` | Pinned native RE2 |
 | Java regular expressions | `JavaRegexp` | The selected JDK's `java.util.regex.Pattern` |
 | Trino regular expressions | `TrinoRegexp` | Pinned Airlift Joni from the selected Trino revision |
-| Rust regular expressions | `RustRegexp` | The pinned Rust `regex` crate's `str` API |
+| Rust regular expressions | `RustRegexp` | The pinned Rust `regex` crate's `str` and bytes APIs |
 | Trino SQL LIKE | `TrinoLikePattern` | Trino's SQL LIKE execution route |
 
 LIKE compares directly with Trino's Slice-based matcher. For patterns eligible
@@ -75,15 +75,18 @@ different languages without relying on row position or display text.
 
 Each engine receives the representation its public API accepts:
 
-- Regulator receives precomputed UTF-8 `Slice` patterns and inputs.
+- Regulator receives precomputed `Slice` patterns and input bytes.
 - Native RE2 receives the identical pattern and input bytes where semantics
   permit.
 - JDK `Pattern` receives precomputed `String` patterns and inputs containing the
   same logical Unicode text.
 - Joni receives the precomputed byte representation used by the pinned Trino
   comparator.
-- The pinned Rust `regex` crate receives the identical UTF-8 bytes as a `str`,
-  validated outside timing.
+- The pinned Rust `regex` crate receives the identical bytes as a `str`,
+  validated outside timing. A bulk case whose source turns Unicode mode off, or
+  whose input is not UTF-8, uses the crate's bytes API instead, and Regulator
+  compiles its pattern in byte mode, as RE2 switches to Latin-1 for a
+  Unicode-off source.
 
 The default JDK timing excludes UTF-8-to-`String` conversion. If an integration
 needs to measure that cost, add a separate conversion-inclusive diagnostic.

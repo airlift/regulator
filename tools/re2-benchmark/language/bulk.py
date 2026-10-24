@@ -30,13 +30,13 @@ def prepare(inventory_directory, destination):
                 if not original["patterns"][0]["valid_utf8"]:
                     reason = "Pattern bytes cannot represent a UTF-8 expression in this public language API"
                 elif original["model"] != "compile" and not original["haystack"]["valid_utf8"]:
-                    reason = {"java": "The JDK String API cannot represent the malformed UTF-8 input",
-                              "trino": "Trino does not define a shared cross-engine matching contract for malformed UTF-8 input",
-                              "rust": "The Rust crate's str API cannot represent the malformed UTF-8 input"}[language]
+                    # Rust matches a malformed haystack in byte mode, with the crate's bytes API.
+                    if language != "rust":
+                        reason = {"java": "The JDK String API cannot represent the malformed UTF-8 input",
+                                  "trino": "Trino does not define a shared cross-engine matching contract for malformed UTF-8 input"}[language]
             fields = rebar_inventory.decode_klv(payload)
             pattern = fields["pattern"][0]
-            translated, explanation = mappings.translate(original["id"], language, pattern,
-                                                         unicode=fields["unicode"] == [b"true"])
+            translated, explanation = mappings.translate(original["id"], language, pattern)
             if translated is None:
                 reason = reason or explanation
             mapped_payload = payload
@@ -123,8 +123,7 @@ def validate_manifest(manifest, directory, archived=False):
             if collection.digest(payload) != mapping["input_file_sha256"]:
                 raise ValueError("bulk input checksum mismatch")
             fields = rebar_inventory.decode_klv(payload)
-            translated, _ = mappings.translate(case["id"], language, source_fields["pattern"][0], archived=archived,
-                                               unicode=source_fields["unicode"] == [b"true"])
+            translated, _ = mappings.translate(case["id"], language, source_fields["pattern"][0], archived=archived)
             expected_fields = dict(source_fields)
             if mapping["status"] != "not-compatible":
                 if translated is None:

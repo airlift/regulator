@@ -69,7 +69,8 @@ assert.deepEqual(Array.from(exports.languageOrder(rustData)), ["re2", "java", "t
 const rustHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: rustData,
   selection: { language: "rust", cpu: "r9g", memory: "native" } }));
 assert.match(rustHtml, /Regulator vs Rust regex crate/);
-assert.match(rustHtml, /The Rust regex crate receives the same UTF-8 bytes as str\. UTF-8 validation is outside the timings\./);
+assert.match(rustHtml, /Regulator receives the input bytes in Slice\./);
+assert.match(rustHtml, /When the source turns Unicode off or the input is not valid UTF-8, the crate uses its bytes API and Regulator uses byte mode\. Otherwise the crate receives the same bytes as str\. UTF-8 validation is outside the timings\./);
 const publishedReleaseHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: {
   ...releaseData, sources: { ...releaseData.sources, currentLabel: "Regulator 1.0 results", releaseVersion: "1.0" },
 } }));
@@ -144,7 +145,7 @@ assert.match(html, /aria-sort="none"/);
 assert.match(html, /\+80.00 ns/);
 assert.doesNotMatch(html.match(/<nav.*?<\/nav>/s)[0], /vs |native RE2|JDK Pattern|Joni/);
 assert.match(html, /<h2 class="comparison-heading">Regulator vs native RE2<\/h2>/);
-assert.match(html, /<p>Regulator receives UTF-8 input in Slice\.<\/p><p>Native RE2 receives the same UTF-8 bytes\.<\/p>/);
+assert.match(html, /<p>Regulator receives the input bytes in Slice\.<\/p><p>Native RE2 receives the same bytes\.<\/p>/);
 assert.doesNotMatch(html, /Execution timings reuse compiled patterns/);
 assert.doesNotMatch(html, /report-toolbar|type="search"|Find a workload|Lower time is better|Within 2% is blue/);
 assert.doesNotMatch(html, /Measurement method and source identity|Test method/);
