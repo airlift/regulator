@@ -13,7 +13,7 @@ from pathlib import Path
 
 from test_language_data import report_fixture
 from build_capture_data import write_report
-from language_data import CURRENT_PLATFORMS, RELEASE_1_0_PLATFORMS
+from language_data import CURRENT_PLATFORMS, LANGUAGES, RELEASE_1_0_LANGUAGES, RELEASE_1_0_PLATFORMS
 
 
 MODULE_PATH = Path(__file__).with_name("report_data.py")
@@ -123,15 +123,25 @@ class TestReportData(unittest.TestCase):
                         report_data.import_data(source)
                 self.assertFalse(report_data.DATA_DIRECTORY.exists())
 
-    def test_import_accepts_the_current_platforms(self):
-        # Campaigns after 1.0 measure only R9g and R8i.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / 'input.json'
-            source.write_text(report_data.encode_json(report_fixture(CURRENT_PLATFORMS)))
-            with self.use_data_directory(root / 'published'):
-                report_data.import_data(source)
-                self.assertEqual(report_fixture(CURRENT_PLATFORMS), report_data.validate_published_data()[2])
+    def test_import_accepts_only_whole_campaign_profiles(self):
+        # Rust is measured only on R9g and R8i, and R8g only without Rust.
+        for platforms, languages, error in ((CURRENT_PLATFORMS, LANGUAGES, None),
+                                            (RELEASE_1_0_PLATFORMS, LANGUAGES, 'campaign profile'),
+                                            (CURRENT_PLATFORMS, RELEASE_1_0_LANGUAGES, 'campaign profile')):
+            with self.subTest(platforms=list(platforms), languages=list(languages)), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / 'input.json'
+                source.write_text(report_data.encode_json(report_fixture(platforms, languages)))
+                with self.use_data_directory(root / 'published'):
+                    if error is None:
+                        report_data.import_data(source)
+                        current = report_data.validate_published_data()[2]
+                        self.assertEqual(report_fixture(platforms, languages), current)
+                        self.assertIn('| Rust regex crate | 2.0× faster | — |', report_data.summary_markdown(current))
+                    else:
+                        with self.assertRaisesRegex(ValueError, error):
+                            report_data.import_data(source)
 
     def test_import_does_not_duplicate_an_uncompressed_release(self):
         with tempfile.TemporaryDirectory() as directory:

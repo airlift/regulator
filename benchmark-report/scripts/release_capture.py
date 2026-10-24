@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 
 from baseline_data import baseline_rows, read_rows
-from language_data import LANGUAGES, MEMORY_MODES, RELEASE_1_0_PLATFORMS, digest, language_rows
+from language_data import MEMORY_MODES, RELEASE_1_0_LANGUAGES, RELEASE_1_0_PLATFORMS, digest, language_rows
 from report_data import validate_report
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -265,7 +265,7 @@ def build(plan_path):
               'sources': {'currentLabel': 'Regulator ' + release['version'] + ' final results',
                           'currentCandidate': release['source_commit'], 'engineTree': release['engine_tree'],
                           'jdk': 'Temurin 25.0.4+7'},
-              'languages': LANGUAGES, 'platforms': RELEASE_1_0_PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
+              'languages': RELEASE_1_0_LANGUAGES, 'platforms': RELEASE_1_0_PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
               'methodology': ['Public measurements load the checksummed published release JAR. Collector source is recorded separately.',
                               'Comparisons use three independent hosts, with same-host ratios and all original samples retained. Baseline confirmations use a fourth host where required.',
                               'Ordinary R-family workers have 2 vCPUs and 16 GiB RAM. Measured JVMs retain an 8 GiB heap; JMH launchers use at most 256 MiB.',

@@ -1479,7 +1479,7 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                 fi
                 expected_cargo_package=not-installed
                 expected_rust_package=not-installed
-                if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* ]]; then
+                if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* || "${CAMPAIGN_MODE}" == language-batch ]]; then
                     expected_cargo_package=${CARGO_PACKAGE}
                     expected_rust_package=${RUST_PACKAGE}
                 fi

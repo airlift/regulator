@@ -30,8 +30,8 @@ class TestFleet(unittest.TestCase):
     def test_complete_matrix_keeps_comparator_with_both_memory_modes(self):
         (self.source / "unrelated.txt").write_text("not part of the workload")
         plan = fleet.prepare(self.source, self.directory)
-        self.assertEqual(len(plan["partitions"]), 39)
-        self.assertEqual(len(plan["jobs"]), 234)
+        self.assertEqual(len(plan["partitions"]), 52)
+        self.assertEqual(len(plan["jobs"]), 312)
         self.assertEqual(plan["platform_allocations"], {
             "r9g": {"instance_type": "r9g.2xlarge", "vcpus": 8},
             "r8i": {"instance_type": "r8i.large", "vcpus": 2},
@@ -95,8 +95,14 @@ class TestFleet(unittest.TestCase):
                 fleet.prepare(self.source, self.root / "invalid", max_concurrent_hosts=value)
 
     def test_archive_validation_preserves_1_0_evidence(self):
-        # 1.0 plans also measured R8g after R9g.
-        with patch.object(fleet, "PLATFORMS", fleet.RELEASE_1_0_PLATFORMS):
+        # 1.0 plans measured three languages, and also measured R8g after R9g.
+        manifest = collection.load(self.source / "manifest.json")
+        manifest["languages"] = collection.RELEASE_1_0_ENGINES
+        for case in manifest["cases"]:
+            del case["mappings"]["rust"]
+        collection.save(self.source / "manifest.json", manifest)
+        with patch.object(collection, "ENGINES", collection.RELEASE_1_0_ENGINES), \
+                patch.object(fleet, "PLATFORMS", fleet.RELEASE_1_0_PLATFORMS):
             plan = self.prepare_small_plan()
         # Archived plans use schema 3, or schema 2 without recorded EC2 allocations.
         for schema in (3, 2):
@@ -108,7 +114,7 @@ class TestFleet(unittest.TestCase):
                     del assignment["vcpus"]
             collection.save(self.directory / "plan.json", plan)
             with self.subTest(schema=schema):
-                with self.assertRaisesRegex(ValueError, "fleet protocol"):
+                with self.assertRaisesRegex(ValueError, "language or memory-mode coverage"):
                     fleet.validate(self.directory)
                 self.assertEqual(fleet.validate_archive(self.directory), plan)
                 shutil.rmtree(self.root / "results", ignore_errors=True)
@@ -158,7 +164,7 @@ class TestFleet(unittest.TestCase):
                   "isolated_pairs": [[manifest["cases"][0]["id"], "java"]], "max_batch_seconds": 4200,
                   "bootstrap_seconds": 600}
         plan = fleet.prepare(self.source, self.directory, operation_budget=10, duration_policy=policy)
-        self.assertEqual(len(plan["jobs"]), 234)
+        self.assertEqual(len(plan["jobs"]), 312)
         self.assertEqual(fleet.validate(self.directory), plan)
         self.assertEqual(sorted(job for batch in plan["host_batches"] for job in batch["jobs"]),
                          sorted(job["id"] for job in plan["jobs"]))
@@ -231,7 +237,7 @@ class TestFleet(unittest.TestCase):
                     row_id = identity + "/" + operation
                     raw_path = result / row_id / "raw.json"
                     raw_path.parent.mkdir(parents=True)
-                    if engine == "native-re2":
+                    if engine in collection.NATIVE_RUNNERS:
                         raw = {"benchmarks": [{"run_type": "iteration", "run_name": operation,
                                                "time_unit": "ns", "real_time": 100} for _ in range(5)]}
                     else:
@@ -269,9 +275,9 @@ class TestFleet(unittest.TestCase):
         output = self.root / "export.json"
         fleet.aggregate(self.directory, results, output)
         data = collection.load(output)
-        self.assertEqual(len(data["observations"]), 6 * 15)
-        self.assertEqual(len(data["comparisons"]), 6 * 10)
-        self.assertEqual(len(data["hosts"]), 6)
+        self.assertEqual(len(data["observations"]), 8 * 15)
+        self.assertEqual(len(data["comparisons"]), 8 * 10)
+        self.assertEqual(len(data["hosts"]), 8)
         self.assertEqual(before, {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before})
         with self.assertRaisesRegex(ValueError, "overwrite"):
             fleet.aggregate(self.directory, results, output)
@@ -286,19 +292,25 @@ class TestFleet(unittest.TestCase):
             return evidence[partition.name]
 
         output = self.root / "preflight"
+        runners = {"native-re2": "native", "native-rust": "rust"}
+        with patch.object(collection, "verify", side_effect=verify_partition) as verify, \
+                self.assertRaisesRegex(ValueError, "missing native runner: --native-rust-runner"):
+            fleet.verify(self.directory, output, "java", "classpath", {"native-re2": "native"})
+        verify.assert_not_called()
+        self.assertFalse(output.exists())
         with patch.object(collection, "verify", side_effect=verify_partition) as verify, \
                 patch.object(collection, "measure") as measure:
-            fleet.verify(self.directory, output, "java", "classpath", "native")
-            self.assertEqual(verify.call_count, 3)
+            fleet.verify(self.directory, output, "java", "classpath", runners)
+            self.assertEqual(verify.call_count, 4)
             measure.assert_not_called()
         combined = collection.load(output / "verification.json")
-        self.assertEqual(len(combined["receipts"]), 9)
+        self.assertEqual(len(combined["receipts"]), 12)
         collection.validate_receipts(collection.load(self.source / "manifest.json"), combined["receipts"])
 
         evidence[next(iter(evidence))]["runners_sha256"] = "changed"
         with patch.object(collection, "verify", side_effect=verify_partition), \
                 self.assertRaisesRegex(ValueError, "runners changed"):
-            fleet.verify(self.directory, self.root / "changed-preflight", "java", "classpath", "native")
+            fleet.verify(self.directory, self.root / "changed-preflight", "java", "classpath", runners)
 
     def test_scoped_preflight_does_not_require_unselected_languages(self):
         manifest = collection.load(self.source / 'manifest.json')
@@ -307,7 +319,7 @@ class TestFleet(unittest.TestCase):
         measured = self.write_results(plan)
         evidence = collection.load(measured / plan['jobs'][0]['id'] / 'verification.json')
         with patch.object(collection, 'verify', return_value=evidence), patch.object(collection, 'measure') as measure:
-            fleet.verify(self.directory, self.root / 'preflight', 'java', 'classpath', 'native')
+            fleet.verify(self.directory, self.root / 'preflight', 'java', 'classpath', {'native-re2': 'native'})
             measure.assert_not_called()
         actual = collection.load(self.root / 'preflight/verification.json')
         self.assertEqual(len(actual['receipts']), 3)

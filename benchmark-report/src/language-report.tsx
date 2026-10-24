@@ -81,7 +81,11 @@ const cpuOrders = [["r9g", "r8g", "r8i"], ["r9g", "r8i"], ["c9g", "c8g", "c8i"]]
 export function cpuOrder(data: Pick<ReportData, "platforms">): string[] {
   return cpuOrders.find(order => order.every(cpu => Object.hasOwn(data?.platforms || {}, cpu))) || [];
 }
-const languageOrder = ["re2", "java", "trino", "like"];
+// The 1.0 release measured three regex languages; later campaigns add Rust.
+const languageOrders = [["re2", "java", "trino", "rust", "like"], ["re2", "java", "trino", "like"]];
+export function languageOrder(data: Pick<ReportData, "languages">): string[] {
+  return languageOrders.find(order => order.every(language => Object.hasOwn(data?.languages || {}, language))) || [];
+}
 const numberFormat = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const percentFormat = new Intl.NumberFormat("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
@@ -133,7 +137,7 @@ export function summaryRatios(data: ReportData) {
   const geometricMean = (rows: Row[]) => rows.length
     ? Math.exp(rows.reduce((sum, row) => sum + Math.log(row.result.ratio!), 0) / rows.length)
     : null;
-  return Object.fromEntries(languageOrder.map(language => {
+  return Object.fromEntries(languageOrder(data).map(language => {
     // Host disagreement describes variability, not invalid measurements. Keep
     // those row estimates in this summary; individual rows retain their warnings.
     const rows = data.rows.filter(row => row.language === language && row.platform === cpuOrder(data)[0]
@@ -329,7 +333,7 @@ function MeasurementQuality({ rows, comparator, platform, memory, cpu, releaseVe
     <p>Percentages are half the approximate 95% interval width divided by mean execution time. For 90% of measurements, uncertainty is at or below the 90th-percentile value.</p>
     <p>Java timings use JMH. Costs average iterations, then independent processes, then hosts equally. Individual JVM executions can vary more than the uncertainty in their average. Expand a flagged workload for its measurement note. Full intervals and process measurements remain in the results download.</p>
     <details className="quality-methodology"><summary>Measurement methodology</summary>
-      <p>Intervals resample paired hosts and whole processes. Native RE2 uses Google Benchmark; repetitions within one native process remain together. “No clear difference” means the ratio interval includes parity, regardless of the 5% annotation threshold.</p>
+      <p>Intervals resample paired hosts and whole processes. Native comparators use Google Benchmark; repetitions within one native process remain together. “No clear difference” means the ratio interval includes parity, regardless of the 5% annotation threshold.</p>
       {releaseVersion === "1.0" && <p>The measurement follow-up replaced affected collections with isolated JMH forks, longer qualified timing windows and separate allocation profiling. Other results retain their original samples. The Regulator 1.0 implementation did not change.</p>}
       <p>Intervals describe the sampled hosts and processes. They do not guarantee repeatability across future collections.{releaseVersion === "1.0" && " The full assessment also covers independent-run differences and distinct process timing levels in diagnostic workloads."}</p>
       {releaseVersion === "1.0" && <p><a href="./measurement-quality.txt" target="_blank" rel="noreferrer">Full measurement-quality assessment</a></p>}
@@ -723,10 +727,11 @@ function SpecializedPatternTable({ rows, like, comparator }: { rows: Row[]; like
   </tr>)}</tbody></table></div>;
 }
 
-function selectionFromUrl(data?: Pick<ReportData, "platforms">): Selection {
+function selectionFromUrl(data?: Pick<ReportData, "platforms" | "languages">): Selection {
   const parameters = new URLSearchParams(typeof window === "undefined" ? "" : window.location.hash.slice(1));
   const available = data ? cpuOrder(data) : cpuOrders.flat();
-  return { language: languageOrder.includes(parameters.get("language") || "") ? parameters.get("language")! : "re2",
+  const languages = data ? languageOrder(data) : languageOrders[0];
+  return { language: languages.includes(parameters.get("language") || "") ? parameters.get("language")! : "re2",
     cpu: available.includes(parameters.get("cpu") || "") ? parameters.get("cpu")! : data ? available[0] : "c9g",
     memory: parameters.get("memory") === "safe" ? "safe" : "native" };
 }
@@ -776,12 +781,13 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
       <div className="benchmark-controls"><div className="platform-switch">{cpuOrder(data).map(platform => <button key={platform} className={cpu === platform ? "active" : ""} onClick={() => select({ cpu: platform })}>{data.platforms[platform]}</button>)}</div>
         <label className="safe-toggle"><input type="checkbox" checked={memory === "safe"} onChange={event => select({ memory: event.target.checked ? "safe" : "native" })} /> Pure Java · no native memory</label>
       </div></header>
-    <nav className="language-tabs" aria-label="Pattern API">{languageOrder.map(id => <button key={id} className={id === language ? "active" : ""} onClick={() => select({ language: id })}>{data.languages[id].label}</button>)}</nav>
+    <nav className="language-tabs" aria-label="Pattern API">{languageOrder(data).map(id => <button key={id} className={id === language ? "active" : ""} onClick={() => select({ language: id })}>{data.languages[id].label}</button>)}</nav>
     <div className="comparison-intro">
       <h2 className="comparison-heading">Regulator vs {comparator}</h2>
       {language === "re2" && <><p>Regulator receives UTF-8 input in Slice.</p><p>Native RE2 receives the same UTF-8 bytes.</p></>}
       {language === "java" && <><p>Regulator receives UTF-8 input in Slice.</p><p>JDK Pattern receives precomputed UTF-16 Java strings. Input conversion is outside the timings.</p></>}
       {language === "trino" && <><p>Regulator receives prepared UTF-8 input in Slice.</p><p>Trino's Joni library receives the same UTF-8 bytes.</p></>}
+      {language === "rust" && <><p>Regulator receives UTF-8 input in Slice.</p><p>The Rust regex crate receives the same UTF-8 bytes as str. UTF-8 validation is outside the timings.</p></>}
       {language === "like" && <><p>Regulator receives UTF-8 input and patterns in Slice.</p><p>Trino LikeMatcher receives UTF-8 input bytes and patterns as Java strings.</p></>}
     </div>
     <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} releaseVersion={data.sources.releaseVersion} />
@@ -827,7 +833,8 @@ function validateDisplayMetadata(data: Omit<ReportData, "rows">) {
       || cpuOrder(data).length === 0 || Object.keys(data?.platforms || {}).length !== cpuOrder(data).length
       || (data?.sources?.releaseVersion === "1.0" && !cpuOrder(data).includes("r8g"))
       || !cpuOrder(data).every(cpu => text(data?.platforms?.[cpu]))
-      || !languageOrder.every(language => text(data?.languages?.[language]?.label) && text(data?.languages?.[language]?.comparator))
+      || languageOrder(data).length === 0 || Object.keys(data?.languages || {}).length !== languageOrder(data).length
+      || !languageOrder(data).every(language => text(data?.languages?.[language]?.label) && text(data?.languages?.[language]?.comparator))
       || (data?.publication !== undefined && !text(data.publication?.note))) {
     throw new Error("Invalid report display metadata");
   }
@@ -897,6 +904,10 @@ function App() {
     void loader.manifest().then(async manifest => {
       if (cancelled) return;
       setManifest(manifest);
+      if (!Object.hasOwn(manifest.languages, selection.language)) {
+        setSelection({ ...selection, language: "re2" });
+        return;
+      }
       if (!Object.hasOwn(manifest.platforms, selection.cpu)) {
         const order = cpuOrder(manifest);
         setSelection({ ...selection, cpu: order.find(cpu => cpu.slice(1) === selection.cpu.slice(1)) || order[0] });

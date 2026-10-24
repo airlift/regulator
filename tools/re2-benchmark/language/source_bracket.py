@@ -50,7 +50,8 @@ def prepare(manifest, package, destination, java):
     # Check the archive tree, exact commit, and extracted contents before executing its build.
     jvm_build.require_clean_source(root, archive, provenance)
     candidate = collection.ROOT
-    native = sorted({name for names in native_build.SOURCES.values() for name in names})
+    # Every leg runs the candidate's native binaries, so the control may differ in their build rules.
+    native = sorted({name for names in native_build.SOURCES.values() for name in names} - {"../CMakeLists.txt"})
     shared = ["src/test/java/io/airlift/regulator/BenchmarkLanguageBulk.java",
               "src/test/java/io/airlift/regulator/BenchmarkLanguageComparison.java",
               "src/test/java/io/airlift/regulator/RebarRunner.java",

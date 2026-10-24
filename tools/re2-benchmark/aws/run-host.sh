@@ -81,6 +81,9 @@ install_packages()
         "${TIME_PACKAGE}" git jq make ninja-build perf tar gzip
     if [[ "${RE2_CAMPAIGN_SHARD_ID}" == rebar-* ]]; then
         sudo dnf install -y abseil-cpp-devel "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
+    elif [[ "${BENCHMARK_MODE}" == language-batch ]]; then
+        # The Rust language comparator links the pinned regex crate.
+        sudo dnf install -y "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
     fi
 }
 

@@ -59,7 +59,7 @@ class TestSlowBulkBudget(unittest.TestCase):
             transport.validate_host_budget(package, Path('inputs'), 5400)
             with self.assertRaises(ValueError):
                 transport.validate_host_budget(package, Path('inputs'), 81000)
-        for language, expected in (('java', 81000), ('trino', 81000), ('re2', 68400)):
+        for language, expected in (('java', 81000), ('trino', 81000), ('re2', 68400), ('rust', 68400)):
             manifest = {
                 'suite': 'language-bulk', 'protocol': collection.SLOW_BULK_PROTOCOL,
                 'selected_languages': [language], 'cases': [{'id': 'fixture', 'model': 'count'}],

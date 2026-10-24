@@ -44,7 +44,7 @@ read -r -a benchmark_targets <<<"${BENCHMARK_TARGETS}"
 cmake --build "${BUILD_DIR}" --target "${benchmark_targets[@]}" --parallel
 
 for benchmark_target in "${benchmark_targets[@]}"; do
-    if [[ "${benchmark_target}" == language_benchmark || "${benchmark_target}" == language_bulk_benchmark ]]; then
+    if [[ "${benchmark_target}" == language_*benchmark ]]; then
         python3 "${SCRIPT_DIR}/language/native_build.py" "${BUILD_DIR}" "${benchmark_target}"
     fi
 done

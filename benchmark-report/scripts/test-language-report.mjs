@@ -61,7 +61,15 @@ assert.match(releaseHtml, /R8i/);
 assert.doesNotMatch(releaseHtml, />C9g</);
 const currentData = { ...releaseData, platforms: { r9g: "R9g", r8i: "R8i" } };
 assert.deepEqual(Array.from(exports.cpuOrder(currentData)), ["r9g", "r8i"]);
-assert.doesNotMatch(renderToStaticMarkup(React.createElement(LanguageReport, { data: currentData })), /R8g/);
+const currentHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: currentData }));
+assert.doesNotMatch(currentHtml, /R8g/);
+assert.doesNotMatch(currentHtml, /Rust regex/);
+const rustData = { ...currentData, languages: { ...currentData.languages, rust: { label: "Rust regex", comparator: "Rust regex crate" } } };
+assert.deepEqual(Array.from(exports.languageOrder(rustData)), ["re2", "java", "trino", "rust", "like"]);
+const rustHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: rustData,
+  selection: { language: "rust", cpu: "r9g", memory: "native" } }));
+assert.match(rustHtml, /Regulator vs Rust regex crate/);
+assert.match(rustHtml, /The Rust regex crate receives the same UTF-8 bytes as str\. UTF-8 validation is outside the timings\./);
 const publishedReleaseHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: {
   ...releaseData, sources: { ...releaseData.sources, currentLabel: "Regulator 1.0 results", releaseVersion: "1.0" },
 } }));

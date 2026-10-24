@@ -24,10 +24,14 @@ import native_build
 
 ROOT = Path(__file__).resolve().parents[3]
 CORPUS = ROOT / "src/test/resources/io/airlift/regulator/everyday-trino-workloads.tsv"
-ENGINES = {"re2": ("re2", "native-re2"), "java": ("java", "jdk"), "trino": ("trino", "joni")}
+ENGINES = {"re2": ("re2", "native-re2"), "java": ("java", "jdk"), "trino": ("trino", "joni"),
+           "rust": ("rust", "native-rust")}
+# Archived manifests are the 1.0 release campaign's, which measured only three languages.
+RELEASE_1_0_ENGINES = {language: ENGINES[language] for language in ("re2", "java", "trino")}
 # Native comparators run as their own binaries: the lifecycle runner, the bulk runner, and the
 # key that names the binary's option (--native-runner) and its evidence (native_binary_sha256).
-NATIVE_RUNNERS = {"native-re2": ("language_benchmark", "language_bulk_benchmark", "native")}
+NATIVE_RUNNERS = {"native-re2": ("language_benchmark", "language_bulk_benchmark", "native"),
+                  "native-rust": ("language_rust_benchmark", "language_rust_bulk_benchmark", "native_rust")}
 OPERATIONS = ("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount")
 MODES = ("native", "safe")
 PROTOCOL = {
@@ -88,6 +92,7 @@ def load(path):
 
 def prepare(destination):
     """Keep input rotation, source identities, and per-language mappings in the frozen manifest."""
+    import mappings
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "inputs").mkdir()
     cases = {}
@@ -118,41 +123,64 @@ def prepare(destination):
         case["rotation"] = "round-robin, one input per invocation"
         case["input_bytes_per_operation"] = sum(source["input_bytes"] for source in case["sources"]) / len(case["sources"])
         case["matches_per_count_operation"] = sum(source["expected_count"] for source in case["sources"]) / len(case["sources"])
-        payload = pattern.hex() + "\n" + "".join(
+        rows = "".join(
             f"{source['slice_offset']}\t{source['expected_count']}\t{source['hex']}\n" for source in case["sources"])
-        path = Path("inputs") / f"{short_id}.tsv"
-        (destination / path).write_text(payload)
-        case["mappings"] = {language: {
-            "status": "identical", "pattern": case["source_pattern"],
-            "input_file": str(path), "input_file_sha256": digest(payload.encode()),
-            "verifier": "ordered-group-zero-bytes-and-count-v1",
-            "reason": "Shared ordinary corpus; verification required before timing",
-        } for language in ENGINES}
+        case["mappings"] = {}
+        for language in ENGINES:
+            mapped, reason = mappings.translate_lifecycle(case["id"], language, case["source_pattern"])
+            payload = mapped.encode("utf-8").hex() + "\n" + rows
+            path = Path("inputs") / (f"{short_id}.tsv" if reason is None else f"{short_id}-{language}.tsv")
+            (destination / path).write_text(payload)
+            case["mappings"][language] = {
+                "status": "identical" if reason is None else "translated", "pattern": mapped,
+                "input_file": str(path), "input_file_sha256": digest(payload.encode()),
+                "verifier": "ordered-group-zero-bytes-and-count-v1",
+                "reason": reason or "Shared ordinary corpus; verification required before timing",
+            }
     manifest = {
         "schema_version": 2, "suite": "language-lifecycle", "protocol": PROTOCOL,
         "corpus_sha256": digest(CORPUS.read_bytes()), "languages": ENGINES,
         "memory_modes": MODES, "operations": OPERATIONS, "cases": list(cases.values()),
         "scope": "Additional shared ordinary/lifecycle suite; baseline shards remain required",
         "representation": {"regulator": "precomputed UTF-8 Slice", "jdk": "precomputed String",
-                           "joni": "precomputed UTF-8 bytes", "native-re2": "identical UTF-8 bytes"},
+                           "joni": "precomputed UTF-8 bytes", "native-re2": "identical UTF-8 bytes",
+                           "native-rust": "identical UTF-8 bytes, validated before timing"},
         "matcher_policy": {"re2": "public count; public find for contains",
                            "java": "public count; public find for contains",
-                           "trino": "public contains/count", "jdk": "reuse Matcher.reset(input)",
+                           "trino": "public contains/count", "rust": "public count; public find for contains",
+                           "jdk": "reuse Matcher.reset(input)",
                            "joni": "new Matcher for each input, as in the Trino byte-array route",
-                           "native-re2": "reuse RE2; Match with zero or one submatch"},
+                           "native-re2": "reuse RE2; Match with zero or one submatch",
+                           "native-rust": "reuse Regex; find_iter count, is_match for contains"},
     }
     validate_manifest(manifest, destination)
     save(destination / "manifest.json", manifest)
     return manifest
 
 
-def validate_manifest(manifest, directory):
+def expected_languages(archived):
+    return RELEASE_1_0_ENGINES if archived else ENGINES
+
+
+def has_release_1_0_languages(manifest):
+    """Saved 1.0 evidence identifies itself by the three languages it measured."""
+    return encode(manifest.get("languages")) == encode(RELEASE_1_0_ENGINES)
+
+
+def selected_engines(manifest):
+    """Read saved evidence with the languages its manifest selected, in collection order."""
+    selected = manifest.get("selected_languages") or manifest["languages"]
+    return {language: engines for language, engines in ENGINES.items() if language in selected}
+
+
+def validate_manifest(manifest, directory, archived=False):
     if manifest.get("suite") == "language-bulk":
         import bulk
-        return bulk.validate_manifest(manifest, directory)
+        return bulk.validate_manifest(manifest, directory, archived)
     if manifest["schema_version"] != 2 or not protocol_for(manifest):
         raise ValueError("unrecognized schema or unfrozen protocol")
-    if encode(manifest["languages"]) != encode(ENGINES) or encode(manifest["memory_modes"]) != encode(MODES):
+    if (encode(manifest["languages"]) != encode(expected_languages(archived)) or
+            encode(manifest["memory_modes"]) != encode(MODES)):
         raise ValueError("incomplete language or memory-mode coverage")
     if manifest["operations"] != list(OPERATIONS) and manifest["operations"] != OPERATIONS:
         raise ValueError("unexpected operation coverage")
@@ -160,16 +188,17 @@ def validate_manifest(manifest, directory):
     if (not isinstance(selected_operations, (list, tuple)) or not selected_operations or
             list(selected_operations) != [operation for operation in OPERATIONS if operation in selected_operations]):
         raise ValueError("invalid selected operations")
-    selected = manifest.get("selected_languages", list(ENGINES))
-    if not selected or len(selected) != len(set(selected)) or not set(selected) <= set(ENGINES):
+    selected = manifest.get("selected_languages", list(manifest["languages"]))
+    if not selected or len(selected) != len(set(selected)) or not set(selected) <= set(manifest["languages"]):
         raise ValueError("invalid selected languages")
     if "selected_languages" in manifest and not manifest.get("parent_manifest_sha256"):
         raise ValueError("partition must identify its parent manifest")
     ids = [case["id"] for case in manifest["cases"]]
     if not ids or len(ids) != len(set(ids)):
         raise ValueError("missing or duplicate logical IDs")
+    import mappings
     for case in manifest["cases"]:
-        if set(case["mappings"]) != set(ENGINES):
+        if set(case["mappings"]) != set(manifest["languages"]):
             raise ValueError(f"missing language mapping: {case['id']}")
         if not case["sources"]:
             raise ValueError("empty source rotation")
@@ -210,8 +239,10 @@ def validate_manifest(manifest, directory):
                 data.decode("utf-8", errors="strict")
                 if digest(data) != source["sha256"] or len(data) != source["input_bytes"]:
                     raise ValueError("input identity mismatch")
-            if mapping["status"] == "identical" and mapping["pattern"] != case["source_pattern"]:
-                raise ValueError(f"unrecorded translation: {case['id']}/{language}")
+            translated, _ = mappings.translate_lifecycle(case["id"], language, case["source_pattern"])
+            if (mapping["pattern"] != translated or
+                    mapping["status"] != ("identical" if translated == case["source_pattern"] else "translated")):
+                raise ValueError(f"mapping differs from its declared translation: {case['id']}/{language}")
 
 
 def run_process(command, prefix, *, measuring=False, measurement_timeout_seconds=None):
@@ -293,9 +324,7 @@ def native_target(manifest, engine):
 
 def required_native_runners(manifest):
     """Every selected native comparator needs its runner; bulk also needs RE2 for the source reference."""
-    selected = manifest.get("selected_languages", ENGINES)
-    required = {comparator for language, (_, comparator) in ENGINES.items()
-                if language in selected and comparator in NATIVE_RUNNERS}
+    required = {comparator for _, comparator in selected_engines(manifest).values() if comparator in NATIVE_RUNNERS}
     if manifest.get("suite") == "language-bulk":
         required.add("native-re2")
     return required
@@ -343,9 +372,7 @@ def host_identity(platform_id):
 
 def observations(manifest):
     for case in manifest["cases"]:
-        for language, (candidate, comparator) in ENGINES.items():
-            if language not in manifest.get("selected_languages", ENGINES):
-                continue
+        for language, (candidate, comparator) in selected_engines(manifest).items():
             for engine, mode in [(candidate, "native"), (candidate, "safe"), (comparator, "safe")]:
                 identity = f"{case['id']}/{language}/{engine}/{mode}"
                 yield identity, case, language, engine, mode
@@ -571,7 +598,7 @@ def work_contract(manifest, case, language, operation, version=3):
         model = case["model"]
         if language == "trino" and model in {"count-spans", "count-captures", "grep-captures"}:
             return "trino-output-assisted-count-v1" if version == 2 else "trino-matcher-count-v3"
-        if language in {"re2", "java"} and model in {"grep", "count"}:
+        if language in {"re2", "java", "rust"} and model in {"grep", "count"}:
             return "public-find-count-v2"
         return "bulk-matched-outputs-v1"
     return "public-pattern-lifecycle-v1"
@@ -697,7 +724,7 @@ def export(directory, results, *, write=True):
             mode: measured_jvm_arguments(mode) for mode in MODES}:
         raise ValueError("release measurement lacks the frozen JVM memory protocol")
     manifest = load(directory / "manifest.json")
-    validate_manifest(manifest, directory)
+    validate_manifest(manifest, directory, has_release_1_0_languages(manifest))
     evidence = load(results / "verification.json")
     validate_receipts(manifest, evidence["receipts"])
     if manifest.get("suite") == "language-bulk":
@@ -710,9 +737,7 @@ def export(directory, results, *, write=True):
         raise ValueError("missing or unexpected observations")
     rows = []
     for case in manifest["cases"]:
-        for language, (candidate, comparator) in ENGINES.items():
-            if language not in manifest.get("selected_languages", ENGINES):
-                continue
+        for language, (candidate, comparator) in selected_engines(manifest).items():
             for mode in MODES:
                 for operation in case_operations(manifest, case):
                     candidate_id = f"{case['id']}/{language}/{candidate}/{mode}/{operation}"

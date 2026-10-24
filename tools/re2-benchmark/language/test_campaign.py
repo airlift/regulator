@@ -26,13 +26,13 @@ class TestLanguageCampaign(unittest.TestCase):
     def test_smoke_and_primary_preserve_language_and_replica_coverage(self):
         smoke = campaign.LanguageCampaign([self.directory], "smoke")
         primary = campaign.LanguageCampaign([self.directory], "primary")
-        self.assertEqual(len(smoke.batches), 6)
-        self.assertEqual(len(primary.batches), 18)
+        self.assertEqual(len(smoke.batches), 8)
+        self.assertEqual(len(primary.batches), 24)
         self.assertTrue(all(batch["replica"] == 1 for _, batch in smoke.batches.values()))
         self.assertTrue(all(batch["instance_type"] == "r9g.2xlarge" and batch["vcpus"] == 8
                             for _, batch in primary.batches.values() if batch["platform"] == "r9g"))
         self.assertEqual(primary.deadline_seconds(64, 5400), 10800)
-        self.assertEqual(primary.deadline_seconds(9, 5400, 1), 54000)
+        self.assertEqual(primary.deadline_seconds(9, 5400, 1), 70200)
 
     def test_package_is_reproducible_and_binds_exact_jobs(self):
         workload = campaign.LanguageCampaign([self.directory], "primary")

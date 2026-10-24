@@ -44,7 +44,7 @@ class TestCollection(unittest.TestCase):
 
     def test_work_contract_distinguishes_output_assisted_counts(self):
         manifest = {"suite": "language-bulk"}
-        for language in ("re2", "java"):
+        for language in ("re2", "java", "rust"):
             for model in ("grep", "count"):
                 self.assertEqual(collection.work_contract(manifest, {"model": model}, language, "execute"), "public-find-count-v2")
         for model in ("count-spans", "count-captures", "grep-captures"):
@@ -63,11 +63,14 @@ class TestCollection(unittest.TestCase):
 
     def test_shared_corpus_has_all_languages_modes_and_lifecycle_operations(self):
         self.assertEqual(len(self.manifest["cases"]), 13)
-        self.assertEqual(len(list(collection.observations(self.manifest))), 13 * 9)
+        self.assertEqual(len(list(collection.observations(self.manifest))), 13 * 12)
         case = self.manifest["cases"][0]
         self.assertEqual(case["id"], "everyday/logLevel")
         self.assertEqual(len(case["sources"]), 8)
-        self.assertEqual(set(case["mappings"]), {"re2", "java", "trino"})
+        self.assertEqual(set(case["mappings"]), {"re2", "java", "trino", "rust"})
+        translated = {(case["id"], language) for case in self.manifest["cases"]
+                      for language, mapping in case["mappings"].items() if mapping["status"] == "translated"}
+        self.assertEqual(translated, {("everyday/trinoPhone", "rust"), ("everyday/whitespace", "rust")})
         self.assertEqual(case["input_bytes_per_operation"],
                          sum(source["input_bytes"] for source in case["sources"]) / 8)
 
@@ -102,6 +105,12 @@ class TestCollection(unittest.TestCase):
         broken = copy.deepcopy(self.manifest)
         broken["cases"][0]["mappings"]["java"]["pattern"] = "wrong"
         with self.assertRaisesRegex(ValueError, "does not match"):
+            collection.validate_manifest(broken, self.directory)
+        # A manifest prepared before the Rust class translation shared the untranslated input.
+        broken = copy.deepcopy(self.manifest)
+        mappings = next(case["mappings"] for case in broken["cases"] if case["id"] == "everyday/trinoPhone")
+        mappings["rust"] = mappings["java"]
+        with self.assertRaisesRegex(ValueError, "differs from its declared translation"):
             collection.validate_manifest(broken, self.directory)
 
     def test_tsv_quotes_are_literal_pattern_and_input_bytes(self):
@@ -297,7 +306,7 @@ class TestCollection(unittest.TestCase):
         with self.assertRaises(ValueError):
             collection.load(path)
 
-    def test_export_preserves_complete_matrix_and_rejects_missing_or_changed_results(self):
+    def write_measurements(self):
         results = self.root / "results"
         results.mkdir()
         receipts = self.receipts()
@@ -318,7 +327,7 @@ class TestCollection(unittest.TestCase):
                 row_id = identity + "/" + operation
                 path = results / row_id / "raw.json"
                 path.parent.mkdir(parents=True)
-                if engine == "native-re2":
+                if engine in collection.NATIVE_RUNNERS:
                     raw = {"benchmarks": [
                         {"run_type": "iteration", "run_name": operation, "time_unit": "ns", "real_time": 100}
                         for _ in range(5)]}
@@ -334,10 +343,14 @@ class TestCollection(unittest.TestCase):
                 observations[row_id] = {"outcome": "compared", **collection.raw_samples(path, engine, operation),
                                         "raw_file": str(path.relative_to(results))}
         collection.save(results / "observations.json", observations)
+        return results, receipts, observations
+
+    def test_export_preserves_complete_matrix_and_rejects_missing_or_changed_results(self):
+        results, receipts, observations = self.write_measurements()
         collection.export(self.directory, results)
         exported = collection.load(results / "language-results.json")
-        self.assertEqual(len(exported["comparisons"]), 13 * 3 * 2 * 5)
-        self.assertEqual(len(exported["observations"]), 13 * 9 * 5)
+        self.assertEqual(len(exported["comparisons"]), 13 * 4 * 2 * 5)
+        self.assertEqual(len(exported["observations"]), 13 * 12 * 5)
         compilation = next(row for row in exported["comparisons"] if row["operation"] == "compile")
         self.assertIsNone(compilation["input_bytes_per_operation"])
         self.assertEqual(exported["manifest"], collection.load(self.directory / "manifest.json"))
@@ -363,6 +376,22 @@ class TestCollection(unittest.TestCase):
         collection.save(results / "observations.json", observations)
         with self.assertRaisesRegex(ValueError, "missing"):
             collection.export(self.directory, results)
+
+    def test_export_reads_saved_1_0_evidence_but_fresh_verification_requires_rust(self):
+        # The 1.0 collector wrote the same lifecycle manifest without Rust.
+        manifest = copy.deepcopy(self.manifest)
+        manifest["languages"] = collection.RELEASE_1_0_ENGINES
+        for case in manifest["cases"]:
+            del case["mappings"]["rust"]
+        for key, policy in (("native-rust", "representation"), ("rust", "matcher_policy"), ("native-rust", "matcher_policy")):
+            del manifest[policy][key]
+        collection.save(self.directory / "manifest.json", manifest)
+        self.manifest = collection.load(self.directory / "manifest.json")
+        results, *_ = self.write_measurements()
+        exported = collection.export(self.directory, results, write=False)
+        self.assertEqual(len(exported["comparisons"]), 13 * 3 * 2 * 5)
+        with self.assertRaisesRegex(ValueError, "language or memory-mode coverage"):
+            collection.verify(self.directory, self.root / "fresh", "java", "classes", {"native-re2": "native"})
 
     def test_operation_evidence_rejects_missing_wrong_results_and_wrong_timeout_phase(self):
         receipts = self.receipts()
@@ -398,17 +427,22 @@ class TestCollection(unittest.TestCase):
         manifest_hash = collection.digest((self.directory / "manifest.json").read_bytes())
         native = self.root / "native"
         native.write_bytes(b"fixture executable")
-        runners = {"fixture": "JVM", "native_binary_sha256": collection.digest(native.read_bytes())}
+        native_rust = self.root / "native-rust"
+        native_rust.write_bytes(b"fixture Rust executable")
+        runners = {"fixture": "JVM", "native_binary_sha256": collection.digest(native.read_bytes()),
+                   "native_rust_binary_sha256": collection.digest(native_rust.read_bytes())}
         runners_hash = collection.digest(collection.encode(runners))
         collection.save(results / "runners.json", runners)
         collection.save(results / "verification.json", {
             "manifest_sha256": manifest_hash, "runners_sha256": runners_hash, "receipts": receipts})
         jvm_receipt = self.root / "jvm-build.json"
         collection.save(jvm_receipt, {"jvm": {"fixture": "JVM"}, "source_tree": "tree"})
-        collection.save(native.with_suffix(".build.json"), {
-            "binary_sha256": runners["native_binary_sha256"],
-            "source_sha256": collection.native_build.source_digest("language_benchmark"),
-            "runner_compile_commands": [{"command": "c++ -O3 -DNDEBUG"}]})
+        for runner, key, target in ((native, "native", "language_benchmark"),
+                                    (native_rust, "native_rust", "language_rust_benchmark")):
+            collection.save(runner.with_suffix(".build.json"), {
+                "binary_sha256": runners[key + "_binary_sha256"],
+                "source_sha256": collection.native_build.source_digest(target),
+                "runner_compile_commands": [{"command": "c++ -O3 -DNDEBUG"}]})
 
         def host_command(command, **kwargs):
             if command[:2] == ["git", "status"]:
@@ -450,10 +484,21 @@ class TestCollection(unittest.TestCase):
                 patch.object(collection, "host_identity", return_value={"instanceType": "r9g.xlarge"}), \
                 patch.object(collection.jvm_build, "validate_receipt"), \
                 patch.object(collection, "run_process", side_effect=measurement_process):
-            collection.measure(Path(os.path.relpath(self.directory)), Path(os.path.relpath(results)), "java", "classpath",
-                               {"native-re2": str(native)}, "r9g", jvm_receipt)
+            def measure():
+                collection.measure(Path(os.path.relpath(self.directory)), Path(os.path.relpath(results)), "java", "classpath",
+                                   {"native-re2": str(native), "native-rust": str(native_rust)}, "r9g", jvm_receipt)
+            # Each native runner's receipt must describe a release build of the current sources.
+            rust_receipt = native_rust.with_suffix(".build.json")
+            valid = collection.load(rust_receipt)
+            for change, error in (({"source_sha256": "0" * 64}, "different source"),
+                                  ({"runner_compile_commands": [{"command": "c++ -O3"}]}, "release build")):
+                collection.save(rust_receipt, {**valid, **change})
+                with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
+                    measure()
+            collection.save(rust_receipt, valid)
+            measure()
         exported = collection.load(results / "language-results.json")
-        self.assertEqual(len(measured), 585 - 2)
+        self.assertEqual(len(measured), 780 - 2)
         for operation in ("compile", "singleUseContains", "reusedContains"):
             row = exported["observations"][first + "/" + operation]
             self.assertEqual(row["outcome"], "compared")

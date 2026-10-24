@@ -12,11 +12,20 @@ LANGUAGES = {
     're2': {'label': 'RE2', 'comparator': 'native RE2'},
     'java': {'label': 'Java regex', 'comparator': 'JDK Pattern'},
     'trino': {'label': 'Trino regex', 'comparator': 'Joni'},
+    'rust': {'label': 'Rust regex', 'comparator': 'Rust regex crate'},
     'like': {'label': 'LIKE', 'comparator': 'Trino SQL LIKE'},
 }
+# The 1.0 campaigns measured three regex languages; later campaigns add Rust.
+# The preliminary C-family capture reuses this language set.
+RELEASE_1_0_LANGUAGES = {language: LANGUAGES[language] for language in ('re2', 'java', 'trino', 'like')}
 PLATFORMS = {'c9g': 'C9g · Graviton5', 'c8g': 'C8g · Graviton4', 'c8i': 'C8i · Intel'}
 RELEASE_1_0_PLATFORMS = {'r9g': 'R9g · Graviton5', 'r8g': 'R8g · Graviton4', 'r8i': 'R8i · Intel'}
 CURRENT_PLATFORMS = {'r9g': 'R9g · Graviton5', 'r8i': 'R8i · Intel'}
+# Each campaign measured one platform set with one language set: the
+# preliminary and 1.0 captures without Rust, later campaigns with Rust but
+# without R8g.
+PROFILES = ((PLATFORMS, RELEASE_1_0_LANGUAGES), (RELEASE_1_0_PLATFORMS, RELEASE_1_0_LANGUAGES),
+            (CURRENT_PLATFORMS, LANGUAGES))
 MEMORY_MODES = {'native': 'Native memory', 'safe': 'Pure Java'}
 STATES = {'compared', 'not-compatible', 'did-not-finish'}
 # Specialized-pattern case suffixes in report column order: the regular engine,
@@ -176,7 +185,7 @@ def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
         if descriptions[key].get('work_contract') is not None:
             rows[-1]['workContract'] = descriptions[key]['work_contract']
     complete = {(manifest['suite'], case['id'], language)
-                for manifest in manifests for case in manifest['cases'] for language in ('re2', 'java', 'trino')}
+                for manifest in manifests for case in manifest['cases'] for language in case['mappings']}
     selected = complete if selection is None else set(map(tuple, selection))
     if not selected or not selected <= complete or (selection is not None and len(selected) != len(selection)):
         raise ValueError('invalid or duplicate language selection')
@@ -258,11 +267,11 @@ def validate_language_report(data):
         if data.get('presentation', {}).get('reviewPreview'):
             raise ValueError('preliminary publication cannot use private-preview presentation')
     platforms = data['platforms']
-    if (set(platforms) not in (set(PLATFORMS), set(RELEASE_1_0_PLATFORMS), set(CURRENT_PLATFORMS)) or
-            set(data['memoryModes']) != set(MEMORY_MODES)):
-        raise ValueError('missing platform or memory mode')
-    if set(data['languages']) != set(LANGUAGES):
-        raise ValueError('missing language')
+    if set(data['memoryModes']) != set(MEMORY_MODES):
+        raise ValueError('missing memory mode')
+    if not any(set(platforms) == set(profile_platforms) and set(data['languages']) == set(profile_languages)
+               for profile_platforms, profile_languages in PROFILES):
+        raise ValueError('platforms and languages do not match one campaign profile')
     if not data.get('methodology') or not data.get('provenance'):
         raise ValueError('report requires method and source provenance')
     for key in ('currentLabel', 'currentCandidate', 'engineTree', 'jdk'):
@@ -276,7 +285,7 @@ def validate_language_report(data):
     specialized = defaultdict(lambda: defaultdict(dict))
     for row in data['rows']:
         language, platform, mode = row['language'], row['platform'], row['memoryMode']
-        if language not in LANGUAGES or platform not in platforms or mode not in MEMORY_MODES:
+        if language not in data['languages'] or platform not in platforms or mode not in MEMORY_MODES:
             raise ValueError('unknown language, CPU, or memory mode')
         identity = (language, platform, mode, row['id'])
         if identity in seen:
@@ -299,7 +308,7 @@ def validate_language_report(data):
                 contracts = {'bulk-matched-outputs-v1'}
                 if language == 'trino' and row['model'] in {'count-spans', 'count-captures', 'grep-captures'}:
                     contracts = {'trino-output-assisted-count-v1', 'trino-matcher-count-v3'}
-                elif language in {'re2', 'java'} and row['model'] in {'grep', 'count'}:
+                elif language in {'re2', 'java', 'rust'} and row['model'] in {'grep', 'count'}:
                     contracts = {'public-find-count-v2'}
             if row['workContract'] not in contracts:
                 raise ValueError('invalid benchmark work contract')
@@ -353,7 +362,7 @@ def validate_language_report(data):
                     raise ValueError('non-comparable outcome cannot have ratio uncertainty')
                 if not result.get('reason') or any(key in result for key in ('ratio', 'candidateNs', 'comparatorNs', 'deltaNs', 'deltaNsPerByte')):
                     raise ValueError('non-comparable result must have a reason and no numerical comparison')
-    for language in LANGUAGES:
+    for language in data['languages']:
         for platform in platforms:
             for mode in MEMORY_MODES:
                 operations = coverage[language, platform, mode]
@@ -395,6 +404,6 @@ def validate_language_report(data):
                     raise ValueError('invalid specialized-pattern gain warnings')
                 earlier.add(variants[suffix]['id'])
     shared = {language: {row['id'] for row in data['rows'] if row['language'] == language and row['source'] == 'language'}
-              for language in ('re2', 'java', 'trino')}
-    if shared['re2'] != shared['java'] or shared['re2'] != shared['trino']:
+              for language in data['languages'] if language != 'like'}
+    if len({frozenset(identities) for identities in shared.values()}) != 1:
         raise ValueError('shared workload identities differ across regex languages')

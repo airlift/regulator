@@ -37,7 +37,7 @@ class TestBulkIsolation(unittest.TestCase):
         self.results = self.root / "verified"
         with patch.object(collection, "runner_identity", return_value={"fixture": "runners"}), \
                 patch.object(collection, "verify_command", side_effect=self.verified):
-            return collection.verify(self.directory, self.results, "java", "classes", {"native-re2": "native"})
+            return collection.verify(self.directory, self.results, "java", "classes", {"native-re2": "native", "native-rust": "native-rust"})
 
     def test_bulk_verification_runs_in_order_on_pinned_caller(self):
         evidence = self.verify()

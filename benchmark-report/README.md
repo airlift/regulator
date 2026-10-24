@@ -5,7 +5,8 @@ benchmark report. The build writes a Pages-ready site to
 `target/benchmark-report/benchmarks/`.
 
 Each language page compares its Regulator API with the corresponding library:
-native RE2, JDK `Pattern`, Joni, or Trino's SQL LIKE route. The default uses
+native RE2, JDK `Pattern`, Joni, the pinned Rust `regex` crate on validated
+UTF-8 `str` input, or Trino's SQL LIKE route. The default uses
 native memory on R9g for released-artifact captures or C9g for historical
 captures. The URL fragment stores the language, CPU, and memory
 selection, even when opening a local file.
@@ -49,8 +50,9 @@ original estimators and warning labels. See
 [measurement quality](../docs/benchmarks/MEASUREMENT_QUALITY.md) and the
 [statistical replay](analysis/README.md) for definitions and reproduction.
 
-Import checks platform and memory-mode coverage, publication scope, and the
-pinned workload-source checksum. It stores the data as deterministic gzip with
+Import checks platform and memory-mode coverage, that the platforms and
+languages match one campaign profile, publication scope, and the pinned
+workload-source checksum. It stores the data as deterministic gzip with
 a hash of the uncompressed JSON and updates the manifest. Both JSON and
 `.json.gz` inputs are supported. It preserves previous publication entries;
 choosing which reports to publish is a separate decision.

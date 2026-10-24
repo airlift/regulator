@@ -30,11 +30,13 @@ def prepare(inventory_directory, destination):
                 if not original["patterns"][0]["valid_utf8"]:
                     reason = "Pattern bytes cannot represent a UTF-8 expression in this public language API"
                 elif original["model"] != "compile" and not original["haystack"]["valid_utf8"]:
-                    reason = ("The JDK String API cannot represent the malformed UTF-8 input" if language == "java" else
-                              "Trino does not define a shared cross-engine matching contract for malformed UTF-8 input")
+                    reason = {"java": "The JDK String API cannot represent the malformed UTF-8 input",
+                              "trino": "Trino does not define a shared cross-engine matching contract for malformed UTF-8 input",
+                              "rust": "The Rust crate's str API cannot represent the malformed UTF-8 input"}[language]
             fields = rebar_inventory.decode_klv(payload)
             pattern = fields["pattern"][0]
-            translated, explanation = mappings.translate(original["id"], language, pattern)
+            translated, explanation = mappings.translate(original["id"], language, pattern,
+                                                         unicode=fields["unicode"] == [b"true"])
             if translated is None:
                 reason = reason or explanation
             mapped_payload = payload
@@ -76,15 +78,15 @@ def encode_klv(fields):
                     for key, values in fields.items() for value in values)
 
 
-def validate_manifest(manifest, directory):
+def validate_manifest(manifest, directory, archived=False):
     if (manifest["schema_version"] != 3 or manifest["suite"] != "language-bulk" or
             not collection.protocol_for(manifest) or
             manifest.get("operations") != ["compile", "execute"] or
-            collection.encode(manifest["languages"]) != collection.encode(collection.ENGINES) or
+            collection.encode(manifest["languages"]) != collection.encode(collection.expected_languages(archived)) or
             collection.encode(manifest["memory_modes"]) != collection.encode(collection.MODES)):
         raise ValueError("invalid bulk collection protocol")
-    selected = manifest.get("selected_languages", list(collection.ENGINES))
-    if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(collection.ENGINES):
+    selected = manifest.get("selected_languages", list(manifest["languages"]))
+    if not selected or len(set(selected)) != len(selected) or not set(selected) <= set(manifest["languages"]):
         raise ValueError("invalid selected bulk languages")
     if "selected_languages" in manifest and not manifest.get("parent_manifest_sha256"):
         raise ValueError("bulk partition must identify its parent")
@@ -92,7 +94,7 @@ def validate_manifest(manifest, directory):
     if not identifiers or len(identifiers) != len(set(identifiers)):
         raise ValueError("missing or duplicate bulk cases")
     for case in manifest["cases"]:
-        if case["model"] not in rebar_inventory.MODELS or set(case["mappings"]) != set(collection.ENGINES):
+        if case["model"] not in rebar_inventory.MODELS or set(case["mappings"]) != set(manifest["languages"]):
             raise ValueError("missing bulk operation or language mapping")
         if type(case["expected_result"]) is not int or case["expected_result"] < 0:
             raise ValueError("invalid expected bulk result")
@@ -121,7 +123,8 @@ def validate_manifest(manifest, directory):
             if collection.digest(payload) != mapping["input_file_sha256"]:
                 raise ValueError("bulk input checksum mismatch")
             fields = rebar_inventory.decode_klv(payload)
-            translated, _ = mappings.translate(case["id"], language, source_fields["pattern"][0])
+            translated, _ = mappings.translate(case["id"], language, source_fields["pattern"][0],
+                                               unicode=source_fields["unicode"] == [b"true"])
             expected_fields = dict(source_fields)
             if mapping["status"] != "not-compatible":
                 if translated is None:
@@ -313,7 +316,8 @@ def probe(directory, results, java, classpath, native_runners, workers=3):
     with ThreadPoolExecutor(max_workers=workers) as executor:
         pending = {executor.submit(probe_one, case, language, engine, directory, results, java, classpath, native_runners):
                    f"{case['id']}/{language}/{engine}"
-                   for case in manifest["cases"] for language, engines in collection.ENGINES.items() for engine in engines}
+                   for case in manifest["cases"] for language, engines in collection.selected_engines(manifest).items()
+                   for engine in engines}
         for future in as_completed(pending):
             evidence[pending[future]] = future.result()
             collection.save(results / "probe.partial.json", evidence)
@@ -331,7 +335,7 @@ def summarize(manifest, evidence):
     for case in manifest["cases"]:
         traces = {}
         expected = "compiled" if case["model"] == "compile" else str(case["expected_result"])
-        for language, engines in collection.ENGINES.items():
+        for language, engines in collection.selected_engines(manifest).items():
             pair = {}
             for engine in engines:
                 key = f"{case['id']}/{language}/{engine}"
