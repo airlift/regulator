@@ -67,6 +67,9 @@ public class BenchmarkTrinoLikeRowsTrino
                 "high-none",
                 "high-selective",
                 "high-common",
+                "ordered-none",
+                "ordered-selective",
+                "ordered-common",
                 "picked-1",
                 "picked-2",
         })

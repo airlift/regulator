@@ -99,7 +99,7 @@ public final class TrinoLikeRowsTrinoVerifier
                 cellCount++;
             }
         }
-        System.out.println("Verified %s Trino LIKE row results against LikeMatcher over %s literals%s".formatted(
+        System.out.println("Verified %s Trino LIKE row results against LikeMatcher over %s cells%s".formatted(
                 comparisonCount,
                 cellCount,
                 skipped.isEmpty() ? "" : "; skipped %s without a corpus directory".formatted(skipped)));

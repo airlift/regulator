@@ -37,9 +37,10 @@ import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPU
  * Normative Trino rows: each method calls one Trino function once per row, as Trino calls it, over
  * 4,096 real corpus rows visited in one fixed shuffled order. {@link TestingTrinoRowsBenchmarkInputs}
  * supplies each workload's rows and literals. Grid literals are named {@code <tercile>-<band>} for the
- * frequency of their first byte and the share of rows containing them; {@code picked-N} literals are
- * hand-picked queries. A cell without a literal fails setup. Setup verifies the sampled rows' checksum
- * and each literal's hit count.
+ * frequency of their first byte and the share of rows containing them; {@code ordered-<band>} cells
+ * search two grid candidates in order with {@code a(?s:.*)b}, named for the share of rows holding
+ * both in that order; {@code picked-N} literals are hand-picked queries. A cell without a literal fails setup. Setup
+ * verifies the sampled rows' checksum and each cell's hit count.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -64,6 +65,9 @@ public class BenchmarkTrinoRows
                 "high-none",
                 "high-selective",
                 "high-common",
+                "ordered-none",
+                "ordered-selective",
+                "ordered-common",
                 "picked-1",
                 "picked-2",
         })

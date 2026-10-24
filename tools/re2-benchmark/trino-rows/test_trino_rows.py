@@ -16,7 +16,7 @@ class TestTrinoRows(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot sample"):
             trino_rows.sample_counts([4095])
 
-    def test_grid_literals_follow_first_byte_tercile_and_hit_band(self):
+    def test_grid_literals_and_ordered_pairs_follow_their_rules(self):
         # Sampled even lines: 30 hold mmmm, 3 of those also aaaa.b, 10 others kkkk.
         # Odd lines supply the candidates, so zzzz, zzzy, and kkkq occur in no sampled row.
         sampled = [b"mmmm aaaa.b" if index < 3 else b"mmmm" if index < 30 else b"kkkk" if index < 40 else b"x y"
@@ -48,12 +48,27 @@ class TestTrinoRows(unittest.TestCase):
             "low-none": (rows["low-none"]["literal"], "3", "0", "0"),
             "low-selective": ("aaaa\\.b", "1", "3", "3"),
             "high-common": ("mmmm", "1", "30", "30"),
+            "ordered-none": (rows["ordered-none"]["pattern"], "5", "0", "0"),
+            "ordered-selective": ("mmmm(?s:.*)aaaa\\.b", "1", "3", "3"),
             "picked-1": ("x y", "-", "60", "60")})
         self.assertIn(rows["low-none"]["literal"], {"zzzz", "zzzy", "kkkq"})
-        self.assertEqual([row["group"] for row in rows.values()], ["grid"] * 9 + ["picked"])
+        # Pairs take the candidates in at least 1% of rows, kkkk too although it is in no band: of
+        # their six orders, only mmmm then aaaa.b occurs.
+        self.assertIn((rows["ordered-none"]["literal"], rows["ordered-none"]["second_literal"]), {
+            ("aaaa.b", "mmmm"), ("mmmm", "kkkk"), ("kkkk", "mmmm"), ("kkkk", "aaaa.b"), ("aaaa.b", "kkkk")})
+        self.assertEqual([row["group"] for row in rows.values()], ["grid"] * 9 + ["ordered"] * 3 + ["picked"])
         self.assertEqual({key for key, row in rows.items() if not row["literal"]},
-                         {"low-common", "mid-none", "mid-selective", "mid-common", "high-none", "high-selective"})
+                         {"low-common", "mid-none", "mid-selective", "mid-common", "high-none", "high-selective",
+                          "ordered-common"})
         self.assertEqual((rows["high-common"]["first_byte"], rows["high-common"]["first_byte_count"]), ("0x6D", "120"))
+
+    def test_ordered_pairs_need_the_second_literal_after_the_first(self):
+        # xyz overlaps the two literals, so it holds neither order.
+        rows = [b"xyz", b"xyyz", b"yz xy", b"xy yz xy"]
+        hits = dict(trino_rows.ordered_hit_rows([b"xy", b"yz"], rows))
+        self.assertEqual(hits, {(b"xy", b"yz"): 2, (b"yz", b"xy"): 2})
+        for pair, hit_rows in hits.items():
+            self.assertEqual(sum(trino_rows.contains_in_order(row, pair) for row in rows), hit_rows)
 
     def test_checked_in_manifests_name_pinned_corpora(self):
         corpora = trino_rows.corpus_rows()
@@ -71,6 +86,7 @@ class TestTrinoRows(unittest.TestCase):
         for workload, _, picked in trino_rows.WORKLOADS:
             self.assertEqual([row["literal_id"] for row in literals if row["workload"] == workload],
                              [f"{tercile}-{band}" for tercile in trino_rows.TERCILES for band in trino_rows.BAND_NAMES] +
+                             [f"ordered-{band}" for band in trino_rows.BAND_NAMES] +
                              [f"picked-{index}" for index in range(1, len(picked) + 1)])
 
 

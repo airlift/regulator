@@ -53,6 +53,17 @@ public class TestBenchmarkTrinoRows
         }
     }
 
+    @Test
+    public void testOrderedCellsUseOrderedLiteralMatcher()
+    {
+        List<Map<String, String>> ordered = TestingTrinoRowsBenchmarkInputs.cellRows("ordered");
+        assertThat(ordered).isNotEmpty();
+        for (Map<String, String> row : ordered) {
+            String cell = row.get("workload") + "/" + row.get("literal_id");
+            assertThat(TrinoRegexp.compile(utf8Slice(row.get("pattern"))).usesOrderedLiteralMatcherForDiagnostics()).as(cell).isTrue();
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"english", "russian", "chinese"})
     public void testEveryMethodCyclesThroughRows(String workload)
@@ -64,7 +75,7 @@ public class TestBenchmarkTrinoRows
         BenchmarkTrinoRows benchmark = new BenchmarkTrinoRows();
         Slice replacement = utf8Slice("_");
         for (String literal : literals) {
-            // Setup verifies the sampled rows and the literal's hit count against the manifest.
+            // Setup verifies the sampled rows and the cell's hit count against the manifest.
             BenchmarkTrinoRows.BenchmarkData data = data(workload, literal);
             data.setup();
             TestingTrinoRowsBenchmarkInputs.Input input = TestingTrinoRowsBenchmarkInputs.create(workload, literal, MISSING_CORPUS_DIRECTORY);

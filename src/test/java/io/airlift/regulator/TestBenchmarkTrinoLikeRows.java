@@ -21,9 +21,11 @@ import org.openjdk.jmh.annotations.Param;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.function.BooleanSupplier;
 
 import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
+import static io.airlift.regulator.TrinoLikePattern.Plan.ORDERED_LITERALS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestBenchmarkTrinoLikeRows
@@ -40,6 +42,19 @@ public class TestBenchmarkTrinoLikeRows
         }
     }
 
+    @Test
+    public void testOrderedCellsUseOrderedLiteralsPlan()
+    {
+        List<Map<String, String>> ordered = TestingTrinoRowsBenchmarkInputs.cellRows("ordered");
+        assertThat(ordered).isNotEmpty();
+        for (Map<String, String> row : ordered) {
+            Slice likePattern = TestingTrinoRowsBenchmarkInputs.likePattern(row.get("workload"), row.get("literal_id"), TestingTrinoRowsBenchmarkInputs.literals(row));
+            assertThat(TrinoLikePattern.compile(likePattern, TrinoLikePattern.Options.defaults()).planForDiagnostics())
+                    .as("%s/%s", row.get("workload"), row.get("literal_id"))
+                    .isEqualTo(ORDERED_LITERALS);
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"english", "russian", "chinese"})
     public void testEveryMethodCyclesThroughRows(String workload)
@@ -49,7 +64,7 @@ public class TestBenchmarkTrinoLikeRows
         assertThat(literals).isNotEmpty();
         BenchmarkTrinoLikeRows benchmark = new BenchmarkTrinoLikeRows();
         for (String literal : literals) {
-            // Setup verifies the sampled rows and the literal's hit rows against the manifest.
+            // Setup verifies the sampled rows and the cell's hit rows against the manifest.
             BenchmarkTrinoLikeRows.BenchmarkData data = new BenchmarkTrinoLikeRows.BenchmarkData();
             data.setWorkload(workload);
             data.setLiteral(literal);
@@ -60,7 +75,7 @@ public class TestBenchmarkTrinoLikeRows
 
             TestingTrinoRowsBenchmarkInputs.Input input = TestingTrinoRowsBenchmarkInputs.create(workload, literal, MISSING_CORPUS_DIRECTORY);
             // Each method takes one cycle through the rows, so the next method starts again at the
-            // first row. The pattern finds the literal anywhere in the row.
+            // first row. The pattern finds the literals in order anywhere in the row.
             String cell = workload + "/" + literal;
             assertEveryRow(cell, input, () -> benchmark.matches(data));
             assertEveryRow(cell, input, () -> benchmark.matchesGenerated(data, generated));
@@ -71,8 +86,21 @@ public class TestBenchmarkTrinoLikeRows
     {
         for (int row = 0; row < input.sources().size(); row++) {
             Slice source = input.sources().get(row);
-            assertThat(method.getAsBoolean()).as("%s row %s", cell, row).isEqualTo(source.indexOf(input.literal()) >= 0);
+            assertThat(method.getAsBoolean()).as("%s row %s", cell, row).isEqualTo(containsInOrder(source, input.literals()));
         }
+    }
+
+    private static boolean containsInOrder(Slice source, List<Slice> literals)
+    {
+        int start = 0;
+        for (Slice literal : literals) {
+            int found = source.indexOf(literal, start);
+            if (found < 0) {
+                return false;
+            }
+            start = found + literal.length();
+        }
+        return true;
     }
 
     private static List<String> parameter(Class<?> benchmarkDataClass, String name)
