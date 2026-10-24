@@ -94,8 +94,18 @@ python3 tools/re2-benchmark/language/collection.py prepare \
 
 The build records `language_benchmark.build.json` beside the native executable.
 It includes binary and source hashes, dependency revisions, compiler commands,
-and the CMake configuration. Rebuilding the C++ target directly requires
+and the CMake configuration. The source hash covers the engine adapter and the
+shared harness it includes. Rebuilding the C++ target directly requires
 refreshing this receipt with `native_build.py`.
+
+Each native runner is a shared harness, `language_harness.h` or
+`language_bulk_harness.h`, instantiated with one engine adapter. The harness
+owns input loading, the command line, phase markers, and benchmark
+registration. A lifecycle adapter supplies compile, contains, count with an
+optional match trace, and the input check; its harness rotates the inputs and
+runs the timed operations. A bulk adapter supplies compile, the input check,
+per-search state allocated outside timing, and the timed loop that runs one
+Rebar model and optionally writes its trace.
 
 Run deterministic verification without collecting timings:
 

@@ -220,7 +220,7 @@ def validate_plan(directory, allow_archived_schema):
     return plan
 
 
-def run_job(directory, job_id, results, java, classpath, native, receipt, archive=None, candidate_provenance=None):
+def run_job(directory, job_id, results, java, classpath, native_runners, receipt, archive=None, candidate_provenance=None):
     plan = validate(directory)
     job = next((job for job in plan["jobs"] if job["id"] == job_id), None)
     if job is None:
@@ -230,8 +230,8 @@ def run_job(directory, job_id, results, java, classpath, native, receipt, archiv
     collection.host_identity(job["platform"])
     partition = directory.resolve() / "partitions" / job["partition"]
     output = results.resolve() / job["id"]
-    collection.verify(partition, output, java, classpath, native)
-    collection.measure(partition, output, java, classpath, native, job["platform"], receipt, archive, candidate_provenance)
+    collection.verify(partition, output, java, classpath, native_runners)
+    collection.measure(partition, output, java, classpath, native_runners, job["platform"], receipt, archive, candidate_provenance)
     collection.save(output / "job.json", {"job": job,
                     "plan_sha256": collection.digest((directory / "plan.json").read_bytes())})
 
@@ -334,19 +334,19 @@ def validate_package(directory):
     return receipt
 
 
-def run_package(directory, results, java, classpath, native, receipt, archive=None, candidate_provenance=None):
+def run_package(directory, results, java, classpath, native_runners, receipt, archive=None, candidate_provenance=None):
     package = validate_package(directory)
     job = package["job"]
     collection.host_identity(job["platform"])
     output = results.resolve() / job["id"]
-    collection.verify(directory, output, java, classpath, native)
-    collection.measure(directory, output, java, classpath, native, job["platform"], receipt, archive, candidate_provenance)
+    collection.verify(directory, output, java, classpath, native_runners)
+    collection.measure(directory, output, java, classpath, native_runners, job["platform"], receipt, archive, candidate_provenance)
     if validate_package(directory) != package:
         raise ValueError("job package changed during execution")
     collection.save(output / "job.json", {"job": job, "plan_sha256": package["plan_sha256"]})
 
 
-def verify(directory, results, java, classpath, native):
+def verify(directory, results, java, classpath, native_runners):
     """Verify every partition locally, including agreement across language boundaries."""
     directory, results = directory.resolve(), results.resolve()
     plan = validate(directory)
@@ -355,7 +355,7 @@ def verify(directory, results, java, classpath, native):
     runner_hash = None
     for index, partition in enumerate(plan["partitions"], start=1):
         evidence = collection.verify(directory / "partitions" / partition["id"],
-                                     results / partition["id"], java, classpath, native)
+                                     results / partition["id"], java, classpath, native_runners)
         if runner_hash is not None and runner_hash != evidence["runners_sha256"]:
             raise ValueError("runners changed between partition verifications")
         runner_hash = evidence["runners_sha256"]
@@ -459,7 +459,7 @@ def main():
     package_runner.add_argument("--results", type=Path, required=True)
     package_runner.add_argument("--java", default="java")
     package_runner.add_argument("--classpath", required=True)
-    package_runner.add_argument("--native-runner", required=True)
+    collection.add_native_runner_arguments(package_runner, required=True)
     package_runner.add_argument("--jvm-build-receipt", type=Path, required=True)
     package_runner.add_argument("--source-archive", type=Path)
     package_runner.add_argument("--candidate-provenance", type=Path)
@@ -473,7 +473,7 @@ def main():
         if name in ("verify", "run-job"):
             command.add_argument("--java", default="java")
             command.add_argument("--classpath", required=True)
-            command.add_argument("--native-runner", required=True)
+            collection.add_native_runner_arguments(command, required=True)
         if name == "run-job":
             command.add_argument("--job", required=True)
             command.add_argument("--jvm-build-receipt", type=Path, required=True)
@@ -491,16 +491,16 @@ def main():
     elif args.command == "package-batch":
         package_batch(args.plan_directory, args.batch, args.output_directory)
     elif args.command == "run-package":
-        run_package(args.package_directory, args.results, args.java, args.classpath, args.native_runner,
+        run_package(args.package_directory, args.results, args.java, args.classpath, collection.native_runner_arguments(args),
                     args.jvm_build_receipt, args.source_archive, args.candidate_provenance)
     elif args.command == "validate":
         plan = validate(args.plan_directory)
         print(f"Validated {len(plan['jobs'])} same-host jobs")
     elif args.command == "run-job":
         run_job(args.plan_directory, args.job, args.results, args.java, args.classpath,
-                args.native_runner, args.jvm_build_receipt, args.source_archive, args.candidate_provenance)
+                collection.native_runner_arguments(args), args.jvm_build_receipt, args.source_archive, args.candidate_provenance)
     elif args.command == "verify":
-        verify(args.plan_directory, args.results, args.java, args.classpath, args.native_runner)
+        verify(args.plan_directory, args.results, args.java, args.classpath, collection.native_runner_arguments(args))
     else:
         aggregate(args.plan_directory, args.results, args.output)
 

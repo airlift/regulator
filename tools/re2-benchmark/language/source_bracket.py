@@ -7,6 +7,7 @@ import tarfile
 import collection
 import focused_controls
 import jvm_build
+import native_build
 
 
 ARCHIVE = "source-control/source.tar.gz"
@@ -49,6 +50,7 @@ def prepare(manifest, package, destination, java):
     # Check the archive tree, exact commit, and extracted contents before executing its build.
     jvm_build.require_clean_source(root, archive, provenance)
     candidate = collection.ROOT
+    native = sorted({name for names in native_build.SOURCES.values() for name in names})
     shared = ["src/test/java/io/airlift/regulator/BenchmarkLanguageBulk.java",
               "src/test/java/io/airlift/regulator/BenchmarkLanguageComparison.java",
               "src/test/java/io/airlift/regulator/RebarRunner.java",
@@ -56,8 +58,7 @@ def prepare(manifest, package, destination, java):
               "pom.xml",
               "tools/re2-benchmark/language/collection.py",
               "tools/re2-benchmark/language/bulk.py",
-              "tools/re2-benchmark/language/language_bulk_benchmark.cc",
-              "tools/re2-benchmark/language/language_benchmark.cc",
+              *(f"tools/re2-benchmark/language/{name}" for name in native),
               "tools/re2-benchmark/baseline/comparators.tsv"]
     if any((root / name).read_bytes() != (candidate / name).read_bytes() for name in shared):
         raise ValueError("candidate and control measurement contracts differ")
@@ -79,7 +80,7 @@ def source_root(root):
         collection.ROOT = original
 
 
-def run(control, partitions, destination, java, classpath, native, receipt, archive, provenance, run_package):
+def run(control, partitions, destination, java, classpath, native_runners, receipt, archive, provenance, run_package):
     """Builds are already finished. Every leg uses fresh JVMs and complete verification."""
     candidate_root = collection.ROOT
     legs = [("candidate-before", candidate_root, destination / "results", classpath, receipt, archive, provenance)]
@@ -91,7 +92,7 @@ def run(control, partitions, destination, java, classpath, native, receipt, arch
     for _, root, results, leg_classpath, leg_receipt, leg_archive, leg_provenance in legs:
         with source_root(root):
             for partition in partitions:
-                run_package(partition, results, java, leg_classpath, native, leg_receipt, leg_archive, leg_provenance)
+                run_package(partition, results, java, leg_classpath, native_runners, leg_receipt, leg_archive, leg_provenance)
                 focused_controls.run(partition, results / partition.name, java, leg_classpath)
     if control is not None:
         collection.save(destination / "source-bracket.json", {

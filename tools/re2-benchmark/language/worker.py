@@ -20,7 +20,7 @@ def profile_partition(partition, results, java, classpath):
     if manifest["suite"] != "language-bulk":
         raise ValueError("diagnostic profiles require bulk workloads")
     for identity, case, language, engine, mode in collection.observations(manifest):
-        if engine == "native-re2" or case["model"] == "compile":
+        if engine in collection.NATIVE_RUNNERS or case["model"] == "compile":
             continue
         if case["mappings"][language]["status"] == "not-compatible":
             continue
@@ -51,14 +51,19 @@ def run(package_directory, destination, java="java", *, measure=False, archive=N
     build_directory = destination / "jvm"
     jvm_build.build(build_directory, java, collection.ROOT, archive, provenance)
     classpath = (build_directory / "classpath.txt").read_text().strip()
-    native_target = "language_bulk_benchmark" if manifest["suite"] == "language-bulk" else "language_benchmark"
+    # RE2 is always built because every collection command requires --native-runner; other native
+    # comparators only when selected.
+    engines = {"native-re2"}.union(*(collection.required_native_runners(collection.load(partition / "manifest.json"))
+                                     for partition in partitions))
+    native_targets = {engine: collection.native_target(manifest, engine)
+                      for engine in collection.NATIVE_RUNNERS if engine in engines}
     native_directory = destination / "native"
-    environment = dict(os.environ, RE2_BENCHMARK_TARGETS=native_target,
+    environment = dict(os.environ, RE2_BENCHMARK_TARGETS=" ".join(native_targets.values()),
                        RE2_BENCHMARK_BUILD_DIR=str(native_directory))
     with (destination / "native-build.log").open("wb") as log:
         subprocess.run([str(collection.ROOT / "tools/re2-benchmark/build.sh")], cwd=collection.ROOT,
                        env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
-    native = str(native_directory / native_target)
+    native_runners = {engine: str(native_directory / target) for engine, target in native_targets.items()}
     control = source_bracket.prepare(manifest, package_directory, destination, java)
     results = destination / "results"
     if measure:
@@ -69,7 +74,7 @@ def run(package_directory, destination, java="java", *, measure=False, archive=N
             if len(os.sched_getaffinity(0)) != 1:
                 raise ValueError("worker CPU affinity was not applied")
             collection.save(destination / "cpu-affinity.json", sorted(os.sched_getaffinity(0)))
-            source_bracket.run(control, partitions, destination, java, classpath, native,
+            source_bracket.run(control, partitions, destination, java, classpath, native_runners,
                                build_directory / "jvm-build.json", archive, provenance, fleet.run_package)
             # No profiled process overlaps a timing process, including subsequent partitions.
             for partition in partitions:
@@ -79,17 +84,17 @@ def run(package_directory, destination, java="java", *, measure=False, archive=N
     else:
         for partition in partitions:
             output = results / partition.name if batch else results
-            collection.verify(partition, output, java, classpath, native)
+            collection.verify(partition, output, java, classpath, native_runners)
             if control is not None:
                 with source_bracket.source_root(control["root"]):
                     collection.verify(partition, destination / "control-results" / partition.name,
-                                      java, control["classpath"], native)
+                                      java, control["classpath"], native_runners)
     actual = fleet.validate_batch(package_directory) if batch else fleet.validate_package(package_directory)
     if actual != package:
         raise ValueError("worker input changed during execution")
     collection.save(destination / "worker.json", {
         "kind": "qualification" if measure else "verification-only", "package": package,
-        "native_target": native_target})
+        "native_targets": list(native_targets.values())})
 
 
 def main():

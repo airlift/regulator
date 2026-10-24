@@ -19,11 +19,15 @@ import time
 import urllib.request
 
 import jvm_build
+import native_build
 
 
 ROOT = Path(__file__).resolve().parents[3]
 CORPUS = ROOT / "src/test/resources/io/airlift/regulator/everyday-trino-workloads.tsv"
 ENGINES = {"re2": ("re2", "native-re2"), "java": ("java", "jdk"), "trino": ("trino", "joni")}
+# Native comparators run as their own binaries: the lifecycle runner, the bulk runner, and the
+# key that names the binary's option (--native-runner) and its evidence (native_binary_sha256).
+NATIVE_RUNNERS = {"native-re2": ("language_benchmark", "language_bulk_benchmark", "native")}
 OPERATIONS = ("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount")
 MODES = ("native", "safe")
 PROTOCOL = {
@@ -274,8 +278,47 @@ def jmh_command(java, classpath, mode):
             "org.openjdk.jmh.Main", "-jvmArgs", " ".join(measured_jvm_arguments(mode))]
 
 
-def runner_identity(java, classpath, native):
-    return {**jvm_build.jvm_identity(java, classpath), "native_binary_sha256": digest(Path(native).read_bytes())}
+def runner_identity(java, classpath, native_runners):
+    identity = jvm_build.jvm_identity(java, classpath)
+    for engine, (*_, key) in NATIVE_RUNNERS.items():
+        if engine in native_runners:
+            identity[f"{key}_binary_sha256"] = digest(Path(native_runners[engine]).read_bytes())
+    return identity
+
+
+def native_target(manifest, engine):
+    lifecycle, bulk, _ = NATIVE_RUNNERS[engine]
+    return bulk if manifest.get("suite") == "language-bulk" else lifecycle
+
+
+def required_native_runners(manifest):
+    """Every selected native comparator needs its runner; bulk also needs RE2 for the source reference."""
+    selected = manifest.get("selected_languages", ENGINES)
+    required = {comparator for language, (_, comparator) in ENGINES.items()
+                if language in selected and comparator in NATIVE_RUNNERS}
+    if manifest.get("suite") == "language-bulk":
+        required.add("native-re2")
+    return required
+
+
+def require_native_runners(manifest, native_runners):
+    missing = sorted(required_native_runners(manifest) - set(native_runners))
+    if missing:
+        raise ValueError(f"missing native runner: {', '.join(native_runner_option(engine) for engine in missing)}")
+
+
+def native_runner_option(engine):
+    return f"--{NATIVE_RUNNERS[engine][2].replace('_', '-')}-runner"
+
+
+def add_native_runner_arguments(parser, required=False):
+    for engine in NATIVE_RUNNERS:
+        parser.add_argument(native_runner_option(engine), required=required and engine == "native-re2")
+
+
+def native_runner_arguments(args):
+    return {engine: getattr(args, f"{key}_runner") for engine, (*_, key) in NATIVE_RUNNERS.items()
+            if getattr(args, f"{key}_runner")}
 
 
 def host_identity(platform_id):
@@ -320,7 +363,7 @@ def verify_command(command, prefix, engine, mode, *, hash_trace=False):
             output = attempt_prefix.with_suffix(".stdout").read_bytes()
             receipt["trace"] = "sha256:" + digest(output) + "\n" if hash_trace else output.decode()
             receipt["trace_sha256"] = digest(receipt["trace"].encode())
-            if engine in {"re2", "java", "trino"}:
+            if engine in {candidate for candidate, _ in ENGINES.values()}:
                 marker = f"native-access={str(mode == 'native').lower()}"
                 if marker not in attempt_prefix.with_suffix(".stderr").read_text().splitlines():
                     raise ValueError(f"wrong native access mode: {prefix}")
@@ -332,15 +375,16 @@ def verify_command(command, prefix, engine, mode, *, hash_trace=False):
     return {**receipt, "attempts": attempts}
 
 
-def verify(directory, results, java, classpath, native):
+def verify(directory, results, java, classpath, native_runners):
     directory, results = directory.resolve(), results.resolve()
     manifest = load(directory / "manifest.json")
     if manifest.get("suite") == "language-bulk":
         import bulk
-        return bulk.verify(directory, results, java, classpath, native)
+        return bulk.verify(directory, results, java, classpath, native_runners)
     validate_manifest(manifest, directory)
+    require_native_runners(manifest, native_runners)
     results.mkdir(parents=True, exist_ok=False)
-    runners = runner_identity(java, classpath, native)
+    runners = runner_identity(java, classpath, native_runners)
     save(results / "runners.json", runners)
     receipts = {}
     for identity, case, language, engine, mode in observations(manifest):
@@ -350,19 +394,19 @@ def verify(directory, results, java, classpath, native):
             receipts[identity] = {**excluded, "operations": {operation: excluded.copy() for operation in OPERATIONS}}
             continue
         workload = str((directory / mapping["input_file"]).resolve())
-        command = ([native, "--verify", workload] if engine == "native-re2" else
+        command = ([native_runners[engine], "--verify", workload] if engine in NATIVE_RUNNERS else
                    java_command(java, classpath, mode) + [CLASS, "--verify", engine, workload])
         prefix = results / identity
         receipt = verify_command(command, prefix, engine, mode)
         receipt["operations"] = {}
         for operation in OPERATIONS:
-            operation_command = ([native, "--verify-operation", workload, operation] if engine == "native-re2" else
+            operation_command = ([native_runners[engine], "--verify-operation", workload, operation] if engine in NATIVE_RUNNERS else
                                  java_command(java, classpath, mode) + [CLASS, "--verify-operation", engine, workload, operation])
             receipt["operations"][operation] = verify_command(operation_command, prefix / operation, engine, mode)
         receipts[identity] = receipt
         save(results / "verification.partial.json", receipts)
     validate_receipts(manifest, receipts)
-    if runners != runner_identity(java, classpath, native):
+    if runners != runner_identity(java, classpath, native_runners):
         raise ValueError("runners changed during verification")
     evidence = {"manifest_sha256": digest((directory / "manifest.json").read_bytes()),
                 "runners_sha256": digest(encode(runners)), "receipts": receipts}
@@ -457,7 +501,7 @@ def raw_samples(path, engine, operation, workload=None, benchmark_class=CLASS, e
                 expected_jvm_arguments=None, protocol=None, allocation_path=None):
     protocol = PROTOCOL if protocol is None else protocol
     data = load(path)
-    if engine == "native-re2":
+    if engine in NATIVE_RUNNERS:
         rows = [row for row in data["benchmarks"] if row.get("run_type") == "iteration"]
         if len(rows) != protocol["native_repetitions"] or any(row.get("error_occurred") for row in rows):
             raise ValueError("incomplete native repetitions")
@@ -533,7 +577,7 @@ def work_contract(manifest, case, language, operation, version=3):
     return "public-pattern-lifecycle-v1"
 
 
-def measure(directory, results, java, classpath, native, platform_id, jvm_receipt, archive=None, candidate_provenance=None):
+def measure(directory, results, java, classpath, native_runners, platform_id, jvm_receipt, archive=None, candidate_provenance=None):
     directory, results = directory.resolve(), results.resolve()
     if (results / "provenance.json").exists() or (results / "observations.json").exists():
         raise ValueError("will not overwrite an existing measurement cohort or its call contract")
@@ -553,7 +597,7 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
     if manifest.get("suite") == "language-bulk":
         import bulk
         bulk.validate_evidence(manifest, evidence, results)
-    runners = runner_identity(java, classpath, native)
+    runners = runner_identity(java, classpath, native_runners)
     if digest(encode(runners)) != evidence["runners_sha256"]:
         raise ValueError("runners differ from verified binaries")
     jvm_build.require_clean_source(ROOT, archive, candidate_provenance)
@@ -562,23 +606,28 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
     version = subprocess.check_output([java, "-version"], stderr=subprocess.STDOUT).decode()
     if "25.0.4" not in version or "25.0.4+7" not in version:
         raise ValueError("JDK differs from baseline/comparators.tsv")
-    native_build = load(Path(native).with_suffix(".build.json"))
-    if native_build["binary_sha256"] != runners["native_binary_sha256"]:
-        raise ValueError("native binary does not match recorded build")
-    native_source = "language_bulk_benchmark.cc" if manifest.get("suite") == "language-bulk" else "language_benchmark.cc"
-    if native_build["source_sha256"] != digest(Path(__file__).with_name(native_source).read_bytes()):
-        raise ValueError("native runner was built from a different source")
-    if any(flag not in native_build["runner_compile_commands"][0]["command"] for flag in ("-O3", "-DNDEBUG")):
-        raise ValueError("native comparator requires a release build")
+    require_native_runners(manifest, native_runners)
+    native_evidence = {}
+    for engine, (*_, key) in NATIVE_RUNNERS.items():
+        if engine not in native_runners:
+            continue
+        build = load(Path(native_runners[engine]).with_suffix(".build.json"))
+        if build["binary_sha256"] != runners[f"{key}_binary_sha256"]:
+            raise ValueError(f"{engine}: native binary does not match recorded build")
+        if build["source_sha256"] != native_build.source_digest(native_target(manifest, engine)):
+            raise ValueError(f"{engine}: native runner was built from a different source")
+        if any(flag not in build["runner_compile_commands"][0]["command"] for flag in ("-O3", "-DNDEBUG")):
+            raise ValueError(f"{engine}: native comparator requires a release build")
+        native_evidence[f"{key}_binary_sha256"] = digest(Path(native_runners[engine]).read_bytes())
+        native_evidence[f"{key}_build"] = build
     provenance = {
         **jvm_build.source_identity(ROOT, archive, candidate_provenance),
         "jdk": version, "platform": platform_id, "machine": platform.machine(),
         "instance_identity": host_identity(platform_id),
         "lscpu": subprocess.check_output(["lscpu"]).decode(),
         "comparators_sha256": digest((ROOT / "tools/re2-benchmark/baseline/comparators.tsv").read_bytes()),
-        "native_binary_sha256": digest(Path(native).read_bytes()),
+        **native_evidence,
         "runners_sha256": digest(encode(runners)),
-        "native_build": native_build,
         "jvm_build": build_receipt,
         "benchmark_contract_version": 3,
         "measured_jvm_arguments": {mode: measured_jvm_arguments(mode) for mode in MODES},
@@ -598,8 +647,8 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
                 raise ValueError(f"will not overwrite existing measurements: {raw}")
             raw.parent.mkdir(parents=True, exist_ok=True)
             workload = str((directory / case["mappings"][language]["input_file"]).resolve())
-            if engine == "native-re2":
-                command = [native, workload, operation, "--benchmark_repetitions=5", "--benchmark_min_time=1s",
+            if engine in NATIVE_RUNNERS:
+                command = [native_runners[engine], workload, operation, "--benchmark_repetitions=5", "--benchmark_min_time=1s",
                            "--benchmark_min_warmup_time=10", "--benchmark_time_unit=ns",
                            "--benchmark_out_format=json", f"--benchmark_out={raw}"]
             else:
@@ -620,7 +669,7 @@ def measure(directory, results, java, classpath, native, platform_id, jvm_receip
                 raise ValueError(f"measurement process exceeded protocol budget: {row_id}")
             allocation_raw = None
             allocation_evidence = {}
-            if engine != "native-re2" and protocol.get("measurement_profile") in SEPARATE_ALLOCATION_PROFILES:
+            if engine not in NATIVE_RUNNERS and protocol.get("measurement_profile") in SEPARATE_ALLOCATION_PROFILES:
                 allocation_raw = raw.with_name("allocation.json")
                 allocation_command = list(command)
                 for flag, value in (("-f", protocol["allocation_forks"]), ("-wi", protocol["allocation_warmup_iterations"]),
@@ -705,7 +754,8 @@ def export(directory, results, *, write=True):
     runners = load(results / "runners.json")
     if digest(encode(runners)) != evidence["runners_sha256"] or provenance["runners_sha256"] != evidence["runners_sha256"]:
         raise ValueError("runner provenance changed after verification")
-    if provenance["jvm_build"]["jvm"] != {key: value for key, value in runners.items() if key != "native_binary_sha256"}:
+    native_keys = {f"{key}_binary_sha256" for *_, key in NATIVE_RUNNERS.values()}
+    if provenance["jvm_build"]["jvm"] != {key: value for key, value in runners.items() if key not in native_keys}:
         raise ValueError("exported JVM artifacts differ from build receipt")
     if provenance["jvm_build"]["source_tree"] != provenance["source_tree"]:
         raise ValueError("exported JVM build identifies a different source tree")
@@ -727,7 +777,7 @@ def main():
     parser.add_argument("--results", type=Path)
     parser.add_argument("--java", default="java")
     parser.add_argument("--classpath")
-    parser.add_argument("--native-runner")
+    add_native_runner_arguments(parser)
     import fleet
     parser.add_argument("--platform", choices=fleet.PLATFORMS)
     parser.add_argument("--jvm-build-receipt", type=Path)
@@ -743,12 +793,13 @@ def main():
     else:
         if not args.results or not args.classpath or not args.native_runner:
             parser.error("verification/measurement requires --results, --classpath, and --native-runner")
+        native_runners = native_runner_arguments(args)
         if args.action == "verify":
-            verify(args.manifest_directory, args.results, args.java, args.classpath, args.native_runner)
+            verify(args.manifest_directory, args.results, args.java, args.classpath, native_runners)
         else:
             if not args.platform or not args.jvm_build_receipt:
                 parser.error("measurement requires --platform and --jvm-build-receipt")
-            measure(args.manifest_directory, args.results, args.java, args.classpath, args.native_runner, args.platform,
+            measure(args.manifest_directory, args.results, args.java, args.classpath, native_runners, args.platform,
                     args.jvm_build_receipt, args.source_archive, args.candidate_provenance)
 
 

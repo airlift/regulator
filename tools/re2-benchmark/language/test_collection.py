@@ -77,7 +77,7 @@ class TestCollection(unittest.TestCase):
         provenance = results / "provenance.json"
         provenance.write_text('{"source_commit":"old"}')
         with self.assertRaisesRegex(ValueError, "will not overwrite.*call contract"):
-            collection.measure(self.directory, results, "java", "classes", "native", "r9g", "unused")
+            collection.measure(self.directory, results, "java", "classes", {"native-re2": "native"}, "r9g", "unused")
         self.assertEqual(provenance.read_text(), '{"source_commit":"old"}')
 
     def test_new_measurement_rejects_historical_bulk_verifier(self):
@@ -87,7 +87,7 @@ class TestCollection(unittest.TestCase):
                 patch.object(collection, 'load', return_value=manifest), \
                 patch.object(collection, 'validate_manifest'):
             with self.assertRaisesRegex(ValueError, 'boundary-and-byte verification'):
-                collection.measure(self.directory, self.root / 'results', 'java', 'classes', 'native', 'r9g', 'unused')
+                collection.measure(self.directory, self.root / 'results', 'java', 'classes', {'native-re2': 'native'}, 'r9g', 'unused')
 
     def test_reject_missing_duplicate_and_unrecorded_translations(self):
         broken = copy.deepcopy(self.manifest)
@@ -407,7 +407,7 @@ class TestCollection(unittest.TestCase):
         collection.save(jvm_receipt, {"jvm": {"fixture": "JVM"}, "source_tree": "tree"})
         collection.save(native.with_suffix(".build.json"), {
             "binary_sha256": runners["native_binary_sha256"],
-            "source_sha256": collection.digest(Path(collection.__file__).with_name("language_benchmark.cc").read_bytes()),
+            "source_sha256": collection.native_build.source_digest("language_benchmark"),
             "runner_compile_commands": [{"command": "c++ -O3 -DNDEBUG"}]})
 
         def host_command(command, **kwargs):
@@ -451,7 +451,7 @@ class TestCollection(unittest.TestCase):
                 patch.object(collection.jvm_build, "validate_receipt"), \
                 patch.object(collection, "run_process", side_effect=measurement_process):
             collection.measure(Path(os.path.relpath(self.directory)), Path(os.path.relpath(results)), "java", "classpath",
-                               str(native), "r9g", jvm_receipt)
+                               {"native-re2": str(native)}, "r9g", jvm_receipt)
         exported = collection.load(results / "language-results.json")
         self.assertEqual(len(measured), 585 - 2)
         for operation in ("compile", "singleUseContains", "reusedContains"):

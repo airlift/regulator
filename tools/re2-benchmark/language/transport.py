@@ -51,7 +51,7 @@ def validate_host_budget(package, directory, seconds):
         for _, case, _, engine, _ in collection.observations(manifest):
             for _ in collection.case_operations(manifest, case):
                 processes += 1
-                if (engine != 'native-re2' and
+                if (engine not in collection.NATIVE_RUNNERS and
                         protocol.get('measurement_profile') in collection.SEPARATE_ALLOCATION_PROFILES):
                     processes += 1
         required = SLOW_SETUP_BUDGET_SECONDS + processes * protocol['measurement_timeout_seconds']
