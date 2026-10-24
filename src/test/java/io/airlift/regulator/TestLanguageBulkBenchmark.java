@@ -23,9 +23,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -59,6 +61,22 @@ public class TestLanguageBulkBenchmark
         check(List.of("rust"), "count", "a*", "ab", 2, "source\n0:1:61;\n2:2:;\n");
         check("count", "a*", "", 1, "source\n0:0:;\n");
         check("grep", ".", "", 0, "");
+    }
+
+    @Test
+    public void testRustByteModeWithoutUnicodeOrForMalformedInput()
+            throws Exception
+    {
+        // Without Unicode, Rust compiles in byte mode, as RE2 compiles Latin-1, so a dot matches each byte of é.
+        check(List.of("re2", "rust"), "count", ".", "é".getBytes(UTF_8), false, 2, "source\n0:1:c3;\n1:2:a9;\n");
+        // With Unicode on, a malformed haystack still selects byte mode, where a byte-oriented dot compiles.
+        check(List.of("rust"), "count", "(?-u:.)", new byte[] {'a', (byte) 0xFF}, true, 2, "source\n0:1:61;\n1:2:ff;\n");
+        // Over UTF-8 text Rust keeps its default mode, which rejects that dot as the crate's str API does.
+        var data = new BenchmarkLanguageBulk.BenchmarkData();
+        data.engine = "rust";
+        data.workloadFile = input("count", "(?-u:.)", "a").toString();
+        assertThatThrownBy(data::setup)
+                .isInstanceOfSatisfying(RegexpParseException.class, exception -> assertThat(exception.errorCode()).isEqualTo(RegexpParseErrorCode.BAD_UTF8));
     }
 
     @Test
@@ -174,7 +192,13 @@ public class TestLanguageBulkBenchmark
     private void check(List<String> engines, String model, String pattern, String source, long expected, String trace)
             throws Exception
     {
-        Path input = input(model, pattern, source);
+        check(engines, model, pattern, source.getBytes(UTF_8), true, expected, trace);
+    }
+
+    private void check(List<String> engines, String model, String pattern, byte[] source, boolean unicode, long expected, String trace)
+            throws Exception
+    {
+        Path input = input(model, pattern, source, unicode);
         for (String engine : engines) {
             var data = new BenchmarkLanguageBulk.BenchmarkData();
             data.engine = engine;
@@ -223,18 +247,26 @@ public class TestLanguageBulkBenchmark
     private Path input(String model, String pattern, String source, String... extraFields)
             throws Exception
     {
+        return input(model, pattern, source.getBytes(UTF_8), true, extraFields);
+    }
+
+    private Path input(String model, String pattern, byte[] source, boolean unicode, String... extraFields)
+            throws Exception
+    {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        List<String[]> fields = new ArrayList<>(List.of(new String[][] {
-                {"name", "test"}, {"model", model}, {"pattern", pattern},
-                {"haystack", source}, {"unicode", "true"}, {"case-insensitive", "false"},
-        }));
+        List<Map.Entry<String, byte[]>> fields = new ArrayList<>(List.of(
+                entry("name", "test".getBytes(UTF_8)),
+                entry("model", model.getBytes(UTF_8)),
+                entry("pattern", pattern.getBytes(UTF_8)),
+                entry("haystack", source),
+                entry("unicode", Boolean.toString(unicode).getBytes(UTF_8)),
+                entry("case-insensitive", "false".getBytes(UTF_8))));
         for (int index = 0; index < extraFields.length; index += 2) {
-            fields.add(new String[] {extraFields[index], extraFields[index + 1]});
+            fields.add(entry(extraFields[index], extraFields[index + 1].getBytes(UTF_8)));
         }
-        for (String[] field : fields) {
-            byte[] value = field[1].getBytes(UTF_8);
-            output.write((field[0] + ":" + value.length + ":").getBytes(UTF_8));
-            output.write(value);
+        for (Map.Entry<String, byte[]> field : fields) {
+            output.write((field.getKey() + ":" + field.getValue().length + ":").getBytes(UTF_8));
+            output.write(field.getValue());
             output.write('\n');
         }
         Path input = directory.resolve("input.klv");

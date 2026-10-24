@@ -88,7 +88,9 @@ inventory:
 6. Regulator through `TrinoLikePattern`, compared with Trino's actual SQL LIKE
    route
 7. Regulator through `RustRegexp`, compared with the pinned Rust `regex`
-   crate's `str` API on validated UTF-8, built with the pinned Rust toolchain
+   crate's `str` API on validated UTF-8, or its bytes API where `RustRegexp`
+   uses byte mode (a source that turns Unicode off, or a haystack that is not
+   UTF-8), built with the pinned Rust toolchain
 
 Direct engine entry points belong to conditional diagnostics. Pin and record
 them when such a diagnostic is required; do not add them to the routine public

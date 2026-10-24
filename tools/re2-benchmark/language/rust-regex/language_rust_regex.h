@@ -12,7 +12,8 @@
 
 #pragma once
 
-// The C interface of src/lib.rs and an owner for its compiled regex.
+// The C interface of src/lib.rs and an owner for its compiled regex. The str and
+// bytes APIs each have their own entry points and opaque compiled type.
 
 #include <cstddef>
 #include <cstdint>
@@ -38,29 +39,51 @@ uint64_t language_rust_regex_count_captures(const LanguageRustRegex* regex, Lang
                                             const char* data, size_t length);
 bool language_rust_regex_trace(const LanguageRustRegex* regex, const char* data, size_t length, bool captures,
                                LanguageRustMatchCallback callback, void* context);
+
+struct LanguageRustBytesRegex;
+struct LanguageRustBytesCaptureLocations;
+
+LanguageRustBytesRegex* language_rust_bytes_regex_compile(const char* pattern, size_t length, bool unicode,
+                                                          bool case_insensitive, char** error);
+void language_rust_bytes_regex_free(LanguageRustBytesRegex* regex);
+LanguageRustBytesCaptureLocations* language_rust_bytes_regex_capture_locations(const LanguageRustBytesRegex* regex);
+void language_rust_bytes_regex_free_capture_locations(LanguageRustBytesCaptureLocations* locations);
+bool language_rust_bytes_regex_is_match(const LanguageRustBytesRegex* regex, const char* data, size_t length);
+uint64_t language_rust_bytes_regex_count(const LanguageRustBytesRegex* regex, const char* data, size_t length);
+uint64_t language_rust_bytes_regex_count_spans(const LanguageRustBytesRegex* regex, const char* data, size_t length);
+uint64_t language_rust_bytes_regex_count_captures(const LanguageRustBytesRegex* regex,
+                                                  LanguageRustBytesCaptureLocations* locations, const char* data,
+                                                  size_t length);
+bool language_rust_bytes_regex_trace(const LanguageRustBytesRegex* regex, const char* data, size_t length,
+                                     bool captures, LanguageRustMatchCallback callback, void* context);
 }
 
 namespace {
-class RustRegex {
+template <typename Handle, Handle* (*Compile)(const char*, size_t, bool, bool, char**), void (*Free)(Handle*)>
+class BasicRustRegex {
 public:
-    RustRegex(std::string_view pattern, bool unicode, bool case_insensitive)
-            : regex_(language_rust_regex_compile(pattern.data(), pattern.size(), unicode, case_insensitive, &error_)) {}
-    ~RustRegex() {
-        if (regex_ != nullptr) language_rust_regex_free(regex_);
+    BasicRustRegex(std::string_view pattern, bool unicode, bool case_insensitive)
+            : regex_(Compile(pattern.data(), pattern.size(), unicode, case_insensitive, &error_)) {}
+    ~BasicRustRegex() {
+        if (regex_ != nullptr) Free(regex_);
         if (error_ != nullptr) language_rust_regex_free_error(error_);
     }
-    RustRegex(const RustRegex&) = delete;
-    RustRegex& operator=(const RustRegex&) = delete;
+    BasicRustRegex(const BasicRustRegex&) = delete;
+    BasicRustRegex& operator=(const BasicRustRegex&) = delete;
 
     bool ok() const { return regex_ != nullptr; }
     std::string error() const { return error_; }
-    const LanguageRustRegex* get() const { return regex_; }
+    const Handle* get() const { return regex_; }
 
 private:
     // Declared before regex_, whose initializer writes it when compiling fails.
     char* error_ = nullptr;
-    LanguageRustRegex* regex_;
+    Handle* regex_;
 };
+
+using RustRegex = BasicRustRegex<LanguageRustRegex, language_rust_regex_compile, language_rust_regex_free>;
+using RustBytesRegex =
+        BasicRustRegex<LanguageRustBytesRegex, language_rust_bytes_regex_compile, language_rust_bytes_regex_free>;
 
 bool valid_utf8(std::string_view text) { return language_rust_regex_valid_utf8(text.data(), text.size()); }
 } // namespace

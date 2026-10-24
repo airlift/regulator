@@ -71,17 +71,17 @@ class TestBulkSummary(unittest.TestCase):
         self.assertEqual(bulk.summarize(manifest, evidence)["issues"], [])
 
 
-def prepare_manifest(identity, pattern, destination):
+def prepare_manifest(identity, pattern, destination, haystack=b"aab"):
     inventory = destination.with_name(f"{destination.name}-inventory")
     inventory.mkdir()
     fields = {"name": [identity.encode()], "model": [b"count"], "pattern": [pattern],
-              "haystack": [b"aab"], "unicode": [b"true"], "case-insensitive": [b"false"]}
+              "haystack": [haystack], "unicode": [b"true"], "case-insensitive": [b"false"]}
     payload = bulk.encode_klv(fields)
     (inventory / "input.gz").write_bytes(gzip.compress(payload))
     source = {"id": identity, "model": "count", "population": "curated", "family": "example",
               "klv_file": "input.gz", "klv_sha256": collection.digest(payload),
-              "patterns": [{"valid_utf8": True, "sha256": collection.digest(pattern), "bytes": len(pattern)}],
-              "haystack": {"valid_utf8": True, "sha256": collection.digest(b"aab"), "bytes": 3},
+              "patterns": [bulk.rebar_inventory.input_identity(pattern)],
+              "haystack": bulk.rebar_inventory.input_identity(haystack),
               "native_expected_result": 2}
     data = {"cases": [source], "rebar_commit": "fixture"}
     collection.save(inventory / "inventory.json", data)
@@ -152,13 +152,18 @@ class TestBulkEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "translation"):
             bulk.validate_manifest(self.manifest, self.directory)
 
+    def test_only_rust_marks_a_malformed_haystack_compatible(self):
+        manifest = prepare_manifest("example", b"a", self.root / "malformed", haystack=b"a\xffa")
+        self.assertEqual({language: mapping["status"] for language, mapping in manifest["cases"][0]["mappings"].items()},
+                         {"re2": "identical", "java": "not-compatible", "trino": "not-compatible", "rust": "identical"})
+
     def test_archived_bibleref_keeps_its_1_0_java_translation(self):
         # The 1.0 tool measured three languages and gave Java bibleref only the syntax translation.
         translate = mappings.translate
         directory = self.root / "release-1.0"
         with patch.object(collection, "ENGINES", collection.RELEASE_1_0_ENGINES), \
                 patch.object(mappings, "translate",
-                             lambda *args, archived=False, **kwargs: translate(*args, archived=True, **kwargs)):
+                             lambda *args, archived=False: translate(*args, archived=True)):
             manifest = prepare_manifest("wild/bibleref/long", mappings.BIBLEREF_PATTERN, directory)
         bulk.validate_manifest(manifest, directory, archived=True)
 

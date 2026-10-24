@@ -54,15 +54,24 @@ class NativeBulkChecks:
         self.check("count", "a", "aA", 1, "source\n0:1:61;\n")
         self.check("count", "a", "aA", 2, "source\n0:1:61;\n1:2:41;\n", case_insensitive=True)
 
+    def test_byte_mode_without_unicode_or_for_malformed_input(self):
+        # Without Unicode, RE2 matches Latin-1 and Rust uses the crate's bytes API: a dot matches each of these bytes.
+        self.check("count", ".", b"\xff\xfe", 2, "source\n0:1:ff;\n1:2:fe;\n", unicode=False)
+        self.check("count", ".", "é", 2, "source\n0:1:c3;\n1:2:a9;\n", unicode=False)
+        # Span sums, case folding and line matching also run in that mode.
+        self.check("count-spans", "a+", b"\xffaAa", 3, "source\n1:4:614161;\n", unicode=False, case_insensitive=True)
+        self.check("grep", "^a$", b"\xff\na", 1, "source\n0\nsource\n1\n", unicode=False)
+        # Both step one byte after an empty match, even inside bytes that are not UTF-8.
+        self.check("count-captures", "(a*)", b"\xff\xfe", 6, "source\n0:0:;0:0:;\n1:1:;1:1:;\n2:2:;2:2:;\n", unicode=False)
+        # With Unicode, a dot matches only valid UTF-8, even in a malformed haystack.
+        self.check("count", ".", b"a\xffb", 2, "source\n0:1:61;\n2:3:62;\n")
+
 
 @unittest.skipUnless(os.environ.get("LANGUAGE_NATIVE_BULK_RUNNER"),
                      "build and set LANGUAGE_NATIVE_BULK_RUNNER for native bulk checks")
 class TestNativeBulk(NativeBulkChecks, unittest.TestCase):
     RUNNER = "LANGUAGE_NATIVE_BULK_RUNNER"
     EMPTY_AFTER_MATCH = (3, "source\n0:1:61;\n1:1:;\n2:2:;\n")
-
-    def test_latin1_bytes(self):
-        self.check("count", ".", b"\xff\xfe", 2, "source\n0:1:ff;\n1:2:fe;\n", unicode=False)
 
 
 @unittest.skipUnless(os.environ.get("LANGUAGE_NATIVE_RUST_BULK_RUNNER"),
@@ -75,11 +84,20 @@ class TestNativeRustBulk(NativeBulkChecks, unittest.TestCase):
         # RE2 also reports the empty match at offset 1, so this case is not shared.
         self.check("count-captures", "(a*)", "ab", 4, "source\n0:1:61;0:1:61;\n2:2:;2:2:;\n")
 
-    def test_rejects_input_outside_the_str_api(self):
-        for pattern, source, unicode, diagnostic in ((".", b"\xff\xfe", True, "haystack is not UTF-8"),
-                                                     (".", "a", False, "pattern can match invalid UTF-8")):
-            with self.subTest(source=source, unicode=unicode):
-                result = run_bulk(os.environ[self.RUNNER], "execute", "count", pattern, source, unicode)
+    def test_capture_counting_in_byte_mode(self):
+        # Without Unicode, the bytes API skips the empty match where "a" ended and leaves the unmatched group unset.
+        self.check("count-captures", "(a)|b*", b"a\xffb", 3, "source\n0:1:61;0:1:61;\n2:3:62;-;\n", unicode=False)
+
+    def test_str_api_only_for_unicode_text(self):
+        # Over a malformed haystack the bytes API accepts a byte-matching pattern; a Unicode source over
+        # valid UTF-8 keeps the str API, which rejects it. Both APIs take the pattern as text and
+        # reject one that is not UTF-8.
+        self.check("count", "(?-u:.)", b"a\xff", 2, "source\n0:1:61;\n1:2:ff;\n")
+        for pattern, unicode, diagnostic in (("(?-u:.)", True, "pattern can match invalid UTF-8"),
+                                             (b"\xff", True, "pattern is not UTF-8"),
+                                             (b"\xff", False, "pattern is not UTF-8")):
+            with self.subTest(pattern=pattern, unicode=unicode):
+                result = run_bulk(os.environ[self.RUNNER], "execute", "count", pattern, "a", unicode)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(diagnostic, result.stderr)
 

@@ -49,8 +49,17 @@ against `captures_iter`. A panic aborts the process rather than unwinding into
 C++. The release profile is Rebar's `rust/regex` profile: fat LTO, one codegen
 unit, and `panic = "abort"`, for the generic CPU with no `RUSTFLAGS`. Rebar's
 own `rust/regex` engine instead runs the `regex-automata` meta engine with byte
-semantics and `perf-dfa-full`; this comparator measures the public `str` API
-that `RustRegexp` follows.
+semantics and `perf-dfa-full`; this comparator measures the public APIs that
+`RustRegexp` follows.
+
+A bulk case uses the crate's `str` API unless its source turns Unicode mode
+off or its haystack is not UTF-8. Then both sides use byte mode: the crate's
+`regex::bytes` API and `RustRegexp` with `setBytes`. The Unicode-off rule
+follows RE2, whose runners switch to Latin-1 exactly when the source turns
+Unicode off. Each runner derives the mode from the case's own inputs and
+chooses the API before timing, so a timed call never dispatches on it. Both
+APIs take the pattern as text, so the native runner always checks that it is
+UTF-8. Lifecycle workloads are valid UTF-8 and use the `str` API.
 
 Rust iteration skips an empty match that ends where the previous match ended,
 so `a*` matches twice in `ab` rather than three times as in RE2. Campaign
@@ -143,13 +152,14 @@ source hash also covers the shim crate. The crate lock must resolve the same
 `baseline/comparators.tsv`.
 
 Each native runner is a shared harness, `language_harness.h` or
-`language_bulk_harness.h`, instantiated with one engine adapter. The harness
-owns input loading, the command line, phase markers, and benchmark
-registration. A lifecycle adapter supplies compile, contains, count with an
-optional match trace, and the input check; its harness rotates the inputs and
-runs the timed operations. A bulk adapter supplies compile, the input check,
-per-search state allocated outside timing, and the timed loop that runs one
-Rebar model and optionally writes its trace.
+`language_bulk_harness.h`, instantiated with an engine adapter. A comparator
+may choose among adapters from the case's inputs before timing, as the Rust
+bulk runner does. The harness owns input loading, the command line, phase
+markers, and benchmark registration. A lifecycle adapter supplies compile,
+contains, count with an optional match trace, and the input check; its harness
+rotates the inputs and runs the timed operations. A bulk adapter supplies
+compile, the input check, per-search state allocated outside timing, and the
+timed loop that runs one Rebar model and optionally writes its trace.
 
 Run deterministic verification without collecting timings:
 
@@ -434,22 +444,17 @@ in bibleref for Rust and Java (archived 1.0 manifests keep Java's syntax-only
 translation), and in the lifecycle `trinoPhone` and `whitespace` workloads for
 Rust. ASCII-word-boundary cases without an equivalent Trino assertion are not
 compatible. Byte-oriented non-ASCII escape cases are not silently converted
-into code-point matching.
+into code-point matching; Rust's byte mode runs them unchanged, matching
+single bytes as RE2's Latin-1 mode does.
 
-Rust accepts the source's named-capture and property syntax unchanged, but
-three groups are not compatible:
+Rust accepts the source's named-capture and property syntax unchanged. Its
+byte mode also runs executions over a malformed UTF-8 haystack, which are not
+compatible with Java and Trino. Two groups are not compatible in Rust:
 
-- Sources that turn Unicode mode off and use a dot, negated class, or other
-  expression that can match bytes that are not UTF-8. Rust's `str` API rejects
-  these patterns, and so does `RustRegexp`; only the crate's bytes API accepts
-  them.
 - `.*` and `(?s).*` span counts, where Rust's empty-match rule reports
   different matches than the source.
 - `\p{L}{256}`, which exceeds the crate's default 10 MiB compiled-size limit.
   `RustRegexp` does not reproduce that estimate.
-
-As for Java and Trino, an execution over a malformed UTF-8 haystack is not
-compatible.
 
 Two execution workloads expand their Unicode properties to pinned RE2 ranges
 for every language and comparator. This preserves source membership despite

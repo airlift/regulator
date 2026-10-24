@@ -77,6 +77,7 @@ public class BenchmarkLanguageBulk
         private RebarRunner.Benchmark input;
         private Slice patternBytes;
         private String patternText;
+        private boolean rustBytes;
         private Object pattern;
         private Re2Matcher sliceMatcher;
         private java.util.regex.Matcher jdkMatcher;
@@ -103,6 +104,9 @@ public class BenchmarkLanguageBulk
             if (engine.equals("jdk")) {
                 patternText = decode(patternBytes);
             }
+            // As RE2 compiles Latin-1 when the source turns Unicode off, Rust uses byte mode then,
+            // and for a haystack that is not UTF-8, matching the crate comparator's bytes API.
+            rustBytes = engine.equals("rust") && (!input.unicode() || !isValidUtf8(input.haystack()));
             System.err.println("phase=compile");
             pattern = compilePattern();
             if (input.model().equals("compile")) {
@@ -143,6 +147,7 @@ public class BenchmarkLanguageBulk
                 case "rust" -> RustRegexp.compile(patternBytes, RustRegexp.Options.defaults()
                         .setCaseInsensitive(input.caseInsensitive())
                         .setUnicode(input.unicode())
+                        .setBytes(rustBytes)
                         .setByteFrequencies(input.byteFrequencies()));
                 case "jdk" -> Pattern.compile(patternText, flags);
                 case "joni" -> new Regex(
@@ -455,6 +460,17 @@ public class BenchmarkLanguageBulk
             throws CharacterCodingException
     {
         return UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes.getBytes())).toString();
+    }
+
+    private static boolean isValidUtf8(Slice bytes)
+    {
+        try {
+            decode(bytes);
+            return true;
+        }
+        catch (CharacterCodingException e) {
+            return false;
+        }
     }
 
     private static void writeGroup(BufferedWriter writer, Slice source, int start, int end)
