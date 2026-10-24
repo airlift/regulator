@@ -239,7 +239,7 @@ class TestProtocolRepresentatives(unittest.TestCase):
 
         self.assertIn("parameters_match_selection()", source)
         self.assertIn(
-            'parameters_match_selection "${full_parameters}" "${target_parameters}"',
+            'parameters_match_selection "${full_parameters}" "${expected_parameters}"',
             source)
 
     @staticmethod

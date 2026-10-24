@@ -215,12 +215,14 @@ The checked-in inputs are:
 - `baseline/platform-regions.tsv`: each platform's AMI ID in each launch region
 - `baseline/comparators.tsv`: pinned comparator identities
 - `baseline/protocol-representatives.tsv`: bounded/full protocol equivalence
+- `baseline/row-protocol.tsv`: each row's frozen qualification protocol
 
 Run the validators before allocating hosts:
 
 ```bash
 python3 tools/re2-benchmark/baseline/validate-manifest.py
 python3 tools/re2-benchmark/baseline/validate-protocol-representatives.py
+python3 tools/re2-benchmark/baseline/validate-row-protocol.py
 python3 tools/re2-benchmark/baseline/validate-shard-plans.py
 python3 tools/re2-benchmark/baseline/validate-mode-inventory.py
 ```
