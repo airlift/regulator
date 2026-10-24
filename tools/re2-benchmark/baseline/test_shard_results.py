@@ -399,7 +399,9 @@ class TestShardResults(unittest.TestCase):
         campaign = (SOURCE.parents[1] / "aws" / "run-campaign.sh").read_text(encoding="utf-8")
         host = (SOURCE.parents[1] / "aws" / "run-host.sh").read_text(encoding="utf-8")
         scope_start = campaign.index('case "$(campaign_shard_handler)" in\n    trino-operations | trino-final-line)')
-        host_start = host.index("SHARD_HANDLER=$(")
+        # The host takes a shard's handler from dispatch, then its Trino use from that handler.
+        host_start = host.index('case "${BENCHMARK_MODE}:${RE2_CAMPAIGN_SHARD_ID:-}" in')
+        host_end = host.index("\nesac\n", host.index("\nesac\n", host_start) + 1) + 6
         wrapper_code = "\n".join([
             shell_function(campaign, "campaign_shard_handler"),
             shell_function(campaign, "campaign_uses_trino"),
@@ -407,7 +409,7 @@ class TestShardResults(unittest.TestCase):
             "campaign_uses_trino && echo campaign=true || echo campaign=false",
             'echo "scope=${JONI_EVIDENCE_SCOPE}"',
             "(set -- regulator ''",
-            host[host_start:host.index("\nesac\n", host_start) + 6],
+            host[host_start:host_end],
             ") 2>/dev/null && echo host=false || echo host=true"])
         joni_scopes = {
             "trino-operations": "trino-operation-comparison",
@@ -422,7 +424,8 @@ class TestShardResults(unittest.TestCase):
                 completed = subprocess.run(
                     ["bash"],
                     input=f"set -euo pipefail\nREGULATOR_DIR={shlex.quote(str(SOURCE.parents[3]))} CAMPAIGN_MODE=baseline-shard "
-                          f"CAMPAIGN_SHARD_ID={row['shard_id']} RE2_CAMPAIGN_SHARD_ID={row['shard_id']}\n{wrapper_code}\n",
+                          f"BENCHMARK_MODE=baseline-shard CAMPAIGN_SHARD_ID={row['shard_id']} "
+                          f"RE2_CAMPAIGN_SHARD_ID={row['shard_id']}\n{wrapper_code}\n",
                     text=True, capture_output=True, check=True)
 
                 # Pinned Trino serves these handlers' Joni and Trino comparators, or their LIKE corpus.

@@ -14,10 +14,12 @@ BASE = Path(__file__).parents[1]
 class TestRebarPreparation(unittest.TestCase):
     def test_shared_joni_directory_survives_both_route_orders_and_cache_reuse(self):
         source = (BASE / "run-shard.sh").read_text()
-        preparation = source[source.index("prepare_rebar()\n"):source.index("    local primary_systems\n")]
+        preparation = source[source.index("prebuilt_engine()\n"):source.index("record_engine_builds()\n")]
+        preparation += source[source.index("prepare_rebar()\n"):source.index("    local primary_systems\n")]
         preparation += "}\nprepare_rebar\n"
-        for routes in (("native-access", "object-row"), ("object-row", "native-access")):
-            with self.subTest(routes=routes), tempfile.TemporaryDirectory() as directory:
+        for routes, prebuilt in ((("native-access", "object-row"), False), (("object-row", "native-access"), False),
+                                 (("native-access", "object-row"), True)):
+            with self.subTest(routes=routes, prebuilt=prebuilt), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 repository = root / "repository"
                 scripts = repository / "tools/re2-benchmark"
@@ -41,7 +43,11 @@ class TestRebarPreparation(unittest.TestCase):
                 executable(scripts / "rebar/build-regulator.sh",
                            f"mkdir -p {shlex.quote(str(repository / 'target'))}\n"
                            f"echo fixture > {shlex.quote(str(repository / 'target/rebar-classpath.txt'))}\n")
-                executable(rebar / "target/release/rebar", '[[ ${REBAR_HEAP_PRETOUCH} == false ]]\n')
+                # A verified engine build replaces the host's own cargo build of Rebar.
+                rebar_executable = shared / "engine-build/rebar" if prebuilt else rebar / "target/release/rebar"
+                executable(rebar_executable, '[[ ${REBAR_HEAP_PRETOUCH} == false ]]\n')
+                if prebuilt:
+                    (shared / "engine-build/native.sha256").write_text("f" * 64 + "\n")
                 for name in ("definitions/curated", "haystacks", "regexes"):
                     (rebar / "benchmarks" / name).mkdir(parents=True)
                 (rebar / "benchmarks/engines.toml").write_text('[[engine]]\n  name = "re2"\n  cwd = "fixture"\n')
@@ -87,7 +93,12 @@ prepare_pinned_trino() {
                     joni = next(engine for engine in engines if engine["name"] == "joni/trino")
                     actual = {item["name"]: item["value"] for item in joni["run"]["envs"]}
                     self.assertEqual(str(shared / "pinned-trino"), actual["TRINO_COMPARATOR_WORK_DIR"])
-                self.assertEqual(["build"], (shared / "builds").read_text().splitlines())
+                    # The engine runs from that harness, so once a Joni route prepared it, every later preparation
+                    # leaves it in place.
+                    self.assertEqual("native-access" in (*routes, routes[0])[:invocation + 1],
+                                     (shared / "pinned-trino/provenance.properties").is_file())
+                self.assertEqual([] if prebuilt else ["build"],
+                                 (shared / "builds").read_text().splitlines() if (shared / "builds").exists() else [])
                 self.assertEqual(configurations[0], configurations[1])
                 self.assertEqual(configurations[0], configurations[2])
 

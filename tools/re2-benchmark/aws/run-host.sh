@@ -17,8 +17,8 @@ if [[ $# -ne 3 ]]; then
 fi
 
 BENCHMARK_MODE=${RE2_BENCHMARK_MODE:-}
-if [[ "${BENCHMARK_MODE}" != baseline-shard && "${BENCHMARK_MODE}" != language-batch ]]; then
-    echo "RE2_BENCHMARK_MODE must be baseline-shard or language-batch" >&2
+if [[ "${BENCHMARK_MODE}" != baseline-shard && "${BENCHMARK_MODE}" != language-batch && "${BENCHMARK_MODE}" != engine-build ]]; then
+    echo "RE2_BENCHMARK_MODE must be baseline-shard, language-batch, or engine-build" >&2
     exit 1
 fi
 CAMPAIGN_PROVENANCE=${CAMPAIGN_PROVENANCE:-}
@@ -41,13 +41,30 @@ RUST_PACKAGE=${RUST_PACKAGE:?RUST_PACKAGE is required}
 TIME_PACKAGE=${TIME_PACKAGE:?TIME_PACKAGE is required}
 REGULATOR_DIR=$(cd "$1" && pwd)
 TRINO_DIR=
-# The dispatch file names each shard's route handler, which decides the shard's Trino use.
-SHARD_HANDLER=$(awk -F '\t' -v shard="${RE2_CAMPAIGN_SHARD_ID:-}" 'NR > 1 && $1 == shard {print $2}' \
-    "${REGULATOR_DIR}/tools/re2-benchmark/baseline/shard-dispatch.tsv")
+case "${BENCHMARK_MODE}:${RE2_CAMPAIGN_SHARD_ID:-}" in
+    engine-build:engine-build)
+        # The build phase's job is not a shard; it prepares the Trino harness among its engines.
+        SHARD_HANDLER=${BENCHMARK_MODE}
+        ;;
+    engine-build:* | *:engine-build)
+        echo "RE2_BENCHMARK_MODE=${BENCHMARK_MODE} disagrees with" \
+            "RE2_CAMPAIGN_SHARD_ID=${RE2_CAMPAIGN_SHARD_ID:-unset}" >&2
+        exit 1
+        ;;
+    *)
+        # The dispatch file names each shard's route handler, which decides the shard's Trino use.
+        SHARD_HANDLER=$(awk -F '\t' -v shard="${RE2_CAMPAIGN_SHARD_ID:-}" 'NR > 1 && $1 == shard {print $2}' \
+            "${REGULATOR_DIR}/tools/re2-benchmark/baseline/shard-dispatch.tsv")
+        ;;
+esac
 case "${SHARD_HANDLER}" in
-    trino-operations | trino-final-line | trino-like | lifecycle | rebar)
+    engine-build | trino-operations | trino-final-line | trino-like | lifecycle | rebar)
         if [[ -z "$2" || ! -d "$2" ]]; then
-            echo "Baseline shard ${RE2_CAMPAIGN_SHARD_ID} requires a Trino checkout" >&2
+            if [[ "${SHARD_HANDLER}" == "${BENCHMARK_MODE}" ]]; then
+                echo "The ${BENCHMARK_MODE} job requires a Trino checkout" >&2
+            else
+                echo "Baseline shard ${RE2_CAMPAIGN_SHARD_ID} requires a Trino checkout" >&2
+            fi
             exit 1
         fi
         TRINO_DIR=$(cd "$2" && pwd)
@@ -79,7 +96,7 @@ install_packages()
 {
     sudo dnf install -y "${CMAKE_PACKAGE}" "${NATIVE_COMPILER_PACKAGE}" "${GLIBC_PACKAGE}" \
         "${TIME_PACKAGE}" git jq make ninja-build perf tar gzip
-    if [[ "${RE2_CAMPAIGN_SHARD_ID}" == rebar-* ]]; then
+    if [[ "${RE2_CAMPAIGN_SHARD_ID}" == rebar-* || "${BENCHMARK_MODE}" == engine-build ]]; then
         sudo dnf install -y abseil-cpp-devel "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
     elif [[ "${BENCHMARK_MODE}" == language-batch ]]; then
         # The Rust language comparator links the pinned regex crate.
@@ -285,6 +302,23 @@ record_environment()
     } > "${RESULT_DIR}/environment.txt" 2>&1
 }
 
+install_engine_build()
+{
+    # Install the platform's prebuilt engines once the compiler can resolve this
+    # host's native target. Without a build, shards build every engine locally;
+    # native engines made for another target or CPU are left for shards to build,
+    # while the Java Trino harness installs on any host.
+    local arguments=(
+        --shared "${BASELINE_SHARED_WORK_DIR}"
+        --environment "${RESULT_DIR}/environment-manifest.txt"
+        --output "${RESULT_DIR}/engine-build.txt"
+    )
+    if [[ -n "${ENGINE_BUILD_INPUT_DIR:-}" ]]; then
+        arguments+=(--build "${ENGINE_BUILD_INPUT_DIR}" --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256:?}")
+    fi
+    python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" install "${arguments[@]}"
+}
+
 install_packages
 install_java
 record_environment
@@ -292,6 +326,9 @@ record_environment
 export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
     export BASELINE_HEAP_SIZE=${BENCHMARK_HEAP_SIZE:-8g}
     export BASELINE_SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${REGULATOR_DIR}/target/baseline-shared}
+    if [[ "${BENCHMARK_MODE}" == baseline-shard ]]; then
+        install_engine_build
+    fi
     capacity_file="${RESULT_DIR}/host-capacity.txt"
     memory_total_bytes=$(awk '/^MemTotal:/ {print $2 * 1024; exit}' /proc/meminfo)
     memory_available_before_bytes=$(awk '/^MemAvailable:/ {print $2 * 1024; exit}' /proc/meminfo)
@@ -310,6 +347,8 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
     if [[ "${BENCHMARK_MODE}" == language-batch ]]; then
         session_command=(bash "${REGULATOR_DIR}/tools/re2-benchmark/language/run-host-session.sh"
             "${REGULATOR_DIR}" "${RESULT_DIR}")
+    elif [[ "${BENCHMARK_MODE}" == engine-build ]]; then
+        session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/build-engines.sh" "${RESULT_DIR}")
     else
         session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/run-host-session.sh"
             "${RE2_CAMPAIGN_SHARD_ID}" "${BASELINE_PROTOCOL}" "${RESULT_DIR}")

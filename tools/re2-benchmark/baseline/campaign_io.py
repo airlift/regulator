@@ -7,6 +7,11 @@ import subprocess
 
 from acceptance import RECEIPT_FIELDS
 
+JSON_LEDGER_WORKLOADS = {
+    "accepted-language-sessions.json": "language-batch",
+    "accepted-engine-builds.json": "engine-build",
+}
+
 
 class UnsafeCampaignError(RuntimeError):
     """The campaign cannot continue without risking invalid evidence or leaked resources."""
@@ -40,7 +45,8 @@ def write_accepted_sessions(path, rows):
     rows = sorted(rows, key=lambda row: (row["platform"], row["shard_id"], int(row["replica_id"])))
     with temporary_path.open("w", newline="") as output_file:
         if path.suffix == ".json":
-            json.dump({"schema_version": 1, "workload": "language-batch", "receipts": rows}, output_file, sort_keys=True)
+            json.dump({"schema_version": 1, "workload": JSON_LEDGER_WORKLOADS[path.name], "receipts": rows},
+                      output_file, sort_keys=True)
             output_file.write("\n")
         else:
             writer = csv.DictWriter(output_file, fieldnames=RECEIPT_FIELDS, delimiter="\t", lineterminator="\n")
