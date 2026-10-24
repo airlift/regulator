@@ -19,6 +19,7 @@ from pathlib import Path
 from acceptance import RECEIPT_FIELDS, ValidationError, normalize_heap_size, validate_campaign, validate_host_results
 from topology import CONCURRENCY_SHARDS
 from fleet_budget import BudgetError, FleetBudget
+from campaign_io import UnsafeCampaignError, aws_output, check_output, fsync_directory, write_accepted_sessions
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
 import batch_acceptance
@@ -119,10 +120,6 @@ class Job:
     @property
     def logical_identity(self):
         return f"{self.platform.name}/{self.shard}/replica-{self.replica}"
-
-
-class UnsafeCampaignError(RuntimeError):
-    """The campaign cannot continue without risking invalid evidence or leaked resources."""
 
 
 def campaign_engine_tree(arguments):
@@ -414,18 +411,6 @@ def campaign_heap_size(arguments):
     return arguments.heap_size
 
 
-def check_output(command, **kwargs):
-    return subprocess.check_output(command, text=True, **kwargs).strip()
-
-
-def fsync_directory(path):
-    descriptor = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def deterministic_archive_sha256(root, candidate):
     archive = subprocess.Popen(
         ["git", "archive", "--format=tar", candidate],
@@ -665,16 +650,6 @@ def validate_dependencies(root, arguments, jobs):
     actual_trino = check_output(["git", "rev-parse", f"{expected_trino}^{{commit}}"], cwd=trino_root)
     if actual_trino != expected_trino:
         raise SystemExit(f"Trino checkout does not contain {expected_trino}")
-
-
-def aws_output(arguments):
-    environment = os.environ.copy()
-    region = environment.get("AWS_REGION", "us-west-2")
-    command = ["aws", "--region", region]
-    profile = environment.get("AWS_PROFILE")
-    if profile:
-        command[1:1] = ["--profile", profile]
-    return command
 
 
 def validate_aws(arguments, platforms, jobs=None):
@@ -1364,24 +1339,6 @@ def read_accepted_sessions(path):
     if len(identities) != len(set(identities)):
         raise UnsafeCampaignError(f"accepted-session ledger contains duplicate logical jobs: {path}")
     return rows
-
-
-def write_accepted_sessions(path, rows):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(path.name + ".new")
-    rows = sorted(rows, key=lambda row: (row["platform"], row["shard_id"], int(row["replica_id"])))
-    with temporary_path.open("w", newline="") as output_file:
-        if path.suffix == ".json":
-            json.dump({"schema_version": 1, "workload": "language-batch", "receipts": rows}, output_file, sort_keys=True)
-            output_file.write("\n")
-        else:
-            writer = csv.DictWriter(output_file, fieldnames=RECEIPT_FIELDS, delimiter="\t", lineterminator="\n")
-            writer.writeheader()
-            writer.writerows(rows)
-        output_file.flush()
-        os.fsync(output_file.fileno())
-    os.replace(temporary_path, path)
-    fsync_directory(path.parent)
 
 
 def persist_accepted_receipt(path, receipt_path):
