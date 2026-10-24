@@ -53,12 +53,22 @@ CloudTrail launch/shutdown events and verified cleanup. Wrapper lifetimes
 include local preparation and recovery; they are not exact billed running
 time. Saved price estimates are not a reconciled AWS invoice.
 
+A Spot launch that finds no capacity in its zone tries each other zone of its
+region that offers the type before it fails. When several regions are allowed,
+a Spot launch that found no capacity in any zone first retries Spot in the next
+allowed region it has not tried, in placement order, and moves to On-Demand
+only after every allowed region has failed. These region moves do not count
+against the job's replacement allowance.
+
 Use `--spot-only` to prohibit On-Demand workers and fallback. Preserve
 interrupted attempts and retry on fresh Spot hosts within the frozen retry
-limits. Other users' running and pending Spot work still consumes quota.
-Keep one owner for each mutable capacity limit. Transfer reservations only
-after cleanup or a complete finite-inventory bound proves they are available.
-A temporary gap between worker launches is not free reserved capacity.
+limits. A Spot launch that found no capacity still moves through the allowed
+regions it has not tried, without spending a replacement, and then retries Spot
+within those limits. Other users' running and pending Spot work still consumes
+quota. Keep one owner for each mutable capacity limit. Transfer reservations
+only after cleanup or a complete finite-inventory bound proves they are
+available. A temporary gap between worker launches is not free reserved
+capacity.
 
 ## Shared fleet budget
 
@@ -283,9 +293,10 @@ the shared budget's when one is set. Without one, On-Demand launches query
 quota, and Spot launches query it only with `--spot-only` or a
 `--max-concurrent` above 32; otherwise a Spot launch takes the first placement
 and learns of a full region from EC2. A campaign
-with one region asks for no score. Within the chosen region, retries still
-rotate across the zones that offer the worker type. Each session runs and
-verifies its cleanup in its own region.
+with one region asks for no score. Within the chosen region, each attempt
+starts in a different zone that offers the worker type, and a Spot launch that
+finds a zone without capacity moves on to the region's next zone. Each session
+runs and verifies its cleanup in its own region.
 
 `platforms.tsv` pins each AMI by its ID in `us-west-2`. Preflight resolves that
 image's name and requires each allowed region's AMI in `platform-regions.tsv`
@@ -341,10 +352,13 @@ On restart, it revalidates saved artifacts, recovers receipts written just
 before interruption, and skips accepted jobs. Conflicting receipts, changed
 inputs, or unverifiable resources stop the campaign.
 
-Failed jobs record their failure type. Unclassified benchmark failures and
-invalid artifacts remain unresolved after verified cleanup while independent
-jobs continue. Unverifiable cleanup and other unsafe controller failures stop
-admissions across both collectors.
+Failed jobs record their failure type. A session that fails before its first
+RunInstances request, in setup such as the default VPC lookup or the instance
+profile, is `retryable-infrastructure`, since no instance can exist; cleanup
+still removes and verifies the bucket and profile it created. Unclassified
+benchmark failures and invalid artifacts remain unresolved after verified
+cleanup while independent jobs continue. Unverifiable cleanup and other unsafe
+controller failures stop admissions across both collectors.
 
 A Spot-only campaign can exhaust its retries when one platform runs out of
 Spot capacity. Once no job awaits an ordinary retry, rerun the phase in the

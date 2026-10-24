@@ -121,6 +121,8 @@ class Job:
     # Chosen at launch; empty until the controller places the attempt.
     region: str = ""
     placement_score: str = ""
+    # Regions this job's earlier Spot launches found no capacity in, each moved past once.
+    spot_capacity_failures: tuple = ()
 
     @property
     def identity(self):
@@ -853,25 +855,34 @@ def spot_placement_scores(arguments, instance_type, regions):
     return scores
 
 
-def launch_placements(arguments, job):
-    """Order the allowed regions that can launch the job, best Spot placement score first."""
-    regions = campaign_regions(arguments)
+def launch_regions(arguments, job):
+    """Return the allowed regions that offer the job's instance type and image."""
     offered = getattr(arguments, "region_offerings", {}).get(job.platform.instance_type)
     amis = getattr(arguments, "regional_amis", None)
-    regions = [region for region in regions
+    regions = [region for region in campaign_regions(arguments)
                if (offered is None or region in offered) and (amis is None or (job.platform.name, region) in amis)]
     if not regions:
         raise UnsafeCampaignError(f"no allowed region can launch {job.platform.name} {job.platform.instance_type}")
-    if len(regions) == 1 or job.market != "spot":
+    return regions
+
+
+def launch_placements(arguments, job):
+    """Order the allowed regions that can launch the job, best Spot placement score first."""
+    regions = launch_regions(arguments, job)
+    if job.market != "spot":
         return [(region, "") for region in regions]
+    # A Spot replacement skips the regions where this job's Spot launches found no capacity.
+    eligible = [region for region in regions if region not in job.spot_capacity_failures]
+    if len(eligible) <= 1:
+        return [(region, "") for region in eligible]
     scores = spot_placement_scores(arguments, job.platform.instance_type, regions)
     if scores is None:
         # Without scores, keep the allowed-region order; launch admission picks the first region
         # with headroom only where it queries quota.
-        return [(region, "") for region in regions]
+        return [(region, "") for region in eligible]
     # The sort is stable, so equal scores keep the allowed-region order.
     return [(region, str(scores.get(region, ""))) for region in
-            sorted(regions, key=lambda region: -scores.get(region, 0))]
+            sorted(eligible, key=lambda region: -scores.get(region, 0))]
 
 
 def place(job, placement):
@@ -1469,9 +1480,17 @@ def validate_failed_job(result_root, job):
     return session, cleanup
 
 
-def replacement_job(job, host_epoch, failure_classification, failure_detail, *, spot_only=False):
+def replacement_job(job, host_epoch, failure_classification, failure_detail="", *, regions=(), spot_only=False):
+    tried = (*job.spot_capacity_failures, job.region)
+    if (job.market == "spot" and job.region and
+            failure_classification == "retryable-spot" and failure_detail.startswith("launch-capacity:") and
+            any(region not in tried for region in regions)):
+        # A Spot launch that found no capacity tries Spot in the next allowed region first. Each
+        # region is tried once, so these moves do not spend the replacement allowance.
+        return replace(job, host_epoch=host_epoch, attempt=job.attempt + 1, spot_capacity_failures=tried)
+    counted_attempt = job.attempt - len(job.spot_capacity_failures)
     if (failure_classification != "retryable-capacity" and
-            job.attempt >= MAX_REPLACEMENTS_PER_JOB + 1):
+            counted_attempt >= MAX_REPLACEMENTS_PER_JOB + 1):
         raise RuntimeError(f"{job.logical_identity} exhausted its bounded replacement allowance")
     if spot_only:
         if job.market != "spot":
@@ -1484,7 +1503,7 @@ def replacement_job(job, host_epoch, failure_classification, failure_detail, *, 
         # moves directly to the same On-Demand instance type.
         market = (
             "on-demand"
-            if job.attempt >= 2 or failure_detail.startswith("launch-capacity:")
+            if counted_attempt >= 2 or failure_detail.startswith("launch-capacity:")
             else "spot")
     else:
         market = "on-demand"
@@ -1890,12 +1909,16 @@ def settle_detached_attempts(result_root, jobs, attempts_path):
         time.sleep(15)
 
 
-def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted, *, spot_only=False, refill=None,
+def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted, *, spot_only=False, job_regions=None, refill=None,
                          superseded=None, settled=True):
     attempts = read_attempts(attempts_path)
     attempts_by_epoch = {
         (row["platform"], row["shard_id"], int(row["replica"]), int(row["host_epoch"])): row
         for row in attempts
+    }
+    starts_by_epoch = {
+        (row["platform"], row["shard_id"], int(row["replica"]), int(row["host_epoch"])): row
+        for row in attempts if row["outcome"] == "starting"
     }
     attempts_by_logical_identity = {}
     for row in attempts:
@@ -1922,7 +1945,8 @@ def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted, *, spot_onl
             return
         try:
             replacement = replacement_job(
-                previous_job, maximum_epoch + 1, classification, detail, spot_only=spot_only)
+                previous_job, maximum_epoch + 1, classification, detail,
+                regions=job_regions(previous_job) if job_regions else (), spot_only=spot_only)
             ready_at = CAPACITY_RETRY_SECONDS if classification == "retryable-capacity" else 0
         except RuntimeError as error:
             if refill is None or not refill(previous_job, outcome):
@@ -1976,11 +2000,16 @@ def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted, *, spot_onl
         if attempt_row is None:
             raise UnsafeCampaignError(
                 f"{base_job.logical_identity} has artifacts for epoch {latest_epoch} without an attempt record")
+        # The attempt's launch record names its region and the regions its chain already moved past.
+        start = starts_by_epoch.get((base_job.platform.name, base_job.shard, base_job.replica, latest_epoch))
+        launch = dict(item.split("=", 1) for item in start["detail"].split(";") if "=" in item) if start else {}
         previous_job = replace(
             base_job,
             host_epoch=latest_epoch,
             attempt=int(attempt_row["attempt"]),
-            market=attempt_row["market"])
+            market=attempt_row["market"],
+            region=launch.get("region", ""),
+            spot_capacity_failures=tuple(filter(None, launch.get("spot_capacity_failures", "").split(","))))
         try:
             session, cleanup = validate_cleanup_manifest(result_root, previous_job)
         except (OSError, RuntimeError) as error:
@@ -2286,7 +2315,8 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
         accepted = recover_accepted_sessions(
             root, arguments, result_root, jobs, accepted_sessions)
         pending, unresolved, next_host_epoch = prepare_resumed_jobs(
-            result_root, jobs, attempts_path, accepted, spot_only=getattr(arguments, "spot_only", False))
+            result_root, jobs, attempts_path, accepted, spot_only=getattr(arguments, "spot_only", False),
+            job_regions=lambda job: launch_regions(arguments, job))
     pending = [(job, time.monotonic() + delay) for job, delay in pending]
     capacity_waits = set()
     elapsed_seconds = max(0, time.time() - started_at)
@@ -2420,7 +2450,9 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                 write_attempt(
                     attempts_path, job, "starting",
                     f"region={environment['AWS_REGION']};"
-                    f"placement_score={environment.get('CAMPAIGN_PLACEMENT_SCORE', '')}")
+                    f"placement_score={environment.get('CAMPAIGN_PLACEMENT_SCORE', '')}" +
+                    (f";spot_capacity_failures={','.join(job.spot_capacity_failures)}"
+                     if job.spot_capacity_failures else ""))
                 try:
                     process = subprocess.Popen(
                         [str(runner), job.identity],
@@ -2438,6 +2470,7 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                     try:
                         replacement = replacement_job(
                             job, next_host_epoch, "retryable-infrastructure", detail,
+                            regions=launch_regions(arguments, job),
                             spot_only=getattr(arguments, "spot_only", False))
                     except RuntimeError as replacement_error:
                         unresolved.append((job, str(replacement_error)))
@@ -2469,6 +2502,7 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                         try:
                             replacement = replacement_job(
                                 job, next_host_epoch, classification, detail,
+                                regions=launch_regions(arguments, job),
                                 spot_only=getattr(arguments, "spot_only", False))
                         except RuntimeError as error:
                             failure_detail = f"status={status}; {error}; detail={detail}"
