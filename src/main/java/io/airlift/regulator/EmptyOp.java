@@ -147,8 +147,7 @@ final class EmptyOp
             flags |= EMPTY_TRINO_END_LINE;
         }
 
-        if ((textDependentAssertions & EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR) != 0 &&
-                isJavaEndTextOrFinalTerminator(bytes, end, position)) {
+        if ((textDependentAssertions & EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR) != 0 && isJavaEndTextOrFinalTerminator(bytes, begin, end, position)) {
             flags |= EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR;
         }
 
@@ -287,7 +286,7 @@ final class EmptyOp
         return nextCodePoint != '\n' || previousCodePoint(bytes, begin, position) != '\r';
     }
 
-    private static boolean isJavaEndTextOrFinalTerminator(byte[] bytes, int end, int position)
+    private static boolean isJavaEndTextOrFinalTerminator(byte[] bytes, int begin, int end, int position)
     {
         if (position == end) {
             return true;
@@ -297,6 +296,10 @@ final class EmptyOp
         int nextPosition = nextCodePointPosition(bytes, end, position);
         if (nextCodePoint == '\r' && nextPosition < end && nextCodePoint(bytes, end, nextPosition) == '\n') {
             return nextCodePointPosition(bytes, end, nextPosition) == end;
+        }
+        // A final CR LF is one terminator, so the JDK refuses the position between its bytes.
+        if (nextCodePoint == '\n' && position > begin && bytes[position - 1] == '\r') {
+            return false;
         }
         return isJavaLineTerminator(nextCodePoint) && nextPosition == end;
     }
