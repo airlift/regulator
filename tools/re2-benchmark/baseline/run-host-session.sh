@@ -170,7 +170,7 @@ mkdir -p "${RESULT_DIR}/routes"
 while IFS=$'\t' read -r route _; do
     route_directory="${RESULT_DIR}/routes/${route}"
     mkdir -p "${route_directory}"
-    for environment_file in environment-manifest.txt environment.txt; do
+    for environment_file in environment-manifest.txt environment.txt engine-build.txt; do
         if [[ -f "${RESULT_DIR}/${environment_file}" ]]; then
             cp "${RESULT_DIR}/${environment_file}" "${route_directory}/${environment_file}"
         fi

@@ -158,6 +158,7 @@ RESULT_DIR=$(cd "${RESULT_DIR}" && pwd)
 unexpected_existing=$(find "${RESULT_DIR}" -mindepth 1 -maxdepth 1 \
     ! -name environment.txt \
     ! -name environment-manifest.txt \
+    ! -name engine-build.txt \
     -print -quit)
 if [[ -n "${unexpected_existing}" ]]; then
     echo "Result directory must be empty: ${RESULT_DIR}" >&2
@@ -703,6 +704,29 @@ manifest_sha256=$(sha256sum "${MANIFEST}" | awk '{print $1}')
     printf 'jmh_host_compiler_hints=jmh-generated-and-installed\n'
 } > "${RESULT_DIR}/run-metadata.txt"
 
+# Where each engine this route used came from: prebuilt:<archive SHA-256>, local, or not-used.
+native_re2_build=not-used
+rebar_build=not-used
+rebar_native_build=not-used
+trino_harness_build=not-used
+
+prebuilt_engine()
+{
+    # The host installs an archive, and writes its marker, only after verifying it against the manifest.
+    local marker="${SHARED_WORK_DIR}/engine-build/$1.sha256"
+    [[ -f "${marker}" ]] && printf 'prebuilt:%s\n' "$(cat "${marker}")"
+}
+
+record_engine_builds()
+{
+    {
+        printf 'native_re2_build=%s\n' "${native_re2_build}"
+        printf 'rebar_build=%s\n' "${rebar_build}"
+        printf 'rebar_native_build=%s\n' "${rebar_native_build}"
+        printf 'trino_harness_build=%s\n' "${trino_harness_build}"
+    } >> "${RESULT_DIR}/run-metadata.txt"
+}
+
 (cd "${ROOT}" && ./mvnw "${MAVEN_ARGS[@]}" -q -DskipTests test-compile) | tee "${RESULT_DIR}/logs/maven-test-compile.log"
 (cd "${ROOT}" && ./mvnw "${MAVEN_ARGS[@]}" -q dependency:build-classpath \
     -DincludeScope=test \
@@ -788,9 +812,12 @@ prepare_pinned_trino()
             TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
             "${ROOT}/tools/re2-benchmark/trino-joni/verify.sh" \
             >> "${semantic_log}" 2>&1; then
+        # A prebuilt harness this host cannot verify is replaced by a local build.
+        rm -f "${SHARED_WORK_DIR}/engine-build/trino.sha256"
         TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
             "${ROOT}/tools/re2-benchmark/trino-joni/prepare.sh" 2>&1 | tee -a "${semantic_log}"
     fi
+    trino_harness_build=$(prebuilt_engine trino || echo local)
     TRINO_COMPARATOR_NATIVE_ACCESS="${expected_native_access}" \
         TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
         "${ROOT}/tools/re2-benchmark/trino-joni/verify.sh" 2>&1 | tee -a "${semantic_log}"
@@ -883,6 +910,10 @@ prepare_rebar()
             "${RESULT_DIR}/raw/rebar-joni-provenance.properties"
     fi
     REBAR_EXECUTABLE="${REBAR_ROOT}/target/release/rebar"
+    rebar_build=$(prebuilt_engine native || echo local)
+    if [[ "${rebar_build}" != local ]]; then
+        REBAR_EXECUTABLE="${SHARED_WORK_DIR}/engine-build/rebar"
+    fi
     local rebar_shared_root="${SHARED_WORK_DIR}/rebar/${SHARD_ID}"
     local prepared_receipt="${rebar_shared_root}/prepared.properties"
     REBAR_BENCHMARK_DIRECTORY="${rebar_shared_root}/benchmarks"
@@ -941,12 +972,14 @@ prepare_rebar()
     }
 
     if ! rebar_shared_preparation_is_valid; then
-        command -v cargo >/dev/null || {
-            echo "cargo is required to prepare Rebar baseline shards" >&2
-            exit 1
-        }
-        cargo build --release --locked --manifest-path "${REBAR_ROOT}/Cargo.toml" \
-            2>&1 | tee "${RESULT_DIR}/logs/rebar-build.log"
+        if [[ "${rebar_build}" == local ]]; then
+            command -v cargo >/dev/null || {
+                echo "cargo is required to prepare Rebar baseline shards" >&2
+                exit 1
+            }
+            cargo build --release --locked --manifest-path "${REBAR_ROOT}/Cargo.toml" \
+                2>&1 | tee "${RESULT_DIR}/logs/rebar-build.log"
+        fi
 
         "${ROOT}/tools/re2-benchmark/rebar/prepare.sh" \
             "${REBAR_ROOT}" \
@@ -995,17 +1028,19 @@ PY
         } > "${prepared_receipt}"
     fi
 
-    if tr ',' '\n' <<<"${systems}" | grep -Eq '^native-re2-(before|after)$' && \
-            [[ ! -x "${REBAR_PORTABLE_NATIVE}/target/release/main" || \
-            ! -x "${REBAR_TUNED_NATIVE}/target/release/main" ]]; then
-        "${ROOT}/tools/re2-golden/fetch-dependencies.sh" \
-            2>&1 | tee "${RESULT_DIR}/logs/rebar-native-fetch.log"
-        "${ROOT}/tools/re2-benchmark/rebar/build-native.sh" \
-            "${REBAR_ROOT}" \
-            "${REBAR_PORTABLE_NATIVE}" \
-            "${REBAR_TUNED_NATIVE}" \
-            "${ROOT}/target/re2-golden-dependencies/re2" \
-            2>&1 | tee "${RESULT_DIR}/logs/rebar-native-build.log"
+    if tr ',' '\n' <<<"${systems}" | grep -Eq '^native-re2-(before|after)$'; then
+        if [[ ! -x "${REBAR_PORTABLE_NATIVE}/target/release/main" || \
+                ! -x "${REBAR_TUNED_NATIVE}/target/release/main" ]]; then
+            "${ROOT}/tools/re2-golden/fetch-dependencies.sh" \
+                2>&1 | tee "${RESULT_DIR}/logs/rebar-native-fetch.log"
+            "${ROOT}/tools/re2-benchmark/rebar/build-native.sh" \
+                "${REBAR_ROOT}" \
+                "${REBAR_PORTABLE_NATIVE}" \
+                "${REBAR_TUNED_NATIVE}" \
+                "${ROOT}/target/re2-golden-dependencies/re2" \
+                2>&1 | tee "${RESULT_DIR}/logs/rebar-native-build.log"
+        fi
+        rebar_native_build=$(prebuilt_engine native || echo local)
     fi
 
     if [[ "${ROUTE}" == native-access ]]; then
@@ -1125,6 +1160,7 @@ semantic_result_digest=$(sha256sum "${RESULT_DIR}/semantic-evidence.tsv" | awk '
 if [[ "${VERIFICATION_ONLY}" == true ]]; then
     [[ "$(source_hash)" == "${source_hash_before}" ]] || exit 1
     printf 'verification_only=true\n' >> "${RESULT_DIR}/run-metadata.txt"
+    record_engine_builds
     echo "Completed semantic preparation ${SHARD_ID} ${ROUTE}"
     exit 0
 fi
@@ -1527,16 +1563,22 @@ run_traditional_shard()
     local java_output="${RESULT_DIR}/raw/traditional-${ROUTE}.json"
     local java_normalized="${RESULT_DIR}/normalized/traditional-${candidate_system}.tsv"
 
+    local native_benchmark="${ROOT}/target/re2-benchmark-build/regexp_benchmark"
     if [[ "${ROUTE}" == native-access && ${native_system_row_count} -gt 0 ]]; then
-        RE2_NATIVE_TUNING=host "${ROOT}/tools/re2-benchmark/build.sh" |
-            tee "${RESULT_DIR}/logs/native-build.log"
+        native_re2_build=$(prebuilt_engine native || echo local)
+        if [[ "${native_re2_build}" == local ]]; then
+            RE2_NATIVE_TUNING=host "${ROOT}/tools/re2-benchmark/build.sh" |
+                tee "${RESULT_DIR}/logs/native-build.log"
+        else
+            native_benchmark="${SHARED_WORK_DIR}/engine-build/regexp_benchmark"
+        fi
         local native_filter
         native_filter=$(python3 "${RESULT_TOOL}" native-filter \
             --manifest "${MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system native-re2-before)
         taskset --cpu-list "${CPU_LIST}" \
-            "${ROOT}/target/re2-benchmark-build/regexp_benchmark" \
+            "${native_benchmark}" \
             --benchmark_filter="${native_filter}" \
             --benchmark_min_time="${NATIVE_MINIMUM_TIME}" \
             --benchmark_repetitions="${NATIVE_REPETITIONS}" \
@@ -1629,7 +1671,7 @@ run_traditional_shard()
 
     if [[ "${ROUTE}" == native-access && ${native_system_row_count} -gt 0 ]]; then
         taskset --cpu-list "${CPU_LIST}" \
-            "${ROOT}/target/re2-benchmark-build/regexp_benchmark" \
+            "${native_benchmark}" \
             --benchmark_filter="${native_filter}" \
             --benchmark_min_time="${NATIVE_MINIMUM_TIME}" \
             --benchmark_repetitions="${NATIVE_REPETITIONS}" \
@@ -2203,6 +2245,7 @@ if [[ "${source_hash_after}" != "${source_hash_before}" ]]; then
 fi
 printf 'engine_content_sha256_after=%s\n' "${source_hash_after}" >> "${RESULT_DIR}/run-metadata.txt"
 printf 'observed_row_count=%s\n' "$(($(wc -l < "${RESULT_DIR}/observed-rows.tsv") - 1))" >> "${RESULT_DIR}/run-metadata.txt"
+record_engine_builds
 
 (
     cd "${RESULT_DIR}"

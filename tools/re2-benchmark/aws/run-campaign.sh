@@ -97,6 +97,8 @@ LANGUAGE_BATCH_ARCHIVE=${LANGUAGE_BATCH_ARCHIVE:-}
 LANGUAGE_BATCH_ARCHIVE_SHA256=${LANGUAGE_BATCH_ARCHIVE_SHA256:-}
 LANGUAGE_CANDIDATE_PROVENANCE=${LANGUAGE_CANDIDATE_PROVENANCE:-}
 LANGUAGE_CANDIDATE_PROVENANCE_SHA256=${LANGUAGE_CANDIDATE_PROVENANCE_SHA256:-}
+ENGINE_BUILD_DIRECTORY=${ENGINE_BUILD_DIRECTORY:-}
+ENGINE_BUILD_MANIFEST_SHA256=${ENGINE_BUILD_MANIFEST_SHA256:-}
 BASELINE_SELECTED_ROUTE=${BASELINE_SELECTED_ROUTE:-}
 BASELINE_JONI_JMH_TIME=${BASELINE_JONI_JMH_TIME:-}
 TRINO_REVISION=${TRINO_REVISION:-}
@@ -130,6 +132,8 @@ campaign_shard_handler()
 
 campaign_uses_trino()
 {
+    # The engine build prepares the pinned Trino harness for the platform's baseline hosts.
+    [[ "${CAMPAIGN_MODE}" == engine-build ]] && return 0
     [[ "${CAMPAIGN_MODE}" == baseline-shard ]] || return 1
     case "$(campaign_shard_handler)" in
         trino-operations | trino-final-line | trino-like | lifecycle | rebar) return 0 ;;
@@ -173,11 +177,11 @@ benchmark_ami_name()
     esac
 }
 
-if [[ "${CAMPAIGN_MODE}" != baseline-shard && "${CAMPAIGN_MODE}" != language-batch ]]; then
-    echo "RE2 benchmark campaign mode must be baseline-shard or language-batch" >&2
+if [[ "${CAMPAIGN_MODE}" != baseline-shard && "${CAMPAIGN_MODE}" != language-batch && "${CAMPAIGN_MODE}" != engine-build ]]; then
+    echo "RE2 benchmark campaign mode must be baseline-shard, language-batch, or engine-build" >&2
     exit 1
 fi
-if [[ ( "${CAMPAIGN_MODE}" == baseline-shard && "${TIMEOUT_SECONDS}" != 5400 ) ||
+if [[ ( "${CAMPAIGN_MODE}" != language-batch && "${TIMEOUT_SECONDS}" != 5400 ) ||
         ( "${CAMPAIGN_MODE}" == language-batch && "${TIMEOUT_SECONDS}" != 5400 &&
           "${TIMEOUT_SECONDS}" != 68400 && "${TIMEOUT_SECONDS}" != 81000 ) ]]; then
     echo "Formal baseline jobs require TIMEOUT_SECONDS=5400; isolated slow language jobs require their computed 68400- or 81000-second budget, found ${TIMEOUT_SECONDS}" >&2
@@ -236,6 +240,16 @@ if [[ "${CAMPAIGN_MODE}" == baseline-shard ]] &&
         ! awk -F '\t' -v shard="${CAMPAIGN_SHARD_ID}" 'NR > 1 && $1 == shard {found = 1} END {exit !found}' \
         "${REGULATOR_DIR}/tools/re2-benchmark/baseline/shards.tsv"; then
     echo "CAMPAIGN_SHARD_ID is not in the baseline shard manifest: ${CAMPAIGN_SHARD_ID}" >&2
+    exit 1
+fi
+if [[ -n "${ENGINE_BUILD_DIRECTORY}${ENGINE_BUILD_MANIFEST_SHA256}" ]] &&
+        { [[ "${CAMPAIGN_MODE}" != baseline-shard || ! -d "${ENGINE_BUILD_DIRECTORY}" ]] ||
+          [[ ! "${ENGINE_BUILD_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; }; then
+    echo "Prebuilt engines require a baseline shard, an engine build directory, and its manifest SHA-256" >&2
+    exit 1
+fi
+if [[ -n "${ENGINE_BUILD_DIRECTORY}" && -z "${TRANSFER_BUCKET}" ]]; then
+    echo "Prebuilt engines require TRANSFER_BUCKET, the shared bucket that holds their archives" >&2
     exit 1
 fi
 if [[ ! ${CAMPAIGN_REPLICA_ID} =~ ^[1-9][0-9]*$ || ! ${CAMPAIGN_HOST_EPOCH} =~ ^[1-9][0-9]*$ ||
@@ -953,6 +967,24 @@ commit_archive_sha256()
         | awk '{print $1}'
 }
 
+verify_engine_build_archive()
+{
+    local checksum=$1
+    local key=$2
+    local encoded
+    local existing
+    encoded=$(python3 -c 'import base64, sys; print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode())' "${checksum}")
+    existing=$(aws_cli s3api head-object --bucket "${BUCKET}" --key "${key}" --checksum-mode ENABLED \
+        --query ChecksumSHA256 --output text 2>/dev/null || true)
+    if [[ "${existing}" != "${encoded}" ]]; then
+        # The controller uploads each archive before it launches any host in this region.
+        echo "Engine build archive in the shared transfer bucket is missing, unreadable, or fails its checksum:" \
+            "s3://${BUCKET}/${key}" >&2
+        record_failure_classification retryable-infrastructure "engine-build-archive-unavailable:s3://${BUCKET}/${key}"
+        return 1
+    fi
+}
+
 create_instance_profile()
 {
     INSTANCE_ROLE_NAME="re2-benchmark-${LOWER_SESSION_ID}"
@@ -961,10 +993,16 @@ create_instance_profile()
     cat > "${SESSION_DIR}/instance-trust-policy.json" <<'EOF'
 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}
 EOF
+    local engine_build_statement=
+    if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
+        # Read only the exact shared archives this session's host installs.
+        engine_build_statement=",
+  {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":[${ENGINE_BUILD_SHARED_RESOURCES}]}"
+    fi
     cat > "${SESSION_DIR}/instance-transfer-policy.json" <<EOF
 {"Version":"2012-10-17","Statement":[
   {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::${BUCKET}/${INPUT_PREFIX}/*"},
-  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::${BUCKET}/${RESULT_PREFIX}/*"}
+  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::${BUCKET}/${RESULT_PREFIX}/*"}${engine_build_statement}
 ]}
 EOF
 
@@ -1133,6 +1171,20 @@ if [[ '${REBAR_OFFICIAL_SHA256}' != '' ]]; then
     download_input 's3://${BUCKET}/${INPUT_PREFIX}/rebar-official.tar.gz' /tmp/rebar-official.tar.gz
     printf '%s  %s\n' '${REBAR_OFFICIAL_SHA256}' /tmp/rebar-official.tar.gz | sha256sum --check -
     tar --no-same-owner -xzf /tmp/rebar-official.tar.gz -C /opt/re2-work/rebar --strip-components=1
+fi
+export ENGINE_BUILD_INPUT_DIR=
+export ENGINE_BUILD_MANIFEST_SHA256='${ENGINE_BUILD_MANIFEST_SHA256}'
+if [[ '${ENGINE_BUILD_MANIFEST_SHA256}' != '' ]]; then
+    ENGINE_BUILD_INPUT_DIR=/opt/re2-work/engine-build
+    mkdir -p "\${ENGINE_BUILD_INPUT_DIR}"
+    download_input 's3://${BUCKET}/${INPUT_PREFIX}/engine-build.json' "\${ENGINE_BUILD_INPUT_DIR}/engine-build.json"
+    printf '%s  %s\n' '${ENGINE_BUILD_MANIFEST_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/engine-build.json" | sha256sum --check -
+    download_input 's3://${BUCKET}/${ENGINE_BUILD_NATIVE_KEY}' "\${ENGINE_BUILD_INPUT_DIR}/native.tar.gz"
+    printf '%s  %s\n' '${ENGINE_BUILD_NATIVE_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/native.tar.gz" | sha256sum --check -
+    if [[ '${ENGINE_BUILD_TRINO_SHA256}' != '' ]]; then
+        download_input 's3://${BUCKET}/${ENGINE_BUILD_TRINO_KEY}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz"
+        printf '%s  %s\n' '${ENGINE_BUILD_TRINO_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz" | sha256sum --check -
+    fi
 fi
 
 export REGULATOR_SNAPSHOT_COMMIT='${REGULATOR_COMMIT}'
@@ -1370,7 +1422,7 @@ if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"
 fi
 
-if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* ]]; then
+if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* || "${CAMPAIGN_MODE}" == engine-build ]]; then
     if [[ ! -d "${REBAR_OFFICIAL_DIR}/.git" ]]; then
         echo "Pinned Rebar checkout does not exist: ${REBAR_OFFICIAL_DIR}" >&2
         exit 1
@@ -1386,6 +1438,21 @@ if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* ]]; then
         "${rebar_commit}" \
         "${SESSION_DIR}/rebar-official.tar.gz"
     REBAR_OFFICIAL_SHA256=$(sha256 "${SESSION_DIR}/rebar-official.tar.gz")
+fi
+
+ENGINE_BUILD_NATIVE_SHA256=
+ENGINE_BUILD_TRINO_SHA256=
+if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
+    read -r ENGINE_BUILD_NATIVE_SHA256 ENGINE_BUILD_TRINO_SHA256 < <(
+        PYTHONDONTWRITEBYTECODE=1 python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" checksums \
+            --build "${ENGINE_BUILD_DIRECTORY}" --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256}")
+    if [[ ! "${ENGINE_BUILD_NATIVE_SHA256}" =~ ^[0-9a-f]{64}$ || ! "${ENGINE_BUILD_TRINO_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "Engine build archives do not match their manifest" >&2
+        exit 1
+    fi
+    if [[ "${CAMPAIGN_USES_TRINO}" != true ]]; then
+        ENGINE_BUILD_TRINO_SHA256=
+    fi
 fi
 
 REGULATOR_SHA256=$(sha256 "${SESSION_DIR}/regulator.tar.gz")
@@ -1452,6 +1519,23 @@ fi
 if [[ -f "${SESSION_DIR}/rebar-official.tar.gz" ]]; then
     aws_cli s3 cp "${SESSION_DIR}/rebar-official.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/rebar-official.tar.gz" --only-show-errors
 fi
+ENGINE_BUILD_NATIVE_KEY=
+ENGINE_BUILD_TRINO_KEY=
+ENGINE_BUILD_SHARED_RESOURCES=
+if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
+    aws_cli s3 cp "${ENGINE_BUILD_DIRECTORY}/engine-build.json" "s3://${BUCKET}/${INPUT_PREFIX}/engine-build.json" --only-show-errors
+    # Every session in the bucket's region shares one copy of each content-addressed
+    # archive; they are campaign inputs, not session resources, so cleanup keeps them.
+    engine_build_prefix="${TRANSFER_PREFIX}/engine-builds"
+    ENGINE_BUILD_NATIVE_KEY="${engine_build_prefix}/${ENGINE_BUILD_NATIVE_SHA256}.tar.gz"
+    verify_engine_build_archive "${ENGINE_BUILD_NATIVE_SHA256}" "${ENGINE_BUILD_NATIVE_KEY}"
+    ENGINE_BUILD_SHARED_RESOURCES="\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_NATIVE_KEY}\""
+    if [[ -n "${ENGINE_BUILD_TRINO_SHA256}" ]]; then
+        ENGINE_BUILD_TRINO_KEY="${engine_build_prefix}/${ENGINE_BUILD_TRINO_SHA256}.tar.gz"
+        verify_engine_build_archive "${ENGINE_BUILD_TRINO_SHA256}" "${ENGINE_BUILD_TRINO_KEY}"
+        ENGINE_BUILD_SHARED_RESOURCES+=",\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_TRINO_KEY}\""
+    fi
+fi
 
 create_instance_profile
 
@@ -1517,6 +1601,9 @@ baseline_protocol_qualification=${BASELINE_PROTOCOL_QUALIFICATION}
 trino_commit=${TRINO_COMMIT}
 trino_snapshot_sha256=${TRINO_SHA256}
 rebar_official_sha256=${REBAR_OFFICIAL_SHA256:-none}
+engine_build_manifest_sha256=${ENGINE_BUILD_MANIFEST_SHA256:-none}
+engine_build_native_sha256=${ENGINE_BUILD_NATIVE_SHA256:-none}
+engine_build_trino_sha256=${ENGINE_BUILD_TRINO_SHA256:-none}
 rebar_workload_definitions_sha256=${REBAR_WORKLOAD_DEFINITIONS_SHA256}
 rebar_selected_definitions_sha256=${REBAR_SELECTED_DEFINITIONS_SHA256}
 joni_evidence_scope=${JONI_EVIDENCE_SCOPE}
@@ -1585,7 +1672,7 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                 fi
                 expected_cargo_package=not-installed
                 expected_rust_package=not-installed
-                if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* || "${CAMPAIGN_MODE}" == language-batch ]]; then
+                if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* || "${CAMPAIGN_MODE}" != baseline-shard ]]; then
                     expected_cargo_package=${CARGO_PACKAGE}
                     expected_rust_package=${RUST_PACKAGE}
                 fi
@@ -1625,6 +1712,13 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                         ! grep -Fqx "protocol_representatives_sha256=${BASELINE_PROTOCOL_REPRESENTATIVES_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "time_package=${TIME_PACKAGE}" "${environment_manifest}"); then
                     echo "${label} baseline manifest identity is inconsistent" >&2
+                    campaign_failed=1
+                    continue
+                fi
+                if [[ -n "${ENGINE_BUILD_MANIFEST_SHA256}" ]] &&
+                        ! grep -Fqx "engine_build_manifest_sha256=${ENGINE_BUILD_MANIFEST_SHA256}" \
+                            "${SESSION_DIR}/${label}/re2-results/engine-build.txt"; then
+                    echo "${label} did not record the engine build it was sent" >&2
                     campaign_failed=1
                     continue
                 fi

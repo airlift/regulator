@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import base64
 import csv
 import fcntl
 import hashlib
@@ -17,11 +18,14 @@ import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+import engine_build
 from acceptance import RECEIPT_FIELDS, ValidationError, normalize_heap_size, validate_campaign, validate_host_results
 from topology import CONCURRENCY_SHARDS
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, REGION_PATTERN, BudgetError, FleetBudget, on_demand_regions, region_limits)
-from campaign_io import UnsafeCampaignError, aws_output, check_output, fsync_directory, write_accepted_sessions
+from campaign_io import (
+    JSON_LEDGER_WORKLOADS, UnsafeCampaignError, aws_output, check_output, fsync_directory,
+    write_accepted_sessions)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
 import batch_acceptance
@@ -66,6 +70,16 @@ REFILL_ENVIRONMENT_SCOPES = {
 PINNED_REBAR_COMMIT = "463d00f31887e84c38467805b9e3122c314b9521"
 # A shard needs the pinned Trino checkout when shard-dispatch.tsv gives it one of these handlers.
 TRINO_HANDLERS = frozenset({"trino-operations", "trino-final-line", "trino-like", "lifecycle", "rebar"})
+# The build phase's one job per platform; it prepares the Trino harness among its engines.
+ENGINE_BUILD_SHARD = "engine-build"
+TRINO_SHARDS = frozenset(
+    row["shard_id"] for row in csv.DictReader(
+        (Path(__file__).resolve().parent / "shard-dispatch.tsv").read_text().splitlines(), delimiter="\t")
+    if row["native_access_handler"] in TRINO_HANDLERS) | {ENGINE_BUILD_SHARD}
+# An engine archive upload slower than this has stalled; it is retried rather than left to
+# hold every launch behind it.
+ENGINE_BUILD_UPLOAD_MINIMUM_RATE = 256 * 1024
+ENGINE_BUILD_UPLOAD_ATTEMPTS = 3
 CANDIDATE_PROVENANCE_FIELDS = (
     "candidate_ref",
     "candidate_commit",
@@ -82,6 +96,7 @@ CANDIDATE_PROVENANCE_FIELDS = (
 JOB_MANIFEST_FIELDS = (
     "platform", "shard_id", "replica", "host_epoch", "attempt", "market", "instance_type", "architecture")
 PHASE_TIMEOUT_SECONDS = {
+    "build": 3 * 60 * 60,
     "smoke": 6 * 60 * 60,
     "primary": 10 * 60 * 60,
     "confirmation": 2 * 60 * 60,
@@ -90,6 +105,12 @@ PHASE_HOST_EPOCH_START = {
     "smoke": 1,
     "primary": 100_001,
     "confirmation": 200_001,
+    "build": 300_001,
+}
+RECEIPT_NAMES = {
+    "baseline-shard": "acceptance-receipt.tsv",
+    "language-batch": "language-acceptance.json",
+    "engine-build": engine_build.RECEIPT,
 }
 
 
@@ -182,6 +203,11 @@ def parse_args():
     parser.add_argument("--region", action="append", dest="regions",
                         help="AWS region a host may launch in; repeat to let Spot placement scores choose, "
                              "ties going to the earlier region (default: AWS_REGION or us-west-2)")
+    parser.add_argument("--engine-builds", type=Path,
+                        help="accepted build-phase result root whose per-platform engines hosts install "
+                             "when their native target matches")
+    parser.add_argument("--local-engine-builds", action="store_true",
+                        help="have every host build its own engines, as before the build phase existed")
     parser.add_argument("--transfer-bucket", action="append", default=[], metavar="REGION=BUCKET",
                         help="shared transfer bucket for hosts launched in REGION; regions without one "
                              "use a per-session bucket")
@@ -202,6 +228,15 @@ def campaign_regions(arguments):
     return getattr(arguments, "regions", None) or [os.environ.get("AWS_REGION", "us-west-2")]
 
 
+def shared_transfer_buckets(arguments):
+    """Return each allowed region's shared transfer bucket; a single-region campaign may name its own."""
+    buckets = getattr(arguments, "transfer_buckets", None)
+    if buckets:
+        return buckets
+    bucket = os.environ.get("TRANSFER_BUCKET")
+    return {campaign_regions(arguments)[0]: bucket} if bucket else {}
+
+
 def language_campaign(arguments):
     return getattr(arguments, "language_campaign", None)
 
@@ -215,7 +250,14 @@ def execution_policy(arguments):
             "max_concurrent_per_platform": getattr(arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT),
             "phase_timeout_seconds": getattr(arguments, "topology_deadline_seconds", None),
             "fleet_budget": str(arguments.shared_budget.policy_path) if getattr(arguments, "shared_budget", None) else None,
-            "fleet_policy": arguments.shared_budget.policy if getattr(arguments, "shared_budget", None) else None}
+            "fleet_policy": arguments.shared_budget.policy if getattr(arguments, "shared_budget", None) else None,
+            # Each platform's engine-build manifest SHA-256, or "local" when hosts build their own.
+            "engine_builds": getattr(arguments, "engine_build_policy", "local")}
+
+
+def recorded_engine_builds(policy):
+    # Policies recorded before the build phase existed had every host build locally.
+    return policy.get("engine_builds", "local")
 
 
 def validate_execution_policy(arguments, result_root):
@@ -224,11 +266,13 @@ def validate_execution_policy(arguments, result_root):
     if getattr(arguments, "refill_unresolved", False):
         # A refill keeps the campaign's policy and records its own beside it.
         original = json.loads(path.read_text())
-        if any(original.get(field) != expected[field] for field in ("release_version", "smoke_protocol")):
-            raise UnsafeCampaignError("refill must measure the campaign's release and protocol")
+        if (any(original.get(field) != expected[field] for field in ("release_version", "smoke_protocol")) or
+                recorded_engine_builds(original) != expected["engine_builds"]):
+            raise UnsafeCampaignError("refill must measure the campaign's release and protocol with its engine builds")
         path = result_root / "refill-execution-policy.json"
     if path.exists():
-        if json.loads(path.read_text()) != expected:
+        recorded = json.loads(path.read_text())
+        if {**recorded, "engine_builds": recorded_engine_builds(recorded)} != expected:
             raise UnsafeCampaignError("campaign execution policy changed on restart")
         return
     temporary = path.with_suffix(".new")
@@ -260,6 +304,8 @@ def build_language_jobs(language, platforms):
 
 
 def accepted_sessions_path(result_root, arguments):
+    if arguments.phase == "build":
+        return result_root / "accepted-engine-builds.json"
     return result_root / ("accepted-language-sessions.json" if language_campaign(arguments) else "accepted-sessions.tsv")
 
 
@@ -303,16 +349,6 @@ def read_shards(directory):
         return [row["shard_id"] for row in csv.DictReader(input_file, delimiter="\t")]
 
 
-def read_trino_shards(directory):
-    with (directory / "shard-dispatch.tsv").open(newline="") as input_file:
-        return frozenset(
-            row["shard_id"] for row in csv.DictReader(input_file, delimiter="\t")
-            if row["native_access_handler"] in TRINO_HANDLERS)
-
-
-TRINO_SHARDS = read_trino_shards(Path(__file__).resolve().parent)
-
-
 def read_confirmation_jobs(path, platforms, shards):
     if path is None:
         raise SystemExit("confirmation requires --confirmation-jobs")
@@ -334,6 +370,9 @@ def read_confirmation_jobs(path, platforms, shards):
 
 
 def build_jobs(phase, platforms, shards, confirmation_jobs):
+    if phase == "build":
+        return [Job(platform, ENGINE_BUILD_SHARD, 1, host_epoch, 1, "spot", "engine-build")
+                for host_epoch, platform in enumerate(platforms, start=PHASE_HOST_EPOCH_START[phase])]
     if phase == "confirmation":
         matrix = read_confirmation_jobs(confirmation_jobs, platforms, shards)
     else:
@@ -395,8 +434,8 @@ def validate_configuration(arguments, jobs, launched_jobs=None):
         # A shared bucket serves hosts in its own region, so name each one with its region.
         raise SystemExit("TRANSFER_BUCKET serves only a single-region campaign without --transfer-bucket; "
                          "name each region's shared bucket with --transfer-bucket")
-    if buckets and not os.environ.get("TRANSFER_PREFIX"):
-        raise SystemExit("--transfer-bucket requires TRANSFER_PREFIX")
+    if shared_transfer_buckets(arguments) and not os.environ.get("TRANSFER_PREFIX"):
+        raise SystemExit("--transfer-bucket and TRANSFER_BUCKET require TRANSFER_PREFIX")
     budget = getattr(arguments, "shared_budget", None)
     if getattr(arguments, "refill_unresolved", False) and (getattr(arguments, "spot_only", False) or budget):
         raise SystemExit("refill runs On-Demand without --spot-only or a shared fleet budget")
@@ -466,6 +505,7 @@ def validate_durable_paths(root, arguments, result_root):
         ("candidate archive", arguments.candidate_archive),
         ("candidate provenance", arguments.candidate_provenance),
         ("shared fleet policy", getattr(arguments, "fleet_budget", None)),
+        ("engine builds", getattr(arguments, "engine_builds", None)),
     )
     for label, path in paths:
         if path is None:
@@ -578,6 +618,10 @@ def frozen_input_fingerprint(root, arguments, jobs_path):
         jobs_path))
     if language_campaign(arguments):
         tracked_inputs.extend(directory / "plan.json" for directory, _ in language_campaign(arguments).plans.values())
+    # The policy binds each manifest's SHA-256 and each wrapper checks the archives against
+    # it, so large archives are not rehashed at every launch.
+    tracked_inputs.extend(directory / engine_build.MANIFEST for _, directory in
+                          sorted(getattr(arguments, "engine_build_directories", {}).items()))
     return (
         execution_policy(arguments),
         check_output(["git", "rev-parse", f"{arguments.candidate_ref}^{{commit}}"], cwd=root),
@@ -595,8 +639,8 @@ def validate_frozen_inputs(root, arguments, jobs_path, expected_fingerprint):
 def read_receipt(path):
     if path.suffix == ".json":
         receipt = json.loads(path.read_text())
-        if receipt.get("schema_version") != 1 or receipt.get("workload") != "language-batch":
-            raise RuntimeError(f"unexpected language receipt schema in {path}")
+        if receipt.get("schema_version") != 1 or receipt.get("workload") not in JSON_LEDGER_WORKLOADS.values():
+            raise RuntimeError(f"unexpected JSON receipt schema in {path}")
         return receipt
     with path.open(newline="") as input_file:
         reader = csv.DictReader(input_file, delimiter="\t")
@@ -606,6 +650,12 @@ def read_receipt(path):
     if len(rows) != 1:
         raise RuntimeError(f"{path} must contain exactly one receipt")
     return rows[0]
+
+
+def check_prerequisite_engine_builds(arguments, recorded, phase):
+    """A phase uses the engine builds its prerequisite phase recorded."""
+    if recorded != execution_policy(arguments)["engine_builds"]:
+        raise SystemExit(f"{arguments.phase} must use the engine builds its {phase} prerequisite used")
 
 
 def validate_phase_prerequisite(root, arguments, platforms, result_root, expected_replicas, phase):
@@ -623,6 +673,9 @@ def validate_phase_prerequisite(root, arguments, platforms, result_root, expecte
             selected_shards=getattr(arguments, 'selected_shards', None))
     except (OSError, ValidationError) as error:
         raise SystemExit(f"{phase} prerequisite campaign is not accepted: {error}") from error
+    policy_path = result_root / "execution-policy.json"
+    recorded = recorded_engine_builds(json.loads(policy_path.read_text())) if policy_path.exists() else "local"
+    check_prerequisite_engine_builds(arguments, recorded, phase)
 
     with accepted_sessions.open(newline="") as input_file:
         reader = csv.DictReader(input_file, delimiter="\t")
@@ -693,6 +746,51 @@ def validate_prerequisites(root, arguments, platforms):
     elif arguments.phase == "confirmation":
         validate_phase_prerequisite(
             root, arguments, platforms, arguments.primary_results, (1, 2, 3), "primary")
+
+
+def resolve_engine_builds(root, arguments, platforms):
+    builds = getattr(arguments, "engine_builds", None)
+    local = getattr(arguments, "local_engine_builds", False)
+    if arguments.phase == "build" or language_campaign(arguments):
+        if builds is not None or local:
+            raise SystemExit("engine builds apply only to baseline smoke, primary, and confirmation")
+        return
+    if builds is None and not local:
+        raise SystemExit(f"{arguments.phase} execution requires either --engine-builds from an accepted "
+                         "build phase or --local-engine-builds")
+    if builds is not None and local:
+        raise SystemExit(f"{arguments.phase} execution takes either --engine-builds or --local-engine-builds, "
+                         "not both")
+    if local:
+        arguments.engine_build_policy = "local"
+        return
+    buckets = shared_transfer_buckets(arguments)
+    missing = [region for region in campaign_regions(arguments) if region not in buckets]
+    if missing:
+        # Hosts install the archives from a bucket in their own region, uploaded once before launch.
+        raise SystemExit(f"--engine-builds requires a shared transfer bucket in every allowed region; "
+                         f"name one for {missing} with --transfer-bucket REGION=BUCKET, created as "
+                         "aws/README.md \"Launch regions\" describes, or use --local-engine-builds")
+    from copy import copy
+    build_arguments = copy(arguments)
+    build_arguments.phase = "build"
+    jobs = build_jobs("build", platforms, (), None)
+    try:
+        accepted = recover_accepted_sessions(
+            root, build_arguments, builds, jobs, accepted_sessions_path(builds, build_arguments))
+    except (OSError, RuntimeError, ValueError) as error:
+        raise SystemExit(f"engine builds are not accepted: {error}") from error
+    missing = [job.platform.name for job in jobs if job.logical_identity not in accepted]
+    if missing:
+        raise SystemExit(f"engine builds have no accepted build for platforms {missing}")
+    arguments.engine_build_policy = {}
+    arguments.engine_build_directories = {}
+    for job in jobs:
+        receipt = accepted[job.logical_identity]
+        session = single_session(builds, replace(job, host_epoch=int(receipt["host_epoch"])))
+        arguments.engine_build_policy[job.platform.name] = receipt["manifest_sha256"]
+        arguments.engine_build_directories[job.platform.name] = (
+            session / job.platform.architecture / "re2-results" / engine_build.DIRECTORY)
 
 
 def validate_dependencies(root, arguments, jobs):
@@ -823,7 +921,7 @@ def validate_aws(arguments, platforms, jobs=None):
         if not offered:
             raise SystemExit(f"{platform.instance_type} is not offered in any allowed region")
         offerings[platform.instance_type] = offered
-    for region, bucket in (getattr(arguments, "transfer_buckets", None) or {}).items():
+    for region, bucket in shared_transfer_buckets(arguments).items():
         prefix = aws_output(arguments, region)
         location = check_output(prefix + ["s3api", "get-bucket-location", "--bucket", bucket,
                                           "--query", "LocationConstraint", "--output", "text"])
@@ -837,6 +935,51 @@ def validate_aws(arguments, platforms, jobs=None):
                              f"bucket in {region}: location={location}")
     arguments.ami_names = names
     arguments.region_offerings = offerings
+
+
+def upload_engine_builds(arguments, jobs):
+    """Put each engine archive once in every region that may launch a host installing it."""
+    directories = getattr(arguments, "engine_build_directories", None)
+    if not directories:
+        return
+    buckets = shared_transfer_buckets(arguments)
+    uploads = {}
+    for job in jobs:
+        if job.workload not in ("baseline-shard", "unit-worker"):
+            continue
+        names = ("native", "trino") if job.workload == "unit-worker" or job.shard in TRINO_SHARDS else ("native",)
+        for region in launch_regions(arguments, job):
+            uploads.setdefault((job.platform.name, region), set()).update(names)
+    for (platform, region), names in sorted(uploads.items()):
+        build = directories[platform]
+        manifest = engine_build.load_manifest(build, arguments.engine_build_policy[platform])
+        for name in sorted(names):
+            archive = manifest["archives"][name]
+            path = build / archive["file"]
+            key = f"{os.environ['TRANSFER_PREFIX']}/engine-builds/{archive['sha256']}.tar.gz"
+            checksum = base64.b64encode(bytes.fromhex(archive["sha256"])).decode()
+            prefix = aws_output(arguments, region) + ["s3api"]
+            for attempt in range(1, ENGINE_BUILD_UPLOAD_ATTEMPTS + 1):
+                try:
+                    existing = check_output(prefix + [
+                        "head-object", "--bucket", buckets[region], "--key", key, "--checksum-mode", "ENABLED",
+                        "--query", "ChecksumSHA256", "--output", "text"], stderr=subprocess.DEVNULL, timeout=60)
+                except subprocess.SubprocessError:
+                    existing = None
+                if existing == checksum:
+                    break
+                print(f"uploading {platform} {name} engine archive to {region} (attempt {attempt})", flush=True)
+                try:
+                    # A single PUT keeps S3's checksum the whole-object SHA-256, which S3 verifies on upload.
+                    check_output(prefix + [
+                        "put-object", "--bucket", buckets[region], "--key", key, "--body", str(path),
+                        "--checksum-algorithm", "SHA256", "--checksum-sha256", checksum],
+                        timeout=60 + path.stat().st_size / ENGINE_BUILD_UPLOAD_MINIMUM_RATE)
+                    break
+                except subprocess.SubprocessError as error:
+                    if attempt == ENGINE_BUILD_UPLOAD_ATTEMPTS:
+                        raise SystemExit(f"could not upload the {platform} {name} engine archive to "
+                                         f"s3://{buckets[region]}/{key}: {error}") from error
 
 
 def spot_placement_scores(arguments, instance_type, regions):
@@ -1240,6 +1383,13 @@ def job_environment(job, arguments, root, result_root):
         "BASELINE_EXPECTED_ENGINE_TREE": campaign_engine_tree(arguments),
         "BENCHMARK_HEAP_SIZE": campaign_heap_size(arguments),
     })
+    # Only baseline shards install engine builds; never pass the controller's own environment through.
+    environment.pop("ENGINE_BUILD_DIRECTORY", None)
+    environment.pop("ENGINE_BUILD_MANIFEST_SHA256", None)
+    directories = getattr(arguments, "engine_build_directories", None)
+    if directories and job.workload == "baseline-shard":
+        environment["ENGINE_BUILD_DIRECTORY"] = str(directories[job.platform.name].resolve())
+        environment["ENGINE_BUILD_MANIFEST_SHA256"] = arguments.engine_build_policy[job.platform.name]
     if language_campaign(arguments):
         package = result_root / "language-packages" / (job.logical_identity.replace("/", "-") + ".tar.gz")
         checksum = language_campaign(arguments).package(job.logical_identity, package)
@@ -1457,8 +1607,7 @@ def validate_job_artifacts(result_root, job):
     if (session / "campaign-success").read_text() != "complete\n":
         raise RuntimeError(f"{job.identity} has no campaign success marker")
     label = job.platform.architecture
-    receipt_name = "language-acceptance.json" if job.workload == "language-batch" else "acceptance-receipt.tsv"
-    receipt = session / label / "re2-results" / receipt_name
+    receipt = session / label / "re2-results" / RECEIPT_NAMES[job.workload]
     if not receipt.is_file():
         raise RuntimeError(f"{job.identity} has no acceptance receipt")
     validate_capacity(session / label / "re2-results" / "host-capacity.txt")
@@ -1477,6 +1626,12 @@ def validate_job_artifacts(result_root, job):
                 raise ValueError("saved language receipt differs from raw evidence")
         except (ValueError, KeyError, TypeError) as error:
             raise RuntimeError(f"invalid language evidence for {job.identity}: {error}") from error
+    if job.workload == "engine-build":
+        try:
+            if engine_build.validate(receipt.parent) != read_receipt(receipt):
+                raise ValueError("saved engine build receipt differs from its archives")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise RuntimeError(f"invalid engine build for {job.identity}: {error}") from error
     return receipt
 
 
@@ -1594,8 +1749,8 @@ def read_accepted_sessions(path):
         return []
     if path.suffix == ".json":
         data = json.loads(path.read_text())
-        if data.get("schema_version") != 1 or data.get("workload") != "language-batch":
-            raise UnsafeCampaignError(f"unexpected language ledger schema in {path}")
+        if data.get("schema_version") != 1 or data.get("workload") != JSON_LEDGER_WORKLOADS.get(path.name):
+            raise UnsafeCampaignError(f"unexpected JSON ledger schema in {path}")
         rows = data["receipts"]
     else:
         with path.open(newline="") as input_file:
@@ -1628,7 +1783,8 @@ def persist_accepted_receipt(path, receipt_path):
 
 def validate_receipt_candidate(root, arguments, result_root, job, receipt, receipt_path=None):
     version = getattr(arguments, "release_version", "")
-    if version:
+    # Engine builds come from the candidate's tooling; the release is measured by the shards.
+    if version and job.workload != "engine-build":
         identity = released_artifact.manifest(root, version)
         if job.workload == "language-batch":
             if receipt.get("released_artifact") != identity:
@@ -1657,6 +1813,9 @@ def validate_receipt_candidate(root, arguments, result_root, job, receipt, recei
         expected["comparators_sha256"] = hashlib.sha256(
             (root / "tools/re2-benchmark/baseline/comparators.tsv").read_bytes()).hexdigest()
         language_campaign(arguments).validate_receipt(job.logical_identity, receipt)
+    elif job.workload == "engine-build":
+        # The candidate commit and archive bind the tree; the build does not depend on the heap.
+        del expected["engine_tree"], expected["heap_size"]
     mismatches = [field for field, value in expected.items() if receipt.get(field) != value]
     if mismatches:
         raise UnsafeCampaignError(
@@ -1767,7 +1926,7 @@ def recover_accepted_sessions(root, arguments, result_root, jobs, accepted_sessi
             except ValueError:
                 raise UnsafeCampaignError(f"invalid host epoch directory: {epoch_root}")
             job = replace(base_job, host_epoch=host_epoch)
-            receipt_name = "language-acceptance.json" if job.workload == "language-batch" else "acceptance-receipt.tsv"
+            receipt_name = RECEIPT_NAMES[job.workload]
             receipt_paths = list(epoch_root.glob(f"*/{job.platform.architecture}/re2-results/{receipt_name}"))
             if not receipt_paths:
                 continue
@@ -2632,14 +2791,14 @@ def main():
     arguments.regional_amis = read_platform_regions(directory)
     shards = read_shards(directory)
     if arguments.selected_shards is not None:
-        if (arguments.language_plan or arguments.phase == 'confirmation' or
+        if (arguments.language_plan or arguments.phase in ('confirmation', 'build') or
                 not set(arguments.selected_shards) <= set(shards) or
                 len(arguments.selected_shards) != len(set(arguments.selected_shards))):
             raise SystemExit('invalid baseline shard selection')
         shards = arguments.selected_shards
     if arguments.language_plan:
-        if arguments.confirmation_jobs is not None:
-            raise SystemExit("language plans cannot be combined with baseline confirmation jobs")
+        if arguments.confirmation_jobs is not None or arguments.phase == "build":
+            raise SystemExit("language plans cannot be combined with baseline confirmation jobs or engine builds")
         arguments.language_campaign = LanguageCampaign(arguments.language_plan, arguments.phase)
         jobs = build_language_jobs(arguments.language_campaign, platforms)
     else:
@@ -2654,8 +2813,10 @@ def main():
     if arguments.execute:
         validate_source(root, arguments)
         validate_dependencies(root, arguments, jobs)
+        resolve_engine_builds(root, arguments, platforms)
         validate_prerequisites(root, arguments, platforms)
         validate_aws(arguments, platforms, jobs)
+        upload_engine_builds(arguments, jobs)
         execute_jobs(arguments, root, result_root, jobs)
 
 

@@ -1,13 +1,14 @@
 # AWS baseline qualification
 
-The AWS tools run two kinds of jobs: `baseline-shard` and `language-batch`.
-Both are needed for full qualification. This guide gives the baseline commands;
+The AWS tools run three kinds of jobs: `baseline-shard`, `language-batch`, and
+`engine-build`. The first two are needed for full qualification; the third
+builds engines for the first. This guide gives the baseline commands;
 see the [language guide](../language/README.md) for language collection.
 
-`baseline/run-campaign.py` plans and controls baseline smoke, primary, and
-confirmation runs. `language/fleet.py` prepares language plans, and
-`language/campaign.py` controls their collection and acceptance. Standalone
-engineering diagnostics are separate from both.
+`baseline/run-campaign.py` plans and controls the baseline engine build and the
+smoke, primary, and confirmation runs. `language/fleet.py` prepares language
+plans, and `language/campaign.py` controls their collection and acceptance.
+Standalone engineering diagnostics are separate from both.
 
 Do not collect performance evidence on a development machine. Local commands
 may validate manifests, scripts, and protocol behavior, but performance
@@ -251,16 +252,37 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --result-root /durable/path/<campaign-id>/smoke
 ```
 
-Execute the smoke after inspecting that plan:
+Build each platform's engines once before the smoke. The build phase runs one
+job per platform on its pinned instance type and AMI; see
+[engine builds](#engine-builds):
 
 ```bash
 TRINO_DIR=/path/to/trino \
+python3 tools/re2-benchmark/baseline/run-campaign.py \
+  build <campaign-id> --execute \
+  --candidate-ref refs/benchmarks/<candidate-name> \
+  --candidate-archive /durable/path/candidate.tar.gz \
+  --candidate-provenance /durable/path/candidate-provenance.tsv \
+  --result-root /durable/path/<campaign-id>/build \
+  --spot-only --spot-vcpu-reserve 16
+```
+
+`--engine-builds` requires a shared transfer bucket in every allowed region
+and `TRANSFER_PREFIX`; see [launch regions](#launch-regions). The examples
+below run in one region with one shared bucket.
+
+Execute the smoke after inspecting the smoke plan above:
+
+```bash
+TRINO_DIR=/path/to/trino TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   smoke <campaign-id> --execute \
   --candidate-ref refs/benchmarks/<candidate-name> \
   --candidate-archive /durable/path/candidate.tar.gz \
   --candidate-provenance /durable/path/candidate-provenance.tsv \
   --result-root /durable/path/<campaign-id>/smoke \
+  --engine-builds /durable/path/<campaign-id>/build \
+  --transfer-bucket us-west-2=<bucket> \
   --max-concurrent 16 --spot-only --spot-vcpu-reserve 16 \
   --release-version 1.0 --fleet-budget /durable/path/fleet-policy.json
 ```
@@ -269,7 +291,7 @@ The primary phase requires the accepted smoke root and runs three independent
 host replicas for every platform and shard:
 
 ```bash
-TRINO_DIR=/path/to/trino \
+TRINO_DIR=/path/to/trino TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   primary <campaign-id> --execute \
   --candidate-ref refs/benchmarks/<candidate-name> \
@@ -277,6 +299,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --candidate-provenance /durable/path/candidate-provenance.tsv \
   --smoke-results /durable/path/<campaign-id>/smoke \
   --result-root /durable/path/<campaign-id>/primary \
+  --engine-builds /durable/path/<campaign-id>/build \
+  --transfer-bucket us-west-2=<bucket> \
   --max-concurrent 16 --spot-only --spot-vcpu-reserve 16 \
   --release-version 1.0 --fleet-budget /durable/path/fleet-policy.json
 ```
@@ -284,7 +308,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
 Use confirmation only for the bounded list emitted by preliminary reduction:
 
 ```bash
-TRINO_DIR=/path/to/trino \
+TRINO_DIR=/path/to/trino TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   confirmation <campaign-id> --execute \
   --candidate-ref refs/benchmarks/<candidate-name> \
@@ -293,6 +317,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --primary-results /durable/path/<campaign-id>/primary \
   --confirmation-jobs /durable/path/confirmation-jobs.tsv \
   --result-root /durable/path/<campaign-id>/confirmation \
+  --engine-builds /durable/path/<campaign-id>/build \
+  --transfer-bucket us-west-2=<bucket> \
   --max-concurrent 16 --spot-only --spot-vcpu-reserve 16 \
   --release-version 1.0 --fleet-budget /durable/path/fleet-policy.json
 ```
@@ -348,32 +374,93 @@ Hosts read campaign inputs from a bucket in their launch region. Without a
 shared bucket, each session creates and removes its own bucket there. To reuse
 shared buckets, give each region's bucket with `--transfer-bucket
 REGION=BUCKET` and set `TRANSFER_PREFIX`; regions without one use per-session
-buckets. Each shared bucket must carry the `Project=regulator-benchmark` tag,
-and preflight checks the tag and the bucket's region. A single-region campaign
-may still set `TRANSFER_BUCKET`; a multi-region campaign must use
-`--transfer-bucket` instead. Every session uploads its own inputs to its
-bucket.
+buckets, but `--engine-builds` requires one in every allowed region. Each
+shared bucket must carry the `Project=regulator-benchmark` tag, and preflight
+checks the tag and the bucket's region. A single-region campaign may still set
+`TRANSFER_BUCKET`; a multi-region campaign must use `--transfer-bucket`
+instead. Every session uploads its own inputs to its bucket, except the engine
+build archives described below. To create a shared bucket, omitting
+`--create-bucket-configuration` in `us-east-1`:
+
+```bash
+aws s3api create-bucket --bucket <bucket> --region <region> \
+  --create-bucket-configuration LocationConstraint=<region>
+aws s3api put-public-access-block --bucket <bucket> --region <region> \
+  --public-access-block-configuration \
+  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+aws s3api put-bucket-tagging --bucket <bucket> --region <region> \
+  --tagging 'TagSet=[{Key=Project,Value=regulator-benchmark}]'
+```
+
+### Engine builds
+
+The `build` phase builds the native RE2 benchmark, the Rebar engines and native
+runners, and the pinned Trino harness once per platform, exactly as a baseline
+host would. Each build records the compiler's expansion of `-march=native` or
+`-mcpu=native` and the builder's CPU identity, and freezes its outputs in
+`native.tar.gz` and `trino.tar.gz` under a manifest, `engine-build.json`. The
+manifest lists each archive's SHA-256 and per-file hashes, and its inputs: the
+candidate, the Rebar and Trino commits, the toolchain packages, and the build
+scripts. Accepted builds go to `accepted-engine-builds.json`.
+
+Smoke, primary, and confirmation execution require either `--engine-builds`,
+naming an accepted build root for every platform, or `--local-engine-builds`,
+which has every host build its own engines as before. The choice and each
+platform's manifest SHA-256 are frozen in `execution-policy.json`, and primary
+and confirmation refuse a prerequisite that used different builds. Policies
+recorded before the build phase existed resume as local builds. Language
+batches do not use engine builds; their Rust comparator still builds on the
+host.
+
+Hosts check every downloaded archive with `sha256sum --check`, then verify each
+archive and installed file against the manifest; a mismatch fails the session.
+After installing packages, the host computes its own native target and CPU
+identity. If either differs from the builder's, it ignores the native archive
+and builds the native engines locally, as before. The Java harness is installed
+either way. `engine-build.txt` records the choice and its reason beside the
+host evidence and in each route, and every route's `run-metadata.txt` records
+whether each engine was prebuilt, with its archive SHA-256, or built locally.
+
+Preflight names each allowed region that lacks the shared transfer bucket
+`--engine-builds` requires. Before it launches any host,
+the controller puts each archive once in every region that may launch a host
+installing it, under `TRANSFER_PREFIX/engine-builds/<sha256>.tar.gz`, and skips
+an object with that key and checksum. An upload slower than 256 KiB/s counts as
+stalled and is stopped and retried; the campaign stops after three failed
+attempts. A session whose archive is missing from its bucket fails as
+`retryable-infrastructure` before it launches. Each session's instance role
+may read exactly those archive keys, in addition to its own session prefix.
+These archives are campaign inputs rather than session resources, so session
+cleanup leaves them in place. Remove them once the campaign is done:
+
+```bash
+aws s3 rm "s3://<bucket>/<transfer-prefix>/engine-builds/" --recursive --region <region>
+```
+
+`--local-engine-builds` uploads no archives and needs no shared bucket.
 
 ## Single-job wrapper
 
 The controllers use `run-campaign.sh` to run one AWS job. A
-`CAMPAIGN_MODE=baseline-shard` job selects one architecture, platform, shard, and
-replica. A `CAMPAIGN_MODE=language-batch` job selects one language batch and its
-frozen inputs. The wrapper verifies the archive, provisions an isolated
-instance, uploads inputs through a private temporary S3 location, downloads
-the result, and verifies instance, IAM, and S3 cleanup.
+`CAMPAIGN_MODE=baseline-shard` job selects one architecture, platform, shard,
+and replica. A `CAMPAIGN_MODE=language-batch` job selects one language batch and
+its frozen inputs. A `CAMPAIGN_MODE=engine-build` job builds one platform's
+engines. The wrapper verifies the archive, provisions an isolated instance,
+uploads inputs through a private temporary S3 location, downloads the result,
+and verifies instance, IAM, and S3 cleanup.
 
 The fleet controller should normally invoke this wrapper. Direct invocation is
 appropriate only while diagnosing one qualification job and still requires all
 pinned identity variables. The language fleet launches through the same
 controller and wrapper, so it uses the same launch regions.
 
-`run-host.sh` runs on the instance. It accepts the same two
+`run-host.sh` runs on the instance. It accepts the same three
 modes, verifies the AMI, JDK, package, candidate, comparator, and manifest
-identities, and delegates to `baseline/run-host-session.sh` or
-`language/run-host-session.sh`. Language batches, like Rebar shards, install
-the pinned Cargo and Rust packages, because the Rust language comparator builds
-the pinned `regex` crate on the host.
+identities, and delegates to `baseline/run-host-session.sh`,
+`language/run-host-session.sh`, or `baseline/build-engines.sh`. Language
+batches and engine builds, like Rebar shards, install the pinned Cargo and Rust
+packages, because the Rust language comparator builds the pinned `regex` crate
+on the host and the engine build compiles Rebar.
 
 ## Recovery and evidence
 

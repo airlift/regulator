@@ -44,6 +44,10 @@ class TestHostDuration(unittest.TestCase):
                     if shard[handler] == "-":
                         continue
                     destination = Path(directory) / route
+                    # The host session seeds each route with its environment and engine-build records.
+                    destination.mkdir()
+                    for name in ("environment-manifest.txt", "environment.txt", "engine-build.txt"):
+                        (destination / name).write_text("fixture=true\n")
                     subprocess.run([str(BASELINE / "run-shard.sh"), shard["shard_id"], "qualification",
                                     route, str(destination)],
                                    env={**os.environ, "BASELINE_PLAN_ONLY": "true", "BASELINE_DEFER_ACCEPTANCE": "true"},

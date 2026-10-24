@@ -177,6 +177,22 @@ top-level JMH JSON file. Calibration retains JMH's ordinary forked shape: one
 qualification JSON file contains five fork groups, all of which are included
 in the calibration statistics.
 
+### Engine Builds
+
+A host may install the native RE2 benchmark, the Rebar engines and native
+runners, and the pinned Trino harness from its platform's
+[engine build](../aws/README.md#engine-builds) instead of building them. The
+cold-build allowances above stay unchanged: a host whose native target differs
+from the builder's builds the native engines itself, and the bound must hold
+for that host too. Each route's `run-metadata.txt` records `native_re2_build`,
+`rebar_build`, `rebar_native_build`, and `trino_harness_build` as
+`prebuilt:<archive-sha256>`, `local`, or `not-used`; `engine-build.txt` in the
+route records the host's native target and CPU identity against the builder's.
+Routes from sessions before engine builds carry neither and remain valid.
+Engine builds change where an engine binary came from, not what a route
+measures or how it is accepted and reduced. The language comparison does not
+use them.
+
 ## Comparator Ordering
 
 `JONI_COMPARATOR_ORDER=forward|reverse` controls the accepted measurement

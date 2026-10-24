@@ -1,6 +1,9 @@
+import base64
+import contextlib
 import csv
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -234,6 +237,85 @@ class TestRunCampaign(unittest.TestCase):
             refill.max_concurrent = 3
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
                 RUN_CAMPAIGN.validate_execution_policy(refill, root)
+
+    def test_engine_builds_are_frozen_and_older_policies_resume_as_local(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            arguments = SimpleNamespace(engine_build_policy={"r8i": "1" * 64})
+            RUN_CAMPAIGN.validate_execution_policy(arguments, root)
+            arguments.engine_build_policy = {"r8i": "2" * 64}
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
+                RUN_CAMPAIGN.validate_execution_policy(arguments, root)
+
+            policy = RUN_CAMPAIGN.execution_policy(SimpleNamespace())
+            del policy["engine_builds"]
+            (root / "execution-policy.json").write_text(json.dumps(policy))
+            arguments.engine_build_policy = "local"
+            RUN_CAMPAIGN.validate_execution_policy(arguments, root)
+            RUN_CAMPAIGN.validate_execution_policy(SimpleNamespace(refill_unresolved=True), root)
+
+    def test_baseline_execution_requires_an_explicit_engine_build_choice(self):
+        arguments = SimpleNamespace(phase="smoke", engine_builds=None, local_engine_builds=False)
+        with self.assertRaisesRegex(SystemExit, "--engine-builds .* or --local-engine-builds"):
+            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
+        arguments.local_engine_builds = True
+        RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
+        self.assertEqual("local", RUN_CAMPAIGN.execution_policy(arguments)["engine_builds"])
+        arguments.phase = "build"
+        with self.assertRaisesRegex(SystemExit, "apply only to baseline"):
+            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
+        arguments = SimpleNamespace(phase="smoke", engine_builds=Path("builds"), local_engine_builds=False,
+                                    regions=["us-west-2", "us-east-2"], transfer_buckets={"us-west-2": "bucket"})
+        with self.assertRaisesRegex(SystemExit, r"bucket in every allowed region; name one for \['us-east-2'\]"):
+            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
+
+    def test_engine_archives_upload_once_per_region(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            build = Path(temporary)
+            archives = {}
+            for name in ("native", "trino"):
+                (build / f"{name}.tar.gz").write_bytes(name.encode())
+                archives[name] = {"file": f"{name}.tar.gz", "sha256": hashlib.sha256(name.encode()).hexdigest()}
+            (build / "engine-build.json").write_text(json.dumps({"archives": archives}))
+            arguments = SimpleNamespace(
+                regions=["us-west-2", "us-east-2"], transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
+                engine_build_directories={"r8i": build},
+                engine_build_policy={"r8i": hashlib.sha256((build / "engine-build.json").read_bytes()).hexdigest()})
+            jobs = [RUN_CAMPAIGN.Job(self.platform, shard, replica, 10, 1, "spot")
+                    for shard in ("traditional-search", "trino-operations") for replica in (1, 2)]
+            native = archives["native"]["sha256"]
+            present = {("east", f"prefix/engine-builds/{native}.tar.gz"): base64.b64encode(bytes.fromhex(native)).decode()}
+            for stalls, expected_puts in ((1, 4), (RUN_CAMPAIGN.ENGINE_BUILD_UPLOAD_ATTEMPTS, None)):
+                with self.subTest(stalls=stalls):
+                    puts = []
+
+                    def aws(command, **kwargs):
+                        bucket, key = command[command.index("--bucket") + 1], command[command.index("--key") + 1]
+                        if "head-object" in command:
+                            if (bucket, key) not in present:
+                                raise subprocess.CalledProcessError(254, command)
+                            return present[bucket, key]
+                        puts.append((bucket, key))
+                        self.assertIn("timeout", kwargs)
+                        if len(puts) <= stalls:
+                            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                        return ""
+
+                    with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), \
+                            patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        if expected_puts is None:
+                            with self.assertRaisesRegex(SystemExit, "could not upload the r8i trino engine archive to s3://east/"):
+                                RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
+                            continue
+                        RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
+                    # Each region gets each archive once; Ohio already holds the native archive, and the
+                    # stalled first upload is retried.
+                    self.assertEqual(
+                        sorted(set(puts)),
+                        sorted((bucket, f"prefix/engine-builds/{archives[name]['sha256']}.tar.gz")
+                               for bucket, name in (("east", "trino"), ("west", "native"), ("west", "trino"))))
+                    self.assertEqual(expected_puts, len(puts))
 
     def test_spot_only_launcher_rejects_on_demand_before_aws(self):
         environment = dict(os.environ, CAMPAIGN_SPOT_ONLY="1", INSTANCE_MARKET_TYPE="on-demand")
@@ -697,6 +779,16 @@ class TestRunCampaign(unittest.TestCase):
                     RUN_CAMPAIGN.validate_phase_prerequisite(
                         root, arguments, [self.platform], results, (1,), "smoke")
 
+    def test_prerequisite_rejects_different_engine_builds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_receipts(root / "accepted-sessions.tsv", [self.prerequisite_receipt()])
+            (root / "execution-policy.json").write_text(json.dumps({"engine_builds": {"r8i": "1" * 64}}))
+            arguments = SimpleNamespace(phase="primary", campaign_id="baseline", engine_build_policy="local")
+            with patch.object(RUN_CAMPAIGN, "validate_campaign"):
+                with self.assertRaisesRegex(SystemExit, "engine builds its smoke prerequisite used"):
+                    RUN_CAMPAIGN.validate_phase_prerequisite(root, arguments, [self.platform], root, (1,), "smoke")
+
     def test_prerequisite_rejects_unreproducible_receipt(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -805,9 +897,11 @@ class TestRunCampaign(unittest.TestCase):
                 "primary", [self.platform], ["traditional-search"], None)
             confirmation = RUN_CAMPAIGN.build_jobs(
                 "confirmation", [self.platform], ["traditional-search"], confirmation_file)
+            build = RUN_CAMPAIGN.build_jobs("build", [self.platform], ["traditional-search"], None)
 
-        epochs = {job.host_epoch for job in smoke + primary + confirmation}
-        self.assertEqual(len(smoke) + len(primary) + len(confirmation), len(epochs))
+        self.assertEqual([("engine-build", "engine-build")], [(job.shard, job.workload) for job in build])
+        epochs = {job.host_epoch for job in smoke + primary + confirmation + build}
+        self.assertEqual(len(smoke) + len(primary) + len(confirmation) + len(build), len(epochs))
 
     def test_rebar_jobs_run_before_shorter_shards(self):
         second_platform = RUN_CAMPAIGN.Platform(

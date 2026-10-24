@@ -67,6 +67,13 @@ if [[ $(sha256 "${joni_jar}") != "${TRINO_COMPARATOR_JONI_SHA256}" ]]; then
 fi
 
 classpath=$(cat "${CLASSPATH_FILE}")
+# A harness prepared on another host needs every entry to exist here too.
+while IFS= read -r classpath_entry || [[ -n "${classpath_entry}" ]]; do
+    if [[ ! -e "${classpath_entry}" ]]; then
+        echo "Comparator classpath entry is missing: ${classpath_entry}" >&2
+        exit 1
+    fi
+done < <(tr ':' '\n' < "${CLASSPATH_FILE}")
 classpath_joni_jar=$(tr ':' '\n' < "${CLASSPATH_FILE}" |
     grep "/io/airlift/joni/${TRINO_COMPARATOR_JONI_VERSION}/joni-${TRINO_COMPARATOR_JONI_VERSION}\.jar$")
 if [[ $(printf '%s\n' "${classpath_joni_jar}" | grep -c .) -ne 1 || "${classpath_joni_jar}" != "${joni_jar}" ]]; then
