@@ -3,7 +3,7 @@
 A unit is the rows one host measures between two chained calibrations. Atoms
 are the row sets a comparison or a scaling fit needs measured together; atoms
 are packed greedily, largest first, adding a unit until every unit holding
-several atoms fits the unit budget. Execution does not read units yet.
+several atoms fits the unit budget. run-unit.sh measures one unit.
 """
 import csv
 import hashlib

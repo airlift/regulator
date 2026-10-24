@@ -681,13 +681,8 @@ def write_expected(arguments):
     write_tsv(arguments.output, MANIFEST_FIELDS, rows)
 
 
-def combine(arguments):
-    expected = load_manifest(arguments.expected)
-    outcomes = load_rebar_outcomes(getattr(arguments, "rebar_outcomes", None))
-    observed = []
-    for path in arguments.inputs:
-        observed.extend(load_observed(path))
-
+def combined_rows(expected, observed, outcomes):
+    """Observed rows, sorted, after validating that they are exactly the expected rows, each once."""
     identifiers = [row["row_id"] for row in observed]
     duplicate_ids = sorted(identifier for identifier in set(identifiers) if identifiers.count(identifier) > 1)
     expected_by_id = {row["row_id"]: row for row in expected}
@@ -724,11 +719,23 @@ def combine(arguments):
         if re.fullmatch(r"[0-9a-f]{64}", observed_row["result_checksum"]) is None:
             raise ValueError(f"Observed row {identifier!r} has an invalid result checksum")
 
-    rows = [observed_by_id[identifier] for identifier in sorted(observed_by_id)]
-    write_tsv(arguments.output, OBSERVED_FIELDS, rows)
-    digest = hashlib.sha256(arguments.output.read_bytes()).hexdigest()
-    arguments.output.with_suffix(arguments.output.suffix + ".sha256").write_text(
-        f"{digest}  {arguments.output.name}\n", encoding="utf-8")
+    return [observed_by_id[identifier] for identifier in sorted(observed_by_id)]
+
+
+def write_observed_rows(path, fields, rows):
+    write_tsv(path, fields, rows)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_suffix(path.suffix + ".sha256").write_text(f"{digest}  {path.name}\n", encoding="utf-8")
+
+
+def combine(arguments):
+    observed = []
+    for path in arguments.inputs:
+        observed.extend(load_observed(path))
+    rows = combined_rows(
+        load_manifest(arguments.expected), observed,
+        load_rebar_outcomes(getattr(arguments, "rebar_outcomes", None)))
+    write_observed_rows(arguments.output, OBSERVED_FIELDS, rows)
     print(f"Validated {len(rows)} observed rows")
 
 

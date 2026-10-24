@@ -231,7 +231,7 @@ line per unit with its counts and estimated seconds) and `unit-rows.tsv`
 (each unit's owned rows, copied rows, and representatives; one row ID
 contains a comma, so row lists are not packed into a column).
 `validate-units.py` regenerates both files byte for byte and checks them
-independently. Hosts still measure whole routes; nothing reads units yet.
+independently. `run-unit.sh` measures one unit; hosts do not yet pull units.
 
 - Atoms are the rows that must share a unit: every system of one logical row,
   which keeps both routes, native RE2 brackets, Joni, Trino, and route
@@ -240,7 +240,9 @@ independently. Hosts still measure whole routes; nothing reads units yet.
 - A unit's share of a JMH method must stay one exact selector, the method and
   one Cartesian `-p` block for each system and frozen protocol. A method is
   split along at most one parameter, its most varied one outside its scaling
-  sizes, so rows sharing that parameter's value are one atom.
+  sizes, so rows sharing that parameter's value are one atom. JMH splits a
+  `-p` value list at every comma, so a parameter with a value containing one
+  never splits a method, and a method with no other parameter stays whole.
 - An atom over budget that holds native RE2 rows is split without its logical
   row links: each route's scaling groups become their own atom, still joined
   to any Joni, Trino, or route-control comparator, and each copies the native
@@ -271,6 +273,49 @@ independently. Hosts still measure whole routes; nothing reads units yet.
   `lifecycle-shared-cold` with both routes over five worker counts, and each
   17-minute route of a `traditional-extra-*` eight-size scaling group with its
   native bracket.
+
+### Running a Unit
+
+`run-unit.sh <unit-id> <smoke|qualification> <replica-id> <result-directory>`
+plans the unit with `unit_session.py` and runs `run-shard.sh` once for each
+route its rows need, so every route handler, verifier, and normalizer is the
+one a host session runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
+
+- Each route reads the unit's expected rows. Its JMH runners execute the
+  unit's selectors instead of the handler's whole filter: one exact method
+  list, one Cartesian `-p` block, and the rows' frozen protocol each, so
+  qualification runs each row at its own process count and windows, and smoke
+  keeps the route's smoke windows. A method holding a value JMH cannot select
+  runs whole with the handler's own arguments.
+- A unit holding only object-row Java rows of a native-bracketed atom
+  measures its copied native rows around them on the object-row route. Copied
+  rows are measured and marked pairing-only in the unit's observed rows.
+- Odd replicas run native access, then object row, with forward Joni and
+  Rebar comparator order; even replicas reverse both, as the unit ID's order
+  rule binds. A comparator order set in the environment that disagrees is an
+  error.
+- The first route calibrates before its rows and the last route after them,
+  always in the native-access JVM so the two sides compare across routes. The
+  unit's before/after calibration drift must be within 5%. Native bracket
+  drift is kept per row; above 5% it leaves only the affected comparisons
+  unresolved during reduction.
+  Chaining replaces the before side with the previous unit's after.
+- The route runs only the unit's representatives for its replica; replica 4
+  runs replica 1's. A failed representative exits 42 and rejects only that
+  unit attempt.
+- Units of one shard on one host share a route's Surefire semantic tests. The
+  first unit stores the reports and log under the shared work directory,
+  keyed by host epoch, shard, route, handler, tests, and candidate and
+  manifest identity; a later unit uses them only when every file matches the
+  stored SHA-256 receipt. The native-access probe, preparations, and
+  differential verifiers still run for every unit.
+- `validate-unit-plans.py` plans every unit for both protocols and replicas 1
+  to 4 in process, and checks that the selectors expand to exactly the unit's
+  rows under their frozen protocols, in replica route order, with the unit's
+  representatives. It also plans a deterministic sample through `run-unit.sh`,
+  one unit per route handler pairing plus `traditional-capture`, a unit with
+  copied rows, and a whole-method unit, for qualification replicas 1 and 2 and
+  smoke replica 4.
 
 ## Comparator Ordering
 
@@ -351,7 +396,9 @@ Every successful route contains:
 - normalized fragments under `normalized/`
 - `semantic-gate.tsv`, written only after semantic checks pass
 - exact, sorted `observed-rows.tsv`
-- `calibration.tsv` and, when applicable, `native-bracket.tsv`
+- `calibration.tsv`, except in a unit's routes, whose calibrations the unit
+  records once (see [Running a Unit](#running-a-unit)), and, when applicable,
+  `native-bracket.tsv`
 - `raw-artifacts.sha256`, which records raw file hashes separately from result
   identity
 - `route-session.tsv` for deferred host execution

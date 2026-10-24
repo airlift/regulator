@@ -5,6 +5,9 @@ import csv
 from collections import Counter
 from pathlib import Path
 
+from row_protocol import FINAL_LINE_CLASS, TRINO_LIKE_CLASS
+from row_protocol import jmh_benchmark as actual_jmh_benchmark
+
 
 BOUNDED_PROTOCOL_ROW_THRESHOLD = 30
 PRIMARY_REPLICA_IDS = {"1", "2", "3"}
@@ -23,15 +26,6 @@ REPRESENTATIVE_FIELDS = (
     "parameters",
     "classpath",
 )
-
-FINAL_LINE_CLASS = "io.trino.operator.scalar.BenchmarkTrinoFinalLine"
-TRINO_LIKE_CLASS = "io.airlift.regulator.benchmark.BenchmarkTrinoLike"
-TRINO_LIKE_METHODS = {
-    "regulator": "candidate",
-    "trino-optimized": "trinoOptimized",
-    "trino-sql": "trinoSql",
-}
-
 
 def parse_args():
     directory = Path(__file__).resolve().parent
@@ -76,20 +70,6 @@ def benchmark_family(row):
     if not separator:
         raise ValueError(f"manifest row {row['row_id']} has no benchmark class")
     return benchmark_class
-
-
-def actual_jmh_benchmark(row):
-    if row["shard_id"] == "trino-final-line":
-        suffix = "Joni" if row["system"] == "joni" else "Regulator"
-        return f"{FINAL_LINE_CLASS}.{row['benchmark']}{suffix}"
-    if row["shard_id"] in {"trino-like", "like-compile", "like-single-use", "like-dfa-single-use"}:
-        try:
-            method = TRINO_LIKE_METHODS[row["system"]]
-        except KeyError as error:
-            raise ValueError(f"manifest row {row['row_id']} has an unknown Trino LIKE system") from error
-        suffix = {"matches": "", "compile": "Compile", "singleUse": "SingleUse"}[row["benchmark"]]
-        return f"{TRINO_LIKE_CLASS}.{method}{suffix}"
-    return row["benchmark"]
 
 
 def required_classpath(row):

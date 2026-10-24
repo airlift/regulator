@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 BASELINE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BASELINE))
 SPECIFICATION = importlib.util.spec_from_file_location(
     "validate_protocol_representatives",
     BASELINE / "validate-protocol-representatives.py")
