@@ -83,6 +83,61 @@ tools/re2-benchmark/baseline/validate-confirmation-host-results.py \
     --receipt accepted-confirmation-session.tsv
 ```
 
+## Unit acceptance
+
+`validate-unit-results.py` accepts one work-unit attempt on its own, from the
+directory `run-unit.sh` writes, an entry point separate from host acceptance
+and its receipts. The unit directory holds a one-row `unit-session.tsv` with
+these columns, in order:
+
+```text
+schema_version campaign_id platform unit_id replica_id unit_attempt_id instance_id host_epoch architecture instance_type availability_zone region
+```
+
+`unit_attempt_id` is `<host_session>/<lease_seq>`, the host session that
+leased the unit and the lease's sequence number there, so each retry of a unit
+is a distinct attempt. The validator rejects the attempt unless:
+
+- the unit is a checked-in unit, its `unit-rows.tsv` is exactly the checked-in
+  rows of the unit, roles included, and its ID recomputes from its owned rows,
+  copies, and representatives under the frozen row protocols
+- `expected-rows.tsv` and `observed-rows.tsv` hold exactly the owned and
+  copied rows, each observed row marked `owner` or `copy`; copies are
+  measured for pairing only
+- `route-plan.tsv` is the unit's plan for its replica, route order and
+  calibration split included, and every route's session matches the unit
+  session's host and the unit's shard
+- the unit's `calibration.tsv`, from the first route's before and the last
+  route's after calibration, drifted at most 5%
+- every route ran the frozen protocol: qualification or smoke, the default
+  Joni JMH window, and exactly the JMH selectors that protocol plans for its
+  share
+- every route's Surefire reports are the files of its semantic receipt,
+  whether that receipt was measured by this unit or cached from an earlier
+  unit of the shard on the same host
+- the representatives the routes ran are exactly the unit's for the replica,
+  replica 1's for replica 4, and each passed the representative protocol rule
+- every artifact in `unit-evidence.tsv` verifies
+
+`unit-evidence.tsv` has the `route-evidence.tsv` shape. Its route rows bind
+each route's artifacts as host sessions do, except that a unit route holds
+its JMH selectors and no calibration of its own. Its `host` rows bind the
+environment and engine-build provenance, route plan, unit rows, expected and
+observed rows, Rebar outcomes, calibration, unit session, and the immutable
+prefix of `unit-capacity.txt`. As for hosts, GNU `time` completes that file
+only after acceptance returns.
+
+On success, the validator writes `unit-receipt.tsv`: the unit session, its
+shard and owned and copied row counts, the digest of the unit's frozen row
+protocols, the manifest, observed-row, and evidence-manifest digests, and the
+candidate commit, archive, engine tree, and heap size.
+
+```bash
+tools/re2-benchmark/baseline/validate-unit-results.py \
+    --unit-directory unit-attempt \
+    --receipt unit-attempt/unit-receipt.tsv
+```
+
 ## Campaign acceptance
 
 The campaign controller atomically adds each validated host receipt to

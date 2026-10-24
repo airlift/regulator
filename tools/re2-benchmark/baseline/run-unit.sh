@@ -18,6 +18,8 @@ RESULT_TOOL="${SCRIPT_DIR}/shard_results.py"
 SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${ROOT}/target/baseline-shared}
 PLAN_ONLY=${BASELINE_PLAN_ONLY:-false}
 PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
+# A measured unit runs itself as its measurement stage under GNU time.
+UNIT_STAGE=${BASELINE_UNIT_STAGE:-unit}
 
 case "${PROTOCOL}" in
     smoke | qualification) ;;
@@ -62,8 +64,75 @@ export REBAR_COMPARATOR_ORDER=${unit_order}
 
 mkdir -p "${RESULT_DIR}"
 RESULT_DIR=$(cd "${RESULT_DIR}" && pwd)
+
+# Like a host session, a unit records its capacity: memory, swap, and OOM
+# state around the unit, and GNU time's wall time, peak resident memory, and
+# status. Unit evidence binds the prefix written before the unit runs.
+if [[ "${PLAN_ONLY}" != true && "${UNIT_STAGE}" == unit ]]; then
+    capacity_file="${RESULT_DIR}/unit-capacity.txt"
+    if [[ -e "${capacity_file}" ]]; then
+        echo "Unit output already exists: ${capacity_file}" >&2
+        exit 1
+    fi
+    memory_total_bytes=$(awk '/^MemTotal:/ {print $2 * 1024; exit}' /proc/meminfo)
+    memory_available_before_bytes=$(awk '/^MemAvailable:/ {print $2 * 1024; exit}' /proc/meminfo)
+    swap_total_bytes=$(awk '/^SwapTotal:/ {print $2 * 1024; exit}' /proc/meminfo)
+    swap_free_before_bytes=$(awk '/^SwapFree:/ {print $2 * 1024; exit}' /proc/meminfo)
+    oom_kills_before=$(awk '$1 == "oom_kill" {print $2; exit}' /proc/vmstat)
+    disk_available_before_bytes=$(df -B1 --output=avail "${ROOT}" | awk 'NR == 2 {print $1}')
+    {
+        printf 'memory_total_bytes=%.0f\n' "${memory_total_bytes}"
+        printf 'memory_available_before_bytes=%.0f\n' "${memory_available_before_bytes}"
+        printf 'swap_total_bytes=%.0f\n' "${swap_total_bytes}"
+        printf 'swap_free_before_bytes=%.0f\n' "${swap_free_before_bytes}"
+        printf 'oom_kills_before=%s\n' "${oom_kills_before}"
+        printf 'disk_available_before_bytes=%s\n' "${disk_available_before_bytes}"
+    } > "${capacity_file}"
+    set +e
+    /usr/bin/time --append --output="${capacity_file}" \
+        --format='wall_seconds=%e\nmaximum_resident_kibibytes=%M\nexit_status=%x' \
+        env BASELINE_UNIT_STAGE=measure "${BASH_SOURCE[0]}" "$@"
+    unit_status=$?
+    set -e
+    memory_available_after_bytes=$(awk '/^MemAvailable:/ {print $2 * 1024; exit}' /proc/meminfo)
+    swap_free_after_bytes=$(awk '/^SwapFree:/ {print $2 * 1024; exit}' /proc/meminfo)
+    oom_kills_after=$(awk '$1 == "oom_kill" {print $2; exit}' /proc/vmstat)
+    disk_available_after_bytes=$(df -B1 --output=avail "${ROOT}" | awk 'NR == 2 {print $1}')
+    minimum_available_disk_bytes=$((2 * 1024 * 1024 * 1024))
+    minimum_available_memory_bytes=$((2 * 1024 * 1024 * 1024))
+    minimum_fractional_memory_bytes=$(awk -v total="${memory_total_bytes}" 'BEGIN {printf "%.0f", total / 10}')
+    if ((minimum_fractional_memory_bytes > minimum_available_memory_bytes)); then
+        minimum_available_memory_bytes=${minimum_fractional_memory_bytes}
+    fi
+    capacity_status=accepted
+    if ((disk_available_before_bytes < minimum_available_disk_bytes ||
+            disk_available_after_bytes < minimum_available_disk_bytes ||
+            memory_available_after_bytes < minimum_available_memory_bytes ||
+            swap_free_before_bytes < swap_total_bytes ||
+            swap_free_after_bytes < swap_total_bytes ||
+            oom_kills_after != oom_kills_before)); then
+        capacity_status=rejected
+    fi
+    {
+        printf 'memory_available_after_bytes=%.0f\n' "${memory_available_after_bytes}"
+        printf 'minimum_available_memory_bytes=%s\n' "${minimum_available_memory_bytes}"
+        printf 'swap_free_after_bytes=%.0f\n' "${swap_free_after_bytes}"
+        printf 'oom_kills_after=%s\n' "${oom_kills_after}"
+        printf 'disk_available_after_bytes=%s\n' "${disk_available_after_bytes}"
+        printf 'minimum_available_disk_bytes=%s\n' "${minimum_available_disk_bytes}"
+        printf 'capacity_status=%s\n' "${capacity_status}"
+    } >> "${capacity_file}"
+    if [[ "${capacity_status}" != accepted ]]; then
+        echo "Unit capacity gate rejected unit ${UNIT_ID}; see ${capacity_file}" >&2
+        exit 1
+    fi
+    # Preserve the representative rejection status only after resource checks.
+    exit "${unit_status}"
+fi
+
 for output in routes route-plan.tsv expected-rows.tsv unit-rows.tsv calibration.tsv \
-        observed-rows.tsv observed-rows.tsv.sha256 rebar-outcomes.tsv status.txt; do
+        observed-rows.tsv observed-rows.tsv.sha256 rebar-outcomes.tsv unit-session.tsv \
+        unit-evidence.tsv unit-receipt.tsv status.txt; do
     if [[ -e "${RESULT_DIR}/${output}" ]]; then
         echo "Unit output already exists: ${RESULT_DIR}/${output}" >&2
         exit 1
@@ -116,8 +185,13 @@ if [[ "${PLAN_ONLY}" != true ]]; then
     export BASELINE_INSTANCE_ID=${BASELINE_INSTANCE_ID:-$(environment_value instance_id)}
     export BASELINE_INSTANCE_TYPE=${BASELINE_INSTANCE_TYPE:-$(environment_value instance_type)}
     export BASELINE_AVAILABILITY_ZONE=${BASELINE_AVAILABILITY_ZONE:-$(environment_value availability_zone)}
+    # The worker names the attempt: its host session and the lease sequence there.
+    RE2_CAMPAIGN_HOST_SESSION=${RE2_CAMPAIGN_HOST_SESSION:-}
+    RE2_CAMPAIGN_LEASE_SEQUENCE=${RE2_CAMPAIGN_LEASE_SEQUENCE:-}
+    BASELINE_REGION=${BASELINE_REGION:-${BASELINE_AVAILABILITY_ZONE%[a-z]}}
     for value_name in RE2_CAMPAIGN_ID RE2_CAMPAIGN_PLATFORM RE2_CAMPAIGN_HOST_EPOCH \
-            RE2_ENGINEERING_ARCHITECTURE BASELINE_INSTANCE_ID BASELINE_INSTANCE_TYPE BASELINE_AVAILABILITY_ZONE; do
+            RE2_ENGINEERING_ARCHITECTURE BASELINE_INSTANCE_ID BASELINE_INSTANCE_TYPE BASELINE_AVAILABILITY_ZONE \
+            RE2_CAMPAIGN_HOST_SESSION RE2_CAMPAIGN_LEASE_SEQUENCE BASELINE_REGION; do
         if [[ -z ${!value_name} || ${!value_name} == unknown || ${!value_name} == standalone ]]; then
             echo "Missing formal host identity: ${value_name}" >&2
             exit 1
@@ -178,6 +252,12 @@ for native_bracket in "${RESULT_DIR}"/routes/*/native-bracket.tsv; do
 done
 python3 "${RESULT_TOOL}" validate-drift "${drift_arguments[@]}"
 
-python3 "${UNIT_TOOL}" combine --unit-directory "${RESULT_DIR}"
+python3 "${UNIT_TOOL}" combine \
+    --unit-directory "${RESULT_DIR}" \
+    --unit-attempt "${RE2_CAMPAIGN_HOST_SESSION}/${RE2_CAMPAIGN_LEASE_SEQUENCE}" \
+    --region "${BASELINE_REGION}"
+python3 "${SCRIPT_DIR}/validate-unit-results.py" \
+    --unit-directory "${RESULT_DIR}" \
+    --receipt "${RESULT_DIR}/unit-receipt.tsv"
 
 echo "Completed unit ${UNIT_ID} ${PROTOCOL} replica ${REPLICA_ID}"
