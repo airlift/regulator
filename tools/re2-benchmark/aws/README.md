@@ -67,11 +67,24 @@ AWS credentials. Supply the same `--fleet-budget PATH` and `--spot-only` to
 every phase. Set `--spot-vcpu-reserve` to the policy's reserved headroom and
 use `--release-version 1.0` when reproducing the published release.
 
-The policy records the expected AWS account and region, resource and spending
-ceilings, and hourly price ceilings for each selected worker type. The
-controller checks the active account and region against it before execution.
-Set `AWS_REGION` to that region and update the region-specific AMI pins before
-freezing a new campaign. The worker types remain those in `platforms.tsv`.
+The policy records the expected AWS account and home region, resource and
+spending ceilings, and hourly price ceilings for each selected worker type.
+The controller checks the active account against it, and every allowed launch
+region against the policy's regions, before execution. The top-level
+`max_vcpus` and `spot_vcpu_reserve` limit the home region. A campaign that may
+launch elsewhere adds a `regions` object naming each other region's own
+`max_vcpus` and `spot_vcpu_reserve`, because Spot quotas are regional:
+
+```json
+"regions": {"eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 16}}
+```
+
+Admission counts each region's quota, reserve, vCPU limit, and pending
+launches against that region's instances and reservations. Each reservation
+records its region. Hosts, machine hours, spending, and the launch interval
+remain fleet-wide. The hourly price ceilings apply in every region, so set them
+for the most expensive allowed region. Policies without `regions` keep their
+single-region meaning. The worker types remain those in `platforms.tsv`.
 
 For example, a policy for at most 16 ordinary workers could contain:
 
@@ -122,8 +135,11 @@ and live quota checks enforce aggregate capacity across collectors. Multicore
 workers, reserved headroom, unrelated Spot use, and spending reservations can
 reduce actual concurrency. Derived phase deadlines use the configured host,
 per-platform, and shared vCPU limits, plus one retry wave and a capacity
-allowance. Without a shared policy, deadline planning uses host counts; live
-quota shortages can require a larger explicit deadline. An explicit
+allowance; the shared limit is the sum of the allowed regions' `max_vcpus`.
+Every worker type must fit the largest
+`max_vcpus` among the allowed regions that hold its image. Without a shared
+policy, deadline planning uses host counts; live quota shortages can require
+a larger explicit deadline. An explicit
 `--phase-timeout-seconds` is frozen on first execution and cannot change on
 resume.
 
@@ -156,6 +172,7 @@ The checked-in inputs are:
 - `baseline/shards.tsv`: the qualification shards, including focused LIKE lifecycle collection
 - `baseline/shard-dispatch.tsv`: route and system ownership
 - `baseline/platforms.tsv`: instance, AMI, JDK, and package identities
+- `baseline/platform-regions.tsv`: each platform's AMI ID in each launch region
 - `baseline/comparators.tsv`: pinned comparator identities
 - `baseline/protocol-representatives.tsv`: bounded/full protocol equivalence
 
@@ -252,6 +269,50 @@ Set `AWS_PROFILE` before any execution command when selecting a named profile;
 otherwise the AWS CLI uses its standard credential chain. `TRINO_DIR` is
 required because the full campaign includes Trino and Joni shards.
 
+### Launch regions
+
+Hosts launch in `AWS_REGION`, or `us-west-2` when it is unset. Repeat
+`--region` to allow several regions; benchmarks do not depend on the region.
+For each Spot launch, the controller asks AWS for the Spot placement score of
+the worker type in every allowed region that offers it, caches the answer for
+five minutes, and launches in the best-scored region with quota headroom.
+Equal scores go to the earlier `--region`. When scores are unavailable, the
+first allowed region with headroom launches and the session records no score.
+On-Demand launches take the first allowed region with headroom. Headroom is
+the shared budget's when one is set. Without one, On-Demand launches query
+quota, and Spot launches query it only with `--spot-only` or a
+`--max-concurrent` above 32; otherwise a Spot launch takes the first placement
+and learns of a full region from EC2. A campaign
+with one region asks for no score. Within the chosen region, retries still
+rotate across the zones that offer the worker type. Each session runs and
+verifies its cleanup in its own region.
+
+`platforms.tsv` pins each AMI by its ID in `us-west-2`. Preflight resolves that
+image's name and requires each allowed region's AMI in `platform-regions.tsv`
+to have that exact name, Amazon's owner ID, and the platform's architecture.
+Hosts record the name, and a refill accepts another region's copy of an
+original host's image by name. The controller refuses an allowed region with
+no row in the table. Amazon deprecates its images after about three months;
+deprecated images still launch by ID but are hidden from name searches. To add
+a region, find the pinned image's copy there:
+
+```bash
+aws ec2 describe-images --region <region> --owners 137112412989 --include-deprecated \
+  --filters "Name=name,Values=$(aws ec2 describe-images --region us-west-2 \
+  --image-ids <pinned-ami-id> --query 'Images[0].Name' --output text)" \
+  --query 'Images[0].ImageId' --output text
+```
+
+Hosts read campaign inputs from a bucket in their launch region. Without a
+shared bucket, each session creates and removes its own bucket there. To reuse
+shared buckets, give each region's bucket with `--transfer-bucket
+REGION=BUCKET` and set `TRANSFER_PREFIX`; regions without one use per-session
+buckets. Each shared bucket must carry the `Project=regulator-benchmark` tag,
+and preflight checks the tag and the bucket's region. A single-region campaign
+may still set `TRANSFER_BUCKET`; a multi-region campaign must use
+`--transfer-bucket` instead. Every session uploads its own inputs to its
+bucket.
+
 ## Single-job wrapper
 
 The controllers use `run-campaign.sh` to run one AWS job. A
@@ -263,7 +324,8 @@ the result, and verifies instance, IAM, and S3 cleanup.
 
 The fleet controller should normally invoke this wrapper. Direct invocation is
 appropriate only while diagnosing one qualification job and still requires all
-pinned identity variables.
+pinned identity variables. The language fleet launches through the same
+controller and wrapper, so it uses the same launch regions.
 
 `run-host.sh` runs on the instance. It accepts the same two
 modes, verifies the AMI, JDK, package, candidate, comparator, and manifest

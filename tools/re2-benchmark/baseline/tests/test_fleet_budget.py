@@ -208,6 +208,28 @@ class TestFleetBudget(unittest.TestCase):
         self.budget = fleet_budget.FleetBudget(self.path)
         self.assertTrue(self.reserve(1)[0])
 
+    def test_each_region_admits_against_its_own_quota_and_limits(self):
+        # Ireland's quota less its reserve leaves five vCPUs, under its own limit and Oregon's.
+        self.policy["regions"] = {"eu-west-1": {"max_vcpus": 8, "spot_vcpu_reserve": 2}}
+        self.path.write_text(json.dumps(self.policy))
+        self.budget = fleet_budget.FleetBudget(self.path)
+        snapshots = {"us-west-2": self.snapshot, "eu-west-1": {"quota": 7, "instances": [], "requests": []}}
+
+        def reserve(epoch, region):
+            job = self.job(epoch)
+            job.region = region
+            return self.budget.reserve("baseline", job, self.root / "baseline", lambda: snapshots[region], 1000)[0]
+
+        self.assertTrue(reserve(1, "eu-west-1"))
+        self.assertTrue(reserve(2, "eu-west-1"))
+        self.assertFalse(reserve(3, "eu-west-1"))
+        self.assertTrue(reserve(3, "us-west-2"))
+        state = json.loads(self.budget.state_path.read_text())
+        self.assertEqual({key: item["region"] for key, item in state["reservations"].items()},
+                         {"baseline/1": "eu-west-1", "baseline/2": "eu-west-1", "baseline/3": "us-west-2"})
+        with self.assertRaisesRegex(fleet_budget.BudgetError, "does not cover region ap-south-1"):
+            reserve(4, "ap-south-1")
+
     def test_reserved_headroom_is_unavailable_to_both_controllers(self):
         self.policy["spot_vcpu_reserve"] = 4
         self.path.write_text(json.dumps(self.policy))
@@ -226,7 +248,11 @@ class TestFleetBudget(unittest.TestCase):
                    "max_pending_launches": [0, True, 1.5],
                    "max_attempt_seconds": [0, True, 1.5],
                    "max_machine_hours": [0, -1, True, float("inf"), float("nan")],
-                   "max_usd": [0, -1, True, float("inf"), float("nan")]}
+                   "max_usd": [0, -1, True, float("inf"), float("nan")],
+                   "regions": [[], {}, {"us-west-2": {"max_vcpus": 8, "spot_vcpu_reserve": 0}},
+                               {"bad region": {"max_vcpus": 8, "spot_vcpu_reserve": 0}},
+                               {"eu-west-1": {"max_vcpus": 0, "spot_vcpu_reserve": 0}},
+                               {"eu-west-1": {"max_vcpus": 8}}]}
         for name, values in invalid.items():
             for value in values:
                 with self.subTest(name=name, value=value):
