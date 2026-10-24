@@ -82,7 +82,7 @@ public final class TestingTrinoRowsBenchmarkInputs
     }
 
     /**
-     * Returns the literal, its pattern, and the workload's sampled rows, verified against the
+     * Returns the cell's literals, its pattern, and the workload's sampled rows, verified against the
      * manifest's population sizes and checksum, shuffled and laid out back to back in one buffer, as
      * a Trino block holds them. A cell without a literal fails.
      */
@@ -105,31 +105,55 @@ public final class TestingTrinoRowsBenchmarkInputs
         return new Input(
                 workload,
                 literalId,
-                Slices.utf8Slice(literalRow.get("literal")),
+                literals(literalRow),
                 Slices.utf8Slice(literalRow.get("pattern")),
                 List.copyOf(sources),
                 Long.parseLong(literalRow.get("hit_rows")),
                 Long.parseLong(literalRow.get("matches")));
     }
 
-    public record Input(String workload, String literalId, Slice literal, Slice pattern, List<Slice> sources, long hitRows, long matches)
+    /**
+     * Returns the literals a cell searches: one literal, or the two of an ordered cell, which its
+     * pattern finds in order.
+     */
+    static List<Slice> literals(Map<String, String> literalRow)
     {
-        /**
-         * Returns the LIKE pattern {@code %literal%}, which finds the literal anywhere in a row
-         * without an escape character. A literal containing {@code _}, {@code %}, or {@code \}
-         * fails, because the pattern would need an escape character.
-         */
-        public Slice likePattern()
-        {
+        return literalRow.get("second_literal").isEmpty()
+                ? List.of(Slices.utf8Slice(literalRow.get("literal")))
+                : List.of(Slices.utf8Slice(literalRow.get("literal")), Slices.utf8Slice(literalRow.get("second_literal")));
+    }
+
+    /**
+     * Returns the LIKE pattern {@code %literal%}, or {@code %a%b%} for an ordered cell, which finds
+     * the literals in order anywhere in a row without an escape character. A literal containing
+     * {@code _}, {@code %}, or {@code \} fails, because the pattern would need an escape character.
+     */
+    static Slice likePattern(String workload, String literalId, List<Slice> literals)
+    {
+        StringBuilder pattern = new StringBuilder("%");
+        for (Slice literal : literals) {
             String text = literal.toStringUtf8();
             if (text.chars().anyMatch(character -> character == '_' || character == '%' || character == '\\')) {
                 throw new IllegalArgumentException("Literal %s/%s, %s, contains a LIKE metacharacter".formatted(workload, literalId, text));
             }
-            return Slices.utf8Slice("%" + text + "%");
+            pattern.append(text).append('%');
+        }
+        return Slices.utf8Slice(pattern.toString());
+    }
+
+    public record Input(String workload, String literalId, List<Slice> literals, Slice pattern, List<Slice> sources, long hitRows, long matches)
+    {
+        /**
+         * Returns the LIKE pattern {@code %literal%}, or {@code %a%b%} for an ordered cell. A
+         * literal containing {@code _}, {@code %}, or {@code \} fails.
+         */
+        public Slice likePattern()
+        {
+            return TestingTrinoRowsBenchmarkInputs.likePattern(workload, literalId, literals);
         }
 
         /**
-         * Checks that an engine finds the literal in the manifest's number of rows, with its
+         * Checks that an engine finds the cell's pattern in the manifest's number of rows, with its
          * number of non-overlapping matches.
          */
         public void verifyHits(Predicate<Slice> contains, ToLongFunction<Slice> count)
@@ -147,7 +171,7 @@ public final class TestingTrinoRowsBenchmarkInputs
         }
 
         /**
-         * Checks that a LIKE pattern finds the literal in the manifest's number of rows.
+         * Checks that a LIKE pattern finds the cell's literals in the manifest's number of rows.
          */
         public void verifyHitRows(Predicate<Slice> like)
         {
@@ -250,6 +274,16 @@ public final class TestingTrinoRowsBenchmarkInputs
     static List<Map<String, String>> literalRows()
     {
         return LITERAL_ROWS;
+    }
+
+    /**
+     * Returns the manifest rows of the group's cells in every workload, without the empty cells.
+     */
+    static List<Map<String, String>> cellRows(String group)
+    {
+        return literalRows().stream()
+                .filter(row -> row.get("group").equals(group) && !row.get("pattern").isEmpty())
+                .toList();
     }
 
     private static List<Map<String, String>> manifestRows(String resource)

@@ -2,17 +2,20 @@
 """Generate the normative Trino row workloads from pinned corpora.
 
 Every workload is 4,096 real rows, a stride sample of one corpus, or of six pooled
-loghub files, and a grid of literals chosen by a seeded rule from the corpus rows
-outside that sample. The generator writes the two manifests BenchmarkTrinoRows reads,
-or with --check compares them with the checked-in files. See README.md for the rules.
+loghub files, a grid of literals chosen by a seeded rule from the corpus rows
+outside that sample, and ordered pairs of the grid candidates in at least 1% of rows.
+The generator writes the two manifests BenchmarkTrinoRows reads, or with --check
+compares them with the checked-in files. See README.md for the rules.
 """
 
 import argparse
+import bisect
 import csv
 import gzip
 import hashlib
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
@@ -48,8 +51,8 @@ WORKLOADS = (
 )
 WORKLOAD_COLUMNS = ("workload", "corpora", "sources", "population_rows", "sampled_rows", "rows", "row_bytes",
                     "rows_sha256", "p50_bytes", "p90_bytes", "p99_bytes")
-LITERAL_COLUMNS = ("workload", "literal_id", "group", "tercile", "band", "candidates", "literal", "pattern",
-                   "first_byte", "first_byte_count", "first_byte_frequency", "hit_rows", "matches")
+LITERAL_COLUMNS = ("workload", "literal_id", "group", "tercile", "band", "candidates", "literal", "second_literal",
+                   "pattern", "first_byte", "first_byte_count", "first_byte_frequency", "hit_rows", "matches")
 
 
 def sha256(data):
@@ -161,8 +164,8 @@ def run_substrings(row):
     return found
 
 
-def rank(workload, token):
-    return sha256(b"\0".join((b"trino-rows", SEED.encode(), workload.encode(), token)))
+def rank(workload, *literals):
+    return sha256(b"\0".join((b"trino-rows", SEED.encode(), workload.encode(), *literals)))
 
 
 def bands():
@@ -193,17 +196,68 @@ def starter_terciles(starters, byte_counts):
     return terciles
 
 
-def describe(workload, literal_id, group, tercile, band_name, candidates, literal, rows, byte_counts, row_bytes):
-    if literal is None:
+@dataclass
+class PairCell:
+    """An ordered cell's tally while pairs stream past: its pairs in the band and the lowest-ranked of them."""
+    pairs: int = 0
+    rank: str | None = None
+    pair: tuple = ()
+    hit_rows: int | None = None
+
+
+def contains_in_order(row, literals):
+    """Whether the row holds each literal starting at or after the end of the previous one, as a(?s:.*)b matches."""
+    start = 0
+    for literal in literals:
+        found = row.find(literal, start)
+        if found < 0:
+            return False
+        start = found + len(literal)
+    return True
+
+
+def ordered_hit_rows(literals, rows):
+    """Yield every ordered pair of distinct literals with the number of rows holding the first and then the second.
+
+    The earliest occurrence of the first literal leaves the most room after it, so a row holds the
+    pair exactly when the last occurrence of the second starts at or after the earliest end of the first.
+    """
+    count = len(literals)
+    pair_rows = [0] * (count * count)
+    for row in rows:
+        present = []
+        for index, literal in enumerate(literals):
+            start = row.find(literal)
+            if start >= 0:
+                present.append((row.rfind(literal), start + len(literal), index))
+        present.sort()
+        last_starts = [last_start for last_start, _, _ in present]
+        for _, end, first in present:
+            base = first * count
+            for _, _, second in present[bisect.bisect_left(last_starts, end):]:
+                pair_rows[base + second] += 1
+    for first in range(count):
+        for second in range(count):
+            if first != second:
+                yield (literals[first], literals[second]), pair_rows[first * count + second]
+
+
+def describe(workload, literal_id, group, tercile, band_name, candidates, literals, rows, byte_counts, row_bytes):
+    """Describe a cell searching one literal, or an ordered pair with the pattern a(?s:.*)b; an empty cell has none."""
+    if not literals:
         return dict(workload=workload, literal_id=literal_id, group=group, tercile=tercile, band=band_name,
-                    candidates=str(candidates), literal="", pattern="", first_byte="-", first_byte_count="-",
-                    first_byte_frequency="-", hit_rows="-", matches="-")
-    first = literal[0]
+                    candidates=str(candidates), literal="", second_literal="", pattern="", first_byte="-",
+                    first_byte_count="-", first_byte_frequency="-", hit_rows="-", matches="-")
+    first = literals[0][0]
+    hit_rows = sum(contains_in_order(row, literals) for row in rows)
+    # A row holds at most one match of a(?s:.*)b, because the greedy .* runs to the last occurrence of b.
+    matches = sum(row.count(literals[0]) for row in rows) if len(literals) == 1 else hit_rows
     return dict(workload=workload, literal_id=literal_id, group=group, tercile=tercile, band=band_name,
-                candidates=str(candidates), literal=literal.decode("utf-8"),
-                pattern=literal_probe.literal_pattern(literal).decode("utf-8"), first_byte=f"0x{first:02X}",
-                first_byte_count=str(byte_counts[first]), first_byte_frequency=f"{byte_counts[first] / row_bytes:.6f}",
-                hit_rows=str(sum(literal in row for row in rows)), matches=str(sum(row.count(literal) for row in rows)))
+                candidates=str(candidates), literal=literals[0].decode("utf-8"),
+                second_literal=literals[1].decode("utf-8") if len(literals) > 1 else "",
+                pattern="(?s:.*)".join(literal_probe.literal_pattern(literal).decode("utf-8") for literal in literals),
+                first_byte=f"0x{first:02X}", first_byte_count=str(byte_counts[first]),
+                first_byte_frequency=f"{byte_counts[first] / row_bytes:.6f}", hit_rows=str(hit_rows), matches=str(matches))
 
 
 def build_workload(workload, names, picked, corpora, directory):
@@ -247,13 +301,32 @@ def build_workload(workload, names, picked, corpora, directory):
         for band_name in BAND_NAMES:
             members = cells.get((tercile, band_name), [])
             chosen = min(members, key=lambda token: rank(workload, token)) if members else None
-            described = describe(workload, f"{tercile}-{band_name}", "grid", tercile, band_name, len(members), chosen,
-                                 sampled, byte_counts, row_bytes)
+            described = describe(workload, f"{tercile}-{band_name}", "grid", tercile, band_name, len(members),
+                                 (chosen,) if chosen is not None else (), sampled, byte_counts, row_bytes)
             if chosen is not None and int(described["hit_rows"]) != hits[chosen]:
                 raise ValueError(f"token run count disagrees with substring search: {workload} {chosen!r}")
             literal_rows.append(described)
+    # Millions of pairs are too many to keep, so each cell keeps its count and its lowest-ranked pair.
+    pair_cells = {band_name: PairCell() for band_name in BAND_NAMES}
+    selective_floor = bands()[1][1]
+    pair_candidates = sorted(token for token, token_rows in hits.items() if token_rows >= selective_floor)
+    for pair, hit_rows in ordered_hit_rows(pair_candidates, sampled):
+        band_name = band(hit_rows)
+        if band_name is not None:
+            cell = pair_cells[band_name]
+            cell.pairs += 1
+            pair_rank = rank(workload, *pair)
+            if cell.rank is None or pair_rank < cell.rank:
+                cell.rank, cell.pair, cell.hit_rows = pair_rank, pair, hit_rows
+    for band_name in BAND_NAMES:
+        cell = pair_cells[band_name]
+        described = describe(workload, f"ordered-{band_name}", "ordered", "-", band_name, cell.pairs, cell.pair,
+                             sampled, byte_counts, row_bytes)
+        if cell.pair and int(described["hit_rows"]) != cell.hit_rows:
+            raise ValueError(f"ordered pair count disagrees with ordered search: {workload} {cell.pair!r}")
+        literal_rows.append(described)
     for index, literal in enumerate(picked, 1):
-        literal_rows.append(describe(workload, f"picked-{index}", "picked", "-", "-", "-", literal.encode("utf-8"),
+        literal_rows.append(describe(workload, f"picked-{index}", "picked", "-", "-", "-", (literal.encode("utf-8"),),
                                      sampled, byte_counts, row_bytes))
     return workload_row, literal_rows
 

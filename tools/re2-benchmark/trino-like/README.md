@@ -37,10 +37,11 @@ compile and run against a Regulator build without it; there only
 `candidateGenerated` fails.
 
 A change to a LIKE path Trino calls once per row is judged on
-`BenchmarkTrinoLikeRows`, which matches `%literal%` once per row over the
-[normative Trino rows](../trino-rows/README.md), interpreted and generated,
-against its Trino LIKE twin in the [comparator](../trino-joni/README.md); the
-[maintenance guide](../../../docs/MAINTAINING_REGULATOR.md#normative-trino-rows-gate)
+`BenchmarkTrinoLikeRows`, which matches `%literal%`, and `%a%b%` on the
+ordered cells, once per row over the [normative Trino
+rows](../trino-rows/README.md), interpreted and generated, against its Trino
+LIKE twin in the [comparator](../trino-joni/README.md); the [maintenance
+guide](../../../docs/MAINTAINING_REGULATOR.md#normative-trino-rows-gate)
 defines the gate. `BenchmarkTrinoLike`'s `CONTAINS_ABSENT`, `CONTAINS_LATE`,
 `ORDERED_LATE`, and `WILDCARD_CHAIN` scenarios and `BenchmarkTrinoLikeTpch`'s
 `Q13_ORDER_COMMENT` are that gate's edge controls; the other probes are

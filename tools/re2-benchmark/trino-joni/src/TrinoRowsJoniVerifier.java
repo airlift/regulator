@@ -62,7 +62,7 @@ public final class TrinoRowsJoniVerifier
                 continue;
             }
             for (String literal : TestingTrinoRowsBenchmarkInputs.literalIds(workload)) {
-                // Each setup checks the rows and the literal's hit count against the manifest.
+                // Each setup checks the rows and the cell's hit count against the manifest.
                 BenchmarkTrinoRows.BenchmarkData regulatorData = new BenchmarkTrinoRows.BenchmarkData();
                 regulatorData.setWorkload(workload);
                 regulatorData.setLiteral(literal);
@@ -109,7 +109,7 @@ public final class TrinoRowsJoniVerifier
                 cellCount++;
             }
         }
-        System.out.println("Verified %s Trino row Regulator/Joni results over %s literals%s".formatted(
+        System.out.println("Verified %s Trino row Regulator/Joni results over %s cells%s".formatted(
                 comparisonCount,
                 cellCount,
                 skipped.isEmpty() ? "" : "; skipped %s without a corpus directory".formatted(skipped)));
