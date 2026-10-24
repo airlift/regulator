@@ -35,19 +35,31 @@ final class VectorTrinoScanKernelSupport
     private VectorTrinoScanKernelSupport() {}
 
     // PERFORMANCE-SENSITIVE HOT LOOPS: changes here require target-host assembly
-    // and benchmark evidence. Keep Vector API linkage isolated in this class.
+    // and benchmark evidence. Keep Vector API linkage isolated in this class. The
+    // run scans broadcast their needles before the block loop because C2 does not
+    // hoist per-block broadcasts out of it on aarch64 or x86.
 
     /**
      * A copy of {@code VectorTrinoScanner.findRunStop}.
      */
     static int findRunStop(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
+        int count = needles.length;
         ByteVector first = ByteVector.broadcast(SPECIES, needles[0]);
+        ByteVector second = ByteVector.broadcast(SPECIES, count > 1 ? needles[1] : needles[0]);
+        ByteVector third = ByteVector.broadcast(SPECIES, count > 2 ? needles[2] : needles[0]);
+        ByteVector fourth = ByteVector.broadcast(SPECIES, count > 3 ? needles[3] : needles[0]);
         for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
             ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
             VectorMask<Byte> matches = bytes.compare(VectorOperators.EQ, first);
-            for (int index = 1; index < needles.length; index++) {
-                matches = matches.or(bytes.compare(VectorOperators.EQ, needles[index]));
+            if (count > 1) {
+                matches = matches.or(bytes.compare(VectorOperators.EQ, second));
+            }
+            if (count > 2) {
+                matches = matches.or(bytes.compare(VectorOperators.EQ, third));
+            }
+            if (count > 3) {
+                matches = matches.or(bytes.compare(VectorOperators.EQ, fourth));
             }
             VectorMask<Byte> stops = inverted ? matches : matches.not();
             if (stops.anyTrue()) {
@@ -67,11 +79,53 @@ final class VectorTrinoScanKernelSupport
      */
     static int findRe2RunStop(byte[] input, int cursor, int end, byte[] needles)
     {
+        if (needles.length > 1) {
+            return findRe2SetStop(input, cursor, end, needles);
+        }
+        // Most runs stop at one ASCII byte, such as a host's '/', and their scans often end in the
+        // first block. Keep this path small: callers inline it, and a larger body pushed them past
+        // C2's inlining limits. With no excluded ASCII byte, broadcast -1; the non-ASCII comparison
+        // already stops at that value.
+        ByteVector needle = ByteVector.broadcast(SPECIES, needles.length > 0 ? needles[0] : (byte) -1);
+        for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
+            ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
+            VectorMask<Byte> stops = bytes.compare(VectorOperators.LT, (byte) 0).or(bytes.compare(VectorOperators.EQ, needle));
+            if (stops.anyTrue()) {
+                return cursor + stops.firstTrue();
+            }
+        }
+        for (; cursor < end; cursor++) {
+            byte value = input[cursor];
+            if (value < 0 || (needles.length > 0 && value == needles[0])) {
+                return cursor;
+            }
+        }
+        return end;
+    }
+
+    // A copy of VectorTrinoScanner.findRe2SetStop. The guards on the first two needles always
+    // hold here; they stay because this is the shape that was measured.
+    private static int findRe2SetStop(byte[] input, int cursor, int end, byte[] needles)
+    {
+        int count = needles.length;
+        ByteVector first = ByteVector.broadcast(SPECIES, count > 0 ? needles[0] : 0);
+        ByteVector second = ByteVector.broadcast(SPECIES, count > 1 ? needles[1] : 0);
+        ByteVector third = ByteVector.broadcast(SPECIES, count > 2 ? needles[2] : 0);
+        ByteVector fourth = ByteVector.broadcast(SPECIES, count > 3 ? needles[3] : 0);
         for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
             ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
             VectorMask<Byte> stops = bytes.compare(VectorOperators.LT, (byte) 0);
-            for (byte needle : needles) {
-                stops = stops.or(bytes.compare(VectorOperators.EQ, needle));
+            if (count > 0) {
+                stops = stops.or(bytes.compare(VectorOperators.EQ, first));
+            }
+            if (count > 1) {
+                stops = stops.or(bytes.compare(VectorOperators.EQ, second));
+            }
+            if (count > 2) {
+                stops = stops.or(bytes.compare(VectorOperators.EQ, third));
+            }
+            if (count > 3) {
+                stops = stops.or(bytes.compare(VectorOperators.EQ, fourth));
             }
             if (stops.anyTrue()) {
                 return cursor + stops.firstTrue();
@@ -96,12 +150,22 @@ final class VectorTrinoScanKernelSupport
      */
     static int findRunCandidate(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
+        int count = needles.length;
         ByteVector first = ByteVector.broadcast(SPECIES, needles[0]);
+        ByteVector second = ByteVector.broadcast(SPECIES, count > 1 ? needles[1] : needles[0]);
+        ByteVector third = ByteVector.broadcast(SPECIES, count > 2 ? needles[2] : needles[0]);
+        ByteVector fourth = ByteVector.broadcast(SPECIES, count > 3 ? needles[3] : needles[0]);
         for (; cursor <= end - SPECIES.length(); cursor += SPECIES.length()) {
             ByteVector bytes = ByteVector.fromArray(SPECIES, input, cursor);
             VectorMask<Byte> matches = bytes.compare(VectorOperators.EQ, first);
-            for (int index = 1; index < needles.length; index++) {
-                matches = matches.or(bytes.compare(VectorOperators.EQ, needles[index]));
+            if (count > 1) {
+                matches = matches.or(bytes.compare(VectorOperators.EQ, second));
+            }
+            if (count > 2) {
+                matches = matches.or(bytes.compare(VectorOperators.EQ, third));
+            }
+            if (count > 3) {
+                matches = matches.or(bytes.compare(VectorOperators.EQ, fourth));
             }
             VectorMask<Byte> candidates = inverted ? matches.not() : matches;
             if (candidates.anyTrue()) {

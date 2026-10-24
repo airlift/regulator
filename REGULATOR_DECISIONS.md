@@ -1634,11 +1634,40 @@ specific to each language.
   run scan finishes its tail, and reads the member table only when the run
   excludes an ASCII byte. On R8i this takes ClickBench `NEWLINE_PATH` without
   dotAll from 1.22 to 0.84 times the build without RE2 plans and
-  `OPTIONAL_FALLBACK` from 1.25 to 1.08. On Graviton it makes
-  `BenchmarkRe2ScanPlan` `URL_MALFORMED` `contains`, whose runs stop every few
-  bytes at a malformed sequence, take 1.06 to 1.14 times its time with the
-  vector scan, up to 11 ns per row; that slowdown on malformed rows is
-  accepted.
+  `OPTIONAL_FALLBACK` from 1.25 to 1.08. On Graviton, `BenchmarkRe2ScanPlan`
+  `URL_MALFORMED` `contains`, whose runs stop every few bytes at a malformed
+  sequence, takes longer than with a vector scan of the tail: with bytecode
+  generation off, 1.06 to 1.14 times before the vector run scans broadcast
+  their bytes once, as the next bullet describes, and 1.04 times on R9g after,
+  within noise; with generation on, 1.18 to 1.23 times on R9g, before and
+  after. The small scan for an RE2 run that excludes at most one ASCII byte,
+  also described in the next bullet, was not compared with the vector-tail
+  build directly. These slowdowns on malformed rows are accepted.
+- The vector run scans compare each block with up to four ASCII bytes: the
+  run's members or, for a run that matches most bytes, the bytes it excludes.
+  They broadcast those bytes once before the block loop, because C2 does not
+  hoist per-block broadcasts on aarch64 or x86. Against the previous build,
+  this takes `LONG_HOST` rows of `BenchmarkClickBenchRegexp` and
+  `BenchmarkRe2ScanPlan` 0.45 to 0.72 times their time, ClickBench `WWW` and
+  `BenchmarkRe2ScanPlan` `URL` rows 0.89 to 0.96, `LONG_SET` rows of
+  `BenchmarkTrinoScanPlan` and `BenchmarkRe2ScanPlan` 0.56 to 0.80, and
+  `BenchmarkTrinoScanPlan` `LONG_OPTIONAL` without dotAll 0.68 to 0.76. An RE2
+  run that excludes at most one ASCII byte, the common case, keeps a small
+  scan of its own, because a larger one stopped generated RE2 kernels from
+  inlining their run scan. These losses are accepted:
+  - On R8i, ClickBench `HTTP` with dotAll takes about 1.11 times its time,
+    35 ns against 31.5 ns. The loss tracks how C2 compiles the plan's matching
+    loop, but its cause is only partly explained, and moving the broadcasts
+    before the loop may still contribute. The row is still well under the
+    build without RE2 plans.
+  - Runs that end within a block pay for broadcasts they do not use:
+    `BenchmarkTrinoScanPlan` `ANCHORED_PREFIX` on R9g with generation off
+    takes 1.7 ns longer, 5.6%, and generated kernels 0.2 to 0.8 ns longer.
+    Skipping the broadcasts when fewer than 16 bytes remain traded these
+    losses rather than removing them.
+  - On R8i with generation off, `BenchmarkTrinoScanPlan` `RETRY_256`,
+    `RETRY_128`, and `OPTIONAL_MIXED` took 2.4 to 5.8 ns longer in some
+    measurements and were within noise in others.
 - The short boolean route to the DFA described in
   [Trino Specialized Byte Scans](#trino-specialized-byte-scans) applies to an
   RE2 plan whatever bytes it consumes, because an RE2 plan agrees with the
@@ -1854,11 +1883,13 @@ plans; the last bullets record the rules and measurements specific to each.
 - Two workloads fail that bar, and both are accepted as known exceptions. On
   R8i `LONG_HOST`, every method takes 1.05 to 1.14 times the interpreted time,
   `contains` 493 ns against 440 ns, while the same rows take 0.83 to 0.96
-  times on Graviton. On R9g, `UNANCHORED_TAIL_4096_NON_ASCII` `replace` takes
-  1.07 to 1.09 times, 2730 ns against 2544 ns. Both slowdowns repeated on an
-  identical rebuild. Each exceeds the host's A/A spread, the largest difference
-  between two builds of the same source, over rows with one mode, but not its
-  spread over all rows.
+  times on Graviton. Since the vector run scans broadcast their bytes once,
+  `contains` without dotAll on R8i takes 0.92 times, 229 ns against 250 ns;
+  the other methods and dotAll were not measured again. On R9g,
+  `UNANCHORED_TAIL_4096_NON_ASCII` `replace` takes 1.07 to 1.09 times, 2730 ns
+  against 2544 ns. Both slowdowns repeated on an identical rebuild. Each
+  exceeds the host's A/A spread, the largest difference between two builds of
+  the same source, over rows with one mode, but not its spread over all rows.
 - Compilation is reported separately from matching. With generation it takes
   0.44 to 0.70 ms per pattern on R9g and 0.69 to 1.55 ms on R8g and R8i,
   against 3.6 to 16 us for the interpreted plan, and up to about 353 times the

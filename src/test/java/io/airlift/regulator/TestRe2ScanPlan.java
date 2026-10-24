@@ -73,6 +73,13 @@ public class TestRe2ScanPlan
             new PlanCase("x([^/]{2,})/", "xé/"),
             // An unanchored run that stops at a rejected sequence before its delimiter.
             new PlanCase("[?&]([^=]+)=END", HexFormat.of().parseHex("3f61c080623d654e64")),
+            // A run excluding four ASCII bytes, whose vector scan must stop at each of them; in
+            // ascending byte order '#' is the first, ':' the third, and '?' the fourth.
+            new PlanCase("^x([^/:?#]+)/$", "x" + "a".repeat(20) + "?" + "a".repeat(20) + "/"),
+            new PlanCase("^x([^/:?#]+)/$", "x" + "a".repeat(20) + "#" + "a".repeat(20) + "/"),
+            new PlanCase("^x([^/:?#]+)/$", "x" + "a".repeat(20) + ":" + "a".repeat(20) + "/"),
+            // A run of three ASCII members, whose vector scan must not stop at the third, 'c'.
+            new PlanCase("^x([abc]+)/$", "x" + "c".repeat(40) + "/"),
             // Forked start-anchored plans, whose boolean find and count run on the ordinary engine
             // up to 48 bytes.
             new PlanCase("^(a)?(b)?abcd([0-9]+)/$", "aabcd" + "1".repeat(42) + "/"),
@@ -200,6 +207,9 @@ public class TestRe2ScanPlan
         }
         Slice dense = witness("[0-9]([0-9]*)zz");
         assertThat(plan("[0-9]([0-9]*)zz").searchBeforeHandoff(dense, 0, dense.length(), 0, false)).isEqualTo(dense.toStringUtf8().indexOf('8') + 1);
+        // The four excluded ASCII bytes keep this a run rather than a delimited capture, so the
+        // case reaches the run's vector scan.
+        assertThat(plan("^x([^/:?#]+)/$").operationsForDiagnostics()).isEqualTo("LITERAL,RE2_RUN,LITERAL,END");
     }
 
     @Test
