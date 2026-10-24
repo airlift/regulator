@@ -1085,9 +1085,10 @@ matcher path. Invalid UTF-8 bytes never match a Unicode class, while a valid
 encoded U+FFFD remains an ordinary code point; a byte class reads bytes
 undecoded, so it counts malformed bytes like any others.
 
-`Re2.count` and `JavaRegexp.count` expose this counter and the existing DFA
-counting path. Unsupported shapes use a fresh zero-capture matcher per call;
-callers can retain a matcher and iterate when workspace reuse matters.
+`Re2.count`, `JavaRegexp.count`, and `RustRegexp.count` expose this counter
+and the existing DFA counting path. Unsupported shapes use a fresh zero-capture
+matcher per call; callers can retain a matcher and iterate when workspace reuse
+matters.
 Qualification on C9g, C8g, and C8i confirms the bulk-counting benefit, while
 whitespace single-use counting pays for the existing table initialization:
 roughly 1.5 to 2.2 microseconds extra on ARM and 10 microseconds on Intel.
