@@ -374,6 +374,53 @@ UTF-16 code-unit offsets.
 Trino SQL registration, `CHAR` padding, block construction, and error-code
 translation belong in the Trino repository rather than the Regulator library.
 
+### Trino Regexp Literal Searches
+
+Boolean `contains` of a pattern planned as a contained literal, such as
+`.*lit.*` or `lit.*`, dot-star literal spans, and every literal of the
+ordered-literal matcher, such as `a(?s:.*)b`, search a literal of two or more
+bytes with the LIKE frontend's call-free first-and-last-byte scan and
+out-of-line verification; see [Trino LIKE Frontend](#trino-like-frontend).
+`Slice.indexOf` stopped at every occurrence of the literal's first byte, which
+lost time where that byte is common and lost cells to Joni, and the ordered
+matcher verified candidates inside its scan loop, which C2 did not unroll. The
+contains search is built once at compilation, charged to the forward-DFA
+budget, and shared with dot-star spans; a one-byte contains or dot-star literal,
+or a contains search that does not fit, keeps `Slice.indexOf`. A plain literal
+pattern such as `lit` keeps its exact-literal route and probe-byte scan for
+boolean find. On the normative rows, against the previous routes, dot-star
+contains took 0.459x the time on r9g and 0.413x on r8i, dot-star count 0.527x
+and 0.472x, and ordered contains 0.710x and 0.791x. No win against Joni became a
+loss, and 2 r9g and 11 r8i dot-star contains cells and 12 r8i dot-star count
+cells went from a loss to a win. r8i accepts Russian ordered rows at 1.12x, 4 to
+5 ns per row more, and `russian/dotstar-low-selective` (`-то`) contains at
+1.34x, 22.4 to 30.1 ns per row, still over twice as fast as Joni.
+`english/dotstar-low-none` (`waffles`) is slower on both platforms: contains
+1.35x on r9g (8.8 to 11.9 ns per row), count 1.45x on r9g (8.0 to 11.6 ns) and
+1.48x on r8i (10.1 to 14.9 ns), still 1.9x to 3.4x as fast as Joni; why is not
+established. Pooled over dot-star contains, dot-star count, and ordered
+contains, the previous routes' forks had a 90th-percentile spread of 42% to 51%
+against 8% to 10% for the pair scan, landing in a fast mode or one about 1.5x
+slower, so their per-cell noise is wide; the cause is not established. The r8i
+`english/ordered-none` (`Yeah`, `there`) loss in a confirmation measurement,
+1.17x, came from that fast mode: in the initial comparison the pair scan matched
+the previous route's slower mode, 22.7 against 22.9 ns per row.
+
+Exact-literal spans on short rows, which count, position, and extract a plain
+literal, keep their first-byte search, and RE2, Java, and Rust keep
+`Slice.indexOf`; only Trino rows were measured. Alternatives rejected:
+
+- The pair scan for short-row exact-literal spans won only 3% to 4% on r9g and
+  8% to 12% on r8i, and lost 1.53x to 1.78x on short r8i Russian rows (14.0 to
+  24.9 ns for position), 1.31x on an r9g log-row count (39.7 to 52.0 ns), and
+  up to 1.54x on r9g tiny rows (20.9 to 32.2 ns for `extractAll`).
+- The same change on r8i alone adds a platform branch for that marginal gain
+  and keeps its unexplained Russian losses.
+
+Why the pair scan loses on short Russian rows on r8i is not established; the
+inference is that Cyrillic literals begin and end with bytes that fill the
+text, so the pair scan rejects little that a first-byte scan would not.
+
 ## Memory Budgets And DFA Caching
 
 - Public compilation defaults to a 96 MiB planning budget. Unlike upstream's
@@ -697,12 +744,12 @@ error. Syntax-error byte offsets are relative to the pattern Slice.
 
 Wildcard runs are normalized during parsing. Exact, prefix, and suffix forms
 use direct byte operations. Ordered literals use the shared
-`OrderedLiteralMatcher`: fused first-byte and last-byte SWAR candidate masks
-find sparse candidates, and a KMP fallback preserves linear progress once
-failed candidates compare more bytes than the search has covered, plus a small
-budget. Patterns containing `_` use a dedicated LIKE wildcard automaton. This
-frontend does not translate LIKE into a regex string and does not fall back to
-the RE2 engine.
+`OrderedLiteralMatcher`, which finds each literal of two or more bytes in turn
+with the contains search below, whose KMP fallback preserves linear progress
+once failed candidates compare more bytes than the search has covered, plus a
+small budget, and a one-byte literal with a word scan for that byte. Patterns
+containing `_` use a dedicated LIKE wildcard automaton. This frontend does not
+translate LIKE into a regex string and does not fall back to the RE2 engine.
 
 Contains of a literal of two or more bytes scans for the literal's first and
 last bytes together, in a call-free word loop that stops at the first possible
@@ -729,41 +776,65 @@ measured:
 
 - `Slice.indexOf` stops at every occurrence of the literal's first byte, so it
   lost to Trino's LIKE when that byte was common.
-- The shared kernel's ordered loop checks candidates inside its word loop,
-  which C2 then neither keeps innermost nor unrolls; on x86-64 it took 1.97x
-  the time of `Slice.indexOf` on long GH Archive rows whose first byte is
-  rare.
+- Checking candidates inside the word loop kept C2 from keeping that loop
+  innermost or unrolling it; on x86-64 it took 1.97x the time of
+  `Slice.indexOf` on long GH Archive rows whose first byte is rare.
 - An adaptive scan, by first byte until failed candidates grow dense and then
   by both ends, lost Chinese short rows on r9g by up to 1.47x and won less
   overall, 0.61x on r8i and 0.56x on r9g.
 
-Interpreted ordered literals and Trino regexp `contains` search with the
-ordered loop, which verifies in line. The same call-free loop with field
-constants took 0.34x the time of the ordered loop on r9g regexp rows, but
-splitting verification from the scan costs on short rows with frequent
-candidates, such as TPC-H Q13, so these callers keep verifying in line.
-Generated LIKE emits one search for contained and ordered literals alike, so
-its ordered searches split too and accept 1.06x to 1.07x on Q13 for the
-split's gain on the normative rows; see [generated Trino LIKE
+Interpreted ordered literals, and the first literal of a literal-gap plan, use
+the same split search, as do the Trino regexp routes in [Trino regexp literal
+searches](#trino-regexp-literal-searches). On the normative ordered rows,
+interpreted ordered LIKE took 0.767x the time of verifying in line on r9g and
+0.776x on r8i, and turned no win against Trino's LIKE into a loss; one r8i
+Chinese cell went from a loss to a win. The gap-matcher cells time
+`BenchmarkLiteralGapMatcher.sharedMatcher` and `.likePublic` on the same ten
+scenarios each: sparse input with no match or one late match, a late match after
+a failed candidate, input dense with the first literal for a long and a short
+gap, and a late three-literal chain. The gap matcher took 0.77x to 0.99x the
+time on 15 of the 20 gap-matcher cells on r9g, and 0.74x to 0.90x on the r8i
+sparse-absent and retry cells. These costs are accepted:
+
+- TPC-H Q13, 1.23x on r9g (498 to 611 ns per row, against Trino's 994) and
+  1.15x on r8i (641 to 735 ns, against 951). Its short comments have frequent
+  candidates, where splitting verification costs.
+- r8i Russian ordered rows, 1.13x, 4 to 5 ns per row more, still faster than
+  Trino's LIKE.
+- Edge controls with separated fork ranges: `MIXED_LATE` 1.08x on r8i (2,780.0
+  to 3,000.1 ns) and `ORDERED_LATE` 1.05x on r9g (2,790.6 to 2,923.4 ns), both
+  still faster than Trino's LIKE.
+- Nine r8i 32 KiB gap-matcher cells, which have no Trino comparison: three
+  dense cells, 1.05x to 1.09x, and six late cells over `x` filler with one
+  injected match, 1.03x to 1.09x. The late cells have the shape of
+  `CONTAINS_ABSENT` above: the first literal's first byte is absent from the
+  `x` filler, so the pair scan does more work per word than a first-byte scan.
+
+Splitting only an ordered search's first literal cost less on Q13, 1.19x and
+1.13x, but won less on every ordered geomean, 0.789x on r9g and 0.805x on r8i
+for LIKE and 0.729x and 0.813x for regexp, and was rejected. Generated LIKE
+emits the same split search for contained and ordered literals and accepts
+1.06x to 1.07x on Q13; see [generated Trino LIKE
 kernels](#generated-trino-like-kernels).
 
 The LIKE and Trino-regexp parsers remain separate language frontends, but they
-share the ordered-literal execution kernel when analysis proves equivalent
-semantics. Trino regexp uses that kernel only for boolean `contains`; count,
+share the ordered-literal matcher when analysis proves equivalent semantics.
+Trino regexp uses that matcher only for boolean `contains`; count,
 position, extraction, replacement, split, and unsupported shapes retain the
 complete RE2 execution route.
 
 There is deliberately no literal-count cutoff between ordered scanning and the
-DFA. On both target architectures, candidate distribution—not counts of 2, 8,
-or 32—determined the winner. A C8i 32-literal dense-at-start match is the one
-protected loss: 335.7 ns with ordered scanning versus 225.7 ns with the DFA.
-The same ordered route improves the other 23 C8i protected rows, every C9g
-protected row, and large sparse or late-miss rows by up to tens of times. A
-runtime near-cursor counterfactual reduced the dense loss by 51 ns, but expanded
-C2 main code by 61% on C8i and 46% on C9g and caused stable 6-16% protected
-regressions. That hybrid is rejected; the 110 ns absolute dense cost is retained
-rather than discarding the general wins or adding an input-distribution
-heuristic.
+DFA. The evidence comes from the earlier cutoff study, measured before ordered
+searches verified candidates out of line. On both target architectures,
+candidate distribution—not counts of 2, 8, or 32—determined the winner. A C8i
+32-literal dense-at-start match was the one protected loss: 335.7 ns with
+ordered scanning versus 225.7 ns with the DFA. The same ordered route improved
+the other 23 C8i protected rows, every C9g protected row, and large sparse or
+late-miss rows by up to tens of times. A runtime near-cursor counterfactual
+reduced the dense loss by 51 ns, but expanded C2 main code by 61% on C8i and 46%
+on C9g and caused stable 6-16% protected regressions. That hybrid is rejected;
+the study's 110 ns absolute dense cost is retained rather than discarding the
+general wins or adding an input-distribution heuristic.
 
 Compiled patterns are immutable and thread-safe. General wildcard matching uses
 one growable workspace per thread shared across all compiled LIKE patterns, so
@@ -1690,8 +1761,8 @@ UTF-8, which differential tests check over the corpus and seeded patterns.
   literals search one after another, as the interpreter does. Generated
   contains specializes its literal with this search, as interpreted contains
   does with the kernel's contains search for a literal of two or more bytes.
-- Each search of a literal of two or more bytes splits that loop as
-  interpreted contains does: a call-free word scan finds the first candidate
+- Each search of a literal of two or more bytes splits that loop as the
+  interpreter's searches do: a call-free word scan finds the first candidate
   and calls a separate generated method that verifies candidates from there,
   with the KMP handoff counted from where the search started. Verifying in
   line kept the word loop from being innermost, because C2 never inlined the

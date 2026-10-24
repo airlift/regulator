@@ -54,11 +54,11 @@ public class TestLiteralSearchKernel
         Slice input = offsetSlice(bytes);
         LiteralSearchKernel kernel = kernel('a');
 
-        assertThat(kernel.find(input, 0, input.length())).isZero();
-        assertThat(kernel.find(input, 1, input.length() - 1)).isEqualTo(15);
-        assertThat(kernel.find(input, 16, input.length() - 16)).isEqualTo(16);
-        assertThat(kernel.find(input, 17, input.length() - 17)).isEqualTo(40);
-        assertThat(kernel.find(input, 17, 23)).isNegative();
+        assertThat(kernel.findSingleByte(input, 0, input.length())).isZero();
+        assertThat(kernel.findSingleByte(input, 1, input.length() - 1)).isEqualTo(15);
+        assertThat(kernel.findSingleByte(input, 16, input.length() - 16)).isEqualTo(16);
+        assertThat(kernel.findSingleByte(input, 17, input.length() - 17)).isEqualTo(40);
+        assertThat(kernel.findSingleByte(input, 17, 23)).isNegative();
     }
 
     @Test
@@ -109,8 +109,8 @@ public class TestLiteralSearchKernel
         Slice input = offsetSlice(bytes);
         LiteralSearchKernel kernel = new LiteralSearchKernel(Slices.wrappedBuffer(new byte[] {(byte) 0xC0, (byte) 0xFF}));
 
-        assertThat(kernel.find(input, 0, input.length())).isZero();
-        assertThat(kernel.find(input, 1, input.length() - 1)).isEqualTo(3);
+        assertThat(kernel.findContains(input, 0, input.length())).isZero();
+        assertThat(kernel.findContains(input, 1, input.length() - 1)).isEqualTo(3);
     }
 
     @Test
@@ -138,27 +138,20 @@ public class TestLiteralSearchKernel
             if (expected >= 0) {
                 expected += offset;
             }
-            assertThat(kernel.find(input, offset, length))
+            int actual = literalLength == 1 ? kernel.findSingleByte(input, offset, length) : kernel.findContains(input, offset, length);
+            assertThat(actual)
                     .as("iteration %s, offset %s, length %s, literal length %s", iteration, offset, length, literalLength)
                     .isEqualTo(expected);
-            if (literalLength >= 2) {
-                assertThat(kernel.findContains(input, offset, length))
-                        .as("contains iteration %s, offset %s, length %s, literal length %s", iteration, offset, length, literalLength)
-                        .isEqualTo(expected);
-            }
         }
     }
 
     /**
-     * Requires {@link LiteralSearchKernel#find} and {@link LiteralSearchKernel#findContains} to
-     * switch to KMP at {@code kmpHandoff}, or not at all when it is -1, and to find the literal at
-     * {@code match}, or nowhere when it is -1.
+     * Requires {@link LiteralSearchKernel#findContains} to switch to KMP at {@code kmpHandoff}, or
+     * not at all when it is -1, and to find the literal at {@code match}, or nowhere when it is -1.
      */
     private static void assertSearch(LiteralSearchKernel kernel, Slice input, int offset, int length, int kmpHandoff, int match)
     {
         assertThat(kernel.kmpHandoffOffsetForDiagnostics(input, offset, length)).isEqualTo(kmpHandoff);
-        assertThat(kernel.containsKmpHandoffOffsetForDiagnostics(input, offset, length)).isEqualTo(kmpHandoff);
-        assertThat(kernel.find(input, offset, length)).isEqualTo(match);
         assertThat(kernel.findContains(input, offset, length)).isEqualTo(match);
     }
 
@@ -169,7 +162,7 @@ public class TestLiteralSearchKernel
         System.arraycopy(literal, 0, inputBytes, inputBytes.length - literal.length, literal.length);
         Slice input = offsetSlice(inputBytes);
 
-        assertThat(new LiteralSearchKernel(Slices.wrappedBuffer(literal)).find(input, 0, input.length()))
+        assertThat(new LiteralSearchKernel(Slices.wrappedBuffer(literal)).findContains(input, 0, input.length()))
                 .isEqualTo(input.length() - literal.length);
     }
 

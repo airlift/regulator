@@ -87,19 +87,24 @@ failure.
 
 ### Byte frequencies
 
-Unanchored searches for a case-sensitive literal scan for its first byte unless
-the caller chooses a byte distribution with `setByteFrequencies` on
+Unanchored searches that scan for one probe byte of a case-sensitive literal,
+such as a plain literal pattern or a pattern's leading literal, probe its first
+byte unless the caller chooses a byte distribution with `setByteFrequencies` on
 `Re2.Options`, `TrinoRegexp.Options`, `JavaRegexp.Options`, or
 `RustRegexp.Options`. The default, `ByteFrequencies.uniform()`, keeps
 first-byte scanning. A distribution that matches the searched data lets the
 search scan for a rarer byte of the literal instead. `JavaRegexp`,
 `RustRegexp`, and `Re2` without a scan plan move the scan only for a multi-byte
 literal whose first byte is ASCII; scan plans (Trino and RE2) also move it for
-a plan's leading literal led by a non-ASCII byte. A distribution that does not
-match the data can make literal scans several times slower per byte than
-first-byte scanning, because it moves the scan onto bytes that are common in
-the searched text; it never changes what matches, and the cost stays linear in
-the input. The choices are:
+a plan's leading literal led by a non-ASCII byte. Byte frequencies do not
+affect `TrinoRegexp` contains of a contained literal such as `.*lit.*`, its
+dot-star literal spans, or its ordered literals such as `a(?s:.*)b`, which scan
+for the first and last bytes of a multi-byte literal together, nor the other
+languages' contains of a contained literal, which uses `Slice.indexOf`. A
+distribution that does not match the data can make literal scans several times
+slower per byte than first-byte scanning, because it moves the scan onto bytes
+that are common in the searched text; it never changes what matches, and the
+cost stays linear in the input. The choices are:
 
 - `ByteFrequencies.builder()`, which learns from sample Slices of the caller's
   own data and is the most reliable choice. A few hundred kilobytes of whole

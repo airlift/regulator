@@ -120,7 +120,13 @@ final class LiteralGapMatcher
         int inputOffset = input.byteArrayOffset();
         LiteralSearchKernel firstLiteral = literals[0];
         for (int searchOffset = offset; searchOffset <= end - firstLiteral.literalLength(); ) {
-            int matchOffset = firstLiteral.find(input, searchOffset, end - searchOffset);
+            // A literal of two or more bytes scans for its first and last bytes together and
+            // verifies candidates out of line; a one-byte literal scans for that byte. Only the
+            // diagnostics shapes, from analyzeUnrestrictedForDiagnostics, have a one-byte first
+            // literal.
+            int matchOffset = firstLiteral.literalLength() > 1
+                    ? firstLiteral.findContains(input, searchOffset, end - searchOffset)
+                    : firstLiteral.findSingleByte(input, searchOffset, end - searchOffset);
             if (matchOffset < 0) {
                 return false;
             }

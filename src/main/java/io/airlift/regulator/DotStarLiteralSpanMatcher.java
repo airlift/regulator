@@ -21,15 +21,23 @@ import static java.util.Objects.requireNonNull;
 final class DotStarLiteralSpanMatcher
 {
     private final Slice literal;
+    // The pattern's shared contains search for this literal, or null for a language other than
+    // Trino, a one-byte literal, or no room in the forward-DFA budget. Null selects Slice.indexOf.
+    private final LiteralSearchKernel search;
     private final boolean latin1;
 
-    private DotStarLiteralSpanMatcher(Slice literal, boolean latin1)
+    private DotStarLiteralSpanMatcher(Slice literal, LiteralSearchKernel search, boolean latin1)
     {
         this.literal = requireNonNull(literal, "literal is null");
+        this.search = search;
         this.latin1 = latin1;
     }
 
-    static DotStarLiteralSpanMatcher analyze(ExpressionAnalysis analysis)
+    /**
+     * Returns the matcher for {@code analysis}, or null; {@code search} is the pattern's boolean
+     * contains search for the matcher's literal, or null.
+     */
+    static DotStarLiteralSpanMatcher analyze(ExpressionAnalysis analysis, LiteralSearchKernel search)
     {
         ExpressionAnalysis.LiteralSequence sequence = analysis.literalSequence();
         if (analysis.hasCaptures() ||
@@ -49,7 +57,12 @@ final class DotStarLiteralSpanMatcher
         if (literal.length() == 0 || containsLineFeed(literal)) {
             return null;
         }
-        return new DotStarLiteralSpanMatcher(literal, analysis.latin1());
+        return new DotStarLiteralSpanMatcher(literal, search, analysis.latin1());
+    }
+
+    LiteralSearchKernel searchForDiagnostics()
+    {
+        return search;
     }
 
     private static boolean containsLineFeed(Slice literal)
@@ -69,7 +82,7 @@ final class DotStarLiteralSpanMatcher
             return Dfa.SEARCH_NO_MATCH;
         }
 
-        int literalStart = input.indexOf(literal, start);
+        int literalStart = search == null ? input.indexOf(literal, start) : search.findContains(input, start, input.length() - start);
         if (literalStart < 0) {
             return Dfa.SEARCH_NO_MATCH;
         }

@@ -1086,6 +1086,13 @@ public sealed class Re2
             semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - disjointSuffixRepeatMatcher.estimatedRetainedSize());
             booleanPlans = booleanPlans.withDisjointSuffixRepeatMatcher(disjointSuffixRepeatMatcher);
         }
+        // A call-free first-and-last-byte search for contains and dot-star spans. Only Trino rows
+        // were measured, so other languages' contains keeps Slice.indexOf.
+        LiteralSearchKernel literalSearch = compilerDialect == Compiler.Dialect.TRINO ? createLiteralSearch(booleanPlans) : null;
+        if (literalSearch != null && literalSearch.estimatedRetainedSize() <= semanticProgram.dfaMemory()) {
+            semanticProgram.setDfaMemory(semanticProgram.dfaMemory() - literalSearch.estimatedRetainedSize());
+            booleanPlans = booleanPlans.withLiteralSearch(literalSearch);
+        }
 
         return new Re2(
                 flags,
@@ -1106,6 +1113,18 @@ public sealed class Re2
                 capturingGroupCount,
                 parsed.capturingGroupNames(),
                 null);
+    }
+
+    /**
+     * Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns
+     * null. Boolean contains and dot-star span matching share this search.
+     */
+    private static LiteralSearchKernel createLiteralSearch(BooleanPlans booleanPlans)
+    {
+        if (booleanPlans.partialMatchStrategy() != BooleanPartialMatchStrategy.CONTAINS || booleanPlans.literal().length() < 2) {
+            return null;
+        }
+        return new LiteralSearchKernel(booleanPlans.literal());
     }
 
     private static LoweredBooleanProgram compileLoweredBooleanProgram(
@@ -1165,7 +1184,7 @@ public sealed class Re2
         BooleanPartialMatchStrategy partialMatchStrategy = find == BooleanPlanKind.LOWERED_PROGRAM
                 ? BooleanPartialMatchStrategy.LOWERED_PROGRAM
                 : plans.partialMatchStrategy();
-        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.trinoScanPlan(), plans.trinoScanBooleanPlan());
+        return new BooleanPlans(plans.literal(), partialMatchStrategy, find, lookingAt, plans.matches(), program, plans.taggedAlternationProgram(), plans.wordRunMatcher(), plans.wholeInputCapturePlan(), plans.disjointSuffixRepeatMatcher(), plans.trinoScanPlan(), plans.trinoScanBooleanPlan(), plans.literalSearch());
     }
 
     private static boolean requiresProgramExecution(BooleanPlanKind plan)
@@ -1386,6 +1405,11 @@ public sealed class Re2
         return booleanFindStrategy == BOOLEAN_FIND_EXACT_LITERAL;
     }
 
+    LiteralSearchKernel literalSearchForDiagnostics()
+    {
+        return booleanPlans.literalSearch();
+    }
+
     boolean hasExactLiteralSpan()
     {
         return exactLiteralLength >= 0;
@@ -1393,7 +1417,7 @@ public sealed class Re2
 
     DotStarLiteralSpanMatcher createDotStarLiteralSpanMatcher()
     {
-        return DotStarLiteralSpanMatcher.analyze(expressionAnalysis);
+        return DotStarLiteralSpanMatcher.analyze(expressionAnalysis, booleanPlans.literalSearch());
     }
 
     OrderedLiteralMatcher createOrderedLiteralMatcher()
@@ -1688,7 +1712,7 @@ public sealed class Re2
         }
         Slice literal = booleanPlans.literal();
         return switch (strategy) {
-            case BOOLEAN_FIND_CONTAINS -> LiteralMatchKernel.contains(input, literal);
+            case BOOLEAN_FIND_CONTAINS -> containsBooleanPlanLiteral(input, literal);
             case BOOLEAN_FIND_EQUALS -> LiteralMatchKernel.equals(input, literal);
             case BOOLEAN_FIND_STARTS_WITH -> startsWithBooleanPlanLiteral(input, literal);
             case BOOLEAN_FIND_ENDS_WITH -> endsWithBooleanPlanLiteral(input, literal);
@@ -1716,7 +1740,7 @@ public sealed class Re2
         Slice literal = booleanPlans.literal();
         return switch (plan) {
             case LITERAL_SEARCH, NULLABLE_START -> optimizedPartialMatch(input, booleanFindStrategy);
-            case CONTAINS -> LiteralMatchKernel.contains(input, literal);
+            case CONTAINS -> containsBooleanPlanLiteral(input, literal);
             case EQUALS -> LiteralMatchKernel.equals(input, literal);
             case STARTS_WITH -> startsWithBooleanPlanLiteral(input, literal);
             case ENDS_WITH -> endsWithBooleanPlanLiteral(input, literal);
@@ -1739,6 +1763,14 @@ public sealed class Re2
                 anchor,
                 null,
                 NO_MATCH_WORKSPACES);
+    }
+
+    private boolean containsBooleanPlanLiteral(Slice input, Slice literal)
+    {
+        LiteralSearchKernel literalSearch = booleanPlans.literalSearch();
+        return literalSearch == null
+                ? LiteralMatchKernel.contains(input, literal)
+                : literalSearch.findContains(input, 0, input.length()) >= 0;
     }
 
     private static boolean startsWithBooleanPlanLiteral(Slice input, Slice literal)
@@ -3097,7 +3129,7 @@ public sealed class Re2
             case ENDS_WITH_FINAL_LINE -> BooleanPlanKind.ENDS_WITH_FINAL_LINE;
             case LOWERED_PROGRAM -> BooleanPlanKind.LOWERED_PROGRAM;
         };
-        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null, null);
+        return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, null, null, null, null, null, null, null, null);
     }
 
     private static BooleanPartialMatchStrategy selectBooleanPartialMatchStrategy(
@@ -3252,32 +3284,41 @@ public sealed class Re2
             TrinoScanPlan trinoScanPlan,
             // The scan plan's boolean plan, resolved here so that full-Slice boolean find loads
             // it as directly as it would load the plan.
-            TrinoScanPlan trinoScanBooleanPlan)
+            TrinoScanPlan trinoScanBooleanPlan,
+            // Scans for a literal of two or more bytes by its first and last bytes together, for
+            // Trino's boolean contains and dot-star spans; null leaves them on Slice.indexOf.
+            // Exact-literal spans never use it.
+            LiteralSearchKernel literalSearch)
     {
         private BooleanPlans withTrinoScanPlan(TrinoScanPlan trinoScanPlan)
         {
             TrinoScanPlan trinoScanBooleanPlan = trinoScanPlan == null ? null : trinoScanPlan.booleanPlan();
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan, literalSearch);
         }
 
         private BooleanPlans withTaggedAlternationProgram(TaggedAlternationProgram taggedAlternationProgram)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan, literalSearch);
         }
 
         private BooleanPlans withWordRunMatcher(WordRunMatcher wordRunMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan, literalSearch);
         }
 
         private BooleanPlans withWholeInputCapturePlan(WholeInputCapturePlan wholeInputCapturePlan)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan, literalSearch);
         }
 
         private BooleanPlans withDisjointSuffixRepeatMatcher(DisjointSuffixRepeatMatcher disjointSuffixRepeatMatcher)
         {
-            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan);
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan, literalSearch);
+        }
+
+        private BooleanPlans withLiteralSearch(LiteralSearchKernel literalSearch)
+        {
+            return new BooleanPlans(literal, partialMatchStrategy, find, lookingAt, matches, loweredProgram, taggedAlternationProgram, wordRunMatcher, wholeInputCapturePlan, disjointSuffixRepeatMatcher, trinoScanPlan, trinoScanBooleanPlan, literalSearch);
         }
     }
 
