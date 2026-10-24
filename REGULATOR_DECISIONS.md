@@ -243,9 +243,10 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   `java.util.regex.Pattern`. It does not reinterpret rejected Java syntax as
   RE2 syntax and does not add a dialect selector to `Re2.compile`.
 - Java's `$`, `\Z`, multiline anchors, and combining-aware word boundaries use
-  frontend-specific empty-width predicates. Programs containing those
-  text-dependent assertions use BitState or NFA; protected DFA transition loops
-  do not contain Java-language branches.
+  frontend-specific empty-width predicates, and a scan plan checks the same
+  final-terminator rule for `$` and `\Z`. In the ordinary engine, programs
+  containing those text-dependent assertions use BitState or NFA; protected DFA
+  transition loops do not contain Java-language branches.
 - Multiline `^` excludes end-of-input even with `UNIX_LINES`. In that mode
   the compiler combines LF-only beginning-of-line with Java's non-EOF
   assertion, using the same context-sensitive fallback. UNIX multiline `$`
@@ -1645,13 +1646,18 @@ Java.
   charge. The Java frontend compiles to the same byte ranges as RE2, so a Java
   plan reads input by the RE2 rule and reports what the ordinary engine reports
   on every input, which on valid UTF-8 is the JDK's result. A plan's end is the
-  end of input, or with `UNIX_LINES` the JDK's end or position before a final
-  LF. Java's default `$` and `\Z` also end before a final CR LF, CR, U+0085,
-  U+2028, or U+2029, so their patterns build no plan; `\z` and `UNIX_LINES` `$`
-  do. Java's default dot excludes some non-ASCII line terminators, so it reaches
-  a plan only with `DOTALL` or `UNIX_LINES`, and multiline anchors, Java word
-  boundaries, reluctant runs, and folds with a non-ASCII member keep the
-  ordinary engine, as they do in Trino.
+  end of input, or with `UNIX_LINES` `$` and `\Z` also the position before a
+  final LF. Java's default `$` and `\Z` end before one final LF, CR, CR LF,
+  U+0085, U+2028, or U+2029, never between a final CR and LF, and the plan
+  compares those exact bytes, which agrees with the ordinary engine's strict
+  decoding on malformed input. The JDK gives back run characters to reach that
+  position and a run does not, so a variable run that can reach a Java end
+  without consuming more input must admit no line terminator, or every one and
+  be unbounded; `^x([^\n]+)$`, `^x(\S+)$`, and `(?s)^x(.{1,3})$` keep the
+  ordinary engine. Java's default dot excludes some non-ASCII line terminators,
+  so it reaches a plan only with `DOTALL` or `UNIX_LINES`, and multiline
+  anchors, Java word boundaries, reluctant runs, and folds with a non-ASCII
+  member keep the ordinary engine, as they do in Trino.
 - A Java plan must not be slower than the same pattern without it. On R9g and
   R8i, the 95 rows of `BenchmarkJavaScanPlan` without dotAll, five matching
   methods over the 19 workloads `URL`, `URL_SHORT`, `ANCHORED_HOST`,
@@ -1668,7 +1674,34 @@ Java.
   R8i the same rows take 0.90 times. On R8i, `UNANCHORED_END` `count` takes 1.06
   times, 81.7 ns against 76.8 ns, in one build, while its identical rebuild is
   within noise; the RE2 plan takes 1.095 times there, and on R9g the row takes
-  0.73 times. Adding Java plans left `BenchmarkRe2ScanPlan` rows unchanged.
+  0.73 times. These Java rows end at `\z`. Adding Java plans left
+  `BenchmarkRe2ScanPlan` rows unchanged. The Java end step, which changed the
+  end check that Trino and RE2 plans share, moved no row beyond noise: against
+  plans without the Java end, 61 rows of the scan-plan benchmarks take a
+  geometric mean of 1.009 and 0.996 times their earlier time, and none is
+  slower beyond the spread between identical builds. Those rows are the
+  `BenchmarkTrinoScanPlan` workloads `URL`, `OPTIONALS`, `OPTIONAL_RETRY`,
+  `OPTIONAL_MIXED`, `RETRY_64`, `MIXED`, and `LONG_RETRY`; the
+  `BenchmarkRe2ScanPlan` workloads `URL`, `OPTIONALS`, `OPTIONAL_RETRY`,
+  `RETRY_64`, `MIXED`, `LONG_HOST`, and `ANCHORED_HOST`; the `\z` patterns of
+  the `BenchmarkJavaScanPlan` workloads `URL`, `OPTIONALS`, `MIXED`, and
+  `LONG_HOST`; and `BenchmarkTrinoScanProfiles` rows.
+- The Java end is timed on 10 workloads of `BenchmarkJavaScanPlan` with
+  `javaDollar=true` and dotAll: `URL`, `URL_SHORT`, `UNANCHORED_END`,
+  `OPTIONALS`, `OPTIONAL_RETRY`, `OPTIONAL_MIXED`, `RETRY_64`, `LONG_HOST`,
+  `MIXED`, and `URL_MALFORMED`. Without dotAll the patterns set `UNIX_LINES`,
+  so `$` ends only before a final LF, and every row ends at most in LF, so the
+  other terminators are not timed. On R9g and R8i their 50 matching rows take
+  a geometric mean of 0.131 and 0.114 times the ordinary engine's time, and
+  every row is faster than the ordinary engine. The plan costs about what the
+  `\z` plan costs, 0.997 and 1.072 times over the same rows; most of the larger
+  gain is the ordinary engine taking 2.5 to 3.1 times longer with `$` than with
+  `\z`. On R8i, `OPTIONAL_RETRY` and `OPTIONALS` `contains` are slower than
+  with `\z`, 87 ns against 52 ns and 77 ns against 66 ns, because the `\z`
+  pattern takes the short boolean route to the DFA described in
+  [Trino Specialized Byte Scans](#trino-specialized-byte-scans), and a Java end
+  cannot, since the DFA cannot evaluate it; they still take 0.14 to 0.16 times
+  the ordinary engine's time.
 
 ## Generated Trino Scan Kernels
 
@@ -1788,19 +1821,25 @@ the last bullet records its measurements.
   ordinary engine's compilation, on R8i `UNANCHORED_TAIL_4096`. With the option
   off, sealing `Re2` changed no row on any host.
 - `JavaRegexp.Options.setGenerateBytecode` gives Java patterns the same executor
-  classes under the same rules. A Java plan is an RE2 plan, so the emitter,
-  eligibility, and routes are unchanged, and `JavaRegexp` holds the generated
-  `Re2` subclass. On R9g and R8i, the 65 matching rows of
-  `BenchmarkJavaScanPlan` with `generateBytecode=true`, on the `URL`,
-  `URL_SHORT`, `ANCHORED_HOST`, `ANCHORED_QUERY`, `UNANCHORED_URL`,
-  `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`, `OPTIONAL_MIXED`,
-  `RETRY_64`, `LONG_HOST`, `MIXED`, and `URL_MALFORMED` workloads, take a
-  geometric mean of 0.51 and 0.56 times the interpreted plan's time and 0.12 and
-  0.13 times the ordinary engine's, excluding compilation and the `FOLDED_MIXED`
-  control. No generated row is slower than the interpreted plan or the ordinary
-  engine, and R8i `LONG_HOST`, RE2's exception, is within noise for Java.
-  Compilation with generation takes 0.44 to 0.71 ms per pattern on R9g and 1.0
-  to 1.6 ms on R8i, against 3.9 to 15.1 us for the interpreted plan.
+  classes under the same rules. The Java end adds a generated end check, and a
+  Java-only rule on which runs may precede it decides whether a plan exists;
+  once a plan exists, the decision whether to generate it and the routes are
+  RE2's, and `JavaRegexp` holds the generated `Re2` subclass. On R9g and R8i,
+  the 65 matching rows of `BenchmarkJavaScanPlan` with `generateBytecode=true`,
+  on the `URL`, `URL_SHORT`, `ANCHORED_HOST`, `ANCHORED_QUERY`,
+  `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`,
+  `OPTIONAL_MIXED`, `RETRY_64`, `LONG_HOST`, `MIXED`, and `URL_MALFORMED`
+  workloads, take a geometric mean of 0.51 and 0.56 times the interpreted
+  plan's time and 0.12 and 0.13 times the ordinary engine's, excluding
+  compilation and the `FOLDED_MIXED` control. No generated row is slower than
+  the interpreted plan or the ordinary engine, and R8i `LONG_HOST`, RE2's
+  exception, is within noise for Java. Compilation with generation takes 0.44
+  to 0.71 ms per pattern on R9g and 1.0 to 1.6 ms on R8i, against 3.9 to 15.1
+  us for the interpreted plan. Over the 50 Java end rows, generated classes
+  take 0.489 and 0.507 times the interpreted plan's time and 0.064 and 0.057
+  times the ordinary engine's; no row is slower than the interpreted plan, and
+  R8i `LONG_HOST` is within noise. Their compilation takes 0.47 to 0.69 ms per
+  pattern on R9g and 1.11 to 1.52 ms on R8i.
 
 ## Generated Trino LIKE Kernels
 

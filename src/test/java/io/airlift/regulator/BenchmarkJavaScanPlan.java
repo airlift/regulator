@@ -41,12 +41,19 @@ import static io.airlift.slice.Slices.utf8Slice;
 
 /**
  * Public Java operations over the workloads and rows of {@link BenchmarkRe2ScanPlan}, with each
- * pattern written in Java syntax for the same match: {@code $} becomes {@code \z}, since Java's
- * {@code $} also matches before a final line terminator; {@code (?i)} becomes {@code (?iu)}, since
- * Java's {@code (?i)} folds only ASCII letters and RE2's folds {@code K} with the Kelvin sign; and
- * without dotAll the pattern sets UNIX_LINES, so that its dot excludes only {@code \n}, as RE2's
- * does. {@link JavaRegexp} has no replacement, so there is no replace method. No compilation cache
- * is involved.
+ * pattern written in Java syntax for the same match: by default {@code $} becomes {@code \z},
+ * since Java's {@code $} also matches before a final line terminator; {@code (?i)} becomes
+ * {@code (?iu)}, since Java's {@code (?i)} folds only ASCII letters and RE2's folds {@code K} with
+ * the Kelvin sign; and without dotAll the pattern sets UNIX_LINES, so that its dot excludes only
+ * {@code \n}, as RE2's does. {@link JavaRegexp} has no replacement, so there is no replace method.
+ * No compilation cache is involved.
+ * <p>
+ * With {@code javaDollar=true}, each {@code $} stays Java's {@code $}, so those patterns follow
+ * Java's end rather than RE2's. With dotAll, {@code $} also matches before one final line
+ * terminator, so those patterns time the plan's Java end; without dotAll, under UNIX_LINES, it
+ * matches only before a final {@code \n}, which the plan's end-before-LF step checks. No row ends
+ * in a terminator other than {@code \n}, so the Java end's CR, CR LF, U+0085, U+2028, and U+2029
+ * checks are not timed.
  * <p>
  * With {@code scanPlan=false}, every pattern compiles without its scan plan, so the methods time the
  * ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
@@ -134,6 +141,10 @@ public class BenchmarkJavaScanPlan
         @Param("false")
         public boolean generateBytecode;
 
+        // Keep each $ as Java's $ rather than \z.
+        @Param({"true", "false"})
+        public boolean javaDollar;
+
         Slice[] expressions;
         private JavaRegexp.Options options;
         private MethodHandle compiler;
@@ -163,7 +174,7 @@ public class BenchmarkJavaScanPlan
             bounds = new int[2];
             extractionGroups = new int[count];
             for (int index = 0; index < count; index++) {
-                expressions[index] = utf8Slice(javaExpression(source.expressions[index].toStringUtf8(), dotAll));
+                expressions[index] = utf8Slice(javaExpression(source.expressions[index].toStringUtf8(), dotAll, javaDollar));
                 patterns[index] = compile(compiler, expressions[index], options);
                 matchers[index] = patterns[index].matcher(EMPTY_SLICE);
                 extractionGroups[index] = patterns[index].capturingGroupCount() == 0 ? 0 : 1;
@@ -235,10 +246,10 @@ public class BenchmarkJavaScanPlan
     /**
      * Returns {@code expression}, a {@link BenchmarkRe2ScanPlan} pattern, in Java syntax. Only
      * {@code $}, {@code (?i)}, and the dot differ in these patterns: each {@code $} outside a class
-     * becomes {@code \z}, {@code (?i)} adds Unicode case, and without dotAll, UNIX_LINES limits
-     * the dot to excluding {@code \n}.
+     * becomes {@code \z} unless {@code javaDollar} keeps it, {@code (?i)} adds Unicode case, and
+     * without dotAll, UNIX_LINES limits the dot to excluding {@code \n}.
      */
-    static String javaExpression(String expression, boolean dotAll)
+    static String javaExpression(String expression, boolean dotAll, boolean javaDollar)
     {
         StringBuilder java = new StringBuilder(dotAll ? "" : "(?d)");
         boolean inClass = false;
@@ -259,7 +270,7 @@ public class BenchmarkJavaScanPlan
             else if (character == ']') {
                 inClass = false;
             }
-            java.append(character == '$' && !inClass ? "\\z" : String.valueOf(character));
+            java.append(character == '$' && !inClass && !javaDollar ? "\\z" : String.valueOf(character));
         }
         return java.toString();
     }
