@@ -540,6 +540,30 @@ public class TestDfaCountMatches
     }
 
     @Test
+    public void testCountAddsStatesAfterPairedTransitionsAreBuilt()
+    {
+        // The first count builds paired transitions for its states. The second count adds states
+        // before the table is rebuilt, and its paired search then follows a match transition into
+        // one of them, past the end of the paired table.
+        Re2 afterMatch = Re2.compile(utf8Slice("[^,]+,.*"));
+        assertThat(afterMatch.count(utf8Slice("\u00e9".repeat(132)))).isZero();
+        assertThat(afterMatch.forwardProgramForDiagnostics()
+                .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH)
+                .pairedTransitionMemory())
+                .isPositive();
+        assertThat(afterMatch.count(utf8Slice("\u00e9," + "\u00e9".repeat(130)))).isEqualTo(1);
+
+        // Here the paired search follows an ordinary transition into a state past the end of the table.
+        Re2 afterOrdinaryTransition = Re2.compile(utf8Slice(".*(abcdef|a)"));
+        assertThat(afterOrdinaryTransition.count(utf8Slice("a".repeat(300)))).isEqualTo(1);
+        assertThat(afterOrdinaryTransition.forwardProgramForDiagnostics()
+                .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH)
+                .pairedTransitionMemory())
+                .isPositive();
+        assertThat(afterOrdinaryTransition.count(utf8Slice("a,abcdefq" + "\u00e9".repeat(150)))).isEqualTo(1);
+    }
+
+    @Test
     public void testSelfLoopExitScanMatchHandOff()
     {
         // After the x, the matching loop exits at every two-byte character, so four short scans
