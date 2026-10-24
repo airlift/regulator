@@ -46,6 +46,25 @@ public class TestCompilerAllocations
     }
 
     @Test
+    public void testExpressionAnalysisStaysLinearInNestedConcatenations()
+    {
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        // Simplification expands each x{1000} into single-byte literals, and each y( adds a
+        // concatenation level above all of them.
+        String pattern = "y(".repeat(500) + "(?:x{1000})".repeat(50) + ")".repeat(500);
+        Regexp regexp = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
+        Regexp normalized = Simplifier.simplify(regexp, CaseFolding.RE2);
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        ExpressionAnalysis analysis = ExpressionAnalysis.analyzeNormalized(normalized, CaseFolding.RE2);
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        assertThat(analysis.literalSequence().exactLiteral()).isEqualTo(utf8Slice("y".repeat(500) + "x".repeat(50_000)));
+        assertThat(allocatedBytes).isLessThan(64_000_000);
+    }
+
+    @Test
     public void testFlatteningReusesHintScratchSpace()
     {
         ThreadMXBean threadBean = allocatedMemoryBean();
