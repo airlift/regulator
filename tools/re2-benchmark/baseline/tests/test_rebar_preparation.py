@@ -66,6 +66,7 @@ class TestRebarPreparation(unittest.TestCase):
                         "ROOT": str(repository), "SHARED_WORK_DIR": str(shared),
                         "REBAR_ROOT": str(rebar), "RESULT_DIR": str(results),
                         "RESULT_TOOL": str(BASE / "shard_results.py"), "MANIFEST": str(BASE / "rows.tsv"),
+                        "SELECTION_MANIFEST": str(BASE / "rows.tsv"),
                         "SHARD_ID": "rebar-a", "ROUTE": route, "semantic_log": str(results / "semantic.log"),
                         "candidate_commit": "fixture", "engine_tree": "fixture", "manifest_sha256": "fixture",
                         "candidate_system": "regulator-native-access" if route == "native-access" else "regulator-object-row",

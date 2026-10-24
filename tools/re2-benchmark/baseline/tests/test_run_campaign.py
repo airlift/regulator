@@ -643,7 +643,7 @@ class TestRunCampaign(unittest.TestCase):
 
     def test_native_re2_execution_requires_native_manifest_rows(self):
         source = (SCRIPT.parent / "run-shard.sh").read_text()
-        guard = '[[ "${ROUTE}" == native-access && ${native_system_row_count} -gt 0 ]]'
+        guard = '[[ ${native_system_row_count} -gt 0 ]]'
 
         self.assertGreaterEqual(source.count(guard), 3)
 

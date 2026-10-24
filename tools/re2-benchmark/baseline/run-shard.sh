@@ -18,6 +18,11 @@ RESULT_TOOL="${SCRIPT_DIR}/shard_results.py"
 PROTOCOL_REPRESENTATIVES="${SCRIPT_DIR}/protocol-representatives.tsv"
 FULL_PROTOCOL_BENCHMARKS="${SCRIPT_DIR}/full-protocol-benchmarks.tsv"
 ROW_PROTOCOL="${SCRIPT_DIR}/row-protocol.tsv"
+UNIT_TOOL="${SCRIPT_DIR}/unit_session.py"
+# run-unit.sh names a planned work unit; its route then measures only the unit's rows.
+UNIT_DIRECTORY=${BASELINE_UNIT_DIRECTORY:-}
+UNIT_CALIBRATION=${BASELINE_UNIT_CALIBRATION:-both}
+SELECTION_MANIFEST=${MANIFEST}
 PLAN_ONLY=${BASELINE_PLAN_ONLY:-false}
 DEFER_ACCEPTANCE=${BASELINE_DEFER_ACCEPTANCE:-false}
 PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
@@ -28,6 +33,11 @@ if [[ "${VERIFICATION_ONLY}" == true && ( "${PROTOCOL}" != smoke || "${PROTOCOL_
     exit 1
 fi
 SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${ROOT}/target/baseline-shared}
+if [[ -n "${UNIT_DIRECTORY}" && -n "${BASELINE_JONI_JMH_TIME:-}" ]]; then
+    # A unit's selectors run at their frozen windows; the override would change them too.
+    echo "Work units measure their frozen protocol; unset BASELINE_JONI_JMH_TIME" >&2
+    exit 1
+fi
 JONI_COMPARATOR_ORDER=${JONI_COMPARATOR_ORDER:-forward}
 CAMPAIGN_REPLICA_ID=${RE2_CAMPAIGN_REPLICA_ID:-1}
 CPU_LIST=${BASELINE_CPU_LIST:-0}
@@ -152,6 +162,27 @@ JMH_SUITE_ORDER=forward
 if ((CAMPAIGN_REPLICA_ID % 2 == 0)); then
     JMH_SUITE_ORDER=reverse
 fi
+UNIT_ID=
+if [[ -n "${UNIT_DIRECTORY}" ]]; then
+    UNIT_DIRECTORY=$(cd "${UNIT_DIRECTORY}" && pwd)
+    UNIT_ID=$(awk -F '\t' 'NR == 2 {print $1}' "${UNIT_DIRECTORY}/unit-rows.tsv")
+    SELECTION_MANIFEST="${UNIT_DIRECTORY}/expected-rows.tsv"
+    systems=${BASELINE_UNIT_SYSTEMS:?A work unit route requires BASELINE_UNIT_SYSTEMS}
+    case "${UNIT_CALIBRATION}" in
+        before | after | both | none) ;;
+        *)
+            echo "BASELINE_UNIT_CALIBRATION must be before, after, both, or none: ${UNIT_CALIBRATION}" >&2
+            exit 1
+            ;;
+    esac
+    if [[ "${DEFER_ACCEPTANCE}" != true ]]; then
+        echo "A work unit route defers acceptance to its unit" >&2
+        exit 1
+    fi
+elif [[ "${UNIT_CALIBRATION}" != both ]]; then
+    echo "Only a work unit route may split its calibrations" >&2
+    exit 1
+fi
 
 mkdir -p "${RESULT_DIR}"
 RESULT_DIR=$(cd "${RESULT_DIR}" && pwd)
@@ -179,10 +210,21 @@ finish()
 }
 trap finish EXIT
 
+environment_value()
+{
+    local key=$1
+    local file
+    for file in "${RESULT_DIR}/environment-manifest.txt" "${RESULT_DIR}/environment.txt"; do
+        if [[ -f "${file}" ]]; then
+            awk -F= -v key="${key}" '$1 == key {print substr($0, length($1) + 2); exit}' "${file}"
+        fi
+    done | head -1
+}
+
 python3 "${SCRIPT_DIR}/validate-manifest.py"
 python3 "${SCRIPT_DIR}/validate-protocol-representatives.py"
 python3 "${RESULT_TOOL}" expected \
-    --manifest "${MANIFEST}" \
+    --manifest "${SELECTION_MANIFEST}" \
     --shard "${SHARD_ID}" \
     --systems "${systems}" \
     --output "${RESULT_DIR}/expected-rows.tsv"
@@ -217,6 +259,8 @@ frozen_route_value()
 
 full_protocol_benchmarks()
 {
+    # A unit's selectors measure its full-protocol rows like any other row.
+    [[ -z "${UNIT_DIRECTORY}" ]] || return 0
     awk -F '\t' -v shard="${SHARD_ID}" -v route="${ROUTE}" \
         'NR > 1 && $1 == shard && $2 == route {print $3 "\t" $4 "\t" $5}' \
         "${FULL_PROTOCOL_BENCHMARKS}"
@@ -276,7 +320,9 @@ while IFS=$'\t' read -r full_protocol_benchmark full_parameters _; do
     full_protocol_row_count=$((full_protocol_row_count + matching_row_count))
 done < <(full_protocol_benchmarks)
 frozen_full_protocol_row_count=$(frozen_route_value full-protocol-rows)
-if [[ ${frozen_full_protocol_row_count} -ne ${full_protocol_row_count} ]]; then
+if [[ -n "${UNIT_DIRECTORY}" ]]; then
+    full_protocol_row_count=${frozen_full_protocol_row_count}
+elif [[ ${frozen_full_protocol_row_count} -ne ${full_protocol_row_count} ]]; then
     echo "Frozen row protocols select ${frozen_full_protocol_row_count} full-protocol rows, not ${full_protocol_row_count}" >&2
     exit 1
 fi
@@ -378,7 +424,7 @@ retained_memory_census_allowance_seconds_per_process=0
 retained_memory_census_estimate_seconds=0
 case "${handler}" in
     traditional)
-        if [[ "${ROUTE}" == native-access && ${native_system_row_count} -gt 0 ]]; then
+        if [[ ${native_system_row_count} -gt 0 ]]; then
             native_measurement_estimate_seconds=$(awk \
                 -v rows="${native_system_row_count}" \
                 -v repetitions="${NATIVE_REPETITIONS}" \
@@ -425,8 +471,9 @@ if [[ "${handler}" == memory-census ]]; then
         -v allowance="${retained_memory_census_allowance_seconds_per_process}" \
         'BEGIN {printf "%.17g", count * allowance}')
 fi
-# Every row's qualification protocol is frozen in row-protocol.tsv. A route
-# still runs its JMH process rows together, so they share one measurement window.
+# Every row's qualification protocol is frozen in row-protocol.tsv. A route outside
+# a work unit still runs its JMH process rows together, so they share one
+# measurement window; a unit runs one selector per frozen protocol instead.
 frozen_process_protocol=$(frozen_route_value process)
 bounded_jmh_protocol=false
 if [[ -n "${frozen_process_protocol}" ]]; then
@@ -443,6 +490,14 @@ if [[ -n "${frozen_joni_protocol}" ]]; then
 fi
 protocol_qualification_required=false
 protocol_representative_count=0
+# A unit runs only the representatives attached to its rows for this replica.
+unit_holds_representative()
+{
+    [[ -z "${UNIT_DIRECTORY}" ]] && return 0
+    awk -F '\t' -v replica="$1" -v row_id="$2" \
+        'NR > 1 && $3 == "representative" && $4 == replica && $2 == row_id {found=1} END {exit !found}' \
+        "${UNIT_DIRECTORY}/unit-rows.tsv"
+}
 if [[ "${bounded_jmh_protocol}" == true && "${PROTOCOL_QUALIFICATION}" == true ]]; then
     protocol_replica_id=${CAMPAIGN_REPLICA_ID}
     if [[ "${protocol_replica_id}" == 4 ]]; then
@@ -453,6 +508,7 @@ if [[ "${bounded_jmh_protocol}" == true && "${PROTOCOL_QUALIFICATION}" == true ]
         [[ "${representative_shard}" == "${SHARD_ID}" ]] || continue
         [[ "${representative_replica}" == "${protocol_replica_id}" ]] || continue
         [[ "${representative_route}" == "${ROUTE}" ]] || continue
+        unit_holds_representative "${protocol_replica_id}" "${representative_row_id}" || continue
         # The comparison is with a ten-by-one-second reference, so rows frozen
         # at one-second windows have nothing to compare.
         representative_time=$(frozen_route_value representative "${representative_row_id}")
@@ -536,6 +592,22 @@ if [[ "${PROTOCOL}" != smoke && "${JMH_EXECUTION_PROTOCOL}" == multi-row-process
         -v extended="${extended_warmup_additional_seconds}" \
         'BEGIN {printf "%.17g", base + extended}')
 fi
+if [[ -n "${UNIT_DIRECTORY}" ]]; then
+    # Smoke keeps the route's smoke windows; qualification runs each selector at its frozen protocol.
+    python3 "${UNIT_TOOL}" selectors \
+        --manifest "${MANIFEST}" \
+        --row-protocol "${ROW_PROTOCOL}" \
+        --expected "${RESULT_DIR}/expected-rows.tsv" \
+        --shard "${SHARD_ID}" \
+        --protocol "${PROTOCOL}" \
+        --smoke "${JMH_PROCESS_COUNT}" "${JMH_PROCESS_WARMUP_ITERATIONS}" \
+        "${JMH_PROCESS_MEASUREMENT_ITERATIONS}" "${JMH_PROCESS_TIME}" \
+        --output "${RESULT_DIR}/jmh-selectors.tsv"
+    # Each process selector starts its own JVMs.
+    candidate_jmh_invocation_count=$(awk -F '\t' 'NR > 1 && $4 == "processes" {count++} END {print count + 0}' \
+        "${RESULT_DIR}/jmh-selectors.tsv")
+    jmh_invocation_count=$((candidate_jmh_invocation_count + joni_jmh_invocation_count))
+fi
 precision_arguments=()
 if [[ "${JMH_EXECUTION_PROTOCOL}" == multi-row-process-bounded ]]; then
     precision_arguments=(--maximum-relative-standard-error "${frozen_maximum_relative_standard_error}")
@@ -567,6 +639,21 @@ route_duration_estimate_seconds=$(python3 "${RESULT_TOOL}" estimate-jmh-runtime 
     "${jmh_runtime_arguments[@]}" \
     --additional-seconds "${additional_duration_allowance_seconds}" \
     --maximum-seconds "${maximum_route_seconds}")
+
+record_unit_metadata()
+{
+    [[ -n "${UNIT_DIRECTORY}" ]] || return 0
+    local maximum_relative_standard_error=-
+    if [[ "${JMH_EXECUTION_PROTOCOL}" == multi-row-process-bounded ]]; then
+        maximum_relative_standard_error=${frozen_maximum_relative_standard_error}
+    fi
+    {
+        printf 'unit_id=%s\n' "${UNIT_ID}"
+        printf 'unit_calibration=%s\n' "${UNIT_CALIBRATION}"
+        printf 'jmh_selector_count=%s\n' "$(($(wc -l < "${RESULT_DIR}/jmh-selectors.tsv") - 1))"
+        printf 'maximum_relative_standard_error=%s\n' "${maximum_relative_standard_error}"
+    } >> "${RESULT_DIR}/run-metadata.txt"
+}
 
 if [[ "${PLAN_ONLY}" == true ]]; then
     {
@@ -634,6 +721,7 @@ if [[ "${PLAN_ONLY}" == true ]]; then
         printf 'route_static_duration_estimate_seconds=%s\n' "${route_duration_estimate_seconds}"
         printf 'route_static_duration_limit_seconds=%s\n' "${maximum_route_seconds}"
     } > "${RESULT_DIR}/run-metadata.txt"
+    record_unit_metadata
     printf 'status=planned\n' > "${status_file}"
     trap - EXIT
     echo "Planned ${SHARD_ID} ${PROTOCOL} ${ROUTE} ($(($(wc -l < "${RESULT_DIR}/expected-rows.tsv") - 1)) rows)"
@@ -758,6 +846,7 @@ manifest_sha256=$(sha256sum "${MANIFEST}" | awk '{print $1}')
     printf 'jmh_row_order=jmh-deterministic-no-cli-randomization\n'
     printf 'jmh_host_compiler_hints=jmh-generated-and-installed\n'
 } > "${RESULT_DIR}/run-metadata.txt"
+record_unit_metadata
 
 # Where each engine this route used came from: prebuilt:<archive SHA-256>, local, or not-used.
 native_re2_build=not-used
@@ -806,6 +895,14 @@ jmh_process_jvm_arguments=("${route_jvm_arguments[@]}" -Xms"${HEAP_SIZE}" -Xmx"$
 jmh_fork_arguments="${jmh_process_jvm_arguments[*]}"
 jmh_launcher_jvm_arguments=("${route_jvm_arguments[@]}" -Xms64m -Xmx256m)
 jmh_host_compiler_arguments=()
+calibration_jvm_arguments=("${route_jvm_arguments[@]}")
+if [[ -n "${UNIT_DIRECTORY}" ]]; then
+    # A unit's calibrations compare across its routes, and later with the next
+    # unit's, so every unit calibrates in the native-access JVM.
+    calibration_jvm_arguments=(--enable-native-access=ALL-UNNAMED --illegal-native-access=deny --add-modules=jdk.incubator.vector)
+fi
+calibration_launcher_jvm_arguments=("${calibration_jvm_arguments[@]}" -Xms64m -Xmx256m)
+calibration_fork_arguments="${calibration_jvm_arguments[*]} -Xms${HEAP_SIZE} -Xmx${HEAP_SIZE} -XX:+AlwaysPreTouch"
 
 prepare_jmh_host_compiler_arguments()
 {
@@ -847,17 +944,88 @@ taskset --cpu-list "${CPU_LIST}" \
     -cp "${CLASSPATH}" \
     io.airlift.regulator.DfaAbsolutePointerProbe "${expected_native_access}" \
     2>&1 | tee "${semantic_log}"
-(
-    cd "${ROOT}"
-    JDK_JAVA_OPTIONS="${semantic_java_options}" \
-        ./mvnw "${MAVEN_ARGS[@]}" -q \
-        -Dtest="${semantic_tests}" test
-) 2>&1 | tee -a "${semantic_log}"
-if ! compgen -G "${default_semantic_report_dir}/TEST-*.xml" >/dev/null; then
-    echo "Semantic tests produced no Surefire XML reports" >&2
-    exit 1
+# Units of one shard on one host share a route's Surefire semantic tests. The
+# receipt is keyed by the host epoch and candidate identity and verified by
+# hash; each unit still runs the native probe above and its handler's own
+# preparation and verifiers below.
+semantic_receipt_directory=
+semantic_receipt=measured
+if [[ -n "${UNIT_DIRECTORY}" ]]; then
+    unit_host_epoch=${RE2_CAMPAIGN_HOST_EPOCH:-$(environment_value host_epoch)}
+    if [[ -n "${unit_host_epoch}" ]]; then
+        semantic_receipt_key=$(
+            printf '%s\n' \
+                "host_epoch=${unit_host_epoch}" \
+                "shard_id=${SHARD_ID}" \
+                "route=${ROUTE}" \
+                "handler=${handler}" \
+                "semantic_tests=${semantic_tests}" \
+                "candidate_commit=${candidate_commit}" \
+                "engine_tree=${engine_tree}" \
+                "engine_content_sha256=${source_hash_before}" \
+                "manifest_sha256=${manifest_sha256}" \
+                "regulator_snapshot_sha256=${REGULATOR_SNAPSHOT_SHA256:-}" \
+                "release_version=${REGULATOR_RELEASE_VERSION:-}" |
+                sha256sum |
+                awk '{print $1}')
+        semantic_receipt_directory="${SHARED_WORK_DIR}/semantic-receipts/${semantic_receipt_key}"
+    fi
 fi
-cp "${default_semantic_report_dir}"/TEST-*.xml "${semantic_report_dir}/"
+
+semantic_receipt_is_valid()
+{
+    local directory=$1
+    [[ -s "${directory}/receipt.sha256" && -s "${directory}/surefire.log" ]] || return 1
+    compgen -G "${directory}/reports/TEST-*.xml" >/dev/null || return 1
+    # The receipt must list exactly the files it holds, each with its hash.
+    [[ "$(cd "${directory}" && find . -type f ! -name receipt.sha256 | sed 's|^[.]/||' | sort)" == \
+        "$(awk '{print $2}' "${directory}/receipt.sha256" | sort)" ]] || return 1
+    (cd "${directory}" && sha256sum --check --quiet --strict receipt.sha256) >/dev/null 2>&1
+}
+
+store_semantic_receipt()
+{
+    local directory=$1
+    local surefire_log=$2
+    local staging="${directory}.staging"
+    rm -rf "${staging}" "${directory}"
+    mkdir -p "${staging}/reports"
+    cp "${surefire_log}" "${staging}/surefire.log"
+    cp "${semantic_report_dir}"/TEST-*.xml "${staging}/reports/"
+    (cd "${staging}" && find . -type f | sed 's|^[.]/||' | sort | xargs sha256sum) > "${RESULT_DIR}/semantic-receipt.sha256"
+    cp "${RESULT_DIR}/semantic-receipt.sha256" "${staging}/receipt.sha256"
+    mv "${staging}" "${directory}"
+}
+
+if [[ -n "${semantic_receipt_directory}" ]] && semantic_receipt_is_valid "${semantic_receipt_directory}"; then
+    cat "${semantic_receipt_directory}/surefire.log" >> "${semantic_log}"
+    cp "${semantic_receipt_directory}"/reports/TEST-*.xml "${semantic_report_dir}/"
+    cp "${semantic_receipt_directory}/receipt.sha256" "${RESULT_DIR}/semantic-receipt.sha256"
+    semantic_receipt=cached
+else
+    surefire_logs=("${semantic_log}")
+    if [[ -n "${semantic_receipt_directory}" ]]; then
+        surefire_logs+=("${RESULT_DIR}/logs/semantic-surefire.log")
+    fi
+    (
+        cd "${ROOT}"
+        JDK_JAVA_OPTIONS="${semantic_java_options}" \
+            ./mvnw "${MAVEN_ARGS[@]}" -q \
+            -Dtest="${semantic_tests}" test
+    ) 2>&1 | tee -a "${surefire_logs[@]}"
+    if ! compgen -G "${default_semantic_report_dir}/TEST-*.xml" >/dev/null; then
+        echo "Semantic tests produced no Surefire XML reports" >&2
+        exit 1
+    fi
+    cp "${default_semantic_report_dir}"/TEST-*.xml "${semantic_report_dir}/"
+    if [[ -n "${semantic_receipt_directory}" ]]; then
+        store_semantic_receipt "${semantic_receipt_directory}" "${RESULT_DIR}/logs/semantic-surefire.log"
+    fi
+fi
+if [[ -n "${semantic_receipt_directory}" ]]; then
+    printf 'semantic_receipt=%s\nsemantic_receipt_sha256=%s\n' "${semantic_receipt}" \
+        "$(sha256sum "${RESULT_DIR}/semantic-receipt.sha256" | awk '{print $1}')" >> "${RESULT_DIR}/run-metadata.txt"
+fi
 
 prepare_pinned_trino()
 {
@@ -976,13 +1144,13 @@ prepare_rebar()
     REBAR_TUNED_NATIVE="${SHARED_WORK_DIR}/rebar/native-tuned"
     REBAR_MODEL_FILTER='^(?:compile|count|count-spans|count-captures|grep|grep-captures)$'
     REBAR_PRIMARY_BENCHMARK_FILTER=$(python3 "${RESULT_TOOL}" jmh-filter \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --system "${candidate_system}")
     REBAR_JONI_BENCHMARK_FILTER=
     if tr ',' '\n' <<<"${systems}" | grep -Fqx joni; then
         REBAR_JONI_BENCHMARK_FILTER=$(python3 "${RESULT_TOOL}" jmh-filter \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system joni)
     fi
@@ -1132,7 +1300,7 @@ PY
         --test > "${RESULT_DIR}/raw/rebar-primary-verification.csv" \
         2> "${RESULT_DIR}/logs/rebar-primary-verification.log" || primary_verification_status=$?
     python3 "${SCRIPT_DIR}/validate-rebar-shard-verification.py" \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --systems "${primary_systems}" \
         --verification "${RESULT_DIR}/raw/rebar-primary-verification.csv" \
@@ -1160,7 +1328,7 @@ PY
             --test > "${RESULT_DIR}/raw/rebar-joni-verification.csv" \
             2> "${RESULT_DIR}/logs/rebar-joni-verification.log" || joni_verification_status=$?
         python3 "${SCRIPT_DIR}/validate-rebar-shard-verification.py" \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --systems joni \
             --verification "${RESULT_DIR}/raw/rebar-joni-verification.csv" \
@@ -1169,7 +1337,7 @@ PY
             --append
         cat "${RESULT_DIR}/raw/rebar-joni-verification.csv" >> "${semantic_log}"
         REBAR_JONI_BENCHMARK_FILTER=$(python3 "${RESULT_TOOL}" jmh-filter \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system joni \
             --rebar-outcomes "${RESULT_DIR}/raw/rebar-outcomes.tsv")
@@ -1227,7 +1395,7 @@ run_calibration_jmh_with_classpath()
     local output=$3
     shift 3
     taskset --cpu-list "${CPU_LIST}" \
-        java "${jmh_launcher_jvm_arguments[@]}" \
+        java "${calibration_launcher_jvm_arguments[@]}" \
         -cp "${classpath}" \
         org.openjdk.jmh.Main "${filter}" \
         -f "${CALIBRATION_FORKS}" \
@@ -1237,7 +1405,7 @@ run_calibration_jmh_with_classpath()
         -r "${CALIBRATION_MEASUREMENT_TIME}" \
         -foe true \
         -prof gc \
-        -jvmArgs "${jmh_fork_arguments}" \
+        -jvmArgs "${calibration_fork_arguments}" \
         -rf json \
         -rff "${output}" \
         "$@"
@@ -1263,6 +1431,7 @@ run_protocol_qualification()
         [[ "${representative_shard}" == "${SHARD_ID}" ]] || continue
         [[ "${representative_replica}" == "${protocol_replica_id}" ]] || continue
         [[ "${representative_route}" == "${ROUTE}" ]] || continue
+        unit_holds_representative "${protocol_replica_id}" "${manifest_row_id}" || continue
         local representative_time
         representative_time=$(frozen_route_value representative "${manifest_row_id}")
         [[ "${representative_time}" != 1s ]] || continue
@@ -1377,10 +1546,13 @@ PY
 }
 
 # Qualification reads an invocation's warmup window from its rows' frozen protocol.
+# A unit route returns nothing here; its selector runner reads each selector's frozen windows.
 jmh_warmup_time()
 {
     if [[ "${PROTOCOL}" == smoke ]]; then
         printf '%s\n' "${JMH_PROCESS_TIME}"
+    elif [[ -n "${UNIT_DIRECTORY}" ]]; then
+        return 0
     else
         frozen_protocol --execution jmh-processes --field warmup_time "$@"
     fi
@@ -1394,6 +1566,19 @@ set_jmh_input_files()
     local full_protocol_benchmark
     local process_index
     JMH_INPUT_FILES=()
+    if [[ -n "${UNIT_DIRECTORY}" ]]; then
+        local selector kind processes
+        while IFS=$'\t' read -r selector _ _ kind processes _; do
+            if [[ "${kind}" == processes ]]; then
+                for ((process_index = 1; process_index <= processes; process_index++)); do
+                    JMH_INPUT_FILES+=("${output_base}-selector-${selector}-process-${process_index}.json")
+                done
+            else
+                JMH_INPUT_FILES+=("${output_base}-selector-${selector}.json")
+            fi
+        done < <(tail -n +2 "${output_base}-selectors.tsv")
+        return
+    fi
     for ((process_index = 1; process_index <= JMH_PROCESS_COUNT; process_index++)); do
         JMH_INPUT_FILES+=("${output_base}-process-${process_index}.json")
     done
@@ -1414,6 +1599,10 @@ run_jmh_with_classpath()
     local filter=$2
     local output=$3
     shift 3
+    if [[ -n "${UNIT_DIRECTORY}" && -z "${JMH_UNIT_SELECTOR:-}" ]]; then
+        run_unit_jmh_selectors "${classpath}" "${filter}" "${output}" "$@"
+        return
+    fi
     local output_base=${output%.json}
     local warmup_time=${JMH_PROCESS_WARMUP_TIME_OVERRIDE:-${JMH_PROCESS_TIME}}
     prepare_jmh_host_compiler_arguments "${classpath}" "$(basename "${output_base}")"
@@ -1512,6 +1701,15 @@ run_jmh_with_classpath()
     fi
 }
 
+set_forked_jmh_input_files()
+{
+    if [[ -n "${UNIT_DIRECTORY}" ]]; then
+        set_jmh_input_files "$1"
+    else
+        JMH_INPUT_FILES=("$1")
+    fi
+}
+
 run_jmh()
 {
     run_jmh_with_classpath "${CLASSPATH}" "$@"
@@ -1523,6 +1721,10 @@ run_joni_jmh_with_classpath()
     local filter=$2
     local output=$3
     shift 3
+    if [[ -n "${UNIT_DIRECTORY}" && -z "${JMH_UNIT_SELECTOR:-}" ]]; then
+        run_unit_jmh_selectors "${classpath}" "${filter}" "${output}" "$@"
+        return
+    fi
     local joni_time=${BASELINE_JONI_JMH_TIME:-${JONI_JMH_TIME}}
     taskset --cpu-list "${CPU_LIST}" \
         java "${jmh_launcher_jvm_arguments[@]}" \
@@ -1541,6 +1743,74 @@ run_joni_jmh_with_classpath()
         "$@"
 }
 
+# A unit handler call runs its selected selectors one after another: process
+# selectors through the process runner, forked selectors through the forked
+# runner, each at its own protocol, with explicit -p values or, for a whole
+# method JMH cannot select by value, the handler's own arguments. The handler's
+# -p values narrow the selectors it runs; its other arguments reach every one.
+run_unit_jmh_selectors()
+{
+    local classpath=$1
+    local filter=$2
+    local output=$3
+    shift 3
+    local output_base=${output%.json}
+    local warmup_arguments=()
+    if [[ "${PROTOCOL}" == smoke ]]; then
+        warmup_arguments=(--warmup-time "${JMH_PROCESS_WARMUP_TIME_OVERRIDE:-${JMH_PROCESS_TIME}}")
+    fi
+    local selection_arguments=()
+    local handler_arguments=()
+    local arguments=("$@")
+    local index
+    for ((index = 0; index < ${#arguments[@]}; index++)); do
+        if [[ "${arguments[index]}" == -p ]]; then
+            selection_arguments+=(--parameter "${arguments[index + 1]}")
+            index=$((index + 1))
+        else
+            handler_arguments+=("${arguments[index]}")
+        fi
+    done
+    python3 "${UNIT_TOOL}" select \
+        --selectors "${RESULT_DIR}/jmh-selectors.tsv" \
+        --filter "${filter}" \
+        "${warmup_arguments[@]}" \
+        "${selection_arguments[@]}" \
+        --output-base "${output_base}"
+    local selector kind processes warmup_iterations warmup_time measurement_iterations measurement_time
+    local selector_filter parameters
+    while IFS=$'\t' read -r -u 3 selector _ _ kind processes warmup_iterations warmup_time \
+            measurement_iterations measurement_time _ parameters _ selector_filter; do
+        local parameter_arguments=("$@")
+        if [[ "${parameters}" != route ]]; then
+            parameter_arguments=()
+            local parameter
+            while IFS= read -r parameter; do
+                parameter_arguments+=(-p "${parameter}")
+            done < "${output_base}-selector-${selector}-parameters.txt"
+            parameter_arguments+=("${handler_arguments[@]}")
+        fi
+        if [[ "${kind}" == processes ]]; then
+            JMH_UNIT_SELECTOR=true \
+                JMH_PROCESS_COUNT=${processes} \
+                JMH_PROCESS_WARMUP_ITERATIONS=${warmup_iterations} \
+                JMH_PROCESS_MEASUREMENT_ITERATIONS=${measurement_iterations} \
+                JMH_PROCESS_TIME=${measurement_time} \
+                JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+                run_jmh_with_classpath "${classpath}" "${selector_filter}" \
+                "${output_base}-selector-${selector}.json" "${parameter_arguments[@]}"
+        else
+            JMH_UNIT_SELECTOR=true \
+                JONI_JMH_FORKS=${processes} \
+                JMH_PROCESS_WARMUP_ITERATIONS=${warmup_iterations} \
+                JMH_PROCESS_MEASUREMENT_ITERATIONS=${measurement_iterations} \
+                JONI_JMH_TIME=${measurement_time} \
+                run_joni_jmh_with_classpath "${classpath}" "${selector_filter}" \
+                "${output_base}-selector-${selector}.json" "${parameter_arguments[@]}"
+        fi
+    done 3< <(tail -n +2 "${output_base}-selectors.tsv")
+}
+
 joni_process_arguments=()
 
 secondary_metric_arguments=()
@@ -1548,23 +1818,32 @@ if [[ ${JMH_PROCESS_COUNT} -gt 1 ]]; then
     secondary_metric_arguments=(--allow-missing-secondary-metrics)
 fi
 mixed_process_arguments=()
-if [[ "${PROTOCOL}" == qualification && ${full_protocol_row_count} -gt 0 ]]; then
+if [[ -n "${UNIT_DIRECTORY}" || ( "${PROTOCOL}" == qualification && ${full_protocol_row_count} -gt 0 ) ]]; then
     mixed_process_arguments=(
         --allow-mixed-process-sets
         --expected-process-groups "${JMH_PROCESS_COUNT}")
+fi
+if [[ -n "${UNIT_DIRECTORY}" ]]; then
+    # Each selector of a unit call writes its own results.
+    joni_process_arguments=(
+        --allow-mixed-process-sets
+        --expected-process-groups "${JONI_JMH_FORKS}")
 fi
 
 calibration_filter='^io\.airlift\.regulator\.BenchmarkExpressionPlans\.findLiteral$'
 calibration_parameters=(-p workload=KIB_LATE)
 run_protocol_qualification
-if [[ ${CALIBRATION_PRIME_INVOCATIONS} -gt 0 ]]; then
-    run_calibration_jmh "${calibration_filter}" "${RESULT_DIR}/raw/calibration-prime.json" \
+# A unit calibrates before its first route and after its last.
+if [[ "${UNIT_CALIBRATION}" == before || "${UNIT_CALIBRATION}" == both ]]; then
+    if [[ ${CALIBRATION_PRIME_INVOCATIONS} -gt 0 ]]; then
+        run_calibration_jmh "${calibration_filter}" "${RESULT_DIR}/raw/calibration-prime.json" \
+            "${calibration_parameters[@]}" |
+            tee "${RESULT_DIR}/logs/calibration-prime.log"
+    fi
+    run_calibration_jmh "${calibration_filter}" "${RESULT_DIR}/raw/calibration-before.json" \
         "${calibration_parameters[@]}" |
-        tee "${RESULT_DIR}/logs/calibration-prime.log"
+        tee "${RESULT_DIR}/logs/calibration-before.log"
 fi
-run_calibration_jmh "${calibration_filter}" "${RESULT_DIR}/raw/calibration-before.json" \
-    "${calibration_parameters[@]}" |
-    tee "${RESULT_DIR}/logs/calibration-before.log"
 
 normalized_files=()
 
@@ -1586,7 +1865,7 @@ run_generic_jmh_shard()
             continue
         fi
         filter=$(python3 "${RESULT_TOOL}" jmh-filter \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --suite "${suite}" \
             --system "${candidate_system}")
@@ -1602,7 +1881,7 @@ run_generic_jmh_shard()
         set_jmh_input_files "${output}"
         normalized="${RESULT_DIR}/normalized/${suite}-${candidate_system}.tsv"
         python3 "${RESULT_TOOL}" normalize-jmh \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --suite "${suite}" \
             --system "${candidate_system}" \
@@ -1616,18 +1895,24 @@ run_generic_jmh_shard()
     done < <(jmh_suite_rows)
 }
 
+# A unit may hold only one of a handler's phases; a route holds them all.
+unit_holds_rows()
+{
+    [[ -z "${UNIT_DIRECTORY}" || $(frozen_protocol "$@" --count) -gt 0 ]]
+}
+
 run_traditional_shard()
 {
     local filter
     filter=$(python3 "${RESULT_TOOL}" jmh-filter \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --system "${candidate_system}")
     local java_output="${RESULT_DIR}/raw/traditional-${ROUTE}.json"
     local java_normalized="${RESULT_DIR}/normalized/traditional-${candidate_system}.tsv"
 
     local native_benchmark="${ROOT}/target/re2-benchmark-build/regexp_benchmark"
-    if [[ "${ROUTE}" == native-access && ${native_system_row_count} -gt 0 ]]; then
+    if [[ ${native_system_row_count} -gt 0 ]]; then
         native_re2_build=$(prebuilt_engine native || echo local)
         if [[ "${native_re2_build}" == local ]]; then
             RE2_NATIVE_TUNING=host "${ROOT}/tools/re2-benchmark/build.sh" |
@@ -1637,7 +1922,7 @@ run_traditional_shard()
         fi
         local native_filter
         native_filter=$(python3 "${RESULT_TOOL}" native-filter \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system native-re2-before)
         taskset --cpu-list "${CPU_LIST}" \
@@ -1650,7 +1935,7 @@ run_traditional_shard()
             --benchmark_out="${RESULT_DIR}/raw/traditional-native-before.json" |
             tee "${RESULT_DIR}/logs/traditional-native-before.log"
         python3 "${RESULT_TOOL}" normalize-native \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system native-re2-before \
             --input "${RESULT_DIR}/raw/traditional-native-before.json" \
@@ -1679,48 +1964,52 @@ run_traditional_shard()
         done
 
         local warmup_time
-        warmup_time=$(jmh_warmup_time --system "${candidate_system}" "${regular_selection[@]}")
-        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
-            run_jmh "${regular_filter}" "${regular_output}" |
-            tee "${RESULT_DIR}/logs/traditional-regular-${ROUTE}.log"
-        set_jmh_input_files "${regular_output}"
-        python3 "${RESULT_TOOL}" normalize-jmh \
-            --manifest "${MANIFEST}" \
-            --shard "${SHARD_ID}" \
-            --suite traditional \
-            --system "${candidate_system}" \
-            "${regular_selection[@]}" \
-            --input "${JMH_INPUT_FILES[@]}" \
-            "${secondary_metric_arguments[@]}" \
-            "${mixed_process_arguments[@]}" \
-            --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
-            "${precision_arguments[@]}" \
-            --allow-traditional-unpaired \
-            --output "${regular_normalized}"
-        normalized_files+=("${regular_normalized}")
-
-        # Smoke has always given these rows the extended warmup window too.
-        warmup_time=${EXTENDED_WARMUP_TIME}
-        if [[ "${PROTOCOL}" == qualification ]]; then
-            warmup_time=$(jmh_warmup_time --system "${candidate_system}" "${extended_selection[@]}")
+        if unit_holds_rows --system "${candidate_system}" "${regular_selection[@]}"; then
+            warmup_time=$(jmh_warmup_time --system "${candidate_system}" "${regular_selection[@]}")
+            JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+                run_jmh "${regular_filter}" "${regular_output}" |
+                tee "${RESULT_DIR}/logs/traditional-regular-${ROUTE}.log"
+            set_jmh_input_files "${regular_output}"
+            python3 "${RESULT_TOOL}" normalize-jmh \
+                --manifest "${SELECTION_MANIFEST}" \
+                --shard "${SHARD_ID}" \
+                --suite traditional \
+                --system "${candidate_system}" \
+                "${regular_selection[@]}" \
+                --input "${JMH_INPUT_FILES[@]}" \
+                "${secondary_metric_arguments[@]}" \
+                "${mixed_process_arguments[@]}" \
+                --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
+                "${precision_arguments[@]}" \
+                --allow-traditional-unpaired \
+                --output "${regular_normalized}"
+            normalized_files+=("${regular_normalized}")
         fi
-        JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
-            run_jmh "${extended_filter}" "${extended_output}" |
-            tee "${RESULT_DIR}/logs/traditional-extended-${ROUTE}.log"
-        set_jmh_input_files "${extended_output}"
-        python3 "${RESULT_TOOL}" normalize-jmh \
-            --manifest "${MANIFEST}" \
-            --shard "${SHARD_ID}" \
-            --suite traditional \
-            --system "${candidate_system}" \
-            "${extended_selection[@]}" \
-            --input "${JMH_INPUT_FILES[@]}" \
-            "${secondary_metric_arguments[@]}" \
-            "${mixed_process_arguments[@]}" \
-            --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
-            "${precision_arguments[@]}" \
-            --output "${extended_normalized}"
-        normalized_files+=("${extended_normalized}")
+
+        if unit_holds_rows --system "${candidate_system}" "${extended_selection[@]}"; then
+            # Smoke has always given these rows the extended warmup window too.
+            warmup_time=${EXTENDED_WARMUP_TIME}
+            if [[ "${PROTOCOL}" == qualification ]]; then
+                warmup_time=$(jmh_warmup_time --system "${candidate_system}" "${extended_selection[@]}")
+            fi
+            JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
+                run_jmh "${extended_filter}" "${extended_output}" |
+                tee "${RESULT_DIR}/logs/traditional-extended-${ROUTE}.log"
+            set_jmh_input_files "${extended_output}"
+            python3 "${RESULT_TOOL}" normalize-jmh \
+                --manifest "${SELECTION_MANIFEST}" \
+                --shard "${SHARD_ID}" \
+                --suite traditional \
+                --system "${candidate_system}" \
+                "${extended_selection[@]}" \
+                --input "${JMH_INPUT_FILES[@]}" \
+                "${secondary_metric_arguments[@]}" \
+                "${mixed_process_arguments[@]}" \
+                --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
+                "${precision_arguments[@]}" \
+                --output "${extended_normalized}"
+            normalized_files+=("${extended_normalized}")
+        fi
     else
         local warmup_time
         warmup_time=$(jmh_warmup_time --system "${candidate_system}")
@@ -1729,7 +2018,7 @@ run_traditional_shard()
             tee "${RESULT_DIR}/logs/traditional-${ROUTE}.log"
         set_jmh_input_files "${java_output}"
         python3 "${RESULT_TOOL}" normalize-jmh \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --suite traditional \
             --system "${candidate_system}" \
@@ -1743,7 +2032,7 @@ run_traditional_shard()
         normalized_files+=("${java_normalized}")
     fi
 
-    if [[ "${ROUTE}" == native-access && ${native_system_row_count} -gt 0 ]]; then
+    if [[ ${native_system_row_count} -gt 0 ]]; then
         taskset --cpu-list "${CPU_LIST}" \
             "${native_benchmark}" \
             --benchmark_filter="${native_filter}" \
@@ -1754,7 +2043,7 @@ run_traditional_shard()
             --benchmark_out="${RESULT_DIR}/raw/traditional-native-after.json" |
             tee "${RESULT_DIR}/logs/traditional-native-after.log"
         python3 "${RESULT_TOOL}" normalize-native \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system native-re2-after \
             --input "${RESULT_DIR}/raw/traditional-native-after.json" \
@@ -1762,7 +2051,7 @@ run_traditional_shard()
             --output "${RESULT_DIR}/normalized/traditional-native-after.tsv"
         normalized_files+=("${RESULT_DIR}/normalized/traditional-native-after.tsv")
         python3 "${RESULT_TOOL}" bracket \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --before "${RESULT_DIR}/normalized/traditional-native-before.tsv" \
             --after "${RESULT_DIR}/normalized/traditional-native-after.tsv" \
             --output "${RESULT_DIR}/native-bracket.tsv"
@@ -1833,11 +2122,11 @@ run_jmh_per_workload()
         "${launcher}" "${classpath}" "^${filter_benchmark//./\\.}$" "${output}" "${parameter_arguments[@]}" "$@" |
             tee "${RESULT_DIR}/logs/${label}.log"
         if [[ "${mode}" == forked ]]; then
-            workload_input_files+=("${output}")
+            set_forked_jmh_input_files "${output}"
         else
             set_jmh_input_files "${output}"
-            workload_input_files+=("${JMH_INPUT_FILES[@]}")
         fi
+        workload_input_files+=("${JMH_INPUT_FILES[@]}")
     done
     JMH_INPUT_FILES=("${workload_input_files[@]}")
     JMH_PROCESS_ARGUMENTS=(--allow-mixed-process-sets --expected-process-groups "${process_groups}")
@@ -1858,7 +2147,7 @@ run_trino_operations_candidate()
         local filter
         local output="${RESULT_DIR}/raw/trino-operations-${system}.json"
         filter=$(python3 "${RESULT_TOOL}" jmh-filter \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system "${system}")
         JMH_PROCESS_WARMUP_TIME_OVERRIDE=${warmup_time} \
@@ -1867,7 +2156,7 @@ run_trino_operations_candidate()
         set_jmh_input_files "${output}"
     fi
     python3 "${RESULT_TOOL}" normalize-jmh \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --system "${system}" \
         --input "${JMH_INPUT_FILES[@]}" \
@@ -1882,7 +2171,7 @@ run_trino_operations_candidate()
 run_trino_operations_joni()
 {
     local normalized="${RESULT_DIR}/normalized/trino-operations-joni.tsv"
-    local process_arguments=("${mixed_process_arguments[@]}")
+    local process_arguments=("${joni_process_arguments[@]}")
     if [[ "${jmh_invocation_per_workload}" == true ]]; then
         # Joni keeps its forward workload order; only the Regulator variants reverse.
         run_jmh_per_workload forward forked "${PINNED_TRINO_CLASSPATH}" trino-operations joni -
@@ -1891,19 +2180,18 @@ run_trino_operations_joni()
         local filter
         local output="${RESULT_DIR}/raw/trino-operations-joni.json"
         filter=$(python3 "${RESULT_TOOL}" jmh-filter \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system joni)
         run_joni_jmh_with_classpath "${PINNED_TRINO_CLASSPATH}" "${filter}" "${output}" |
             tee "${RESULT_DIR}/logs/trino-operations-joni.log"
-        JMH_INPUT_FILES=("${output}")
+        set_forked_jmh_input_files "${output}"
     fi
     python3 "${RESULT_TOOL}" normalize-jmh \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --system joni \
         --input "${JMH_INPUT_FILES[@]}" \
-        "${joni_process_arguments[@]}" \
         "${secondary_metric_arguments[@]}" \
         "${process_arguments[@]}" \
         --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
@@ -1987,7 +2275,7 @@ run_final_line_candidate()
         tee "${RESULT_DIR}/logs/trino-final-line-${candidate_system}.log"
     set_jmh_input_files "${output}"
     python3 "${RESULT_TOOL}" normalize-mapped-jmh \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --suite trino-final-line \
         --system "${candidate_system}" \
@@ -2009,9 +2297,9 @@ run_final_line_joni()
     local normalized="${RESULT_DIR}/normalized/trino-final-line-joni.tsv"
     run_joni_jmh_with_classpath "${SPECIAL_CLASSPATH}" "${filter}" "${output}" |
         tee "${RESULT_DIR}/logs/trino-final-line-joni.log"
-    JMH_INPUT_FILES=("${output}")
+    set_forked_jmh_input_files "${output}"
     python3 "${RESULT_TOOL}" normalize-mapped-jmh \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --suite trino-final-line \
         --system joni \
@@ -2042,7 +2330,7 @@ run_trino_like_system()
     local operation=${3:-matches}
     local benchmark_class=io.airlift.regulator.benchmark.BenchmarkTrinoLike
     local suite=trino-like
-    local process_arguments=()
+    local process_arguments=("${mixed_process_arguments[@]}")
     if [[ "${SHARD_ID}" == trino-like-specialized ]]; then
         benchmark_class=io.airlift.regulator.BenchmarkTrinoLikeTpch
         suite=trino-like-specialized
@@ -2069,7 +2357,7 @@ run_trino_like_system()
         set_jmh_input_files "${output}"
     fi
     python3 "${RESULT_TOOL}" normalize-mapped-jmh \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --suite "${suite}" \
         --system "${system}" \
@@ -2126,7 +2414,7 @@ run_lifecycle_candidate()
     local output="${RESULT_DIR}/raw/lifecycle-${candidate_system}.json"
     local normalized="${RESULT_DIR}/normalized/lifecycle-${candidate_system}.tsv"
     filter=$(python3 "${RESULT_TOOL}" jmh-filter \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --suite lifecycle \
         --system "${candidate_system}")
@@ -2137,12 +2425,13 @@ run_lifecycle_candidate()
         tee "${RESULT_DIR}/logs/lifecycle-${candidate_system}.log"
     set_jmh_input_files "${output}"
     python3 "${RESULT_TOOL}" normalize-jmh \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --suite lifecycle \
         --system "${candidate_system}" \
         --input "${JMH_INPUT_FILES[@]}" \
         "${secondary_metric_arguments[@]}" \
+        "${mixed_process_arguments[@]}" \
         --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
         "${precision_arguments[@]}" \
         --output "${normalized}"
@@ -2173,7 +2462,7 @@ run_memory_census_for_system()
         "${output_directory}/memory-census.csv" \
         "${output_directory}/summary"
     python3 "${RESULT_TOOL}" normalize-memory-census \
-        --manifest "${MANIFEST}" \
+        --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
         --system "${system}" \
         --engine "${engine}" \
@@ -2248,7 +2537,7 @@ run_rebar_shard()
         # Rebar measurement mode reports per-row errors in CSV and exits zero.
         # A process failure remains fatal, even when an earlier row timed out.
         python3 "${SCRIPT_DIR}/validate-rebar-shard-verification.py" \
-            --manifest "${MANIFEST}" --shard "${SHARD_ID}" --systems joni \
+            --manifest "${SELECTION_MANIFEST}" --shard "${SHARD_ID}" --systems joni \
             --verification "${RESULT_DIR}/raw/rebar-joni-measurements.csv" \
             --outcomes "${RESULT_DIR}/raw/rebar-outcomes.tsv" \
             --command-status "${measurement_status}" --append --measurement
@@ -2269,7 +2558,7 @@ run_rebar_shard()
         fi
         local normalized="${RESULT_DIR}/normalized/rebar-${system}.tsv"
         python3 "${RESULT_TOOL}" normalize-rebar \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system "${system}" \
             --input "${measurements}" \
@@ -2282,7 +2571,7 @@ run_rebar_shard()
     if tr ',' '\n' <<<"${systems}" | grep -Fqx native-re2-before &&
             tr ',' '\n' <<<"${systems}" | grep -Fqx native-re2-after; then
         python3 "${RESULT_TOOL}" bracket \
-            --manifest "${MANIFEST}" \
+            --manifest "${SELECTION_MANIFEST}" \
             --before "${RESULT_DIR}/normalized/rebar-native-re2-before.tsv" \
             --after "${RESULT_DIR}/normalized/rebar-native-re2-after.tsv" \
             --output "${RESULT_DIR}/native-bracket.tsv"
@@ -2304,13 +2593,18 @@ case "${handler}" in
         ;;
 esac
 
-run_calibration_jmh "${calibration_filter}" "${RESULT_DIR}/raw/calibration-after.json" \
-    "${calibration_parameters[@]}" |
-    tee "${RESULT_DIR}/logs/calibration-after.log"
-python3 "${RESULT_TOOL}" calibration \
-    --before "${RESULT_DIR}/raw/calibration-before.json" \
-    --after "${RESULT_DIR}/raw/calibration-after.json" \
-    --output "${RESULT_DIR}/calibration.tsv"
+if [[ "${UNIT_CALIBRATION}" == after || "${UNIT_CALIBRATION}" == both ]]; then
+    run_calibration_jmh "${calibration_filter}" "${RESULT_DIR}/raw/calibration-after.json" \
+        "${calibration_parameters[@]}" |
+        tee "${RESULT_DIR}/logs/calibration-after.log"
+fi
+# run-unit.sh calibrates a unit across its routes.
+if [[ -z "${UNIT_DIRECTORY}" ]]; then
+    python3 "${RESULT_TOOL}" calibration \
+        --before "${RESULT_DIR}/raw/calibration-before.json" \
+        --after "${RESULT_DIR}/raw/calibration-after.json" \
+        --output "${RESULT_DIR}/calibration.tsv"
+fi
 
 if [[ ${#normalized_files[@]} -eq 0 ]]; then
     echo "Shard produced no normalized result files" >&2
@@ -2349,18 +2643,9 @@ drift_arguments=(
 if [[ -s "${RESULT_DIR}/native-bracket.tsv" ]]; then
     drift_arguments+=(--native-bracket "${RESULT_DIR}/native-bracket.tsv")
 fi
-python3 "${RESULT_TOOL}" validate-drift "${drift_arguments[@]}"
-
-environment_value()
-{
-    local key=$1
-    local file
-    for file in "${RESULT_DIR}/environment-manifest.txt" "${RESULT_DIR}/environment.txt"; do
-        if [[ -f "${file}" ]]; then
-            awk -F= -v key="${key}" '$1 == key {print substr($0, length($1) + 2); exit}' "${file}"
-        fi
-    done | head -1
-}
+if [[ -z "${UNIT_DIRECTORY}" ]]; then
+    python3 "${RESULT_TOOL}" validate-drift "${drift_arguments[@]}"
+fi
 
 campaign_id=${RE2_CAMPAIGN_ID:-$(environment_value baseline_campaign)}
 platform=${RE2_CAMPAIGN_PLATFORM:-$(environment_value platform)}

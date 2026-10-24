@@ -27,12 +27,12 @@ class TestSemanticIdentity(unittest.TestCase):
     def test_native_probe_options_do_not_reach_measurements(self):
         source = (BASE / "run-shard.sh").read_text()
         options = source[source.index("route_jvm_arguments=("):source.index("prepare_jmh_host_compiler_arguments()")]
-        probe = source[source.index("expected_native_access=false\n"):source.index('(\n    cd "${ROOT}"\n    JDK_JAVA_OPTIONS=')]
+        probe = source[source.index("expected_native_access=false\n"):source.index("# Units of one shard on one host")]
         for route in ("native-access", "object-row"):
             with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 script = "set -euo pipefail\n"
-                script += f"ROUTE={shlex.quote(route)}\nHEAP_SIZE=8g\nCPU_LIST=0\nCLASSPATH=fixture\n"
+                script += f"ROUTE={shlex.quote(route)}\nHEAP_SIZE=8g\nCPU_LIST=0\nCLASSPATH=fixture\nUNIT_DIRECTORY=\n"
                 script += f"semantic_log={shlex.quote(str(root / 'probe.log'))}\n"
                 script += 'taskset() { shift 2; "$@"; }\njava() { printf "%s\\n" "$@"; }\n'
                 script += options + probe
@@ -90,7 +90,7 @@ class TestSemanticIdentity(unittest.TestCase):
                     }])
                     variables = {
                         "RESULT_DIR": str(root), "SCRIPT_DIR": str(BASE), "RESULT_TOOL": str(BASE / "shard_results.py"),
-                        "MANIFEST": str(manifest), "SHARD_ID": "rebar-g", "systems": systems,
+                        "MANIFEST": str(manifest), "SELECTION_MANIFEST": str(manifest), "SHARD_ID": "rebar-g", "systems": systems,
                         "REBAR_EXECUTABLE": "fake_rebar", "CPU_LIST": "0", "REBAR_BENCHMARK_DIRECTORY": str(root),
                         "REBAR_PRIMARY_ENGINE_FILTER": "primary", "REBAR_PRIMARY_BENCHMARK_FILTER": ".*",
                         "REBAR_MODEL_FILTER": "count", "REBAR_MAXIMUM_TIME": "1s", "REBAR_WARMUP_TIME": "1s",

@@ -43,6 +43,23 @@ NATIVE_MINIMUM_TIME = "1s"
 REBAR_WARMUP_TIME = "5s"
 REBAR_MAXIMUM_TIME = "5s"
 DURATION_UNITS = {"ms": 0.001, "s": 1.0}
+# Final-line and LIKE rows name a logical operation; one JMH method per system measures it.
+FINAL_LINE_CLASS = "io.trino.operator.scalar.BenchmarkTrinoFinalLine"
+TRINO_LIKE_CLASS = "io.airlift.regulator.benchmark.BenchmarkTrinoLike"
+TRINO_LIKE_SHARDS = frozenset({"trino-like", "like-compile", "like-single-use", "like-dfa-single-use"})
+TRINO_LIKE_METHODS = {
+    "regulator": "candidate",
+    "trino-optimized": "trinoOptimized",
+    "trino-sql": "trinoSql",
+}
+# The specialized LIKE shard measures the TPC-H workloads with its own methods.
+TRINO_LIKE_SPECIALIZED_SHARD = "trino-like-specialized"
+TRINO_LIKE_SPECIALIZED_CLASS = "io.airlift.regulator.BenchmarkTrinoLikeTpch"
+TRINO_LIKE_SPECIALIZED_METHODS = {
+    "regulator": "candidate",
+    "regulator-generated": "candidateGenerated",
+    "trino-sql": "trinoSql",
+}
 
 
 def read_tsv(path):
@@ -57,11 +74,34 @@ def seconds(duration):
     raise ValueError(f"invalid protocol duration {duration!r}")
 
 
-def manifest_benchmark(jmh_benchmark):
-    prefix = "io.trino.operator.scalar.BenchmarkTrinoFinalLine."
-    if jmh_benchmark.startswith(prefix) and jmh_benchmark.endswith("Regulator"):
-        return jmh_benchmark[len(prefix):-len("Regulator")]
-    return jmh_benchmark
+def manifest_benchmark(benchmark):
+    prefix = f"{FINAL_LINE_CLASS}."
+    if benchmark.startswith(prefix) and benchmark.endswith("Regulator"):
+        return benchmark[len(prefix):-len("Regulator")]
+    return benchmark
+
+
+def jmh_benchmark(row):
+    """The JMH method that measures a manifest row."""
+    if row["shard_id"] == "trino-final-line":
+        suffix = "Joni" if row["system"] == "joni" else "Regulator"
+        return f"{FINAL_LINE_CLASS}.{row['benchmark']}{suffix}"
+    if row["shard_id"] in TRINO_LIKE_SHARDS:
+        try:
+            method = TRINO_LIKE_METHODS[row["system"]]
+        except KeyError as error:
+            raise ValueError(f"manifest row {row['row_id']} has an unknown Trino LIKE system") from error
+        suffix = {"matches": "", "compile": "Compile", "singleUse": "SingleUse"}[row["benchmark"]]
+        return f"{TRINO_LIKE_CLASS}.{method}{suffix}"
+    if row["shard_id"] == TRINO_LIKE_SPECIALIZED_SHARD:
+        try:
+            method = TRINO_LIKE_SPECIALIZED_METHODS[row["system"]]
+        except KeyError as error:
+            raise ValueError(f"manifest row {row['row_id']} has an unknown specialized LIKE system") from error
+        if row["benchmark"] != "matches":
+            raise ValueError(f"manifest row {row['row_id']} has an unknown specialized LIKE operation")
+        return f"{TRINO_LIKE_SPECIALIZED_CLASS}.{method}"
+    return row["benchmark"]
 
 
 def parameters_match_selection(selection, parameters):

@@ -11,6 +11,7 @@ import host_duration
 import host_session
 import row_protocol
 import unit_cost
+import unit_session
 from shard_results import load_manifest
 
 
@@ -47,11 +48,10 @@ def check_cost_model(result_directory, shard, route, replica, protocols, represe
     """Pin the unit cost model to the route estimate run-shard.sh planned."""
     metadata = host_duration.read_properties(result_directory / "run-metadata.txt")
     rows = load_manifest(result_directory / "expected-rows.tsv")
-    protocol_replica = "1" if replica == 4 else str(replica)
     representative_count = sum(
         1 for representative in representatives
         if (representative["shard_id"], representative["replica_id"], representative["route"]) ==
-        (shard, protocol_replica, route) and
+        (shard, unit_session.protocol_replica(replica), route) and
         unit_cost.compares_with_reference(protocols[representative["manifest_row_id"]]))
     if representative_count != int(metadata["protocol_representative_count"]):
         raise SystemExit(

@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -18,13 +19,18 @@ from types import SimpleNamespace
 
 SOURCE = Path(__file__).with_name("shard_results.py")
 MANIFEST = Path(__file__).with_name("rows.tsv")
+sys.path.insert(0, str(SOURCE.parent))
 SPECIFICATION = importlib.util.spec_from_file_location("shard_results", SOURCE)
 SHARD_RESULTS = importlib.util.module_from_spec(SPECIFICATION)
 SPECIFICATION.loader.exec_module(SHARD_RESULTS)
+import row_protocol as ROW_PROTOCOL  # noqa: E402
+import unit_session as UNIT_SESSION  # noqa: E402
+import work_units as WORK_UNITS  # noqa: E402
 # The qualification process count the handler harness gives run-shard.sh.
 JMH_PROCESS_COUNT = 5
 with SOURCE.with_name("shard-dispatch.tsv").open(newline="", encoding="utf-8") as dispatch_file:
     DISPATCH = {row["shard_id"]: row for row in csv.DictReader(dispatch_file, delimiter="\t")}
+HANDLER_FUNCTIONS = {"trino-final-line": "run_final_line_shard", "jmh": "run_generic_jmh_shard"}
 
 
 def shell_function(source, name):
@@ -59,12 +65,18 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
             "run_jmh_with_classpath", "run_jmh", "run_joni_jmh_with_classpath", "run_jmh_per_workload",
             "run_ordered_joni_comparison", "run_trino_operations_candidate", "run_trino_operations_joni",
             "run_trino_operations_candidates", "run_trino_operations_shard", "run_trino_like_system",
-            "run_trino_like_shard", "frozen_protocol", "jmh_warmup_time")]
+            "run_trino_like_shard", "run_final_line_candidate", "run_final_line_joni", "run_final_line_shard",
+            "frozen_protocol", "jmh_warmup_time", "set_forked_jmh_input_files", "run_generic_jmh_shard",
+            "unit_holds_rows", "run_traditional_shard", "run_lifecycle_candidate", "run_lifecycle_regulator_phase",
+            "run_lifecycle_shard")]
         script = "\n".join([
             "set -euo pipefail",
             f"SHARD_ID={shard} ROUTE={route} CAMPAIGN_REPLICA_ID={replica} RESULT_DIR={shlex.quote(str(root))}",
             f"systems={dispatch[f'{route_column}_systems']} MANIFEST={shlex.quote(str(MANIFEST))}",
-            f"RESULT_TOOL={shlex.quote(str(SOURCE))}",
+            f"SELECTION_MANIFEST={shlex.quote(str(MANIFEST))} UNIT_DIRECTORY=",
+            f"RESULT_TOOL={shlex.quote(str(SOURCE))} SCRIPT_DIR={shlex.quote(str(SOURCE.parent))}",
+            # The native RE2 comparator is not a JMH launch.
+            f"native_system_row_count=0 EXTENDED_WARMUP_TIME=300ms ROOT={shlex.quote(str(SOURCE.parents[2]))}",
             f"FULL_PROTOCOL_BENCHMARKS={shlex.quote(str(SOURCE.with_name('full-protocol-benchmarks.tsv')))}",
             f"ROW_PROTOCOL={shlex.quote(str(SOURCE.with_name('row-protocol.tsv')))}",
             f"PROTOCOL=qualification JMH_PROCESS_COUNT={JMH_PROCESS_COUNT} JMH_PROCESS_TIME=1s JONI_JMH_FORKS=1 JONI_JMH_TIME=1s",
@@ -74,6 +86,7 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
             "jmh_process_jvm_arguments=() jmh_launcher_jvm_arguments=() jmh_host_compiler_arguments=()",
             "secondary_metric_arguments=(--allow-missing-secondary-metrics) mixed_process_arguments=()",
             "precision_arguments=() joni_process_arguments=() normalized_files=() joni_jmh_row_count=0",
+            f"candidate_system=regulator-{route} final_line_mappings=() final_line_joni_mappings=()",
             block("JMH_SUITE_ORDER=forward\n"), block("jmh_invocation_per_workload=false\n"),
             "taskset() { shift 2; \"$@\"; }",
             "java() {",
@@ -105,7 +118,7 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
             "    fi",
             "}",
             *functions,
-            f"run_{handler.replace('-', '_')}_shard",
+            HANDLER_FUNCTIONS.get(handler, f"run_{handler.replace('-', '_')}_shard"),
         ])
         subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True)
         launches = [tuple(line.split("\t")) for line in (root / "launches.tsv").read_text().splitlines()]
@@ -204,6 +217,7 @@ class TestShardResults(unittest.TestCase):
             script = (
                 "set -euo pipefail\n"
                 "PROTOCOL=qualification\n"
+                "UNIT_DIRECTORY=\n"
                 "JMH_PROCESS_COUNT=2\n"
                 "JMH_PROCESS_TIME=50ms\n"
                 "JMH_PROCESS_WARMUP_ITERATIONS=1\n"
@@ -336,6 +350,29 @@ class TestShardResults(unittest.TestCase):
                     self.assertEqual(
                         ["io.airlift.regulator.BenchmarkTrinoLikeTpch"], argument_values(arguments, "--benchmark-class"))
 
+    def testEveryUnitSelectorMatchesItsHandlersJmhFilters(self):
+        protocols = ROW_PROTOCOL.load(MANIFEST.with_name("row-protocol.tsv"))
+        manifest = SHARD_RESULTS.load_manifest(MANIFEST)
+        units = WORK_UNITS.load(MANIFEST.parent)
+        filters = {}
+        handlers = set()
+        for unit in units.values():
+            shard_rows = [row for row in manifest if row["shard_id"] == unit["shard_id"]]
+            for route, handler, _, share, _ in UNIT_SESSION.plan_routes(MANIFEST.parent, unit, "1"):
+                route_selectors = UNIT_SESSION.selectors(share, shard_rows, protocols, "qualification", {})
+                if not route_selectors:
+                    continue
+                handlers.add(handler)
+                key = (unit["shard_id"], route)
+                if key not in filters:
+                    launches, _, _ = run_shard_handler(*key, 1)
+                    filters[key] = [re.compile(launch[1]) for launch in launches]
+                for selector in route_selectors:
+                    for benchmark in selector["benchmarks"].split(","):
+                        with self.subTest(unit=unit["unit_id"], route=route, benchmark=benchmark):
+                            self.assertTrue(any(pattern.search(benchmark) for pattern in filters[key]))
+        self.assertLessEqual({"jmh", "traditional", "lifecycle", "trino-like", "trino-operations"}, handlers)
+
     def testPlannedStartupsMatchTheLaunchedJvms(self):
         dispatch = [
             row for shard, row in DISPATCH.items()
@@ -388,6 +425,68 @@ class TestShardResults(unittest.TestCase):
                                     capture_output=True, text=True)
         self.assertEqual(1, result.returncode)
         self.assertIn("does not match the frozen protocol rules", result.stderr)
+
+    def testUnitHandlerCallRunsEachSelectorAtItsProtocol(self):
+        source = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "jmh-selectors.tsv").write_text(
+                "\t".join(UNIT_SESSION.SELECTOR_FIELDS) + "\n"
+                "1\tregulator\tjmh-processes\tprocesses\t2\t3\t300ms\t4\t50ms\t"
+                'example.A.first,example.A.second\t{"size":["1","2"]}\t4\n'
+                "2\tregulator\tjmh-processes\tprocesses\t1\t1\t1s\t1\t1s\texample.B.whole\troute\t3\n"
+                "3\tjoni\tjmh-forks\tforks\t5\t10\t1s\t10\t1s\texample.A.joni\t{}\t1\n"
+                '4\tregulator\tjmh-processes\tprocesses\t1\t1\t1s\t1\t1s\texample.C.each\t{"workload":["a"]}\t1\n'
+                '5\tregulator\tjmh-processes\tprocesses\t1\t1\t1s\t1\t1s\texample.C.each\t{"workload":["b"]}\t1\n',
+                encoding="utf-8")
+            output = root / "call.json"
+            workload_output = root / "workload.json"
+            script = (
+                "set -euo pipefail\n"
+                "PROTOCOL=qualification\n"
+                f"UNIT_DIRECTORY={shlex.quote(str(root))}\n"
+                f"RESULT_DIR={shlex.quote(str(root))}\n"
+                f"UNIT_TOOL={shlex.quote(str(SOURCE.with_name('unit_session.py')))}\n"
+                "JMH_PROCESS_TIME=20ms\nJONI_JMH_TIME=20ms\nCPU_LIST=0\n"
+                "jmh_process_jvm_arguments=()\njmh_launcher_jvm_arguments=()\njmh_fork_arguments=-Xmx1g\n"
+                "prepare_jmh_host_compiler_arguments() { jmh_host_compiler_arguments=(); }\n"
+                "full_protocol_benchmarks() { :; }\n"
+                "taskset() { shift 2; \"$@\"; }\n"
+                "java() { printf '%s\\n' \"$*\"; }\n"
+                + "".join(shell_function(source, name) for name in (
+                    "run_jmh_with_classpath", "run_joni_jmh_with_classpath", "run_unit_jmh_selectors",
+                    "set_jmh_input_files"))
+                + f"run_jmh_with_classpath cp '^example\\.(A\\.(first|joni)|B\\..*)$' {shlex.quote(str(output))} "
+                "-p scenario=x,y\n"
+                f"set_jmh_input_files {shlex.quote(str(output))}\n"
+                "printf 'input %s\\n' \"${JMH_INPUT_FILES[@]}\"\n"
+                # A per-workload call's -p value narrows its selectors; its other arguments pass through.
+                f"run_jmh_with_classpath cp '^example\\.C\\.each$' {shlex.quote(str(workload_output))} "
+                "-p workload=b -tu ns\n"
+                f"set_jmh_input_files {shlex.quote(str(workload_output))}\n"
+                "printf 'input %s\\n' \"${JMH_INPUT_FILES[@]}\"\n")
+
+            completed = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True)
+
+            base = output.with_suffix("")
+            lines = completed.stdout.splitlines()
+            self.assertEqual(5, sum(" -f " in line for line in lines))
+            self.assertEqual(
+                f"-cp cp org.openjdk.jmh.Main ^(example\\.A\\.first)$ -f 0 -wi 3 -i 4 -w 300ms -r 50ms -foe true "
+                f"-prof gc -rf json -rff {base}-selector-1-process-1.json -p size=1,2",
+                lines[0])
+            self.assertTrue(lines[1].endswith(f"-rff {base}-selector-1-process-2.json -p size=1,2"))
+            self.assertIn("^(example\\.B\\.whole)$ -f 0 -wi 1 -i 1 -w 1s -r 1s", lines[2])
+            self.assertTrue(lines[2].endswith("-p scenario=x,y"))
+            self.assertIn("^(example\\.A\\.joni)$ -f 5 -wi 10 -i 10 -w 1s -r 1s", lines[3])
+            self.assertTrue(lines[3].endswith(f"-rff {base}-selector-3.json"))
+            self.assertEqual(
+                [f"input {base}-selector-1-process-1.json", f"input {base}-selector-1-process-2.json",
+                 f"input {base}-selector-2-process-1.json", f"input {base}-selector-3.json"],
+                lines[4:8])
+            workload_base = workload_output.with_suffix("")
+            self.assertTrue(lines[8].endswith(f"-rff {workload_base}-selector-5-process-1.json -p workload=b -tu ns"))
+            self.assertEqual([f"input {workload_base}-selector-5-process-1.json"], lines[9:])
 
     def testReverseSuiteOrderingUsesPortableAwkVariable(self):
         script = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
