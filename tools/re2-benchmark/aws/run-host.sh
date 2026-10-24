@@ -216,6 +216,7 @@ record_environment()
         printf 'trino_commit=%s\n' "${TRINO_SNAPSHOT_COMMIT:-none}"
         printf 'trino_archive_sha256=%s\n' "${TRINO_SNAPSHOT_SHA256:-none}"
         printf 'expected_ami_id=%s\n' "${EXPECTED_AMI_ID:-unverified}"
+        printf 'expected_ami_name=%s\n' "${EXPECTED_AMI_NAME:-unverified}"
         printf 'actual_ami_id=%s\n' "${actual_ami_id:-unknown}"
         printf 'instance_id=%s\n' "${actual_instance_id:-unknown}"
         printf 'instance_type=%s\n' "${instance_type:-unknown}"

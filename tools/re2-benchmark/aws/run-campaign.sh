@@ -115,6 +115,8 @@ BENCHMARK_ARM_JAVA_ARCHIVE_URL=${BENCHMARK_ARM_JAVA_ARCHIVE_URL:-}
 BENCHMARK_ARM_JAVA_ARCHIVE_SHA256=${BENCHMARK_ARM_JAVA_ARCHIVE_SHA256:-}
 BENCHMARK_INTEL_AMI_ID=${BENCHMARK_INTEL_AMI_ID:-}
 BENCHMARK_ARM_AMI_ID=${BENCHMARK_ARM_AMI_ID:-}
+BENCHMARK_INTEL_AMI_NAME=${BENCHMARK_INTEL_AMI_NAME:-}
+BENCHMARK_ARM_AMI_NAME=${BENCHMARK_ARM_AMI_NAME:-}
 REBAR_OFFICIAL_DIR=${REBAR_OFFICIAL_DIR:-"${HOME}/.cache/regulator/rebar-463d00f31887e84c38467805b9e3122c314b9521"}
 REBAR_COMPARATOR_ORDER=${REBAR_COMPARATOR_ORDER:-forward}
 JONI_COMPARATOR_ORDER=${JONI_COMPARATOR_ORDER:-forward}
@@ -158,6 +160,15 @@ benchmark_ami_id()
     case "$1" in
         intel) printf '%s\n' "${BENCHMARK_INTEL_AMI_ID:-${BENCHMARK_AMI_ID}}" ;;
         arm) printf '%s\n' "${BENCHMARK_ARM_AMI_ID:-${BENCHMARK_AMI_ID}}" ;;
+        *) echo "Unsupported architecture: $1" >&2; exit 1 ;;
+    esac
+}
+
+benchmark_ami_name()
+{
+    case "$1" in
+        intel) printf '%s\n' "${BENCHMARK_INTEL_AMI_NAME}" ;;
+        arm) printf '%s\n' "${BENCHMARK_ARM_AMI_NAME}" ;;
         *) echo "Unsupported architecture: $1" >&2; exit 1 ;;
     esac
 }
@@ -292,6 +303,10 @@ java_sha256=$(jdk_archive_sha256 "${benchmark_architecture}")
 ami_id=$(benchmark_ami_id "${benchmark_architecture}")
 if [[ -z "${ami_id}" || ! "${ami_id}" =~ ^ami-[0-9a-f]+$ ]]; then
     echo "Qualification requires a pinned ${benchmark_architecture} AMI ID" >&2
+    exit 1
+fi
+if [[ ! "$(benchmark_ami_name "${benchmark_architecture}")" =~ ^[A-Za-z0-9._/@()-]*$ ]]; then
+    echo "Invalid ${benchmark_architecture} AMI name" >&2
     exit 1
 fi
 if [[ ! "${java_url}" =~ ^https:// || ! "${java_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
@@ -996,6 +1011,7 @@ create_user_data()
     local expected_ami_id=$5
     local java_archive_url=$6
     local java_archive_sha256=$7
+    local expected_ami_name=${8:-}
     cat > "${output}" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -1133,6 +1149,7 @@ export TIME_PACKAGE='${TIME_PACKAGE}'
 export CAMPAIGN_USES_TRINO='${CAMPAIGN_USES_TRINO}'
 export JONI_EVIDENCE_SCOPE='${JONI_EVIDENCE_SCOPE}'
 export EXPECTED_AMI_ID='${expected_ami_id}'
+export EXPECTED_AMI_NAME='${expected_ami_name}'
 export RE2_ENGINEERING_ARCHITECTURE='${campaign_architecture}'
 export RE2_BENCHMARK_MODE='${CAMPAIGN_MODE}'
 export INSTANCE_MARKET_TYPE='${INSTANCE_MARKET_TYPE}'
@@ -1215,7 +1232,8 @@ launch_instance()
         "${user_data}" \
         "${ami}" \
         "${java_url}" \
-        "${java_sha256}"
+        "${java_sha256}" \
+        "$(benchmark_ami_name "${label}")"
 
     launch_arguments=(
         --image-id "${ami}" \
@@ -1344,9 +1362,14 @@ if [[ -n "${TRANSFER_BUCKET}" ]]; then
 else
     BUCKET="re2-${CAMPAIGN_PROVENANCE}-${ACCOUNT_ID}-${LOWER_SESSION_ID}-$RANDOM"
     BUCKET_OWNED=1
-    aws_cli s3api create-bucket \
-        --bucket "${BUCKET}" \
-        --create-bucket-configuration "LocationConstraint=${AWS_REGION}" >/dev/null
+    # us-east-1 is S3's default location, which S3 rejects as an explicit constraint.
+    if [[ "${AWS_REGION}" == us-east-1 ]]; then
+        aws_cli s3api create-bucket --bucket "${BUCKET}" >/dev/null
+    else
+        aws_cli s3api create-bucket \
+            --bucket "${BUCKET}" \
+            --create-bucket-configuration "LocationConstraint=${AWS_REGION}" >/dev/null
+    fi
     aws_cli s3api put-public-access-block \
         --bucket "${BUCKET}" \
         --public-access-block-configuration \
@@ -1460,6 +1483,8 @@ benchmark_arm_java_archive_url=${RESOLVED_ARM_JAVA_ARCHIVE_URL:-default-temurin-
 benchmark_arm_java_archive_sha256=${RESOLVED_ARM_JAVA_ARCHIVE_SHA256:-none}
 benchmark_intel_ami_id=${RESOLVED_INTEL_AMI_ID:-latest}
 benchmark_arm_ami_id=${RESOLVED_ARM_AMI_ID:-latest}
+benchmark_intel_ami_name=${BENCHMARK_INTEL_AMI_NAME:-unverified}
+benchmark_arm_ami_name=${BENCHMARK_ARM_AMI_NAME:-unverified}
 benchmark_heap_size=${BENCHMARK_HEAP_SIZE:-8g}
 intel_instance_type=${INTEL_INSTANCE_TYPE}
 intel_instance_id=${INTEL_INSTANCE_ID}

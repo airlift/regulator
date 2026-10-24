@@ -243,6 +243,19 @@ class TestLanguageController(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, r"differs from the campaign's: \['trino_commit'\]"):
             self.execute(FAKE_MUST_NOT_RUN="1")
 
+    def test_refill_accepts_another_regions_copy_of_the_campaign_image(self):
+        # A regional copy has its own ID but the pinned image's name. A host that records no
+        # name, as older candidates' hosts do not, can only match by ID.
+        copy = {"FAKE_AMI_ID": "ami-0123456789abcdef0"}
+        for name, image, error in (("al2023-pinned", copy, None), ("al2023-other", copy, r"\['ami'\]"),
+                                   ("unverified", copy, r"\['ami'\]"), ("unverified", {}, None)):
+            with self.subTest(name=name, copy=bool(image)):
+                self.exhaust_spot("r8i/*/replica-[23]")
+                with patch.object(CONTROLLER, "current_on_demand_capacity", return_value={"available": 64}), \
+                        (self.assertRaisesRegex(RuntimeError, "differs from the campaign's: " + error)
+                         if error else contextlib.nullcontext()):
+                    self.refill(FAKE_AMI_NAME=name, **image)
+
     def test_released_refill_checks_the_candidate_source_not_the_checkout(self):
         self.exhaust_spot("r8i/*/replica-[23]")
         manifest = Path("tools/re2-benchmark/baseline/releases/1.0.json")
@@ -359,7 +372,10 @@ environment = {
     "logical_cpu_count": os.environ["BENCHMARK_EXPECTED_VCPUS"],
     "regulator_commit": "commit", "regulator_archive_sha256": "archive",
     "java_runtime_version": "25.0.4+7", "comparator_manifest_sha256": os.environ["FAKE_PINS"],
-    "trino_used": "false", "trino_commit": os.environ.get("FAKE_TRINO_COMMIT", "none")}
+    "trino_used": "false", "trino_commit": os.environ.get("FAKE_TRINO_COMMIT", "none"),
+    "expected_ami_name": os.environ.get("FAKE_AMI_NAME", "al2023-pinned")}
+environment["expected_ami_id"] = environment["actual_ami_id"] = os.environ.get("FAKE_AMI_ID", os.environ[
+    "BENCHMARK_" + ("INTEL" if os.environ["CAMPAIGN_ARCHITECTURES"] == "intel" else "ARM") + "_AMI_ID"])
 (result / "environment-manifest.txt").write_text("".join(f"{key}={value}\n" for key, value in environment.items()))
 collection.save(result / "language-acceptance.json", batch_acceptance.validate(result))
 (result / "host-capacity.txt").write_text("memory_total_bytes=34359738368\nmemory_available_before_bytes=30000000000\nswap_total_bytes=0\nswap_free_before_bytes=0\noom_kills_before=0\nwall_seconds=1\nmaximum_resident_kibibytes=1048576\nexit_status=0\nmemory_available_after_bytes=29000000000\nminimum_available_memory_bytes=3435973837\nswap_free_after_bytes=0\noom_kills_after=0\ncapacity_status=accepted\n")

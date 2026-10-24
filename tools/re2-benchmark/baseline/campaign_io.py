@@ -24,9 +24,9 @@ def fsync_directory(path):
         os.close(descriptor)
 
 
-def aws_output(arguments):
+def aws_output(arguments, region=None):
     environment = os.environ.copy()
-    region = environment.get("AWS_REGION", "us-west-2")
+    region = region or environment.get("AWS_REGION", "us-west-2")
     command = ["aws", "--region", region]
     profile = environment.get("AWS_PROFILE")
     if profile:

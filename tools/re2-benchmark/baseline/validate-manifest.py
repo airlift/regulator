@@ -3,6 +3,7 @@
 import csv
 import hashlib
 import importlib.util
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -178,6 +179,24 @@ def main():
                       "time_package"):
             if not actual[field]:
                 raise SystemExit(f"{platform} has no pinned {field}")
+
+    # Other regions run the image whose name preflight resolves from the Oregon pin.
+    with (directory / "platform-regions.tsv").open(newline="") as input_file:
+        reader = csv.DictReader(input_file, delimiter="\t")
+        if tuple(reader.fieldnames or ()) != ("platform", "region", "ami_id"):
+            raise SystemExit("platform-regions.tsv must have platform, region, and ami_id columns")
+        region_rows = list(reader)
+    placements = Counter((row["platform"], row["region"]) for row in region_rows)
+    repeated = sorted(placement for placement, count in placements.items() if count != 1)
+    if repeated:
+        raise SystemExit(f"platform-regions.tsv repeats a platform and region: {repeated}")
+    for row in region_rows:
+        if (row["platform"] not in platforms or not re.fullmatch(r"[a-z]+(?:-[a-z]+)+-[0-9]+", row["region"]) or
+                not re.fullmatch(r"ami-[0-9a-f]{8}(?:[0-9a-f]{9})?", row["ami_id"])):
+            raise SystemExit(f"invalid platform-regions.tsv row: {row}")
+    pinned = {row["platform"]: row["ami_id"] for row in region_rows if row["region"] == "us-west-2"}
+    if pinned != {platform: row["ami_id"] for platform, row in platforms.items()}:
+        raise SystemExit("platform-regions.tsv us-west-2 AMIs differ from platforms.tsv")
 
     comparator_rows = read_tsv(directory / "comparators.tsv")
     comparators = {row["component"]: row for row in comparator_rows}

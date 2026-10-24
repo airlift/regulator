@@ -814,14 +814,119 @@ class TestRunCampaign(unittest.TestCase):
             [(job.replica, job.platform.name) for job in jobs[:6]])
 
     def test_shared_policy_checks_the_actual_aws_account_and_region(self):
-        arguments = SimpleNamespace(shared_budget=SimpleNamespace(
-            policy={"account": "123456789012", "region": "us-east-2"}))
-        for account, region in (("234567890123", "us-east-2"), ("123456789012", "us-west-2")):
-            with self.subTest(account=account, region=region), \
+        policy = {"account": "123456789012", "region": "us-east-2",
+                  "regions": {"us-east-1": {"max_vcpus": 8, "spot_vcpu_reserve": 0}}}
+        arguments = SimpleNamespace(shared_budget=SimpleNamespace(policy=policy))
+        for account, region, regions in (("234567890123", "us-east-2", None),
+                                         ("123456789012", "us-west-2", None),
+                                         ("123456789012", "us-east-2", ["us-east-2", "eu-west-1"])):
+            arguments.regions = regions
+            with self.subTest(account=account, region=region, regions=regions), \
                     patch.dict(os.environ, {"AWS_REGION": region}), \
                     patch.object(RUN_CAMPAIGN, "check_output", return_value=account), \
                     self.assertRaisesRegex(SystemExit, "differs from the shared fleet policy"):
                 RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+
+    def test_aws_preflight_requires_each_region_to_run_the_pinned_image(self):
+        arguments = SimpleNamespace(
+            shared_budget=None, spot_only=True, spot_vcpu_reserve=0,
+            regions=["eu-west-1", "us-west-2", "ap-south-1"],
+            regional_amis={("r8i", "us-west-2"): "ami-test", ("r8i", "eu-west-1"): "ami-ireland"},
+            transfer_buckets={"eu-west-1": "bucket-ireland"})
+        names = {"ami-test": "al2023-pinned", "ami-ireland": "al2023-pinned"}
+        location = "EU"
+        public_subnets = {"eu-west-1", "us-west-2", "ap-south-1"}
+
+        def aws_result(command, **_):
+            region = command[command.index("--region") + 1]
+            if "get-caller-identity" in command:
+                return "123456789012"
+            if "describe-vpcs" in command:
+                return "vpc-" + region
+            if "describe-subnets" in command:
+                self.assertIn("Name=vpc-id,Values=vpc-" + region, command)
+                return region + "a" if region in public_subnets else ""
+            if "get-service-quota" in command:
+                return "64"
+            if "describe-images" in command:
+                image = command[command.index("--image-ids") + 1]
+                # The Oregon pin names the image even when Oregon does not offer the type.
+                self.assertEqual(region, "us-west-2" if image == "ami-test" else "eu-west-1")
+                return f"x86_64\tavailable\t137112412989\t{names[image]}"
+            if "describe-instance-type-offerings" in command:
+                return "" if region in ("ap-south-1", "us-west-2") else region + "a"
+            if "get-bucket-location" in command:
+                return location
+            if "get-bucket-tagging" in command:
+                return "1"
+            raise AssertionError(command)
+
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
+            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+        self.assertEqual(arguments.ami_names, {"r8i": "al2023-pinned"})
+        self.assertEqual(arguments.region_offerings, {"r8i.2xlarge": ["eu-west-1"]})
+
+        public_subnets.discard("ap-south-1")
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
+                self.assertRaisesRegex(SystemExit, "ap-south-1 has no public default-VPC subnet"):
+            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+        public_subnets.add("ap-south-1")
+        location = "us-west-2"
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
+                self.assertRaisesRegex(SystemExit, "bucket-ireland is not a tagged"):
+            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+        names["ami-ireland"] = "al2023-other"
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
+                self.assertRaisesRegex(SystemExit, "ami-ireland in eu-west-1 is not al2023-pinned"):
+            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+        del arguments.regional_amis[("r8i", "eu-west-1")]
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
+                self.assertRaisesRegex(SystemExit, "no r8i AMI for eu-west-1"):
+            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+
+    def test_spot_launch_takes_the_best_scored_region_with_headroom(self):
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        regions = ["us-west-2", "eu-west-1", "ap-south-1"]
+        # Ireland ties Mumbai but comes first, then lacks quota headroom. Without scores, the
+        # first allowed region with headroom launches and no score is recorded.
+        for scored, expected_queries, expected_region, expected_score in (
+                (True, ["eu-west-1", "ap-south-1"], "ap-south-1", "9"),
+                (False, ["us-west-2"], "us-west-2", "")):
+            with self.subTest(scored=scored), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                result_root = root / "results"
+                result_root.mkdir()
+                arguments = self.arguments(root)
+                arguments.spot_only, arguments.spot_vcpu_reserve = True, 0
+                arguments.regions = regions
+                arguments.regional_amis = {("r8i", region): "ami-" + region for region in regions}
+                arguments.transfer_buckets = {"ap-south-1": "bucket-mumbai"}
+                queried = []
+
+                def spot_capacity(_, __, ___, region):
+                    queried.append(region)
+                    return {"available": 0 if region == "eu-west-1" else 8}
+
+                def placement_scores(command, **_):
+                    self.assertIn("get-spot-placement-scores", command)
+                    if not scored:
+                        raise subprocess.CalledProcessError(254, command)
+                    return "us-west-2\t3\neu-west-1\t9\nap-south-1\t9\n"
+
+                process = FakeProcess(110, status=1, poll_action=lambda: self.write_cleanup_session(
+                    result_root, job, failure_classification="benchmark-failure"))
+                with patch.object(RUN_CAMPAIGN, "check_output", side_effect=placement_scores), \
+                        patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=spot_capacity), \
+                        patch.object(RUN_CAMPAIGN.time, "sleep"), \
+                        patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process) as popen:
+                    with self.assertRaises(SystemExit):
+                        RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, [job])
+                environment = popen.call_args.kwargs["env"]
+                self.assertEqual(queried, expected_queries)
+                self.assertEqual(environment["AWS_REGION"], expected_region)
+                self.assertEqual(environment["CAMPAIGN_PLACEMENT_SCORE"], expected_score)
+                self.assertEqual(environment["BENCHMARK_INTEL_AMI_ID"], "ami-" + expected_region)
+                self.assertEqual(environment.get("TRANSFER_BUCKET"), "bucket-mumbai" if scored else None)
 
     def test_aws_preflight_uses_routed_worker_topologies(self):
         platform = RUN_CAMPAIGN.replace(
@@ -842,9 +947,13 @@ class TestRunCampaign(unittest.TestCase):
             if RUN_CAMPAIGN.STANDARD_ON_DEMAND_QUOTA_CODE in command:
                 return "100"
             if "describe-images" in command:
-                return "x86_64\tavailable\t137112412989"
+                return "x86_64\tavailable\t137112412989\tal2023-test"
             if "describe-instance-type-offerings" in command:
                 return "us-west-2a" if "Name=instance-type,Values=r8i.large" in command else ""
+            if "describe-vpcs" in command:
+                return "vpc-default"
+            if "describe-subnets" in command:
+                return "us-west-2a"
             raise AssertionError(command)
 
         with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
@@ -870,8 +979,12 @@ class TestRunCampaign(unittest.TestCase):
             if RUN_CAMPAIGN.STANDARD_ON_DEMAND_QUOTA_CODE in command:
                 return "100"
             if "describe-images" in command:
-                return "x86_64\tavailable\t137112412989"
+                return "x86_64\tavailable\t137112412989\tal2023-test"
             if "describe-instance-type-offerings" in command:
+                return "us-west-2a"
+            if "describe-vpcs" in command:
+                return "vpc-default"
+            if "describe-subnets" in command:
                 return "us-west-2a"
             raise AssertionError(command)
 
@@ -885,12 +998,12 @@ class TestRunCampaign(unittest.TestCase):
     def test_campaign_concurrency_uses_configuration(self):
         jobs = RUN_CAMPAIGN.build_jobs(
             "primary", [self.platform], ["traditional-search"], None)
-        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary")
+        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary", regions=["us-west-2"])
         RUN_CAMPAIGN.validate_configuration(arguments, jobs)
         arguments.execute = True
         with self.assertRaisesRegex(SystemExit, "requires a shared fleet budget"):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
-        arguments.shared_budget = SimpleNamespace(policy={"max_hosts": 512, "max_vcpus": 1024,
+        arguments.shared_budget = SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512, "max_vcpus": 1024,
                                                           "spot_vcpu_reserve": 16})
         arguments.spot_only, arguments.spot_vcpu_reserve = True, 16
         RUN_CAMPAIGN.validate_configuration(arguments, jobs)
@@ -912,9 +1025,9 @@ class TestRunCampaign(unittest.TestCase):
     def test_deadline_uses_shared_fleet_host_and_vcpu_limits(self):
         jobs = RUN_CAMPAIGN.build_jobs("primary", [self.platform], ["traditional-search"], None)
         arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary",
-                                    spot_only=True, spot_vcpu_reserve=0,
-                                    shared_budget=SimpleNamespace(policy={"max_hosts": 512, "max_vcpus": 8,
-                                                                         "spot_vcpu_reserve": 0}),
+                                    spot_only=True, spot_vcpu_reserve=0, regions=["us-west-2"],
+                                    shared_budget=SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512,
+                                                                         "max_vcpus": 8, "spot_vcpu_reserve": 0}),
                                     phase_timeout_seconds=2 * RUN_CAMPAIGN.JOB_TIMEOUT_SECONDS)
         with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
@@ -926,6 +1039,11 @@ class TestRunCampaign(unittest.TestCase):
         arguments.shared_budget.policy["max_vcpus"] = 1
         with self.assertRaisesRegex(SystemExit, "cannot admit every worker type"):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        # Another allowed region's limit admits the workers, and a wave fills every region's limit at once:
+        # the three 8-vCPU jobs need Oregon's one vCPU beside Ireland's 23.
+        arguments.regions.append("eu-west-1")
+        arguments.shared_budget.policy["regions"] = {"eu-west-1": {"max_vcpus": 23, "spot_vcpu_reserve": 0}}
+        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
 
     def test_primary_topology_fits_deadline_with_retry_headroom(self):
         platforms = [
@@ -1057,7 +1175,9 @@ done
             arguments = self.arguments(root)
             job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
 
-            environment = RUN_CAMPAIGN.job_environment(job, arguments, root, root)
+            with patch.object(RUN_CAMPAIGN, "check_output"):
+                environment = RUN_CAMPAIGN.job_environment(
+                    RUN_CAMPAIGN.place(job, RUN_CAMPAIGN.launch_placements(arguments, job)[0]), arguments, root, root)
 
             self.assertNotIn("AWS_PROFILE", environment)
             self.assertNotIn("TRINO_DIR", environment)
@@ -1121,6 +1241,12 @@ done
             "InsufficientInstanceCapacity|UnfulfillableCapacity|MaxSpotInstanceCountExceeded",
             source)
         self.assertIn('record_failure_classification retryable-capacity "vcpu-limit:', source)
+
+    def test_session_bucket_omits_the_location_constraint_s3_rejects_in_us_east_1(self):
+        source = AWS_RUNNER.read_text()
+
+        self.assertIn('if [[ "${AWS_REGION}" == us-east-1 ]]; then\n'
+                      '        aws_cli s3api create-bucket --bucket "${BUCKET}" >/dev/null\n    else', source)
 
     def test_cleanup_ignores_repeated_termination_signals(self):
         source = AWS_RUNNER.read_text()

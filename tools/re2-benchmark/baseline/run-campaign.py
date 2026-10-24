@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from pathlib import Path
 
 from acceptance import RECEIPT_FIELDS, ValidationError, normalize_heap_size, validate_campaign, validate_host_results
 from topology import CONCURRENCY_SHARDS
-from fleet_budget import BudgetError, FleetBudget
+from fleet_budget import REGION_PATTERN, BudgetError, FleetBudget, region_limits
 from campaign_io import UnsafeCampaignError, aws_output, check_output, fsync_directory, write_accepted_sessions
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
@@ -39,6 +40,11 @@ CAPACITY_RETRY_SECONDS = 30
 JOB_TIMEOUT_SECONDS = 90 * 60
 MAX_REPLACEMENTS_PER_JOB = 2
 WRAPPER_NOT_CREATED = "wrapper process was not created"
+# platforms.tsv pins each AMI by its ID in this region; other regions run the image of the same name.
+PINNED_AMI_REGION = "us-west-2"
+AMAZON_AMI_OWNER = "137112412989"
+# Spot placement scores are rate-limited per configuration, so reuse each answer briefly.
+PLACEMENT_SCORE_CACHE_SECONDS = 5 * 60
 # Host environment fields the controller checkout chooses, each with the fields an
 # original receipt's environment must share to have been given the same value.
 REFILL_ENVIRONMENT_SCOPES = {
@@ -48,7 +54,7 @@ REFILL_ENVIRONMENT_SCOPES = {
         "rebar_selected_definitions_sha256", "baseline_protocol", "baseline_selected_route",
         "baseline_joni_jmh_time", "benchmark_heap_size", "regulator_release_version", "java_home"), ()),
     **dict.fromkeys((
-        "expected_ami_id", "actual_ami_id", "jdk_archive_url", "jdk_archive_sha256", "java_runtime_version",
+        "ami", "jdk_archive_url", "jdk_archive_sha256", "java_runtime_version",
         "native_compiler_package", "cmake_package", "glibc_package", "time_package"), ("platform",)),
     **dict.fromkeys(("trino_commit", "trino_archive_sha256"), ("trino_used",)),
     **dict.fromkeys(("benchmark_mode", "trino_used", "joni_evidence_scope", "cargo_package", "rust_package"),
@@ -112,6 +118,9 @@ class Job:
     attempt: int
     market: str
     workload: str = "baseline-shard"
+    # Chosen at launch; empty until the controller places the attempt.
+    region: str = ""
+    placement_score: str = ""
 
     @property
     def identity(self):
@@ -165,7 +174,27 @@ def parse_args():
     parser.add_argument("--candidate-provenance", type=Path)
     parser.add_argument("--language-plan", action="append", type=Path, default=[],
                         help="expanded language fleet plan; repeat for lifecycle and bulk")
+    parser.add_argument("--region", action="append", dest="regions",
+                        help="AWS region a host may launch in; repeat to let Spot placement scores choose, "
+                             "ties going to the earlier region (default: AWS_REGION or us-west-2)")
+    parser.add_argument("--transfer-bucket", action="append", default=[], metavar="REGION=BUCKET",
+                        help="shared transfer bucket for hosts launched in REGION; regions without one "
+                             "use a per-session bucket")
     return parser.parse_args()
+
+
+def parse_transfer_buckets(values):
+    buckets = {}
+    for value in values:
+        region, separator, bucket = value.partition("=")
+        if not separator or not region or not bucket or region in buckets:
+            raise SystemExit(f"--transfer-bucket takes one REGION=BUCKET value per region: {value}")
+        buckets[region] = bucket
+    return buckets
+
+
+def campaign_regions(arguments):
+    return getattr(arguments, "regions", None) or [os.environ.get("AWS_REGION", "us-west-2")]
 
 
 def language_campaign(arguments):
@@ -248,6 +277,12 @@ def read_platforms(directory):
             row.get("concurrency_instance_type", ""),
             int(row.get("concurrency_vcpus", 0)))
             for row in csv.DictReader(input_file, delimiter="\t")]
+
+
+def read_platform_regions(directory):
+    with (directory / "platform-regions.tsv").open(newline="") as input_file:
+        return {(row["platform"], row["region"]): row["ami_id"]
+                for row in csv.DictReader(input_file, delimiter="\t")}
 
 
 def campaign_manifest(root, arguments):
@@ -339,9 +374,37 @@ def validate_configuration(arguments, jobs, launched_jobs=None):
         raise SystemExit("Spot vCPU reserve must not be negative")
     if getattr(arguments, "spot_only", False) and any(job.market != "spot" for job in jobs):
         raise SystemExit("Spot-only campaigns cannot contain On-Demand jobs")
+    regions = campaign_regions(arguments)
+    if len(regions) != len(set(regions)) or not all(re.fullmatch(REGION_PATTERN, region) for region in regions):
+        raise SystemExit(f"allowed regions must be distinct AWS region names: {regions}")
+    amis = getattr(arguments, "regional_amis", None)
+    if amis is not None:
+        missing = [region for region in regions if not any(row_region == region for _, row_region in amis)]
+        if missing:
+            raise SystemExit(f"platform-regions.tsv has no AMIs for allowed regions: {missing}")
+    buckets = getattr(arguments, "transfer_buckets", None) or {}
+    if not set(buckets) <= set(regions):
+        raise SystemExit(
+            f"--transfer-bucket names regions the campaign does not allow: {sorted(set(buckets) - set(regions))}")
+    if os.environ.get("TRANSFER_BUCKET") and (buckets or len(regions) > 1):
+        # A shared bucket serves hosts in its own region, so name each one with its region.
+        raise SystemExit("TRANSFER_BUCKET serves only a single-region campaign without --transfer-bucket; "
+                         "name each region's shared bucket with --transfer-bucket")
+    if buckets and not os.environ.get("TRANSFER_PREFIX"):
+        raise SystemExit("--transfer-bucket requires TRANSFER_PREFIX")
     budget = getattr(arguments, "shared_budget", None)
     if getattr(arguments, "refill_unresolved", False) and (getattr(arguments, "spot_only", False) or budget):
         raise SystemExit("refill runs On-Demand without --spot-only or a shared fleet budget")
+    # Each worker type launches only in the allowed regions that hold its image.
+    workers = [job.platform for job in jobs]
+    launchable = {platform.name: [region for region in regions if amis is None or (platform.name, region) in amis]
+                  for platform in workers}
+    fleet_limits, fleet_vcpus = {}, None
+    if budget:
+        limits = region_limits(budget.policy)
+        fleet_limits = {region: limits[region] for region in regions if region in limits}
+        # A wave fills every allowed region's limit at once.
+        fleet_vcpus = max(1, sum(fleet_limits[region]["max_vcpus"] for region in fleet_limits))
     if budget and (not getattr(arguments, "spot_only", False) or
                    getattr(arguments, "spot_vcpu_reserve", None) != budget.policy["spot_vcpu_reserve"]):
         raise SystemExit("shared fleet requires --spot-only and a reserve matching its policy")
@@ -364,9 +427,10 @@ def validate_configuration(arguments, jobs, launched_jobs=None):
     host_limit = min(arguments.max_concurrent, budget.policy["max_hosts"]) if budget else arguments.max_concurrent
     vcpu_waves = 0
     if budget:
-        if any(job.platform.vcpus > budget.policy["max_vcpus"] for job in jobs):
+        if any(platform.vcpus > max((fleet_limits[region]["max_vcpus"] for region in launchable[platform.name]
+                                     if region in fleet_limits), default=0) for platform in workers):
             raise SystemExit("shared fleet vCPU limit cannot admit every worker type")
-        vcpu_waves = math.ceil(sum(job.platform.vcpus for job in jobs) / budget.policy["max_vcpus"])
+        vcpu_waves = math.ceil(sum(job.platform.vcpus for job in jobs) / fleet_vcpus)
     bounded_waves = max(math.ceil(len(launched_jobs) / host_limit),
                         max((math.ceil(count / per_platform) for count in counts.values()), default=0),
                         vcpu_waves)
@@ -652,26 +716,21 @@ def validate_dependencies(root, arguments, jobs):
         raise SystemExit(f"Trino checkout does not contain {expected_trino}")
 
 
+def describe_image(arguments, region, ami_id):
+    return check_output(aws_output(arguments, region) + [
+        "ec2", "describe-images", "--image-ids", ami_id,
+        "--query", "Images[0].[Architecture,State,OwnerId,Name]", "--output", "text",
+    ]).split("\t")
+
+
 def validate_aws(arguments, platforms, jobs=None):
-    prefix = aws_output(arguments)
-    account = check_output(prefix + ["sts", "get-caller-identity", "--query", "Account", "--output", "text"])
+    regions = campaign_regions(arguments)
+    account = check_output(aws_output(arguments, regions[0]) + [
+        "sts", "get-caller-identity", "--query", "Account", "--output", "text"])
     budget = getattr(arguments, "shared_budget", None)
     if budget and (account != budget.policy["account"] or
-                   os.environ.get("AWS_REGION", "us-west-2") != budget.policy["region"]):
+                   not set(regions) <= set(region_limits(budget.policy))):
         raise SystemExit("AWS account or region differs from the shared fleet policy")
-    spot_quota = float(check_output(prefix + [
-        "service-quotas", "get-service-quota", "--service-code", "ec2",
-        "--quota-code", STANDARD_SPOT_QUOTA_CODE, "--query", "Quota.Value", "--output", "text",
-    ]))
-    on_demand_quota = float(check_output(prefix + [
-        "service-quotas", "get-service-quota", "--service-code", "ec2",
-        "--quota-code", STANDARD_ON_DEMAND_QUOTA_CODE, "--query", "Quota.Value", "--output", "text",
-    ]))
-    if budget:
-        effective_spot_quota = spot_quota - budget.policy["spot_vcpu_reserve"]
-        if budget.policy["max_vcpus"] > effective_spot_quota:
-            raise SystemExit(
-                "shared fleet max_vcpus exceeds the Standard Spot quota after its reserve")
     required_platforms = list({
         (platform.name, platform.instance_type): platform
         for platform in ([job.platform for job in jobs] if jobs is not None else platforms)
@@ -679,8 +738,36 @@ def validate_aws(arguments, platforms, jobs=None):
     if not required_platforms:
         required_platforms = platforms
     maximum_vcpus = max(platform.vcpus for platform in required_platforms)
-    has_spot_capacity = spot_quota >= getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) + maximum_vcpus
-    has_on_demand_capacity = on_demand_quota >= ON_DEMAND_VCPU_SAFETY_RESERVE + maximum_vcpus
+    has_spot_capacity = has_on_demand_capacity = False
+    quotas = []
+    # The wrapper launches into a public subnet of each region's default VPC.
+    public_zones = {}
+    for region in regions:
+        prefix = aws_output(arguments, region)
+        vpc = check_output(prefix + ["ec2", "describe-vpcs", "--filters", "Name=is-default,Values=true",
+                                     "--query", "Vpcs[0].VpcId", "--output", "text"])
+        public_zones[region] = set() if vpc in ("", "None") else set(check_output(prefix + [
+            "ec2", "describe-subnets", "--filters", f"Name=vpc-id,Values={vpc}", "Name=state,Values=available",
+            "--query", "Subnets[?MapPublicIpOnLaunch].AvailabilityZone", "--output", "text"]).split())
+        if not public_zones[region]:
+            raise SystemExit(f"allowed region {region} has no public default-VPC subnet")
+        spot_quota = float(check_output(prefix + [
+            "service-quotas", "get-service-quota", "--service-code", "ec2",
+            "--quota-code", STANDARD_SPOT_QUOTA_CODE, "--query", "Quota.Value", "--output", "text",
+        ]))
+        on_demand_quota = float(check_output(prefix + [
+            "service-quotas", "get-service-quota", "--service-code", "ec2",
+            "--quota-code", STANDARD_ON_DEMAND_QUOTA_CODE, "--query", "Quota.Value", "--output", "text",
+        ]))
+        if budget:
+            limits = region_limits(budget.policy)[region]
+            if limits["max_vcpus"] > spot_quota - limits["spot_vcpu_reserve"]:
+                raise SystemExit(
+                    f"shared fleet max_vcpus exceeds the Standard Spot quota after its reserve in {region}")
+        has_spot_capacity |= spot_quota >= getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) + maximum_vcpus
+        has_on_demand_capacity |= on_demand_quota >= ON_DEMAND_VCPU_SAFETY_RESERVE + maximum_vcpus
+        quotas.append(("" if len(regions) == 1 else region + ": ") +
+                      f"spot={spot_quota:g}, on-demand={on_demand_quota:g}")
     if getattr(arguments, "spot_only", False) and not has_spot_capacity:
         raise SystemExit("Standard Spot quota cannot admit one host after the configured reserve")
     if getattr(arguments, "refill_unresolved", False) and not has_on_demand_capacity:
@@ -688,30 +775,141 @@ def validate_aws(arguments, platforms, jobs=None):
     if not has_spot_capacity and not has_on_demand_capacity:
         raise SystemExit(
             f"Neither Standard Spot nor On-Demand quota can admit one host after safety reserves: "
-            f"spot={spot_quota:g}, on-demand={on_demand_quota:g}")
+            + "; ".join(quotas))
+    # The Oregon pin names the image; every other region must run an image of that name.
+    amis = getattr(arguments, "regional_amis", None)
+    names = {}
+    offerings = {}
+    verified = set()
     for platform in required_platforms:
         expected_architecture = "x86_64" if platform.architecture == "intel" else "arm64"
-        image = check_output(prefix + [
-            "ec2", "describe-images", "--image-ids", platform.ami_id,
-            "--query", "Images[0].[Architecture,State,OwnerId]", "--output", "text",
-        ]).split()
-        if image != [expected_architecture, "available", "137112412989"]:
-            raise SystemExit(f"unexpected AMI identity for {platform.name}: {image}")
-        zones = check_output(prefix + [
-            "ec2", "describe-instance-type-offerings", "--location-type", "availability-zone",
-            "--filters", f"Name=instance-type,Values={platform.instance_type}",
-            "--query", "InstanceTypeOfferings[].Location", "--output", "text",
-        ]).split()
-        if not zones:
-            raise SystemExit(f"{platform.instance_type} is not offered in the selected region")
+        if platform.name not in names:
+            image = describe_image(arguments, PINNED_AMI_REGION, platform.ami_id)
+            if (len(image) != 4 or image[:3] != [expected_architecture, "available", AMAZON_AMI_OWNER] or
+                    image[3] in ("", "None")):
+                raise SystemExit(f"unexpected AMI identity for {platform.name}: {image}")
+            names[platform.name] = image[3]
+        offered = []
+        for region in regions:
+            zones = check_output(aws_output(arguments, region) + [
+                "ec2", "describe-instance-type-offerings", "--location-type", "availability-zone",
+                "--filters", f"Name=instance-type,Values={platform.instance_type}",
+                "--query", "InstanceTypeOfferings[].Location", "--output", "text",
+            ]).split()
+            if not set(zones) & public_zones[region]:
+                continue
+            ami_id = platform.ami_id if amis is None else amis.get((platform.name, region))
+            if ami_id is None:
+                raise SystemExit(f"platform-regions.tsv has no {platform.name} AMI for {region}")
+            if (platform.name, region) not in verified and (region, ami_id) != (PINNED_AMI_REGION, platform.ami_id):
+                image = describe_image(arguments, region, ami_id)
+                if image != [expected_architecture, "available", AMAZON_AMI_OWNER, names[platform.name]]:
+                    raise SystemExit(f"{platform.name} AMI {ami_id} in {region} is not {names[platform.name]}: {image}")
+            verified.add((platform.name, region))
+            offered.append(region)
+        if not offered:
+            raise SystemExit(f"{platform.instance_type} is not offered in any allowed region")
+        offerings[platform.instance_type] = offered
+    for region, bucket in (getattr(arguments, "transfer_buckets", None) or {}).items():
+        prefix = aws_output(arguments, region)
+        location = check_output(prefix + ["s3api", "get-bucket-location", "--bucket", bucket,
+                                          "--query", "LocationConstraint", "--output", "text"])
+        # S3 reports us-east-1 as no constraint and keeps the legacy EU name for eu-west-1.
+        location = {"None": "us-east-1", "": "us-east-1", "EU": "eu-west-1"}.get(location, location)
+        tagged = check_output(prefix + ["s3api", "get-bucket-tagging", "--bucket", bucket, "--query",
+                                        "length(TagSet[?Key==`Project` && Value==`regulator-benchmark`])",
+                                        "--output", "text"])
+        if location != region or tagged != "1":
+            raise SystemExit(f"shared transfer bucket {bucket} is not a tagged Project=regulator-benchmark "
+                             f"bucket in {region}: location={location}")
+    arguments.ami_names = names
+    arguments.region_offerings = offerings
+
+
+def spot_placement_scores(arguments, instance_type, regions):
+    """Return each region's 1-10 Spot placement score, or None when AWS cannot say."""
+    if not hasattr(arguments, "placement_scores"):
+        arguments.placement_scores = {}
+    key = (instance_type, tuple(regions))
+    cached = arguments.placement_scores.get(key)
+    now = time.monotonic()
+    if cached is not None and now - cached[0] < PLACEMENT_SCORE_CACHE_SECONDS:
+        return cached[1]
+    # A campaign-constant target keeps every query the same configuration.
+    target = min(arguments.max_concurrent, getattr(arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT))
+    try:
+        output = check_output(aws_output(arguments, regions[0]) + [
+            "ec2", "get-spot-placement-scores", "--instance-types", instance_type,
+            "--target-capacity", str(target), "--region-names", *regions,
+            "--query", "SpotPlacementScores[].[Region,Score]", "--output", "text"])
+        scores = {}
+        for line in output.splitlines():
+            region, score = line.split()
+            if region in regions and 1 <= int(score) <= 10:
+                scores[region] = int(score)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        scores = None
+    arguments.placement_scores[key] = (now, scores)
+    return scores
+
+
+def launch_placements(arguments, job):
+    """Order the allowed regions that can launch the job, best Spot placement score first."""
+    regions = campaign_regions(arguments)
+    offered = getattr(arguments, "region_offerings", {}).get(job.platform.instance_type)
+    amis = getattr(arguments, "regional_amis", None)
+    regions = [region for region in regions
+               if (offered is None or region in offered) and (amis is None or (job.platform.name, region) in amis)]
+    if not regions:
+        raise UnsafeCampaignError(f"no allowed region can launch {job.platform.name} {job.platform.instance_type}")
+    if len(regions) == 1 or job.market != "spot":
+        return [(region, "") for region in regions]
+    scores = spot_placement_scores(arguments, job.platform.instance_type, regions)
+    if scores is None:
+        # Without scores, keep the allowed-region order; launch admission picks the first region
+        # with headroom only where it queries quota.
+        return [(region, "") for region in regions]
+    # The sort is stable, so equal scores keep the allowed-region order.
+    return [(region, str(scores.get(region, ""))) for region in
+            sorted(regions, key=lambda region: -scores.get(region, 0))]
+
+
+def place(job, placement):
+    region, score = placement
+    return replace(job, region=region, placement_score=score)
+
+
+def place_with_headroom(job, placements, query):
+    """Place the job in the first region with room, else return each region's capacity."""
+    capacities = []
+    failure = None
+    for placement in placements:
+        try:
+            capacity = query(placement[0])
+        except UnsafeCampaignError:
+            raise
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            failure = error
+            continue
+        if capacity["available"] >= job.platform.vcpus:
+            return place(job, placement), capacities, None
+        capacities.append((placement[0], capacity))
+    return None, capacities, failure
+
+
+def capacity_detail(capacities):
+    details = [";".join(f"{key}={value}" for key, value in capacity.items()) for _, capacity in capacities]
+    if len(capacities) == 1:
+        return details[0]
+    return " ".join(f"{region}:{detail}" for (region, _), detail in zip(capacities, details))
 
 
 def is_standard_instance_type(instance_type):
     return bool(instance_type) and instance_type[0].lower() in STANDARD_INSTANCE_FAMILIES
 
 
-def shared_spot_snapshot(arguments):
-    prefix = aws_output(arguments)
+def shared_spot_snapshot(arguments, region=None):
+    prefix = aws_output(arguments, region)
     quota = int(float(check_output(prefix + ["service-quotas", "get-service-quota", "--service-code", "ec2",
                       "--quota-code", STANDARD_SPOT_QUOTA_CODE, "--query", "Quota.Value", "--output", "text"])))
     instances = json.loads(check_output(prefix + ["ec2", "describe-instances", "--filters",
@@ -739,8 +937,17 @@ def shared_spot_snapshot(arguments):
     return {"quota": quota, "instances": instances, "requests": requests}
 
 
-def current_on_demand_capacity(arguments, campaign_id, running_jobs):
-    prefix = aws_output(arguments)
+def region_jobs(arguments, running_jobs, region):
+    """Keep the running jobs placed in the region whose capacity is being counted."""
+    if region is None:
+        return running_jobs
+    default = campaign_regions(arguments)[0]
+    return [job for job in running_jobs if (job.region or default) == region]
+
+
+def current_on_demand_capacity(arguments, campaign_id, running_jobs, region=None):
+    prefix = aws_output(arguments, region)
+    running_jobs = region_jobs(arguments, running_jobs, region)
     quota = int(float(check_output(prefix + [
         "service-quotas", "get-service-quota", "--service-code", "ec2",
         "--quota-code", STANDARD_ON_DEMAND_QUOTA_CODE,
@@ -815,8 +1022,9 @@ def current_on_demand_capacity(arguments, campaign_id, running_jobs):
     }
 
 
-def current_spot_capacity(arguments, campaign_id, running_jobs):
-    prefix = aws_output(arguments)
+def current_spot_capacity(arguments, campaign_id, running_jobs, region=None):
+    prefix = aws_output(arguments, region)
+    running_jobs = region_jobs(arguments, running_jobs, region)
     quota = int(float(check_output(prefix + [
         "service-quotas", "get-service-quota", "--service-code", "ec2",
         "--quota-code", STANDARD_SPOT_QUOTA_CODE,
@@ -957,8 +1165,22 @@ def job_environment(job, arguments, root, result_root):
         environment["CAMPAIGN_SPOT_MAX_PRICE"] = str(arguments.shared_budget.policy["hourly_rates"][job.platform.instance_type]["spot"])
     architecture = job.platform.architecture
     benchmark_protocol = getattr(arguments, "smoke_protocol", "smoke") if arguments.phase == "smoke" else "qualification"
+    region = job.region or campaign_regions(arguments)[0]
+    amis = getattr(arguments, "regional_amis", None)
+    ami_id = job.platform.ami_id if amis is None else amis.get((job.platform.name, region))
+    if ami_id is None:
+        raise UnsafeCampaignError(f"platform-regions.tsv has no {job.platform.name} AMI for {region}")
+    buckets = getattr(arguments, "transfer_buckets", None)
+    if buckets:
+        # Hosts read inputs from a bucket in their own region; others get a per-session bucket.
+        environment.pop("TRANSFER_BUCKET", None)
+        if region in buckets:
+            environment["TRANSFER_BUCKET"] = buckets[region]
+    if len(campaign_regions(arguments)) > 1:
+        # The controller chose the region, so it alone reports the score it chose by.
+        environment["CAMPAIGN_PLACEMENT_SCORE"] = job.placement_score
     environment.update({
-        "AWS_REGION": environment.get("AWS_REGION", "us-west-2"),
+        "AWS_REGION": region,
         "CAMPAIGN_PROVENANCE": "qualification",
         "CAMPAIGN_MODE": job.workload,
         "BASELINE_PROTOCOL": benchmark_protocol,
@@ -1003,14 +1225,16 @@ def job_environment(job, arguments, root, result_root):
     if architecture == "intel":
         environment.update({
             "INTEL_INSTANCE_TYPE": job.platform.instance_type,
-            "BENCHMARK_INTEL_AMI_ID": job.platform.ami_id,
+            "BENCHMARK_INTEL_AMI_ID": ami_id,
+            "BENCHMARK_INTEL_AMI_NAME": getattr(arguments, "ami_names", {}).get(job.platform.name, ""),
             "BENCHMARK_INTEL_JAVA_ARCHIVE_URL": job.platform.jdk_url,
             "BENCHMARK_INTEL_JAVA_ARCHIVE_SHA256": job.platform.jdk_sha256,
         })
     else:
         environment.update({
             "ARM_INSTANCE_TYPE": job.platform.instance_type,
-            "BENCHMARK_ARM_AMI_ID": job.platform.ami_id,
+            "BENCHMARK_ARM_AMI_ID": ami_id,
+            "BENCHMARK_ARM_AMI_NAME": getattr(arguments, "ami_names", {}).get(job.platform.name, ""),
             "BENCHMARK_ARM_JAVA_ARCHIVE_URL": job.platform.jdk_url,
             "BENCHMARK_ARM_JAVA_ARCHIVE_SHA256": job.platform.jdk_sha256,
         })
@@ -1435,6 +1659,17 @@ def refill_field_references(references, environment):
         for field, scope in REFILL_ENVIRONMENT_SCOPES.items()}
 
 
+def refill_field_differs(field, reference, environment):
+    if field != "ami":
+        return reference.get(field) != environment.get(field)
+    # Regional copies of one image share its name but not its ID. Hosts that predate
+    # recorded names can only be compared by ID.
+    names = [manifest.get("expected_ami_name", "unverified") for manifest in (reference, environment)]
+    if "unverified" not in names:
+        return names[0] != names[1]
+    return any(reference.get(name) != environment.get(name) for name in ("expected_ami_id", "actual_ami_id"))
+
+
 def validate_refill_references(result_root, arguments, granted_jobs):
     # A refilled host must match an original sharing its platform, shard, or Trino use,
     # so refuse before launching a job for which no such original exists.
@@ -1465,7 +1700,7 @@ def validate_refill_environment(result_root, arguments, job, receipt_path):
     if missing:
         raise UnsafeCampaignError(
             f"refill host environment for {job.identity} has no accepted original to compare: {missing}")
-    mismatches = [field for field, reference in matched.items() if reference.get(field) != environment.get(field)]
+    mismatches = [field for field, reference in matched.items() if refill_field_differs(field, reference, environment)]
     if mismatches:
         raise UnsafeCampaignError(
             f"refill host environment for {job.identity} differs from the campaign's: {mismatches}")
@@ -2080,17 +2315,16 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                         continue
                     if budget and blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
                         continue
+                    placements = launch_placements(arguments, candidate)
+                    candidate = place(candidate, placements[0])
+                    running_jobs = [record[1] for record in running.values()]
                     if candidate.market == "spot" and (
                             getattr(arguments, "spot_only", False) or
                             arguments.max_concurrent > PROACTIVE_SPOT_CAPACITY_THRESHOLD) and budget is None:
-                        try:
-                            spot_capacity = current_spot_capacity(
-                                arguments,
-                                arguments.campaign_id,
-                                [record[1] for record in running.values()])
-                        except UnsafeCampaignError:
-                            raise
-                        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                        placed, spot_capacities, error = place_with_headroom(
+                            candidate, placements,
+                            lambda region: current_spot_capacity(arguments, arguments.campaign_id, running_jobs, region))
+                        if placed is None and error is not None:
                             pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
                             wait_key = (candidate.identity, "spot-capacity-query")
                             if wait_key not in capacity_waits:
@@ -2101,16 +2335,18 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                                     "queued-capacity",
                                     f"Spot capacity query failed: {error}")
                             continue
-                        if spot_capacity["available"] < candidate.platform.vcpus:
-                            if getattr(arguments, "spot_only", False):
-                                pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
-                                wait_key = (candidate.identity, "spot-capacity")
-                                if wait_key not in capacity_waits:
-                                    capacity_waits.add(wait_key)
-                                    write_attempt(attempts_path, candidate, "queued-capacity",
-                                                  "Spot-only policy waiting for quota; " +
-                                                  ";".join(f"{key}={value}" for key, value in spot_capacity.items()))
-                                continue
+                        if placed is not None:
+                            candidate = placed
+                        elif getattr(arguments, "spot_only", False):
+                            pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
+                            wait_key = (candidate.identity, "spot-capacity")
+                            if wait_key not in capacity_waits:
+                                capacity_waits.add(wait_key)
+                                write_attempt(attempts_path, candidate, "queued-capacity",
+                                              "Spot-only policy waiting for quota; " +
+                                              capacity_detail(spot_capacities))
+                            continue
+                        else:
                             candidate = replace(candidate, market="on-demand")
                             pending[index] = (candidate, ready_at)
                             wait_key = (candidate.identity, "spot-to-on-demand")
@@ -2120,24 +2356,20 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                                     attempts_path,
                                     candidate,
                                     "queued-capacity",
-                                    "Spot capacity exhausted; " +
-                                    ";".join(f"{key}={value}" for key, value in spot_capacity.items()))
+                                    "Spot capacity exhausted; " + capacity_detail(spot_capacities))
                     if candidate.market == "on-demand":
-                        try:
-                            capacity = current_on_demand_capacity(
-                                arguments,
-                                arguments.campaign_id,
-                                [record[1] for record in running.values()])
-                        except UnsafeCampaignError:
-                            raise
-                        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                        placements = launch_placements(arguments, candidate)
+                        placed, capacities, error = place_with_headroom(
+                            candidate, placements,
+                            lambda region: current_on_demand_capacity(arguments, arguments.campaign_id, running_jobs, region))
+                        if placed is None and error is not None:
                             pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
                             wait_key = (candidate.identity, "capacity-query")
                             if wait_key not in capacity_waits:
                                 capacity_waits.add(wait_key)
                                 write_attempt(attempts_path, candidate, "queued-capacity", f"capacity query failed: {error}")
                             continue
-                        if capacity["available"] < candidate.platform.vcpus:
+                        if placed is None:
                             pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
                             wait_key = (candidate.identity, "capacity")
                             if wait_key not in capacity_waits:
@@ -2146,16 +2378,25 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                                     attempts_path,
                                     candidate,
                                     "queued-capacity",
-                                    ";".join(f"{key}={value}" for key, value in capacity.items()))
+                                    capacity_detail(capacities))
                             continue
+                        candidate = placed
                     if budget:
-                        try:
-                            admitted, reason = budget.reserve(arguments.campaign_id, candidate, result_root,
-                                                              lambda: shared_spot_snapshot(arguments))
-                        except BudgetError:
-                            raise
-                        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                            admitted, reason = False, f"shared capacity query failed: {error}"
+                        for placement in placements:
+                            try:
+                                admitted, reason = budget.reserve(
+                                    arguments.campaign_id, place(candidate, placement), result_root,
+                                    lambda region=placement[0]: shared_spot_snapshot(arguments, region))
+                            except BudgetError:
+                                raise
+                            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                                admitted, reason = False, f"shared capacity query failed: {error}"
+                            if admitted:
+                                candidate = place(candidate, placement)
+                                break
+                            # Fleet-wide host, spending and launch-rate limits hold in every region.
+                            if reason in ("fleet launch limit", "fleet spending or machine-hour ceiling"):
+                                break
                         if not admitted:
                             pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
                             if (candidate.identity, reason) not in capacity_waits:
@@ -2165,6 +2406,7 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                                 break
                             blocked_vcpus = candidate.platform.vcpus
                             continue
+                    pending[index] = (candidate, ready_at)
                     selected_index = index
                     break
                 if selected_index is None:
@@ -2334,6 +2576,9 @@ def main():
             raise SystemExit("production source differs from the selected release")
     result_root = arguments.result_root or root / "benchmark-results" / "pre-review-baseline" / arguments.campaign_id / arguments.phase
     platforms = read_platforms(directory)
+    arguments.regions = campaign_regions(arguments)
+    arguments.transfer_buckets = parse_transfer_buckets(arguments.transfer_bucket)
+    arguments.regional_amis = read_platform_regions(directory)
     shards = read_shards(directory)
     if arguments.selected_shards is not None:
         if (arguments.language_plan or arguments.phase == 'confirmation' or

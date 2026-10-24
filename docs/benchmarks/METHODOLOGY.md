@@ -302,6 +302,11 @@ candidate, or to decide whether it deserves a target-host run.
 
 Independent shards may use separate host pairs in parallel. Results from
 different hosts are independent sessions, not interchangeable brackets.
+A campaign may allow several AWS regions. Each Spot launch goes to the allowed
+region with the best Spot placement score, when scores are available, that has
+quota headroom; an On-Demand launch takes the first allowed region with
+headroom. Every region runs the same pinned image, identified by the name of
+its Oregon pin.
 
 See the [AWS guide](../../tools/re2-benchmark/aws/README.md) for commands,
 environment variables, machine-hour planning, and Spot/On-Demand costs.

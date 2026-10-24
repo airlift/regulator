@@ -1,0 +1,13 @@
+platform	region	ami_id
+r8i	us-west-2	ami-0b76d82b547c3c077
+r8i	ap-northeast-2	ami-04bb4ddfc0e51bb5e
+r8i	ap-south-1	ami-0884624fc54d115f3
+r8i	ap-southeast-1	ami-094819e1130d6d35b
+r8i	eu-central-1	ami-0352a6b853b4367b3
+r8i	eu-west-1	ami-02c25106ee38f6087
+r8i	us-east-1	ami-0006118602dfc1c09
+r8i	us-east-2	ami-06dd88604c99ec11f
+r9g	us-west-2	ami-0159f3bbb387b05a7
+r9g	eu-central-1	ami-0d4009f1875697189
+r9g	us-east-1	ami-04fc404d256fd34a2
+r9g	us-east-2	ami-0263206814db4826a
