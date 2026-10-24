@@ -340,6 +340,47 @@ public class TestTrinoRegexpFunctions
     }
 
     @Test
+    public void testLiteralSearchMemoryIsReservedFromForwardDfa()
+    {
+        Slice pattern = utf8(".*literal.*");
+        // The RE2 dialect builds no literal search, and neither compile builds a scan plan for this
+        // pattern, so the baseline's program and DFA allowance differ only by the search's charge.
+        Re2 baseline = Re2.compileParsed(pattern, TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL), Regexp.LIKE_PERL, 96L << 20);
+        TrinoRegexp regexp = TrinoRegexp.compile(pattern);
+
+        LiteralSearchKernel search = regexp.pattern().literalSearchForDiagnostics();
+        assertThat(search).isNotNull();
+        assertThat(baseline.literalSearchForDiagnostics()).isNull();
+        assertThat(regexp.pattern().usesTrinoScanPlanForDiagnostics()).isFalse();
+        assertThat(regexp.pattern().forwardProgramForDiagnostics().size()).isEqualTo(baseline.forwardProgramForDiagnostics().size());
+        assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.pattern().forwardProgramForDiagnostics().dfaMemory())
+                .isEqualTo(search.estimatedRetainedSize());
+
+        TrinoRegexp fallback = null;
+        for (long maxMemory = 512; maxMemory <= 64 * 1024; maxMemory += 64) {
+            try {
+                TrinoRegexp candidate = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
+                if (candidate.pattern().literalSearchForDiagnostics() == null) {
+                    fallback = candidate;
+                    break;
+                }
+            }
+            catch (RegexpCompileMemoryLimitException ignored) {
+                // Continue until the semantic program fits but the optional search does not.
+            }
+        }
+        assertThat(fallback).isNotNull();
+        assertThat(fallback.pattern().forwardProgramForDiagnostics().dfaMemory()).isLessThan(search.estimatedRetainedSize());
+        assertThat(fallback.pattern().booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.CONTAINS);
+        assertThat(fallback.usesDotStarLiteralSpanMatcherForDiagnostics()).isTrue();
+        Slice source = utf8("xxliteralyy\nliteral");
+        assertThat(fallback.contains(source)).isTrue();
+        assertThat(fallback.contains(utf8("xxlitera lyy"))).isFalse();
+        assertThat(fallback.count(source)).isEqualTo(2);
+        assertThat(fallback.extract(source)).isEqualTo(utf8("xxliteralyy"));
+    }
+
+    @Test
     public void testOrderedLiteralMatcherConcurrentReuse()
             throws Exception
     {

@@ -709,9 +709,9 @@ final class TrinoLikeKernelGenerator
                     emitFindSingleByte(body, bytes, start, end, literalBytes[0]);
                 }
                 else {
-                    // The search splits the interpreter's loop, as interpreted contains does: a
-                    // word scan that makes no call until it finds a possible candidate, and a
-                    // separate method that verifies candidates from there.
+                    // Each search splits its loop as the interpreter's searches do: a word scan
+                    // that makes no call until it finds a possible candidate, and a separate
+                    // method that verifies candidates from there.
                     MethodDefinition verifyCandidates = defineVerifyCandidates(searches.size(), literalBytes, literal.prefixShifts());
                     emitSkipToCandidate(body, bytes, start, end, literalBytes, verifyCandidates);
                 }
@@ -768,12 +768,12 @@ final class TrinoLikeKernelGenerator
         }
 
         /**
-         * A copy of {@code LiteralSearchKernel.verifyContainsCandidates}, which verifies as
-         * {@code findFrontAndBack} does: candidates whose first and last bytes match, verified in
-         * order, with the same KMP handoff rule. Verification begins at {@code verifyStart}, where
-         * the word scan found the first candidate, but the words and the KMP handoff count from
-         * {@code start}, because the bytes skipped count as covered. The word loop reads LOW_BITS
-         * and the literal's broadcasts as the scan does.
+         * A copy of {@code LiteralSearchKernel.verifyContainsCandidates}: possible candidates
+         * selected by the first-and-last-byte masks, verified in order, with the same KMP handoff
+         * rule. Verification begins at {@code verifyStart}, where the word scan found the first
+         * candidate, but the words and the KMP handoff count from {@code start}, because the bytes
+         * skipped count as covered. The word loop reads LOW_BITS and the literal's broadcasts as the
+         * scan does.
          */
         private void emitVerifyCandidates(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter verifyStart, Parameter end, byte[] literal, int[] prefixShifts)
         {

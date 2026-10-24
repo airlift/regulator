@@ -105,7 +105,11 @@ final class OrderedLiteralMatcher
                 return false;
             }
             LiteralSearchKernel literal = literals[literalIndex];
-            int matchOffset = literal.find(input, searchOffset, remaining);
+            // A literal of two or more bytes scans for its first and last bytes together and
+            // verifies candidates out of line; a one-byte literal scans for that byte.
+            int matchOffset = literal.literalLength() > 1
+                    ? literal.findContains(input, searchOffset, remaining)
+                    : literal.findSingleByte(input, searchOffset, remaining);
             if (matchOffset < 0) {
                 return false;
             }

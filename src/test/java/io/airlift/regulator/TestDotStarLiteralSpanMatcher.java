@@ -94,18 +94,33 @@ public class TestDotStarLiteralSpanMatcher
     @Test
     public void testGeneralEngineAgreement()
     {
+        Re2 pattern = Re2.compile(utf8Slice(".*literal.*"));
+        DotStarLiteralSpanMatcher matcher = pattern.createDotStarLiteralSpanMatcher();
+        assertThat(matcher.searchForDiagnostics()).isNull();
+        assertGeneralEngineAgreement(pattern, matcher);
+
+        // Trino spans share the pattern's contains search, so this checks the call-free scan's spans.
+        Re2 trinoPattern = TrinoRegexp.compile(utf8Slice(".*literal.*")).pattern();
+        DotStarLiteralSpanMatcher trinoMatcher = trinoPattern.createDotStarLiteralSpanMatcher();
+        assertThat(trinoMatcher.searchForDiagnostics())
+                .isNotNull()
+                .isSameAs(trinoPattern.literalSearchForDiagnostics());
+        assertGeneralEngineAgreement(trinoPattern, trinoMatcher);
+    }
+
+    private static void assertGeneralEngineAgreement(Re2 pattern, DotStarLiteralSpanMatcher matcher)
+    {
         List<Slice> inputs = List.of(
                 utf8Slice(""),
                 utf8Slice("literal"),
                 utf8Slice("before literal after"),
                 utf8Slice("before\nliteral\nafter"),
                 utf8Slice("literal one literal two"),
+                utf8Slice("lxxxxxl litexxl lxxxxxl literal lxxxxxl"),
+                utf8Slice("l".repeat(300) + "\nliteral " + "l".repeat(300)),
                 utf8Slice("é💰literalж終"),
                 wrappedBuffer(new byte[] {'a', (byte) 0xFF, 'l', 'i', 't', 'e', 'r', 'a', 'l', 'z'}),
                 wrappedBuffer(new byte[] {'a', 'l', 'i', 't', 'e', 'r', 'a', 'l', (byte) 0xFF, 'z'}));
-        Re2 pattern = Re2.compile(utf8Slice(".*literal.*"));
-        DotStarLiteralSpanMatcher matcher = pattern.createDotStarLiteralSpanMatcher();
-
         for (Slice input : inputs) {
             int start = 0;
             while (true) {

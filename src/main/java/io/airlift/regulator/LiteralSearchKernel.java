@@ -75,10 +75,16 @@ final class LiteralSearchKernel
         return prefixShifts.clone();
     }
 
-    int find(Slice input, int offset, int length)
+    /**
+     * Returns the Slice-relative offset of the first occurrence of the literal in the range, or
+     * -1. Requires a one-byte literal; OrderedLiteralMatcher and LiteralGapMatcher call it for such
+     * literals and {@link #findContains} for longer ones. TrinoLikeKernelGenerator emits a copy of
+     * its scan for each one-byte literal of a generated LIKE pattern; keep the copy in step.
+     */
+    int findSingleByte(Slice input, int offset, int length)
     {
         requireNonNull(input, "input is null");
-        if (offset < 0 || length < 0 || offset > input.length() - length || literal.length > length || literal.length == 0) {
+        if (offset < 0 || length < 0 || offset > input.length() - length || literal.length > length) {
             return -1;
         }
 
@@ -86,25 +92,34 @@ final class LiteralSearchKernel
         int inputOffset = input.byteArrayOffset();
         int searchStart = inputOffset + offset;
         int searchEnd = searchStart + length;
-        int matchOffset;
-        if (literal.length == 1) {
-            matchOffset = findSingleByte(inputBytes, searchStart, searchEnd);
-        }
-        else {
-            matchOffset = findFrontAndBack(inputBytes, searchStart, searchEnd);
-            if (matchOffset < -1) {
-                matchOffset = findKmp(inputBytes, -2 - matchOffset, searchEnd);
+        int wordEnd = searchStart + (length / (2 * Long.BYTES)) * (2 * Long.BYTES);
+        int position = searchStart;
+        for (; position < wordEnd; position += 2 * Long.BYTES) {
+            long firstDifference = ((long) LONG_HANDLE.get(inputBytes, position)) ^ frontBroadcast;
+            long secondDifference = ((long) LONG_HANDLE.get(inputBytes, position + Long.BYTES)) ^ frontBroadcast;
+            long firstMatches = zeroByteMask(firstDifference);
+            long secondMatches = zeroByteMask(secondDifference);
+            if ((firstMatches | secondMatches) != 0) {
+                if (firstMatches != 0) {
+                    return position + (Long.numberOfTrailingZeros(firstMatches) >>> 3) - inputOffset;
+                }
+                return position + Long.BYTES + (Long.numberOfTrailingZeros(secondMatches) >>> 3) - inputOffset;
             }
         }
-        return matchOffset < 0 ? -1 : matchOffset - inputOffset;
+        for (; position < searchEnd; position++) {
+            if (inputBytes[position] == literal[0]) {
+                return position - inputOffset;
+            }
+        }
+        return -1;
     }
 
     /**
      * Returns the Slice-relative offset of the first occurrence of the literal in the range, or
-     * -1, for a literal of at least two bytes and a valid range; Trino LIKE contains calls it. Its
-     * word scan makes no call until it finds a possible candidate and verifies candidates out of
-     * line, a split that costs short rows with frequent candidates, so {@link #find}, which
-     * ordered literals call, keeps verifying in line.
+     * -1, for a literal of at least two bytes and a valid range. LIKE and Trino regexp contains,
+     * Trino dot-star spans, OrderedLiteralMatcher, and LiteralGapMatcher's first literal call it
+     * for such literals. Its word scan makes no call until it finds a possible candidate, and a
+     * separate method verifies the candidates.
      */
     int findContains(Slice input, int offset, int length)
     {
@@ -123,28 +138,11 @@ final class LiteralSearchKernel
     }
 
     /**
-     * Returns the Slice-relative offset where {@link #find} continues with KMP, or -1 when the
-     * front-and-back scan finishes, matching or not, without switching, when the range is
-     * invalid, or when the literal is a single byte; only tests call it.
+     * Returns the Slice-relative offset where {@link #findContains} continues with KMP; only tests
+     * call it. Returns -1 when the search ends, with or without a match, before it switches to
+     * KMP, when the range is invalid, and when the literal is a single byte.
      */
     int kmpHandoffOffsetForDiagnostics(Slice input, int offset, int length)
-    {
-        requireNonNull(input, "input is null");
-        if (offset < 0 || length < 0 || offset > input.length() - length || literal.length > length || literal.length < 2) {
-            return -1;
-        }
-
-        int inputOffset = input.byteArrayOffset();
-        int searchStart = inputOffset + offset;
-        int result = findFrontAndBack(input.byteArray(), searchStart, searchStart + length);
-        return result < -1 ? -2 - result - inputOffset : -1;
-    }
-
-    /**
-     * Returns the Slice-relative offset where {@link #findContains} continues with KMP, or -1,
-     * as {@link #kmpHandoffOffsetForDiagnostics} does for {@link #find}; only tests call it.
-     */
-    int containsKmpHandoffOffsetForDiagnostics(Slice input, int offset, int length)
     {
         requireNonNull(input, "input is null");
         if (offset < 0 || length < 0 || offset > input.length() - length || literal.length > length || literal.length < 2) {
@@ -164,61 +162,6 @@ final class LiteralSearchKernel
         }
         int inputOffset = input.byteArrayOffset() + offset;
         return Arrays.equals(input.byteArray(), inputOffset, inputOffset + literal.length, literal, 0, literal.length);
-    }
-
-    /**
-     * Returns the match position, -1 when there is no match, or {@code -2 - resume} when the
-     * search must continue with {@link #findKmp} at {@code resume}. Returning the handoff, rather
-     * than running KMP here, lets {@link #kmpHandoffOffsetForDiagnostics} observe it.
-     * <p>
-     * {@link #verifyContainsCandidates} verifies as this scan does; keep the two in step: the
-     * candidates they verify, the order they verify them in, and the KMP handoff rule.
-     */
-    private int findFrontAndBack(byte[] input, int searchStart, int searchEnd)
-    {
-        int candidateCount = searchEnd - searchStart - literal.length + 1;
-        int wordEnd = searchStart + (candidateCount / Long.BYTES) * Long.BYTES;
-        int backOffset = literal.length - 1;
-        // searchStart plus the failed candidates' compared bytes, minus the budget, so the search
-        // switches when it passes the candidate. It never passes the current candidate by more
-        // than the literal length, so it cannot overflow. Counting the bytes alone and comparing
-        // them with candidate - searchStart kept searchStart live in the loop, and on aarch64 C2
-        // then rebuilt the -LOW_BITS constant on every word.
-        int comparisonEnd = searchStart - CANDIDATE_COMPARISON_BUDGET;
-        int position = searchStart;
-
-        for (; position < wordEnd; position += Long.BYTES) {
-            long frontDifference = ((long) LONG_HANDLE.get(input, position)) ^ frontBroadcast;
-            long backDifference = ((long) LONG_HANDLE.get(input, position + backOffset)) ^ backBroadcast;
-            long candidates = zeroByteMask(frontDifference) & zeroByteMask(backDifference);
-            while (candidates != 0) {
-                int candidate = position + (Long.numberOfTrailingZeros(candidates) >>> 3);
-                int matchedLength = matchingPrefixLength(input, candidate);
-                if (matchedLength == literal.length) {
-                    return candidate;
-                }
-                comparisonEnd += matchedLength + 1;
-                if (comparisonEnd > candidate) {
-                    return -2 - (candidate + 1);
-                }
-                candidates &= candidates - 1;
-            }
-        }
-
-        int candidateEnd = searchEnd - literal.length + 1;
-        for (; position < candidateEnd; position++) {
-            if (input[position] == literal[0] && input[position + backOffset] == literal[backOffset]) {
-                int matchedLength = matchingPrefixLength(input, position);
-                if (matchedLength == literal.length) {
-                    return position;
-                }
-                comparisonEnd += matchedLength + 1;
-                if (comparisonEnd > position) {
-                    return -2 - (position + 1);
-                }
-            }
-        }
-        return -1;
     }
 
     /**
@@ -257,12 +200,14 @@ final class LiteralSearchKernel
     }
 
     /**
-     * Verifies candidates in order from {@code verifyStart}, the word or tail position where
-     * {@link #skipToContainsCandidate} found the first one, scanning on as
-     * {@link #findFrontAndBack} does, and returns as it does. The KMP handoff counts from
-     * {@code searchStart}, because the bytes skipped to reach {@code verifyStart} count as
-     * covered. The word loop reads LOW_BITS from {@link #lowBits}, as the scan does.
-     * TrinoLikeKernelGenerator emits a copy of this method; keep the copies in step.
+     * Verifies possible candidates selected by the first-and-last-byte masks, in order from
+     * {@code verifyStart}, the word or tail position where {@link #skipToContainsCandidate} found
+     * the first one. Returns the match position, -1 when there is no match, or {@code -2 - resume}
+     * when the search must continue with {@link #findKmp} at {@code resume}; returning the handoff,
+     * rather than running KMP here, lets {@link #kmpHandoffOffsetForDiagnostics} observe it. The
+     * KMP handoff counts from {@code searchStart}, because the bytes skipped to reach
+     * {@code verifyStart} count as covered. The word loop reads LOW_BITS from {@link #lowBits}, as
+     * the scan does. TrinoLikeKernelGenerator emits a copy of this method; keep the copies in step.
      */
     private int verifyContainsCandidates(byte[] input, int searchStart, int verifyStart, int searchEnd)
     {
@@ -270,6 +215,11 @@ final class LiteralSearchKernel
         int wordEnd = searchStart + (candidateCount / Long.BYTES) * Long.BYTES;
         int backOffset = literal.length - 1;
         long lowBits = this.lowBits;
+        // searchStart plus the failed candidates' compared bytes, minus the budget, so the search
+        // switches when it passes the candidate. It never passes the current candidate by more
+        // than the literal length, so it cannot overflow. In the former in-line scan, counting the
+        // bytes alone and comparing them with candidate - searchStart kept searchStart live in the
+        // loop, and on aarch64 C2 then rebuilt the -LOW_BITS constant on every word.
         int comparisonEnd = searchStart - CANDIDATE_COMPARISON_BUDGET;
         int position = verifyStart;
 
@@ -302,32 +252,6 @@ final class LiteralSearchKernel
                 if (comparisonEnd > position) {
                     return -2 - (position + 1);
                 }
-            }
-        }
-        return -1;
-    }
-
-    // TrinoLikeKernelGenerator emits a copy of this scan for each one-byte literal of a generated
-    // LIKE pattern; keep the copy in step.
-    private int findSingleByte(byte[] input, int searchStart, int searchEnd)
-    {
-        int wordEnd = searchStart + ((searchEnd - searchStart) / (2 * Long.BYTES)) * (2 * Long.BYTES);
-        int position = searchStart;
-        for (; position < wordEnd; position += 2 * Long.BYTES) {
-            long firstDifference = ((long) LONG_HANDLE.get(input, position)) ^ frontBroadcast;
-            long secondDifference = ((long) LONG_HANDLE.get(input, position + Long.BYTES)) ^ frontBroadcast;
-            long firstMatches = zeroByteMask(firstDifference);
-            long secondMatches = zeroByteMask(secondDifference);
-            if ((firstMatches | secondMatches) != 0) {
-                if (firstMatches != 0) {
-                    return position + (Long.numberOfTrailingZeros(firstMatches) >>> 3);
-                }
-                return position + Long.BYTES + (Long.numberOfTrailingZeros(secondMatches) >>> 3);
-            }
-        }
-        for (; position < searchEnd; position++) {
-            if (input[position] == literal[0]) {
-                return position;
             }
         }
         return -1;
