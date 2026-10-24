@@ -43,7 +43,8 @@ REBAR_OUTCOME_FIELDS = (
 )
 EVENT_FIELDS = (
     "event_type", "campaign_id", "platform", "shard_id", "replica_id",
-    "instance_id", "host_epoch", "reason", "artifact_uri", "artifact_sha256", "details",
+    "instance_id", "host_epoch", "reason", "artifact_uri", "artifact_sha256", "region",
+    "availability_zone", "placement_score", "failure_classification", "details",
 )
 CAMPAIGN_ARTIFACT_FIELDS = (
     "s3_uri", "version_id", "archive_sha256", "candidate_commit", "candidate_ref",
@@ -733,7 +734,8 @@ def load_rebar_exclusions(paths, campaign_id):
                 "event_type": "exclusion", "campaign_id": campaign_id, "platform": "",
                 "shard_id": "", "replica_id": "", "instance_id": "", "host_epoch": "",
                 "reason": row["reason"], "artifact_uri": str(path),
-                "artifact_sha256": sha256_file(path),
+                "artifact_sha256": sha256_file(path), "region": "", "availability_zone": "",
+                "placement_score": "", "failure_classification": "",
                 "details": json.dumps(details, sort_keys=True, separators=(",", ":")),
             })
     return events
@@ -814,7 +816,8 @@ def load_rebar_joni_applicability(path, manifest_rows, campaign_id):
             "event_type": "exclusion", "campaign_id": campaign_id, "platform": "",
             "shard_id": "", "replica_id": "", "instance_id": "", "host_epoch": "",
             "reason": row["reason"], "artifact_uri": str(source),
-            "artifact_sha256": ledger_digest,
+            "artifact_sha256": ledger_digest, "region": "", "availability_zone": "",
+            "placement_score": "", "failure_classification": "",
             "details": json.dumps(details, sort_keys=True, separators=(",", ":")),
         })
     return events

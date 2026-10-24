@@ -1281,19 +1281,28 @@ def write_attempt(path, job, outcome, detail="-"):
 
 
 def write_event(path, event_type, campaign_id, job, session, reason, details=""):
+    # A launch that failed before the host started leaves only the cleanup manifest.
     metadata = {}
-    session_file = session / "session.txt"
-    if session_file.is_file():
-        metadata = read_properties(session_file)
-    instance_field = "intel_instance_id" if job.platform.architecture == "intel" else "arm_instance_id"
-    instance_id = metadata.get(instance_field, "")
+    for name in ("cleanup-manifest.txt", "session.txt"):
+        if (session / name).is_file():
+            metadata.update(read_properties(session / name))
+    label = job.platform.architecture
+    instance_id = metadata.get(f"{label}_instance_id", "")
+    availability_zone = metadata.get(f"{label}_availability_zone", "")
+    failure_classification = metadata.get("failure_classification", "")
     fields = (
         "event_type", "campaign_id", "platform", "shard_id", "replica_id", "instance_id",
-        "host_epoch", "reason", "artifact_uri", "artifact_sha256", "details",
+        "host_epoch", "reason", "artifact_uri", "artifact_sha256", "region", "availability_zone",
+        "placement_score", "failure_classification", "details",
     )
     write_header = not path.exists()
+    if not write_header:
+        # Resumed campaigns keep the event columns their file started with.
+        with path.open(newline="") as input_file:
+            fields = tuple(csv.DictReader(input_file, delimiter="\t").fieldnames or fields)
     with path.open("a", newline="") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=fields, delimiter="\t", lineterminator="\n")
+        writer = csv.DictWriter(
+            output_file, fieldnames=fields, extrasaction="ignore", delimiter="\t", lineterminator="\n")
         if write_header:
             writer.writeheader()
         writer.writerow({
@@ -1307,6 +1316,10 @@ def write_event(path, event_type, campaign_id, job, session, reason, details="")
             "reason": reason,
             "artifact_uri": str(session),
             "artifact_sha256": "",
+            "region": metadata.get("aws_region", ""),
+            "availability_zone": "" if availability_zone in {"none", "None"} else availability_zone,
+            "placement_score": metadata.get("placement_score", ""),
+            "failure_classification": "" if failure_classification == "none" else failure_classification,
             "details": details.replace("\t", " ").replace("\n", " "),
         })
         output_file.flush()
@@ -2158,15 +2171,19 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                     break
                 job, _ = pending.pop(selected_index)
                 validate_frozen_inputs(root, arguments, jobs_path, expected_fingerprint)
+                environment = job_environment(job, arguments, root, result_root)
                 log_path = result_root / "controller-logs" / (job.identity.replace("/", "-") + ".log")
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log = log_path.open("w")
-                write_attempt(attempts_path, job, "starting")
+                write_attempt(
+                    attempts_path, job, "starting",
+                    f"region={environment['AWS_REGION']};"
+                    f"placement_score={environment.get('CAMPAIGN_PLACEMENT_SCORE', '')}")
                 try:
                     process = subprocess.Popen(
                         [str(runner), job.identity],
                         cwd=root,
-                        env=job_environment(job, arguments, root, result_root),
+                        env=environment,
                         stdout=log,
                         stderr=subprocess.STDOUT,
                         start_new_session=True)
@@ -2212,7 +2229,7 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                                 job, next_host_epoch, classification, detail,
                                 spot_only=getattr(arguments, "spot_only", False))
                         except RuntimeError as error:
-                            failure_detail = f"status={status}; {error}"
+                            failure_detail = f"status={status}; {error}; detail={detail}"
                             unresolved.append((job, failure_detail))
                             write_attempt(attempts_path, job, "unresolved", failure_detail)
                             write_event(

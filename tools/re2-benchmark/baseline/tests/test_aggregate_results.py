@@ -115,7 +115,9 @@ class CampaignFixture:
             for replica in (1, 2, 3):
                 self.add_session(platform, replica)
         self.write_ledgers()
-        write_tsv(self.events, aggregate_results.EVENT_FIELDS[:-1], ({
+        # Archived campaigns recorded neither details nor launch placement.
+        write_tsv(self.events, ("event_type", "campaign_id", "platform", "shard_id", "replica_id",
+                                "instance_id", "host_epoch", "reason", "artifact_uri", "artifact_sha256"), ({
             "event_type": "interruption", "campaign_id": "test-campaign", "platform": "r8g",
             "shard_id": "only", "replica_id": "2", "instance_id": "i-interrupted",
             "host_epoch": "interrupted-epoch", "reason": "Spot interruption",
@@ -1081,11 +1083,21 @@ class TestAggregateResults(unittest.TestCase):
                 "details": '{"attempt":"1"}',
                 "log_sha256": "c" * 64,
             })
+        events[0].update({
+            "region": "us-east-2", "availability_zone": "us-east-2b", "placement_score": "9",
+            "failure_classification": "retryable-spot",
+        })
         write_tsv(self.fixture.events, fields, events)
         self.aggregate()
         actual = read_tsv(self.fixture.output / "events.tsv")
         self.assertEqual({row["event_type"] for row in actual}, {
             "interruption", "rejected-session", "exclusion"})
+        interruption = next(row for row in actual if row["event_type"] == "interruption")
+        self.assertEqual(
+            [interruption[field] for field in (
+                "region", "availability_zone", "placement_score", "failure_classification")],
+            ["us-east-2", "us-east-2b", "9", "retryable-spot"])
+        self.assertEqual(json.loads(interruption["details"]), {"attempt": "1", "log_sha256": "c" * 64})
         rejected = next(row for row in actual if row["event_type"] == "rejected-session")
         self.assertEqual(json.loads(rejected["details"])["log_sha256"], "c" * 64)
         self.assertEqual(json.loads(rejected["details"])["attempt"], "1")

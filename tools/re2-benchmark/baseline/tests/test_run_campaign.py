@@ -369,14 +369,16 @@ class TestRunCampaign(unittest.TestCase):
             *,
             failure_classification="controller-abort",
             failure_detail="test failure",
-            bucket_removed="verified"):
+            bucket_removed="verified",
+            launched=True):
         session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
         session.mkdir(parents=True)
-        (session / "session.txt").write_text(
-            "session=session\n"
-            "bucket=re2-baseline-test-bucket\n"
-            "intel_instance_id=i-0123456789abcdef0\n"
-            "arm_instance_id=none\n")
+        if launched:
+            (session / "session.txt").write_text(
+                "session=session\n"
+                "bucket=re2-baseline-test-bucket\n"
+                "intel_instance_id=i-0123456789abcdef0\n"
+                "arm_instance_id=none\n")
         (session / "cleanup-manifest.txt").write_text(
             "instances_terminated=verified\n"
             "iam_removed=verified\n"
@@ -385,7 +387,11 @@ class TestRunCampaign(unittest.TestCase):
             f"cleanup_status={'verified' if bucket_removed == 'verified' else 'failed'}\n"
             "run_status=failed\n"
             f"failure_classification={failure_classification}\n"
-            f"failure_detail={failure_detail}\n")
+            f"failure_detail={failure_detail}\n"
+            "aws_region=us-east-2\n"
+            "intel_availability_zone=us-east-2b\n"
+            "arm_availability_zone=none\n"
+            "placement_score=9\n")
         return session
 
     def test_capacity_evidence_requires_complete_successful_measurement(self):
@@ -989,7 +995,7 @@ aws_cli() {
     if [[ "$*" == *describe-instance-type-offerings* ]]; then
         printf 'us-west-2a us-west-2b us-west-2c us-west-2d\\n'
     else
-        printf 'subnet-a subnet-b subnet-c subnet-d\\n'
+        printf 'subnet-%s\\tus-west-2%s\\n' a a b b c c d d
     fi
 }
 VPC_ID=vpc-test
@@ -1002,7 +1008,8 @@ for CAMPAIGN_ATTEMPT in 1 2 3 4; do
 done
 '''
         result = subprocess.run(['bash', '-c', selector + fixture], capture_output=True, text=True, check=True)
-        self.assertEqual(set(result.stdout.splitlines()), {'subnet-a', 'subnet-b', 'subnet-c', 'subnet-d'})
+        self.assertEqual(set(result.stdout.splitlines()), {
+            'subnet-a us-west-2a', 'subnet-b us-west-2b', 'subnet-c us-west-2c', 'subnet-d us-west-2d'})
         self.assertEqual(len(result.stdout.splitlines()), 4)
 
     def test_aws_command_uses_standard_credential_chain_without_profile(self):
@@ -1302,6 +1309,10 @@ done
                 "INSTANCE_ROLE_NAME=test-role\n"
                 "BUCKET=test-bucket\n"
                 "BUCKET_OWNED=1\n"
+                "AWS_REGION=us-east-2\n"
+                "INTEL_AVAILABILITY_ZONE=us-east-2b\n"
+                "ARM_AVAILABILITY_ZONE=none\n"
+                "CAMPAIGN_PLACEMENT_SCORE=9\n"
                 "OBJECT_PREFIX=\n"
                 "CAMPAIGN_MODE=baseline-shard\n"
                 "CAMPAIGN_ID=baseline\n"
@@ -1328,6 +1339,9 @@ done
             self.assertEqual(cleanup["bucket_removed"], "verified")
             self.assertEqual(cleanup["cleanup_status"], "verified")
             self.assertEqual(cleanup["run_status"], "failed")
+            self.assertEqual(
+                [cleanup[field] for field in ("aws_region", "intel_availability_zone", "placement_score")],
+                ["us-east-2", "us-east-2b", "9"])
 
     def test_retryable_launch_does_not_hide_failed_instance_discovery(self):
         source = AWS_RUNNER.read_text()
@@ -2458,7 +2472,8 @@ done
                     result_root,
                     spot_job,
                     failure_classification="retryable-spot",
-                    failure_detail="launch-capacity:InsufficientInstanceCapacity"))
+                    failure_detail="launch-capacity:InsufficientInstanceCapacity",
+                    launched=False))
             on_demand_process = FakeProcess(
                 109,
                 status=1,
@@ -2475,7 +2490,8 @@ done
                         "reserved": 0,
                         "safety_reserve": 32,
                         "available": 468,
-                    }):
+                    }), \
+                    patch.dict(os.environ, {"AWS_REGION": "us-east-2", "CAMPAIGN_PLACEMENT_SCORE": "9"}):
                 with self.assertRaises(SystemExit):
                     RUN_CAMPAIGN.execute_jobs(
                         self.arguments(root), root, result_root, [spot_job])
@@ -2484,6 +2500,40 @@ done
             epochs = [call.kwargs["env"]["CAMPAIGN_HOST_EPOCH"] for call in popen.call_args_list]
             self.assertEqual(markets, ["spot", "on-demand"])
             self.assertEqual(epochs, ["10", "11"])
+            self.assertIn("starting\tregion=us-east-2;placement_score=9",
+                          (result_root / "job-attempts.tsv").read_text())
+            with (result_root / "campaign-events.tsv").open(newline="") as input_file:
+                failed_launch = next(csv.DictReader(input_file, delimiter="\t"))
+            self.assertEqual(
+                {field: failed_launch[field] for field in (
+                    "event_type", "instance_id", "reason", "region", "availability_zone",
+                    "placement_score", "failure_classification")},
+                {
+                    "event_type": "interruption",
+                    "instance_id": "",
+                    "reason": "launch-capacity:InsufficientInstanceCapacity",
+                    "region": "us-east-2",
+                    "availability_zone": "us-east-2b",
+                    "placement_score": "9",
+                    "failure_classification": "retryable-spot",
+                })
+
+    def test_resumed_campaign_events_keep_their_columns(self):
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result_root = Path(temporary_directory)
+            session = self.write_cleanup_session(result_root, job)
+            events = result_root / "campaign-events.tsv"
+            fields = ("event_type", "campaign_id", "platform", "shard_id", "replica_id", "instance_id",
+                      "host_epoch", "reason", "artifact_uri", "artifact_sha256", "details")
+            events.write_text("\t".join(fields) + "\n")
+
+            RUN_CAMPAIGN.write_event(events, "interruption", "baseline", job, session, "spot-interruption")
+
+            with events.open(newline="") as input_file:
+                rows = list(csv.DictReader(input_file, delimiter="\t"))
+            self.assertEqual(tuple(rows[0]), fields)
+            self.assertEqual(rows[0]["instance_id"], "i-0123456789abcdef0")
 
 
 if __name__ == "__main__":

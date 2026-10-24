@@ -17,6 +17,11 @@ if [[ -n "${CAMPAIGN_SPOT_MAX_PRICE}" && ! "${CAMPAIGN_SPOT_MAX_PRICE}" =~ ^[0-9
     echo "Invalid Spot price ceiling" >&2
     exit 1
 fi
+CAMPAIGN_PLACEMENT_SCORE=${CAMPAIGN_PLACEMENT_SCORE:-}
+if [[ -n "${CAMPAIGN_PLACEMENT_SCORE}" && ! "${CAMPAIGN_PLACEMENT_SCORE}" =~ ^([1-9]|10)$ ]]; then
+    echo "Invalid Spot placement score" >&2
+    exit 1
+fi
 REGULATOR_RELEASE_VERSION=${REGULATOR_RELEASE_VERSION:-}
 if [[ -n "${REGULATOR_RELEASE_VERSION}" && ! "${REGULATOR_RELEASE_VERSION}" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
     echo "Invalid release version" >&2
@@ -319,6 +324,9 @@ ROOT_BASHPID=${BASHPID}
 CLEANUP_CAUSE=exit
 INSTANCE_IDS=()
 LAUNCH_ATTEMPTED=0
+LAUNCHED_INSTANCE_ID=
+INTEL_AVAILABILITY_ZONE=none
+ARM_AVAILABILITY_ZONE=none
 DOWNLOADED_RESULT_COUNT=0
 FAILURE_CLASSIFICATION=none
 FAILURE_DETAIL=none
@@ -806,6 +814,10 @@ cleanup()
             printf 'cleanup_cause=%s\n' "${CLEANUP_CAUSE:-exit}"
             printf 'failure_classification=%s\n' "${FAILURE_CLASSIFICATION}"
             printf 'failure_detail=%s\n' "${FAILURE_DETAIL}"
+            printf 'aws_region=%s\n' "${AWS_REGION}"
+            printf 'intel_availability_zone=%s\n' "${INTEL_AVAILABILITY_ZONE}"
+            printf 'arm_availability_zone=%s\n' "${ARM_AVAILABILITY_ZONE}"
+            printf 'placement_score=%s\n' "${CAMPAIGN_PLACEMENT_SCORE}"
         } > "${SESSION_DIR}/cleanup-manifest.txt"
         if [[ ${status} -eq 0 ]]; then
             printf 'complete\n' > "${SESSION_DIR}/campaign-success"
@@ -946,6 +958,7 @@ select_subnet()
     local replica_index
     local placement_seed
     local subnet_count
+    local subnet_zones
     local subnets
     local zone_values
     available_zones=$(aws_cli ec2 describe-instance-type-offerings \
@@ -960,10 +973,10 @@ select_subnet()
             "Name=vpc-id,Values=${VPC_ID}" \
             "Name=state,Values=available" \
             "Name=availability-zone,Values=${zone_values}" \
-        --query 'sort_by(Subnets[?MapPublicIpOnLaunch], &AvailabilityZone)[].SubnetId' \
+        --query 'sort_by(Subnets[?MapPublicIpOnLaunch], &AvailabilityZone)[].[SubnetId,AvailabilityZone]' \
         --output text)
-    read -r -a subnet_array <<<"${subnets}"
-    subnet_count=${#subnet_array[@]}
+    read -r -a subnet_zones <<<"$(tr '\n\t' '  ' <<<"${subnets}")"
+    subnet_count=$((${#subnet_zones[@]} / 2))
     if [[ ${subnet_count} -eq 0 ]]; then
         return
     fi
@@ -971,7 +984,7 @@ select_subnet()
     # pool on each retry regardless of other jobs' allocated host epochs.
     placement_seed=$(printf '%s' "${CAMPAIGN_PLATFORM}/${CAMPAIGN_SHARD_ID}/replica-${CAMPAIGN_REPLICA_ID}" | cksum | awk '{print $1}')
     replica_index=$(((placement_seed + CAMPAIGN_ATTEMPT - 1) % subnet_count))
-    printf '%s\n' "${subnet_array[${replica_index}]}"
+    printf '%s %s\n' "${subnet_zones[$((2 * replica_index))]}" "${subnet_zones[$((2 * replica_index + 1))]}"
 }
 
 create_user_data()
@@ -1146,8 +1159,19 @@ fi
 EOF
 }
 
+record_launch_zone()
+{
+    case "$1" in
+        intel) INTEL_AVAILABILITY_ZONE=$2 ;;
+        arm) ARM_AVAILABILITY_ZONE=$2 ;;
+        *) echo "Unsupported architecture: $1" >&2; exit 1 ;;
+    esac
+}
+
 launch_instance()
 {
+    # Runs in the root shell, which records the zone as it is chosen, so a failed launch still
+    # records its zone; sets LAUNCHED_INSTANCE_ID.
     local label=$1
     local architecture=$2
     local instance_type=$3
@@ -1160,8 +1184,10 @@ launch_instance()
     local instance_id
     local launch_error=
     local root_device
-    local subnet
     local launch_arguments
+    local subnet
+    local subnet_selection
+    local zone
 
     local java_url
     local java_sha256
@@ -1174,11 +1200,13 @@ launch_instance()
         ami=$(aws_cli ssm get-parameter --name "${ami_parameter}" --query Parameter.Value --output text)
     fi
     root_device=$(aws_cli ec2 describe-images --image-ids "${ami}" --query 'Images[0].RootDeviceName' --output text)
-    subnet=$(select_subnet "${instance_type}")
+    subnet_selection=$(select_subnet "${instance_type}")
+    read -r subnet zone <<<"${subnet_selection}"
     if [[ -z "${subnet}" || "${subnet}" == "None" ]]; then
         echo "No public default-VPC subnet offers ${instance_type}" >&2
         exit 1
     fi
+    record_launch_zone "${label}" "${zone}"
 
     create_user_data \
         "${label}" \
@@ -1216,7 +1244,7 @@ launch_instance()
                 --user-data "file://${user_data}" \
                 --query 'Instances[0].InstanceId' \
                 --output text 2>"${SESSION_DIR}/launch-${label}.error"); then
-            printf '%s\n' "${instance_id}"
+            LAUNCHED_INSTANCE_ID=${instance_id}
             return
         fi
         launch_error=$(tr '\n\t' '  ' < "${SESSION_DIR}/launch-${label}.error")
@@ -1371,19 +1399,21 @@ ARM_INSTANCE_ID=none
 pending=()
 if includes_architecture intel; then
     LAUNCH_ATTEMPTED=1
-    INTEL_INSTANCE_ID=$(launch_instance \
+    launch_instance \
         intel x86_64 "${INTEL_INSTANCE_TYPE}" \
         /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
-        "${INTEL_RESULT_KEY}")
+        "${INTEL_RESULT_KEY}"
+    INTEL_INSTANCE_ID=${LAUNCHED_INSTANCE_ID}
     INSTANCE_IDS+=("${INTEL_INSTANCE_ID}")
     pending+=(intel)
 fi
 if includes_architecture arm; then
     LAUNCH_ATTEMPTED=1
-    ARM_INSTANCE_ID=$(launch_instance \
+    launch_instance \
         arm aarch64 "${ARM_INSTANCE_TYPE}" \
         /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 \
-        "${ARM_RESULT_KEY}")
+        "${ARM_RESULT_KEY}"
+    ARM_INSTANCE_ID=${LAUNCHED_INSTANCE_ID}
     INSTANCE_IDS+=("${ARM_INSTANCE_ID}")
     pending+=(arm)
 fi
@@ -1400,6 +1430,7 @@ campaign_provenance=${CAMPAIGN_PROVENANCE}
 source_snapshot_kind=${SOURCE_SNAPSHOT_KIND}
 aws_profile=${AWS_PROFILE:-default-credential-chain}
 aws_region=${AWS_REGION}
+placement_score=${CAMPAIGN_PLACEMENT_SCORE}
 bucket=${BUCKET}
 bucket_owned=${BUCKET_OWNED}
 object_prefix=${OBJECT_PREFIX}
@@ -1432,8 +1463,10 @@ benchmark_arm_ami_id=${RESOLVED_ARM_AMI_ID:-latest}
 benchmark_heap_size=${BENCHMARK_HEAP_SIZE:-8g}
 intel_instance_type=${INTEL_INSTANCE_TYPE}
 intel_instance_id=${INTEL_INSTANCE_ID}
+intel_availability_zone=${INTEL_AVAILABILITY_ZONE}
 arm_instance_type=${ARM_INSTANCE_TYPE}
 arm_instance_id=${ARM_INSTANCE_ID}
+arm_availability_zone=${ARM_AVAILABILITY_ZONE}
 EOF
 
 echo "Started ${CAMPAIGN_ARCHITECTURES}: Intel ${INTEL_INSTANCE_ID}, Arm ${ARM_INSTANCE_ID}"
