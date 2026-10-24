@@ -21,8 +21,9 @@ class TestReleaseCapture(unittest.TestCase):
                  'partition': part['id'], 'replica': replica}
                 for replica in (1, 2, 3)]
         self.manifest = {'suite': 'language-bulk', 'cases': [{'id': 'example', 'model': 'count'}]}
-        self.data = {'plan': {'schema_version': 3, 'replicas': 3,
-                              'platform_allocations': release_capture.fleet.platform_allocations('language-bulk'),
+        platforms = release_capture.fleet.RELEASE_1_0_PLATFORMS
+        self.data = {'plan': {'schema_version': 3, 'replicas': 3, 'platforms': list(platforms),
+                              'platform_allocations': release_capture.fleet.platform_allocations('language-bulk', platforms),
                               'jobs': jobs, 'partitions': [part]},
                      'candidate': {'source_commit': self.collector['candidate_commit'], 'source_tree': self.collector['root_tree']},
                      'hosts': [], 'observations': [], 'comparisons': []}
@@ -83,7 +84,8 @@ class TestReleaseCapture(unittest.TestCase):
     def test_lifecycle_r9g_uses_the_frozen_larger_allocation(self):
         self.manifest['suite'] = 'language-lifecycle'
         allocation = release_capture.fleet.platform_allocation('language-lifecycle', 'r9g')
-        self.data['plan']['platform_allocations'] = release_capture.fleet.platform_allocations('language-lifecycle')
+        self.data['plan']['platform_allocations'] = release_capture.fleet.platform_allocations(
+            'language-lifecycle', release_capture.fleet.RELEASE_1_0_PLATFORMS)
         for host in self.data['hosts']:
             job = host['job']
             job.update(id=job['id'].replace('r8i/', 'r9g/'), platform='r9g', **allocation)
@@ -96,19 +98,33 @@ class TestReleaseCapture(unittest.TestCase):
             self.normalize()
 
     def test_imports_legacy_plan_with_the_qualified_allocation(self):
-        self.manifest['suite'] = 'language-lifecycle'
-        allocation = release_capture.fleet.platform_allocation('language-lifecycle', 'r9g')
-        for host in self.data['hosts']:
-            job = host['job']
-            job.update(id=job['id'].replace('r8i/', 'r9g/'), platform='r9g', **allocation)
-            host['provenance']['instance_identity']['instanceType'] = allocation['instance_type']
-        self.data['plan']['schema_version'] = 2
-        del self.data['plan']['platform_allocations']
-        for job in self.data['plan']['jobs']:
-            del job['instance_type']
-            del job['vcpus']
-        self.refresh_receipts()
-        self.assertEqual(len(self.normalize()['hosts']), 3)
+        # Legacy plans are the 1.0 release campaign's, which also measured R8g.
+        for platform in ('r9g', 'r8g'):
+            self.setUp()
+            self.manifest['suite'] = 'language-lifecycle'
+            allocation = release_capture.fleet.platform_allocation('language-lifecycle', platform)
+            for host in self.data['hosts']:
+                job = host['job']
+                job.update(id=job['id'].replace('r8i/', platform + '/'), platform=platform, **allocation)
+                host['provenance']['instance_identity']['instanceType'] = allocation['instance_type']
+            self.data['plan']['schema_version'] = 2
+            del self.data['plan']['platform_allocations']
+            for job in self.data['plan']['jobs']:
+                del job['instance_type']
+                del job['vcpus']
+            self.refresh_receipts()
+            with self.subTest(platform=platform):
+                self.assertEqual(len(self.normalize()['hosts']), 3)
+
+    def test_baseline_validates_against_the_platforms_its_collector_pinned(self):
+        # The manifests/platforms.tsv entry of docs/benchmarks/results-1.0/baseline-evidence.json.
+        collector = {'platform_manifest_sha256': '5439d337086d2d0bae3a61d6533001d5362e898ffdba1d99011e4fc036d5b0c7'}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'platforms.tsv'
+            path.write_bytes(release_capture.collector_platform_manifest(collector))
+            self.assertEqual(set(release_capture.acceptance.load_platforms(path)), {'r8i', 'r8g', 'r9g'})
+        with self.assertRaisesRegex(ValueError, 'baseline collector'):
+            release_capture.collector_platform_manifest({'platform_manifest_sha256': '0' * 64})
 
     def test_shared_language_ledger_routes_each_frozen_plan(self):
         other_plan = {**self.data['plan'], 'suite': 'language-lifecycle'}

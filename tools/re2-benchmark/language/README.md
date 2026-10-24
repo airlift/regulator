@@ -166,9 +166,8 @@ the frozen-source check correctly rejects as extra files. Do not exempt caches
 from source validation or reuse an already-modified extracted directory.
 
 Run `verify` with this classpath, then run `measure` with the same manifest,
-result directory, classpath, and native runner arguments, plus `--platform r9g`,
-`r8g`, or `r8i` and
-`--jvm-build-receipt target/language-jvm-build/jvm-build.json`.
+result directory, classpath, and native runner arguments, plus `--platform r9g`
+or `r8i` and `--jvm-build-receipt target/language-jvm-build/jvm-build.json`.
 It refuses non-Linux hosts, a dirty source tree, changed runner binaries, the
 wrong pinned JDK, or a mismatched EC2 instance identity. Verification must be
 performed on that host with those binaries first.
@@ -250,8 +249,8 @@ python3 tools/re2-benchmark/language/fleet.py validate \
 
 Each partition contains one logical case and one language, with the comparator
 and both Regulator memory modes kept together. The everyday corpus produces
-39 partitions and 351 jobs across R9g, R8g, R8i and three independent host
-replicas. `--max-concurrent-hosts` records the intended concurrency in the
+39 partitions and 234 jobs across R9g and R8i, each with three independent
+host replicas. `--max-concurrent-hosts` records the intended concurrency in the
 plan and defaults to 64.
 `fleet.py` does not allocate or schedule hosts, so that field is not a capacity
 reservation or an enforced scheduler setting.
@@ -450,7 +449,7 @@ python3 tools/re2-benchmark/language/literal_probe.py prepare \
 The manifest uses the `language-bulk` suite and the `steady-state-v1` profile,
 so `collection.py verify`, `fleet.py prepare`, and `run-campaign.py
 --language-plan` accept it unchanged. Its six cases produce 18 partitions and
-162 jobs. Smoke adds the learned-sample workload to the usual first workload
+108 jobs. Smoke adds the learned-sample workload to the usual first workload
 for each language.
 
 ## AWS dispatch and recovery

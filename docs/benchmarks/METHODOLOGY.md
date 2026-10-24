@@ -22,7 +22,7 @@ or generated-code level. "JVM overhead" is not an explanation.
 6. Read the pinned C++ implementation before claiming a Java-specific limit.
 7. Measure the complete public operation before retaining an isolated win.
 8. Include source-identical controls and important unaffected paths.
-9. Run all performance measurements on the designated AWS R8i, R8g, and R9g hosts.
+9. Run all performance measurements on the designated AWS R8i and R9g hosts.
    Do not use developer Macs for screening, directionality, profiling, generated-code
    conclusions, or retained evidence. Local execution is limited to build and correctness
    checks because Apple Silicon, macOS, and its JVM code generation are not representative
@@ -289,7 +289,7 @@ Final runs require:
 - candidate and control measurements on the same host
 
 Exploratory measurements and comparisons of alternative implementations must
-also run on R8i, R8g, and R9g. Do not use local timings to accept or reject a
+also run on R8i and R9g. Do not use local timings to accept or reject a
 candidate, or to decide whether it deserves a target-host run.
 
 Independent shards may use separate host pairs in parallel. Results from

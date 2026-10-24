@@ -17,7 +17,7 @@ REPORT_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = REPORT_ROOT.parent
 sys.path.insert(0, str(REPOSITORY_ROOT / 'tools/re2-benchmark/language'))
 import released_artifact
-from language_data import RELEASE_PLATFORMS
+from language_data import CURRENT_PLATFORMS, RELEASE_1_0_PLATFORMS
 DATA_DIRECTORY = REPORT_ROOT / "data"
 MANIFEST_FILE = DATA_DIRECTORY / "manifest.json"
 README_FILE = REPOSITORY_ROOT / "README.md"
@@ -219,7 +219,8 @@ def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict
     expected_artifact = released_artifact.manifest(REPOSITORY_ROOT, version)
     if artifact != expected_artifact:
         raise ValueError('released report artifact identity does not match the frozen release manifest')
-    if set(data.get('platforms', {})) != set(RELEASE_PLATFORMS):
+    # The 1.0 release also measured R8g; later releases measure the current platforms.
+    if set(data.get('platforms', {})) != set(RELEASE_1_0_PLATFORMS if version == '1.0' else CURRENT_PLATFORMS):
         raise ValueError('released report platform set does not match the release platforms')
     expected_sources = {
         'currentCandidate': expected_artifact['source_commit'],

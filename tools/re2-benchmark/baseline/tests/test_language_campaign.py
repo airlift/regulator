@@ -115,7 +115,7 @@ class TestLanguageController(unittest.TestCase):
         self.execute()
         ledger = self.result_root / "accepted-language-sessions.json"
         accepted = CONTROLLER.read_accepted_sessions(ledger)
-        self.assertEqual(len(accepted), 9)
+        self.assertEqual(len(accepted), 6)
         attempts = (self.result_root / "job-attempts.tsv").read_bytes()
         self.execute(FAKE_MUST_NOT_RUN="1")
         self.assertEqual((self.result_root / "job-attempts.tsv").read_bytes(), attempts)
@@ -131,7 +131,7 @@ class TestLanguageController(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         policy = fixture.policy
         policy["hourly_rates"] = {family + ".large": {"spot": 0.065, "total": 0.075}
-                                  for family in ("r8i", "r8g", "r9g")}
+                                  for family in ("r8i", "r9g")}
         policy["hourly_rates"]["r9g.2xlarge"] = {"spot": 0.26, "total": 0.30}
         fixture.path.write_text(collection.encode(policy).decode())
         self.arguments.shared_budget = CONTROLLER.FleetBudget(fixture.path)
@@ -141,10 +141,10 @@ class TestLanguageController(unittest.TestCase):
             self.execute(FAKE_INTERRUPT_EPOCH="1")
         state = collection.load(self.arguments.shared_budget.state_path)
         self.assertEqual(state["reservations"], {})
-        self.assertEqual(len(state["completed"]), 10)
+        self.assertEqual(len(state["completed"]), 7)
         self.assertGreater(state["machine_hours"], 0)
         self.assertEqual({item["instance_type"] for item in state["completed"].values()},
-                         {"r8i.large", "r8g.large", "r9g.2xlarge"})
+                         {"r8i.large", "r9g.2xlarge"})
 
     def test_restart_rejects_changed_candidate_plan_and_deadline(self):
         self.execute()

@@ -26,8 +26,8 @@ class TestLanguageCampaign(unittest.TestCase):
     def test_smoke_and_primary_preserve_language_and_replica_coverage(self):
         smoke = campaign.LanguageCampaign([self.directory], "smoke")
         primary = campaign.LanguageCampaign([self.directory], "primary")
-        self.assertEqual(len(smoke.batches), 9)
-        self.assertEqual(len(primary.batches), 27)
+        self.assertEqual(len(smoke.batches), 6)
+        self.assertEqual(len(primary.batches), 18)
         self.assertTrue(all(batch["replica"] == 1 for _, batch in smoke.batches.values()))
         self.assertTrue(all(batch["instance_type"] == "r9g.2xlarge" and batch["vcpus"] == 8
                             for _, batch in primary.batches.values() if batch["platform"] == "r9g"))

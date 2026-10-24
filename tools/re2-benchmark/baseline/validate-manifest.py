@@ -13,7 +13,6 @@ EXPECTED_ROW_COUNT = 5522
 EXPECTED_SHARD_COUNT = 47
 EXPECTED_PLATFORMS = {
     "r8i": ("intel", "r8i.large", "2"),
-    "r8g": ("arm", "r8g.large", "2"),
     "r9g": ("arm", "r9g.large", "2"),
 }
 EXPECTED_COMPARATORS = {

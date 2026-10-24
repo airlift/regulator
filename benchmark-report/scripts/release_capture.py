@@ -7,13 +7,15 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import tarfile
 import tempfile
 
 from baseline_data import baseline_rows, read_rows
-from language_data import LANGUAGES, MEMORY_MODES, RELEASE_PLATFORMS, digest, language_rows
+from language_data import LANGUAGES, MEMORY_MODES, RELEASE_1_0_PLATFORMS, digest, language_rows
 from report_data import validate_report
 
 ROOT = Path(__file__).resolve().parents[2]
+RELEASE_BASELINE_EVIDENCE = ROOT / 'docs/benchmarks/results-1.0/baseline-tables.tar.gz'
 sys.path.insert(0, str(ROOT / 'tools/re2-benchmark/baseline'))
 sys.path.insert(0, str(ROOT / 'tools/re2-benchmark/language'))
 import acceptance
@@ -59,7 +61,7 @@ def normalize_language(data, manifest, expected_release, collector, receipts):
     if plan['replicas'] != 3 or 'selection' in plan:
         raise ValueError('release language capture requires the complete three-host matrix')
     schema = plan.get('schema_version', 2)
-    allocations = fleet.platform_allocations(manifest['suite'])
+    allocations = fleet.platform_allocations(manifest['suite'], plan['platforms'])
     if schema not in (2, 3) or (schema == 3 and plan.get('platform_allocations') != allocations):
         raise ValueError('release language capture changed its frozen worker allocations')
     expected_candidate = {'source_commit': collector['candidate_commit'], 'source_tree': collector['root_tree']}
@@ -99,7 +101,7 @@ def normalize_language(data, manifest, expected_release, collector, receipts):
         allocation = allocations.get(job['platform'])
         planned = {key: job.get(key) for key in ('instance_type', 'vcpus')}
         unfrozen = {'instance_type': None, 'vcpus': None}
-        if (job['platform'] not in RELEASE_PLATFORMS or allocation is None or
+        if (job['platform'] not in RELEASE_1_0_PLATFORMS or allocation is None or
                 (schema == 3 and planned != allocation) or
                 (schema == 2 and planned not in (unfrozen, allocation)) or
                 instance['instanceType'] != allocation['instance_type'] or
@@ -161,10 +163,20 @@ def baseline_manifests(release):
         yield manifest, shard_manifest
 
 
+def collector_platform_manifest(collector):
+    """Return the platform manifest the baseline collector pinned, as the release evidence archives it."""
+    with tarfile.open(RELEASE_BASELINE_EVIDENCE) as archive:
+        content = archive.extractfile('manifests/platforms.tsv').read()
+    if hashlib.sha256(content).hexdigest() != collector['platform_manifest_sha256']:
+        raise ValueError('archived platform manifest differs from the baseline collector')
+    return content
+
+
 def validate_baseline(capture, release, collector, campaign_id, primary):
-    with baseline_manifests(release) as (manifest, shards):
+    with baseline_manifests(release) as (manifest, shards), tempfile.TemporaryDirectory() as directory:
         receipts_path = capture / 'accepted-sessions.tsv'
-        platforms_path = ROOT / 'tools/re2-benchmark/baseline/platforms.tsv'
+        platforms_path = Path(directory) / 'platforms.tsv'
+        platforms_path.write_bytes(collector_platform_manifest(collector))
         if primary:
             acceptance.validate_campaign(manifest, platforms_path, shards, receipts_path, campaign_id, (1, 2, 3))
         receipts = read_rows(receipts_path)
@@ -244,7 +256,7 @@ def build(plan_path):
     actual = {tuple(row[key] for key in identity_fields) for row in read_rows(reduction / 'host-rows.tsv')}
     if actual != expected:
         raise ValueError('baseline reduction changed the accepted host cohort')
-    rows = language_rows(combined, manifests, platforms=RELEASE_PLATFORMS)
+    rows = language_rows(combined, manifests, platforms=RELEASE_1_0_PLATFORMS)
     lifecycle = next(manifest for manifest in manifests if manifest['suite'] == 'language-lifecycle')
     # The current baseline already includes all LIKE lifecycle shards.
     rows.extend(baseline_rows(reduction, lifecycle))
@@ -253,7 +265,7 @@ def build(plan_path):
               'sources': {'currentLabel': 'Regulator ' + release['version'] + ' final results',
                           'currentCandidate': release['source_commit'], 'engineTree': release['engine_tree'],
                           'jdk': 'Temurin 25.0.4+7'},
-              'languages': LANGUAGES, 'platforms': RELEASE_PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
+              'languages': LANGUAGES, 'platforms': RELEASE_1_0_PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
               'methodology': ['Public measurements load the checksummed published release JAR. Collector source is recorded separately.',
                               'Comparisons use three independent hosts, with same-host ratios and all original samples retained. Baseline confirmations use a fourth host where required.',
                               'Ordinary R-family workers have 2 vCPUs and 16 GiB RAM. Measured JVMs retain an 8 GiB heap; JMH launchers use at most 256 MiB.',

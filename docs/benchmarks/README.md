@@ -17,10 +17,11 @@ classifies every executable benchmark mode and identifies the sole formal
 baseline path.
 
 [The qualification plan](QUALIFICATION_PLAN.md) defines the full campaign for
-the released 1.0 artifact. [The release results](RESULTS_1.0.md) record coverage,
-findings, limitations, and permanent evidence retrieval. Version 1.0 was
-released with labeled preliminary development results; the released-artifact
-campaign uses Oregon Spot workers and preserves the measured library identity.
+a released artifact. [The 1.0 release results](RESULTS_1.0.md) record that
+campaign's coverage, findings, limitations, and permanent evidence retrieval.
+Version 1.0 was released with labeled preliminary development results; its
+released-artifact campaign used Oregon Spot workers and preserved the measured
+library identity.
 
 The [measurement-quality assessment](MEASUREMENT_QUALITY.md) explains the
 follow-up collection, within-process and across-host variation, native controls,

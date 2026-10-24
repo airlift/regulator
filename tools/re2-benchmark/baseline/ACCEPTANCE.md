@@ -99,7 +99,8 @@ must cover all systems assigned to its shard.
 
 The validator also requires:
 
-- exactly the `c8i`, `c8g`, and `c9g` platform identities
+- exactly the `r8i` and `r9g` platform identities, or the 1.0 release's
+  `r8i`, `r8g`, and `r9g` from its archived `platforms.tsv`
 - the architecture and exact instance type pinned in `platforms.tsv`
 - globally distinct EC2 instance IDs
 - globally distinct host epochs

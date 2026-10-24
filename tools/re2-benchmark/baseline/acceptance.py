@@ -10,11 +10,9 @@ import topology
 
 
 SCHEMA_VERSION = "2"
-EXPECTED_PLATFORMS = {
-    "r8i": ("intel", "r8i."),
-    "r8g": ("arm", "r8g."),
-    "r9g": ("arm", "r9g."),
-}
+EXPECTED_PLATFORMS = frozenset({"r8i", "r9g"})
+# The 1.0 release campaign also measured R8g; its archived platform manifest still validates.
+RELEASE_1_0_PLATFORMS = EXPECTED_PLATFORMS | {"r8g"}
 SESSION_FIELDS = (
     "schema_version",
     "campaign_id",
@@ -595,11 +593,11 @@ def load_platforms(path):
     if duplicates:
         raise ValidationError(f"{path} has duplicate platforms: {duplicates}")
     platforms = {row["platform"]: row for row in rows}
-    if set(platforms) != set(EXPECTED_PLATFORMS):
+    if set(platforms) not in (set(EXPECTED_PLATFORMS), set(RELEASE_1_0_PLATFORMS)):
         raise ValidationError(
-            f"platform identities must be {sorted(EXPECTED_PLATFORMS)}, found {sorted(platforms)}")
-    for platform, (architecture, instance_prefix) in EXPECTED_PLATFORMS.items():
-        row = platforms[platform]
+            f"platform identities must be {sorted(EXPECTED_PLATFORMS)} or the 1.0 release's "
+            f"{sorted(RELEASE_1_0_PLATFORMS)}, found {sorted(platforms)}")
+    for platform, row in platforms.items():
         try:
             topology.validate(row)
         except ValueError as error:
