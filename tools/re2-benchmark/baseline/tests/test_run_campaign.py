@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import test_fleet_budget
+
 
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 AWS_RUNNER = SCRIPT.parents[1] / "aws" / "run-campaign.sh"
@@ -785,8 +787,8 @@ class TestRunCampaign(unittest.TestCase):
     def test_replacement_uses_a_new_epoch(self):
         initial = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
 
-        replacement = RUN_CAMPAIGN.replacement_job(
-            initial, 117, "retryable-spot", "instance-terminated-no-capacity")
+        # A failure Spot did not cause retries on Spot once.
+        replacement = RUN_CAMPAIGN.replacement_job(initial, 117, "retryable-infrastructure")
 
         self.assertEqual(replacement.logical_identity, initial.logical_identity)
         self.assertEqual(replacement.host_epoch, 117)
@@ -1012,7 +1014,8 @@ class TestRunCampaign(unittest.TestCase):
             if RUN_CAMPAIGN.STANDARD_SPOT_QUOTA_CODE in command:
                 return "64"
             if RUN_CAMPAIGN.STANDARD_ON_DEMAND_QUOTA_CODE in command:
-                return "100"
+                # Below the On-Demand safety reserve, which binds only a region with an allowance.
+                return "16"
             if "describe-images" in command:
                 return "x86_64\tavailable\t137112412989\tal2023-test"
             if "describe-instance-type-offerings" in command:
@@ -1046,6 +1049,21 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "reserve matching its policy"):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
         arguments.spot_vcpu_reserve = 16
+        # A shared fleet runs On-Demand only where its policy allows it.
+        arguments.spot_only = False
+        arguments.shared_budget.policy.update(regions={
+            "eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 64}})
+        with self.assertRaisesRegex(SystemExit, "--spot-only unless the policy allows On-Demand"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.regions.append("eu-west-1")
+        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        # An allowance in a region without the worker type's image cannot launch it.
+        arguments.regional_amis = {("r8i", "us-west-2"): "ami", ("r9g", "eu-west-1"): "ami"}
+        with self.assertRaisesRegex(SystemExit, "--spot-only unless the policy allows On-Demand"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.regional_amis[("r8i", "eu-west-1")] = "ami"
+        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        arguments.spot_only = True
         arguments.refill_unresolved = True
         with self.assertRaisesRegex(SystemExit, "without --spot-only or a shared fleet budget"):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
@@ -1325,29 +1343,20 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
             with self.assertRaises(subprocess.CalledProcessError):
                 RUN_CAMPAIGN.validate_dependencies(Path(directory), SimpleNamespace(), [job])
 
-    def test_second_replacement_moves_to_on_demand(self):
-        second_attempt = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 117, 2, "spot")
-
-        replacement = RUN_CAMPAIGN.replacement_job(
-            second_attempt,
-            118,
-            "retryable-spot",
-            "instance-terminated-capacity-oversubscribed")
-
-        self.assertEqual(replacement.attempt, 3)
-        self.assertEqual(replacement.market, "on-demand")
-
-    def test_launch_capacity_moves_directly_to_on_demand(self):
-        initial = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
-
-        replacement = RUN_CAMPAIGN.replacement_job(
-            initial,
-            117,
-            "retryable-spot",
-            "launch-capacity:InsufficientInstanceCapacity")
-
-        self.assertEqual(replacement.market, "on-demand")
+    def test_interruption_unavailability_quota_or_second_failure_moves_to_on_demand(self):
+        # A Spot interruption, Spot launch unavailability in the only allowed region, or a second
+        # failure of any kind. Other allowed regions do not delay On-Demand after a host started.
+        for attempt, classification, detail, regions in (
+                (1, "retryable-spot", "instance-terminated-no-capacity", ("us-east-2", "us-west-2")),
+                (1, "retryable-spot", "launch-capacity:InsufficientInstanceCapacity", ("us-east-2",)),
+                (1, "retryable-capacity", "", ()),
+                (2, "retryable-infrastructure", "", ())):
+            with self.subTest(attempt=attempt, classification=classification, regions=regions):
+                job = RUN_CAMPAIGN.Job(
+                    self.platform, "traditional-search", 1, 117, attempt, "spot", region="us-east-2")
+                replacement = RUN_CAMPAIGN.replacement_job(job, 118, classification, detail, regions=regions)
+                self.assertEqual(replacement.attempt, attempt + 1)
+                self.assertEqual(replacement.market, "on-demand")
 
     def test_spot_vcpu_quota_failure_is_retryable(self):
         source = AWS_RUNNER.read_text()
@@ -2478,7 +2487,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     raise OSError("simulated durable-ledger failure")
                 return real_write_attempt(*arguments, **keywords)
 
+            # A one-job phase is all tail; keep this launch on Spot.
             with patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process), \
+                    patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
                     patch.object(
                         RUN_CAMPAIGN,
                         "write_attempt",
@@ -2670,6 +2681,8 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     RUN_CAMPAIGN.replace(spot_job, market="on-demand"),
                     failure_classification="benchmark-failure"))
 
+            # A one-job phase is all tail; without the tail rule only the Spot quota shortage moves it to
+            # On-Demand.
             with patch.object(RUN_CAMPAIGN, "current_spot_capacity", return_value={
                         "quota": 352,
                         "used": 320,
@@ -2684,6 +2697,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                         "safety_reserve": 32,
                         "available": 397,
                     }), \
+                    patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
                     patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process) as popen:
                 with self.assertRaises(SystemExit):
                     RUN_CAMPAIGN.execute_jobs(
@@ -2769,6 +2783,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 poll_action=lambda: self.write_cleanup_session(
                     result_root, on_demand_job, failure_classification="benchmark-failure"))
 
+            # A one-job phase is all tail; without the tail rule only Spot unavailability moves it to On-Demand.
             with patch.object(
                     RUN_CAMPAIGN.subprocess,
                     "Popen",
@@ -2780,6 +2795,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                         "safety_reserve": 32,
                         "available": 468,
                     }), \
+                    patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
                     patch.dict(os.environ, {"AWS_REGION": "us-east-2", "CAMPAIGN_PLACEMENT_SCORE": "9"}):
                 with self.assertRaises(SystemExit):
                     RUN_CAMPAIGN.execute_jobs(
@@ -2831,9 +2847,12 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             on_demand = FakeProcess(112, status=1, poll_action=lambda: self.write_cleanup_session(
                 result_root, jobs[2], failure_classification="benchmark-failure"))
             launches = []
+            # A one-job phase is all tail; without the tail rule only Spot unavailability in every region moves
+            # it to On-Demand.
             with patch.object(RUN_CAMPAIGN, "check_output",
                               side_effect=subprocess.CalledProcessError(254, "get-spot-placement-scores")), \
                     patch.object(RUN_CAMPAIGN, "current_on_demand_capacity", return_value={"available": 8}), \
+                    patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
                     patch.object(RUN_CAMPAIGN.time, "sleep"):
                 for processes, failure in (([first, second], KeyboardInterrupt), ([on_demand], SystemExit)):
                     with patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=processes) as popen, \
@@ -2842,6 +2861,83 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     launches += [(call.kwargs["env"]["INSTANCE_MARKET_TYPE"], call.kwargs["env"]["AWS_REGION"])
                                  for call in popen.call_args_list]
             self.assertEqual(launches, [("spot", "us-east-2"), ("spot", "us-west-2"), ("on-demand", "us-east-2")])
+
+    def test_phase_tail_launches_on_demand_unless_spot_only(self):
+        # Ten shard jobs leave a one-job tail.
+        jobs = [RUN_CAMPAIGN.Job(self.platform, f"rebar-{letter}", 1, epoch, 1, "spot")
+                for epoch, letter in enumerate("abcdefghij", start=1)]
+        for spot_only, expected in ((False, ["spot"] * 9 + ["on-demand"]), (True, ["spot"] * 10)):
+            with self.subTest(spot_only=spot_only), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                result_root = root / "results"
+                result_root.mkdir()
+                arguments = self.arguments(root)
+                arguments.spot_only, arguments.spot_vcpu_reserve = spot_only, 0
+                processes = [FakeProcess(100 + job.host_epoch, status=1, poll_action=lambda job=job:
+                                         self.write_cleanup_session(result_root, job,
+                                                                    failure_classification="benchmark-failure"))
+                             for job in jobs]
+                with patch.object(RUN_CAMPAIGN, "current_spot_capacity", return_value={"available": 8}), \
+                        patch.object(RUN_CAMPAIGN, "current_on_demand_capacity", return_value={"available": 8}), \
+                        patch.object(RUN_CAMPAIGN.time, "sleep"), \
+                        patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=processes) as popen:
+                    with self.assertRaises(SystemExit):
+                        RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, jobs)
+                self.assertEqual([call.kwargs["env"]["INSTANCE_MARKET_TYPE"] for call in popen.call_args_list],
+                                 expected)
+
+    def test_shared_fleet_launches_on_demand_where_its_allowance_has_headroom(self):
+        fixture = test_fleet_budget.TestFleetBudget()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        policy = fixture.policy
+        policy["regions"] = {"eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 64}}
+        for rates in policy["hourly_rates"].values():
+            rates["on_demand_total"] = 2 * rates["total"]
+        fixture.path.write_text(json.dumps(policy))
+        # A one-job phase is all tail, so its only launch is On-Demand.
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        queried = []
+
+        def aws_result(command, **_):
+            region = command[command.index("--region") + 1]
+            queried.append(region)
+            if "get-service-quota" in command:
+                self.assertIn(RUN_CAMPAIGN.STANDARD_ON_DEMAND_QUOTA_CODE, command)
+                return "64"
+            if "describe-instances" in command:
+                self.assertNotIn("Name=instance-lifecycle,Values=spot", command)
+                return json.dumps([{"id": "i-spot", "type": "r8i.2xlarge", "lifecycle": "spot"},
+                                   {"id": "i-other", "type": "r8i.2xlarge", "lifecycle": None}])
+            if "describe-instance-types" in command:
+                return json.dumps([{"type": "r8i.2xlarge", "vcpus": 8}])
+            raise AssertionError(command)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result_root = root / "results"
+            result_root.mkdir()
+            arguments = self.arguments(root)
+            arguments.shared_budget = RUN_CAMPAIGN.FleetBudget(fixture.path)
+            arguments.spot_vcpu_reserve, arguments.regions = 0, ["us-west-2", "eu-west-1"]
+            process = FakeProcess(110, status=1, poll_action=lambda: self.write_cleanup_session(
+                result_root, job, failure_classification="benchmark-failure", region="eu-west-1"))
+            with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
+                    patch.object(RUN_CAMPAIGN.time, "sleep"), \
+                    patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process) as popen:
+                with self.assertRaises(SystemExit):
+                    RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, [job])
+        # Oregon has no allowance; Ireland's quota, less its reserve and other work, fits the host.
+        self.assertEqual(set(queried), {"eu-west-1"})
+        environment = popen.call_args.kwargs["env"]
+        self.assertEqual((environment["AWS_REGION"], environment["INSTANCE_MARKET_TYPE"]), ("eu-west-1", "on-demand"))
+        completed = json.loads(arguments.shared_budget.state_path.read_text())["completed"]
+        self.assertEqual([(item["region"], item["market"], item["hourly_rate"]) for item in completed.values()],
+                         [("eu-west-1", "on-demand", 0.60)])
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
+            snapshot = RUN_CAMPAIGN.shared_fleet_snapshot(arguments, "eu-west-1", "on-demand")
+        self.assertEqual(snapshot["instances"],
+                         [{"id": "i-other", "type": "r8i.2xlarge", "vcpus": 8, "campaign_id": None, "host_epoch": None}])
 
     def test_resumed_campaign_events_keep_their_columns(self):
         job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")

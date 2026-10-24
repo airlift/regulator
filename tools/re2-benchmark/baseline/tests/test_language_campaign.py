@@ -59,6 +59,10 @@ class TestLanguageController(unittest.TestCase):
         wrapper.parent.mkdir(parents=True)
         wrapper.write_text("#!/usr/bin/env python3\n" + FAKE_WRAPPER)
         wrapper.chmod(0o755)
+        # Replacements, refills, and a phase's last launches run On-Demand.
+        on_demand = patch.object(CONTROLLER, "current_on_demand_capacity", return_value={"available": 64})
+        on_demand.start()
+        self.addCleanup(on_demand.stop)
 
     def prepare_phase(self, phase):
         self.arguments.phase = phase
@@ -136,7 +140,7 @@ class TestLanguageController(unittest.TestCase):
         fixture.path.write_text(collection.encode(policy).decode())
         self.arguments.shared_budget = CONTROLLER.FleetBudget(fixture.path)
         self.arguments.spot_only, self.arguments.spot_vcpu_reserve = True, 0
-        with patch.object(CONTROLLER, "shared_spot_snapshot", return_value={"quota": 16, "instances": [], "requests": []}), \
+        with patch.object(CONTROLLER, "shared_fleet_snapshot", return_value={"quota": 16, "instances": [], "requests": []}), \
                 patch.object(CONTROLLER, "CAPACITY_RETRY_SECONDS", 0.01):
             self.execute(FAKE_INTERRUPT_EPOCH="1")
         state = collection.load(self.arguments.shared_budget.state_path)
@@ -207,8 +211,7 @@ class TestLanguageController(unittest.TestCase):
             SLEEP(0.02)
 
         # Let the refill's deadline follow its job count.
-        with patch.dict(CONTROLLER.PHASE_TIMEOUT_SECONDS, primary=0), \
-                patch.object(CONTROLLER, "current_on_demand_capacity", return_value={"available": 64}):
+        with patch.dict(CONTROLLER.PHASE_TIMEOUT_SECONDS, primary=0):
             # The killed controller leaves its wrapper process and log behind.
             with warnings.catch_warnings(), self.assertRaises(ControllerKilled):
                 warnings.simplefilter("ignore", ResourceWarning)
@@ -235,8 +238,7 @@ class TestLanguageController(unittest.TestCase):
 
     def test_refill_rejects_host_environment_unlike_the_campaign(self):
         self.exhaust_spot("r8i/*/replica-[23]")
-        with patch.object(CONTROLLER, "current_on_demand_capacity", return_value={"available": 64}), \
-                self.assertRaisesRegex(RuntimeError, r"differs from the campaign's: \['trino_commit'\]"):
+        with self.assertRaisesRegex(RuntimeError, r"differs from the campaign's: \['trino_commit'\]"):
             self.refill(FAKE_TRINO_COMMIT="newer-trino")
         # An ordinary restart must not recover the receipt the refill rejected.
         self.head = "commit"
@@ -251,9 +253,8 @@ class TestLanguageController(unittest.TestCase):
                                    ("unverified", copy, r"\['ami'\]"), ("unverified", {}, None)):
             with self.subTest(name=name, copy=bool(image)):
                 self.exhaust_spot("r8i/*/replica-[23]")
-                with patch.object(CONTROLLER, "current_on_demand_capacity", return_value={"available": 64}), \
-                        (self.assertRaisesRegex(RuntimeError, "differs from the campaign's: " + error)
-                         if error else contextlib.nullcontext()):
+                with (self.assertRaisesRegex(RuntimeError, "differs from the campaign's: " + error)
+                      if error else contextlib.nullcontext()):
                     self.refill(FAKE_AMI_NAME=name, **image)
 
     def test_released_refill_checks_the_candidate_source_not_the_checkout(self):

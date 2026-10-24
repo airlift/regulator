@@ -15,6 +15,8 @@ import time
 
 
 REGION_PATTERN = r"[a-z]+(?:-[a-z]+)+-[0-9]+"
+# Every On-Demand launch leaves this much of its region's On-Demand quota free.
+ON_DEMAND_VCPU_SAFETY_RESERVE = 32
 
 
 class BudgetError(RuntimeError):
@@ -22,12 +24,16 @@ class BudgetError(RuntimeError):
 
 
 def validate_region_limits(limits):
-    if not isinstance(limits, dict) or set(limits) != {"max_vcpus", "spot_vcpu_reserve"}:
-        raise BudgetError("fleet region limits require max_vcpus and spot_vcpu_reserve")
+    if (not isinstance(limits, dict) or {"max_vcpus", "spot_vcpu_reserve"} - set(limits) or
+            set(limits) - {"max_vcpus", "spot_vcpu_reserve", "on_demand_max_vcpus"}):
+        raise BudgetError("fleet region limits require max_vcpus and spot_vcpu_reserve and allow on_demand_max_vcpus")
     if type(limits["max_vcpus"]) is not int or limits["max_vcpus"] <= 0:
         raise BudgetError("invalid fleet budget: max_vcpus")
     if type(limits["spot_vcpu_reserve"]) is not int or limits["spot_vcpu_reserve"] < 0:
         raise BudgetError("invalid fleet Spot vCPU reserve")
+    if "on_demand_max_vcpus" in limits and (
+            type(limits["on_demand_max_vcpus"]) is not int or limits["on_demand_max_vcpus"] <= 0):
+        raise BudgetError("invalid fleet On-Demand vCPU allowance")
 
 
 def validate_policy(policy):
@@ -41,7 +47,7 @@ def validate_policy(policy):
         value = policy.get(name)
         if type(value) is not int or value <= 0:
             raise BudgetError("invalid fleet budget: " + name)
-    validate_region_limits({name: policy.get(name) for name in ("max_vcpus", "spot_vcpu_reserve")})
+    validate_region_limits(home_limits(policy))
     # The top-level limits cover the home region; each other region a campaign may
     # launch in names its own, since quotas are regional.
     regions = policy.get("regions", {})
@@ -61,31 +67,45 @@ def validate_policy(policy):
         raise BudgetError("ancillary reserve exhausts the fleet budget")
     if not isinstance(policy.get("hourly_rates"), dict) or not policy["hourly_rates"]:
         raise BudgetError("fleet budget requires per-type hourly ceilings")
+    # A policy allowing On-Demand anywhere prices every worker type's On-Demand hour.
+    on_demand = bool(on_demand_regions(policy))
+    price_fields = {"spot", "total", "on_demand_total"} if on_demand else {"spot", "total"}
     for instance_type, rates in policy["hourly_rates"].items():
         if instance_type not in {family + size for family in ("r8i", "r9g") for size in (".large", ".2xlarge")}:
             raise BudgetError("unapproved instance type in fleet budget")
-        if (set(rates) != {"spot", "total"} or
+        if (set(rates) != price_fields or
                 any(type(value) not in (int, float) or not math.isfinite(value) for value in rates.values()) or
-                not 0 < rates["spot"] < rates["total"]):
+                not 0 < rates["spot"] < rates["total"] or (on_demand and rates["on_demand_total"] <= 0)):
             raise BudgetError("invalid hourly price ceiling")
 
 
+def home_limits(policy):
+    limits = {name: policy.get(name) for name in ("max_vcpus", "spot_vcpu_reserve")}
+    if "on_demand_max_vcpus" in policy:
+        limits["on_demand_max_vcpus"] = policy["on_demand_max_vcpus"]
+    return limits
+
+
 def region_limits(policy):
-    return {policy["region"]: {"max_vcpus": policy["max_vcpus"], "spot_vcpu_reserve": policy["spot_vcpu_reserve"]},
-            **policy.get("regions", {})}
+    return {policy["region"]: home_limits(policy), **policy.get("regions", {})}
+
+
+def on_demand_regions(policy):
+    """Name the regions whose On-Demand allowance lets the fleet launch On-Demand there."""
+    return [region for region, limits in region_limits(policy).items() if "on_demand_max_vcpus" in limits]
 
 
 def reservation_key(campaign_id, host_epoch):
     return f"{campaign_id}/{host_epoch}"
 
 
-def capacity(snapshot, reservations, policy, *, region=None, remember=False):
-    """Count one region's instance/request unions and wrappers not yet visible in EC2."""
+def capacity(snapshot, reservations, policy, *, region=None, market="spot", remember=False):
+    """Count one region's and market's instance/request unions and wrappers not yet visible in EC2."""
     region = region or policy["region"]
     limits = region_limits(policy)[region]
-    # Reservations made before regions were recorded all launched in the home region.
+    # Reservations made before regions and markets were recorded all launched on Spot in the home region.
     reservations = {key: item for key, item in reservations.items()
-                    if item.get("region", policy["region"]) == region}
+                    if item.get("region", policy["region"]) == region and item.get("market", "spot") == market}
     instances = {instance["id"]: instance for instance in snapshot["instances"]}
     if len(instances) != len(snapshot["instances"]):
         raise BudgetError("duplicate EC2 instances in capacity snapshot")
@@ -128,7 +148,14 @@ def capacity(snapshot, reservations, policy, *, region=None, remember=False):
     pending = sum(key not in observed and not item.get("launch_observed", False)
                   for key, item in reservations.items())
     reserved = sum(item["vcpus"] for item in reservations.values())
-    available = max(0, min(snapshot["quota"] - limits["spot_vcpu_reserve"], limits["max_vcpus"]) - external_vcpus - reserved)
+    if market == "spot":
+        # max_vcpus bounds all Standard Spot use in the region, the fleet's and others'.
+        ceiling = min(snapshot["quota"] - limits["spot_vcpu_reserve"], limits["max_vcpus"]) - external_vcpus
+    else:
+        # The allowance bounds only the fleet's own On-Demand use; other workloads take quota headroom.
+        ceiling = min(snapshot["quota"] - ON_DEMAND_VCPU_SAFETY_RESERVE - external_vcpus,
+                      limits.get("on_demand_max_vcpus", 0))
+    available = max(0, ceiling - reserved)
     return {"available": available, "reserved": reserved, "external": external_vcpus,
             "pending_launches": pending}
 
@@ -169,7 +196,7 @@ class FleetBudget:
                 os.close(descriptor)
 
     def reserve(self, campaign_id, job, owner, snapshot_reader, now=None):
-        if job.market != "spot":
+        if job.market != "spot" and not on_demand_regions(self.policy):
             raise BudgetError("shared fleet forbids On-Demand")
         now = time.time() if now is None else now
         key = reservation_key(campaign_id, job.host_epoch)
@@ -188,23 +215,26 @@ class FleetBudget:
             rate = policy["hourly_rates"].get(job.platform.instance_type)
             if rate is None:
                 raise BudgetError("instance type has no frozen price ceiling")
+            hourly_rate = rate["total"] if job.market == "spot" else rate["on_demand_total"]
             # Outstanding attempts reserve their whole remaining allowance. If
             # cleanup is delayed, charge the longer elapsed lifetime instead.
             hours = policy["max_attempt_seconds"] / 3600
             active_hours = [max(hours, (now - item["started_at"]) / 3600) for item in active.values()]
             committed_hours = state["machine_hours"] + sum(active_hours) + hours
-            committed_cost = state["cost_usd"] + policy["ancillary_reserve_usd"] + hours * rate["total"] + sum(
+            committed_cost = state["cost_usd"] + policy["ancillary_reserve_usd"] + hours * hourly_rate + sum(
                 duration * item["hourly_rate"] for duration, item in zip(active_hours, active.values()))
             if committed_hours > policy["max_machine_hours"] or committed_cost > policy["max_usd"]:
                 return False, "fleet spending or machine-hour ceiling"
-            available = capacity(snapshot_reader(), active, policy, region=region, remember=True)
+            if job.market != "spot" and region not in on_demand_regions(policy):
+                return False, "fleet quota or pending-launch limit"
+            available = capacity(snapshot_reader(), active, policy, region=region, market=job.market, remember=True)
             if available["available"] < job.platform.vcpus or available["pending_launches"] >= policy["max_pending_launches"]:
                 return False, "fleet quota or pending-launch limit"
             active[key] = {"campaign_id": campaign_id, "host_epoch": job.host_epoch, "owner": str(Path(owner).resolve()),
                            "attempt": getattr(job, "attempt", 1),
-                           "logical_identity": job.logical_identity, "region": region,
+                           "logical_identity": job.logical_identity, "region": region, "market": job.market,
                            "instance_type": job.platform.instance_type,
-                           "vcpus": job.platform.vcpus, "started_at": now, "hourly_rate": rate["total"]}
+                           "vcpus": job.platform.vcpus, "started_at": now, "hourly_rate": hourly_rate}
             state["last_launch_at"] = now
             return True, "reserved"
 
