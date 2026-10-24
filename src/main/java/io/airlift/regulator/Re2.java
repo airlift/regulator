@@ -528,7 +528,8 @@ public sealed class Re2
                         ? (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_TRINO_SCAN : BOOLEAN_FIND_PARTIAL_TRINO_SCAN)
                         : (scanPlan.usesAsciiFoldedExecutor() ? BOOLEAN_FIND_ASCII_FOLDED_TRINO_SCAN : BOOLEAN_FIND_TRINO_SCAN);
                 // The short route is the ordinary engine's general search, which must run the
-                // DFA. A Trino final-line end, which the DFA cannot evaluate, keeps the plan.
+                // DFA. A Trino final-line end or a Java final-terminator end, which the DFA cannot
+                // evaluate, keeps the plan.
                 ordinaryShortMatch = scanPlan.allowsOrdinaryShortBooleanMatch() && findStrategy == BOOLEAN_FIND_GENERAL && !partialProg.hasDfaUnsupportedAssertions();
             }
             // Literal kernels answer existence without reading past the literal; keep them for

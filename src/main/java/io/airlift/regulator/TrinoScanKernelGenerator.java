@@ -570,6 +570,10 @@ final class TrinoScanKernelGenerator
                                 .and(cursor.equal(end.subtract(constantInt(1))))
                                 .and(bytes.getElement(cursor).cast(int.class).equal(constantInt('\n'))));
                     }
+                    if (plan.hasJavaFinalEnd()) {
+                        atEnd = atEnd.or(fullMatch.not()
+                                .and(invokeStatic(TrinoScanKernelSupport.class, "endsBeforeJavaFinalTerminator", boolean.class, bytes, base, end, cursor)));
+                    }
                     body.append(IfStatement.builder()
                             .condition(atEnd)
                             .then(attempt == Attempt.UNANCHORED ? unanchoredSuccess() : anchoredSuccess(cursor.subtract(base)))

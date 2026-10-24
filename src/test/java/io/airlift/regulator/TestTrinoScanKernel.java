@@ -79,6 +79,7 @@ public class TestTrinoScanKernel
             "TrinoReplacementPlan.maximumCapturingGroup",
             "TrinoScanKernelSupport.containsRequiredLiteral",
             "TrinoScanKernelSupport.decode",
+            "TrinoScanKernelSupport.endsBeforeJavaFinalTerminator",
             "TrinoScanKernelSupport.findByte",
             "TrinoScanKernelSupport.findLiteral",
             "TrinoScanKernelSupport.literalMatches",
@@ -285,6 +286,12 @@ public class TestTrinoScanKernel
             re2Kinds.addAll(List.of(re2.caseSensitiveTrinoScanPlan().operationsForDiagnostics().split(",")));
         }
         assertThat(re2Kinds).contains("RE2_RUN", "RE2_DELIMITED_CAPTURE");
+        // A Java end, whose class checks the final line terminator. TestJavaScanPlan compares its
+        // results with the JDK.
+        Re2 javaEnd = JavaRegexp.compile(utf8Slice("^x([a-z]+)$"), JavaRegexp.Options.defaults().setGenerateBytecode(true)).pattern();
+        assertThat(javaEnd.usesGeneratedBytecode()).isTrue();
+        boolean javaEndHandoff = javaEnd.usesTrinoScanPlanForFindForDiagnostics() && javaEnd.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
+        invoked.addAll(invokedMethods(TrinoScanKernelGenerator.re2ClassfileForDiagnostics(javaEnd.caseSensitiveTrinoScanPlan(), javaEndHandoff)));
         assertThat(leadingRun("[a-z]([0-9]*)!").candidateScan()).isEqualTo(TrinoScanPlanRun.CANDIDATE_SCAN_RANGE);
         TrinoScanPlanRun threeBytes = leadingRun("[abc]([0-9]*)!");
         assertThat(threeBytes.candidateScan()).isEqualTo(TrinoScanPlanRun.CANDIDATE_SCAN_SMALL_SET);

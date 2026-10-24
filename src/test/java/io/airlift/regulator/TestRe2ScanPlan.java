@@ -455,7 +455,7 @@ public class TestRe2ScanPlan
         return output.slice().getBytes();
     }
 
-    private static byte[] bytes(int... values)
+    static byte[] bytes(int... values)
     {
         byte[] bytes = new byte[values.length];
         for (int index = 0; index < values.length; index++) {

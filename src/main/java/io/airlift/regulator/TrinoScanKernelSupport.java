@@ -63,6 +63,21 @@ final class TrinoScanKernelSupport
     }
 
     /**
+     * A copy of {@code TrinoScanPlan.endsBeforeJavaFinalTerminator}: whether the bytes from
+     * {@code cursor} to {@code end} are exactly one Java line terminator that Java's default
+     * {@code $} matches before.
+     */
+    static boolean endsBeforeJavaFinalTerminator(byte[] bytes, int base, int end, int cursor)
+    {
+        return switch (end - cursor) {
+            case 1 -> bytes[cursor] == '\r' || (bytes[cursor] == '\n' && (cursor == base || bytes[cursor - 1] != '\r'));
+            case 2 -> (bytes[cursor] == '\r' && bytes[cursor + 1] == '\n') || (bytes[cursor] == (byte) 0xC2 && bytes[cursor + 1] == (byte) 0x85);
+            case 3 -> bytes[cursor] == (byte) 0xE2 && bytes[cursor + 1] == (byte) 0x80 && (bytes[cursor + 2] == (byte) 0xA8 || bytes[cursor + 2] == (byte) 0xA9);
+            default -> false;
+        };
+    }
+
+    /**
      * A copy of {@code TrinoScanPlan.findByte}.
      */
     static int findByte(byte[] bytes, int cursor, int end, byte target)

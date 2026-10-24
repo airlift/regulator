@@ -38,9 +38,7 @@ final class TrinoScanPlan
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoScanPlan.class);
     private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.LATIN1;
-    // A plan's end is the end of input, or before a final LF. Java's default $ and \Z also end
-    // before any other final line terminator, so their patterns build no plan.
-    private static final int UNSUPPORTED_FLAGS = UNSUPPORTED_ATOM_FLAGS | Regexp.NON_GREEDY | Regexp.JAVA_FINAL_END;
+    private static final int UNSUPPORTED_FLAGS = UNSUPPORTED_ATOM_FLAGS | Regexp.NON_GREEDY;
     private static final int MAX_RECURSIVE_DEPTH = 32;
     static final int RETRY_OPERATION_BITS = 6;
     static final int RETRY_OPERATION_MASK = (1 << RETRY_OPERATION_BITS) - 1;
@@ -136,7 +134,11 @@ final class TrinoScanPlan
     // positions changes: choosing an operation array inside the shared executors slowed capture
     // calls.
     private final TrinoScanPlan booleanPlan;
+    // A plan's end is the end of input, or with finalLineEnd also before a final LF. With
+    // javaFinalEnd, END also accepts the position before one final Java line terminator (see
+    // endsBeforeJavaFinalTerminator). Only Java's default $ and \Z select this mode.
     private final boolean finalLineEnd;
+    private final boolean javaFinalEnd;
     private final boolean partialMatch;
     private final boolean anchoredStart;
     private final int leadingOperation;
@@ -183,11 +185,12 @@ final class TrinoScanPlan
     // before its first attempt. Only tests select the negative value.
     private final int workBudgetBytes;
 
-    private TrinoScanPlan(List<Step> steps, boolean finalLineEnd, boolean partialMatch, boolean anchoredStart, boolean re2Characters, int workBudgetBytes, ByteFrequencies byteFrequencies)
+    private TrinoScanPlan(List<Step> steps, boolean finalLineEnd, boolean javaFinalEnd, boolean partialMatch, boolean anchoredStart, boolean re2Characters, int workBudgetBytes, ByteFrequencies byteFrequencies)
     {
         this.steps = steps.toArray(Step[]::new);
         this.booleanTails = partialMatch ? findBooleanTails(this.steps) : new boolean[this.steps.length];
         this.finalLineEnd = finalLineEnd;
+        this.javaFinalEnd = javaFinalEnd;
         this.partialMatch = partialMatch;
         this.anchoredStart = anchoredStart;
         this.leadingOperation = findLeadingOperation(this.steps);
@@ -202,7 +205,7 @@ final class TrinoScanPlan
         this.allowsOrdinaryShortBooleanMatch = anchoredFork && !hasBooleanTail(booleanTails) && (re2Characters || consumesOnlyAscii(this.steps));
         this.workBudgetBytes = workBudgetBytes;
         this.booleanPlan = anchoredFork && hasSave(this.steps)
-                ? new TrinoScanPlan(withoutSaves(this.steps), finalLineEnd, partialMatch, anchoredStart, re2Characters, workBudgetBytes, byteFrequencies)
+                ? new TrinoScanPlan(withoutSaves(this.steps), finalLineEnd, javaFinalEnd, partialMatch, anchoredStart, re2Characters, workBudgetBytes, byteFrequencies)
                 : this;
     }
 
@@ -425,8 +428,9 @@ final class TrinoScanPlan
 
     /**
      * Analyzes {@code expression} for {@code language}, which is {@link Language#TRINO},
-     * {@link Language#RE2}, or {@link Language#JAVA}. The languages admit the same shapes, and a
-     * Java plan reads input as an RE2 plan does.
+     * {@link Language#RE2}, or {@link Language#JAVA}. The languages admit the same shapes, except
+     * that a Java end admits fewer runs before it, and a Java plan reads input as an RE2 plan does.
+     * Only Java's default {@code $} and {@code \Z} build a Java end.
      */
     static TrinoScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
@@ -555,6 +559,11 @@ final class TrinoScanPlan
     boolean hasFinalLineEnd()
     {
         return finalLineEnd;
+    }
+
+    boolean hasJavaFinalEnd()
+    {
+        return javaFinalEnd;
     }
 
     int failureResumeOperation()
@@ -796,7 +805,8 @@ final class TrinoScanPlan
                     failed = true;
                 }
                 case END -> {
-                    if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n')) {
+                    if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n') ||
+                            (javaFinalEnd && !fullMatch && endsBeforeJavaFinalTerminator(bytes, base, end, cursor))) {
                         return success(groups, cursor - base);
                     }
                     failed = true;
@@ -961,7 +971,8 @@ final class TrinoScanPlan
                     failed = true;
                 }
                 case END -> {
-                    if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n')) {
+                    if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n') ||
+                            (javaFinalEnd && !fullMatch && endsBeforeJavaFinalTerminator(bytes, base, end, cursor))) {
                         return success(groups, cursor - base);
                     }
                     failed = true;
@@ -1785,7 +1796,8 @@ final class TrinoScanPlan
                         }
                     }
                     case END -> {
-                        if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n')) {
+                        if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n') ||
+                                (javaFinalEnd && !fullMatch && endsBeforeJavaFinalTerminator(bytes, base, end, cursor))) {
                             success(groups, matchStart - base, cursor - base);
                             return cursor;
                         }
@@ -1949,7 +1961,8 @@ final class TrinoScanPlan
                         }
                     }
                     case END -> {
-                        if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n')) {
+                        if (cursor == end || (finalLineEnd && !fullMatch && cursor == end - 1 && bytes[cursor] == '\n') ||
+                                (javaFinalEnd && !fullMatch && endsBeforeJavaFinalTerminator(bytes, base, end, cursor))) {
                             success(groups, matchStart - base, cursor - base);
                             return cursor;
                         }
@@ -2078,6 +2091,26 @@ final class TrinoScanPlan
         }
     }
 
+    /**
+     * Returns whether Java's default {@code $} matches at {@code cursor} before {@code end}, as
+     * the JDK's non-multiline dollar does: the bytes from {@code cursor} to {@code end} are
+     * exactly one line terminator, LF, CR, CR LF, U+0085, U+2028, or U+2029, and a final LF does
+     * not follow a CR, since CR LF is one terminator. The CR before {@code cursor} counts only at
+     * or after {@code base}, the context start, as in the ordinary engine. The ordinary engine
+     * decodes the terminator strictly, so comparing its exact encoded bytes gives the same answer
+     * on every input, malformed UTF-8 included.
+     * Copied as {@code TrinoScanKernelSupport.endsBeforeJavaFinalTerminator}; keep the copy in step.
+     */
+    private static boolean endsBeforeJavaFinalTerminator(byte[] bytes, int base, int end, int cursor)
+    {
+        return switch (end - cursor) {
+            case 1 -> bytes[cursor] == '\r' || (bytes[cursor] == '\n' && (cursor == base || bytes[cursor - 1] != '\r'));
+            case 2 -> (bytes[cursor] == '\r' && bytes[cursor + 1] == '\n') || (bytes[cursor] == (byte) 0xC2 && bytes[cursor + 1] == (byte) 0x85);
+            case 3 -> bytes[cursor] == (byte) 0xE2 && bytes[cursor + 1] == (byte) 0x80 && (bytes[cursor + 2] == (byte) 0xA8 || bytes[cursor + 2] == (byte) 0xA9);
+            default -> false;
+        };
+    }
+
     // Copied as TrinoScanKernelSupport.findByte; keep the copy in step.
     private static int findByte(byte[] bytes, int cursor, int end, byte target)
     {
@@ -2148,6 +2181,12 @@ final class TrinoScanPlan
             }
             boolean anchoredStart = sequence.getFirst().op() == RegexpOp.BEGIN_TEXT;
             boolean anchoredEnd = sequence.getLast().op() == RegexpOp.END_TEXT;
+            boolean javaFinalEnd = anchoredEnd && (sequence.getLast().parseFlags() & Regexp.JAVA_FINAL_END) != 0;
+            // Only the Java frontend builds a Java end, and its plans compact as RE2 plans do,
+            // keeping a final run rather than a tail that would not check the end.
+            if (javaFinalEnd && !re2Characters) {
+                return null;
+            }
             int bodyStart = anchoredStart ? 1 : 0;
             int bodyEnd = anchoredEnd ? sequence.size() - 1 : sequence.size();
             if (bodyStart >= bodyEnd) {
@@ -2167,7 +2206,7 @@ final class TrinoScanPlan
                 return null;
             }
             builder.steps.add(Step.end());
-            if (!builder.verifyContinuations()) {
+            if (!builder.verifyContinuations(javaFinalEnd)) {
                 return null;
             }
             if (anchoredStart) {
@@ -2190,6 +2229,7 @@ final class TrinoScanPlan
             return new TrinoScanPlan(
                     builder.steps,
                     anchoredEnd && (sequence.getLast().parseFlags() & Regexp.FINAL_LINE_END) != 0,
+                    javaFinalEnd,
                     !anchoredEnd,
                     anchoredStart,
                     re2Characters,
@@ -2481,7 +2521,12 @@ final class TrinoScanPlan
             return true;
         }
 
-        private boolean verifyContinuations()
+        /**
+         * Returns whether every variable run stops where a backtracking match would, and the plan
+         * cannot match without consuming input. With {@code javaFinalEnd}, the end also matches
+         * before one final line terminator; see {@link #stopsWhereJavaFinalEndAllows}.
+         */
+        private boolean verifyContinuations(boolean javaFinalEnd)
         {
             // The graph only moves forward. Propagate possible first bytes through capture
             // boundaries and both arms of every optional, then check each variable run against
@@ -2517,6 +2562,9 @@ final class TrinoScanPlan
                         if (!step.run.canStopBefore(first, (index + 1) * FIRST_BYTE_WORDS)) {
                             return false;
                         }
+                        if (javaFinalEnd && nullable[index + 1] && step.run.isVariable() && !stopsWhereJavaFinalEndAllows(step.run)) {
+                            return false;
+                        }
                         step.run.addFirstBytes(first, index * FIRST_BYTE_WORDS);
                         if (step.run.minimum() == 0) {
                             merge(first, index, index + 1);
@@ -2527,6 +2575,30 @@ final class TrinoScanPlan
                 }
             }
             return !nullable[0];
+        }
+
+        /**
+         * Returns whether a variable run that can reach a Java end without consuming more input
+         * stops where the JDK's backtracking match would. The end also matches before one final
+         * line terminator, up to three bytes before the end, and the JDK gives back run
+         * characters to reach one: {@code ^x([^\n]+)$} on {@code "xab\r\n"} gives back the CR,
+         * since the end refuses the position between CR and LF. A run never gives back, so this
+         * planner accepts only a run that admits every terminator byte or none. A run that admits
+         * none (only ASCII bytes other than CR and LF) never consumes a terminator byte, so no
+         * shorter stop starts the final one. An unbounded run that admits all (CR, LF, and every
+         * non-ASCII character) reads a final terminator it reaches as members through to the end,
+         * where the end matches, so the longest stop wins. The run's other continuations start
+         * with bytes outside it, as for every run, so a shorter stop has no other path. A bounded
+         * run that admits terminators may stop at its maximum inside the final terminator, so it
+         * is rejected. Both readings hold on malformed input: a terminator is valid UTF-8, its
+         * first byte continues no sequence, and every run reads it whole.
+         */
+        private static boolean stopsWhereJavaFinalEndAllows(TrinoScanPlanRun run)
+        {
+            boolean[] members = run.members();
+            boolean admitsNone = !members['\n'] && !members['\r'] && !run.matchesNonAscii();
+            boolean admitsAll = members['\n'] && members['\r'] && run.matchesNonAscii();
+            return admitsNone || (admitsAll && run.isUnbounded());
         }
 
         private static void add(long[] sets, int set, int value)
