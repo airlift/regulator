@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""One work unit's route plan, exact JMH selectors, and combined rows.
+"""One work unit's route plan, exact JMH selectors, combined rows, and acceptance.
 
 run-unit.sh plans a unit into the routes its rows need and runs run-shard.sh
 once per route. Each route measures only its share of the unit: run-shard.sh
 reads the unit's expected rows, and its JMH runners execute the selectors
-planned here instead of a handler's whole-method invocation.
+planned here instead of a handler's whole-method invocation. The combined
+unit is accepted on its own, by validate-unit-results.py.
 """
 import argparse
 import json
 import math
 import re
 from pathlib import Path
+from typing import NoReturn
 
 from aggregate_results import parse_parameters
 
@@ -18,7 +20,27 @@ import host_session
 import row_protocol
 import unit_cost
 import work_units
-from acceptance import SESSION_FIELDS, ValidationError, canonical_systems, parse_systems, read_one_tsv
+from acceptance import (
+    EVIDENCE_FIELDS,
+    FORMAL_UNIT_ARTIFACTS,
+    SESSION_FIELDS,
+    SHA256,
+    UNIT_ROUTE_REQUIRED_ARTIFACTS,
+    ValidationError,
+    canonical_systems,
+    capacity_prefix_sha256,
+    duplicate_values,
+    evidence_candidate_identity,
+    exceeds_published_limit,
+    format_values,
+    parse_systems,
+    read_one_tsv,
+    read_properties,
+    read_tsv,
+    sha256_file,
+    verify_evidence_manifest,
+    verify_observed_rows_checksum,
+)
 from shard_results import (
     MANIFEST_FIELDS,
     OBSERVED_FIELDS,
@@ -54,6 +76,54 @@ UNIT_OBSERVED_FIELDS = OBSERVED_FIELDS + ("role",)
 # A selector whose values JMH cannot express runs a whole method with its handler's arguments.
 ROUTE_ARGUMENTS = "route"
 SMOKE_SETTINGS = ("processes", "warmup_iterations", "measurement_iterations", "time")
+UNIT_SCHEMA_VERSION = "1"
+UNIT_SESSION_FIELDS = (
+    "schema_version",
+    "campaign_id",
+    "platform",
+    "unit_id",
+    "replica_id",
+    "unit_attempt_id",
+    "instance_id",
+    "host_epoch",
+    "architecture",
+    "instance_type",
+    "availability_zone",
+    "region",
+)
+UNIT_RECEIPT_FIELDS = UNIT_SESSION_FIELDS + (
+    "shard_id",
+    "owned_row_count",
+    "copied_row_count",
+    "row_protocol_sha256",
+    "manifest_sha256",
+    "observed_rows_sha256",
+    "evidence_manifest_sha256",
+    "candidate_commit",
+    "candidate_archive_sha256",
+    "engine_tree",
+    "heap_size",
+)
+# A host session leases units in sequence; each lease is one attempt.
+UNIT_ATTEMPT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*/[1-9][0-9]*")
+# Identity a unit's routes share with the host that measured them.
+ROUTE_IDENTITY_FIELDS = (
+    "campaign_id", "platform", "replica_id", "instance_id", "host_epoch", "architecture", "instance_type",
+    "availability_zone")
+UNIT_HOST_ARTIFACTS = (
+    "environment-manifest.txt",
+    "environment.txt",
+    "engine-build.txt",
+    "route-plan.tsv",
+    "unit-rows.tsv",
+    "expected-rows.tsv",
+    "observed-rows.tsv",
+    "observed-rows.tsv.sha256",
+    "rebar-outcomes.tsv",
+    "calibration.tsv",
+    "unit-session.tsv",
+)
+MAXIMUM_CALIBRATION_DRIFT = 0.05
 
 
 def load_unit(directory, unit_id):
@@ -343,7 +413,254 @@ def combine(arguments):
                   [rebar_outcomes[row_id] for row_id in sorted(rebar_outcomes)])
     write_observed_rows(root / "observed-rows.tsv", UNIT_OBSERVED_FIELDS,
                         [{**row, "role": roles[row["row_id"]]} for row in rows])
+    unit_id = mapping[0]["unit_id"]
+    write_tsv(root / "unit-session.tsv", UNIT_SESSION_FIELDS, [{
+        "schema_version": UNIT_SCHEMA_VERSION,
+        **{field: sessions[0][field] for field in ROUTE_IDENTITY_FIELDS},
+        "unit_id": unit_id,
+        "unit_attempt_id": arguments.unit_attempt,
+        "region": arguments.region,
+    }])
+    write_unit_evidence(root, route_plan)
     print(f"Combined {len(rows)} unit rows")
+
+
+def write_unit_evidence(root, route_plan):
+    """Bind each route's artifacts and the unit's own, in the host-session evidence shape."""
+    evidence = []
+    for route in route_plan:
+        systems = parse_systems(route["systems"], "route plan")
+        for artifact, path in host_session.route_evidence(
+                root / "routes" / route["route"],
+                work_units.NATIVE_COMPARATOR_SYSTEMS <= systems,
+                UNIT_ROUTE_REQUIRED_ARTIFACTS):
+            evidence.append({
+                "route": route["route"],
+                "artifact": f"routes/{route['route']}/{artifact}",
+                "verification": "sha256",
+                "sha256": sha256_file(path),
+            })
+    for artifact in UNIT_HOST_ARTIFACTS:
+        if (root / artifact).is_file():
+            evidence.append({
+                "route": "host", "artifact": artifact, "verification": "sha256", "sha256": sha256_file(root / artifact)})
+    if (root / "unit-capacity.txt").is_file():
+        evidence.append({
+            "route": "host",
+            "artifact": "unit-capacity.txt",
+            "verification": "capacity-prefix-sha256",
+            "sha256": capacity_prefix_sha256(root / "unit-capacity.txt"),
+        })
+    write_tsv(root / "unit-evidence.tsv", EVIDENCE_FIELDS, sorted(
+        evidence, key=lambda row: (row["route"], row["artifact"])))
+    verify_unit_evidence(root)
+
+
+def verify_unit_evidence(root):
+    rows = verify_evidence_manifest(
+        root / "unit-evidence.tsv", root,
+        route_required=UNIT_ROUTE_REQUIRED_ARTIFACTS,
+        formal_required=FORMAL_UNIT_ARTIFACTS,
+        capacity_artifact="unit-capacity.txt")
+    return evidence_candidate_identity(rows, root)
+
+
+def reject(message) -> NoReturn:
+    raise ValidationError(message)
+
+
+def check_unit_identity(root, session, units, protocols):
+    """The unit recomputes from its rows, protocols, and representatives, and is a checked-in unit."""
+    unit_rows_file = read_tsv(root / "unit-rows.tsv", work_units.UNIT_ROW_FIELDS, work_units.UNIT_ROW_FIELDS)
+    if {row["unit_id"] for row in unit_rows_file} != {session["unit_id"]}:
+        reject(f"{root / 'unit-rows.tsv'} does not hold only unit {session['unit_id']}")
+    unit = units.get(session["unit_id"])
+    if unit is None:
+        reject(f"unit {session['unit_id']} is not a checked-in work unit")
+    # The attempt's mapping is the checked-in one, row for row, so no row of another role slips past.
+    checked_in = [row for row in row_protocol.read_tsv(DIRECTORY / "unit-rows.tsv")
+                  if row["unit_id"] == session["unit_id"]]
+    if unit_rows_file != checked_in:
+        reject(f"{root / 'unit-rows.tsv'} differs from the checked-in rows of unit {session['unit_id']}")
+    owned = sorted(unit["owned"])
+    copies = sorted(unit["copies"])
+    representatives = sorted(unit["representatives"])
+    identity = work_units.unit_id(
+        unit["shard_id"], owned, copies, [f"{replica}:{row_id}" for replica, row_id in representatives], protocols)
+    if identity != session["unit_id"]:
+        reject(f"unit {session['unit_id']} recomputes as {identity} under the frozen row protocols")
+    return unit
+
+
+def check_unit_rows(root, unit, manifest):
+    """Expected and observed rows are exactly the unit's owned and copied rows, each with its role."""
+    held = {row_id: "owner" for row_id in unit["owned"]} | {row_id: "copy" for row_id in unit["copies"]}
+    by_id = {row["row_id"]: row for row in manifest}
+    expected = [row["row_id"] for row in load_manifest(root / "expected-rows.tsv")]
+    if sorted(expected) != sorted(held):
+        reject(f"{root / 'expected-rows.tsv'} does not list exactly the unit's rows")
+    observed_path = root / "observed-rows.tsv"
+    observed = read_tsv(observed_path, ("row_id", "shard_id", "system", "role"), UNIT_OBSERVED_FIELDS)
+    identifiers = [row["row_id"] for row in observed]
+    problems = []
+    duplicates = duplicate_values(identifiers)
+    missing = sorted(set(held) - set(identifiers))
+    unexpected = sorted(set(identifiers) - set(held))
+    if missing:
+        problems.append(f"missing rows={format_values(missing)}")
+    if duplicates:
+        problems.append(f"duplicate rows={format_values(duplicates)}")
+    if unexpected:
+        problems.append(f"unexpected rows={format_values(unexpected)}")
+    for line_number, row in enumerate(observed, 2):
+        if row["row_id"] not in held:
+            continue
+        manifest_row = by_id[row["row_id"]]
+        if (row["shard_id"], row["system"]) != (manifest_row["shard_id"], manifest_row["system"]):
+            problems.append(f"{observed_path}:{line_number} does not match the manifest shard and system")
+        if row["role"] != held[row["row_id"]]:
+            problems.append(f"{observed_path}:{line_number} role is {row['role']!r}, expected {held[row['row_id']]!r}")
+    if problems:
+        reject("unit observed-row acceptance failed: " + "; ".join(problems))
+    verify_observed_rows_checksum(root / "observed-rows.tsv.sha256")
+
+
+def check_unit_routes(root, unit, session, protocols, manifest):
+    """Routes ran in the unit's order with its calibrations, on the unit session's host."""
+    routes = plan_routes(DIRECTORY, unit, session["replica_id"])
+    shares = {route: share for route, _, _, share, _ in routes}
+    planned = [
+        {"route": route, "handler": handler, "systems": canonical_systems(systems), "calibration": calibration}
+        for route, handler, systems, _, calibration in routes]
+    if read_tsv(root / "route-plan.tsv", ROUTE_PLAN_FIELDS, ROUTE_PLAN_FIELDS) != planned:
+        reject(f"{root / 'route-plan.tsv'} is not the unit's plan for replica {session['replica_id']}")
+    shard_rows = [row for row in manifest if row["shard_id"] == unit["shard_id"]]
+    for route in planned:
+        directory = root / "routes" / route["route"]
+        route_session = read_one_tsv(directory / "route-session.tsv", SESSION_FIELDS)
+        changed = [field for field in ROUTE_IDENTITY_FIELDS if route_session[field] != session[field]]
+        changed += [field for field, value in (("shard_id", unit["shard_id"]), ("systems", route["systems"]))
+                    if route_session[field] != value]
+        if changed:
+            reject(f"{directory / 'route-session.tsv'} differs from the unit session and route plan: {changed}")
+        metadata = read_properties(directory / "run-metadata.txt")
+        if (metadata.get("unit_id"), metadata.get("unit_calibration")) != (unit["unit_id"], route["calibration"]):
+            reject(f"{directory / 'run-metadata.txt'} ran unit {metadata.get('unit_id')} with calibration "
+                   f"{metadata.get('unit_calibration')}, expected unit {unit['unit_id']} with calibration "
+                   f"{route['calibration']}")
+        check_semantic_receipt(directory, metadata)
+        check_route_selectors(directory, metadata, shares[route["route"]], shard_rows, protocols)
+    return planned
+
+
+def check_route_selectors(directory, metadata, share, shard_rows, protocols):
+    """The route ran its JMH selectors at the frozen protocol of their rows, with no window override."""
+    path = directory / "run-metadata.txt"
+    if metadata.get("baseline_joni_jmh_time") != "default":
+        reject(f"{path} overrides the frozen Joni JMH window: {metadata.get('baseline_joni_jmh_time')}")
+    if metadata.get("protocol") not in {"smoke", "qualification"}:
+        reject(f"{path} records unit protocol {metadata.get('protocol')!r}, expected smoke or qualification")
+    try:
+        smoke = {setting: metadata[name] for setting, name in zip(SMOKE_SETTINGS, (
+            "jmh_process_count", "jmh_process_warmup_iterations", "jmh_process_measurement_iterations",
+            "jmh_iteration_time"))}
+        expected = selectors(share, shard_rows, protocols, metadata["protocol"], smoke)
+    except (KeyError, ValueError) as error:
+        reject(f"{path} does not plan the route's selectors: {error}")
+
+    def settings(rows):
+        return sorted((tuple((field, row[field]) for field in SELECTOR_FIELDS if field != "selector")
+                       for row in rows))
+
+    recorded = read_tsv(directory / "jmh-selectors.tsv", SELECTOR_FIELDS, SELECTOR_FIELDS)
+    if settings(recorded) != settings(expected):
+        reject(f"{directory / 'jmh-selectors.tsv'} differs from the selectors of the frozen protocol")
+
+
+def check_semantic_receipt(directory, metadata):
+    """A cached Surefire receipt is used only when the route's reports are the receipt's files."""
+    if metadata.get("semantic_receipt") not in {"cached", "measured"}:
+        reject(f"{directory / 'run-metadata.txt'} records semantic receipt {metadata.get('semantic_receipt')!r}, "
+               "expected cached or measured")
+    receipt_path = directory / "semantic-receipt.sha256"
+    if not receipt_path.is_file() or sha256_file(receipt_path) != metadata.get("semantic_receipt_sha256"):
+        reject(f"{receipt_path} does not match the route's recorded semantic receipt")
+    listed = {}
+    for line in receipt_path.read_text(encoding="utf-8").splitlines():
+        digest, _, artifact = line.partition("  ")
+        if SHA256.fullmatch(digest) is None or not artifact:
+            reject(f"{receipt_path} has an invalid line {line!r}")
+        listed[artifact] = digest
+    reports = {
+        f"reports/{path.name}": sha256_file(path) for path in (directory / "semantic-reports").glob("TEST-*.xml")}
+    if not reports or {key: value for key, value in listed.items() if key.startswith("reports/")} != reports \
+            or set(listed) - set(reports) != {"surefire.log"}:
+        reject(f"{directory / 'semantic-reports'} are not the files of its semantic receipt")
+
+
+def check_unit_calibration(root):
+    path = root / "calibration.tsv"
+    rows = read_tsv(path, ("phase", "score", "before_after_drift"))
+    if [row["phase"] for row in rows] != ["before", "after"]:
+        reject(f"{path} must hold one before and one after calibration")
+    before, after = (float(row["score"]) for row in rows)
+    if not (math.isfinite(before) and math.isfinite(after)) or min(before, after) <= 0:
+        reject(f"{path} has invalid calibration scores")
+    drift = abs(after - before) / min(before, after)
+    if exceeds_published_limit(drift, MAXIMUM_CALIBRATION_DRIFT):
+        reject(f"{path} drifted {drift:.4f}, above {MAXIMUM_CALIBRATION_DRIFT}")
+
+
+def check_unit_representatives(root, unit, session, planned):
+    """The unit's representatives for this replica ran, each on its own route, and passed."""
+    ran = []
+    for route in planned:
+        path = root / "routes" / route["route"] / "protocol-qualification.tsv"
+        if path.is_file():
+            ran.extend(row["manifest_row_id"] for row in read_tsv(path, ("manifest_row_id",)))
+    expected = unit_representatives(unit, session["replica_id"])
+    if sorted(ran) != expected:
+        reject(f"unit {unit['unit_id']} ran representatives {format_values(sorted(ran))}, expected "
+               f"{format_values(expected)}")
+
+
+def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTORY / "row-protocol.tsv"):
+    """Accept one unit attempt on its own and return its receipt."""
+    session = read_one_tsv(root / "unit-session.tsv", UNIT_SESSION_FIELDS)
+    if session["schema_version"] != UNIT_SCHEMA_VERSION:
+        reject(f"{root / 'unit-session.tsv'} schema_version must be {UNIT_SCHEMA_VERSION}")
+    if session["replica_id"] not in {"1", "2", "3", "4"}:
+        reject(f"{root / 'unit-session.tsv'} replica_id must be 1 to 4")
+    if UNIT_ATTEMPT.fullmatch(session["unit_attempt_id"]) is None:
+        reject(f"{root / 'unit-session.tsv'} unit_attempt_id must be <host_session>/<lease_seq>")
+    if not session["availability_zone"].startswith(session["region"]):
+        reject(f"{root / 'unit-session.tsv'} availability zone is outside region {session['region']}")
+    protocols = row_protocol.load(protocol_path)
+    manifest = load_manifest(manifest_path)
+    unit = check_unit_identity(root, session, work_units.load(DIRECTORY), protocols)
+    check_unit_rows(root, unit, manifest)
+    planned = check_unit_routes(root, unit, session, protocols, manifest)
+    check_unit_calibration(root)
+    candidate_commit, candidate_archive_sha256, engine_tree, heap_size = verify_unit_evidence(root)
+    check_unit_representatives(root, unit, session, planned)
+    return {
+        **session,
+        "shard_id": unit["shard_id"],
+        "owned_row_count": str(len(unit["owned"])),
+        "copied_row_count": str(len(unit["copies"])),
+        "row_protocol_sha256": work_units.protocol_digest([*unit["owned"], *unit["copies"]], protocols),
+        "manifest_sha256": sha256_file(manifest_path),
+        "observed_rows_sha256": sha256_file(root / "observed-rows.tsv"),
+        "evidence_manifest_sha256": sha256_file(root / "unit-evidence.tsv"),
+        "candidate_commit": candidate_commit,
+        "candidate_archive_sha256": candidate_archive_sha256,
+        "engine_tree": engine_tree,
+        "heap_size": heap_size,
+    }
+
+
+def write_unit_receipt(path, receipt):
+    write_tsv(path, UNIT_RECEIPT_FIELDS, [receipt])
 
 
 def parser():
@@ -376,6 +693,8 @@ def parser():
 
     combine_parser = subparsers.add_parser("combine")
     combine_parser.add_argument("--unit-directory", type=Path, required=True)
+    combine_parser.add_argument("--unit-attempt", required=True)
+    combine_parser.add_argument("--region", required=True)
     combine_parser.set_defaults(function=combine)
     return argument_parser
 

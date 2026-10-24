@@ -55,6 +55,28 @@ ROUTE_REQUIRED_ARTIFACTS = {
     "run-metadata.txt",
     "status.txt",
 }
+# A unit's routes calibrate across the unit, so the unit root holds its one calibration.
+UNIT_ROUTE_REQUIRED_ARTIFACTS = (ROUTE_REQUIRED_ARTIFACTS - {"calibration.tsv"}) | {"jmh-selectors.tsv"}
+FORMAL_HOST_ARTIFACTS = {
+    "environment-manifest.txt",
+    "environment.txt",
+    "route-plan.tsv",
+    "expected-rows.tsv",
+    "observed-rows.tsv",
+    "session.tsv",
+    "host-capacity.txt",
+}
+FORMAL_UNIT_ARTIFACTS = {
+    "environment-manifest.txt",
+    "environment.txt",
+    "route-plan.tsv",
+    "unit-rows.tsv",
+    "expected-rows.tsv",
+    "observed-rows.tsv",
+    "calibration.tsv",
+    "unit-session.tsv",
+    "unit-capacity.txt",
+}
 PROTOCOL_QUALIFICATION_FIELDS = (
     "manifest_row_id",
     "system",
@@ -231,7 +253,13 @@ def verify_protocol_qualification(path, route, systems, expected_count):
             raise ValidationError(f"{context} protocol outcome is not accepted")
 
 
-def verify_evidence_manifest(path, root):
+def verify_evidence_manifest(
+        path,
+        root,
+        route_required=ROUTE_REQUIRED_ARTIFACTS,
+        formal_required=FORMAL_HOST_ARTIFACTS,
+        capacity_artifact="host-capacity.txt"):
+    """Verify every bound artifact; a unit passes its own route, formal, and capacity artifacts."""
     rows = read_tsv(path, EVIDENCE_FIELDS, EVIDENCE_FIELDS)
     if not rows:
         raise ValidationError(f"{path} has no evidence rows")
@@ -243,13 +271,13 @@ def verify_evidence_manifest(path, root):
         context = f"{path}:{line_number}"
         artifact = safe_evidence_path(root, row["artifact"], context)
         if not artifact.is_file() or artifact.stat().st_size == 0:
-            raise ValidationError(f"required host evidence is missing or empty: {artifact}")
+            raise ValidationError(f"required evidence is missing or empty: {artifact}")
         if not SHA256.fullmatch(row["sha256"]):
             raise ValidationError(f"{context} has an invalid SHA-256 digest")
         if row["verification"] == "sha256":
             digest = sha256_file(artifact)
         elif row["verification"] == "capacity-prefix-sha256":
-            if row["artifact"] != "host-capacity.txt":
+            if row["artifact"] != capacity_artifact:
                 raise ValidationError(f"{context} uses capacity-prefix verification for another artifact")
             digest = capacity_prefix_sha256(artifact)
         else:
@@ -262,8 +290,8 @@ def verify_evidence_manifest(path, root):
             verify_observed_rows_checksum(artifact)
 
     listed = set(artifacts)
-    if (root / "host-capacity.txt").is_file() and "host-capacity.txt" not in listed:
-        raise ValidationError("host-capacity.txt exists but is not bound by host evidence")
+    if (root / capacity_artifact).is_file() and capacity_artifact not in listed:
+        raise ValidationError(f"{capacity_artifact} exists but is not bound by {path.name}")
     for line_number, row in enumerate(rows, 2):
         route = row["route"]
         artifact = row["artifact"]
@@ -284,7 +312,7 @@ def verify_evidence_manifest(path, root):
             for artifact in listed
             if artifact.startswith(prefix)
         }
-        missing = ROUTE_REQUIRED_ARTIFACTS - route_artifacts
+        missing = route_required - route_artifacts
         if missing:
             raise ValidationError(f"{path} route {route!r} is missing evidence: {sorted(missing)}")
         route_directory = root / "routes" / route
@@ -330,18 +358,9 @@ def verify_evidence_manifest(path, root):
     if environment_path.is_file():
         environment = read_properties(environment_path)
         if environment.get("verification_status") == "verified":
-            required_host = {
-                "environment-manifest.txt",
-                "environment.txt",
-                "route-plan.tsv",
-                "expected-rows.tsv",
-                "observed-rows.tsv",
-                "session.tsv",
-                "host-capacity.txt",
-            }
-            missing = required_host - listed
+            missing = formal_required - listed
             if missing:
-                raise ValidationError(f"{path} is missing formal host evidence: {sorted(missing)}")
+                raise ValidationError(f"{path} is missing formal evidence: {sorted(missing)}")
             for key in (
                     "row_manifest_sha256",
                     "platform_manifest_sha256",

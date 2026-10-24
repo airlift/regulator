@@ -309,6 +309,13 @@ one a host session runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
   manifest identity; a later unit uses them only when every file matches the
   stored SHA-256 receipt. The native-access probe, preparations, and
   differential verifiers still run for every unit.
+- Outside planning, `run-unit.sh` requires the attempt's host session,
+  `RE2_CAMPAIGN_HOST_SESSION`, and lease sequence,
+  `RE2_CAMPAIGN_LEASE_SEQUENCE`; the region defaults to the availability
+  zone's. It runs itself under GNU `time` into `unit-capacity.txt` with the
+  host session's capacity gate, combines the routes, and writes
+  `unit-session.tsv`, `unit-evidence.tsv`, and, once `validate-unit-results.py`
+  accepts the attempt, `unit-receipt.tsv`; see `ACCEPTANCE.md`.
 - `validate-unit-plans.py` plans every unit for both protocols and replicas 1
   to 4 in process, and checks that the selectors expand to exactly the unit's
   rows under their frozen protocols, in replica route order, with the unit's

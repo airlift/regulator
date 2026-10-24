@@ -7,6 +7,7 @@ from pathlib import Path
 
 from acceptance import (
     EVIDENCE_FIELDS,
+    ROUTE_REQUIRED_ARTIFACTS,
     SESSION_FIELDS,
     ValidationError,
     canonical_systems,
@@ -86,18 +87,8 @@ def require_complete_route(route_directory):
         raise ValueError(f"Route did not complete successfully: {route_directory}")
 
 
-def route_evidence(route_directory, needs_native_bracket):
-    required = {
-        "route-session.tsv",
-        "semantic-gate.tsv",
-        "semantic-evidence.tsv",
-        "calibration.tsv",
-        "observed-rows.tsv",
-        "observed-rows.tsv.sha256",
-        "raw-artifacts.sha256",
-        "run-metadata.txt",
-        "status.txt",
-    }
+def route_evidence(route_directory, needs_native_bracket, required_artifacts=ROUTE_REQUIRED_ARTIFACTS):
+    required = set(required_artifacts)
     if needs_native_bracket:
         required.add("native-bracket.tsv")
     metadata = read_properties(route_directory / "run-metadata.txt")
