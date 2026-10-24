@@ -45,6 +45,7 @@ public final class JavaRegexp
         private boolean unicodeCharacterClasses;
         private long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
         private ByteFrequencies byteFrequencies = ByteFrequencies.uniform();
+        private boolean generateBytecode;
 
         private Options() {}
 
@@ -140,6 +141,25 @@ public final class JavaRegexp
             return this;
         }
 
+        boolean generateBytecode()
+        {
+            return generateBytecode;
+        }
+
+        /**
+         * Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
+         * so each operation that would run its specialized scan runs dedicated bytecode instead.
+         * Operations that take another route keep it. Patterns that are not eligible, or whose
+         * class cannot be generated, compile as they do without this option. Disabled by default.
+         *
+         * @see JavaRegexp#usesGeneratedBytecode()
+         */
+        public Options setGenerateBytecode(boolean generateBytecode)
+        {
+            this.generateBytecode = generateBytecode;
+            return this;
+        }
+
         int parseFlags()
         {
             int flags = Regexp.LIKE_PERL;
@@ -219,12 +239,22 @@ public final class JavaRegexp
         Re2 compiled = scanPlan
                 ? Re2.compileParsedForJava(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), forceScanPlanHandoff)
                 : Re2.compileParsed(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies());
-        return new JavaRegexp(compiled);
+        return new JavaRegexp(options.generateBytecode() ? Re2.withGeneratedBytecode(compiled) : compiled);
     }
 
     Re2 pattern()
     {
         return pattern;
+    }
+
+    /**
+     * Returns whether this compiled pattern has a class generated for it, which only
+     * {@link Options#setGenerateBytecode(boolean)} enables. Each operation of such a pattern that
+     * would run its specialized scan runs the generated class.
+     */
+    public boolean usesGeneratedBytecode()
+    {
+        return pattern.usesGeneratedBytecode();
     }
 
     public boolean find(Slice input)

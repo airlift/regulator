@@ -438,7 +438,7 @@ public class TestRe2ScanPlan
      * Makes every search of the pattern's interpreted plan throw. A generated class holds the
      * operations it needs, so it still answers.
      */
-    private static void disableInterpretedPlan(Re2 pattern)
+    static void disableInterpretedPlan(Re2 pattern)
             throws ReflectiveOperationException
     {
         Field steps = TrinoScanPlan.class.getDeclaredField("steps");

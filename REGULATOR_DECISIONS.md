@@ -1738,6 +1738,8 @@ interpreter's helpers, and the class is defined in Regulator's package and is
 not charged to the memory budget. RE2 runs and delimited captures call copies
 of the RE2 run reader and its vector stop scan, so a generated plan reports
 what the ordinary engine reports on every input, malformed UTF-8 included.
+`JavaRegexp.Options.setGenerateBytecode` applies these decisions to Java plans;
+the last bullet records its measurements.
 
 - The class is an executor, not a set of operation entries. It replaces the
   plan's attempt, or an unanchored plan's region search, with the same
@@ -1785,6 +1787,20 @@ what the ordinary engine reports on every input, malformed UTF-8 included.
   against 3.6 to 16 us for the interpreted plan, and up to about 353 times the
   ordinary engine's compilation, on R8i `UNANCHORED_TAIL_4096`. With the option
   off, sealing `Re2` changed no row on any host.
+- `JavaRegexp.Options.setGenerateBytecode` gives Java patterns the same executor
+  classes under the same rules. A Java plan is an RE2 plan, so the emitter,
+  eligibility, and routes are unchanged, and `JavaRegexp` holds the generated
+  `Re2` subclass. On R9g and R8i, the 65 matching rows of
+  `BenchmarkJavaScanPlan` with `generateBytecode=true`, on the `URL`,
+  `URL_SHORT`, `ANCHORED_HOST`, `ANCHORED_QUERY`, `UNANCHORED_URL`,
+  `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`, `OPTIONAL_MIXED`,
+  `RETRY_64`, `LONG_HOST`, `MIXED`, and `URL_MALFORMED` workloads, take a
+  geometric mean of 0.51 and 0.56 times the interpreted plan's time and 0.12 and
+  0.13 times the ordinary engine's, excluding compilation and the `FOLDED_MIXED`
+  control. No generated row is slower than the interpreted plan or the ordinary
+  engine, and R8i `LONG_HOST`, RE2's exception, is within noise for Java.
+  Compilation with generation takes 0.44 to 0.71 ms per pattern on R9g and 1.0
+  to 1.6 ms on R8i, against 3.9 to 15.1 us for the interpreted plan.
 
 ## Generated Trino LIKE Kernels
 
