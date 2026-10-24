@@ -165,11 +165,12 @@ final class BoundedCharacterClassCounter
         if (atom.op() != CHAR_CLASS || atom.charClass().isEmpty()) {
             return null;
         }
+        // A Rust bytes pattern marks only its byte classes, so the class decides the encoding.
         return new Analysis(
                 atom.charClass().ranges(),
                 minimum,
                 maximum,
-                (regexp.parseFlags() & LATIN1) != 0);
+                (atom.parseFlags() & LATIN1) != 0);
     }
 
     private record Analysis(RuneRange[] ranges, int minimum, int maximum, boolean latin1) {}

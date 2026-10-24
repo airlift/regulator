@@ -73,11 +73,15 @@ fn run() -> Result<(), String> {
         Some("match") => match_mode(&read_cases(6)?)?,
         Some("upstream") => {
             let testdata = testdata.ok_or("--mode=upstream requires --testdata=DIR")?;
-            upstream_mode(Path::new(&testdata))?
+            upstream_mode(Path::new(&testdata), false)?
+        }
+        Some("upstream-bytes") => {
+            let testdata = testdata.ok_or("--mode=upstream-bytes requires --testdata=DIR")?;
+            upstream_mode(Path::new(&testdata), true)?
         }
         _ => {
             return Err(
-                "usage: rust-regex-golden --mode=syntax|match|upstream [--testdata=DIR]"
+                "usage: rust-regex-golden --mode=syntax|match|upstream|upstream-bytes [--testdata=DIR]"
                     .to_string(),
             )
         }
@@ -96,7 +100,8 @@ fn run() -> Result<(), String> {
 // Options
 
 /// The `RegexBuilder` settings the front end exposes. Unicode is on by
-/// default and the nest limit defaults to the crate's.
+/// default and the nest limit defaults to the crate's. `bytes` selects
+/// `regex::bytes::RegexBuilder` instead of `regex::RegexBuilder`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Options {
     case_insensitive: bool,
@@ -108,6 +113,7 @@ struct Options {
     octal: bool,
     unicode_disabled: bool,
     nest_limit: u32,
+    bytes: bool,
 }
 
 impl Default for Options {
@@ -122,6 +128,7 @@ impl Default for Options {
             octal: false,
             unicode_disabled: false,
             nest_limit: DEFAULT_NEST_LIMIT,
+            bytes: false,
         }
     }
 }
@@ -129,13 +136,18 @@ impl Default for Options {
 impl Options {
     /// Parses `-` for defaults, or comma-separated groups in this order:
     /// enabled flags from `imsRUxo` in that order, `-u` to disable Unicode,
-    /// and `n` followed by a nest limit other than the default.
+    /// `n` followed by a nest limit other than the default, and `bytes` for
+    /// the bytes API.
     fn parse(field: &str) -> Result<Options, String> {
         let mut options = Options::default();
         if field != "-" {
             for part in field.split(',') {
                 if part == "-u" {
                     options.unicode_disabled = true;
+                    continue;
+                }
+                if part == "bytes" {
+                    options.bytes = true;
                     continue;
                 }
                 if let Some(limit) = part.strip_prefix('n') {
@@ -196,6 +208,9 @@ impl Options {
         if self.nest_limit != DEFAULT_NEST_LIMIT {
             groups.push(format!("n{}", self.nest_limit));
         }
+        if self.bytes {
+            groups.push("bytes".to_string());
+        }
         if groups.is_empty() {
             return "-".to_string();
         }
@@ -206,30 +221,75 @@ impl Options {
 // ---------------------------------------------------------------------------
 // Compilation through the public API, the meta engine, and the syntax crate
 
-fn build_public(pattern: &str, options: Options) -> Result<regex::Regex, regex::Error> {
-    regex::RegexBuilder::new(pattern)
-        .case_insensitive(options.case_insensitive)
-        .multi_line(options.multi_line)
-        .dot_matches_new_line(options.dot_matches_new_line)
-        .crlf(options.crlf)
-        .swap_greed(options.swap_greed)
-        .ignore_whitespace(options.ignore_whitespace)
-        .octal(options.octal)
-        .nest_limit(options.nest_limit)
-        .unicode(!options.unicode_disabled)
-        .build()
+/// The public API: `regex::Regex` searches `&str`, and `regex::bytes::Regex`
+/// searches `&[u8]`.
+enum PublicRegex {
+    String(regex::Regex),
+    Bytes(regex::bytes::Regex),
 }
 
-/// The meta configuration `regex` 1.13.1 `Builder::build_one_string` uses.
-fn meta_config() -> meta::Config {
+impl PublicRegex {
+    fn captures_len(&self) -> usize {
+        match self {
+            PublicRegex::String(regex) => regex.captures_len(),
+            PublicRegex::Bytes(regex) => regex.captures_len(),
+        }
+    }
+
+    fn capture_names(&self) -> Vec<Option<String>> {
+        match self {
+            PublicRegex::String(regex) => regex
+                .capture_names()
+                .map(|name| name.map(str::to_string))
+                .collect(),
+            PublicRegex::Bytes(regex) => regex
+                .capture_names()
+                .map(|name| name.map(str::to_string))
+                .collect(),
+        }
+    }
+}
+
+/// Applies the settings the front end exposes, identically for both builders.
+macro_rules! configure_builder {
+    ($builder:expr, $options:expr) => {
+        $builder
+            .case_insensitive($options.case_insensitive)
+            .multi_line($options.multi_line)
+            .dot_matches_new_line($options.dot_matches_new_line)
+            .crlf($options.crlf)
+            .swap_greed($options.swap_greed)
+            .ignore_whitespace($options.ignore_whitespace)
+            .octal($options.octal)
+            .nest_limit($options.nest_limit)
+            .unicode(!$options.unicode_disabled)
+    };
+}
+
+fn build_public(pattern: &str, options: Options) -> Result<PublicRegex, regex::Error> {
+    if options.bytes {
+        configure_builder!(regex::bytes::RegexBuilder::new(pattern), options)
+            .build()
+            .map(PublicRegex::Bytes)
+    } else {
+        configure_builder!(regex::RegexBuilder::new(pattern), options)
+            .build()
+            .map(PublicRegex::String)
+    }
+}
+
+/// The meta configuration `regex` 1.13.1 `Builder::build_one_string` uses,
+/// or `Builder::build_one_bytes` for the bytes API.
+fn meta_config(options: Options) -> meta::Config {
     meta::Config::new()
         .nfa_size_limit(Some(NFA_SIZE_LIMIT))
         .hybrid_cache_capacity(HYBRID_CACHE_CAPACITY)
         .match_kind(MatchKind::LeftmostFirst)
-        .utf8_empty(true)
+        .utf8_empty(!options.bytes)
 }
 
-/// The syntax configuration `regex` 1.13.1 `Builder::build_one_string` uses.
+/// The syntax configuration `regex` 1.13.1 `Builder::build_one_string` uses,
+/// or `Builder::build_one_bytes` for the bytes API.
 fn syntax_config(options: Options) -> automata_syntax::Config {
     automata_syntax::Config::new()
         .case_insensitive(options.case_insensitive)
@@ -241,12 +301,12 @@ fn syntax_config(options: Options) -> automata_syntax::Config {
         .octal(options.octal)
         .nest_limit(options.nest_limit)
         .unicode(!options.unicode_disabled)
-        .utf8(true)
+        .utf8(!options.bytes)
 }
 
 fn build_meta(pattern: &str, options: Options) -> Result<meta::Regex, meta::BuildError> {
     meta::Builder::new()
-        .configure(meta_config())
+        .configure(meta_config(options))
         .syntax(syntax_config(options))
         .build(pattern)
 }
@@ -269,7 +329,7 @@ fn parse_hir(pattern: &str, options: Options) -> Result<Hir, regex_syntax::Error
         .dot_matches_new_line(options.dot_matches_new_line)
         .line_terminator(LINE_TERMINATOR)
         .swap_greed(options.swap_greed)
-        .utf8(true)
+        .utf8(!options.bytes)
         .build()
         .translate(pattern, &ast)?;
     Ok(hir)
@@ -280,10 +340,10 @@ fn parse_hir(pattern: &str, options: Options) -> Result<Hir, regex_syntax::Error
 /// match must span exactly the window. The parsed `Hir` is wrapped rather than
 /// the pattern text, because a verbose-mode comment at the end of a pattern
 /// would swallow a textual anchor.
-fn build_full(hir: &Hir) -> Result<meta::Regex, meta::BuildError> {
+fn build_full(hir: &Hir, options: Options) -> Result<meta::Regex, meta::BuildError> {
     let anchored = Hir::concat(vec![hir.clone(), Hir::look(Look::End)]);
     meta::Builder::new()
-        .configure(meta_config())
+        .configure(meta_config(options))
         .build_from_hir(&anchored)
 }
 
@@ -318,7 +378,7 @@ fn reads_right_context(hir: &Hir) -> bool {
 
 enum Compiled {
     Accepted {
-        public: regex::Regex,
+        public: PublicRegex,
         meta: meta::Regex,
         full: meta::Regex,
         reads_right_context: bool,
@@ -344,7 +404,7 @@ fn compile(pattern: &str, options: Options) -> Result<Compiled, String> {
             let hir = parsed.map_err(|e| {
                 format!("syntax crate rejected {pattern:?} with options {} that RegexBuilder accepts: {e}", options.render())
             })?;
-            let full = build_full(&hir)
+            let full = build_full(&hir, options)
                 .map_err(|e| format!("full-match regex for {pattern:?} failed to build: {e}"))?;
             if group_len(&full) != public.captures_len() {
                 return Err(format!(
@@ -466,13 +526,6 @@ struct Search {
     matches: Vec<Groups>,
 }
 
-fn public_groups(captures: &regex::Captures<'_>) -> Groups {
-    captures
-        .iter()
-        .map(|group| group.map(|m| (m.start(), m.end())))
-        .collect()
-}
-
 fn meta_groups(captures: &regex_automata::util::captures::Captures) -> Groups {
     (0..captures.group_len())
         .map(|index| captures.get_group(index).map(|span| (span.start, span.end)))
@@ -492,31 +545,57 @@ fn meta_first(regex: &meta::Regex, input: Input<'_>) -> Option<Groups> {
     captures.is_match().then(|| meta_groups(&captures))
 }
 
-fn public_search(regex: &regex::Regex, text: &str) -> Result<Search, String> {
-    let found: Vec<(usize, usize)> = regex
-        .find_iter(text)
-        .map(|m| (m.start(), m.end()))
-        .collect();
-    let matches: Vec<Groups> = regex
-        .captures_iter(text)
-        .map(|captures| public_groups(&captures))
-        .collect();
-    check_iteration(&found, &matches)?;
-    Ok(Search {
-        group_count: regex.captures_len(),
-        group_names: regex
-            .capture_names()
-            .map(|name| name.map(str::to_string))
-            .collect(),
-        is_match: regex.is_match(text),
-        captures: regex
-            .captures(text)
-            .map(|captures| public_groups(&captures)),
-        matches,
-    })
+/// The group spans of either public `Captures` type.
+macro_rules! public_groups {
+    ($captures:expr) => {
+        $captures
+            .iter()
+            .map(|group| group.map(|m| (m.start(), m.end())))
+            .collect::<Groups>()
+    };
 }
 
-fn meta_search(regex: &meta::Regex, text: &str, window: &Range<usize>) -> Result<Search, String> {
+/// Searches with either public regex type, whose methods share names and
+/// shapes but not types.
+macro_rules! public_search_with {
+    ($regex:expr, $text:expr) => {{
+        let (regex, text) = ($regex, $text);
+        let found: Vec<(usize, usize)> = regex
+            .find_iter(text)
+            .map(|m| (m.start(), m.end()))
+            .collect();
+        let matches: Vec<Groups> = regex
+            .captures_iter(text)
+            .map(|captures| public_groups!(captures))
+            .collect();
+        check_iteration(&found, &matches)?;
+        Ok(Search {
+            group_count: regex.captures_len(),
+            group_names: regex
+                .capture_names()
+                .map(|name| name.map(str::to_string))
+                .collect(),
+            is_match: regex.is_match(text),
+            captures: regex
+                .captures(text)
+                .map(|captures| public_groups!(captures)),
+            matches,
+        })
+    }};
+}
+
+fn public_search(regex: &PublicRegex, text: &[u8]) -> Result<Search, String> {
+    match regex {
+        PublicRegex::String(regex) => {
+            let text = std::str::from_utf8(text)
+                .map_err(|_| "internal error: a string search of text that is not UTF-8")?;
+            public_search_with!(regex, text)
+        }
+        PublicRegex::Bytes(regex) => public_search_with!(regex, text),
+    }
+}
+
+fn meta_search(regex: &meta::Regex, text: &[u8], window: &Range<usize>) -> Result<Search, String> {
     let input = || Input::new(text).range(window.clone());
     let found: Vec<(usize, usize)> = regex
         .find_iter(input())
@@ -563,7 +642,7 @@ struct Observed {
 /// the meta configuration used for anchored, full, and windowed searches.
 fn observe(
     compiled: &Compiled,
-    text: &str,
+    text: &[u8],
     window: Option<Range<usize>>,
 ) -> Result<Observed, String> {
     let Compiled::Accepted {
@@ -581,20 +660,23 @@ fn observe(
         let expected = public_search(public, text)?;
         if search != expected {
             return Err(format!(
-                "meta search {search:?} differs from the public API {expected:?} on {text:?}"
+                "meta search {search:?} differs from the public API {expected:?} on textHex={}",
+                encode_hex(text)
             ));
         }
     }
     // Truncating at the window end keeps the left context exact. It loses the
     // right context only where the window stops short of the haystack end: for
-    // assertions that read at or after their position, and for a window end
-    // inside a character, where truncation makes the end a character boundary.
-    let truncation_changes_result =
-        range.end < text.len() && (*reads_right_context || !text.is_char_boundary(range.end));
+    // assertions that read at or after their position, and, outside the bytes
+    // API, for a window end inside a character, where truncation makes the end
+    // a character boundary that an empty match may use.
+    let bytes = matches!(public, PublicRegex::Bytes(_));
+    let truncation_changes_result = range.end < text.len()
+        && (*reads_right_context || (!bytes && !is_char_boundary(text, range.end)));
     let full = (!truncation_changes_result).then(|| {
         meta_first(
             full,
-            Input::new(&text.as_bytes()[..range.end])
+            Input::new(&text[..range.end])
                 .range(range.clone())
                 .anchored(Anchored::Yes),
         )
@@ -613,7 +695,7 @@ fn observe(
 
 /// Successive anchored matches, each starting where the previous one ended,
 /// as regex-automata's own test suite runs anchored tests.
-fn anchored_matches(meta: &meta::Regex, text: &str, range: &Range<usize>) -> Vec<Groups> {
+fn anchored_matches(meta: &meta::Regex, text: &[u8], range: &Range<usize>) -> Vec<Groups> {
     meta.captures_iter(
         Input::new(text)
             .range(range.clone())
@@ -767,11 +849,7 @@ fn syntax_mode(cases: &[Vec<String>]) -> Result<Vec<String>, String> {
             Compiled::Accepted { public, .. } => {
                 fields.push(("ok", Value::Bool(true)));
                 push_error_fields(&mut fields, None)?;
-                let names: Vec<Option<String>> = public
-                    .capture_names()
-                    .map(|name| name.map(str::to_string))
-                    .collect();
-                push_group_fields(&mut fields, public.captures_len(), &names);
+                push_group_fields(&mut fields, public.captures_len(), &public.capture_names());
             }
             Compiled::Rejected { rejection, .. } => {
                 fields.push(("ok", Value::Bool(false)));
@@ -792,9 +870,9 @@ fn match_mode(cases: &[Vec<String>]) -> Result<Vec<String>, String> {
         let (id, pattern_hex, options_field, text_hex, start, end) =
             (&case[0], &case[1], &case[2], &case[3], &case[4], &case[5]);
         let pattern = decode_utf8(pattern_hex, id)?;
-        let text = decode_utf8(text_hex, id)?;
         let options = Options::parse(options_field).map_err(|e| format!("{id}: {e}"))?;
-        let window = parse_window(start, end, &text).map_err(|e| format!("{id}: {e}"))?;
+        let text = decode_text(text_hex, id, options)?;
+        let window = parse_window(start, end, &text, options).map_err(|e| format!("{id}: {e}"))?;
         let compiled = compile(&pattern, options).map_err(|e| format!("{id}: {e}"))?;
         let windowed = window.is_some();
         let observed = match &compiled {
@@ -819,7 +897,15 @@ fn match_mode(cases: &[Vec<String>]) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
-fn parse_window(start: &str, end: &str, text: &str) -> Result<Option<Range<usize>>, String> {
+/// Parses a window: `-` and `-` mean no window. Otherwise the offsets must be
+/// ordered and within the text, and in string mode on character boundaries; a
+/// window of the bytes API may split a character.
+fn parse_window(
+    start: &str,
+    end: &str,
+    text: &[u8],
+    options: Options,
+) -> Result<Option<Range<usize>>, String> {
     match (start, end) {
         ("-", "-") => Ok(None),
         ("-", _) | (_, "-") => Err("start and end must both be - or both be offsets".to_string()),
@@ -828,14 +914,15 @@ fn parse_window(start: &str, end: &str, text: &str) -> Result<Option<Range<usize
                 .parse()
                 .map_err(|_| format!("invalid start {start:?}"))?;
             let end: usize = end.parse().map_err(|_| format!("invalid end {end:?}"))?;
-            if start > end
-                || end > text.len()
-                || !text.is_char_boundary(start)
-                || !text.is_char_boundary(end)
-            {
+            if start > end || end > text.len() {
                 return Err(format!(
-                    "window {start}..{end} is not a character-aligned range of the {}-byte text",
+                    "window {start}..{end} is not a range of the {}-byte text",
                     text.len()
+                ));
+            }
+            if !options.bytes && (!is_char_boundary(text, start) || !is_char_boundary(text, end)) {
+                return Err(format!(
+                    "window {start}..{end} of a string search is not character-aligned"
                 ));
             }
             Ok(Some(start..end))
@@ -843,8 +930,10 @@ fn parse_window(start: &str, end: &str, text: &str) -> Result<Option<Range<usize
     }
 }
 
-/// Upstream cases a public `regex::Regex` string search can express.
-fn upstream_skip_reason(test: &RegexTest) -> Option<&'static str> {
+/// Upstream cases a public `regex::Regex` string search can express. For the
+/// bytes API the filter is the same except that it requires `utf8 = false`
+/// and allows haystacks that are not UTF-8.
+fn upstream_skip_reason(test: &RegexTest, bytes: bool) -> Option<&'static str> {
     if test.group() == REGEX_LITE_GROUP {
         return Some("regex-lite-only");
     }
@@ -857,13 +946,16 @@ fn upstream_skip_reason(test: &RegexTest) -> Option<&'static str> {
     if test.search_kind() != regex_test::SearchKind::Leftmost {
         return Some("search-kind");
     }
-    if !test.utf8() {
+    if bytes && test.utf8() {
+        return Some("utf8-enabled");
+    }
+    if !bytes && !test.utf8() {
         return Some("utf8-disabled");
     }
     if test.line_terminator() != LINE_TERMINATOR {
         return Some("line-terminator");
     }
-    if std::str::from_utf8(test.haystack()).is_err() {
+    if !bytes && std::str::from_utf8(test.haystack()).is_err() {
         return Some("invalid-utf8-haystack");
     }
     None
@@ -877,7 +969,7 @@ struct UpstreamObservation {
     matches: Vec<Groups>,
 }
 
-fn upstream_mode(testdata: &Path) -> Result<Vec<String>, String> {
+fn upstream_mode(testdata: &Path, bytes: bool) -> Result<Vec<String>, String> {
     if std::env::var_os("REGEX_TEST").is_some() || std::env::var_os("REGEX_TEST_VERBOSE").is_some()
     {
         return Err("unset REGEX_TEST and REGEX_TEST_VERBOSE; they filter or redirect the regex-test runner".to_string());
@@ -898,20 +990,22 @@ fn upstream_mode(testdata: &Path) -> Result<Vec<String>, String> {
     let mut observations: BTreeMap<String, UpstreamObservation> = BTreeMap::new();
     let mut records = Vec::new();
     for test in tests.iter() {
-        if let Some(reason) = upstream_skip_reason(test) {
+        if let Some(reason) = upstream_skip_reason(test, bytes) {
             *skipped.entry(reason).or_default() += 1;
             continue;
         }
         let id = format!("{}/{}", test.group(), test.name());
         let pattern = &test.regexes()[0];
-        let text = std::str::from_utf8(test.haystack()).expect("checked by upstream_skip_reason");
+        let text = test.haystack();
         let options = Options {
             case_insensitive: test.case_insensitive(),
             unicode_disabled: !test.unicode(),
+            bytes,
             ..Options::default()
         };
         // Upstream bounds may split a character; the meta engine accepts any
-        // byte range and its UTF-8 mode keeps matches on character boundaries.
+        // byte range, and outside the bytes API its UTF-8 mode keeps matches
+        // on character boundaries.
         let bounds = test.bounds();
         if bounds.start > bounds.end || bounds.end > text.len() {
             return Err(format!(
@@ -979,7 +1073,7 @@ fn upstream_mode(testdata: &Path) -> Result<Vec<String>, String> {
             ("id", Value::string(&id)),
             ("patternHex", Value::string(&encode_hex(pattern.as_bytes()))),
             ("options", Value::string(&options.render())),
-            ("textHex", Value::string(&encode_hex(text.as_bytes()))),
+            ("textHex", Value::string(&encode_hex(text))),
             ("start", Value::string(&start)),
             ("end", Value::string(&end)),
         ];
@@ -1000,7 +1094,8 @@ fn upstream_mode(testdata: &Path) -> Result<Vec<String>, String> {
         .collect::<Vec<_>>()
         .join(" ");
     eprintln!(
-        "upstream: kept {kept} cases, skipped {skipped_total}, checked {}: {summary}",
+        "{}: kept {kept} cases, skipped {skipped_total}, checked {}: {summary}",
+        if bytes { "upstream-bytes" } else { "upstream" },
         checked.len()
     );
     let mut lines = vec![
@@ -1013,7 +1108,8 @@ fn upstream_mode(testdata: &Path) -> Result<Vec<String>, String> {
 
 /// Checks every kept case against its TOML expectation with the regex-test
 /// runner, expanded into the same is_match, find, and captures checks the
-/// regex crate's own string suite runs. Any failure aborts generation.
+/// regex crate's own string and bytes suites run. Any failure aborts
+/// generation.
 fn check_upstream_expectations(
     checked: &[RegexTest],
     observations: &BTreeMap<String, UpstreamObservation>,
@@ -1123,10 +1219,23 @@ fn read_cases(field_count: usize) -> Result<Vec<Vec<String>>, String> {
     Ok(cases)
 }
 
-/// Decodes a hex field, `-` for empty, into UTF-8 text. The front end's
-/// contract on malformed UTF-8 is garbage in, garbage out, so a case table may
-/// not contain any.
+/// Decodes a hex field into UTF-8 text. A pattern is always a Rust string,
+/// and a string-mode text must be valid UTF-8.
 fn decode_utf8(hex: &str, id: &str) -> Result<String, String> {
+    String::from_utf8(decode_hex(hex, id)?).map_err(|_| format!("{id}: {hex} is not valid UTF-8"))
+}
+
+/// Decodes a text field, which for the bytes API may be any bytes.
+fn decode_text(hex: &str, id: &str, options: Options) -> Result<Vec<u8>, String> {
+    if options.bytes {
+        decode_hex(hex, id)
+    } else {
+        decode_utf8(hex, id).map(String::into_bytes)
+    }
+}
+
+/// Decodes canonical lowercase hex, or `-` for empty, into bytes.
+fn decode_hex(hex: &str, id: &str) -> Result<Vec<u8>, String> {
     let bytes = if hex == "-" {
         Vec::new()
     } else {
@@ -1146,7 +1255,12 @@ fn decode_utf8(hex: &str, id: &str) -> Result<String, String> {
             "{id}: hex {hex:?} is not canonical lowercase, or - for empty"
         ));
     }
-    String::from_utf8(bytes).map_err(|_| format!("{id}: {hex} is not valid UTF-8"))
+    Ok(bytes)
+}
+
+/// `str::is_char_boundary` for text that is valid UTF-8.
+fn is_char_boundary(text: &[u8], offset: usize) -> bool {
+    offset == text.len() || (offset < text.len() && (text[offset] & 0xC0) != 0x80)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {

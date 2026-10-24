@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -95,8 +96,8 @@ public class TestRustRegexp
     @Test
     public void testRangeStartingInsideCharacter()
     {
-        // The crate never reports an empty match that splits a character, and an anchored
-        // search cannot move past one.
+        // The crate's Regex never reports an empty match that splits a character, and an
+        // anchored search cannot move past one.
         RustRegexp regexp = RustRegexp.compile(utf8Slice(""));
         Slice input = utf8Slice("𝛃");
         int[] groups = new int[2];
@@ -118,6 +119,48 @@ public class TestRustRegexp
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(4);
         assertThat(matcher.find()).isFalse();
+    }
+
+    @Test
+    public void testBytesRangeStartingInsideCharacter()
+    {
+        // The crate's bytes::Regex reports an empty match that splits a character, so an anchored
+        // search succeeds there.
+        RustRegexp regexp = RustRegexp.compile(utf8Slice(""), RustRegexp.Options.bytes());
+        Slice input = utf8Slice("𝛃");
+        int[] groups = new int[2];
+
+        assertThat(regexp.find(input, 1, 4)).isTrue();
+        assertThat(regexp.findInto(input, 1, 4, groups)).isTrue();
+        assertThat(groups).containsExactly(1, 1);
+
+        assertThat(regexp.lookingAt(input, 1, 4)).isTrue();
+        assertThat(regexp.lookingAtInto(input, 1, 4, groups)).isTrue();
+        assertThat(groups).containsExactly(1, 1);
+        assertThat(regexp.matches(input, 1, 1)).isTrue();
+        assertThat(regexp.matchesInto(input, 1, 1, groups)).isTrue();
+        assertThat(groups).containsExactly(1, 1);
+
+        Re2Matcher matcher = regexp.matcher(input).reset(input, 1, 4);
+        assertThat(matcher.lookingAt()).isTrue();
+        assertThat(matcher.start()).isEqualTo(1);
+        assertThat(matcher.reset(input, 1, 1).matches()).isTrue();
+        assertThat(matcher.start()).isEqualTo(1);
+    }
+
+    @Test
+    public void testPatternMustBeUtf8()
+    {
+        // Even the crate's bytes API, which matches bytes that are not UTF-8, takes its patterns
+        // as strings.
+        Slice pattern = Slices.wrappedBuffer(new byte[] {'a', (byte) 0xFF});
+        for (RustRegexp.Options options : List.of(RustRegexp.Options.defaults(), RustRegexp.Options.bytes())) {
+            assertThatThrownBy(() -> RustRegexp.compile(pattern, options))
+                    .isInstanceOfSatisfying(RegexpParseException.class, exception -> {
+                        assertThat(exception.errorCode()).isEqualTo(RegexpParseErrorCode.BAD_UTF8);
+                        assertThat(exception.byteOffset()).isEqualTo(1);
+                    });
+        }
     }
 
     // Property names come from the Unicode 18.0 database, so they include versions and scripts

@@ -2,11 +2,12 @@
 #
 # Each case is (id, pattern, options, text, start, end), as in match_cases.py.
 # Every pattern and text is drawn from one seeded generator in the order below,
-# so editing an earlier section changes every later draw. A pattern and text
-# pair that repeats an earlier case is skipped, and each identifier keeps its
-# draw number so identifiers stay stable. Every case uses the default options
-# and searches the whole text. David Phillips wrote this corpus for the front
-# end's first golden generator, in pull request 11.
+# so editing an earlier section changes every later draw. A case whose pattern,
+# text, and options repeat an earlier case is skipped, and each identifier keeps
+# its draw number so identifiers stay stable. Every case searches the whole text,
+# and every case before the bytes API section uses the default options. David
+# Phillips wrote this corpus for the front end's first golden generator, in
+# pull request 11.
 import random
 
 cases = []
@@ -17,10 +18,10 @@ def section(title):
     cases.append(("#", title))
 
 
-def case(id, pattern, text):
-    if (pattern, text) not in seen:
-        seen.add((pattern, text))
-        cases.append((id, pattern, "-", text, "-", "-"))
+def case(id, pattern, text, options="-"):
+    if (pattern, text, options) not in seen:
+        seen.add((pattern, text, options))
+        cases.append((id, pattern, options, text, "-", "-"))
 
 
 # Fixed texts, which the malformed patterns draw from.
@@ -33,19 +34,19 @@ rng = random.Random(790431)
 atoms = ['a', 'b', '.', '[ab]', '[^a]', r'\w', r'\b', '^', '$', '\u00e9', '']
 
 
-def expression(depth):
+def expression(depth, choices=atoms):
     if depth == 0:
-        return rng.choice(atoms)
+        return rng.choice(choices)
     kind = rng.randrange(5)
     if kind == 0:
-        return '(' + expression(depth - 1) + ')' + rng.choice(['*', '+', '?', '*?', '{0,2}', '{2}', ''])
+        return '(' + expression(depth - 1, choices) + ')' + rng.choice(['*', '+', '?', '*?', '{0,2}', '{2}', ''])
     if kind == 1:
-        return '(?:' + expression(depth - 1) + '|' + expression(depth - 1) + ')'
+        return '(?:' + expression(depth - 1, choices) + '|' + expression(depth - 1, choices) + ')'
     if kind == 2:
-        return expression(depth - 1) + expression(depth - 1)
+        return expression(depth - 1, choices) + expression(depth - 1, choices)
     if kind == 3:
-        return '(?' + rng.choice(['i', 'm', 's', 'U', 'mR', '-u']) + ':' + expression(depth - 1) + ')'
-    return rng.choice(atoms)
+        return '(?' + rng.choice(['i', 'm', 's', 'U', 'mR', '-u']) + ':' + expression(depth - 1, choices) + ')'
+    return rng.choice(choices)
 
 
 section("Random expressions over random texts")
@@ -66,3 +67,13 @@ for pattern_index, pattern in enumerate(['\\p{L\u00e9}', r'\p{IsL}', '\\p{\u0130
                                          '\\p{i\u017fL}', '\\p{I\u017fL}', '\\p{\u0130\u017fL}', '\\p{\u0131\u017fL}']):
     for text_index, text in enumerate(['a', 'A', '1', '\u0661', '\u096f', '\U0001d7d9', '\uff11', '\uff21', '\uff46', '\uff27', '\uff47']):
         case(f"property_{pattern_index:02}_{text_index:02}", pattern, text)
+
+section("Random byte expressions over random bytes with the bytes API")
+# Byte and Unicode constructs over texts that split and break UTF-8: a, é and
+# its two bytes alone, a byte that is never UTF-8, CR, LF, and space.
+byte_atoms = ['a', '.', '(?-u:.)', r'(?-u:\xA9)', '(?-u:[^a])', '[^a]', r'\w', r'(?-u:\w)', r'\b', r'\B',
+              r'(?-u:\b)', r'\b{start-half}', r'\b{end}', '^', '$', '\u00e9', '']
+byte_texts = [b'a', b'\xc3\xa9', b'\xc3', b'\xa9', b'\xff', b'\r', b'\n', b' ']
+for index in range(400):
+    text = b''.join(rng.choice(byte_texts) for _ in range(rng.randrange(12)))
+    case(f"bytes_{index:03}", expression(3, byte_atoms), text, "bytes")

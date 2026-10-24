@@ -22,21 +22,22 @@ import static java.util.Objects.requireNonNull;
 
 /**
  * A compiled regular expression in the pattern language of the Rust {@code regex} crate, pinned at
- * regex 1.13.1, over UTF-8 Slice inputs.
+ * regex 1.13.1, over Slice inputs.
  * <p>
- * Matching follows the crate's leftmost-first semantics on valid UTF-8 input. Searches skip an
- * empty match that splits a UTF-8 character, iteration skips an empty match adjacent to the
- * previous match, and a search of a range or matcher region sees the input outside it as
- * assertion context, as in the crate's {@code Input::range}. Unicode properties read Regulator's
- * Unicode database. Repetition counts above 1,000 fail during compilation. Match offsets are UTF-8
- * byte offsets, as in the crate.
+ * Matching follows the crate's leftmost-first semantics. By default this is the crate's
+ * {@code regex::Regex}, which matches valid UTF-8 input, and searches skip an empty match that
+ * splits a UTF-8 character. With {@link Options#setBytes byte mode}, this is the crate's
+ * {@code regex::bytes::Regex}, which matches arbitrary bytes. In both modes, iteration skips an
+ * empty match adjacent to the previous match, and a search of a range or matcher region sees the
+ * input outside it as assertion context, as in the crate's {@code Input::range}. Unicode
+ * properties read Regulator's Unicode database. Repetition counts above 1,000 fail during
+ * compilation. Match offsets are byte offsets, as in the crate.
  */
 public final class RustRegexp
 {
     /**
-     * Mutable Rust-language compilation options, matching the crate's {@code RegexBuilder} flags.
-     * Compilation snapshots every option, so later changes do not affect an existing
-     * {@link RustRegexp}. Options instances are not thread-safe.
+     * Mutable Rust-language compilation options. Compilation snapshots every option, so later
+     * changes do not affect an existing {@link RustRegexp}. Options instances are not thread-safe.
      */
     public static final class Options
     {
@@ -48,6 +49,7 @@ public final class RustRegexp
         private boolean comments;
         private boolean unicode = true;
         private boolean octal;
+        private boolean bytes;
         private int nestLimit = RustRegexpParser.DEFAULT_NEST_LIMIT;
         private long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
         private ByteFrequencies byteFrequencies = ByteFrequencies.uniform();
@@ -57,6 +59,18 @@ public final class RustRegexp
         public static Options defaults()
         {
             return new Options();
+        }
+
+        /**
+         * Creates the default options in byte mode.
+         *
+         * @see #setBytes(boolean)
+         */
+        public static Options bytes()
+        {
+            Options options = new Options();
+            options.bytes = true;
+            return options;
         }
 
         public Options setCaseInsensitive(boolean caseInsensitive)
@@ -107,8 +121,10 @@ public final class RustRegexp
         }
 
         /**
-         * Sets whether Unicode mode is enabled, which is the default. Without it, classes and case
-         * folding are ASCII-only, and constructs that could match part of a UTF-8 character fail.
+         * Sets whether Unicode mode is enabled, which is the default. Without it, {@code \d},
+         * {@code \s}, {@code \w}, and case folding use ASCII rules, a class can name a non-ASCII
+         * byte only in {@link #setBytes byte mode}, and outside byte mode constructs that could
+         * match part of a UTF-8 character fail.
          */
         public Options setUnicode(boolean unicode)
         {
@@ -124,6 +140,21 @@ public final class RustRegexp
         public Options setOctal(boolean octal)
         {
             this.octal = octal;
+            return this;
+        }
+
+        /**
+         * Sets whether the pattern is the crate's {@code regex::bytes::Regex}, which matches
+         * arbitrary bytes. In byte mode, with Unicode mode off, the dot, character classes, and
+         * two-digit {@code \xNN} escapes, such as {@code (?-u:.)} or {@code (?-u:\xFF)}, match a
+         * single byte even when it is not part of valid UTF-8. Outside a class, a non-ASCII literal,
+         * a braced {@code \x{...}} or Unicode escape, and an enabled octal escape keep their UTF-8
+         * encoding, and a construct in Unicode mode still matches only UTF-8. An empty match may
+         * split a UTF-8 character. Disabled by default.
+         */
+        public Options setBytes(boolean bytes)
+        {
+            this.bytes = bytes;
             return this;
         }
 
@@ -211,15 +242,32 @@ public final class RustRegexp
             if (octal) {
                 flags |= RustRegexpParser.OCTAL;
             }
+            if (bytes) {
+                flags |= RustRegexpParser.BYTES;
+            }
+            return flags;
+        }
+
+        int compileFlags()
+        {
+            // Byte mode sets the pattern-level Latin-1 flag, so a search advances one byte past an
+            // empty match, and the matcher lets an empty match split a UTF-8 character.
+            int flags = Regexp.LIKE_PERL | Regexp.RUST_SEARCH;
+            if (bytes) {
+                flags |= Regexp.LATIN1;
+            }
             return flags;
         }
     }
 
     private final Re2 pattern;
+    // The crate's bytes API, where an empty match may split a UTF-8 character.
+    private final boolean bytes;
 
     private RustRegexp(Re2 pattern)
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
+        this.bytes = (pattern.flags() & Regexp.LATIN1) != 0;
     }
 
     public static RustRegexp compile(Slice pattern)
@@ -236,7 +284,7 @@ public final class RustRegexp
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
         ParseResult parsed = RustRegexpParser.parse(patternCopy, options.syntaxFlags(), options.nestLimit());
-        return new RustRegexp(Re2.compileParsed(patternCopy, parsed, Regexp.LIKE_PERL | Regexp.RUST_SEARCH, options.maxMemory(), options.byteFrequencies()));
+        return new RustRegexp(Re2.compileParsed(patternCopy, parsed, options.compileFlags(), options.maxMemory(), options.byteFrequencies()));
     }
 
     Re2 pattern()
@@ -255,8 +303,9 @@ public final class RustRegexp
 
     /**
      * Returns the number of non-overlapping matches, including empty matches.
-     * As in the Rust crate, an empty match that ends where the previous match ended or that splits
-     * a UTF-8 character is skipped. No capture values are returned.
+     * As in the Rust crate, an empty match that ends where the previous match ended is skipped,
+     * and outside byte mode, so is one that splits a UTF-8 character. No capture values are
+     * returned.
      */
     public long count(Slice input)
     {
@@ -286,7 +335,7 @@ public final class RustRegexp
      */
     public boolean lookingAt(Slice input, int start, int end)
     {
-        return pattern.lookingAt(requireNonNull(input, "input is null"), start, end) && Utf8.isCharacterBoundary(input, start);
+        return pattern.lookingAt(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
     }
 
     /**
@@ -294,7 +343,7 @@ public final class RustRegexp
      */
     public boolean matches(Slice input, int start, int end)
     {
-        return pattern.matches(requireNonNull(input, "input is null"), start, end) && Utf8.isCharacterBoundary(input, start);
+        return pattern.matches(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
     }
 
     /**
@@ -398,7 +447,7 @@ public final class RustRegexp
     public MatchResult lookingAtResult(Slice input, int start, int end)
     {
         MatchResult result = pattern.lookingAtResult(requireNonNull(input, "input is null"), start, end);
-        return Utf8.isCharacterBoundary(input, start) ? result : null;
+        return isSearchStart(input, start) ? result : null;
     }
 
     /**
@@ -415,7 +464,7 @@ public final class RustRegexp
     public MatchResult matchesResult(Slice input, int start, int end)
     {
         MatchResult result = pattern.matchesResult(requireNonNull(input, "input is null"), start, end);
-        return Utf8.isCharacterBoundary(input, start) ? result : null;
+        return isSearchStart(input, start) ? result : null;
     }
 
     public int capturingGroupCount()
@@ -428,11 +477,11 @@ public final class RustRegexp
         return pattern.namedCapturingGroups();
     }
 
-    // Every unanchored search of a range comes here. The crate skips an empty match that splits a
-    // UTF-8 character and searches again one byte later.
+    // Every unanchored search of a range comes here. Outside byte mode, the crate skips an empty
+    // match that splits a UTF-8 character and searches again one byte later.
     private boolean search(Slice input, int start, int end, int[] groups)
     {
-        if (!pattern.canMatchEmpty()) {
+        if (bytes || !pattern.canMatchEmpty()) {
             return pattern.findInto(input, start, end, groups);
         }
         int[] span = groups == null ? new int[2] : groups;
@@ -450,15 +499,21 @@ public final class RustRegexp
         return false;
     }
 
-    // An anchored search cannot skip ahead, so a match at a split UTF-8 character fails.
-    private static boolean anchoredAt(Slice input, int start, boolean matched, int[] groups)
+    // An anchored search cannot skip ahead, so outside byte mode a match at a split UTF-8
+    // character fails.
+    private boolean anchoredAt(Slice input, int start, boolean matched, int[] groups)
     {
-        if (!matched || Utf8.isCharacterBoundary(input, start)) {
+        if (!matched || isSearchStart(input, start)) {
             return matched;
         }
         if (groups != null) {
             Arrays.fill(groups, -1);
         }
         return false;
+    }
+
+    private boolean isSearchStart(Slice input, int start)
+    {
+        return bytes || Utf8.isCharacterBoundary(input, start);
     }
 }

@@ -46,3 +46,4 @@ generate "${RESOURCE_DIR}/rust-regex-syntax.jsonl" --mode=syntax < "${SCRIPT_DIR
 generate "${RESOURCE_DIR}/rust-regex-match.jsonl" --mode=match < "${SCRIPT_DIR}/match-cases.tsv"
 generate "${RESOURCE_DIR}/rust-regex-random.jsonl" --mode=match < "${SCRIPT_DIR}/random-cases.tsv"
 generate "${RESOURCE_DIR}/rust-regex-upstream.jsonl" --mode=upstream "--testdata=${RUST_REGEX_DIR}/testdata" < /dev/null
+generate "${RESOURCE_DIR}/rust-regex-upstream-bytes.jsonl" --mode=upstream-bytes "--testdata=${RUST_REGEX_DIR}/testdata" < /dev/null

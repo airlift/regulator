@@ -56,13 +56,17 @@ final class RustRegexpParser
     static final int CRLF = 1 << 5;
     static final int IGNORE_WHITESPACE = 1 << 6;
     static final int OCTAL = 1 << 7;
-    private static final int ALL_SYNTAX_FLAGS = (1 << 8) - 1;
+    // The crate's bytes API, regex::bytes::Regex, which is not a pattern flag: without Unicode
+    // mode, the dot, classes, and \xNN escapes match single bytes, even ones that are not UTF-8.
+    static final int BYTES = 1 << 8;
+    private static final int ALL_SYNTAX_FLAGS = (1 << 9) - 1;
 
     static final int DEFAULT_NEST_LIMIT = 250;
     private static final int NODE_FLAGS = Regexp.LIKE_PERL;
-    // A word boundary is RE2's in ASCII mode and Java's Unicode boundary otherwise, never Java's
-    // ASCII boundary. EmptyOp relies on this to evaluate Rust assertions only without the latter.
-    private static final int UNICODE_WORD_BOUNDARY_FLAGS = NODE_FLAGS | Regexp.JAVA_WORD_BOUNDARY | Regexp.JAVA_UNICODE_CHARACTER_CLASS;
+    // A byte construct that can match a byte above 0x7F; an ASCII one is the same as a character.
+    private static final int BYTE_NODE_FLAGS = NODE_FLAGS | Regexp.LATIN1;
+    // A word boundary is RE2's in ASCII mode and the crate's Unicode boundary otherwise.
+    private static final int UNICODE_WORD_BOUNDARY_FLAGS = NODE_FLAGS | Regexp.JAVA_WORD_BOUNDARY | Regexp.JAVA_UNICODE_CHARACTER_CLASS | Regexp.RUST_ASSERTION;
 
     // The crate folds case with simple case folding, as RE2 does.
     private static final CaseFolding CASE_FOLDING = CaseFolding.RE2;
@@ -1413,13 +1417,16 @@ final class RustRegexpParser
     private static final class Translator
     {
         private final Parser parser;
+        // The crate's utf8 translation option, which only the bytes API turns off.
+        private final boolean utf8;
         private int flags;
         private RegexpParseException unsupported;
 
         Translator(Parser parser, int syntaxFlags)
         {
             this.parser = parser;
-            this.flags = syntaxFlags & ~(IGNORE_WHITESPACE | OCTAL);
+            this.utf8 = (syntaxFlags & BYTES) == 0;
+            this.flags = syntaxFlags & ~(IGNORE_WHITESPACE | OCTAL | BYTES);
         }
 
         void throwUnsupported()
@@ -1503,16 +1510,43 @@ final class RustRegexpParser
             };
         }
 
-        private static Regexp charClass(CharClassBuilder builder)
+        // In byte mode, a class without Unicode mode holds bytes, so negation above 0xFF is
+        // dropped, and a Unicode class still matches only UTF-8, so it drops the surrogates that
+        // negation adds, as the crate's classes of Rust chars never hold them.
+        private Regexp charClass(CharClassBuilder builder)
         {
+            if (!utf8) {
+                if (!enabled(UNICODE)) {
+                    builder.removeAbove(0xFF);
+                    int rangeCount = builder.rangeCount();
+                    if (rangeCount > 0 && builder.range(rangeCount - 1).high() > 0x7F) {
+                        return Regexp.charClass(BYTE_NODE_FLAGS, builder.toCharClass());
+                    }
+                }
+                else {
+                    builder.retainAll(scalarValues());
+                }
+            }
             return Regexp.charClass(NODE_FLAGS, builder.toCharClass());
+        }
+
+        private static CharClassBuilder scalarValues()
+        {
+            CharClassBuilder builder = new CharClassBuilder();
+            builder.addRange(0, 0xD7FF);
+            builder.addRange(0xE000, CharClass.RUNEMAX);
+            return builder;
         }
 
         private Regexp translateLiteral(LiteralAst literal)
         {
             int codePoint = literal.codePoint();
             if (!enabled(UNICODE) && literal.hexByte() && codePoint > 0x7F) {
-                throw parser.error(ErrorKind.INVALID_UTF8, literal.start(), literal.end());
+                if (utf8) {
+                    throw parser.error(ErrorKind.INVALID_UTF8, literal.start(), literal.end());
+                }
+                // A byte literal never folds case, because it is not ASCII.
+                return Regexp.literal(BYTE_NODE_FLAGS, codePoint);
             }
             if (enabled(CASE_INSENSITIVE)) {
                 if (enabled(UNICODE) ? CASE_FOLDING.cycleFoldRune(codePoint) != codePoint : isAsciiLetter(codePoint)) {
@@ -1527,11 +1561,20 @@ final class RustRegexpParser
         private Regexp translateDot(DotAst dot)
         {
             // A byte-oriented dot can match part of a character, which the crate rejects in UTF-8 mode.
-            if (!enabled(UNICODE)) {
+            if (!enabled(UNICODE) && utf8) {
                 throw parser.error(ErrorKind.INVALID_UTF8, dot.start(), dot.end());
             }
             if (enabled(DOT_MATCHES_NEW_LINE)) {
-                return Regexp.anyChar(NODE_FLAGS);
+                if (!enabled(UNICODE)) {
+                    return Regexp.anyByte(NODE_FLAGS);
+                }
+                if (utf8) {
+                    return Regexp.anyChar(NODE_FLAGS);
+                }
+                // The byte-mode Unicode dot must reject malformed UTF-8, but the compiler matches
+                // any character as any lead byte and continuation bytes, so the dot is the class
+                // of scalar values.
+                return Regexp.charClass(NODE_FLAGS, scalarValues().toCharClass());
             }
             CharClassBuilder builder = new CharClassBuilder();
             builder.addRange('\n', '\n');
@@ -1651,30 +1694,49 @@ final class RustRegexpParser
         private static Regexp translateConcat(List<Regexp> children)
         {
             List<Regexp> items = new ArrayList<>(children.size());
-            int[] runes = new int[children.size()];
-            int runeCount = 0;
+            List<Regexp> literals = new ArrayList<>(children.size());
             for (Regexp item : children) {
                 if (item.op() == RegexpOp.EMPTY_MATCH) {
                     continue;
                 }
-                if (item.op() == RegexpOp.LITERAL && item.parseFlags() == NODE_FLAGS) {
-                    runes[runeCount++] = item.rune();
+                if (item.op() == RegexpOp.LITERAL && (item.parseFlags() == NODE_FLAGS || item.parseFlags() == BYTE_NODE_FLAGS)) {
+                    literals.add(item);
                     continue;
                 }
-                if (runeCount > 0) {
-                    items.add(makeLiteralString(NODE_FLAGS, runes, runeCount));
-                    runeCount = 0;
-                }
+                addLiteralString(items, literals);
                 items.add(item);
             }
-            if (runeCount > 0) {
-                items.add(makeLiteralString(NODE_FLAGS, runes, runeCount));
-            }
+            addLiteralString(items, literals);
             return switch (items.size()) {
                 case 0 -> Regexp.emptyMatch(NODE_FLAGS);
                 case 1 -> items.getFirst();
                 default -> Regexp.concat(NODE_FLAGS, items);
             };
+        }
+
+        // A run of literals is one string. With a byte literal in it, the string holds bytes, and
+        // each character literal in it is its UTF-8 encoding.
+        private static void addLiteralString(List<Regexp> items, List<Regexp> literals)
+        {
+            if (literals.isEmpty()) {
+                return;
+            }
+            boolean bytes = literals.stream().anyMatch(literal -> literal.parseFlags() == BYTE_NODE_FLAGS);
+            int[] runes = new int[bytes ? literals.size() * 4 : literals.size()];
+            int runeCount = 0;
+            byte[] encoded = bytes ? new byte[4] : null;
+            for (Regexp literal : literals) {
+                if (!bytes || literal.parseFlags() == BYTE_NODE_FLAGS) {
+                    runes[runeCount++] = literal.rune();
+                    continue;
+                }
+                int length = Utf8.encode(encoded, 0, literal.rune());
+                for (int index = 0; index < length; index++) {
+                    runes[runeCount++] = encoded[index] & 0xFF;
+                }
+            }
+            items.add(makeLiteralString(bytes ? BYTE_NODE_FLAGS : NODE_FLAGS, runes, runeCount));
+            literals.clear();
         }
 
         private CharClassBuilder perlClass(PerlClassAst perl)
@@ -1703,7 +1765,7 @@ final class RustRegexpParser
             if (perl.negated()) {
                 builder.negate();
             }
-            requireAsciiBytes(builder, perl.start(), perl.end());
+            requireAsciiOutsideByteMode(builder, perl.start(), perl.end());
             return builder;
         }
 
@@ -1810,7 +1872,8 @@ final class RustRegexpParser
             return lhs;
         }
 
-        // A byte class may only name ASCII bytes, because any other byte could split a character.
+        // A byte class names a non-ASCII byte only with a two-digit \xNN escape, and only in the
+        // bytes API, because elsewhere any non-ASCII byte could split a character.
         private int classLiteralByte(LiteralAst literal)
         {
             int codePoint = literal.codePoint();
@@ -1818,6 +1881,9 @@ final class RustRegexpParser
                 return codePoint;
             }
             if (literal.hexByte()) {
+                if (!utf8) {
+                    return codePoint;
+                }
                 throw parser.error(ErrorKind.INVALID_UTF8, literal.start(), literal.end());
             }
             throw parser.error(ErrorKind.UNICODE_NOT_ALLOWED, literal.start(), literal.end());
@@ -1833,15 +1899,15 @@ final class RustRegexpParser
                 builder.negate();
             }
             if (!enabled(UNICODE)) {
-                requireAsciiBytes(builder, start, end);
+                requireAsciiOutsideByteMode(builder, start, end);
             }
             return builder;
         }
 
-        private void requireAsciiBytes(CharClassBuilder builder, int start, int end)
+        private void requireAsciiOutsideByteMode(CharClassBuilder builder, int start, int end)
         {
             int rangeCount = builder.rangeCount();
-            if (rangeCount > 0 && builder.range(rangeCount - 1).high() > 0x7F) {
+            if (utf8 && rangeCount > 0 && builder.range(rangeCount - 1).high() > 0x7F) {
                 throw parser.error(ErrorKind.INVALID_UTF8, start, end);
             }
         }

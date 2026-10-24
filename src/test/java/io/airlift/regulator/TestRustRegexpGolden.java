@@ -40,14 +40,16 @@ public class TestRustRegexpGolden
     private static final String MATCH_FIXTURE = "io/airlift/regulator/rust-regex-match.jsonl";
     private static final String RANDOM_FIXTURE = "io/airlift/regulator/rust-regex-random.jsonl";
     private static final String UPSTREAM_FIXTURE = "io/airlift/regulator/rust-regex-upstream.jsonl";
-    private static final List<String> FIXTURES = List.of(SYNTAX_FIXTURE, MATCH_FIXTURE, RANDOM_FIXTURE, UPSTREAM_FIXTURE);
+    private static final String UPSTREAM_BYTES_FIXTURE = "io/airlift/regulator/rust-regex-upstream-bytes.jsonl";
+    private static final List<String> FIXTURES = List.of(SYNTAX_FIXTURE, MATCH_FIXTURE, RANDOM_FIXTURE, UPSTREAM_FIXTURE, UPSTREAM_BYTES_FIXTURE);
 
     // Patterns the crate accepts that Regulator rejects by design, by fixture.
     private static final Map<String, Map<Gap, Integer>> GAP_COUNTS = Map.of(
             SYNTAX_FIXTURE, Map.of(Gap.REPETITION_COUNT, 1),
             MATCH_FIXTURE, Map.of(),
             RANDOM_FIXTURE, Map.of(),
-            UPSTREAM_FIXTURE, Map.of(Gap.REPETITION_COUNT, 1));
+            UPSTREAM_FIXTURE, Map.of(Gap.REPETITION_COUNT, 1),
+            UPSTREAM_BYTES_FIXTURE, Map.of());
 
     // Cases naming a property or value that Regulator's Unicode 18.0 database holds and the crate's
     // Unicode 16.0 tables lack, by fixture and case ID, with the reason. The crate rejects each
@@ -158,6 +160,12 @@ public class TestRustRegexpGolden
     public List<DynamicTest> testUpstreamCases()
     {
         return cases(UPSTREAM_FIXTURE);
+    }
+
+    @TestFactory
+    public List<DynamicTest> testUpstreamBytesCases()
+    {
+        return cases(UPSTREAM_BYTES_FIXTURE);
     }
 
     @Test
@@ -300,6 +308,10 @@ public class TestRustRegexpGolden
         for (String option : value.split(",", -1)) {
             if (option.equals("-u")) {
                 options.setUnicode(false);
+                continue;
+            }
+            if (option.equals("bytes")) {
+                options.setBytes(true);
                 continue;
             }
             if (option.startsWith("n")) {

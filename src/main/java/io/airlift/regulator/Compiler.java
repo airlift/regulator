@@ -622,12 +622,14 @@ final class Compiler
                         (regexp.parseFlags() & Regexp.LATIN1) != 0);
                 case ANY_CHAR -> anyChar();
                 case ANY_BYTE -> byteRange(0x00, 0xFF, false);
-                case CHAR_CLASS -> charClass(regexp.charClass());
+                case CHAR_CLASS -> charClass(regexp.charClass(), encoding == Encoding.LATIN1 || (regexp.parseFlags() & Regexp.LATIN1) != 0);
                 case BEGIN_LINE -> emptyWidth(beginLineAssertion(regexp, reversed));
                 case END_LINE -> emptyWidth(endLineAssertion(regexp, reversed));
                 case BEGIN_TEXT -> emptyWidth(reversed ? EmptyOp.EMPTY_END_TEXT : EmptyOp.EMPTY_BEGIN_TEXT);
                 case END_TEXT -> emptyWidth(endTextAssertion(regexp, reversed));
-                case WORD_BOUNDARY -> emptyWidth((regexp.parseFlags() & Regexp.RUST_ASSERTION) != 0
+                // A Rust Unicode \b also carries JAVA_WORD_BOUNDARY and goes to wordBoundaryAssertion;
+                // a Rust start, end, or half boundary goes to rustWordAssertion.
+                case WORD_BOUNDARY -> emptyWidth((regexp.parseFlags() & (Regexp.RUST_ASSERTION | Regexp.JAVA_WORD_BOUNDARY)) == Regexp.RUST_ASSERTION
                         ? rustWordAssertion(regexp, reversed)
                         : wordBoundaryAssertion(regexp, false));
                 case NO_WORD_BOUNDARY -> emptyWidth(wordBoundaryAssertion(regexp, true));
@@ -680,6 +682,9 @@ final class Compiler
         {
             if ((regexp.parseFlags() & Regexp.JAVA_WORD_BOUNDARY) != 0) {
                 UnicodeGroups.initializeWordFlags();
+                if ((regexp.parseFlags() & Regexp.RUST_ASSERTION) != 0) {
+                    return negate ? EmptyOp.EMPTY_RUST_NO_UNICODE_WORD_BOUNDARY : EmptyOp.EMPTY_RUST_UNICODE_WORD_BOUNDARY;
+                }
                 boolean unicodeCharacterClass = (regexp.parseFlags() & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0;
                 if (unicodeCharacterClass) {
                     return negate ? EmptyOp.EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY : EmptyOp.EMPTY_JAVA_UNICODE_WORD_BOUNDARY;
@@ -694,8 +699,9 @@ final class Compiler
         }
 
         // A start boundary has a non-word character before it and a word character after it; an end
-        // boundary is the mirror image, and a half boundary checks only the non-word side. A
-        // reversed program reads the text after a position as before it.
+        // boundary is the mirror image, and a half boundary checks only the non-word side, which
+        // for Unicode word characters must also decode as UTF-8 unless it is the start or end of
+        // the text. A reversed program reads the text after a position as before it.
         private static int rustWordAssertion(Regexp regexp, boolean reversed)
         {
             boolean unicode = (regexp.parseFlags() & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0;
@@ -705,15 +711,18 @@ final class Compiler
             boolean nonWordAfter = ((regexp.parseFlags() & Regexp.RUST_WORD_END) != 0) != reversed;
             int nonWordSide;
             int wordSide;
+            int validSide;
             if (nonWordAfter) {
                 nonWordSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_NON_WORD_AFTER : EmptyOp.EMPTY_RUST_NON_WORD_AFTER;
                 wordSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_WORD_BEFORE : EmptyOp.EMPTY_RUST_WORD_BEFORE;
+                validSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_VALID_AFTER : 0;
             }
             else {
                 nonWordSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_NON_WORD_BEFORE : EmptyOp.EMPTY_RUST_NON_WORD_BEFORE;
                 wordSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_WORD_AFTER : EmptyOp.EMPTY_RUST_WORD_AFTER;
+                validSide = unicode ? EmptyOp.EMPTY_RUST_UNICODE_VALID_BEFORE : 0;
             }
-            return (regexp.parseFlags() & Regexp.RUST_WORD_HALF) != 0 ? nonWordSide : nonWordSide | wordSide;
+            return (regexp.parseFlags() & Regexp.RUST_WORD_HALF) != 0 ? nonWordSide | validSide : nonWordSide | wordSide;
         }
 
         private Prog finish(CompileStage stage)
@@ -1127,11 +1136,17 @@ final class Compiler
             // Parsers already represent newline-excluding dots as character classes.
             // ANY_CHAR also comes from full classes, whose meaning is independent of dot flags.
             beginRange();
-            addRuneRange(0, Regexp.RUNEMAX, false);
+            addRuneRange(0, Regexp.RUNEMAX, false, encoding == Encoding.LATIN1);
             return endRange();
         }
 
         private Fragment charClass(CharClass characterClass)
+        {
+            return charClass(characterClass, encoding == Encoding.LATIN1);
+        }
+
+        // A class matches bytes when the program is Latin-1 or the node carries LATIN1.
+        private Fragment charClass(CharClass characterClass, boolean latin1)
         {
             if (characterClass.isEmpty()) {
                 throw new RegexpCompileException("empty char class must be simplified before compilation");
@@ -1151,14 +1166,14 @@ final class Compiler
                     shouldFold = false;
                 }
 
-                addRuneRange(runeRange.low(), runeRange.high(), shouldFold);
+                addRuneRange(runeRange.low(), runeRange.high(), shouldFold, latin1);
             }
             return endRange();
         }
 
-        private void addRuneRange(int low, int high, boolean foldCase)
+        private void addRuneRange(int low, int high, boolean foldCase, boolean latin1)
         {
-            if (encoding == Encoding.LATIN1) {
+            if (latin1) {
                 addRuneRangeLatin1(low, high, foldCase);
                 return;
             }

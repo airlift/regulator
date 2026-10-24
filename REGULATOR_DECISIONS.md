@@ -65,8 +65,8 @@ authority's Unicode data, as Pinned Unicode Properties describes.
   complete capture extraction is unnecessary. It advances empty UTF-8 matches by
   one code point, permits one terminal empty match, and exposes zero-copy Slice
   group views. A Rust pattern follows the crate instead and skips only an empty
-  match that ends where the previous match ended or inside a character; see
-  [Rust Frontend](#rust-frontend). All public offsets are relative to the
+  match that ends where the previous match ended or, outside byte mode, inside
+  a character; see [Rust Frontend](#rust-frontend). All public offsets are relative to the
   complete logical input Slice, including matchers restricted to a region.
   Matchers are mutable and not thread-safe; compiled `Re2` instances remain
   thread-safe.
@@ -270,8 +270,9 @@ UTF-16 code-unit offsets.
 
 - `RustRegexp` is a separate compiler for the pattern language of the pinned
   Rust `regex` crate. Its results must match the crate's on valid UTF-8 input,
-  except for Unicode property names and characters that differ between the
-  crate's Unicode 16.0 tables and the pinned Unicode 18.0 database; see the
+  and in byte mode on any input, except for Unicode property names and
+  characters that differ between the crate's Unicode 16.0 tables and the
+  pinned Unicode 18.0 database; see the
   [Rust language reference](docs/reference/languages/RUST_REGEXP.md#unicode-properties).
   The pinned crate is the authority, recorded in committed fixtures; the crate
   never runs in the Maven build.
@@ -280,18 +281,32 @@ UTF-16 code-unit offsets.
   preserved. Each crate error kind maps to a `RegexpParseErrorCode`, and the
   message names the kind.
 - Rust patterns use the shared `Re2Matcher`. A pattern-level search flag makes
-  it skip empty matches that split a UTF-8 character or end where the previous
-  match ended, and makes ranges and regions keep the whole Slice as assertion
-  context, as the crate's `Input::range` does. There is no Rust-specific
-  matcher type.
-- Inputs are not validated. The crate's `Regex` only accepts valid UTF-8, so
-  results on malformed input are unspecified rather than an error, and valid
-  input pays no validation scan.
-- CRLF multi-line anchors and the start, end, and half word boundaries are
-  Rust-only empty-width predicates, evaluated only when a program contains
-  one. Like Java's text-dependent assertions, they keep a program on BitState
-  or NFA; DFA transition loops do not contain Rust-language branches. Plain
-  `\b` and `\B` reuse the RE2 ASCII and Java Unicode boundaries.
+  it skip empty matches that end where the previous match ended and, outside
+  byte mode, empty matches that split a UTF-8 character. It also makes ranges
+  and regions keep the whole Slice as assertion context, as the crate's
+  `Input::range` does. There is no Rust-specific matcher type.
+- Byte mode, the crate's `regex::bytes::Regex`, is an option on
+  `RustRegexp.Options` rather than a separate compiled type, following the
+  encoding option on `Re2.Options`. It is named after the crate's bytes API
+  rather than Latin-1, because only constructs without Unicode mode match
+  single bytes; Unicode-mode constructs still match UTF-8. The parser marks
+  each byte construct as a Latin-1 node, and the compiler and expression
+  analyses read the encoding from each node. Separately, byte mode sets the
+  pattern-level Latin-1 flag, so empty matches advance one byte, as in Latin-1
+  mode, and the matcher lets an empty match split a character.
+- Outside byte mode, inputs are not validated. The crate's `Regex` only
+  accepts valid UTF-8, so results on malformed input are unspecified rather
+  than an error, and valid input pays no validation scan. Byte mode needs no
+  validation either: its results match the crate on any input.
+- CRLF multi-line anchors, Unicode `\b` and `\B`, and the start, end, and
+  half word boundaries are Rust-only empty-width predicates, evaluated only
+  when a program contains one. Like Java's text-dependent assertions, they keep
+  a program on BitState or NFA; DFA transition loops do not contain
+  Rust-language branches. ASCII `\b` and `\B` reuse RE2's boundaries. Unicode
+  `\b` and `\B` are Rust predicates because the crate decodes the character
+  on each side and treats a side that does not decode as a non-word character,
+  and `\B` also requires each side that is present to decode; byte mode
+  exposes both rules.
 - Unicode properties, `\d`, `\s`, `\w`, and Unicode word boundaries read the
   pinned database, as Pinned Unicode Properties describes. `\w` and the word
   boundaries use the database's word characters, the UTS #18 class that Java's
@@ -989,14 +1004,15 @@ class scans decoded input once instead of running a complete matcher for every
 result. Each maximal matching run is partitioned according to the repetition's
 finite minimum and maximum, preserving ordinary leftmost-first match counts.
 
-Eligible UTF-8 patterns lazily build an exact Unicode membership bitset of 136
-KiB; Latin-1 patterns use 32 bytes. Construction is single-writer and the table
-is retained by the compiled pattern. This fixed bound is independent of
-`maxMemory`, which remains the upstream-compatible program and DFA planning
-budget, and it does not scale with the expression or configured budget.
-Unsupported shapes continue through the ordinary DFA or matcher path. Invalid
-UTF-8 bytes never match the bitset, while a valid encoded U+FFFD remains an
-ordinary code point.
+An eligible Unicode class lazily builds an exact Unicode membership bitset of
+136 KiB; a Latin-1 or Rust byte-mode class uses 32 bytes. Construction is
+single-writer and the table is retained by the compiled pattern. This fixed
+bound is independent of `maxMemory`, which remains the upstream-compatible
+program and DFA planning budget, and it does not scale with the expression or
+configured budget. Unsupported shapes continue through the ordinary DFA or
+matcher path. Invalid UTF-8 bytes never match a Unicode class, while a valid
+encoded U+FFFD remains an ordinary code point; a byte class reads bytes
+undecoded, so it counts malformed bytes like any others.
 
 `Re2.count` and `JavaRegexp.count` expose this counter and the existing DFA
 counting path. Unsupported shapes use a fresh zero-capture matcher per call;
