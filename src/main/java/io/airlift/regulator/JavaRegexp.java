@@ -188,12 +188,38 @@ public final class JavaRegexp
      */
     public static JavaRegexp compile(Slice pattern, Options options)
     {
+        return compile(pattern, options, true, false);
+    }
+
+    /**
+     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but without a scan plan,
+     * so tests and benchmarks can compare a plan with the ordinary engine.
+     */
+    static JavaRegexp compileWithoutScanPlanForTesting(Slice pattern, Options options)
+    {
+        return compile(pattern, options, false, false);
+    }
+
+    /**
+     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but a scan plan
+     * continues every unanchored search on the ordinary engine before its first attempt.
+     */
+    static JavaRegexp compileForcingScanPlanHandoffForTesting(Slice pattern, Options options)
+    {
+        return compile(pattern, options, true, true);
+    }
+
+    private static JavaRegexp compile(Slice pattern, Options options, boolean scanPlan, boolean forceScanPlanHandoff)
+    {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
         int parseFlags = options.parseFlags();
         ParseResult parsed = JavaRegexpParser.parse(patternCopy, parseFlags);
-        return new JavaRegexp(Re2.compileParsed(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies()));
+        Re2 compiled = scanPlan
+                ? Re2.compileParsedForJava(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), forceScanPlanHandoff)
+                : Re2.compileParsed(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies());
+        return new JavaRegexp(compiled);
     }
 
     Re2 pattern()

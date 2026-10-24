@@ -28,6 +28,9 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.options.Options;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -44,6 +47,10 @@ import static io.airlift.slice.Slices.utf8Slice;
  * without dotAll the pattern sets UNIX_LINES, so that its dot excludes only {@code \n}, as RE2's
  * does. {@link JavaRegexp} has no replacement, so there is no replace method. No compilation cache
  * is involved.
+ * <p>
+ * With {@code scanPlan=false}, every pattern compiles without its scan plan, so the methods time the
+ * ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
+ * {@code -p scanPlan=true} this source also times a build without Java scan plans.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -117,8 +124,12 @@ public class BenchmarkJavaScanPlan
         @Param({"true", "false"})
         public boolean dotAll;
 
+        @Param({"true", "false"})
+        public boolean scanPlan;
+
         Slice[] expressions;
         private JavaRegexp.Options options;
+        private MethodHandle compiler;
         JavaRegexp[] patterns;
         private Re2Matcher[] matchers;
         private int[] bounds;
@@ -137,6 +148,7 @@ public class BenchmarkJavaScanPlan
             source.setup();
 
             options = JavaRegexp.Options.defaults();
+            compiler = compiler(scanPlan);
             int count = source.expressions.length;
             expressions = new Slice[count];
             patterns = new JavaRegexp[count];
@@ -145,7 +157,7 @@ public class BenchmarkJavaScanPlan
             extractionGroups = new int[count];
             for (int index = 0; index < count; index++) {
                 expressions[index] = utf8Slice(javaExpression(source.expressions[index].toStringUtf8(), dotAll));
-                patterns[index] = JavaRegexp.compile(expressions[index], options);
+                patterns[index] = compile(compiler, expressions[index], options);
                 matchers[index] = patterns[index].matcher(EMPTY_SLICE);
                 extractionGroups[index] = patterns[index].capturingGroupCount() == 0 ? 0 : 1;
             }
@@ -210,7 +222,7 @@ public class BenchmarkJavaScanPlan
     public JavaRegexp compile(BenchmarkData data)
     {
         data.next();
-        return JavaRegexp.compile(data.expressions[data.patternIndex], data.options);
+        return compile(data.compiler, data.expressions[data.patternIndex], data.options);
     }
 
     /**
@@ -243,6 +255,33 @@ public class BenchmarkJavaScanPlan
             java.append(character == '$' && !inClass ? "\\z" : String.valueOf(character));
         }
         return java.toString();
+    }
+
+    /**
+     * Returns the handle that compiles a pattern through the public API, or through the compiler
+     * that disables scan plans.
+     */
+    private static MethodHandle compiler(boolean scanPlan)
+    {
+        MethodType type = MethodType.methodType(JavaRegexp.class, Slice.class, JavaRegexp.Options.class);
+        try {
+            return scanPlan
+                    ? MethodHandles.publicLookup().findStatic(JavaRegexp.class, "compile", type)
+                    : MethodHandles.lookup().findStatic(JavaRegexp.class, "compileWithoutScanPlanForTesting", type);
+        }
+        catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Cannot find JavaRegexp." + (scanPlan ? "compile" : "compileWithoutScanPlanForTesting"), e);
+        }
+    }
+
+    private static JavaRegexp compile(MethodHandle compiler, Slice expression, JavaRegexp.Options options)
+    {
+        try {
+            return (JavaRegexp) compiler.invokeExact(expression, options);
+        }
+        catch (Throwable throwable) {
+            throw new IllegalStateException("Cannot compile " + expression.toStringUtf8(), throwable);
+        }
     }
 
     /**

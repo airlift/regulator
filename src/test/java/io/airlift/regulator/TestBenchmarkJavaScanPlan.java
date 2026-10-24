@@ -32,51 +32,61 @@ public class TestBenchmarkJavaScanPlan
         BenchmarkJavaScanPlan benchmark = new BenchmarkJavaScanPlan();
         for (String workload : BenchmarkJavaScanPlan.workloads()) {
             for (boolean dotAll : new boolean[] {true, false}) {
-                String state = "%s dotAll=%s".formatted(workload, dotAll);
-                // Each method advances its own cursor, so give each one a separate state.
-                BenchmarkJavaScanPlan.BenchmarkData contains = data(workload, dotAll);
-                BenchmarkJavaScanPlan.BenchmarkData count = data(workload, dotAll);
-                BenchmarkJavaScanPlan.BenchmarkData boundaries = data(workload, dotAll);
-                BenchmarkJavaScanPlan.BenchmarkData extract = data(workload, dotAll);
-                BenchmarkJavaScanPlan.BenchmarkData extractAll = data(workload, dotAll);
-                BenchmarkJavaScanPlan.BenchmarkData compile = data(workload, dotAll);
-                // The rows are the RE2 benchmark's, and each Java pattern matches what its RE2
-                // pattern matches.
-                BenchmarkRe2ScanPlan.BenchmarkData re2 = re2Data(workload, dotAll);
-                assertThat(contains.inputs).as(state).isEqualTo(re2.inputs);
-                JavaRegexp[] patterns = Arrays.stream(contains.expressions).map(JavaRegexp::compile).toArray(JavaRegexp[]::new);
-                boolean[] planMatched = new boolean[patterns.length];
-                // Continue past the last row so that each method's cursor also wraps around.
-                for (int call = 0; call < contains.inputs.length + patterns.length + 1; call++) {
-                    int row = call % contains.inputs.length;
-                    int patternIndex = row % patterns.length;
-                    Slice input = contains.inputs[row];
-                    JavaRegexp pattern = patterns[patternIndex];
-                    int group = pattern.capturingGroupCount() == 0 ? 0 : 1;
-                    String description = state + " row=" + row;
-
-                    MatchResult match = pattern.findResult(input);
-                    assertThat(groupBounds(match)).as(description).isEqualTo(groupBounds(re2.patterns[patternIndex].findResult(input)));
-                    planMatched[patternIndex] |= match != null;
-                    assertThat(benchmark.contains(contains)).as(description).isEqualTo(match != null);
-                    assertThat(benchmark.count(count)).as(description).isEqualTo(pattern.count(input));
-                    long expectedBoundaries = match == null ? -1 : ((long) match.start() << 32) | match.end();
-                    assertThat(benchmark.boundaries(boundaries)).as(description).isEqualTo(expectedBoundaries);
-                    assertThat(benchmark.extract(extract)).as(description).isEqualTo(match == null ? null : match.groupSlice(group));
-
-                    Re2Matcher matcher = pattern.matcher(input);
-                    List<Slice> expectedMatches = new ArrayList<>();
-                    while (matcher.find()) {
-                        expectedMatches.add(matcher.group(group));
+                for (boolean scanPlan : new boolean[] {true, false}) {
+                    String state = "%s dotAll=%s scanPlan=%s".formatted(workload, dotAll, scanPlan);
+                    // Each method advances its own cursor, so give each one a separate state.
+                    BenchmarkJavaScanPlan.BenchmarkData contains = data(workload, dotAll, scanPlan);
+                    BenchmarkJavaScanPlan.BenchmarkData count = data(workload, dotAll, scanPlan);
+                    BenchmarkJavaScanPlan.BenchmarkData boundaries = data(workload, dotAll, scanPlan);
+                    BenchmarkJavaScanPlan.BenchmarkData extract = data(workload, dotAll, scanPlan);
+                    BenchmarkJavaScanPlan.BenchmarkData extractAll = data(workload, dotAll, scanPlan);
+                    BenchmarkJavaScanPlan.BenchmarkData compile = data(workload, dotAll, scanPlan);
+                    // The rows are the RE2 benchmark's, and each Java pattern matches what its RE2
+                    // pattern matches. With scanPlan=true, each Java pattern selects a plan exactly
+                    // when its RE2 pattern does; with scanPlan=false, none does.
+                    BenchmarkRe2ScanPlan.BenchmarkData re2 = re2Data(workload, dotAll);
+                    assertThat(contains.inputs).as(state).isEqualTo(re2.inputs);
+                    for (int index = 0; index < contains.patterns.length; index++) {
+                        assertThat(contains.patterns[index].pattern().usesTrinoScanPlanForDiagnostics())
+                                .as("%s pattern %s", state, index)
+                                .isEqualTo(scanPlan && re2.patterns[index].usesTrinoScanPlanForDiagnostics());
                     }
-                    assertThat(benchmark.extractAll(extractAll)).as(description).isEqualTo(expectedMatches);
+                    JavaRegexp[] patterns = Arrays.stream(contains.expressions).map(JavaRegexp::compile).toArray(JavaRegexp[]::new);
+                    boolean[] planMatched = new boolean[patterns.length];
+                    // Continue past the last row so that each method's cursor also wraps around.
+                    for (int call = 0; call < contains.inputs.length + patterns.length + 1; call++) {
+                        int row = call % contains.inputs.length;
+                        int patternIndex = row % patterns.length;
+                        Slice input = contains.inputs[row];
+                        JavaRegexp pattern = patterns[patternIndex];
+                        int group = pattern.capturingGroupCount() == 0 ? 0 : 1;
+                        String description = state + " row=" + row;
 
-                    JavaRegexp compiled = benchmark.compile(compile);
-                    assertThat(compiled.capturingGroupCount()).as(description).isEqualTo(pattern.capturingGroupCount());
-                    assertThat(compiled.find(input)).as(description).isEqualTo(match != null);
+                        MatchResult match = pattern.findResult(input);
+                        assertThat(groupBounds(match)).as(description).isEqualTo(groupBounds(re2.patterns[patternIndex].findResult(input)));
+                        planMatched[patternIndex] |= match != null;
+                        assertThat(benchmark.contains(contains)).as(description).isEqualTo(match != null);
+                        assertThat(benchmark.count(count)).as(description).isEqualTo(pattern.count(input));
+                        long expectedBoundaries = match == null ? -1 : ((long) match.start() << 32) | match.end();
+                        assertThat(benchmark.boundaries(boundaries)).as(description).isEqualTo(expectedBoundaries);
+                        assertThat(benchmark.extract(extract)).as(description).isEqualTo(match == null ? null : match.groupSlice(group));
+
+                        Re2Matcher matcher = pattern.matcher(input);
+                        List<Slice> expectedMatches = new ArrayList<>();
+                        while (matcher.find()) {
+                            expectedMatches.add(matcher.group(group));
+                        }
+                        assertThat(benchmark.extractAll(extractAll)).as(description).isEqualTo(expectedMatches);
+
+                        JavaRegexp compiled = benchmark.compile(compile);
+                        assertThat(compiled.capturingGroupCount()).as(description).isEqualTo(pattern.capturingGroupCount());
+                        assertThat(compiled.find(input)).as(description).isEqualTo(match != null);
+                        assertThat(compiled.pattern().usesTrinoScanPlanForDiagnostics()).as(description)
+                                .isEqualTo(contains.patterns[patternIndex].pattern().usesTrinoScanPlanForDiagnostics());
+                    }
+                    // A row paired with the wrong plan would time only failure paths.
+                    assertThat(planMatched).as(state).containsOnly(true);
                 }
-                // A row paired with the wrong plan would time only failure paths.
-                assertThat(planMatched).as(state).containsOnly(true);
             }
         }
     }
@@ -94,11 +104,12 @@ public class TestBenchmarkJavaScanPlan
         return bounds;
     }
 
-    private static BenchmarkJavaScanPlan.BenchmarkData data(String workload, boolean dotAll)
+    private static BenchmarkJavaScanPlan.BenchmarkData data(String workload, boolean dotAll, boolean scanPlan)
     {
         BenchmarkJavaScanPlan.BenchmarkData data = new BenchmarkJavaScanPlan.BenchmarkData();
         data.workload = workload;
         data.dotAll = dotAll;
+        data.scanPlan = scanPlan;
         data.setup();
         return data;
     }

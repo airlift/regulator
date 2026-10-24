@@ -164,7 +164,6 @@ public class TestRe2ScanPlan
         String eligible = "^https?://([^/]+)/.*$";
         assertThat(Re2.compile(utf8Slice(eligible), Re2.Options.defaults().setLongestMatch(true)).usesTrinoScanPlanForDiagnostics()).isFalse();
         assertThat(Re2.compile(utf8Slice(eligible), Re2.Options.latin1()).usesTrinoScanPlanForDiagnostics()).isFalse();
-        assertThat(JavaRegexp.compile(utf8Slice(eligible)).pattern().usesTrinoScanPlanForDiagnostics()).isFalse();
         assertThat(Re2.compileWithoutScanPlanForTesting(utf8Slice(eligible), Re2.Options.defaults()).usesTrinoScanPlanForDiagnostics()).isFalse();
         // Shapes Trino excludes: lazy runs, Unicode classes, lazy tails, and nullable patterns.
         for (String expression : List.of("^([^/]+?)/$", "^([é😀]+):$", "^([^/]+)/.*?$", "^([a-z]*)$")) {
@@ -283,7 +282,7 @@ public class TestRe2ScanPlan
      * would complete a truncated sequence at its end, so a trailing run that read past the view
      * would change a result.
      */
-    private static List<Slice> sources(Random random, byte[] witness)
+    static List<Slice> sources(Random random, byte[] witness)
     {
         List<byte[]> sources = new ArrayList<>();
         sources.add(witness);
@@ -353,7 +352,7 @@ public class TestRe2ScanPlan
      * group buffers, count, rewrites, matcher loops over the source and a region, retaining every
      * group or a prefix of them, and a matcher's lookingAt, matches, and find from 1.
      */
-    private static List<String> operations(Re2 pattern, Slice source)
+    static List<String> operations(Re2 pattern, Slice source)
     {
         List<String> results = new ArrayList<>();
         int length = source.length();
@@ -403,7 +402,7 @@ public class TestRe2ScanPlan
         return results;
     }
 
-    private static String matches(Re2Matcher matcher)
+    static String matches(Re2Matcher matcher)
     {
         StringBuilder matches = new StringBuilder();
         while (matcher.find()) {
@@ -412,7 +411,7 @@ public class TestRe2ScanPlan
         return matches.toString();
     }
 
-    private static String describe(MatchResult result)
+    static String describe(MatchResult result)
     {
         if (result == null) {
             return "[none]";

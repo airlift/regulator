@@ -34,10 +34,10 @@ import static java.util.Objects.requireNonNull;
  * the probe byte occurs more often than the first byte. A distribution never changes what
  * matches, and the cost stays linear in the input.
  * <p>
- * Only a case-sensitive literal of more than one byte can probe a later byte. Java and Rust
- * patterns, and RE2 patterns without a scan plan, move the probe only when the literal's first
- * byte is ASCII. Some Trino and RE2 patterns that begin with a literal and capture what follows it
- * run on a scan plan, which can also move the probe of a literal whose first byte is not ASCII.
+ * Only a case-sensitive literal of more than one byte can probe a later byte. Outside scan plans,
+ * Rust, RE2, and Java patterns move the probe only when the literal's first byte is ASCII. Some
+ * Trino, RE2, and Java patterns that begin with a literal and capture what follows it run on a scan
+ * plan, which can also move the probe of a literal whose first byte is not ASCII.
  * <p>
  * A distribution learned with {@link #builder()} from the caller's own data is the most reliable
  * choice. {@link #fromCounts(long[])} builds one from byte counts. Either measures the data it was

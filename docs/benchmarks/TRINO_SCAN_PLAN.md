@@ -3,9 +3,9 @@
 The scan plan recognizes a bounded family of Trino patterns and executes
 literals, deterministic character runs, and captures over Slice bytes. It
 targets `contains`, match boundaries, captures, extraction, and replacement
-through the public APIs. RE2 patterns select the same plans, which report the
-ordinary engine's results on malformed input too, as described in
-[RE2 patterns](#re2-patterns). Java patterns never select one.
+through the public APIs. RE2 and Java patterns select the same plans, which
+report the ordinary engine's results on malformed input too, as described in
+[RE2 patterns](#re2-patterns).
 
 ## Coverage
 
@@ -24,7 +24,7 @@ contract, not importing RE2 syntax or changing Trino semantics.
 | Optional bodies | Literals, runs, captures, and nested optionals; at most four forks, sharing the optional budget |
 | Repetitions | Greedy single-character `?`, `*`, `+`, exact and bounded counts up to 1000; unbounded minimum counts; exact and finite capture-free literal-sequence repeats |
 | Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal, exact one-byte ASCII set, or unbounded run of every byte except the one-byte literal after it |
-| End assertions | Optional; strict end and Trino final-LF `$` are supported when present |
+| End assertions | Optional; strict end and final-LF `$`, Trino's or Java's under `UNIX_LINES`, are supported when present |
 | Terminal behavior | Partial-match success, dot-all `.*`, LF-excluding `.*`, and supported character-set runs |
 | Case folding | Restricted ASCII literal and run folds proven safe against the Unicode fold tables; separate folded executors; general Unicode folding uses the ordinary engine |
 | Empty overall matches | Ordinary engine |
@@ -121,8 +121,9 @@ Any other boolean strategy is replaced by the plan. Boundary, capture, range,
 and count calls reach the plan through its own strategy either way. Unanchored
 plans count with a loop over the plan's search that resumes at each match end,
 not the DFA count. For a Trino plan this keeps `count` in agreement with
-`extract`, `position`, and `extractAll` on malformed bytes; an RE2 plan agrees
-with the DFA anyway, and its count takes the plan route as `find` does.
+`extract`, `position`, and `extractAll` on malformed bytes; an RE2 or Java plan
+agrees with the ordinary engine anyway, and its count takes the plan route as
+`find` does.
 
 A start-anchored plan, end-anchored or partial, matches only at the region
 start, and no `Re2Matcher.find` check runs ahead of it. Its matchers therefore
@@ -140,13 +141,13 @@ described below. Without a boolean tail the attempt reads as far as the DFA, so
 on a short input the plan only adds dispatch. Longer inputs, and calls that
 return boundaries or captures, run the plan. Because the input length picks the
 engine, both engines must agree on every input, as for the density handoff
-below: an RE2 plan always does, and a Trino plan does when every consuming
-operation accepts only ASCII bytes. The pattern's boolean route without a plan
-must also be the DFA, so a Trino final-line end, which the DFA cannot evaluate,
-keeps the plan. In `BenchmarkRe2ScanPlan`, `OPTIONALS`, `OPTIONAL_RETRY`, and
-the forked `OPTIONAL_MIXED` plans take this route on every row; no
-`BenchmarkTrinoScanPlan` or ClickBench plan does. On R9g, R8g, and R8i the
-routed `OPTIONALS` and `OPTIONAL_RETRY` rows take 0.99 to 1.03 times the
+below: an RE2 or Java plan always does, and a Trino plan does when every
+consuming operation accepts only ASCII bytes. The pattern's boolean route
+without a plan must also be the DFA, so a Trino final-line end, which the DFA
+cannot evaluate, keeps the plan. In `BenchmarkRe2ScanPlan`, `OPTIONALS`,
+`OPTIONAL_RETRY`, and the forked `OPTIONAL_MIXED` plans take this route on every
+row; no `BenchmarkTrinoScanPlan` or ClickBench plan does. On R9g, R8g, and R8i
+the routed `OPTIONALS` and `OPTIONAL_RETRY` rows take 0.99 to 1.03 times the
 `scanPlan=false` time. `RETRY_64`, the first row above the limit, is unchanged,
 and on R8i it breaks even with `scanPlan=false`.
 
@@ -266,8 +267,8 @@ input end. Ordinary dot scans for LF; a single terminal LF is left outside the
 match for `$`, but is rejected by strict end or a full-match operation.
 Replacement preserves any unmatched suffix. Malformed input follows Trino's
 garbage-in, garbage-out contract; no UTF-8 validation pass or exact agreement on
-malformed bytes is promised. RE2 plans agree with the ordinary engine on
-malformed input, as described in [RE2 patterns](#re2-patterns).
+malformed bytes is promised. RE2 and Java plans agree with the ordinary engine
+on malformed input, as described in [RE2 patterns](#re2-patterns).
 
 For unanchored plans that begin with a literal or with a run whose minimum is at
 least one, the executor scans for a byte that can start the leading operation
@@ -314,17 +315,29 @@ expression; a literal-leading scan keeps its candidate-byte route.
 
 ## RE2 patterns
 
-The frontend chooses a plan's language: Trino, RE2, or none. `Re2.compile`
-analyzes every pattern with the same builder, proofs, budgets, and candidate
-scans as `TrinoRegexp`, so the same shapes select a plan, ASCII-folded ones
-included, and every `Re2` operation reaches the plan through the same
-strategies with the same memory charge. Java patterns and `Re2.compileParsed`
-build no plan. RE2 also excludes longest-match patterns, whose matches a
+The frontend chooses a plan's language: Trino, RE2, Java, or none.
+`Re2.compile` analyzes every pattern with the same builder, proofs, budgets,
+and candidate scans as `TrinoRegexp`, so the same shapes select a plan,
+ASCII-folded ones included, and every `Re2` operation reaches the plan through
+the same strategies with the same memory charge. `Re2.compileParsed` builds no
+plan. RE2 also excludes longest-match patterns, whose matches a
 leftmost-first plan cannot report, and, as Trino does, Latin-1 patterns. RE2's
 `$` is the strict end, so the final-LF forms never arise, and RE2's simple case
 folding has no multi-character folds for the ASCII-fold proof to exclude.
 `Re2.Options.setGenerateBytecode(true)` compiles a case-sensitive RE2 plan to
 its own class, as [RE2 executor classes](#re2-executor-classes) describes.
+
+`JavaRegexp.compile` analyzes every pattern the same way, and a Java plan reads
+input by the RE2 rule below, so it reports what the ordinary engine reports on
+every input, which on valid UTF-8 is the JDK's result. A plan's end is the end
+of input, or with `UNIX_LINES` the position before a final LF, so `\z` and
+`UNIX_LINES` `$` select a plan, while Java's default `$` and `\Z`, which also
+end before a final CR LF, CR, U+0085, U+2028, or U+2029, do not. Java's
+default dot excludes those non-ASCII line terminators, which a run cannot
+represent, so a dot reaches a plan only with `DOTALL` or `UNIX_LINES`. As in
+Trino, multiline anchors, word boundaries, reluctant runs, and folds with a
+non-ASCII member, such as `(?iu)k`, keep the ordinary engine; Java's `(?i)`
+without Unicode case folds only ASCII letters.
 
 An RE2 plan reports exactly what the ordinary engine reports on every input,
 including malformed UTF-8. A class holding every character from U+0080 through
@@ -397,6 +410,17 @@ its plan, so the same rows measure the ordinary engine. That compile is
 resolved reflectively, so the source also runs on a build without RE2 plans
 with `-p scanPlan=true`. With `generateBytecode=true` it compiles each pattern
 with generated bytecode, set reflectively and only then.
+
+`TestJavaScanPlan` checks which Java constructs select a plan and compares the
+planned and forced-handoff compiles of each plan shape against the JDK on valid
+UTF-8, including line terminators appended after the witness, repeated finds,
+regions, and counts, and against the no-plan compile on malformed input.
+`BenchmarkJavaScanPlan` runs the `BenchmarkRe2ScanPlan` workloads and rows
+through public Java operations, each pattern written in Java syntax for the
+same match, with and without the scan plan; `TestBenchmarkJavaScanPlan`
+confirms that each Java pattern selects a plan exactly when its RE2 pattern
+does. The decisions record holds
+[the results](../../REGULATOR_DECISIONS.md#re2-scan-plans).
 
 ## Correctness and measurement
 
