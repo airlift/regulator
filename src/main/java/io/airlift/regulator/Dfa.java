@@ -1754,6 +1754,13 @@ final class Dfa
         transitions[index] = value;
     }
 
+    private static Object[] pairedStateReferences(Object[][] pairedStateRefArrays, int stateIndex)
+    {
+        // The table is rebuilt only when an exclusive search ends, so states a count adds before then
+        // have no paired row.
+        return stateIndex < pairedStateRefArrays.length ? pairedStateRefArrays[stateIndex] : null;
+    }
+
     private static Object getStateReference(Object[] references, int index)
     {
         return references[index];
@@ -2360,7 +2367,7 @@ final class Dfa
                 lastMatchBoundary = position - 1;
             }
 
-            stateRefs = dfa.pairedStateRefArrays[stateOffset / nextSize];
+            stateRefs = pairedStateReferences(dfa.pairedStateRefArrays, stateOffset / nextSize);
             if (stateRefs == null) {
                 return searchForwardContinuation(
                         dfa,
@@ -2402,7 +2409,7 @@ final class Dfa
                     case PAIR_NORMAL_FIRST, PAIR_NORMAL_SECOND -> {
                         stateOffset = (int) (pairedTransition >>> 32);
                         position += outcome == PAIR_NORMAL_FIRST ? 1 : 2;
-                        stateRefs = dfa.pairedStateRefArrays[stateOffset / nextSize];
+                        stateRefs = pairedStateReferences(dfa.pairedStateRefArrays, stateOffset / nextSize);
                         if (stateRefs == null) {
                             return searchForwardContinuation(
                                     dfa,
@@ -4346,6 +4353,7 @@ final class Dfa
         // three-bit count. Bit 27 marks a matching self-loop, whose transitions carry the match bit.
         // Bit 28 marks a row where every byte 0x80..0xFF exits; the packed exits are then ASCII only.
         volatile int[] selfLoopExitByteSets;
+        // Indexed by stateIndex and sized at the last rebuild; unselected rows are null.
         volatile Object[][] pairedStateRefArrays;
         private long pairedTransitionMemory;
         private volatile boolean pairedTransitionsRequested;
