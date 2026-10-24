@@ -13,10 +13,13 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
 import static io.airlift.regulator.Regexp.FOLD_CASE;
@@ -320,15 +323,24 @@ final class ExpressionAnalysis
         return List.of(new LiteralElement(Regexp.convertRunesToBytes(latin1, runes)));
     }
 
+    /**
+     * Refers to each child's elements instead of copying them, so analysis stays linear in the
+     * expression size; {@link #flatten} expands them once at the root. A child with a single
+     * element contributes it directly, so {@link #repeatedGap} still sees a lone gap.
+     */
     private static List<Element> concatenateElements(List<Node> children)
     {
-        List<Element> result = new ArrayList<>();
+        List<Element> result = new ArrayList<>(children.size());
         for (Node child : children) {
             if (child.elements == null) {
                 result.add(UnsupportedElement.INSTANCE);
-                continue;
             }
-            result.addAll(child.elements);
+            else if (child.elements.size() == 1) {
+                result.add(child.elements.getFirst());
+            }
+            else if (child.elements.size() > 1) {
+                result.add(new ConcatenationElement(child.elements));
+            }
         }
         return List.copyOf(result);
     }
@@ -364,8 +376,46 @@ final class ExpressionAnalysis
                 characterClass.range(1).equals(new RuneRange('\n' + 1, maximumRune));
     }
 
-    private static LiteralSequence buildLiteralSequence(List<Element> elements)
+    private static List<Element> flatten(List<Element> elements)
     {
+        // Nested lists are reachable only through a concatenation element, so a root without one
+        // is already flat.
+        boolean nested = false;
+        for (int elementIndex = 0; elementIndex < elements.size(); elementIndex++) {
+            if (elements.get(elementIndex) instanceof ConcatenationElement) {
+                nested = true;
+                break;
+            }
+        }
+        if (!nested) {
+            return elements;
+        }
+
+        List<Element> result = new ArrayList<>(elements.size());
+        Deque<Element> stack = new ArrayDeque<>();
+        pushReversed(stack, elements);
+        while (!stack.isEmpty()) {
+            Element element = stack.removeLast();
+            if (element instanceof ConcatenationElement concatenation) {
+                pushReversed(stack, concatenation.elements);
+            }
+            else {
+                result.add(element);
+            }
+        }
+        return result;
+    }
+
+    private static void pushReversed(Deque<Element> stack, List<Element> elements)
+    {
+        for (Element element : elements.reversed()) {
+            stack.addLast(element);
+        }
+    }
+
+    private static LiteralSequence buildLiteralSequence(List<Element> nestedElements)
+    {
+        List<Element> elements = flatten(nestedElements);
         int start = 0;
         int end = elements.size();
         boolean anchoredAtStart = false;
@@ -394,6 +444,10 @@ final class ExpressionAnalysis
 
         List<byte[]> literals = new ArrayList<>();
         List<Gap> gaps = new ArrayList<>();
+        // A run's first piece is kept as is; later adjacent pieces accumulate in one buffer, so the
+        // growing run is not recopied for every piece.
+        DynamicSliceOutput runBuffer = null;
+        boolean runBuffered = false;
         Gap pendingGap = Gap.NONE;
         for (int elementIndex = start; elementIndex < end; elementIndex++) {
             Element element = elements.get(elementIndex);
@@ -416,15 +470,30 @@ final class ExpressionAnalysis
                 literals.add(bytes);
             }
             else if (pendingGap == Gap.NONE) {
-                literals.set(literals.size() - 1, concatenate(literals.getLast(), bytes));
+                if (!runBuffered) {
+                    if (runBuffer == null) {
+                        runBuffer = new DynamicSliceOutput(literals.getLast().length + bytes.length);
+                    }
+                    runBuffer.reset();
+                    runBuffer.writeBytes(literals.getLast());
+                    runBuffered = true;
+                }
+                runBuffer.writeBytes(bytes);
             }
             else {
+                if (runBuffered) {
+                    literals.set(literals.size() - 1, runBuffer.slice().getBytes());
+                    runBuffered = false;
+                }
                 gaps.add(pendingGap);
                 literals.add(bytes);
             }
             pendingGap = Gap.NONE;
         }
 
+        if (runBuffered) {
+            literals.set(literals.size() - 1, runBuffer.slice().getBytes());
+        }
         gaps.add(pendingGap);
         return new LiteralSequence(literals, gaps, anchoredAtStart, anchoredAtEnd, hasFinalLineEnd && !hasExactEnd);
     }
@@ -438,14 +507,6 @@ final class ExpressionAnalysis
             return left;
         }
         return Gap.REQUIRES_GENERAL_ENGINE;
-    }
-
-    private static byte[] concatenate(byte[] left, byte[] right)
-    {
-        byte[] result = new byte[left.length + right.length];
-        System.arraycopy(left, 0, result, 0, left.length);
-        System.arraycopy(right, 0, result, left.length, right.length);
-        return result;
     }
 
     private static boolean isUnsupportedPositionAssertion(Regexp regexp)
@@ -592,11 +653,15 @@ final class ExpressionAnalysis
 
     sealed interface Element
             permits AssertionElement,
+                    ConcatenationElement,
                     GapElement,
                     LiteralElement,
                     UnsupportedElement {}
 
     private record AssertionElement(Assertion assertion)
+            implements Element {}
+
+    private record ConcatenationElement(List<Element> elements)
             implements Element {}
 
     private record GapElement(Gap gap)
