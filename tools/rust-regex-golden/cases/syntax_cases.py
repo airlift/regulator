@@ -341,15 +341,21 @@ case("repeat_size_limit_accepted", r"\w{100}")
 case("repeat_size_limit_exceeded", r"\w{1000}{1000}")
 
 section("Unicode disabled with the string API")
-for name, pattern in [("word", r"\w"), ("non_word", r"\W"), ("digit", r"\d"), ("non_digit", r"\D"),
-                      ("space", r"\s"), ("non_space", r"\S"), ("hex_ascii", r"\x7F"),
-                      ("hex_non_ascii", r"\xFF"), ("hex_braced_non_ascii", r"\x{E9}"), ("dot", "."),
-                      ("word_boundary", r"\b"), ("not_word_boundary", r"\B"),
-                      ("literal_non_ascii", "\u00e9"), ("literal_snowman", "\u2603"),
-                      ("case_insensitive_literal", "(?i)k"), ("case_insensitive_non_ascii", "(?i)\u00e9")]:
+# Constructs with Unicode mode disabled, shared with the bytes API section.
+unicode_disabled_constructs = [
+    ("word", r"\w"), ("non_word", r"\W"), ("digit", r"\d"), ("non_digit", r"\D"),
+    ("space", r"\s"), ("non_space", r"\S"), ("hex_ascii", r"\x7F"),
+    ("hex_non_ascii", r"\xFF"), ("hex_braced_non_ascii", r"\x{E9}"), ("dot", "."),
+    ("word_boundary", r"\b"), ("not_word_boundary", r"\B"),
+    ("literal_non_ascii", "\u00e9"), ("literal_snowman", "\u2603"),
+    ("case_insensitive_literal", "(?i)k"), ("case_insensitive_non_ascii", "(?i)\u00e9"),
+]
+for name, pattern in unicode_disabled_constructs:
     case(f"ascii_{name}", f"(?-u:{pattern})")
 case("ascii_dot_matches_newline", "(?s-u:.)")
 case("ascii_crlf_dot", "(?R-u:.)")
+case("ascii_class_hex_non_ascii", r"(?-u:[\xFF])")
+case("ascii_class_intersection_hex_non_ascii", r"(?-u:[\xFF&&a])")
 case("ascii_property", r"(?-u)\pL")
 case("ascii_property_braced", r"(?-u)\p{L}")
 case("ascii_property_negated", r"(?-u)\PL")
@@ -491,3 +497,37 @@ for limit in [0, 1, 2, 251]:
 case("nest_limit_1_class_intersection", "[a&&b]", "n1")
 case("nest_limit_2_class_intersection", "[a&&b]", "n2")
 case("nest_limit_1_with_other_options", "(a)", "o,-u,n1")
+
+section("Unicode disabled with the bytes API")
+# The bytes API accepts every shared construct, including those the string API
+# rejects because they could match a byte that is not UTF-8. A Unicode property
+# without Unicode mode and a non-ASCII character in a byte class still fail.
+for name, pattern in unicode_disabled_constructs:
+    case(f"bytes_ascii_{name}", f"(?-u:{pattern})", "bytes")
+for name, pattern in [
+    ("dot_matches_newline", "(?s-u:.)"),
+    ("crlf_dot", "(?R-u:.)"),
+    ("property", r"(?-u)\pL"),
+    ("property_negated", r"(?-u)\PL"),
+    ("property_in_class", r"(?-u:[\pL])"),
+    ("property_reenabled", r"(?-u)(?u:\pL)"),
+    ("class_hex_byte", r"(?-u:[\xFF])"),
+    ("class_hex_range", r"(?-u:[\x80-\xFF])"),
+    ("class_reversed_byte_range", r"(?-u:[\xFF-\x80])"),
+    ("class_braced_non_ascii", r"(?-u:[\x{E9}])"),
+    ("class_literal_non_ascii", "(?-u:[\u00e9])"),
+    ("class_range_to_non_ascii", "(?-u:[a-\u00e9])"),
+    ("class_negated", r"(?-u:[^a])"),
+    ("class_ascii_negated", r"(?-u:[[:^alpha:]])"),
+    ("class_nested_negated", r"(?-u:[a[^b]])"),
+    ("class_perl_negated", r"(?-u:[\W])"),
+    ("class_case_insensitive_byte", r"(?i-u:[\xE9])"),
+    ("class_difference", r"(?-u:[\x00-\xFF--\x80])"),
+    ("hex_byte_repeated", r"(?-u:\xFF{2})"),
+    ("unicode_hex_character", r"\xFF"),
+    ("unicode_class_negated", "[^a]"),
+]:
+    case(f"bytes_{name}", pattern, "bytes")
+case("bytes_option_unicode_disabled_dot", ".", "-u,bytes")
+case("bytes_option_unicode_disabled_property", r"\pL", "-u,bytes")
+case("bytes_option_nest_limit", "(a)", "o,-u,n1,bytes")

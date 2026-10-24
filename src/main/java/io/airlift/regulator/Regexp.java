@@ -64,13 +64,15 @@ final class Regexp
     static final int TRINO_LINE = 1 << 26;
     // Pattern-level Rust crate search semantics: a matcher region keeps the whole input as
     // assertion context, an empty match that splits a UTF-8 character is skipped, and iteration
-    // skips an empty match ending where the previous match ended.
+    // skips an empty match ending where the previous match ended. With LATIN1, which is the
+    // crate's bytes API, an empty match may split a character.
     static final int RUST_SEARCH = 1 << 27;
     // Rust crate assertions. On BEGIN_LINE and END_LINE, RUST_ASSERTION selects the crate's
     // CRLF multi-line anchors. On WORD_BOUNDARY it selects the crate's start boundary, or with
     // RUST_WORD_END its end boundary; RUST_WORD_HALF checks only that boundary's non-word side.
-    // JAVA_UNICODE_CHARACTER_CLASS selects Unicode word characters, as for the Rust \b. Bit 13 is
-    // now the only free parse-flag bit; Re2 uses bit 31 for the compiler dialect.
+    // JAVA_UNICODE_CHARACTER_CLASS selects Unicode word characters. With JAVA_WORD_BOUNDARY,
+    // RUST_ASSERTION selects the crate's Unicode \b and \B instead. Bit 13 is now the only free
+    // parse-flag bit; Re2 uses bit 31 for the compiler dialect.
     static final int RUST_ASSERTION = 1 << 28;
     static final int RUST_WORD_END = 1 << 29;
     static final int RUST_WORD_HALF = 1 << 30;
@@ -676,6 +678,8 @@ final class Regexp
             case WORD_BOUNDARY, NO_WORD_BOUNDARY -> parseFlags &
                     (UNICODE_WORD_BOUNDARY | JAVA_WORD_BOUNDARY | JAVA_UNICODE_CHARACTER_CLASS | RUST_ASSERTION | RUST_WORD_END | RUST_WORD_HALF);
             case LITERAL, LITERAL_STRING -> parseFlags & (FOLD_CASE | FULL_CASE_FOLD | LATIN1);
+            // A Rust byte class is not the class of the same code points.
+            case CHAR_CLASS -> parseFlags & LATIN1;
             case STAR, PLUS, QUEST, REPEAT -> parseFlags & NON_GREEDY;
             default -> 0;
         };

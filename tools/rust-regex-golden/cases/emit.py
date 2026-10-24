@@ -4,7 +4,8 @@
 # fixtures with generate.sh.
 #
 # Patterns and texts are written as lowercase UTF-8 hex, or `-` when empty, so
-# the tables hold arbitrary text without depending on a platform encoding.
+# the tables hold arbitrary text without depending on a platform encoding. A
+# text given as a bytes object is written as those bytes.
 # Output depends only on the case lists, so rerunning emit.py is a no-op.
 
 import importlib.util
@@ -26,7 +27,8 @@ def load(name):
 
 
 def encode(text):
-    return text.encode("utf-8").hex() if text else "-"
+    data = text if isinstance(text, bytes) else text.encode("utf-8")
+    return data.hex() if data else "-"
 
 
 def emit(output, header, cases, row):

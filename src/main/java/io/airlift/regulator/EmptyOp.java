@@ -38,8 +38,10 @@ final class EmptyOp
     public static final int EMPTY_JAVA_NO_WORD_BOUNDARY = 1 << 15;
     public static final int EMPTY_JAVA_UNICODE_WORD_BOUNDARY = 1 << 16;
     public static final int EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY = 1 << 17;
-    // The Rust crate's CRLF multi-line anchors and the sides of its start and end word boundaries.
-    // A start or end boundary requires one side of each kind; a half boundary requires only one.
+    // The Rust crate's CRLF multi-line anchors, its Unicode \b and \B, and the sides of its start
+    // and end word boundaries. A start or end boundary requires one side of each kind; a half
+    // boundary requires only the non-word side, and for Unicode word characters also that the
+    // text on that side, if any, decodes as UTF-8.
     public static final int EMPTY_RUST_CRLF_BEGIN_LINE = 1 << 18;
     public static final int EMPTY_RUST_CRLF_END_LINE = 1 << 19;
     public static final int EMPTY_RUST_WORD_BEFORE = 1 << 20;
@@ -50,6 +52,11 @@ final class EmptyOp
     public static final int EMPTY_RUST_UNICODE_NON_WORD_BEFORE = 1 << 25;
     public static final int EMPTY_RUST_UNICODE_WORD_AFTER = 1 << 26;
     public static final int EMPTY_RUST_UNICODE_NON_WORD_AFTER = 1 << 27;
+    public static final int EMPTY_RUST_UNICODE_WORD_BOUNDARY = 1 << 28;
+    public static final int EMPTY_RUST_NO_UNICODE_WORD_BOUNDARY = 1 << 29;
+    public static final int EMPTY_RUST_UNICODE_VALID_BEFORE = 1 << 30;
+    public static final int EMPTY_RUST_UNICODE_VALID_AFTER = 1 << 31;
+    // All 32 assertion bits are allocated.
 
     private static final int RUST_CRLF_LINE = EMPTY_RUST_CRLF_BEGIN_LINE | EMPTY_RUST_CRLF_END_LINE;
     private static final int RUST_WORD_SIDES =
@@ -57,17 +64,21 @@ final class EmptyOp
                     EMPTY_RUST_NON_WORD_BEFORE |
                     EMPTY_RUST_WORD_AFTER |
                     EMPTY_RUST_NON_WORD_AFTER;
-    private static final int RUST_UNICODE_WORD_SIDES =
+    private static final int RUST_UNICODE_WORD_ASSERTIONS =
             EMPTY_RUST_UNICODE_WORD_BEFORE |
                     EMPTY_RUST_UNICODE_NON_WORD_BEFORE |
                     EMPTY_RUST_UNICODE_WORD_AFTER |
-                    EMPTY_RUST_UNICODE_NON_WORD_AFTER;
-    private static final int RUST_ASSERTIONS = RUST_CRLF_LINE | RUST_WORD_SIDES | RUST_UNICODE_WORD_SIDES;
+                    EMPTY_RUST_UNICODE_NON_WORD_AFTER |
+                    EMPTY_RUST_UNICODE_WORD_BOUNDARY |
+                    EMPTY_RUST_NO_UNICODE_WORD_BOUNDARY |
+                    EMPTY_RUST_UNICODE_VALID_BEFORE |
+                    EMPTY_RUST_UNICODE_VALID_AFTER;
+    private static final int RUST_ASSERTIONS = RUST_CRLF_LINE | RUST_WORD_SIDES | RUST_UNICODE_WORD_ASSERTIONS;
 
     private static final int JAVA_WORD_BOUNDARIES = EMPTY_JAVA_WORD_BOUNDARY | EMPTY_JAVA_NO_WORD_BOUNDARY;
     private static final int JAVA_UNICODE_WORD_BOUNDARIES = EMPTY_JAVA_UNICODE_WORD_BOUNDARY | EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY;
     // Assertions that hold only at a code point boundary.
-    private static final int CODE_POINT_ASSERTIONS = JAVA_WORD_BOUNDARIES | JAVA_UNICODE_WORD_BOUNDARIES | RUST_ASSERTIONS;
+    private static final int CODE_POINT_ASSERTIONS = JAVA_WORD_BOUNDARIES | JAVA_UNICODE_WORD_BOUNDARIES;
 
     public static final int TEXT_DEPENDENT =
             EMPTY_END_TEXT_OR_FINAL_NEWLINE |
@@ -149,33 +160,38 @@ final class EmptyOp
             flags |= unicodeBoundary ? EMPTY_UNICODE_WORD_BOUNDARY : EMPTY_NO_UNICODE_WORD_BOUNDARY;
         }
 
-        if ((textDependentAssertions & CODE_POINT_ASSERTIONS) != 0 &&
-                isCodePointBoundary(bytes, begin, end, position)) {
+        // No program mixes Rust and Java assertions, so the Rust arm excludes both Java arms.
+        if ((textDependentAssertions & (CODE_POINT_ASSERTIONS | RUST_ASSERTIONS)) != 0) {
             if ((textDependentAssertions & JAVA_WORD_BOUNDARIES) != 0) {
-                boolean javaBoundary = isJavaWord(bytes, begin, end, position, false, false) !=
-                        isJavaWord(bytes, begin, end, position, true, false);
-                flags |= javaBoundary ? EMPTY_JAVA_WORD_BOUNDARY : EMPTY_JAVA_NO_WORD_BOUNDARY;
+                if (isCodePointBoundary(bytes, begin, end, position)) {
+                    boolean javaBoundary = isJavaWord(bytes, begin, end, position, false, false) !=
+                            isJavaWord(bytes, begin, end, position, true, false);
+                    flags |= javaBoundary ? EMPTY_JAVA_WORD_BOUNDARY : EMPTY_JAVA_NO_WORD_BOUNDARY;
+                    if ((textDependentAssertions & JAVA_UNICODE_WORD_BOUNDARIES) != 0) {
+                        flags |= javaUnicodeWordBoundaryFlags(bytes, begin, end, position);
+                    }
+                }
             }
             else if ((textDependentAssertions & RUST_ASSERTIONS) != 0) {
-                // Only Rust patterns compile these, and none compiles a Java ASCII boundary, so
-                // this test stays off the path of every other pattern except Java Unicode
-                // boundaries, which pay one bit test.
                 flags |= rustContextFlags(bytes, begin, end, position, textDependentAssertions);
             }
-            if ((textDependentAssertions & JAVA_UNICODE_WORD_BOUNDARIES) != 0) {
-                boolean javaBoundary = isJavaWord(bytes, begin, end, position, false, true) !=
-                        isJavaWord(bytes, begin, end, position, true, true);
-                flags |= javaBoundary ? EMPTY_JAVA_UNICODE_WORD_BOUNDARY : EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY;
+            else if (isCodePointBoundary(bytes, begin, end, position)) {
+                flags |= javaUnicodeWordBoundaryFlags(bytes, begin, end, position);
             }
         }
 
         return flags;
     }
 
-    // The crate's assertions from regex-automata's util/look.rs, evaluated only at code point
-    // boundaries. Inside a character they are all false, as in the crate, except that the crate's
-    // ASCII half boundaries hold there. On valid UTF-8 no match can start or end inside a
-    // character except an empty match, which the Rust search rules skip, so this is unobservable.
+    private static int javaUnicodeWordBoundaryFlags(byte[] bytes, int begin, int end, int position)
+    {
+        boolean javaBoundary = isJavaWord(bytes, begin, end, position, false, true) !=
+                isJavaWord(bytes, begin, end, position, true, true);
+        return javaBoundary ? EMPTY_JAVA_UNICODE_WORD_BOUNDARY : EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY;
+    }
+
+    // The crate's assertions from regex-automata's util/look.rs, which read bytes at any position,
+    // including inside a character or in text that is not UTF-8.
     private static int rustContextFlags(byte[] bytes, int begin, int end, int position, int textDependentAssertions)
     {
         int flags = 0;
@@ -195,14 +211,41 @@ final class EmptyOp
             flags |= isAsciiWord(position > begin ? bytes[position - 1] : -1) ? EMPTY_RUST_WORD_BEFORE : EMPTY_RUST_NON_WORD_BEFORE;
             flags |= isAsciiWord(position < end ? bytes[position] : -1) ? EMPTY_RUST_WORD_AFTER : EMPTY_RUST_NON_WORD_AFTER;
         }
-        if ((textDependentAssertions & RUST_UNICODE_WORD_SIDES) != 0) {
-            // A side that is not valid UTF-8 decodes to U+FFFD, which is not a word character.
-            boolean wordBefore = position > begin && UnicodeGroups.isWord(previousCodePoint(bytes, begin, position));
-            boolean wordAfter = position < end && UnicodeGroups.isWord(nextCodePoint(bytes, end, position));
+        if ((textDependentAssertions & RUST_UNICODE_WORD_ASSERTIONS) != 0) {
+            // The crate's utf8::decode_last and utf8::decode: the character before the position is
+            // the one decoded from the nearest byte that is not a continuation byte, within the
+            // four bytes before the position, even if stray continuation bytes follow it before the
+            // position. A side that does not decode is not a word character.
+            long before = position == begin ? 0 : Utf8.decode(bytes, previousCodePointStart(bytes, begin, position), position);
+            long after = position == end ? 0 : Utf8.decode(bytes, position, end);
+            boolean validBefore = position == begin || isValid(before);
+            boolean validAfter = position == end || isValid(after);
+            boolean wordBefore = position > begin && validBefore && UnicodeGroups.isWord(Utf8.decodedCodePoint(before));
+            boolean wordAfter = position < end && validAfter && UnicodeGroups.isWord(Utf8.decodedCodePoint(after));
             flags |= wordBefore ? EMPTY_RUST_UNICODE_WORD_BEFORE : EMPTY_RUST_UNICODE_NON_WORD_BEFORE;
             flags |= wordAfter ? EMPTY_RUST_UNICODE_WORD_AFTER : EMPTY_RUST_UNICODE_NON_WORD_AFTER;
+            if (wordBefore != wordAfter) {
+                flags |= EMPTY_RUST_UNICODE_WORD_BOUNDARY;
+            }
+            // \B requires each side that is present to decode, and a half boundary its non-word
+            // side, so neither matches inside a character. A missing side at the start or end of
+            // the text counts as valid and non-word.
+            if (validBefore) {
+                flags |= EMPTY_RUST_UNICODE_VALID_BEFORE;
+            }
+            if (validAfter) {
+                flags |= EMPTY_RUST_UNICODE_VALID_AFTER;
+            }
+            if (wordBefore == wordAfter && validBefore && validAfter) {
+                flags |= EMPTY_RUST_NO_UNICODE_WORD_BOUNDARY;
+            }
         }
         return flags;
+    }
+
+    private static boolean isValid(long decoded)
+    {
+        return Utf8.decodedCodePoint(decoded) != Utf8.RUNE_ERROR || Utf8.decodedWidth(decoded) != 1;
     }
 
     private static boolean isJavaBeginLine(byte[] bytes, int begin, int end, int position)

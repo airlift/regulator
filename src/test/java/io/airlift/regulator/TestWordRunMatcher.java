@@ -38,6 +38,17 @@ public class TestWordRunMatcher
     }
 
     @Test
+    public void testRustUnicodeBoundaryEligibility()
+    {
+        for (boolean bytes : new boolean[] {false, true}) {
+            RustRegexp.Options options = RustRegexp.Options.defaults().setBytes(bytes);
+            ParseResult parsed = RustRegexpParser.parse(utf8Slice("\\b[a-z]+\\b"), options.syntaxFlags(), options.nestLimit());
+            Prog program = Compiler.compile(parsed.regexp(), false, Re2.Options.DEFAULT_MAX_MEMORY);
+            assertThat(WordRunMatcher.analyze(parsed.regexp(), program)).as("bytes %s", bytes).isNotNull();
+        }
+    }
+
+    @Test
     public void testRetainedPlanUsesForwardBudget()
     {
         Slice pattern = utf8Slice("\\b\\w+\\b");

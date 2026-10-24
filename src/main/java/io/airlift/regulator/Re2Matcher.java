@@ -188,14 +188,14 @@ public final class Re2Matcher
     }
 
     /**
-     * The Rust crate skips an empty match that ends where the previous match ended or that splits
-     * a UTF-8 character.
+     * The Rust crate skips an empty match that ends where the previous match ended or, except in
+     * its bytes API, that splits a UTF-8 character.
      */
     private boolean findRust()
     {
         while (findGeneral()) {
             int matchEnd = groups[1];
-            if (groups[0] != matchEnd || (matchEnd != previousMatchEnd && Utf8.isCharacterBoundary(input, regionStart + matchEnd))) {
+            if (groups[0] != matchEnd || (matchEnd != previousMatchEnd && (latin1 || Utf8.isCharacterBoundary(input, regionStart + matchEnd)))) {
                 previousMatchEnd = matchEnd;
                 return true;
             }
@@ -465,8 +465,9 @@ public final class Re2Matcher
 
     private boolean matchWithInputContext(Re2.Anchor anchor)
     {
-        // An anchored Rust search cannot skip ahead, so an empty match splitting a character fails.
-        if (!Utf8.isCharacterBoundary(input, regionStart)) {
+        // An anchored Rust search cannot skip ahead, so an empty match splitting a character fails,
+        // except in the crate's bytes API.
+        if (!latin1 && !Utf8.isCharacterBoundary(input, regionStart)) {
             return false;
         }
         if (!pattern.matchRegionInto(

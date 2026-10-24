@@ -3,17 +3,19 @@
 **Compiler:** `RustRegexp.compile(pattern)`
 
 `RustRegexp` implements the pattern language of the Rust `regex` crate's
-`Regex` type, pinned at regex 1.13.1 with regex-syntax 0.8.11 and
-regex-automata 0.4.18. Results match the crate on valid UTF-8 input for every
-pattern both accept, except where they depend on Unicode data: properties,
-the Unicode `\d`, `\s`, and `\w` classes, word boundaries, and case folding
-follow Regulator's Unicode 18.0 database rather than the crate's Unicode 16.0
-tables; see [Unicode properties](#unicode-properties).
+`Regex` type, and in [byte mode](#byte-mode) its `regex::bytes::Regex` type,
+pinned at regex 1.13.1 with regex-syntax 0.8.11 and regex-automata 0.4.18.
+Results match the crate on valid UTF-8 input, and in byte mode on any input,
+for every pattern both accept, except where they depend on Unicode data:
+properties, the Unicode `\d`, `\s`, and `\w` classes, word boundaries, and case
+folding follow Regulator's Unicode 18.0 database rather than the crate's
+Unicode 16.0 tables; see [Unicode properties](#unicode-properties).
 Compilation rejects every pattern the crate rejects as invalid, plus the
 [unsupported features](#unsupported-features) below. Regulator can accept a
 pattern the crate refuses as too large; see
-[Compilation options](#compilation-options). Patterns and inputs are UTF-8
-`Slice` values, and positions are UTF-8 byte offsets, as in the crate.
+[Compilation options](#compilation-options). Patterns are UTF-8 `Slice`
+values. Inputs are `Slice` values, which hold UTF-8 text outside byte mode.
+Positions are byte offsets, as in the crate.
 
 ```java
 RustRegexp regexp = RustRegexp.compile(
@@ -36,25 +38,54 @@ crate. Captures are zero-copy Slice views.
 `RustRegexp` returns the shared `Re2Matcher`, which applies the crate's search
 rules to Rust patterns:
 
-- A search never reports an empty match that splits a UTF-8 character; it
-  searches again one byte later. An empty pattern on `é` matches at byte
-  offsets 0 and 2.
+- Outside byte mode, a search never reports an empty match that splits a UTF-8
+  character; it searches again one byte later. An empty pattern on `é` matches
+  at byte offsets 0 and 2.
 - Successive `find()` calls skip an empty match that ends where the previous
   match ended, as the crate's `find_iter` does. `a*` on `a` yields only `a`.
   `count` follows the same rules.
-- `lookingAt` and `matches` anchored at an offset that splits a character
-  fail, because an anchored search cannot move past it.
+- Outside byte mode, `lookingAt` and `matches` anchored at an offset that
+  splits a character fail, because an anchored search cannot move past it.
 
 A range overload or a matcher region searches `[start, end)` but keeps the
 whole Slice as assertion context, as the crate's `Input::range` does. `^`, `$`,
 `\b`, and the other assertions see the bytes outside the range, so `\bb` does
 not match `b` in the range `[1, 2)` of `ab`.
 
-Inputs are not validated, because the crate's `Regex` only accepts valid
-UTF-8. Matching malformed UTF-8 input produces unspecified results; validate
-the input first if it can contain malformed bytes. Patterns must be valid
-UTF-8, because the crate parses Rust strings; an invalid pattern fails with
-`BAD_UTF8`.
+Outside byte mode, inputs are not validated, because the crate's `Regex` only
+accepts valid UTF-8. Matching malformed UTF-8 input produces unspecified
+results; use byte mode, or validate the input first, if it can contain
+malformed bytes. Patterns must be valid UTF-8 in both modes, because the crate
+parses Rust strings; an invalid pattern fails with `BAD_UTF8`.
+
+## Byte mode
+
+`RustRegexp.Options.bytes()`, or `setBytes(true)`, compiles the pattern as the
+crate's `regex::bytes::Regex`, which matches arbitrary bytes. Results match the
+crate on every input, including bytes that are not UTF-8:
+
+- Without Unicode mode, `.`, negated classes, `\W`, `\D`, `\S`, and the escapes
+  `\x80` through `\xFF` match single bytes: `(?-u:.)` matches the byte `0xFF`,
+  and `(?-u:\xFF)` matches only that byte. Outside a class, a non-ASCII
+  literal, a braced or Unicode escape such as `\x{E9}`, and an enabled octal
+  escape keep their UTF-8 encoding. A non-ASCII character in a class and a
+  Unicode property still fail.
+- In Unicode mode, constructs match only valid UTF-8: `.` and `[^a]` never
+  match a malformed byte, and `\xFF` is the character U+00FF.
+- An empty match may split a UTF-8 character, and `lookingAt` and `matches` may
+  start inside one. An empty pattern on `é` matches at byte offsets 0, 1, and
+  2. Iteration still skips an empty match that ends where the previous match
+  ended.
+- Unicode word boundaries read the character the crate decodes on each side,
+  and a side that does not decode is not a word character. `\B` requires each
+  side that is present to decode, so it never matches inside a character.
+  `\b{start-half}` requires the side before the position to be non-word and
+  `\b{end-half}` the side after it, and each requires that side to decode if
+  it is present. At the start or end of the text, the missing side counts as
+  non-word. The crate decodes the character before a position from the nearest
+  byte that is not a continuation byte, within the four bytes before the
+  position, ignoring any stray continuation bytes after it, so in `a\x80`, `\b`
+  matches at offset 2, and in `a\x80b`, `\B` matches at offset 2.
 
 ## Supported constructs
 
@@ -74,8 +105,8 @@ UTF-8, because the crate parses Rust strings; an invalid pattern fails with
 
 Without Unicode mode, a construct that could match part of a UTF-8 character
 fails with `BAD_UTF8`, as `regex::Regex` does: `(?-u:.)`, `(?-u:\xFF)`, and
-negated ASCII classes. Unicode literals stay UTF-8 literals, and Unicode
-properties fail with `BAD_CHAR_CLASS`.
+negated ASCII classes. [Byte mode](#byte-mode) accepts them. Unicode literals
+stay UTF-8 literals, and Unicode properties fail with `BAD_CHAR_CLASS`.
 
 Case-insensitive matching uses the crate's rule, simple case folding
 (`CaseFolding.txt` statuses C and S), from Regulator's Unicode database, the
@@ -86,8 +117,8 @@ characters, all read from the database.
 ## Compilation options
 
 `RustRegexp.Options.defaults()` creates mutable, chainable options matching the
-crate's `RegexBuilder` settings. Names follow `JavaRegexp.Options` where the
-concept is the same:
+crate's `RegexBuilder` settings, and `RustRegexp.Options.bytes()` creates them
+in byte mode. Names follow `JavaRegexp.Options` where the concept is the same:
 
 | Option | Crate setting | Default |
 |---|---|---|
@@ -99,6 +130,7 @@ concept is the same:
 | `setComments` | `ignore_whitespace` | off |
 | `setUnicode` | `unicode` | on |
 | `setOctal` | `octal` | off |
+| `setBytes` | `regex::bytes::RegexBuilder` in place of `regex::RegexBuilder` | off |
 | `setNestLimit` | `nest_limit` | 250 |
 | `setMaxMemory` | none; replaces `size_limit` and `dfa_size_limit` with Regulator's compilation and DFA-cache budget | 96 MiB |
 | `setByteFrequencies` | none | `ByteFrequencies.uniform()` |
@@ -156,7 +188,6 @@ match by their 18.0 properties, including in case-insensitive matching.
 
 The following crate features are not offered:
 
-- `regex::bytes::Regex`, which matches arbitrary bytes
 - the crate's replacement syntax
 - the `line_terminator` setting; `^`, `$`, and `.` use `\n`, or `\r` and `\n`
   in CRLF mode, as with the crate's default

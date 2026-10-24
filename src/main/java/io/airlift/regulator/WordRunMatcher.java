@@ -49,6 +49,7 @@ final class WordRunMatcher
         int boundary = program.textDependentAssertions();
         if (boundary != EmptyOp.EMPTY_JAVA_WORD_BOUNDARY &&
                 boundary != EmptyOp.EMPTY_JAVA_UNICODE_WORD_BOUNDARY &&
+                boundary != EmptyOp.EMPTY_RUST_UNICODE_WORD_BOUNDARY &&
                 boundary != EmptyOp.EMPTY_UNICODE_WORD_BOUNDARY) {
             return null;
         }

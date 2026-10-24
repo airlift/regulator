@@ -78,10 +78,10 @@ tools/rust-regex-golden/generate.sh
 
 The script fetches the pinned `regex` source, builds
 `target/rust-regex-golden-build/release/rust-regex-golden` with `--locked`, and
-writes all four fixtures. Each fixture is written to a temporary file first,
+writes all five fixtures. Each fixture is written to a temporary file first,
 so a failed generation never truncates a committed fixture.
 
-The generator has three modes. Run them from the repository root, with
+The generator has four modes. Run them from the repository root, with
 `RUST_REGEX_DIR` set to the crate checkout that `fetch-dependencies.sh` prints:
 
 ```bash
@@ -91,6 +91,7 @@ GENERATOR=target/rust-regex-golden-build/release/rust-regex-golden
 "${GENERATOR}" --mode=match < tools/rust-regex-golden/match-cases.tsv > match.jsonl
 "${GENERATOR}" --mode=match < tools/rust-regex-golden/random-cases.tsv > random.jsonl
 "${GENERATOR}" --mode=upstream --testdata="${RUST_REGEX_DIR}/testdata" > upstream.jsonl
+"${GENERATOR}" --mode=upstream-bytes --testdata="${RUST_REGEX_DIR}/testdata" > upstream-bytes.jsonl
 ```
 
 ### Case tables
@@ -104,9 +105,10 @@ the case lists. Commit the case lists and tables together.
 
 Lines starting with `#` and blank lines are ignored. Identifiers must be
 unique. Pattern and text bytes are lowercase hexadecimal, or `-` for empty, so
-the tables can hold any UTF-8 text without depending on a platform string
-encoding. Patterns and texts must be valid UTF-8 because the front end follows
-the crate's string API.
+the tables can hold any bytes without depending on a platform string encoding.
+Patterns must be valid UTF-8 because the crate parses Rust strings. Texts must
+be valid UTF-8 unless the case uses the bytes API, whose texts may be any
+bytes.
 
 `syntax-cases.tsv` has three tab-separated fields:
 
@@ -123,25 +125,30 @@ the crate's string API.
 5. inclusive window start byte offset, or `-` for the whole text
 6. exclusive window end byte offset, or `-` for the whole text
 
-A window in `match-cases.tsv` must lie on character boundaries.
+A window in `match-cases.tsv` must lie on character boundaries unless the case
+uses the bytes API.
 
 `random-cases.tsv` has the `match-cases.tsv` fields. `cases/random_cases.py`
 draws its cases from `random.Random(790431)`, in this order: 800 random
 expressions, nested up to three levels over a small set of atoms, on random
-texts over `a`, `b`, `é`, space, CR, and LF; then 600 malformed token streams of
-regex metacharacters, flag letters, and digits on a fixed list of texts. It
-ends with 154 property-name regression rows, such as `\p{IsL}` spelled with a
-dotted capital I. Python's seeded `random` sequence is stable across Python 3
-releases, so the table is reproducible, but editing an earlier section changes
-every later draw. A pattern and text pair that repeats an earlier case is
-skipped, leaving 1526 cases, and identifiers keep the draw number, such as
-`random_042` or `malformed_147`, so they stay stable. Every case uses the
-default options and searches the whole text. David Phillips wrote the corpus
-for the front end's first golden generator, in pull request 11.
+texts over `a`, `b`, `é`, space, CR, and LF; then 600 malformed token streams
+of regex metacharacters, flag letters, and digits on a fixed list of texts;
+then 154 property-name regression rows, such as `\p{IsL}` spelled with a dotted
+capital I. It ends with 400 random expressions over byte and Unicode atoms with
+the bytes API, on random texts that split and break UTF-8: `a`, `é`, either of
+its bytes alone, `\xFF`, space, CR, and LF. Python's seeded `random` sequence
+is stable across Python 3 releases, so the table is reproducible, but editing
+an earlier section changes every later draw. A case whose pattern, text, and
+options repeat an earlier case is skipped, leaving 1926 cases, and identifiers keep the draw
+number, such as `random_042`, `malformed_147`, or `bytes_042`, so they stay
+stable. Every case searches the whole text, and every case before the bytes API
+section uses the default options. David Phillips wrote the corpus for the front
+end's first golden generator, in pull request 11.
 
 ### Options
 
-Options are `RegexBuilder` settings, written as flag letters in this order:
+Options select the API and configure its builder, written as flag letters in
+this order:
 
 - `i` case insensitive
 - `m` multi-line
@@ -151,14 +158,18 @@ Options are `RegexBuilder` settings, written as flag letters in this order:
 - `x` ignore whitespace
 - `o` octal
 
-Unicode mode is on by default. `-u` turns it off. The nest limit defaults to the
-crate's 250; `n` followed by a decimal limit, such as `n0` or `n251`, sets any
-other limit. Groups are separated by commas in the order flags, `-u`, nest
-limit. Defaults are written `-`. Examples: `imR`, `-u`, `x,-u`, `o`, `n1`,
-`o,-u,n1`. The generator rejects any other spelling, including a nest limit
-with leading zeros or equal to the default, so each option set has exactly one
-encoding. All other builder settings keep the crate's defaults: line terminator
-`\n` and the default size limits.
+Unicode mode is on by default. `-u` turns it off. The nest limit defaults to
+the crate's 250; `n` followed by a decimal limit, such as `n0` or `n251`, sets
+any other limit. `bytes` builds the pattern with `regex::bytes::RegexBuilder`
+instead of `regex::RegexBuilder`, and configures the meta regex as that builder
+does, with the crate's `utf8` syntax setting and `utf8_empty` matching setting
+off. Groups are separated by
+commas in the order flags, `-u`, nest limit, `bytes`. Defaults are written `-`.
+Examples: `imR`, `-u`, `x,-u`, `o`, `n1`, `o,-u,n1`, `-u,bytes`. The generator
+rejects any other spelling, including a nest limit with leading zeros or equal
+to the default, so each option set has exactly one encoding. All other builder
+settings keep the crate's defaults: line terminator `\n` and the default size
+limits.
 
 ### Fixtures
 
@@ -205,12 +216,13 @@ One record per `match-cases.tsv` row: the input fields, `ok`, the error fields,
 
 Successive matches follow the crate's iterator: after a match, the next search
 starts at its end, and an empty match adjacent to the previous match is
-skipped. Empty matches occur only at character boundaries.
+skipped. Without the bytes API, empty matches occur only at character
+boundaries.
 
-Unwindowed cases use the public `Regex` API. The generator also runs the same
-search through a `regex-automata` meta regex configured exactly as `Regex`
-configures it and asserts the two agree. Anchored searches use that meta regex
-with `Anchored::Yes`.
+Unwindowed cases use the public `Regex` API, or `bytes::Regex` with the `bytes`
+option. The generator also runs the same search through a `regex-automata` meta
+regex configured exactly as the public type configures it and asserts the two
+agree. Anchored searches use that meta regex with `Anchored::Yes`.
 
 Windowed cases search the meta regex with `Input::range`. Look-around
 assertions still see the whole text: `^` does not match at a window start that
@@ -229,8 +241,8 @@ false, when the range ends before the text end and either:
 
 - the pattern contains an assertion that reads the text at or after its
   position, or
-- the range end splits a character, which makes the truncated text end look
-  like a character boundary.
+- the case does not use the bytes API and the range end splits a character,
+  which makes the truncated text end look like a character boundary.
 
 The right-reading assertions follow `regex-automata` 0.4.18
 `util::look::LookMatcher`: `$` and `\z` in every mode, `^` in CRLF multi-line
@@ -251,9 +263,9 @@ The crate's own TOML test corpus at the pinned tag, recorded in the
 `rust-regex-match.jsonl` format. A test with search bounds that do not cover
 the whole text is recorded as a windowed record with the bounds as `start` and
 `end`; other tests have `start` and `end` set to `-`. Upstream bounds may split
-a character, unlike a `match-cases.tsv` window. Identifiers
-are the upstream test name prefixed by its file path under `testdata/` without
-the extension, for example `fowler/basic/basic3`.
+a character, unlike a string-mode window. Identifiers are the upstream test
+name prefixed by its file path under `testdata/` without the extension, for
+example `fowler/basic/basic3`.
 
 The generator keeps a test only when the front end can express it: a single
 pattern, leftmost-first match kind, leftmost search kind, UTF-8 mode, a valid
@@ -280,14 +292,23 @@ Before writing, the generator runs every kept test and every
 `anchored-iteration` test through `regex-test`'s runner against the pinned
 crate and fails if any result disagrees with the upstream expectation.
 
+#### `rust-regex-upstream-bytes.jsonl`
+
+The same corpus recorded for the bytes API, in the same format, with the
+`bytes` option on every record. The filter is the one above with UTF-8 mode
+reversed: a test with UTF-8 mode on is skipped as `utf8-enabled`, because the
+bytes API has no UTF-8 mode, and a text that is not valid UTF-8 is kept. Unlike
+`suite_bytes.rs`, bounded tests are kept and searched with `Input::range`.
+
 ## Committed fixtures
 
-`generate.sh` owns all four fixtures:
+`generate.sh` owns all five fixtures:
 
 - `src/test/resources/io/airlift/regulator/rust-regex-syntax.jsonl`
 - `src/test/resources/io/airlift/regulator/rust-regex-match.jsonl`
 - `src/test/resources/io/airlift/regulator/rust-regex-random.jsonl`
 - `src/test/resources/io/airlift/regulator/rust-regex-upstream.jsonl`
+- `src/test/resources/io/airlift/regulator/rust-regex-upstream-bytes.jsonl`
 
 Regenerate them together from the repository root, case tables first:
 
@@ -358,7 +379,7 @@ For any generator or fixture change, verify that:
 
 ## License
 
-The upstream fixture is derived from the `regex` crate's test data, which is
+The upstream fixtures are derived from the `regex` crate's test data, which is
 distributed under the crate's MIT or Apache-2.0 license. Its `fowler/*`
 records derive from the AT&T testregex data. The crate no longer ships that
 data's license, although `testdata/fowler/dat/README` still refers to it, so
