@@ -86,7 +86,8 @@ public class TestTrinoScanPlanRun
     public void testRunCandidateScanMatchesScalarReference()
     {
         // Covers each candidate scan: one to three bytes, a contiguous range, a nibble-table
-        // set, and larger sets and complements that keep the table scan.
+        // set, and larger sets and complements that keep the table scan. The generated kernels'
+        // copy must agree.
         for (String set : List.of("[a]", "[?&]", "[abz]", "[0-9]", "[0-9a]", "[a-z@]", "\\w", "[\\x00-\\x3F]", "[\\x00-\\x7F]", "[^=]", "[^/:?#]", "[^\\x00-\\x7F]", ".")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("(?s)" + set + "+"), Regexp.LIKE_PERL);
             TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
@@ -116,6 +117,9 @@ public class TestTrinoScanPlanRun
                             int expected = filler < 0 ? cursor : (members[value] && position >= cursor && position < end ? position : -1);
                             assertThat(run.findCandidate(bytes, cursor, end))
                                     .as("%s byte %s cursor %s length %s position %s", set, value, cursor, length, position)
+                                    .isEqualTo(expected);
+                            assertThat(TrinoScanKernelSupport.runFindCandidate(run, bytes, cursor, end))
+                                    .as("generated %s byte %s cursor %s length %s position %s", set, value, cursor, length, position)
                                     .isEqualTo(expected);
                         }
                     }
