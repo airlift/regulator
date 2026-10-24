@@ -96,7 +96,7 @@ def selectors(rows, protocols):
     for row in rows:
         protocol = protocols[row["row_id"]]
         if protocol["execution"] in ("jmh-processes", "jmh-forks"):
-            key = (row["system"], row["benchmark"], tuple(protocol[field] for field in row_protocol.FIELDS[1:]),
+            key = (row["system"], row["benchmark"], row_protocol.protocol_key(protocol),
                    row["row_id"] if runs_each_workload(row) else None)
             result.setdefault(key, protocol)
     return result
