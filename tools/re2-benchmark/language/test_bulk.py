@@ -327,7 +327,7 @@ class TestBulkEvidence(unittest.TestCase):
 
         with patch.object(collection, "runner_identity", return_value=runners), \
                 patch.object(collection, "verify_command", side_effect=verified):
-            evidence = collection.verify(self.directory, results, "java", "classes", "native")
+            evidence = collection.verify(self.directory, results, "java", "classes", {"native-re2": "native"})
         bulk.validate_evidence(self.manifest, evidence, results)
         observations = {}
         for identity, case, language, engine, mode in collection.observations(self.manifest):

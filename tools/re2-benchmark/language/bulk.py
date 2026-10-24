@@ -145,18 +145,20 @@ def validate_manifest(manifest, directory):
                 raise ValueError("unrecorded bulk translation")
 
 
-def verify(directory, results, java, classpath, native):
+def verify(directory, results, java, classpath, native_runners):
     """Qualify each operation independently, including an original native-RE2 reference."""
     manifest = collection.load(directory / "manifest.json")
     validate_manifest(manifest, directory)
     if any(mapping["status"] == "pending" for case in manifest["cases"] for mapping in case["mappings"].values()):
         raise ValueError("pending bulk mappings cannot qualify")
+    collection.require_native_runners(manifest, native_runners)
     results.mkdir(parents=True, exist_ok=False)
-    runners = collection.runner_identity(java, classpath, native)
+    runners = collection.runner_identity(java, classpath, native_runners)
     collection.save(results / "runners.json", runners)
+    native = native_runners["native-re2"]
 
     def command(engine, mode, action, workload):
-        return ([native, "--" + action, str(workload)] if engine == "native-re2" else
+        return ([native_runners[engine], "--" + action, str(workload)] if engine in collection.NATIVE_RUNNERS else
                 collection.java_command(java, classpath, mode) + [CLASS, "--" + action, engine, str(workload)])
 
     def run(case, language, engine, mode, identity):
@@ -206,7 +208,7 @@ def verify(directory, results, java, classpath, native):
         if len(receipts) % 30 == 0:
             print(f"Verified {len(receipts)}/{len(observations)} bulk observations", flush=True)
     validate_receipts(manifest, receipts)
-    if runners != collection.runner_identity(java, classpath, native):
+    if runners != collection.runner_identity(java, classpath, native_runners):
         raise ValueError("bulk runners changed during verification")
     evidence = {"manifest_sha256": collection.digest((directory / "manifest.json").read_bytes()),
                 "runners_sha256": collection.digest(collection.encode(runners)),
@@ -278,14 +280,14 @@ def validate_evidence(manifest, evidence, results):
             raise ValueError("bulk receipt differs from original native RE2")
 
 
-def probe_one(case, language, engine, directory, results, java, classpath, native):
+def probe_one(case, language, engine, directory, results, java, classpath, native_runners):
     mapping = case["mappings"][language]
     if mapping["status"] == "not-compatible":
         return {"outcome": "not-compatible", "reason": mapping["reason"]}
     workload = str((directory / mapping["input_file"]).resolve())
     evidence = {}
     for action in ("execute", "trace"):
-        command = ([str(Path(native).resolve()), "--" + action, workload] if engine == "native-re2" else
+        command = ([str(Path(native_runners[engine]).resolve()), "--" + action, workload] if engine in collection.NATIVE_RUNNERS else
                    collection.java_command(java, classpath, "safe") + [CLASS, "--" + action, engine, workload])
         prefix = results / case["id"] / language / engine / action
         try:
@@ -301,14 +303,15 @@ def probe_one(case, language, engine, directory, results, java, classpath, nativ
     return evidence
 
 
-def probe(directory, results, java, classpath, native, workers=3):
+def probe(directory, results, java, classpath, native_runners, workers=3):
     """Inspect actual outputs. Probe failures are never automatically made publishable outcomes."""
     manifest = collection.load(directory / "manifest.json")
     validate_manifest(manifest, directory)
+    collection.require_native_runners(manifest, native_runners)
     results.mkdir(parents=True, exist_ok=False)
     evidence = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        pending = {executor.submit(probe_one, case, language, engine, directory, results, java, classpath, native):
+        pending = {executor.submit(probe_one, case, language, engine, directory, results, java, classpath, native_runners):
                    f"{case['id']}/{language}/{engine}"
                    for case in manifest["cases"] for language, engines in collection.ENGINES.items() for engine in engines}
         for future in as_completed(pending):
@@ -374,7 +377,7 @@ def main():
     parser.add_argument("--results", type=Path)
     parser.add_argument("--java", default="java")
     parser.add_argument("--classpath")
-    parser.add_argument("--native-runner")
+    collection.add_native_runner_arguments(parser)
     args = parser.parse_args()
     if args.command == "prepare":
         if args.inventory is None:
@@ -384,7 +387,7 @@ def main():
     elif args.command == "probe":
         if not args.results or not args.classpath or not args.native_runner:
             parser.error("probe requires results, classpath, and native runner")
-        probe(args.manifest_directory, args.results, args.java, args.classpath, args.native_runner)
+        probe(args.manifest_directory, args.results, args.java, args.classpath, collection.native_runner_arguments(args))
     else:
         if args.results is None:
             parser.error("summarize requires --results")
