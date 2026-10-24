@@ -40,10 +40,12 @@ class TestMappings(unittest.TestCase):
         self.assertEqual(rebar_inventory.decode_klv(bulk.encode_klv(fields)), fields)
 
     def test_bibleref_preserves_named_capture_order_with_braced_properties(self):
-        pattern = b"".join(b"(?P<g" + str(index).encode() + rb">\pL\pZ)" for index in range(8))
+        pattern = mappings.BIBLEREF_PATTERN
         expected = pattern.replace(b"(?P<", b"(?<").replace(rb"\pL", rb"\p{L}").replace(rb"\pZ", rb"\p{Z}")
-        for language in ("java", "trino"):
-            self.assertEqual(mappings.translate("wild/bibleref/long", language, pattern)[0], expected)
+        self.assertEqual(mappings.translate("wild/bibleref/long", "trino", pattern)[0], expected)
+        # Java compiles the case with Unicode classes; archived 1.0 manifests keep the syntax-only translation.
+        self.assertEqual(mappings.translate("wild/bibleref/long", "java", pattern)[0], mappings.ascii_classes(expected))
+        self.assertEqual(mappings.translate("wild/bibleref/long", "java", pattern, archived=True)[0], expected)
 
     def test_rust_spells_out_re2_ascii_digit_and_space_classes(self):
         self.assertEqual(mappings.ascii_classes(rb"\d\\d\s\\s\w"), rb"[0-9]\\d[\t\n\f\r ]\\s\w")
