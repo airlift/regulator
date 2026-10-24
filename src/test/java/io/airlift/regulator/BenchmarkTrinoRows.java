@@ -39,8 +39,9 @@ import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPU
  * supplies each workload's rows and literals. Grid literals are named {@code <tercile>-<band>} for the
  * frequency of their first byte and the share of rows containing them; {@code ordered-<band>} cells
  * search two grid candidates in order with {@code a(?s:.*)b}, named for the share of rows holding
- * both in that order; {@code picked-N} literals are hand-picked queries. A cell without a literal fails setup. Setup
- * verifies the sampled rows' checksum and each cell's hit count.
+ * both in that order; {@code picked-N} literals are hand-picked queries; {@code dotstar-<id>} cells
+ * search the literal of grid or hand-picked cell {@code <id>} with {@code .*literal.*}. A cell
+ * without a literal fails setup. Setup verifies the sampled rows' checksum and each cell's hit count.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -68,8 +69,19 @@ public class BenchmarkTrinoRows
                 "ordered-none",
                 "ordered-selective",
                 "ordered-common",
+                "dotstar-low-none",
+                "dotstar-low-selective",
+                "dotstar-low-common",
+                "dotstar-mid-none",
+                "dotstar-mid-selective",
+                "dotstar-mid-common",
+                "dotstar-high-none",
+                "dotstar-high-selective",
+                "dotstar-high-common",
                 "picked-1",
+                "dotstar-picked-1",
                 "picked-2",
+                "dotstar-picked-2",
         })
         String literal;
 

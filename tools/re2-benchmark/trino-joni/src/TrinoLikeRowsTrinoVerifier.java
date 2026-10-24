@@ -62,8 +62,8 @@ public final class TrinoLikeRowsTrinoVerifier
                 skipped.add(workload);
                 continue;
             }
-            for (String literal : TestingTrinoRowsBenchmarkInputs.literalIds(workload)) {
-                // Each setup checks the rows and the literal's hit rows against the manifest.
+            for (String literal : TestingTrinoRowsBenchmarkInputs.likeLiteralIds(workload)) {
+                // Each setup checks the rows and the cell's hit rows against the manifest.
                 BenchmarkTrinoLikeRows.BenchmarkData regulatorData = new BenchmarkTrinoLikeRows.BenchmarkData();
                 regulatorData.setWorkload(workload);
                 regulatorData.setLiteral(literal);

@@ -67,8 +67,19 @@ public class BenchmarkTrinoRowsJoni
                 "ordered-none",
                 "ordered-selective",
                 "ordered-common",
+                "dotstar-low-none",
+                "dotstar-low-selective",
+                "dotstar-low-common",
+                "dotstar-mid-none",
+                "dotstar-mid-selective",
+                "dotstar-mid-common",
+                "dotstar-high-none",
+                "dotstar-high-selective",
+                "dotstar-high-common",
                 "picked-1",
+                "dotstar-picked-1",
                 "picked-2",
+                "dotstar-picked-2",
         })
         String literal;
 

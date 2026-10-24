@@ -11,7 +11,17 @@ english	high-common	grid	high	common	0				-	-	-	-	-
 english	ordered-none	ordered	-	none	1195	Yeah	there	Yeah(?s:.*)there	0x59	429	0.003610	0	0
 english	ordered-selective	ordered	-	selective	2	Sherlock	Holmes	Sherlock(?s:.*)Holmes	0x53	445	0.003745	77	77
 english	ordered-common	ordered	-	common	0				-	-	-	-	-
+english	dotstar-low-none	dotstar	low	none	10858	waffles		.*waffles.*	0x77	1819	0.015309	0	0
+english	dotstar-low-selective	dotstar	low	selective	23	know		.*know.*	0x6B	1187	0.009990	131	131
+english	dotstar-low-common	dotstar	low	common	0				-	-	-	-	-
+english	dotstar-mid-none	dotstar	mid	none	2566	herself.		.*herself\..*	0x68	4905	0.041281	0	0
+english	dotstar-mid-selective	dotstar	mid	selective	10	right		.*right.*	0x72	4768	0.040128	73	73
+english	dotstar-mid-common	dotstar	mid	common	0				-	-	-	-	-
+english	dotstar-high-none	dotstar	high	none	1400	adequate		.*adequate.*	0x61	6432	0.054132	0	0
+english	dotstar-high-selective	dotstar	high	selective	14	time		.*time.*	0x74	7674	0.064585	52	52
+english	dotstar-high-common	dotstar	high	common	0				-	-	-	-	-
 english	picked-1	picked	-	-	-	exactly		exactly	0x65	10386	0.087409	8	8
+english	dotstar-picked-1	dotstar	-	-	-	exactly		.*exactly.*	0x65	10386	0.087409	8	8
 russian	low-none	grid	low	none	1194	alphaHFF		alphaHFF	0x61	71	0.000338	0	0
 russian	low-selective	grid	low	selective	1	-то		-то	0x2D	829	0.003950	66	67
 russian	low-common	grid	low	common	0				-	-	-	-	-
@@ -24,6 +34,15 @@ russian	high-common	grid	high	common	2	на		на	0xD0	64537	0.307508	861	1112
 russian	ordered-none	ordered	-	none	10170	тво	чего	тво(?s:.*)чего	0xD1	27727	0.132114	0	0
 russian	ordered-selective	ordered	-	selective	933	от	ор	от(?s:.*)ор	0xD0	64537	0.307508	87	87
 russian	ordered-common	ordered	-	common	0				-	-	-	-	-
+russian	dotstar-low-none	dotstar	low	none	1194	alphaHFF		.*alphaHFF.*	0x61	71	0.000338	0	0
+russian	dotstar-low-selective	dotstar	low	selective	1	-то		.*-то.*	0x2D	829	0.003950	66	66
+russian	dotstar-low-common	dotstar	low	common	0				-	-	-	-	-
+russian	dotstar-mid-none	dotstar	mid	none	3282	трёх		.*трёх.*	0xD1	27727	0.132114	0	0
+russian	dotstar-mid-selective	dotstar	mid	selective	37	том		.*том.*	0xD1	27727	0.132114	97	97
+russian	dotstar-mid-common	dotstar	mid	common	1	то		.*то.*	0xD1	27727	0.132114	1312	1312
+russian	dotstar-high-none	dotstar	high	none	12590	Зайдём		.*Зайдём.*	0xD0	64537	0.307508	0	0
+russian	dotstar-high-selective	dotstar	high	selective	99	боль		.*боль.*	0xD0	64537	0.307508	52	52
+russian	dotstar-high-common	dotstar	high	common	2	на		.*на.*	0xD0	64537	0.307508	861	861
 chinese	low-none	grid	low	none	4353	转头		转头	0xE8	3605	0.033739	0	0
 chinese	low-selective	grid	low	selective	2	这个		这个	0xE8	3605	0.033739	54	54
 chinese	low-common	grid	low	common	0				-	-	-	-	-
@@ -36,6 +55,15 @@ chinese	high-common	grid	high	common	0				-	-	-	-	-
 chinese	ordered-none	ordered	-	none	63	这是	没有	这是(?s:.*)没有	0xE8	3605	0.033739	0	0
 chinese	ordered-selective	ordered	-	selective	0				-	-	-	-	-
 chinese	ordered-common	ordered	-	common	0				-	-	-	-	-
+chinese	dotstar-low-none	dotstar	low	none	4353	转头		.*转头.*	0xE8	3605	0.033739	0	0
+chinese	dotstar-low-selective	dotstar	low	selective	2	这个		.*这个.*	0xE8	3605	0.033739	54	54
+chinese	dotstar-low-common	dotstar	low	common	0				-	-	-	-	-
+chinese	dotstar-mid-none	dotstar	mid	none	2745	不要再笑		.*不要再笑.*	0xE4	6364	0.059560	0	0
+chinese	dotstar-mid-selective	dotstar	mid	selective	4	你们		.*你们.*	0xE4	6364	0.059560	44	44
+chinese	dotstar-mid-common	dotstar	mid	common	0				-	-	-	-	-
+chinese	dotstar-high-none	dotstar	high	none	4885	是海德		.*是海德.*	0xE6	6647	0.062208	0	0
+chinese	dotstar-high-selective	dotstar	high	selective	6	怎么		.*怎么.*	0xE6	6647	0.062208	72	72
+chinese	dotstar-high-common	dotstar	high	common	0				-	-	-	-	-
 nginx	low-none	grid	low	none	254	62.104.48.197		62\.104\.48\.197	0x36	8224	0.014861	0	0
 nginx	low-selective	grid	low	selective	12	74.125.60.158		74\.125\.60\.158	0x37	6304	0.011392	86	86
 nginx	low-common	grid	low	common	2	exp12ubuntu10		exp12ubuntu10	0x65	6172	0.011153	1795	1795
@@ -48,8 +76,19 @@ nginx	high-common	grid	high	common	3	1.0.1ubuntu2		1\.0\.1ubuntu2	0x31	42146	0.0
 nginx	ordered-none	ordered	-	none	974	74.125.60.158	0.8.10.3	74\.125\.60\.158(?s:.*)0\.8\.10\.3	0x37	6304	0.011392	0	0
 nginx	ordered-selective	ordered	-	selective	126	216.46.173.126	exp12ubuntu10	216\.46\.173\.126(?s:.*)exp12ubuntu10	0x32	21792	0.039379	182	182
 nginx	ordered-common	ordered	-	common	33	HTTP/1.1"	ubuntu1	HTTP/1\.1"(?s:.*)ubuntu1	0x48	7888	0.014254	1827	1827
+nginx	dotstar-low-none	dotstar	low	none	254	62.104.48.197		.*62\.104\.48\.197.*	0x36	8224	0.014861	0	0
+nginx	dotstar-low-selective	dotstar	low	selective	12	74.125.60.158		.*74\.125\.60\.158.*	0x37	6304	0.011392	86	86
+nginx	dotstar-low-common	dotstar	low	common	2	exp12ubuntu10		.*exp12ubuntu10.*	0x65	6172	0.011153	1795	1795
+nginx	dotstar-mid-none	dotstar	mid	none	852	54.67.79.77		.*54\.67\.79\.77.*	0x35	13240	0.023925	0	0
+nginx	dotstar-mid-selective	dotstar	mid	selective	3	204.77.168.241		.*204\.77\.168\.241.*	0x32	21792	0.039379	117	117
+nginx	dotstar-mid-common	dotstar	mid	common	1	ubuntu1		.*ubuntu1.*	0x75	13702	0.024760	1827	1827
+nginx	dotstar-high-none	dotstar	high	none	470	173.203.157.20		.*173\.203\.157\.20.*	0x31	42146	0.076159	0	0
+nginx	dotstar-high-selective	dotstar	high	selective	6	180.179.174.219		.*180\.179\.174\.219.*	0x31	42146	0.076159	113	113
+nginx	dotstar-high-common	dotstar	high	common	3	1.0.1ubuntu2		.*1\.0\.1ubuntu2.*	0x31	42146	0.076159	925	925
 nginx	picked-1	picked	-	-	-	Mozilla/5.0		Mozilla/5\.0	0x4D	3382	0.006111	19	19
+nginx	dotstar-picked-1	dotstar	-	-	-	Mozilla/5.0		.*Mozilla/5\.0.*	0x4D	3382	0.006111	19	19
 nginx	picked-2	picked	-	-	-	" 404 		" 404 	0x22	24576	0.044410	2711	2711
+nginx	dotstar-picked-2	dotstar	-	-	-	" 404 		.*" 404 .*	0x22	24576	0.044410	2711	2711
 apache	low-none	grid	low	none	452	45664		45664	0x34	10144	0.010501	0	0
 apache	low-selective	grid	low	selective	47	rv:21.0		rv:21\.0	0x72	16909	0.017504	69	69
 apache	low-common	grid	low	common	8	Firefox		Firefox	0x46	2505	0.002593	1119	1122
@@ -62,7 +101,17 @@ apache	high-common	grid	high	common	5	/images/		/images/	0x2F	49884	0.051638	102
 apache	ordered-none	ordered	-	none	14721	with	12292	with(?s:.*)12292	0x77	9191	0.009514	0	0
 apache	ordered-selective	ordered	-	selective	1606	"Mozilla/4.0	2.0.50727	"Mozilla/4\.0(?s:.*)2\.0\.50727	0x22	24575	0.025439	73	73
 apache	ordered-common	ordered	-	common	113	/images/	"Mozilla/5.0	/images/(?s:.*)"Mozilla/5\.0	0x2F	49884	0.051638	953	953
+apache	dotstar-low-none	dotstar	low	none	452	45664		.*45664.*	0x34	10144	0.010501	0	0
+apache	dotstar-low-selective	dotstar	low	selective	47	rv:21.0		.*rv:21\.0.*	0x72	16909	0.017504	69	69
+apache	dotstar-low-common	dotstar	low	common	8	Firefox		.*Firefox.*	0x46	2505	0.002593	1119	1119
+apache	dotstar-mid-none	dotstar	mid	none	310	200.28.244.131		.*200\.28\.244\.131.*	0x32	29177	0.030203	0	0
+apache	dotstar-mid-selective	dotstar	mid	selective	17	i686		.*i686.*	0x69	26761	0.027702	161	161
+apache	dotstar-mid-common	dotstar	mid	common	1	like		.*like.*	0x6C	25044	0.025925	1652	1652
+apache	dotstar-high-none	dotstar	high	none	405	112.110.247.250		.*112\.110\.247\.250.*	0x31	45658	0.047263	0	0
+apache	dotstar-high-selective	dotstar	high	selective	17	14872		.*14872.*	0x31	45658	0.047263	185	185
+apache	dotstar-high-common	dotstar	high	common	5	/images/		.*/images/.*	0x2F	49884	0.051638	1026	1026
 apache	picked-1	picked	-	-	-	Googlebot		Googlebot	0x47	7384	0.007644	248	248
+apache	dotstar-picked-1	dotstar	-	-	-	Googlebot		.*Googlebot.*	0x47	7384	0.007644	248	248
 loghub	low-none	grid	low	none	360	/10.251.111.228:		/10\.251\.111\.228:	0x2F	2805	0.005584	0	0
 loghub	low-selective	grid	low	selective	53	false		false	0x66	5850	0.011646	170	326
 loghub	low-common	grid	low	common	1	INFO		INFO	0x49	3608	0.007183	1341	1341
@@ -75,7 +124,17 @@ loghub	high-common	grid	high	common	0				-	-	-	-	-
 loghub	ordered-none	ordered	-	none	30014	Algorithm	2016-09-28	Algorithm(?s:.*)2016-09-28	0x41	1402	0.002791	0	0
 loghub	ordered-selective	ordered	-	selective	964	mode=false	adj=0.0userId=0	mode=false(?s:.*)adj=0\.0userId=0	0x6D	6197	0.012337	72	72
 loghub	ordered-common	ordered	-	common	0				-	-	-	-	-
+loghub	dotstar-low-none	dotstar	low	none	360	/10.251.111.228:		.*/10\.251\.111\.228:.*	0x2F	2805	0.005584	0	0
+loghub	dotstar-low-selective	dotstar	low	selective	53	false		.*false.*	0x66	5850	0.011646	170	170
+loghub	dotstar-low-common	dotstar	low	common	1	INFO		.*INFO.*	0x49	3608	0.007183	1341	1341
+loghub	dotstar-mid-none	dotstar	mid	none	619	34711		.*34711.*	0x33	10577	0.021057	0	0
+loghub	dotstar-mid-selective	dotstar	mid	selective	33	complete		.*complete.*	0x63	10753	0.021407	72	72
+loghub	dotstar-mid-common	dotstar	mid	common	1	sshd		.*sshd.*	0x73	14964	0.029791	911	911
+loghub	dotstar-high-none	dotstar	high	none	3332	16:14:27.183		.*16:14:27\.183.*	0x31	24017	0.047814	0	0
+loghub	dotstar-high-selective	dotstar	high	selective	41	20:10:53		.*20:10:53.*	0x32	17013	0.033870	56	56
+loghub	dotstar-high-common	dotstar	high	common	0				-	-	-	-	-
 loghub	picked-1	picked	-	-	-	Failed password		Failed password	0x46	2362	0.004702	178	178
+loghub	dotstar-picked-1	dotstar	-	-	-	Failed password		.*Failed password.*	0x46	2362	0.004702	178	178
 gharchive	low-none	grid	low	none	7227	Judy		Judy	0x4A	4589	0.000274	0	0
 gharchive	low-selective	grid	low	selective	385	file.		file\.	0x66	171100	0.010204	45	195
 gharchive	low-common	grid	low	common	24	v=4"		v=4"	0x76	137015	0.008171	874	3841
@@ -88,4 +147,14 @@ gharchive	high-common	grid	high	common	29	issues		issues	0x69	799834	0.047701	84
 gharchive	ordered-none	ordered	-	none	289539	7068	"number":7	7068(?s:.*)"number":7	0x37	95574	0.005700	0	0
 gharchive	ordered-selective	ordered	-	selective	345199	Feat	path	Feat(?s:.*)path	0x46	8812	0.000526	43	43
 gharchive	ordered-common	ordered	-	common	8019	even	true	even(?s:.*)true	0x65	1006953	0.060053	908	908
+gharchive	dotstar-low-none	dotstar	low	none	7227	Judy		.*Judy.*	0x4A	4589	0.000274	0	0
+gharchive	dotstar-low-selective	dotstar	low	selective	385	file.		.*file\..*	0x66	171100	0.010204	45	45
+gharchive	dotstar-low-common	dotstar	low	common	24	v=4"		.*v=4".*	0x76	137015	0.008171	874	874
+gharchive	dotstar-mid-none	dotstar	mid	none	2288	osiris		.*osiris.*	0x6F	730694	0.043578	0	0
+gharchive	dotstar-mid-selective	dotstar	mid	selective	191	previous		.*previous.*	0x70	519356	0.030974	149	149
+gharchive	dotstar-mid-common	dotstar	mid	common	28	user"		.*user".*	0x75	562760	0.033562	1394	1394
+gharchive	dotstar-high-none	dotstar	high	none	11691	"id":2594464970		.*"id":2594464970.*	0x22	1169885	0.069771	0	0
+gharchive	dotstar-high-selective	dotstar	high	selective	275	"message":"Add		.*"message":"Add.*	0x22	1169885	0.069771	163	163
+gharchive	dotstar-high-common	dotstar	high	common	29	issues		.*issues.*	0x69	799834	0.047701	847	847
 gharchive	picked-1	picked	-	-	-	"PullRequestEvent"		"PullRequestEvent"	0x22	1169885	0.069771	302	302
+gharchive	dotstar-picked-1	dotstar	-	-	-	"PullRequestEvent"		.*"PullRequestEvent".*	0x22	1169885	0.069771	302	302

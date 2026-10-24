@@ -369,6 +369,11 @@ public sealed class TrinoRegexp
         return false;
     }
 
+    boolean usesDotStarLiteralSpanMatcherForDiagnostics()
+    {
+        return false;
+    }
+
     boolean usesTrinoBeginLineCountForDiagnostics()
     {
         return false;
@@ -859,6 +864,12 @@ public sealed class TrinoRegexp
         {
             super(pattern);
             this.spanMatcher = null;
+        }
+
+        @Override
+        boolean usesDotStarLiteralSpanMatcherForDiagnostics()
+        {
+            return spanMatcher != null;
         }
 
         @Override

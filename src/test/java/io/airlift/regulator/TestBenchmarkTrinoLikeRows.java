@@ -34,12 +34,17 @@ public class TestBenchmarkTrinoLikeRows
     public void testJmhParametersMatchTrinoRows()
             throws ReflectiveOperationException
     {
-        // TestBenchmarkTrinoRows checks workload and literal against the manifests.
-        for (String name : List.of("workload", "literal", "corpusDirectory")) {
+        // TestBenchmarkTrinoRows checks workload and literal against the manifests. The LIKE
+        // benchmark has no dot-star cells, whose %literal% would repeat their grid or picked cell.
+        for (String name : List.of("workload", "corpusDirectory")) {
             assertThat(parameter(BenchmarkTrinoLikeRows.BenchmarkData.class, name))
                     .as(name)
                     .isEqualTo(parameter(BenchmarkTrinoRows.BenchmarkData.class, name));
         }
+        assertThat(parameter(BenchmarkTrinoLikeRows.BenchmarkData.class, "literal"))
+                .isEqualTo(parameter(BenchmarkTrinoRows.BenchmarkData.class, "literal").stream()
+                        .filter(literal -> !literal.startsWith("dotstar-"))
+                        .toList());
     }
 
     @Test
@@ -60,7 +65,7 @@ public class TestBenchmarkTrinoLikeRows
     public void testEveryMethodCyclesThroughRows(String workload)
             throws Exception
     {
-        List<String> literals = TestingTrinoRowsBenchmarkInputs.literalIds(workload);
+        List<String> literals = TestingTrinoRowsBenchmarkInputs.likeLiteralIds(workload);
         assertThat(literals).isNotEmpty();
         BenchmarkTrinoLikeRows benchmark = new BenchmarkTrinoLikeRows();
         for (String literal : literals) {

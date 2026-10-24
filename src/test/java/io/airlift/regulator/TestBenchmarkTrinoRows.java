@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
+import static io.airlift.regulator.Re2.BooleanPartialMatchStrategy.CONTAINS;
 import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -61,6 +62,19 @@ public class TestBenchmarkTrinoRows
         for (Map<String, String> row : ordered) {
             String cell = row.get("workload") + "/" + row.get("literal_id");
             assertThat(TrinoRegexp.compile(utf8Slice(row.get("pattern"))).usesOrderedLiteralMatcherForDiagnostics()).as(cell).isTrue();
+        }
+    }
+
+    @Test
+    public void testDotStarCellsUseDotStarLiteralSpanMatcher()
+    {
+        List<Map<String, String>> dotStar = TestingTrinoRowsBenchmarkInputs.cellRows("dotstar");
+        assertThat(dotStar).isNotEmpty();
+        for (Map<String, String> row : dotStar) {
+            TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(row.get("pattern")));
+            String cell = row.get("workload") + "/" + row.get("literal_id");
+            assertThat(regexp.usesDotStarLiteralSpanMatcherForDiagnostics()).as(cell).isTrue();
+            assertThat(regexp.pattern().booleanPartialMatchStrategyForDiagnostics()).as(cell).isEqualTo(CONTAINS);
         }
     }
 

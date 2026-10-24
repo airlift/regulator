@@ -28,7 +28,7 @@ class TestTrinoRows(unittest.TestCase):
             (directory / "fixture.log").write_bytes(data)
             corpora = {"fixture.log": {"name": "fixture.log", "kind": "url", "bytes": str(len(data)),
                                        "sha256": trino_rows.sha256(data)}}
-            fixture = (("fixture", ("fixture.log",), ("x y",)),)
+            fixture = (("fixture", ("fixture.log",), ("mm",)),)
             with patch.object(trino_rows, "ROWS", 100):
                 workloads, literals = trino_rows.generate(directory, corpora, fixture)
                 self.assertEqual((workloads, literals), trino_rows.generate(directory, corpora, fixture))
@@ -50,16 +50,22 @@ class TestTrinoRows(unittest.TestCase):
             "high-common": ("mmmm", "1", "30", "30"),
             "ordered-none": (rows["ordered-none"]["pattern"], "5", "0", "0"),
             "ordered-selective": ("mmmm(?s:.*)aaaa\\.b", "1", "3", "3"),
-            "picked-1": ("x y", "-", "60", "60")})
+            "dotstar-low-none": (f".*{rows['low-none']['literal']}.*", "3", "0", "0"),
+            "dotstar-low-selective": (".*aaaa\\.b.*", "1", "3", "3"),
+            "dotstar-high-common": (".*mmmm.*", "1", "30", "30"),
+            # Each mmmm row holds mm twice, but .*mm.* spans the row, so it holds one match.
+            "picked-1": ("mm", "-", "30", "60"),
+            "dotstar-picked-1": (".*mm.*", "-", "30", "30")})
         self.assertIn(rows["low-none"]["literal"], {"zzzz", "zzzy", "kkkq"})
         # Pairs take the candidates in at least 1% of rows, kkkk too although it is in no band: of
         # their six orders, only mmmm then aaaa.b occurs.
         self.assertIn((rows["ordered-none"]["literal"], rows["ordered-none"]["second_literal"]), {
             ("aaaa.b", "mmmm"), ("mmmm", "kkkk"), ("kkkk", "mmmm"), ("kkkk", "aaaa.b"), ("aaaa.b", "kkkk")})
-        self.assertEqual([row["group"] for row in rows.values()], ["grid"] * 9 + ["ordered"] * 3 + ["picked"])
+        self.assertEqual([row["group"] for row in rows.values()],
+                         ["grid"] * 9 + ["ordered"] * 3 + ["dotstar"] * 9 + ["picked", "dotstar"])
+        empty = {"low-common", "mid-none", "mid-selective", "mid-common", "high-none", "high-selective"}
         self.assertEqual({key for key, row in rows.items() if not row["literal"]},
-                         {"low-common", "mid-none", "mid-selective", "mid-common", "high-none", "high-selective",
-                          "ordered-common"})
+                         empty | {"ordered-common"} | {f"dotstar-{key}" for key in empty})
         self.assertEqual((rows["high-common"]["first_byte"], rows["high-common"]["first_byte_count"]), ("0x6D", "120"))
 
     def test_ordered_pairs_need_the_second_literal_after_the_first(self):
@@ -87,7 +93,8 @@ class TestTrinoRows(unittest.TestCase):
             self.assertEqual([row["literal_id"] for row in literals if row["workload"] == workload],
                              [f"{tercile}-{band}" for tercile in trino_rows.TERCILES for band in trino_rows.BAND_NAMES] +
                              [f"ordered-{band}" for band in trino_rows.BAND_NAMES] +
-                             [f"picked-{index}" for index in range(1, len(picked) + 1)])
+                             [f"dotstar-{tercile}-{band}" for tercile in trino_rows.TERCILES for band in trino_rows.BAND_NAMES] +
+                             [f"{prefix}picked-{index}" for index in range(1, len(picked) + 1) for prefix in ("", "dotstar-")])
 
 
 if __name__ == "__main__":
