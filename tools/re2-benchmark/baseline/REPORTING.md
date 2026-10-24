@@ -73,6 +73,20 @@ campaign_id platform shard_id replica_id instance_id host_epoch
 artifact_uri artifact_sha256
 ```
 
+The controller also records where each launch was placed and why it failed:
+
+```text
+region availability_zone placement_score failure_classification
+```
+
+These are empty when unknown, such as an availability zone the launch never
+chose, a placement score the controller did not supply, or a session that
+reported no failure. A reclaimed host, or a launch that failed for capacity,
+quota, or another retryable reason, is recorded as an `interruption` whose
+`reason` is the wrapper's classified detail, such as `launch-capacity:...`.
+Event files written before these columns existed still reduce, and a resumed
+campaign keeps the columns its event file started with.
+
 The controller's preformatted `details` value is preserved. Additional columns
 are merged into JSON-object details in sorted-key order. For plain-text details,
 they are appended as a canonical `additional={...}` suffix. Events are copied
