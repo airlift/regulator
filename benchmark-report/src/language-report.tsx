@@ -76,7 +76,8 @@ export type ReportData = {
 type Sort = { key: string; descending: boolean } | null;
 type SortValue = string | number | null | undefined;
 type Selection = { language: string; cpu: string; memory: string };
-const cpuOrders = [["r9g", "r8g", "r8i"], ["c9g", "c8g", "c8i"]];
+// The 1.0 release also measured R8g; later campaigns measure only R9g and R8i.
+const cpuOrders = [["r9g", "r8g", "r8i"], ["r9g", "r8i"], ["c9g", "c8g", "c8i"]];
 export function cpuOrder(data: Pick<ReportData, "platforms">): string[] {
   return cpuOrders.find(order => order.every(cpu => Object.hasOwn(data?.platforms || {}, cpu))) || [];
 }
@@ -311,7 +312,7 @@ export function qualityDistribution(rows: Row[], side: TimingSide) {
   return { count: values.length, median: quantile(.5), p90: quantile(.9), aboveFive: values.filter(value => value > .05).length };
 }
 
-function MeasurementQuality({ rows, comparator, platform, memory, cpu }: { rows: Row[]; comparator: string; platform: string; memory: string; cpu: string }) {
+function MeasurementQuality({ rows, comparator, platform, memory, cpu, releaseVersion }: { rows: Row[]; comparator: string; platform: string; memory: string; cpu: string; releaseVersion?: string }) {
   const candidate = qualityDistribution(rows, "candidate");
   const control = qualityDistribution(rows, "comparator");
   if (!candidate || !control) return null;
@@ -329,17 +330,17 @@ function MeasurementQuality({ rows, comparator, platform, memory, cpu }: { rows:
     <p>Java timings use JMH. Costs average iterations, then independent processes, then hosts equally. Individual JVM executions can vary more than the uncertainty in their average. Expand a flagged workload for its measurement note. Full intervals and process measurements remain in the results download.</p>
     <details className="quality-methodology"><summary>Measurement methodology</summary>
       <p>Intervals resample paired hosts and whole processes. Native RE2 uses Google Benchmark; repetitions within one native process remain together. “No clear difference” means the ratio interval includes parity, regardless of the 5% annotation threshold.</p>
-      <p>The measurement follow-up replaced affected collections with isolated JMH forks, longer qualified timing windows and separate allocation profiling. Other results retain their original samples. The Regulator 1.0 implementation did not change.</p>
-      <p>Intervals describe the sampled hosts and processes. They do not guarantee repeatability across future collections. The full assessment also covers independent-run differences and distinct process timing levels in diagnostic workloads.</p>
-      <p><a href="./measurement-quality.txt" target="_blank" rel="noreferrer">Full measurement-quality assessment</a></p>
+      {releaseVersion === "1.0" && <p>The measurement follow-up replaced affected collections with isolated JMH forks, longer qualified timing windows and separate allocation profiling. Other results retain their original samples. The Regulator 1.0 implementation did not change.</p>}
+      <p>Intervals describe the sampled hosts and processes. They do not guarantee repeatability across future collections.{releaseVersion === "1.0" && " The full assessment also covers independent-run differences and distinct process timing levels in diagnostic workloads."}</p>
+      {releaseVersion === "1.0" && <p><a href="./measurement-quality.txt" target="_blank" rel="noreferrer">Full measurement-quality assessment</a></p>}
     </details>
-    <PlatformMeasurements cpu={cpu} />
+    {releaseVersion === "1.0" && <PlatformMeasurements cpu={cpu} />}
     </div>
   </details>;
 }
 
 function PlatformMeasurements({ cpu }: { cpu: string }) {
-  // Fixed 256 KiB C++ control observations from the completed follow-up.
+  // Fixed 256 KiB C++ control observations from the 1.0 measurement follow-up.
   const controls = ({ r8g: ["0.06%", "0.03%"], r9g: ["0.44%", "0.24%"], r8i: ["1.03%", "0.41%"] } as Record<string, string[]>)[cpu];
   return <>
     {controls && <details className="quality-methodology"><summary>Platform measurements: native controls</summary>
@@ -783,7 +784,7 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
       {language === "trino" && <><p>Regulator receives prepared UTF-8 input in Slice.</p><p>Trino's Joni library receives the same UTF-8 bytes.</p></>}
       {language === "like" && <><p>Regulator receives UTF-8 input and patterns in Slice.</p><p>Trino LikeMatcher receives UTF-8 input bytes and patterns as Java strings.</p></>}
     </div>
-    <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} />
+    <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} releaseVersion={data.sources.releaseVersion} />
     {pending.length > 0 && <p className="section-note">{pending.length} measurements are separated below because they need remeasurement or use different API work. Their recorded times remain available, but they are not included in speed comparisons.</p>}
     {ordinary.length > 0 && section("Everyday regex operations", "Compiled patterns over rotating inputs. Contains and count are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
     {specialized.length > 0 && section("Specialized engine and compiler", <>Patterns that get a scan plan run on the specialized engine, which interprets that plan{specialized.some(row => row.caseId.endsWith("/regular-engine")) && "; the regular engine runs the same patterns without one"}. The opt-in compiler, enabled with setGenerateBytecode, turns the plan into bytecode generated for each pattern. Times are warmed steady-state operations and exclude compilation.{columnRows.length > 0 && ` Each time is one scan of the first ${columnRows.map(count => count.toLocaleString("en-US")).join(" or ")} rows of a TPC-H column.`} Ratios between Regulator variants divide their {comparator}-relative ratios, so differences between hosts cancel.</>, <SpecializedPatternTable rows={specialized} like={language === "like"} comparator={comparator} />)}
@@ -823,7 +824,8 @@ function validateDisplayMetadata(data: Omit<ReportData, "rows">) {
   const text = (value: unknown) => typeof value === "string" && value.trim().length > 0;
   if (!["currentLabel", "currentCandidate", "jdk"].every(key => text(data?.sources?.[key as keyof ReportData["sources"]]))
       || (data?.sources?.releaseVersion !== undefined && !text(data.sources.releaseVersion))
-      || cpuOrder(data).length !== 3 || Object.keys(data?.platforms || {}).length !== 3
+      || cpuOrder(data).length === 0 || Object.keys(data?.platforms || {}).length !== cpuOrder(data).length
+      || (data?.sources?.releaseVersion === "1.0" && !cpuOrder(data).includes("r8g"))
       || !cpuOrder(data).every(cpu => text(data?.platforms?.[cpu]))
       || !languageOrder.every(language => text(data?.languages?.[language]?.label) && text(data?.languages?.[language]?.comparator))
       || (data?.publication !== undefined && !text(data.publication?.note))) {

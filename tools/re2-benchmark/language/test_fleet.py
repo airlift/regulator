@@ -1,4 +1,5 @@
 import copy
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -30,10 +31,9 @@ class TestFleet(unittest.TestCase):
         (self.source / "unrelated.txt").write_text("not part of the workload")
         plan = fleet.prepare(self.source, self.directory)
         self.assertEqual(len(plan["partitions"]), 39)
-        self.assertEqual(len(plan["jobs"]), 351)
+        self.assertEqual(len(plan["jobs"]), 234)
         self.assertEqual(plan["platform_allocations"], {
             "r9g": {"instance_type": "r9g.2xlarge", "vcpus": 8},
-            "r8g": {"instance_type": "r8g.large", "vcpus": 2},
             "r8i": {"instance_type": "r8i.large", "vcpus": 2},
         })
         self.assertEqual(fleet.validate(self.directory), plan)
@@ -94,18 +94,27 @@ class TestFleet(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "positive integer"):
                 fleet.prepare(self.source, self.root / "invalid", max_concurrent_hosts=value)
 
-    def test_archive_validation_preserves_schema_two_evidence(self):
-        plan = self.prepare_small_plan()
-        plan["schema_version"] = 2
-        del plan["platform_allocations"]
-        for assignment in plan["jobs"] + plan["host_batches"]:
-            del assignment["instance_type"]
-            del assignment["vcpus"]
-        collection.save(self.directory / "plan.json", plan)
-
-        with self.assertRaisesRegex(ValueError, "fleet protocol"):
-            fleet.validate(self.directory)
-        self.assertEqual(fleet.validate_archive(self.directory), plan)
+    def test_archive_validation_preserves_1_0_evidence(self):
+        # 1.0 plans also measured R8g after R9g.
+        with patch.object(fleet, "PLATFORMS", fleet.RELEASE_1_0_PLATFORMS):
+            plan = self.prepare_small_plan()
+        # Archived plans use schema 3, or schema 2 without recorded EC2 allocations.
+        for schema in (3, 2):
+            if schema == 2:
+                plan["schema_version"] = 2
+                del plan["platform_allocations"]
+                for assignment in plan["jobs"] + plan["host_batches"]:
+                    del assignment["instance_type"]
+                    del assignment["vcpus"]
+            collection.save(self.directory / "plan.json", plan)
+            with self.subTest(schema=schema):
+                with self.assertRaisesRegex(ValueError, "fleet protocol"):
+                    fleet.validate(self.directory)
+                self.assertEqual(fleet.validate_archive(self.directory), plan)
+                shutil.rmtree(self.root / "results", ignore_errors=True)
+                output = self.root / f"export-{schema}.json"
+                fleet.aggregate(self.directory, self.write_results(plan), output)
+                self.assertEqual(len(collection.load(output)["hosts"]), len(plan["jobs"]))
 
     def test_reject_incomplete_duplicate_or_changed_plan(self):
         original = self.prepare_small_plan()
@@ -127,8 +136,8 @@ class TestFleet(unittest.TestCase):
         selection = [(case['id'], 'trino') for case in manifest['cases'][:2]]
         plan = fleet.prepare(self.source, self.directory, selection=selection, operation_budget=10)
         self.assertEqual(len(plan['partitions']), 2)
-        self.assertEqual(len(plan['jobs']), 18)
-        self.assertEqual(len(plan['host_batches']), 9)
+        self.assertEqual(len(plan['jobs']), 12)
+        self.assertEqual(len(plan['host_batches']), 6)
         self.assertTrue(all(len(batch['jobs']) == 2 for batch in plan['host_batches']))
         self.assertEqual(fleet.validate(self.directory), plan)
         plan['selection'].pop()
@@ -149,7 +158,7 @@ class TestFleet(unittest.TestCase):
                   "isolated_pairs": [[manifest["cases"][0]["id"], "java"]], "max_batch_seconds": 4200,
                   "bootstrap_seconds": 600}
         plan = fleet.prepare(self.source, self.directory, operation_budget=10, duration_policy=policy)
-        self.assertEqual(len(plan["jobs"]), 351)
+        self.assertEqual(len(plan["jobs"]), 234)
         self.assertEqual(fleet.validate(self.directory), plan)
         self.assertEqual(sorted(job for batch in plan["host_batches"] for job in batch["jobs"]),
                          sorted(job["id"] for job in plan["jobs"]))
@@ -244,7 +253,8 @@ class TestFleet(unittest.TestCase):
                 "manifest_sha256": manifest_hash, "runners_sha256": runners_hash,
                 "source_commit": "commit", "source_tree": "tree", "comparators_sha256": "pins", "jdk": "JDK25",
                 "platform": job["platform"], "instance_identity": {
-                    "instanceType": job["instance_type"], "instanceId": f"i-{index}"},
+                    # Schema 2 plans recorded no allocation; their hosts were each platform's standard size.
+                    "instanceType": job.get("instance_type", job["platform"] + ".large"), "instanceId": f"i-{index}"},
                 "jvm_build": {"source_tree": "tree", "jvm": runners}})
             collection.save(result / "observations.json", observations)
             collection.export(partition, result)
@@ -259,9 +269,9 @@ class TestFleet(unittest.TestCase):
         output = self.root / "export.json"
         fleet.aggregate(self.directory, results, output)
         data = collection.load(output)
-        self.assertEqual(len(data["observations"]), 9 * 15)
-        self.assertEqual(len(data["comparisons"]), 9 * 10)
-        self.assertEqual(len(data["hosts"]), 9)
+        self.assertEqual(len(data["observations"]), 6 * 15)
+        self.assertEqual(len(data["comparisons"]), 6 * 10)
+        self.assertEqual(len(data["hosts"]), 6)
         self.assertEqual(before, {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before})
         with self.assertRaisesRegex(ValueError, "overwrite"):
             fleet.aggregate(self.directory, results, output)

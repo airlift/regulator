@@ -18,7 +18,9 @@ from pathlib import Path
 
 from acceptance import (
     EVIDENCE_FIELDS,
+    EXPECTED_PLATFORMS,
     RECEIPT_FIELDS,
+    RELEASE_1_0_PLATFORMS,
     SCHEMA_VERSION,
     SESSION_FIELDS,
     ValidationError,
@@ -213,8 +215,9 @@ def load_platforms(path):
     platforms = {row["platform"]: row for row in rows}
     if len(platforms) != len(rows):
         raise ReductionError("platform file contains duplicate platform identities")
-    if set(platforms) != {"r8i", "r8g", "r9g"}:
-        raise ReductionError(f"platforms must be r8i, r8g, and r9g; found {sorted(platforms)}")
+    if set(platforms) not in (set(EXPECTED_PLATFORMS), set(RELEASE_1_0_PLATFORMS)):
+        raise ReductionError(
+            f"platforms must be r8i and r9g, or the 1.0 release's r8i, r8g, and r9g; found {sorted(platforms)}")
     for name, platform in platforms.items():
         try:
             topology.validate(platform)

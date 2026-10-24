@@ -1,5 +1,9 @@
 # Isolated Trino replacement measurements
 
+This is the Regulator 1.0 measurement follow-up procedure. It measured R8i,
+R8g and R9g, and the current launcher no longer accepts R8g, so repeating it
+needs the archived 1.0 collector. The counts below are its frozen inventory.
+
 `remeasure.py` reuses the original exact-row manifest, semantic preparation, pinned
 comparators, release attestation and AWS transport. It collects fresh timing
 for `trino-operations` and `trino-final-line`. It does not rewrite the original
@@ -31,9 +35,9 @@ host uncertainty rather than counting individual iterations as independent.
 
 Four logical operations form one partition. The two shards have 46 and 44
 partitions, respectively. Three independent hosts on each of R8i, R8g and R9g
-produce 810 required host jobs, 9,720 engine/host selections and 2,160 public
-comparisons. Regulator's two memory modes and one shared Joni comparator run
-on each host. The primary timing floor is 540 machine-hours, before builds,
+produced 810 required host jobs, 9,720 engine/host selections and 2,160 public
+comparisons. Regulator's two memory modes and one shared Joni comparator ran
+on each host. The primary timing floor was 540 machine-hours, before builds,
 semantic verification, allocation collection, native controls and retries.
 
 Inspect one partition without AWS access:
@@ -43,10 +47,10 @@ python3 tools/re2-benchmark/baseline/remeasure.py \
   --shard trino-final-line --partition 0
 ```
 
-Use the existing [AWS runner](../aws/README.md) with its frozen source archive,
-release identity and Spot-only settings. The replacement protocol freezes the
-instance type and allocated vCPU count for every platform, and the runner uses
-that allocation when it provisions the host. Set
+Use the archived 1.0 collector's [AWS runner](../aws/README.md) with its frozen
+source archive, release identity and Spot-only settings. The replacement
+protocol freezes the instance type and allocated vCPU count for every platform,
+and the runner uses that allocation when it provisions the host. Set
 `BASELINE_PROTOCOL=smoke`, `BASELINE_PROTOCOL_QUALIFICATION=false`,
 `REGULATOR_RELEASE_VERSION=1.0`, the original `CAMPAIGN_SHARD_ID`, and
 `BENCHMARK_REMEASUREMENT_PARTITION` to the selected zero-based partition.
@@ -97,8 +101,9 @@ validates both; publication uses elapsed time.
 The selection helper verifies the original row-manifest hash and rejects
 unknown, duplicated or incomplete selections. A non-Trino shard automatically
 selects this protocol. Its `qualified_by_pilot` gate must be enabled only after
-the independent diagnostics support it. Validate representative formal jobs
-on all three CPU families before expanding the frozen partition inventory.
+the independent diagnostics support it. Representative formal jobs were
+validated on all three CPU families before the frozen partition inventory was
+expanded.
 The existing Trino replacement protocol and its 810 jobs are unchanged.
 
 

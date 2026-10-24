@@ -15,7 +15,8 @@ LANGUAGES = {
     'like': {'label': 'LIKE', 'comparator': 'Trino SQL LIKE'},
 }
 PLATFORMS = {'c9g': 'C9g · Graviton5', 'c8g': 'C8g · Graviton4', 'c8i': 'C8i · Intel'}
-RELEASE_PLATFORMS = {'r9g': 'R9g · Graviton5', 'r8g': 'R8g · Graviton4', 'r8i': 'R8i · Intel'}
+RELEASE_1_0_PLATFORMS = {'r9g': 'R9g · Graviton5', 'r8g': 'R8g · Graviton4', 'r8i': 'R8i · Intel'}
+CURRENT_PLATFORMS = {'r9g': 'R9g · Graviton5', 'r8i': 'R8i · Intel'}
 MEMORY_MODES = {'native': 'Native memory', 'safe': 'Pure Java'}
 STATES = {'compared', 'not-compatible', 'did-not-finish'}
 # Specialized-pattern case suffixes in report column order: the regular engine,
@@ -257,7 +258,8 @@ def validate_language_report(data):
         if data.get('presentation', {}).get('reviewPreview'):
             raise ValueError('preliminary publication cannot use private-preview presentation')
     platforms = data['platforms']
-    if set(platforms) not in (set(PLATFORMS), set(RELEASE_PLATFORMS)) or set(data['memoryModes']) != set(MEMORY_MODES):
+    if (set(platforms) not in (set(PLATFORMS), set(RELEASE_1_0_PLATFORMS), set(CURRENT_PLATFORMS)) or
+            set(data['memoryModes']) != set(MEMORY_MODES)):
         raise ValueError('missing platform or memory mode')
     if set(data['languages']) != set(LANGUAGES):
         raise ValueError('missing language')

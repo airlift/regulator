@@ -43,7 +43,7 @@ def validate_policy(policy):
     if not isinstance(policy.get("hourly_rates"), dict) or not policy["hourly_rates"]:
         raise BudgetError("fleet budget requires per-type hourly ceilings")
     for instance_type, rates in policy["hourly_rates"].items():
-        if instance_type not in {family + size for family in ("r8i", "r8g", "r9g") for size in (".large", ".2xlarge")}:
+        if instance_type not in {family + size for family in ("r8i", "r9g") for size in (".large", ".2xlarge")}:
             raise BudgetError("unapproved instance type in fleet budget")
         if (set(rates) != {"spot", "total"} or
                 any(type(value) not in (int, float) or not math.isfinite(value) for value in rates.values()) or

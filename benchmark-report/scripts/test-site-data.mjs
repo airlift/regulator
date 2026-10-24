@@ -262,6 +262,7 @@ const invalidMetadata = [
   value => { value.sources.jdk = null; },
   value => { delete value.platforms; },
   value => { delete value.platforms[cpus[2]]; },
+  value => { delete value.platforms.r8g; }, // The 1.0 release measured R8g.
   value => { value.platforms[cpus[0]] = []; },
   value => { value.publication = { status: "preliminary", note: {} }; },
 ];

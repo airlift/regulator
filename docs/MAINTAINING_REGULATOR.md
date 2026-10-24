@@ -97,7 +97,7 @@ Required:
 - a deterministic route or representation test
 - affected semantic and allocation tests
 - the exact affected benchmark and important protected controls
-- focused before/after AWS measurements on R9g, R8g, and R8i
+- focused before/after AWS measurements on R9g and R8i
 
 ### T3: Protected execution loop
 
@@ -110,7 +110,7 @@ Required:
 - direct-engine and public-path benchmarks
 - scaling and dense/sparse controls
 - generated-code inspection when the mechanism depends on JIT shape
-- AWS confirmation on R9g, R8g, and R8i
+- AWS confirmation on R9g and R8i
 
 ## Correctness gate
 
@@ -158,7 +158,7 @@ Use focused measurements during development:
 4. include important unaffected and fallback paths as protected controls
 5. check allocation and retained memory where relevant
 6. inspect scaling, not only one input size
-7. confirm a retained T2 or T3 change on R9g, R8g, and R8i
+7. confirm a retained T2 or T3 change on R9g and R8i
 
 A 2% change calls for investigation, not automatic acceptance or rejection.
 Weigh these together for every material difference:
@@ -242,8 +242,8 @@ is a separate decision, not the default development loop.
    and output construction. Identify other languages and APIs sharing the
    changed path, including fallback and nonzero Slice-offset cases.
 2. Include the exact motivating case, representative
-   affected workloads, and unchanged controls. Cover both memory modes and
-   R8i, R8g, and R9g for routing or hot-loop changes. Set a round limit and
+   affected workloads, and unchanged controls. Cover both memory modes on
+   both R8i and R9g for routing or hot-loop changes. Set a round limit and
    machine-hour budget before execution. Use the cost guidance in the
    [AWS guide](../tools/re2-benchmark/aws/README.md#machine-hours-and-cost).
 3. Add the deterministic path or behavior test and
@@ -276,13 +276,13 @@ is a separate decision, not the default development loop.
    Record accepted trade-offs in `REGULATOR_DECISIONS.md`, retain raw evidence,
    and verify cloud cleanup. Stop at the agreed decision or round limit.
 
-For example, this plans two baseline shards on all three platforms without
+For example, this plans two baseline shards on both platforms without
 launching machines. Choose shards based on the changed path, not this example:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py smoke focused-change \
   --shard traditional-search --shard expression-plans-a \
-  --result-root /durable/path/focused-change/smoke --max-concurrent 6
+  --result-root /durable/path/focused-change/smoke --max-concurrent 4
 ```
 
 Execution additionally requires `--execute` and the frozen candidate arguments
@@ -302,14 +302,17 @@ Run the complete frozen publication campaign only after:
 - the user-facing publication inventory is frozen independently of results
 - no additional cleanup is planned
 
-For 1.0, run the R9g, R8g, and R8i publication campaign after release, using
+For a release, run the R9g and R8i publication campaign after release, using
 the published artifact for public-API measurements and recording its checksum
-and release tag. Measure both native-memory and pure-Java routes. Run internal
-diagnostics only when a qualification failure or explicit measurement-quality
-question requires them; use the same tagged source and give them a separate
-inventory, budget, and private archive. A later change invalidates at least the
-affected publication shards; a broad or hard-to-isolate change invalidates the
-complete publication campaign.
+and release tag. The 1.0 campaign, which also measured R8g, is recorded in
+[`RESULTS_1.0.md`](benchmarks/RESULTS_1.0.md). Its public report is built by
+`benchmark-report/scripts/build_capture_data.py --released-campaign`, which
+supports only the 1.0 campaign. Measure both native-memory and pure-Java
+routes. Run internal diagnostics only when a qualification
+failure or explicit measurement-quality question requires them; use the same
+tagged source and give them a separate inventory, budget, and private archive.
+A later change invalidates at least the affected publication shards; a broad or
+hard-to-isolate change invalidates the complete publication campaign.
 
 Commit one final public report and download containing the exact candidate
 commit, hosts, JDK, compiler flags, comparator revisions, frozen public workload

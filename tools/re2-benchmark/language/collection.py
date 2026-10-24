@@ -728,7 +728,8 @@ def main():
     parser.add_argument("--java", default="java")
     parser.add_argument("--classpath")
     parser.add_argument("--native-runner")
-    parser.add_argument("--platform", choices=("r9g", "r8g", "r8i"))
+    import fleet
+    parser.add_argument("--platform", choices=fleet.PLATFORMS)
     parser.add_argument("--jvm-build-receipt", type=Path)
     parser.add_argument("--source-archive", type=Path)
     parser.add_argument("--candidate-provenance", type=Path)

@@ -364,23 +364,20 @@ class TestAcceptance(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "system is 'native', expected 'engine'"):
             self.validate(self.write_session(), observed)
 
-    def build_campaign(self, replicas=(1, 2, 3)):
+    def build_campaign(self, replicas=(1, 2, 3), architectures=(("r8i", "intel"), ("r9g", "arm"))):
         platforms = self.directory / "platforms.tsv"
         write_tsv(
             platforms,
             ("platform", "architecture", "instance_type", "vcpus",
              "concurrency_instance_type", "concurrency_vcpus"),
-            [
-                ("r8i", "intel", "r8i.large", "2", "r8i.2xlarge", "8"),
-                ("r8g", "arm", "r8g.large", "2", "r8g.2xlarge", "8"),
-                ("r9g", "arm", "r9g.large", "2", "r9g.2xlarge", "8"),
-            ])
+            [(platform, architecture, f"{platform}.large", "2", f"{platform}.2xlarge", "8")
+             for platform, architecture in architectures])
         shards = self.directory / "shards.tsv"
         write_tsv(shards, ("shard_id",), [("alpha",), ("beta",)])
 
         receipts = []
         sequence = 0
-        for platform, architecture in (("r8i", "intel"), ("r8g", "arm"), ("r9g", "arm")):
+        for platform, architecture in architectures:
             for shard_id in ("alpha", "beta"):
                 for replica_id in replicas:
                     sequence += 1
@@ -405,14 +402,22 @@ class TestAcceptance(unittest.TestCase):
     def test_accepts_complete_campaign(self):
         platforms, shards, receipts_path, _ = self.build_campaign()
         result = validate_campaign(self.manifest, platforms, shards, receipts_path, "campaign")
+        self.assertEqual(result["accepted_sessions"], 12)
+        self.assertEqual(result["accepted_rows"], 24)
+        # The 1.0 release campaign's archived evidence also measured R8g.
+        release = (("r8i", "intel"), ("r8g", "arm"), ("r9g", "arm"))
+        platforms, shards, receipts_path, _ = self.build_campaign(architectures=release)
+        result = validate_campaign(self.manifest, platforms, shards, receipts_path, "campaign")
         self.assertEqual(result["accepted_sessions"], 18)
-        self.assertEqual(result["accepted_rows"], 36)
+        platforms, shards, receipts_path, _ = self.build_campaign(architectures=release[:2])
+        with self.assertRaisesRegex(ValidationError, "platform identities"):
+            validate_campaign(self.manifest, platforms, shards, receipts_path, "campaign")
 
     def test_platform_file_requires_and_validates_both_worker_topologies(self):
         platforms, _, _, _ = self.build_campaign()
         loaded = __import__('acceptance').load_platforms(platforms)
-        self.assertEqual("r8g.large", topology.instance_type(loaded["r8g"], "alpha"))
-        self.assertEqual("r8g.2xlarge", topology.instance_type(loaded["r8g"], "lifecycle-shared-cold"))
+        self.assertEqual("r9g.large", topology.instance_type(loaded["r9g"], "alpha"))
+        self.assertEqual("r9g.2xlarge", topology.instance_type(loaded["r9g"], "lifecycle-shared-cold"))
         with platforms.open() as source:
             rows = list(csv.DictReader(source, delimiter="\t"))
         for field, value in (
@@ -439,14 +444,13 @@ class TestAcceptance(unittest.TestCase):
             "platform", "architecture", "instance_type", "vcpus",
             "concurrency_instance_type", "concurrency_vcpus"), [
                 ("r8i", "intel", "r8i.large", "2", "r8i.2xlarge", "8"),
-                ("r8g", "arm", "r8g.large", "2", "r8g.2xlarge", "8"),
                 ("r9g", "arm", "r9g.large", "2", "r9g.2xlarge", "8"),
             ])
         shards = self.directory / "shards.tsv"
         write_tsv(shards, ("shard_id",), [(shard,)])
         receipts = []
         sequence = 0
-        for platform, architecture in (("r8i", "intel"), ("r8g", "arm"), ("r9g", "arm")):
+        for platform, architecture in (("r8i", "intel"), ("r9g", "arm")):
             for replica in (1, 2, 3):
                 sequence += 1
                 session = self.write_session(
@@ -462,7 +466,7 @@ class TestAcceptance(unittest.TestCase):
         ledger = self.directory / "shared-receipts.tsv"
         write_dict_tsv(ledger, RECEIPT_FIELDS, receipts)
         result = validate_campaign(self.manifest, platforms, shards, ledger, "campaign")
-        self.assertEqual(9, result["accepted_sessions"])
+        self.assertEqual(6, result["accepted_sessions"])
         receipts[0]["instance_type"] = "r8i.large"
         write_dict_tsv(ledger, RECEIPT_FIELDS, receipts)
         with self.assertRaisesRegex(ValidationError, "instance_type"):
@@ -477,16 +481,16 @@ class TestAcceptance(unittest.TestCase):
             receipts_path,
             "campaign",
             (1,))
-        self.assertEqual(result["accepted_sessions"], 6)
-        self.assertEqual(result["accepted_rows"], 12)
+        self.assertEqual(result["accepted_sessions"], 4)
+        self.assertEqual(result["accepted_rows"], 8)
 
     def test_scoped_campaign_preserves_full_manifest_identity(self):
         platforms, shards, receipts_path, receipts = self.build_campaign()
         selected = [row for row in receipts if row['shard_id'] == 'alpha']
         write_dict_tsv(receipts_path, RECEIPT_FIELDS, selected)
         result = validate_campaign(self.manifest, platforms, shards, receipts_path, 'campaign', selected_shards=['alpha'])
-        self.assertEqual(result['accepted_sessions'], 9)
-        self.assertEqual(result['accepted_rows'], 18)
+        self.assertEqual(result['accepted_sessions'], 6)
+        self.assertEqual(result['accepted_rows'], 12)
         for scope in ([], ['unknown'], ['alpha', 'alpha']):
             with self.assertRaisesRegex(ValidationError, 'selected shards'):
                 validate_campaign(self.manifest, platforms, shards, receipts_path, 'campaign', selected_shards=scope)

@@ -16,23 +16,25 @@ import source_bracket
 import batching
 
 
-PLATFORMS = ("r9g", "r8g", "r8i")
+PLATFORMS = ("r9g", "r8i")
+# Archived plans are the 1.0 release campaign's, which also measured R8g.
+RELEASE_1_0_PLATFORMS = ("r9g", "r8g", "r8i")
 BATCH_OPERATION_BUDGET = 1
 DEFAULT_MAX_CONCURRENT_HOSTS = 64
 
 
 def platform_allocation(suite, platform):
-    if suite not in {"language-bulk", "language-lifecycle"} or platform not in PLATFORMS:
+    if suite not in {"language-bulk", "language-lifecycle"} or platform not in RELEASE_1_0_PLATFORMS:
         raise ValueError("unknown language suite or platform allocation")
     size = "2xlarge" if suite == "language-lifecycle" and platform == "r9g" else "large"
     return {"instance_type": f"{platform}.{size}", "vcpus": 8 if size == "2xlarge" else 2}
 
 
-def platform_allocations(suite):
-    return {platform: platform_allocation(suite, platform) for platform in PLATFORMS}
+def platform_allocations(suite, platforms=PLATFORMS):
+    return {platform: platform_allocation(suite, platform) for platform in platforms}
 
 
-def host_batches(manifest, partitions, replicas, operation_budget=None, duration_policy=None):
+def host_batches(manifest, partitions, replicas, operation_budget=None, duration_policy=None, platforms=PLATFORMS):
     """Group whole language partitions, never split a native/safe/comparator comparison."""
     if operation_budget is None:
         operation_budget = BATCH_OPERATION_BUDGET
@@ -58,7 +60,7 @@ def host_batches(manifest, partitions, replicas, operation_budget=None, duration
              "platform": platform, **platform_allocation(manifest["suite"], platform),
              "shard": f"{manifest['suite']}-{index:04d}", "replica": replica,
              "jobs": [f"{platform}/{partition}/replica-{replica}" for partition in group]}
-            for index, group in enumerate(groups) for replica in range(1, replicas + 1) for platform in PLATFORMS]
+            for index, group in enumerate(groups) for replica in range(1, replicas + 1) for platform in platforms]
 
 
 def copy_inputs(manifest, source, destination):
@@ -122,10 +124,10 @@ def prepare(manifest_directory, destination, replicas=3, selection=None, operati
             for partition in partitions for replica in range(1, replicas + 1) for platform in PLATFORMS]
     plan = {"schema_version": 3, "parent_manifest_sha256": parent_hash, "replicas": replicas,
             "platforms": list(PLATFORMS), "max_concurrent_hosts": max_concurrent_hosts,
-            "platform_allocations": platform_allocations(manifest["suite"]),
+            "platform_allocations": platform_allocations(manifest["suite"], PLATFORMS),
             "capacity_policy": "up to the limit; continue with available hosts",
             "partitions": partitions, "jobs": jobs,
-            "host_batches": host_batches(manifest, partitions, replicas, operation_budget, duration_policy),
+            "host_batches": host_batches(manifest, partitions, replicas, operation_budget, duration_policy, PLATFORMS),
             "batch_operation_budget": operation_budget}
     if duration_policy is not None:
         plan["duration_policy"] = duration_policy
@@ -149,17 +151,21 @@ def validate_plan(directory, allow_archived_schema):
     plan = collection.load(directory / "plan.json")
     source = directory / "source"
     manifest = collection.load(source / "manifest.json")
+    # Saved 1.0 plans measured three platforms. The oldest (schema 2) also
+    # predate recorded EC2 allocations.
+    archived = allow_archived_schema and plan.get("platforms") == list(RELEASE_1_0_PLATFORMS)
+    unallocated = archived and plan.get("schema_version") == 2
     collection.validate_manifest(manifest, source)
     source_bracket.validate(manifest, source)
     if "selected_languages" in manifest or "parent_manifest_sha256" in manifest:
         raise ValueError("fleet source must be unpartitioned")
     parent_hash = collection.digest((source / "manifest.json").read_bytes())
-    archived = allow_archived_schema and plan.get("schema_version") == 2
-    if (plan.get("schema_version") != 3 and not archived or plan["parent_manifest_sha256"] != parent_hash or
-            plan["platforms"] != list(PLATFORMS) or type(plan["replicas"]) is not int or plan["replicas"] < 1 or
+    platforms = RELEASE_1_0_PLATFORMS if archived else PLATFORMS
+    if (plan.get("schema_version") != 3 and not unallocated or plan["parent_manifest_sha256"] != parent_hash or
+            plan["platforms"] != list(platforms) or type(plan["replicas"]) is not int or plan["replicas"] < 1 or
             type(plan["max_concurrent_hosts"]) is not int or plan["max_concurrent_hosts"] < 1 or
-            (archived and "platform_allocations" in plan) or
-            (not archived and plan.get("platform_allocations") != platform_allocations(manifest["suite"]))):
+            (unallocated and "platform_allocations" in plan) or
+            (not unallocated and plan.get("platform_allocations") != platform_allocations(manifest["suite"], platforms))):
         raise ValueError("invalid fleet protocol or source identity")
     expected = {(case["id"], language) for case in manifest["cases"] for language in collection.ENGINES}
     if 'selection' in plan:
@@ -195,8 +201,8 @@ def validate_plan(directory, allow_archived_schema):
                       **platform_allocation(manifest["suite"], platform),
                       "partition": partition["id"], "replica": replica}
                      for partition in plan["partitions"] for replica in range(1, plan["replicas"] + 1)
-                     for platform in PLATFORMS]
-    if archived:
+                     for platform in platforms]
+    if unallocated:
         expected_jobs = [{key: value for key, value in job.items() if key not in ("instance_type", "vcpus")}
                          for job in expected_jobs]
     if plan["jobs"] != expected_jobs:
@@ -205,8 +211,8 @@ def validate_plan(directory, allow_archived_schema):
     if type(budget) is not int or not 1 <= budget <= 16:
         raise ValueError('invalid batch operation budget')
     expected_batches = host_batches(
-        manifest, plan["partitions"], plan["replicas"], budget, plan.get("duration_policy"))
-    if archived:
+        manifest, plan["partitions"], plan["replicas"], budget, plan.get("duration_policy"), platforms)
+    if unallocated:
         expected_batches = [{key: value for key, value in batch.items() if key not in ("instance_type", "vcpus")}
                             for batch in expected_batches]
     if plan.get("host_batches") != expected_batches:
@@ -379,7 +385,8 @@ def verify(directory, results, java, classpath, native):
 
 def aggregate(directory, results, output):
     directory, results, output = directory.resolve(), results.resolve(), output.resolve()
-    plan = validate(directory)
+    # Aggregation reads saved evidence, so 1.0 plans stay readable.
+    plan = validate_archive(directory)
     if output.exists():
         raise ValueError("will not overwrite an existing fleet export")
     plan_hash = collection.digest((directory / "plan.json").read_bytes())
@@ -409,7 +416,10 @@ def aggregate(directory, results, output):
         if identity != candidate or provenance["platform"] != job["platform"]:
             raise ValueError("mixed candidates, comparator versions, or platforms")
         instance = provenance["instance_identity"]
-        if not instance["instanceId"] or instance["instanceType"] != job["instance_type"]:
+        # Only archived schema 2 jobs lack an allocation. The 1.0 campaign launched them on
+        # the platform's standard size and accepted any host of the platform's family.
+        if not instance["instanceId"] or (instance["instanceType"] != job["instance_type"] if "instance_type" in job else
+                                          not instance["instanceType"].startswith(job["platform"] + ".")):
             raise ValueError("job host does not match platform")
         key = (job["platform"], job["partition"])
         if instance["instanceId"] in replica_instances.setdefault(key, set()):

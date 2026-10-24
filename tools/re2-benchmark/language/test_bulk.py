@@ -142,7 +142,7 @@ class TestBulkEvidence(unittest.TestCase):
     def test_fleet_partitions_keep_bulk_operation_and_all_source_inputs(self):
         destination = self.root / "fleet"
         plan = fleet.prepare(self.directory, destination, replicas=1)
-        self.assertEqual(len(plan["jobs"]), 9)
+        self.assertEqual(len(plan["jobs"]), 6)
         for partition in plan["partitions"]:
             directory = destination / "partitions" / partition["id"]
             manifest = collection.load(directory / "manifest.json")

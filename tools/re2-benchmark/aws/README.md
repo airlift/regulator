@@ -11,7 +11,7 @@ engineering diagnostics are separate from both.
 
 Do not collect performance evidence on a development machine. Local commands
 may validate manifests, scripts, and protocol behavior, but performance
-decisions require the pinned R8i, R8g, and R9g hosts in `baseline/platforms.tsv`.
+decisions require the pinned R8i and R9g hosts in `baseline/platforms.tsv`.
 
 ## Machine-hours and cost
 
@@ -36,9 +36,9 @@ An eight-vCPU `.2xlarge` hour costs differently from a two-vCPU `.large` hour.
 A successful-job floor excludes failed attempts and qualification diagnostics;
 it is not a complete campaign budget or a guaranteed maximum.
 
-Ordinary workers are `r8i.large`, `r8g.large`, and `r9g.large`, each with two
-vCPUs and 16 GiB RAM. Preserve the 8 GiB measured heap, use a 64–256 MiB
-launcher for forked JMH, and use 40 GiB gp3 roots after disk validation.
+Ordinary workers are `r8i.large` and `r9g.large`, each with two vCPUs and
+16 GiB RAM. Preserve the 8 GiB measured heap, use a 64–256 MiB launcher for
+forked JMH, and use 40 GiB gp3 roots after disk validation.
 The original `lifecycle-shared-cold` shard uses eight-vCPU `.2xlarge` workers.
 The measurement-quality follow-up also uses `r9g.2xlarge` for Trino, lifecycle
 and selected traditional/LIKE cohorts, based on exact production integrations
@@ -92,7 +92,6 @@ For example, a policy for at most 16 ordinary workers could contain:
   "minimum_launch_interval_seconds": 1,
   "hourly_rates": {
     "r8i.large": {"spot": 0.08, "total": 0.10},
-    "r8g.large": {"spot": 0.08, "total": 0.10},
     "r9g.large": {"spot": 0.08, "total": 0.10}
   }
 }

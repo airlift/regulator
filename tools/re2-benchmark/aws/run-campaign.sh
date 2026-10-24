@@ -9,7 +9,7 @@ AWS_REGION=${AWS_REGION:-us-west-2}
 TRANSFER_BUCKET=${TRANSFER_BUCKET:-}
 TRANSFER_PREFIX=${TRANSFER_PREFIX:-}
 INTEL_INSTANCE_TYPE=${INTEL_INSTANCE_TYPE:-r8i.large}
-ARM_INSTANCE_TYPE=${ARM_INSTANCE_TYPE:-r8g.large}
+ARM_INSTANCE_TYPE=${ARM_INSTANCE_TYPE:-r9g.large}
 INSTANCE_MARKET_TYPE=${INSTANCE_MARKET_TYPE:-on-demand}
 CAMPAIGN_SPOT_ONLY=${CAMPAIGN_SPOT_ONLY:-0}
 CAMPAIGN_SPOT_MAX_PRICE=${CAMPAIGN_SPOT_MAX_PRICE:-}
@@ -58,7 +58,7 @@ if [[ -n "${BENCHMARK_REMEASUREMENT_PARTITION}" ]]; then
             --print-allocation "${CAMPAIGN_PLATFORM}")
     case "${CAMPAIGN_PLATFORM}" in
         r8i) INTEL_INSTANCE_TYPE=${replacement_instance_type} ;;
-        r8g | r9g) ARM_INSTANCE_TYPE=${replacement_instance_type} ;;
+        r9g) ARM_INSTANCE_TYPE=${replacement_instance_type} ;;
     esac
     BENCHMARK_EXPECTED_VCPUS=${replacement_vcpus}
 fi
@@ -234,14 +234,13 @@ case "${CAMPAIGN_PLATFORM}" in
             exit 1
         fi
         ;;
-    r8g | r9g)
-        required_instance_type="${CAMPAIGN_PLATFORM}.*"
-        if [[ "${CAMPAIGN_ARCHITECTURES}" != arm || "${ARM_INSTANCE_TYPE}" != ${required_instance_type} ]]; then
-            echo "Platform ${CAMPAIGN_PLATFORM} requires CAMPAIGN_ARCHITECTURES=arm and a ${CAMPAIGN_PLATFORM} instance" >&2
+    r9g)
+        if [[ "${CAMPAIGN_ARCHITECTURES}" != arm || "${ARM_INSTANCE_TYPE}" != r9g.* ]]; then
+            echo "Platform r9g requires CAMPAIGN_ARCHITECTURES=arm and a r9g instance" >&2
             exit 1
         fi
         ;;
-    *) echo "CAMPAIGN_PLATFORM must be r8i, r8g, or r9g: ${CAMPAIGN_PLATFORM}" >&2; exit 1 ;;
+    *) echo "CAMPAIGN_PLATFORM must be r8i or r9g: ${CAMPAIGN_PLATFORM}" >&2; exit 1 ;;
 esac
 case "${INSTANCE_MARKET_TYPE}" in
     on-demand | spot) ;;

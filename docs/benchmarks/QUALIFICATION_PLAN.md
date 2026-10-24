@@ -1,8 +1,11 @@
 # Regulator performance qualification plan
 
-Version 1.0 is released. This plan records the qualification requirements for
-measurements of the published `io.airlift:regulator:1.0` artifact. The
-[release results](RESULTS_1.0.md) report the completed campaign and its
+This plan records the qualification requirements for a release campaign,
+which measures a published Regulator artifact on R9g and R8i for the RE2, Java,
+Trino, and LIKE languages.
+
+The 1.0 campaign measured `io.airlift:regulator:1.0` also on R8g. The
+[release results](RESULTS_1.0.md) report it and its
 [measurement-quality follow-up](MEASUREMENT_QUALITY.md). The preliminary
 development measurements remain a separate historical capture.
 
@@ -14,7 +17,7 @@ or explicit measurement-quality question requires them.
 
 For machine-hour and dollar planning, see the
 [AWS cost guide](../../tools/re2-benchmark/aws/README.md#machine-hours-and-cost).
-The 1.0 campaign uses Oregon Spot only, with no On-Demand fallback. Freeze the
+The 1.0 campaign used Oregon Spot only, with no On-Demand fallback. Freeze the
 publication job plans and shared admission budget before collection. Give any
 conditional diagnostic campaign its own inventory, budget, and archive.
 
@@ -121,13 +124,13 @@ AWS qualification or measured performance.
 Use dedicated, non-burstable AWS instances with local execution on:
 
 - one Intel R8i instance
-- one Graviton5 R9g instance as the primary current Arm target
-- one Graviton4 R8g instance as the production and generational Arm baseline
+- one Graviton5 R9g instance as the Arm target
 
-The exact instance types, AMIs, and JDKs are pinned in
+The [1.0 release results](RESULTS_1.0.md) also measured a Graviton4 R8g
+instance. The exact instance types, AMIs, and JDKs are pinned in
 [`platforms.tsv`](../../tools/re2-benchmark/baseline/platforms.tsv).
-Ordinary workers use `r8i.large`, `r8g.large`, and `r9g.large`, each with two
-vCPUs and 16 GiB RAM. The `lifecycle-shared-cold` shard uses the corresponding
+Ordinary workers use `r8i.large` and `r9g.large`, each with two vCPUs and
+16 GiB RAM. The `lifecycle-shared-cold` shard uses the corresponding
 8-vCPU `.2xlarge` type and affinity `0-7`; ordinary work uses affinity `0`.
 The measured heap is 8 GiB. Forked JMH launchers use 64–256 MiB, with the
 full heap and memory-mode options explicitly passed to the measured fork.
@@ -159,17 +162,16 @@ Joni's Rebar verification and measurement remain bounded by their existing
 If verification classifies every Joni row, no Joni measurement process runs.
 Malformed output, unknown errors, and unexpected process failures remain fatal.
 
-Report R8g and R9g independently; do not combine them into one Arm aggregate.
 Record the reported CPU frequency, cache topology, memory generation, and
-available vector instruction capabilities so differences between Graviton
-generations can be attributed rather than treated as run-to-run noise.
+available vector instruction capabilities so differences between platforms can
+be attributed rather than treated as run-to-run noise.
 
 Pin single-threaded runs to one logical CPU and verify that no second benchmark
 uses its sibling thread. Disable unrelated agents and scheduled work. Use a
 fixed CPU power policy where the platform permits it. Reboot or replace the
 instance between independent host sessions.
 
-Run three independent host sessions for Intel, R8g, and R9g. A session is a
+Run three independent host sessions on each of R8i and R9g. A session is a
 fresh instance or reboot followed by the complete randomized benchmark order.
 
 ## Workload manifest

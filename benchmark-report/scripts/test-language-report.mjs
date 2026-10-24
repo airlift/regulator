@@ -59,6 +59,9 @@ const releaseHtml = renderToStaticMarkup(React.createElement(LanguageReport, { d
 assert.match(releaseHtml, /R9g/);
 assert.match(releaseHtml, /R8i/);
 assert.doesNotMatch(releaseHtml, />C9g</);
+const currentData = { ...releaseData, platforms: { r9g: "R9g", r8i: "R8i" } };
+assert.deepEqual(Array.from(exports.cpuOrder(currentData)), ["r9g", "r8i"]);
+assert.doesNotMatch(renderToStaticMarkup(React.createElement(LanguageReport, { data: currentData })), /R8g/);
 const publishedReleaseHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: {
   ...releaseData, sources: { ...releaseData.sources, currentLabel: "Regulator 1.0 results", releaseVersion: "1.0" },
 } }));
@@ -690,6 +693,15 @@ assert.doesNotMatch(qualityHtml, /ratio-interval/);
 assert.match(qualityHtml, /No clear difference/i);
 assert.match(qualityHtml, /<span class="scan-result tie"[^>]*>no clear difference<sup><button[^>]*>\*<\/button><\/sup><\/span>/);
 assert.match(qualityHtml, /id="quality-high"/);
+// The native-control figures and the measurement follow-up belong to the 1.0 release only.
+const controlsHtml = (base, sources) => renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...base, sources,
+  rows: [qualityRow, qualityReused].map(row => ({ ...row, platform: "r9g" })) } }));
+const releaseControlsHtml = controlsHtml(releaseData, { ...releaseData.sources, releaseVersion: "1.0" });
+assert.match(releaseControlsHtml, /native controls/);
+assert.match(releaseControlsHtml, /measurement follow-up/);
+for (const sources of [currentData.sources, { ...currentData.sources, releaseVersion: "1.1" }]) {
+  assert.doesNotMatch(controlsHtml(currentData, sources), /native controls|measurement follow-up/);
+}
 // Expanded rows explain only applicable markers; unflagged measurements stay quiet.
 const flaggedDetails = detailsHtml(qualityRow);
 assert.match(flaggedDetails, /\* native RE2 timing uncertainty: 10.0%/);

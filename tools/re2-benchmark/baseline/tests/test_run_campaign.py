@@ -138,7 +138,7 @@ class TestRunCampaign(unittest.TestCase):
     def test_pinned_jobs_allocate_two_vcpus_except_multicore_shard(self):
         platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
         jobs = RUN_CAMPAIGN.build_jobs("primary", platforms, ["engine", "lifecycle-shared-cold"], None)
-        self.assertEqual(len(jobs), 18)
+        self.assertEqual(len(jobs), 12)
         for job in jobs:
             expected_vcpus = 8 if job.shard == "lifecycle-shared-cold" else 2
             expected_size = ".2xlarge" if expected_vcpus == 8 else ".large"
@@ -931,7 +931,7 @@ class TestRunCampaign(unittest.TestCase):
                                        RUN_CAMPAIGN.read_shards(SCRIPT.parent), None)
         arguments = SimpleNamespace(campaign_id="final", max_concurrent=64, phase="primary")
         RUN_CAMPAIGN.validate_configuration(arguments, jobs)
-        self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 8 * 5400 + 3600)
+        self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 6 * 5400 + 3600)
         arguments.max_concurrent_per_platform = 10
         RUN_CAMPAIGN.validate_configuration(arguments, jobs)
         self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 16 * 5400 + 3600)
