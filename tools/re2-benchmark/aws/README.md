@@ -216,6 +216,7 @@ The checked-in inputs are:
 - `baseline/comparators.tsv`: pinned comparator identities
 - `baseline/protocol-representatives.tsv`: bounded/full protocol equivalence
 - `baseline/row-protocol.tsv`: each row's frozen qualification protocol
+- `baseline/units.tsv` and `baseline/unit-rows.tsv`: the work units each shard's rows are divided into, not yet used by hosts
 
 Run the validators before allocating hosts:
 
@@ -224,6 +225,7 @@ python3 tools/re2-benchmark/baseline/validate-manifest.py
 python3 tools/re2-benchmark/baseline/validate-protocol-representatives.py
 python3 tools/re2-benchmark/baseline/validate-row-protocol.py
 python3 tools/re2-benchmark/baseline/validate-shard-plans.py
+python3 tools/re2-benchmark/baseline/validate-units.py
 python3 tools/re2-benchmark/baseline/validate-mode-inventory.py
 ```
 

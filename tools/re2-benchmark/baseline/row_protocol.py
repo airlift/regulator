@@ -96,6 +96,10 @@ def protocol(row_id, execution, processes="-", warmup_iterations="-", warmup_tim
                              str(measurement_iterations), measurement_time, maximum_relative_standard_error)))
 
 
+def protocol_key(protocol):
+    return tuple(protocol[field] for field in FIELDS[1:])
+
+
 def row_protocol(row, handler, candidate_system, window, precision, full_protocol_selections):
     row_id = row["row_id"]
     if row["suite"] == "retained-memory":

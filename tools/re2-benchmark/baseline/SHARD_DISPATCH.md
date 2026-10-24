@@ -222,6 +222,56 @@ Engine builds change where an engine binary came from, not what a route
 measures or how it is accepted and reduced. The language comparison does not
 use them.
 
+## Work Units
+
+A work unit is a set of one shard's rows that a host can measure between two
+chained calibrations in about 15 minutes, with every comparison and scaling
+fit it feeds complete inside it. `generate-units.py` writes `units.tsv` (one
+line per unit with its counts and estimated seconds) and `unit-rows.tsv`
+(each unit's owned rows, copied rows, and representatives; one row ID
+contains a comma, so row lists are not packed into a column).
+`validate-units.py` regenerates both files byte for byte and checks them
+independently. Hosts still measure whole routes; nothing reads units yet.
+
+- Atoms are the rows that must share a unit: every system of one logical row,
+  which keeps both routes, native RE2 brackets, Joni, Trino, and route
+  controls beside their candidates; every point of a scaling group; the whole
+  `retained-memory` shard; and each Rebar workload with all of its engines.
+- A unit's share of a JMH method must stay one exact selector, the method and
+  one Cartesian `-p` block for each system and frozen protocol. A method is
+  split along at most one parameter, its most varied one outside its scaling
+  sizes, so rows sharing that parameter's value are one atom.
+- An atom over budget that holds native RE2 rows is split without its logical
+  row links: each route's scaling groups become their own atom, still joined
+  to any Joni, Trino, or route-control comparator, and each copies the native
+  bracket rows it is compared against. The copy in the unit measuring the
+  bracket's own route owns the row's sample; other copies only pair.
+- Each shard is packed into `ceil(cost / 788 s)` units, the 900-second unit
+  less one chained calibration, by placing atoms largest first, ties by
+  smallest row ID, into the unit with the lowest estimate. When a unit holding
+  several atoms exceeds the budget, the shard gets one more unit and is packed
+  again; `trino-like` needs six rather than five. Costs come from
+  `unit_cost.py`, including each unit's own selector startups and, for the
+  most demanding of replicas 1 to 3, its representatives. The model counts a
+  startup per method even where methods sharing one `-p` block run as one
+  selector, a deliberately conservative allowance. Units are indexed by
+  their smallest owned row ID, and `lifecycle-shared-cold` units are measured
+  on the concurrency instance type.
+- Each representative that runs, one whose row is frozen with 50 ms windows,
+  belongs to the unit owning its row; replica 4 uses replica 1's. The
+  `trino-like` and full-protocol entries never run and are not attached.
+- A unit ID is the SHA-256 of the shard, the sorted owned and copied rows, the
+  digest of their frozen protocols, the attached representatives, and the
+  order rule, under which a unit sequences its rows as its route handler
+  sequences a route, comparator order included. Changing any of them changes
+  the ID.
+- A unit over 900 seconds is a single atom measured alone, and
+  `validate-units.py` allows only the unit IDs it lists: the 47-minute
+  `retained-memory` shard, each 19-minute text size of
+  `lifecycle-shared-cold` with both routes over five worker counts, and each
+  17-minute route of a `traditional-extra-*` eight-size scaling group with its
+  native bracket.
+
 ## Comparator Ordering
 
 `JONI_COMPARATOR_ORDER=forward|reverse` controls the accepted measurement

@@ -32,7 +32,7 @@ def main():
                        check=True, timeout=300)
     for validator in ("validate-manifest.py", "validate-mode-inventory.py",
                       "validate-protocol-representatives.py", "validate-row-protocol.py",
-                      "validate-shard-plans.py"):
+                      "validate-shard-plans.py", "validate-units.py"):
         print(f"Validating {validator}", flush=True)
         subprocess.run([sys.executable, str(ROOT / "baseline" / validator)],
                        cwd=ROOT.parents[1], env=environment, check=True, timeout=300)

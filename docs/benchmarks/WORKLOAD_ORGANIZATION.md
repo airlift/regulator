@@ -110,7 +110,8 @@ baseline already reduces, needs no report change: it adds its catalog rows to
 campaign code that measures them, which is a benchmark class, the branch of
 `generate-manifest.py` that writes its manifest rows, and its shard's handler in
 `run-shard.sh`. It then regenerates `row-protocol.tsv` with
-`generate-row-protocol.py`.
+`generate-row-protocol.py` and `units.tsv` and `unit-rows.tsv` with
+`generate-units.py`.
 
 ## Bulk text search
 
