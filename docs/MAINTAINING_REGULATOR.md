@@ -40,8 +40,9 @@ code and running the relevant benchmarks.
 
 When changing a helper marked "Copied as", change the copy it names. When that
 copy is in `TrinoScanKernelSupport` or `VectorTrinoScanKernelSupport`, also run
-`TestTrinoScanKernel` and `TestRe2ScanPlan`; when it is in
-`TrinoLikeKernelSupport`, run `TestTrinoLikeKernel` and `TestTrinoLikeCorpus`.
+`TestTrinoScanKernel`, `TestRe2ScanPlan`, and `TestJavaScanPlan`; when it is
+in `TrinoLikeKernelSupport`, run `TestTrinoLikeKernel` and
+`TestTrinoLikeCorpus`.
 Code whose comment names `TrinoLikeKernelGenerator` has its copy in the emitter
 rather than in Java source; change the emitter with it and run the same tests.
 

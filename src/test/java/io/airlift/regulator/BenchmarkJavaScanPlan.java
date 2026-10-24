@@ -50,7 +50,9 @@ import static io.airlift.slice.Slices.utf8Slice;
  * <p>
  * With {@code scanPlan=false}, every pattern compiles without its scan plan, so the methods time the
  * ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
- * {@code -p scanPlan=true} this source also times a build without Java scan plans.
+ * {@code -p scanPlan=true} this source also times a build without Java scan plans. With
+ * {@code generateBytecode=true}, each pattern with a case-sensitive plan runs a class generated for
+ * it; that option is also set reflectively, and only then.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -127,6 +129,11 @@ public class BenchmarkJavaScanPlan
         @Param({"true", "false"})
         public boolean scanPlan;
 
+        // Experimental per-pattern scan kernels; false compiles every pattern as it would without
+        // the option.
+        @Param("false")
+        public boolean generateBytecode;
+
         Slice[] expressions;
         private JavaRegexp.Options options;
         private MethodHandle compiler;
@@ -147,7 +154,7 @@ public class BenchmarkJavaScanPlan
             source.scanPlan = true;
             source.setup();
 
-            options = JavaRegexp.Options.defaults();
+            options = generateBytecode ? generatingOptions() : JavaRegexp.Options.defaults();
             compiler = compiler(scanPlan);
             int count = source.expressions.length;
             expressions = new Slice[count];
@@ -272,6 +279,22 @@ public class BenchmarkJavaScanPlan
         catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Cannot find JavaRegexp." + (scanPlan ? "compile" : "compileWithoutScanPlanForTesting"), e);
         }
+    }
+
+    /**
+     * Returns default options that generate bytecode, resolved reflectively so that this source
+     * also runs against a build without the option when it is not requested.
+     */
+    private static JavaRegexp.Options generatingOptions()
+    {
+        JavaRegexp.Options options = JavaRegexp.Options.defaults();
+        try {
+            JavaRegexp.Options.class.getMethod("setGenerateBytecode", boolean.class).invoke(options, true);
+        }
+        catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Cannot find JavaRegexp.Options.setGenerateBytecode", e);
+        }
+        return options;
     }
 
     private static JavaRegexp compile(MethodHandle compiler, Slice expression, JavaRegexp.Options options)
