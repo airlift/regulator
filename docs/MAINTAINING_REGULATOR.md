@@ -128,6 +128,18 @@ Every behavior change must identify its authority:
 [Language Authorities](../REGULATOR_DECISIONS.md#language-authorities) states
 how strictly each authority binds.
 
+For a Trino call on whether a fork behavior is a bug or Trino's intent, start
+with the fork's history:
+[airlift/joni 2.1.5.3](https://github.com/airlift/joni/commits/2.1.5.3) and
+[airlift/jcodings 1.0.12.1](https://github.com/airlift/jcodings/commits/1.0.12.1).
+Each is JRuby's upstream code plus a few Trino commits: packaging under
+`io.airlift`, Java syntax and properties Trino kept from the Java regular
+expressions it used before Joni, such as `\pL` without braces, named captures,
+and Java's blocks and character properties, and two upstream word-boundary
+fixes picked onto the fork. A behavior one of those Trino commits introduced is
+Trino's intent. Any other behavior came from upstream, so whether modern Joni
+and Oniguruma changed it, and why, informs the call.
+
 Before changing behavior, add a failing deterministic test based on the
 appropriate authority. Exercise the public or engine path that failed, not just
 a helper. For an optimization, verify route selection or data representation
