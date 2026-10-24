@@ -181,6 +181,16 @@ jobs:
           fi
           ./mvnw clean install -B -V -P ci "${arguments[@]}"
 
+      - name: Install Node for the TeaVM check
+        if: matrix.java-version == 25 && matrix.native-access == 'disabled'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Check pattern parsing in TeaVM JavaScript and Wasm GC
+        if: matrix.java-version == 25 && matrix.native-access == 'disabled'
+        run: tools/teavm/verify.sh
+
   ci-success:
     if: always()
     needs:

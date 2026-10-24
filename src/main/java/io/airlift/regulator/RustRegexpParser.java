@@ -1181,7 +1181,7 @@ final class RustRegexpParser
                 throw errorAtCurrent(ErrorKind.UNICODE_CLASS_INVALID);
             }
             bumpAndBumpSpace();
-            return new UnicodeClassAst(start, position, negated, UnicodeKind.ONE_LETTER, Character.toString(letter), null, false);
+            return new UnicodeClassAst(start, position, negated, UnicodeKind.ONE_LETTER, new String(Character.toChars(letter)), null, false);
         }
 
         private BracketedAst parseSetClass()

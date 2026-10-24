@@ -24,6 +24,38 @@ if (matcher.find()) {
 }
 ```
 
+## Pattern validation and capture metadata
+
+Use `RustRegexp.parse(pattern)` to check a pattern without building a matching
+engine. It calls the same parser as `compile` and returns immutable metadata:
+
+```java
+PatternInfo info = RustRegexp.parse(Slices.utf8Slice("(?<word>\\w+)([0-9]+)"));
+int groups = info.capturingGroupCount(); // 2, excluding the whole-match group 0
+Map<String, Integer> names = info.namedCapturingGroups(); // {word=1}
+```
+
+The overload `parse(pattern, options)` uses the current syntax options. Both
+methods throw `RegexpParseException` for invalid syntax and unsupported pattern
+constructs, with the same error codes and UTF-8 byte offsets as `compile`.
+The returned metadata retains neither the input Slice nor a matching engine.
+Parsing does not check the memory needed to compile or execute a pattern.
+
+### TeaVM
+
+The parsing API supports TeaVM JavaScript and Wasm GC. Applications can opt into
+`io.airlift.regulator.teavm.TeaVMParsingSupport` to substitute Slice's
+byte-array operations and include Regulator's pinned Unicode data. Register
+the providers as described in [tools/teavm](../../../tools/teavm/README.md).
+Consumers use the normal Regulator and Slice APIs; there is no second parser
+or Unicode implementation.
+The JVM continues using Airlift Slice.
+
+The substitution covers the operations reachable from parsing, including
+nonzero Slice offsets and UTF-8 diagnostics. Unsupported Slice operations fail
+TeaVM dependency checking rather than falling back to JVM code. Full pattern
+compilation and matching remain JVM-only.
+
 ## Matching
 
 The compiled-pattern operations have the same signatures as `JavaRegexp`:
