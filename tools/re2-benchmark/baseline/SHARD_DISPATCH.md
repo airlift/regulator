@@ -188,6 +188,19 @@ exceed 90 minutes. `run-metadata.txt` records each route estimate, while
 host bound. Native RE2 and Rebar keep their checked-in specialized protocols
 rather than being forced through JMH.
 
+`unit_cost.py` estimates the measurement seconds of any set of rows from their
+frozen protocols, with the same per-row, per-selector startup,
+representative, and calibration rules. It leaves out the cold-build, pinned
+Trino preparation, and host bootstrap allowances, which do not grow with the
+rows a host measures, and the Rebar verification allowance, which grows with
+the selected Rebar rows. `validate-shard-plans.py` checks the
+model against every planned route on every replica. The route estimate
+differs from it in three recorded ways: it charges none of `trino-like`'s
+3,600 seconds of iterations, it charges the compiler warmup to the 26 native
+`traditional-capture` rows that share the compiler benchmark names (325
+seconds), and it also charges each full-protocol row the bounded windows that
+row never runs (5 seconds each).
+
 Measured-shard normalization requires exactly one process sample group in each
 top-level JMH JSON file. Calibration retains JMH's ordinary forked shape: one
 qualification JSON file contains five fork groups, all of which are included
