@@ -338,7 +338,11 @@ mkdir -p "${SESSION_DIR}"
 ROOT_BASHPID=${BASHPID}
 CLEANUP_CAUSE=exit
 INSTANCE_IDS=()
+# A launch is attempted once RunInstances is submitted.
 LAUNCH_ATTEMPTED=0
+# Once any RunInstances attempt of the launch failed without AWS proving it rejected the request, such as
+# a timeout, an instance may exist that discovery does not see yet, whatever the later attempts returned.
+LAUNCH_AMBIGUOUS=0
 LAUNCHED_INSTANCE_ID=
 INTEL_AVAILABILITY_ZONE=none
 ARM_AVAILABILITY_ZONE=none
@@ -429,8 +433,9 @@ classify_launch_error()
         fi
         return 0
     fi
+    # SpotMaxPriceTooLow rejects the request outright: the region's Spot price is above the ceiling.
     if [[ "${market}" == spot ]] &&
-            grep -Eq 'InsufficientInstanceCapacity|UnfulfillableCapacity|MaxSpotInstanceCountExceeded' \
+            grep -Eq 'InsufficientInstanceCapacity|UnfulfillableCapacity|MaxSpotInstanceCountExceeded|SpotMaxPriceTooLow' \
                 <<<"${launch_error}"; then
         record_failure_classification retryable-spot "launch-capacity:${launch_error}"
         return 0
@@ -441,6 +446,13 @@ classify_launch_error()
         return 0
     fi
     return 1
+}
+
+# Whether AWS rejected the RunInstances request outright, so it launched nothing: the errors
+# classify_launch_error classifies.
+launch_error_is_rejection()
+{
+    (record_failure_classification() { :; }; classify_launch_error "$@")
 }
 
 retry_cleanup_command()
@@ -624,7 +636,7 @@ discover_campaign_instances()
     local query_succeeded=0
 
     if [[ ${LAUNCH_ATTEMPTED} -ne 0 && ${#INSTANCE_IDS[@]} -eq 0 ]] &&
-            ! is_retryable_failure_classification "${FAILURE_CLASSIFICATION}"; then
+            { [[ ${LAUNCH_AMBIGUOUS} -ne 0 ]] || ! is_retryable_failure_classification "${FAILURE_CLASSIFICATION}"; }; then
         maximum_attempts=20
     fi
     for ((attempt = 1; attempt <= maximum_attempts; attempt++)); do
@@ -711,12 +723,18 @@ cleanup()
         FAILURE_DETAIL=$(awk -F= '$1 == "detail" {print substr($0, length($1) + 2)}' \
             "${SESSION_DIR}/failure-classification.txt")
     fi
+    if [[ ${status} -ne 0 && ${LAUNCH_ATTEMPTED} -eq 0 &&
+            ( -z "${FAILURE_CLASSIFICATION}" || "${FAILURE_CLASSIFICATION}" == none ) ]]; then
+        # Setup or the launch failed before any RunInstances request, so no instance can exist.
+        FAILURE_CLASSIFICATION=none
+        record_failure_classification retryable-infrastructure "launch-preflight:failed before RunInstances" || true
+    fi
 
     if [[ ${LAUNCH_ATTEMPTED} -ne 0 ]] && ! discover_campaign_instances; then
         echo "Cleanup refused: unable to discover all instances for campaign ${SESSION_ID}" >&2
         cleanup_failed=1
         preserve_resources=1
-    elif [[ ${LAUNCH_ATTEMPTED} -ne 0 && ${#INSTANCE_IDS[@]} -eq 0 ]] &&
+    elif [[ ${LAUNCH_ATTEMPTED} -ne 0 && ${#INSTANCE_IDS[@]} -eq 0 && ${LAUNCH_AMBIGUOUS} -eq 0 ]] &&
             is_retryable_failure_classification "${FAILURE_CLASSIFICATION}"; then
         instance_cleanup_status=verified
     fi
@@ -966,10 +984,13 @@ EOF
     sleep 10
 }
 
-select_subnet()
+subnet_rotation()
 {
+    # Prints the public subnets that offer the type, one subnet and zone per line, in this
+    # attempt's rotation order.
     local instance_type=$1
     local available_zones
+    local offset
     local replica_index
     local placement_seed
     local subnet_count
@@ -992,14 +1013,13 @@ select_subnet()
         --output text)
     read -r -a subnet_zones <<<"$(tr '\n\t' '  ' <<<"${subnets}")"
     subnet_count=$((${#subnet_zones[@]} / 2))
-    if [[ ${subnet_count} -eq 0 ]]; then
-        return
-    fi
     # Keep the initial placement stable for this job, then visit a different
     # pool on each retry regardless of other jobs' allocated host epochs.
     placement_seed=$(printf '%s' "${CAMPAIGN_PLATFORM}/${CAMPAIGN_SHARD_ID}/replica-${CAMPAIGN_REPLICA_ID}" | cksum | awk '{print $1}')
-    replica_index=$(((placement_seed + CAMPAIGN_ATTEMPT - 1) % subnet_count))
-    printf '%s %s\n' "${subnet_zones[$((2 * replica_index))]}" "${subnet_zones[$((2 * replica_index + 1))]}"
+    for ((offset = 0; offset < subnet_count; offset++)); do
+        replica_index=$(((placement_seed + CAMPAIGN_ATTEMPT - 1 + offset) % subnet_count))
+        printf '%s %s\n' "${subnet_zones[$((2 * replica_index))]}" "${subnet_zones[$((2 * replica_index + 1))]}"
+    done
 }
 
 create_user_data()
@@ -1187,7 +1207,7 @@ record_launch_zone()
 
 launch_instance()
 {
-    # Runs in the root shell, which records the zone as it is chosen, so a failed launch still
+    # Runs in the root shell, which records each zone as it is chosen, so a failed launch still
     # records its zone; sets LAUNCHED_INSTANCE_ID.
     local label=$1
     local architecture=$2
@@ -1197,14 +1217,15 @@ launch_instance()
     local user_data="${SESSION_DIR}/user-data-${label}.sh"
     local ami
     local attempt
-    local client_token="re2-${LOWER_SESSION_ID}-${label}"
     local instance_id
     local launch_error=
     local root_device
     local launch_arguments
+    local placements
+    local rotation
     local subnet
-    local subnet_selection
     local zone
+    local zone_offset=0
 
     local java_url
     local java_sha256
@@ -1217,10 +1238,16 @@ launch_instance()
         ami=$(aws_cli ssm get-parameter --name "${ami_parameter}" --query Parameter.Value --output text)
     fi
     root_device=$(aws_cli ec2 describe-images --image-ids "${ami}" --query 'Images[0].RootDeviceName' --output text)
-    subnet_selection=$(select_subnet "${instance_type}")
-    read -r subnet zone <<<"${subnet_selection}"
+    # One snapshot of the subnets serves every zone this launch tries; a subnet added
+    # meanwhile waits for the next launch.
+    rotation=$(subnet_rotation "${instance_type}")
+    read -r -a placements <<<"${rotation//$'\n'/ }"
+    subnet=${placements[0]:-}
+    zone=${placements[1]:-}
     if [[ -z "${subnet}" || "${subnet}" == "None" ]]; then
         echo "No public default-VPC subnet offers ${instance_type}" >&2
+        record_failure_classification retryable-infrastructure \
+            "launch-preflight:no public default-VPC subnet offers ${instance_type}"
         exit 1
     fi
     record_launch_zone "${label}" "${zone}"
@@ -1239,7 +1266,6 @@ launch_instance()
         --image-id "${ami}" \
         --instance-type "${instance_type}" \
         --count 1 \
-        --network-interfaces "DeviceIndex=0,SubnetId=${subnet},Groups=${SECURITY_GROUP_ID},AssociatePublicIpAddress=true" \
         --block-device-mappings "DeviceName=${root_device},Ebs={VolumeSize=40,VolumeType=gp3,DeleteOnTermination=true,Encrypted=true}" \
         --metadata-options HttpTokens=required,HttpEndpoint=enabled \
         --iam-instance-profile "Name=${INSTANCE_PROFILE_NAME}" \
@@ -1254,10 +1280,16 @@ launch_instance()
             "MarketType=spot,SpotOptions={${spot_options}}")
     fi
 
-    for attempt in {1..5}; do
-        if instance_id=$(aws_cli ec2 run-instances \
+    LAUNCH_ATTEMPTED=1
+    attempt=1
+    while ((attempt <= 5)); do
+        # Each zone has its own token, since a token names one exact request. The CLI's own
+        # retries stay off, so every submission's outcome, a timeout among them, reaches this
+        # loop, which resubmits with the same token.
+        if instance_id=$(AWS_MAX_ATTEMPTS=1 aws_cli ec2 run-instances \
                 "${launch_arguments[@]}" \
-                --client-token "${client_token}" \
+                --network-interfaces "DeviceIndex=0,SubnetId=${subnet},Groups=${SECURITY_GROUP_ID},AssociatePublicIpAddress=true" \
+                --client-token "re2-${LOWER_SESSION_ID}-${label}-${zone}" \
                 --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=re2-${CAMPAIGN_PROVENANCE}-${label}-${SESSION_ID}},{Key=Project,Value=re2-port-benchmark},{Key=Campaign,Value=${SESSION_ID}},{Key=BaselineCampaign,Value=${CAMPAIGN_ID}},{Key=Platform,Value=${CAMPAIGN_PLATFORM}},{Key=Shard,Value=${CAMPAIGN_SHARD_ID}},{Key=Replica,Value=${CAMPAIGN_REPLICA_ID}},{Key=HostEpoch,Value=${CAMPAIGN_HOST_EPOCH}}]" \
                 --user-data "file://${user_data}" \
                 --query 'Instances[0].InstanceId' \
@@ -1266,7 +1298,25 @@ launch_instance()
             return
         fi
         launch_error=$(tr '\n\t' '  ' < "${SESSION_DIR}/launch-${label}.error")
+        if ! launch_error_is_rejection "${INSTANCE_MARKET_TYPE}" "${launch_error}"; then
+            LAUNCH_AMBIGUOUS=1
+        fi
+        if [[ "${INSTANCE_MARKET_TYPE}" == spot ]] &&
+                grep -Eq 'InsufficientInstanceCapacity|UnfulfillableCapacity' <<<"${launch_error}"; then
+            # Spot short in one zone may have room in another, so the launch fails for the
+            # region's capacity only once every zone of the region that offers the type has.
+            zone_offset=$((zone_offset + 1))
+            if ((2 * zone_offset >= ${#placements[@]})); then
+                break
+            fi
+            subnet=${placements[$((2 * zone_offset))]}
+            zone=${placements[$((2 * zone_offset + 1))]}
+            record_launch_zone "${label}" "${zone}"
+            attempt=1
+            continue
+        fi
         sleep "${attempt}"
+        attempt=$((attempt + 1))
     done
     classify_launch_error "${INSTANCE_MARKET_TYPE}" "${launch_error}" || true
     echo "Unable to launch or recover the ${label} instance for campaign ${SESSION_ID}" >&2
@@ -1421,7 +1471,6 @@ INTEL_INSTANCE_ID=none
 ARM_INSTANCE_ID=none
 pending=()
 if includes_architecture intel; then
-    LAUNCH_ATTEMPTED=1
     launch_instance \
         intel x86_64 "${INTEL_INSTANCE_TYPE}" \
         /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 \
@@ -1431,7 +1480,6 @@ if includes_architecture intel; then
     pending+=(intel)
 fi
 if includes_architecture arm; then
-    LAUNCH_ATTEMPTED=1
     launch_instance \
         arm aarch64 "${ARM_INSTANCE_TYPE}" \
         /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64 \

@@ -21,6 +21,16 @@ RUN_CAMPAIGN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUN_CAMPAIGN)
 
 
+def shell_function(source, name):
+    """Returns one function definition from a shell script's source."""
+    start = source.index(f"\n{name}()\n") + 1
+    return source[start:source.index("\n}\n", start) + 3]
+
+
+def shell_functions(source, *names):
+    return "".join(shell_function(source, name) for name in names)
+
+
 class FakeProcess:
     def __init__(self, process_id, status=None, wait_action=None, poll_action=None):
         self.pid = process_id
@@ -165,21 +175,32 @@ class TestRunCampaign(unittest.TestCase):
         self.assertEqual(jobs[0].platform.vcpus, 8)
 
     def test_spot_only_replacements_never_fall_back(self):
+        # A Spot capacity failure moves to the next allowed region without spending the allowance.
+        regions = ("us-east-2", "us-west-2")
         for attempt in (1, 2):
-            for classification, detail in (
-                    ("retryable-spot", "launch-capacity:InsufficientInstanceCapacity"),
-                    ("retryable-spot", "instance-terminated-capacity-oversubscribed"),
-                    ("retryable-capacity", "vcpu-limit:VcpuLimitExceeded"),
-                    ("retryable-infrastructure", "wrapper failed")):
+            for classification, detail, moved in (
+                    ("retryable-spot", "launch-capacity:InsufficientInstanceCapacity", True),
+                    ("retryable-spot", "instance-terminated-capacity-oversubscribed", False),
+                    ("retryable-capacity", "vcpu-limit:VcpuLimitExceeded", False),
+                    ("retryable-infrastructure", "wrapper failed", False)):
                 with self.subTest(attempt=attempt, classification=classification, detail=detail):
-                    job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, attempt, "spot")
+                    job = RUN_CAMPAIGN.Job(
+                        self.platform, "traditional-search", 1, 10, attempt, "spot", region="us-east-2")
                     replacement = RUN_CAMPAIGN.replacement_job(
-                        job, 11, classification, detail, spot_only=True)
+                        job, 11, classification, detail, regions=regions, spot_only=True)
                     self.assertEqual(replacement.market, "spot")
                     self.assertEqual(replacement.attempt, attempt + 1)
-        job = RUN_CAMPAIGN.replace(job, market="on-demand")
+                    self.assertEqual(replacement.spot_capacity_failures, ("us-east-2",) if moved else ())
+        # Three counted attempts, after a move from a region with no capacity.
+        exhausted = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 4, "spot", region="us-west-2",
+                                     spot_capacity_failures=("us-east-2",))
+        with self.assertRaisesRegex(RuntimeError, "exhausted"):
+            RUN_CAMPAIGN.replacement_job(
+                exhausted, 12, "retryable-spot", "launch-capacity:InsufficientInstanceCapacity",
+                regions=regions, spot_only=True)
+        on_demand = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "on-demand")
         with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "On-Demand"):
-            RUN_CAMPAIGN.replacement_job(job, 11, "retryable-spot", "interrupted", spot_only=True)
+            RUN_CAMPAIGN.replacement_job(on_demand, 11, "retryable-spot", "interrupted", spot_only=True)
 
     def test_spot_only_policy_and_reserve_are_frozen_on_resume(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -370,7 +391,9 @@ class TestRunCampaign(unittest.TestCase):
             failure_classification="controller-abort",
             failure_detail="test failure",
             bucket_removed="verified",
-            launched=True):
+            launched=True,
+            region="us-east-2"):
+        """Leave the session a wrapper leaves after its launch in region ends."""
         session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
         session.mkdir(parents=True)
         if launched:
@@ -388,8 +411,8 @@ class TestRunCampaign(unittest.TestCase):
             "run_status=failed\n"
             f"failure_classification={failure_classification}\n"
             f"failure_detail={failure_detail}\n"
-            "aws_region=us-east-2\n"
-            "intel_availability_zone=us-east-2b\n"
+            f"aws_region={region}\n"
+            f"intel_availability_zone={region}b\n"
             "arm_availability_zone=none\n"
             "placement_score=9\n")
         return session
@@ -928,6 +951,18 @@ class TestRunCampaign(unittest.TestCase):
                 self.assertEqual(environment["BENCHMARK_INTEL_AMI_ID"], "ami-" + expected_region)
                 self.assertEqual(environment.get("TRANSFER_BUCKET"), "bucket-mumbai" if scored else None)
 
+    def test_spot_placement_leaves_out_regions_that_found_no_capacity(self):
+        # With no region left, none is offered; with one left, no score is asked for.
+        for regions, failures, expected in ((["us-west-2"], ("us-west-2",), []),
+                                            (["us-west-2", "eu-west-1", "ap-south-1"], ("us-west-2", "ap-south-1"),
+                                             [("eu-west-1", "")])):
+            with self.subTest(regions=regions):
+                arguments = SimpleNamespace(regions=regions)
+                job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot",
+                                       spot_capacity_failures=failures)
+                with patch.object(RUN_CAMPAIGN, "check_output", side_effect=AssertionError("scores queried")):
+                    self.assertEqual(expected, RUN_CAMPAIGN.launch_placements(arguments, job))
+
     def test_aws_preflight_uses_routed_worker_topologies(self):
         platform = RUN_CAMPAIGN.replace(
             self.platform,
@@ -1107,7 +1142,7 @@ class TestRunCampaign(unittest.TestCase):
 
     def test_spot_retry_visits_each_pool_independently_of_global_epochs(self):
         source = AWS_RUNNER.read_text()
-        selector = source[source.index('select_subnet()'):source.index('\ncreate_user_data()')]
+        selector = source[source.index('subnet_rotation()'):source.index('\ncreate_user_data()')]
         fixture = '''
 aws_cli() {
     if [[ "$*" == *describe-instance-type-offerings* ]]; then
@@ -1122,13 +1157,93 @@ CAMPAIGN_SHARD_ID=rebar-i
 CAMPAIGN_REPLICA_ID=1
 for CAMPAIGN_ATTEMPT in 1 2 3 4; do
     CAMPAIGN_HOST_EPOCH=$((CAMPAIGN_ATTEMPT * 4 + 1))
-    select_subnet r8i.large
+    subnet_rotation r8i.large | head -n 1
 done
 '''
         result = subprocess.run(['bash', '-c', selector + fixture], capture_output=True, text=True, check=True)
         self.assertEqual(set(result.stdout.splitlines()), {
             'subnet-a us-west-2a', 'subnet-b us-west-2b', 'subnet-c us-west-2c', 'subnet-d us-west-2d'})
         self.assertEqual(len(result.stdout.splitlines()), 4)
+
+    def test_spot_capacity_failure_tries_the_regions_other_zones_first(self):
+        source = AWS_RUNNER.read_text()
+        functions = shell_functions(source, "subnet_rotation", "record_launch_zone", "launch_instance",
+                                    "classify_launch_error", "launch_error_is_rejection")
+        fixture = '''
+aws_cli() {
+    case "$*" in
+        *describe-images*) printf '/dev/xvda\\n' ;;
+        *describe-instance-type-offerings*)
+            printf 'offerings\\n' >> "${SESSION_DIR}/described"
+            printf 'us-east-2a us-east-2b us-east-2c\\n' ;;
+        *describe-subnets*)
+            printf 'subnets\\n' >> "${SESSION_DIR}/described"
+            printf 'subnet-%s\\tus-east-2%s\\n' a a b b c c ;;
+        *run-instances*)
+            subnet=$*
+            subnet=${subnet#*SubnetId=}
+            printf '%s\\n' "${subnet%%,*}" >> "${SESSION_DIR}/tried"
+            if (($(wc -l < "${SESSION_DIR}/tried") <= FULL_ZONES)); then
+                printf 'An error occurred (%s) when calling the RunInstances operation\\n' "${CAPACITY_ERROR}" >&2
+                return 254
+            fi
+            printf 'i-launched\\n' ;;
+    esac
+}
+benchmark_ami_id() { printf 'ami-test\\n'; }
+benchmark_ami_name() { :; }
+jdk_archive_url() { :; }
+jdk_archive_sha256() { :; }
+create_user_data() { :; }
+record_failure_classification() { printf '%s|%s\\n' "$1" "${2%%:*}"; }
+sleep() { :; }
+CAMPAIGN_PLATFORM=r8i CAMPAIGN_SHARD_ID=unit-worker CAMPAIGN_REPLICA_ID=1 CAMPAIGN_ATTEMPT=1
+INSTANCE_MARKET_TYPE=spot LOWER_SESSION_ID=session VPC_ID=vpc-test
+launch_instance intel x86_64 r8i.large parameter result.tar.gz || printf 'failed\\n'
+printf '%s %s\\n' "${LAUNCHED_INSTANCE_ID:-none}" "${INTEL_AVAILABILITY_ZONE}"
+'''
+        # One full zone moves the launch to the next; only all three full make it the region's failure.
+        for error, full_zones, expected in (
+                ("InsufficientInstanceCapacity", 1, ["i-launched"]),
+                ("UnfulfillableCapacity", 1, ["i-launched"]),
+                ("InsufficientInstanceCapacity", 3, ["retryable-spot|launch-capacity", "failed", "none"])):
+            with self.subTest(error=error, full_zones=full_zones), tempfile.TemporaryDirectory() as temporary:
+                result = subprocess.run(
+                    ["bash", "-c", functions + fixture], capture_output=True, text=True,
+                    env={**os.environ, "SESSION_DIR": temporary, "FULL_ZONES": str(full_zones),
+                         "CAPACITY_ERROR": error}, check=True)
+                tried = Path(temporary, "tried").read_text().split()
+                self.assertEqual(min(full_zones + 1, 3), len(set(tried)))
+                self.assertEqual(len(tried), len(set(tried)))
+                # The launch enumerates the region's zones and subnets once, however many it tries.
+                self.assertEqual(["offerings", "subnets"], Path(temporary, "described").read_text().split())
+                # The session records the zone it last tried.
+                self.assertEqual(expected + [f"us-east-2{tried[-1][-1]}"],
+                                 result.stdout.replace(" ", "\n").splitlines())
+
+    def test_launch_without_a_public_subnet_fails_retryably_before_submission(self):
+        source = AWS_RUNNER.read_text()
+        functions = shell_functions(source, "subnet_rotation", "record_launch_zone", "launch_instance")
+        fixture = '''
+aws_cli() {
+    case "$*" in
+        *describe-images*) printf '/dev/xvda\\n' ;;
+        *describe-instance-type-offerings*) printf 'us-east-2a\\n' ;;
+        *run-instances*) printf 'submitted\\n' ;;
+    esac
+}
+benchmark_ami_id() { printf 'ami-test\\n'; }
+jdk_archive_url() { :; }
+jdk_archive_sha256() { :; }
+record_failure_classification() { printf '%s|%s\\n' "$1" "${2%%:*}"; }
+LAUNCH_ATTEMPTED=0
+trap 'printf "attempted=%s\\n" "${LAUNCH_ATTEMPTED}"' EXIT
+launch_instance intel x86_64 r8i.large parameter result.tar.gz
+'''
+        result = subprocess.run(["bash", "-c", functions + fixture], capture_output=True, text=True)
+        # Cleanup then knows no instance can exist, and the controller retries the launch.
+        self.assertEqual((1, ["retryable-infrastructure|launch-preflight", "attempted=0"]),
+                         (result.returncode, result.stdout.splitlines()))
 
     def test_aws_command_uses_standard_credential_chain_without_profile(self):
         with patch.dict(os.environ, {"AWS_REGION": "us-east-1"}, clear=True):
@@ -1403,6 +1518,7 @@ done
             f"{function}\n"
             "classify_launch_error spot VcpuLimitExceeded\n"
             "classify_launch_error on-demand VcpuLimitExceeded\n"
+            "classify_launch_error spot SpotMaxPriceTooLow\n"
             "if classify_launch_error on-demand InternalError; then exit 9; fi\n")
 
         result = subprocess.run(
@@ -1412,62 +1528,87 @@ done
         self.assertEqual(result.stdout.splitlines(), [
             "retryable-spot|launch-capacity:VcpuLimitExceeded",
             "retryable-capacity|vcpu-limit:VcpuLimitExceeded",
+            # A Spot price above the ceiling rejects the request outright.
+            "retryable-spot|launch-capacity:SpotMaxPriceTooLow",
         ])
 
     def test_retryable_no_instance_launch_cleans_all_temporary_resources(self):
         source = AWS_RUNNER.read_text()
-        retryable_function = source[
-            source.index("is_retryable_failure_classification()\n{"):
-            source.index("\n}\n\nclassify_launch_error()") + 2]
-        cleanup_function = source[
-            source.index("cleanup()\n{"):
-            source.index("\n}\n\nabort_campaign()") + 2]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            session = Path(temporary_directory) / "session"
-            session.mkdir()
-            script = (
-                f"SESSION_DIR={session}\n"
-                "FAILURE_CLASSIFICATION=retryable-capacity\n"
-                "FAILURE_DETAIL=vcpu-limit:VcpuLimitExceeded\n"
-                "LAUNCH_ATTEMPTED=1\n"
-                "INSTANCE_IDS=()\n"
-                "INSTANCE_PROFILE_NAME=test-profile\n"
-                "INSTANCE_ROLE_NAME=test-role\n"
-                "BUCKET=test-bucket\n"
-                "BUCKET_OWNED=1\n"
-                "AWS_REGION=us-east-2\n"
-                "INTEL_AVAILABILITY_ZONE=us-east-2b\n"
-                "ARM_AVAILABILITY_ZONE=none\n"
-                "CAMPAIGN_PLACEMENT_SCORE=9\n"
-                "OBJECT_PREFIX=\n"
-                "CAMPAIGN_MODE=baseline-shard\n"
-                "CAMPAIGN_ID=baseline\n"
-                "CAMPAIGN_PLATFORM=r8i\n"
-                "CAMPAIGN_SHARD_ID=rebar-c\n"
-                "CAMPAIGN_REPLICA_ID=1\n"
-                "CAMPAIGN_HOST_EPOCH=10\n"
-                "DOWNLOADED_RESULT_COUNT=0\n"
-                "discover_campaign_instances() { return 0; }\n"
-                "retry_cleanup_command() { return 0; }\n"
-                "verify_aws_resource_absent() { return 0; }\n"
-                f"{retryable_function}\n"
-                f"{cleanup_function}\n"
-                "false\n"
-                "cleanup\n")
+        functions = shell_functions(
+            source, "aws_cli", "record_failure_classification", "is_retryable_failure_classification",
+            "classify_launch_error", "launch_error_is_rejection", "discover_campaign_instances", "cleanup",
+            "subnet_rotation", "record_launch_zone", "launch_instance")
+        fixture = '''
+aws() {
+    case "$*" in
+        *describe-images*) printf '/dev/xvda\\n' ;;
+        *describe-instance-type-offerings*) printf 'us-east-2b\\n' ;;
+        *describe-subnets*) printf 'subnet-b\\tus-east-2b\\n' ;;
+        *run-instances*)
+            printf '%s\\n' "${AWS_MAX_ATTEMPTS:-unlimited}" >> "${SESSION_DIR}/submitted"
+            # Unless its attempts are limited, the CLI resubmits on its own and reports only the last error.
+            for ((request = 0; request < ${AWS_MAX_ATTEMPTS:-5}; request++)); do
+                printf 'x\\n' >> "${SESSION_DIR}/requests"
+                error='An error occurred (RequestLimitExceeded) when calling the RunInstances operation'
+                if [[ -n "${FIRST_ERROR}" && $(wc -l < "${SESSION_DIR}/requests") -eq 1 ]]; then
+                    error=${FIRST_ERROR}
+                fi
+            done
+            printf '%s\\n' "${error}" >&2
+            return 254 ;;
+        *describe-instances*) ;;
+    esac
+}
+benchmark_ami_id() { printf 'ami-test\\n'; }
+benchmark_ami_name() { :; }
+jdk_archive_url() { :; }
+jdk_archive_sha256() { :; }
+create_user_data() { :; }
+retry_cleanup_command() { printf 'removed %s\\n' "$2" >&2; }
+verify_aws_resource_absent() { printf 'verified %s\\n' "$1" >&2; }
+sleep() { :; }
+SESSION_ID=session LOWER_SESSION_ID=session VPC_ID=vpc-test INSTANCE_MARKET_TYPE=on-demand AWS_PROFILE=
+FAILURE_CLASSIFICATION=none FAILURE_DETAIL= LAUNCH_ATTEMPTED=0 LAUNCH_AMBIGUOUS=0 INSTANCE_IDS=()
+INSTANCE_PROFILE_NAME=test-profile INSTANCE_ROLE_NAME=test-role BUCKET=test-bucket BUCKET_OWNED=1
+AWS_REGION=us-east-2 INTEL_AVAILABILITY_ZONE=none ARM_AVAILABILITY_ZONE=none CAMPAIGN_PLACEMENT_SCORE=9
+OBJECT_PREFIX= CAMPAIGN_MODE=baseline-shard CAMPAIGN_ID=baseline CAMPAIGN_PLATFORM=r8i
+CAMPAIGN_SHARD_ID=rebar-c CAMPAIGN_REPLICA_ID=1 CAMPAIGN_ATTEMPT=1 CAMPAIGN_HOST_EPOCH=10
+DOWNLOADED_RESULT_COUNT=0
+launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
+'''
+        # RequestLimitExceeded proves AWS launched nothing. A timed-out submission may have launched an
+        # instance that discovery does not see yet, even though every later submission was rejected, so each
+        # submission's outcome must reach the launch loop, which alone retries.
+        for first_error, expected in (
+                ("", "verified"),
+                ("Read timeout on endpoint URL: \"https://ec2.us-east-2.amazonaws.com/\"", "failed")):
+            with self.subTest(first_error=first_error), tempfile.TemporaryDirectory() as temporary_directory:
+                session = Path(temporary_directory) / "session"
+                session.mkdir()
+                result = subprocess.run(
+                    ["bash", "-c", f"SESSION_DIR={session}\n" + functions + fixture],
+                    env={**os.environ, "FIRST_ERROR": first_error}, text=True, capture_output=True, check=False)
 
-            result = subprocess.run(
-                ["bash"], input=script, text=True, capture_output=True, check=False)
-
-            self.assertEqual(result.returncode, 1, result.stderr)
-            cleanup = RUN_CAMPAIGN.read_properties(session / "cleanup-manifest.txt")
-            self.assertEqual(cleanup["instances_terminated"], "verified")
-            self.assertEqual(cleanup["iam_removed"], "verified")
-            self.assertEqual(cleanup["bucket_removed"], "verified")
-            self.assertEqual(cleanup["cleanup_status"], "verified")
-            self.assertEqual(cleanup["run_status"], "failed")
-            self.assertEqual(
-                [cleanup[field] for field in ("aws_region", "intel_availability_zone", "placement_score")],
-                ["us-east-2", "us-east-2b", "9"])
+                self.assertEqual(result.returncode, 1, result.stderr)
+                cleanup = RUN_CAMPAIGN.read_properties(session / "cleanup-manifest.txt")
+                self.assertEqual(cleanup["failure_classification"], "retryable-infrastructure")
+                self.assertEqual(cleanup["cleanup_status"], expected)
+                self.assertEqual((session / "submitted").read_text().split(), ["1"] * 5)
+                self.assertEqual(cleanup["run_status"], "failed")
+                if expected == "verified":
+                    self.assertEqual(
+                        [cleanup[field] for field in (
+                            "instances_terminated", "iam_removed", "bucket_removed", "aws_region",
+                            "intel_availability_zone", "placement_score")],
+                        ["verified", "verified", "verified", "us-east-2", "us-east-2b", "9"])
+                    self.assertLessEqual(
+                        {"removed delete-instance-profile", "removed delete-role", "removed delete-bucket",
+                         "verified instance profile test-profile", "verified role test-role",
+                         "verified bucket test-bucket"},
+                        set(result.stderr.splitlines()))
+                else:
+                    self.assertIn("Cleanup refused", result.stderr)
+                    self.assertEqual(cleanup["instances_terminated"], "not-created")
 
     def test_retryable_launch_does_not_hide_failed_instance_discovery(self):
         source = AWS_RUNNER.read_text()
@@ -1514,45 +1655,63 @@ done
             self.assertEqual(cleanup["bucket_removed"], "unverified")
             self.assertEqual(cleanup["cleanup_status"], "failed")
 
-    def test_preflight_failure_proves_no_resources_need_cleanup(self):
+    def test_preflight_failure_removes_what_setup_created_and_retries_as_infrastructure(self):
         source = AWS_RUNNER.read_text()
         cleanup_function = source[
             source.index("cleanup()\n{"):
             source.index("\n}\n\nabort_campaign()") + 2]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            session = Path(temporary_directory) / "session"
-            session.mkdir()
-            script = (
-                f"SESSION_DIR={session}\n"
-                "FAILURE_CLASSIFICATION=\n"
-                "FAILURE_DETAIL=preflight\n"
-                "LAUNCH_ATTEMPTED=0\n"
-                "INSTANCE_IDS=()\n"
-                "INSTANCE_PROFILE_NAME=\n"
-                "INSTANCE_ROLE_NAME=\n"
-                "BUCKET=\n"
-                "BUCKET_OWNED=0\n"
-                "OBJECT_PREFIX=\n"
-                "CAMPAIGN_MODE=baseline-shard\n"
-                "CAMPAIGN_ID=baseline\n"
-                "CAMPAIGN_PLATFORM=r8i\n"
-                "CAMPAIGN_SHARD_ID=rebar-c\n"
-                "CAMPAIGN_REPLICA_ID=1\n"
-                "CAMPAIGN_HOST_EPOCH=10\n"
-                "DOWNLOADED_RESULT_COUNT=0\n"
-                f"{cleanup_function}\n"
-                "false\n"
-                "cleanup\n")
+        classification_function = source[
+            source.index("record_failure_classification()\n{"):
+            source.index("\n}\n\nspot_request_status()") + 2]
+        # Cleanup runs at two points. Before setup created anything, as after a failed default VPC or
+        # security group lookup. After setup created the bucket and instance profile, as after a launch
+        # that failed before its RunInstances request.
+        for created in (False, True):
+            with self.subTest(created=created), tempfile.TemporaryDirectory() as temporary_directory:
+                session = Path(temporary_directory) / "session"
+                session.mkdir()
+                resources = "test" if created else ""
+                script = (
+                    f"SESSION_DIR={session}\n"
+                    "FAILURE_CLASSIFICATION=\n"
+                    "FAILURE_DETAIL=preflight\n"
+                    "LAUNCH_ATTEMPTED=0\n"
+                    "INSTANCE_IDS=()\n"
+                    f"INSTANCE_PROFILE_NAME={resources}\n"
+                    f"INSTANCE_ROLE_NAME={resources}\n"
+                    f"BUCKET={resources}\n"
+                    f"BUCKET_OWNED={int(created)}\n"
+                    "OBJECT_PREFIX=\n"
+                    "CAMPAIGN_MODE=baseline-shard\n"
+                    "CAMPAIGN_ID=baseline\n"
+                    "CAMPAIGN_PLATFORM=r8i\n"
+                    "CAMPAIGN_SHARD_ID=rebar-c\n"
+                    "CAMPAIGN_REPLICA_ID=1\n"
+                    "CAMPAIGN_HOST_EPOCH=10\n"
+                    "DOWNLOADED_RESULT_COUNT=0\n"
+                    "retry_cleanup_command() { printf 'removed %s\\n' \"$2\" >&2; }\n"
+                    "verify_aws_resource_absent() { printf 'verified %s\\n' \"$1\" >&2; }\n"
+                    f"{classification_function}\n"
+                    f"{cleanup_function}\n"
+                    "false\n"
+                    "cleanup\n")
 
-            result = subprocess.run(
-                ["bash"], input=script, text=True, capture_output=True, check=False)
+                result = subprocess.run(
+                    ["bash"], input=script, text=True, capture_output=True, check=False)
 
-            self.assertEqual(result.returncode, 1, result.stderr)
-            cleanup = RUN_CAMPAIGN.read_properties(session / "cleanup-manifest.txt")
-            self.assertEqual(cleanup["instances_terminated"], "verified")
-            self.assertEqual(cleanup["iam_removed"], "verified")
-            self.assertEqual(cleanup["bucket_removed"], "verified")
-            self.assertEqual(cleanup["cleanup_status"], "verified")
+                self.assertEqual(result.returncode, 1, result.stderr)
+                cleanup = RUN_CAMPAIGN.read_properties(session / "cleanup-manifest.txt")
+                self.assertEqual(cleanup["instances_terminated"], "verified")
+                self.assertEqual(cleanup["iam_removed"], "verified")
+                self.assertEqual(cleanup["bucket_removed"], "verified")
+                self.assertEqual(cleanup["cleanup_status"], "verified")
+                # No instance can exist, so the controller retries it as infrastructure.
+                self.assertEqual(cleanup["failure_classification"], "retryable-infrastructure")
+                if created:
+                    self.assertLessEqual(
+                        {"removed delete-instance-profile", "removed delete-role", "removed delete-bucket",
+                         "verified instance profile test", "verified role test", "verified bucket test"},
+                        set(result.stderr.splitlines()))
 
     def test_semantic_evidence_uses_actual_surefire_report_directory(self):
         source = (SCRIPT.parent / "run-shard.sh").read_text()
@@ -1845,8 +2004,13 @@ done
             self.platform, "traditional-search", 1, 118, 3, "on-demand")
 
         with self.assertRaisesRegex(RuntimeError, "exhausted"):
+            RUN_CAMPAIGN.replacement_job(final_attempt, 119, "retryable-infrastructure")
+        # A move past a region without Spot capacity is not a replacement.
+        moved = RUN_CAMPAIGN.replace(final_attempt, spot_capacity_failures=("us-east-2",))
+        self.assertEqual(RUN_CAMPAIGN.replacement_job(moved, 119, "retryable-infrastructure").attempt, 4)
+        with self.assertRaisesRegex(RuntimeError, "exhausted"):
             RUN_CAMPAIGN.replacement_job(
-                final_attempt, 119, "retryable-infrastructure", "unexpected")
+                RUN_CAMPAIGN.replace(moved, attempt=4), 120, "retryable-infrastructure")
 
     def test_retry_requires_verified_cleanup_and_aws_classification(self):
         job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
@@ -2538,8 +2702,7 @@ done
             RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1,
             "on-demand")
 
-        replacement = RUN_CAMPAIGN.replacement_job(
-            job, 101, "retryable-capacity", "vcpu-limit:VcpuLimitExceeded")
+        replacement = RUN_CAMPAIGN.replacement_job(job, 101, "retryable-capacity")
 
         self.assertEqual(replacement.market, "on-demand")
         self.assertEqual(replacement.host_epoch, 101)
@@ -2643,6 +2806,42 @@ done
                     "placement_score": "9",
                     "failure_classification": "retryable-spot",
                 })
+
+    def test_spot_unavailability_tries_each_allowed_region_before_on_demand(self):
+        # Neither region has Spot capacity, and the controller restarts after the second fails.
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result_root = root / "results"
+            result_root.mkdir()
+            arguments = self.arguments(root)
+            arguments.regions = ["us-east-2", "us-west-2"]
+            jobs = [RUN_CAMPAIGN.replace(job, host_epoch=epoch, attempt=epoch - 9) for epoch in (10, 11, 12)]
+            launch_failure = {"failure_classification": "retryable-spot",
+                              "failure_detail": "launch-capacity:InsufficientInstanceCapacity", "launched": False}
+
+            def interrupt_controller():
+                second.poll_action = None
+                self.write_cleanup_session(result_root, jobs[1], **launch_failure, region="us-west-2")
+                raise KeyboardInterrupt
+
+            first = FakeProcess(110, status=1, poll_action=lambda: self.write_cleanup_session(
+                result_root, jobs[0], **launch_failure))
+            second = FakeProcess(111, status=1, poll_action=interrupt_controller)
+            on_demand = FakeProcess(112, status=1, poll_action=lambda: self.write_cleanup_session(
+                result_root, jobs[2], failure_classification="benchmark-failure"))
+            launches = []
+            with patch.object(RUN_CAMPAIGN, "check_output",
+                              side_effect=subprocess.CalledProcessError(254, "get-spot-placement-scores")), \
+                    patch.object(RUN_CAMPAIGN, "current_on_demand_capacity", return_value={"available": 8}), \
+                    patch.object(RUN_CAMPAIGN.time, "sleep"):
+                for processes, failure in (([first, second], KeyboardInterrupt), ([on_demand], SystemExit)):
+                    with patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=processes) as popen, \
+                            self.assertRaises(failure):
+                        RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, [job])
+                    launches += [(call.kwargs["env"]["INSTANCE_MARKET_TYPE"], call.kwargs["env"]["AWS_REGION"])
+                                 for call in popen.call_args_list]
+            self.assertEqual(launches, [("spot", "us-east-2"), ("spot", "us-west-2"), ("on-demand", "us-east-2")])
 
     def test_resumed_campaign_events_keep_their_columns(self):
         job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
