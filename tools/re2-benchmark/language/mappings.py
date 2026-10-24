@@ -97,8 +97,8 @@ RUST_SIZE_CASES = {
     "reported/i1095-word-repetition/unicode-compile": rb"\p{L}{256}",
     "reported/i1095-word-repetition/unicode-search": rb"\p{L}{256}",
 }
-# Rust compiles these in Unicode mode, where \d and \s also match non-ASCII digits and
-# spaces. RE2's classes are ASCII, so the translation spells them out.
+# Rust, and Java's bulk Unicode cases, compile these in Unicode mode, where \d and \s also
+# match non-ASCII digits and spaces. RE2's classes are ASCII, so the translation spells them out.
 ASCII_CLASSES = {rb"\d": rb"[0-9]", rb"\s": rb"[\t\n\f\r ]"}
 ASCII_CLASS_REASON = "Spell out RE2's ASCII \\d and \\s, which Unicode mode would widen to non-ASCII digits and spaces"
 BIBLEREF_PATTERN = (rb"(?P<Book>(([1234]|I{1,4})[\t\f\pZ]*)?\pL+\.?)[\t\f\pZ]+(?P<Locations>((?P<Chapter>1?[0-9]?[0-9])"
@@ -135,10 +135,11 @@ def translate_lifecycle(identity, language, pattern):
     return ascii_classes(pattern.encode()).decode(), ASCII_CLASS_REASON
 
 
-def translate(identity, language, pattern, unicode=False):
+def translate(identity, language, pattern, archived=False, unicode=False):
     """Return equivalent bytes and an explanation, or an explicit incompatibility.
 
-    The source's Unicode flag guards the byte-mode exclusions.
+    Archived 1.0 manifests keep the translations they were measured with. The
+    source's Unicode flag guards the byte-mode exclusions.
     """
     if identity == "reported/i13-subset-regex/huge-ascii-nosuffixlit" and language != "re2":
         return None, ("Source uses Latin-1 byte matching and non-ASCII raw-byte escapes on multibyte input. "
@@ -189,7 +190,13 @@ def translate(identity, language, pattern, unicode=False):
         if len(re.findall(rb"\(\?P<", pattern)) != 8:
             raise ValueError("bibleref capture layout changed")
         translated = pattern.replace(b"(?P<", b"(?<").replace(rb"\pL", rb"\p{L}").replace(rb"\pZ", rb"\p{Z}")
-        return translated, "Use Java/Trino named-capture syntax and braced Unicode properties; preserve capture order and names"
+        reason = "Use Java/Trino named-capture syntax and braced Unicode properties; preserve capture order and names"
+        # Java compiles this Unicode case with UNICODE_CHARACTER_CLASS; Joni's \d stays ASCII.
+        if language == "java" and not archived:
+            if pattern != BIBLEREF_PATTERN:
+                raise ValueError("bibleref source pattern changed")
+            return ascii_classes(translated), reason + ". " + ASCII_CLASS_REASON
+        return translated, reason
     if identity.startswith("wild/bibleref/") and language == "rust":
         if pattern != BIBLEREF_PATTERN:
             raise ValueError("bibleref source pattern changed")

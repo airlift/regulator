@@ -123,7 +123,7 @@ def validate_manifest(manifest, directory, archived=False):
             if collection.digest(payload) != mapping["input_file_sha256"]:
                 raise ValueError("bulk input checksum mismatch")
             fields = rebar_inventory.decode_klv(payload)
-            translated, _ = mappings.translate(case["id"], language, source_fields["pattern"][0],
+            translated, _ = mappings.translate(case["id"], language, source_fields["pattern"][0], archived=archived,
                                                unicode=source_fields["unicode"] == [b"true"])
             expected_fields = dict(source_fields)
             if mapping["status"] != "not-compatible":

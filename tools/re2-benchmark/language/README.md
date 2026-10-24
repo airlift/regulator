@@ -429,9 +429,10 @@ need explicit translations even when both engines parse the expression.
 
 The explicit mappings in `mappings.py` cover LF-only Java rules, named-group
 syntax, braced Unicode properties and code-point escapes. They also spell out
-RE2's ASCII `\d` and `\s` where Rust compiles them as Unicode classes: in
-bibleref and in the lifecycle `trinoPhone` and `whitespace` workloads.
-ASCII-word-boundary cases without an equivalent Trino assertion are not
+RE2's ASCII `\d` and `\s` where the target compiles them as Unicode classes:
+in bibleref for Rust and Java (archived 1.0 manifests keep Java's syntax-only
+translation), and in the lifecycle `trinoPhone` and `whitespace` workloads for
+Rust. ASCII-word-boundary cases without an equivalent Trino assertion are not
 compatible. Byte-oriented non-ASCII escape cases are not silently converted
 into code-point matching.
 

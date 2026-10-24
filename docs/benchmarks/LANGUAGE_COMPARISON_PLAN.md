@@ -50,9 +50,11 @@ that uses `\s` or `\S` contains a vertical tab, so this difference cannot
 change a result.
 
 In Unicode mode, `\d` and `\s` also match non-ASCII digits and spaces. The
-Unicode-mode Rust cases that use them are therefore translated to RE2's ASCII
-classes: bibleref and the lifecycle `trinoPhone` and `whitespace` workloads.
-Unicode-off bulk cases keep their ASCII classes unchanged.
+Unicode-mode cases that use them are therefore translated to RE2's ASCII
+classes: bibleref for Rust and Java, and the lifecycle `trinoPhone` and
+`whitespace` workloads for Rust. Unicode-off bulk cases keep their ASCII
+classes unchanged. Saved 1.0 results keep the Java translation they were
+measured with.
 
 Translations are data in the manifest, not ad hoc changes in benchmark code.
 Each records the source pattern, translated pattern, reason, and verifier
