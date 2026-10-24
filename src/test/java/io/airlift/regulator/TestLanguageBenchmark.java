@@ -28,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestLanguageBenchmark
 {
-    private static final List<String> ENGINES = List.of("re2", "java", "trino", "jdk", "joni");
+    private static final List<String> ENGINES = List.of("re2", "java", "trino", "rust", "jdk", "joni");
 
     @TempDir
     Path directory;
@@ -58,7 +58,13 @@ public class TestLanguageBenchmark
         assertEnginesAgree(inputs);
 
         Files.writeString(path, hex("a*") + "\n0\t3\t" + hex("ab") + "\n3\t1\t\n");
-        assertEnginesAgree(TestingLanguageBenchmarkInputs.read(path));
+        assertEnginesAgree(TestingLanguageBenchmarkInputs.read(path), ENGINES.stream().filter(engine -> !engine.equals("rust")).toList());
+        // Rust skips an empty match that ends where the previous match ended.
+        Files.writeString(path, hex("a*") + "\n0\t2\t" + hex("ab") + "\n3\t1\t\n");
+        inputs = TestingLanguageBenchmarkInputs.read(path);
+        var rust = BenchmarkLanguageComparison.compile("rust", inputs);
+        assertThat(rust.matches(inputs.sources().getFirst())).containsExactly("61", "");
+        assertThat(rust.count(inputs.sources().getFirst())).isEqualTo(2);
     }
 
     @Test
@@ -147,8 +153,13 @@ public class TestLanguageBenchmark
 
     private static void assertEnginesAgree(TestingLanguageBenchmarkInputs inputs)
     {
+        assertEnginesAgree(inputs, ENGINES);
+    }
+
+    private static void assertEnginesAgree(TestingLanguageBenchmarkInputs inputs, List<String> engines)
+    {
         var reference = BenchmarkLanguageComparison.compile("jdk", inputs);
-        for (String engine : ENGINES) {
+        for (String engine : engines) {
             var compiled = BenchmarkLanguageComparison.compile(engine, inputs);
             for (int pass = 0; pass < 2; pass++) {
                 for (var source : inputs.sources()) {

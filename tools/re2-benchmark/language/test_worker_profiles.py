@@ -37,6 +37,7 @@ class TestWorkerProfiles(unittest.TestCase):
     def test_skips_native_and_compile(self):
         manifest = {"suite": "language-bulk", "diagnostic_profiles": True}
         cases = [("native", {"model": "count"}, "re2", "native-re2", "safe"),
+                 ("native-rust", {"model": "count"}, "rust", "native-rust", "safe"),
                  ("compile", {"model": "compile"}, "java", "java", "safe")]
         with patch.object(collection, "load", return_value=manifest), \
                 patch.object(collection, "observations", return_value=cases), \

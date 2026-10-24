@@ -31,7 +31,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestLanguageBulkBenchmark
 {
-    private static final List<String> ENGINES = List.of("re2", "java", "trino", "jdk", "joni");
+    private static final List<String> ENGINES = List.of("re2", "java", "trino", "rust", "jdk", "joni");
 
     @TempDir
     Path directory;
@@ -54,7 +54,9 @@ public class TestLanguageBulkBenchmark
                 "aa\nba\n",
                 6,
                 "source\n0:1:61;0:1:61;\n1:2:61;1:2:61;\nsource\n1:2:61;1:2:61;\n");
-        check("count", "a*", "ab", 3, "source\n0:1:61;\n1:1:;\n2:2:;\n");
+        check(ENGINES.stream().filter(engine -> !engine.equals("rust")).toList(), "count", "a*", "ab", 3, "source\n0:1:61;\n1:1:;\n2:2:;\n");
+        // Rust skips an empty match that ends where the previous match ended.
+        check(List.of("rust"), "count", "a*", "ab", 2, "source\n0:1:61;\n2:2:;\n");
         check("count", "a*", "", 1, "source\n0:0:;\n");
         check("grep", ".", "", 0, "");
     }
@@ -64,7 +66,7 @@ public class TestLanguageBulkBenchmark
             throws Exception
     {
         Path input = input("grep", "([a-zA-Z][a-zA-Z0-9]*)://([^ /]+)(/[^ ]*)?", "https://example.com/a\nno uri\n");
-        for (String engine : List.of("re2", "java")) {
+        for (String engine : List.of("re2", "java", "rust")) {
             var data = new BenchmarkLanguageBulk.BenchmarkData();
             data.engine = engine;
             data.workloadFile = input.toString();
@@ -141,8 +143,8 @@ public class TestLanguageBulkBenchmark
             data.setup();
             assertThat(new BenchmarkLanguageBulk().execute(data)).as(engine).isEqualTo(2);
         }
-        // The Java and Trino patterns compile with the workload's distribution.
-        for (String engine : List.of("java", "trino")) {
+        // The Java, Trino and Rust patterns compile with the workload's distribution.
+        for (String engine : List.of("java", "trino", "rust")) {
             assertThat(compiledProbeOffset(engine, "byte-frequency-sample", sample)).as(engine).isEqualTo(1);
             assertThat(compiledProbeOffset(engine)).as(engine).isZero();
         }
@@ -166,8 +168,14 @@ public class TestLanguageBulkBenchmark
     private void check(String model, String pattern, String source, long expected, String trace)
             throws Exception
     {
+        check(ENGINES, model, pattern, source, expected, trace);
+    }
+
+    private void check(List<String> engines, String model, String pattern, String source, long expected, String trace)
+            throws Exception
+    {
         Path input = input(model, pattern, source);
-        for (String engine : ENGINES) {
+        for (String engine : engines) {
             var data = new BenchmarkLanguageBulk.BenchmarkData();
             data.engine = engine;
             data.workloadFile = input.toString();
@@ -177,7 +185,7 @@ public class TestLanguageBulkBenchmark
             if (!model.equals("compile")) {
                 for (int pass = 0; pass < 2; pass++) {
                     assertThat(new BenchmarkLanguageBulk().execute(data)).as("%s/%s", engine, model).isEqualTo(expected);
-                    if (model.equals("count") && List.of("re2", "java").contains(engine)) {
+                    if (model.equals("count") && List.of("re2", "java", "rust").contains(engine)) {
                         assertThat(new BenchmarkLanguageBulk().iterateMatches(data)).isEqualTo(expected);
                     }
                 }
@@ -200,6 +208,7 @@ public class TestLanguageBulkBenchmark
         Re2 pattern = switch (data.compilePattern()) {
             case JavaRegexp java -> java.pattern();
             case TrinoRegexp trino -> trino.pattern();
+            case RustRegexp rust -> rust.pattern();
             default -> throw new IllegalArgumentException("not a Regulator pattern: " + engine);
         };
         return pattern.forwardProgramForDiagnostics().prefixAccelProbeOffset();

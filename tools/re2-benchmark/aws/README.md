@@ -268,7 +268,9 @@ pinned identity variables.
 `run-host.sh` runs on the instance. It accepts the same two
 modes, verifies the AMI, JDK, package, candidate, comparator, and manifest
 identities, and delegates to `baseline/run-host-session.sh` or
-`language/run-host-session.sh`.
+`language/run-host-session.sh`. Language batches, like Rebar shards, install
+the pinned Cargo and Rust packages, because the Rust language comparator builds
+the pinned `regex` crate on the host.
 
 ## Recovery and evidence
 

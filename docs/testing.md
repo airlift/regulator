@@ -71,8 +71,9 @@ python3 tools/re2-benchmark/validate-tooling.py
 It discovers the tooling's Python unit suites in separate processes and checks
 the frozen manifests, modes, protocol representatives, and shard plans. Cloud
 operations and build commands in these unit tests use fixtures or mocks.
-The gate clears `LANGUAGE_NATIVE_RUNNER` and `LANGUAGE_NATIVE_BULK_RUNNER`, so
-native integration tests remain explicitly skipped even in a prepared shell.
+The gate clears `LANGUAGE_NATIVE_RUNNER`, `LANGUAGE_NATIVE_BULK_RUNNER`,
+`LANGUAGE_NATIVE_RUST_RUNNER`, and `LANGUAGE_NATIVE_RUST_BULK_RUNNER`, so native
+integration tests remain explicitly skipped even in a prepared shell.
 It needs Python 3.11 or newer, Git, Bash, and standard Unix tools, but no Java
 build, external comparator checkout, AWS credentials, or benchmark collection.
 See the [language guide](../tools/re2-benchmark/language/README.md) for opt-in

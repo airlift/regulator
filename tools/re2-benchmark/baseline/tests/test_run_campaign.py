@@ -582,6 +582,23 @@ class TestRunCampaign(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_host_installs_rust_exactly_when_the_controller_expects_it(self):
+        host = (AWS_RUNNER.parent / "run-host.sh").read_text()
+        install = host[host.index("install_packages()\n{"):host.index("\n}\n\ninstall_java()") + 2]
+        controller = AWS_RUNNER.read_text()
+        expected = controller[controller.index("expected_cargo_package=not-installed"):
+                              controller.index("if [[ ! -f \"${environment_manifest}\" ]]")]
+        for mode in ("baseline-shard", "language-batch"):
+            for shard in ("rebar-1", "shard-1"):
+                script = (f"sudo() {{ echo \"$*\"; }}\nCARGO_PACKAGE=cargo-pin\nRUST_PACKAGE=rust-pin\n{install}\n"
+                          f"BENCHMARK_MODE={mode} RE2_CAMPAIGN_SHARD_ID={shard} install_packages\n"
+                          f"CAMPAIGN_MODE={mode} CAMPAIGN_SHARD_ID={shard}\n{expected}\n"
+                          "echo \"expected=${expected_cargo_package}\"\n")
+                output = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True).stdout
+                with self.subTest(mode=mode, shard=shard):
+                    self.assertEqual("cargo-pin rust-pin" in output, "expected=cargo-pin" in output)
+                    self.assertEqual("cargo-pin rust-pin" in output, mode == "language-batch" or shard == "rebar-1")
+
     def test_missing_remote_artifact_is_retryable_infrastructure(self):
         source = AWS_RUNNER.read_text()
 

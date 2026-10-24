@@ -56,7 +56,7 @@ public final class LanguageBulkProfile
             throws ReflectiveOperationException
     {
         Object pattern = field(data, "pattern");
-        if (pattern instanceof JavaRegexp || pattern instanceof TrinoRegexp) {
+        if (pattern instanceof JavaRegexp || pattern instanceof TrinoRegexp || pattern instanceof RustRegexp) {
             pattern = field(pattern, "pattern");
         }
         if (pattern instanceof Re2 re2) {

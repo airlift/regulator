@@ -28,7 +28,7 @@ class TestMappings(unittest.TestCase):
 
     def test_pinned_unicode_classes_are_identical_in_all_languages(self):
         for identity, (pattern, name, suffix) in mappings.UNICODE_CASES.items():
-            translated = {mappings.translate(identity, language, pattern)[0] for language in ("re2", "java", "trino")}
+            translated = {mappings.translate(identity, language, pattern)[0] for language in ("re2", "java", "trino", "rust")}
             self.assertEqual(translated, {mappings.unicode_class(name) + suffix})
             self.assertNotIn(b"\\p", next(iter(translated)))
             with self.assertRaisesRegex(ValueError, "source pattern changed"):
@@ -44,6 +44,34 @@ class TestMappings(unittest.TestCase):
         expected = pattern.replace(b"(?P<", b"(?<").replace(rb"\pL", rb"\p{L}").replace(rb"\pZ", rb"\p{Z}")
         for language in ("java", "trino"):
             self.assertEqual(mappings.translate("wild/bibleref/long", language, pattern)[0], expected)
+
+    def test_rust_spells_out_re2_ascii_digit_and_space_classes(self):
+        self.assertEqual(mappings.ascii_classes(rb"\d\\d\s\\s\w"), rb"[0-9]\\d[\t\n\f\r ]\\s\w")
+        self.assertEqual(mappings.translate("wild/bibleref/long", "rust", mappings.BIBLEREF_PATTERN)[0],
+                         mappings.ascii_classes(mappings.BIBLEREF_PATTERN))
+        self.assertEqual(mappings.translate_lifecycle("everyday/trinoPhone", "rust", r"\d{3}/\d{3}/\d{4}")[0],
+                         "[0-9]{3}/[0-9]{3}/[0-9]{4}")
+        self.assertEqual(mappings.translate_lifecycle("everyday/whitespace", "rust", r"\s+")[0], r"[\t\n\f\r ]+")
+        # Java and Trino compile lifecycle patterns with ASCII classes.
+        self.assertEqual(mappings.translate_lifecycle("everyday/whitespace", "java", r"\s+"), (r"\s+", None))
+        with self.assertRaisesRegex(ValueError, "source pattern changed"):
+            mappings.translate("wild/bibleref/long", "rust", rb"\d+")
+        with self.assertRaisesRegex(ValueError, "source pattern changed"):
+            mappings.translate_lifecycle("everyday/whitespace", "rust", r"\s*")
+
+    def test_rust_excludes_byte_patterns_its_empty_match_rule_and_its_size_limit(self):
+        for identity, pattern in (("imported/rsc/not-literal", rb".y"), ("curated/14-quadratic/1x", rb".*[^A-Z]|[A-Z]")):
+            self.assertIsNone(mappings.translate(identity, "rust", pattern)[0])
+            self.assertEqual(mappings.translate(identity, "java", pattern)[0], pattern)
+        # Pin both the source pattern and its Unicode-off flag.
+        for pattern, unicode in ((rb".z", False), (rb".y", True)):
+            with self.assertRaisesRegex(ValueError, "source pattern or Unicode flag changed"):
+                mappings.translate("imported/rsc/not-literal", "rust", pattern, unicode=unicode)
+        for cases in (mappings.RUST_EMPTY_MATCH_CASES, mappings.RUST_SIZE_CASES):
+            for identity, pattern in cases.items():
+                self.assertIsNone(mappings.translate(identity, "rust", pattern)[0])
+                with self.assertRaisesRegex(ValueError, "source pattern changed"):
+                    mappings.translate(identity, "rust", b"different")
 
     def test_unicode_range_generator_rejects_missing_or_overlapping_ranges(self):
         with tempfile.TemporaryDirectory() as directory:

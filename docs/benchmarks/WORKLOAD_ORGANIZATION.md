@@ -6,8 +6,9 @@ ordinary application work separate from stress tests and engine diagnostics.
 The report uses language as its top-level navigation, as defined in
 [`LANGUAGE_COMPARISON_PLAN.md`](LANGUAGE_COMPARISON_PLAN.md). Each regex page
 compares Regulator with the corresponding library: native RE2, JDK `Pattern`,
-or Trino's Joni. LIKE has its own page against Trino SQL LIKE. The workload
-groups below have separate weighting and summary rules within each language.
+Trino's Joni, or the Rust `regex` crate. LIKE has its own page against Trino
+SQL LIKE. The workload groups below have separate weighting and summary rules
+within each language.
 
 ## Questions answered separately
 
@@ -16,11 +17,11 @@ into a row-count-weighted overall score.
 
 | Population | Purpose | Comparators | Headline use |
 |---|---|---|---|
-| Application-shaped scalar operations | Compiled patterns applied to changing, short and medium inputs | Native RE2, JDK Pattern, or Joni for the selected language; Joni for additional Trino operations | Primary application view |
+| Application-shaped scalar operations | Compiled patterns applied to changing, short and medium inputs | Native RE2, JDK Pattern, Joni, or the `regex` crate for the selected language; Joni for additional Trino operations | Primary application view |
 | Specialized engine and compiler | Representative patterns on the regular engine, the specialized engine, and compiled, as warmed steady-state operations; Trino regex and LIKE today | The page comparator: Joni for Trino regex, Trino SQL LIKE for LIKE | Separate report section; excluded from headlines |
-| Bulk text search | Whole files, books, source trees, dictionaries, and large logs | Native RE2, JDK Pattern, or Joni for the selected language, where supported | Separate throughput view |
+| Bulk text search | Whole files, books, source trees, dictionaries, and large logs | Native RE2, JDK Pattern, Joni, or the `regex` crate for the selected language, where supported | Separate throughput view |
 | Compilation | Cold and repeated pattern compilation | Comparator for the pattern language | Integrated lifecycle view; compile-only data in raw downloads |
-| Literal-probe distributions | One literal counted over a pinned corpus with Regulator's default and a corpus-matched byte-frequency distribution | Native RE2, JDK Pattern, or Joni for the selected regex language | Separate report section; excluded from headlines |
+| Literal-probe distributions | One literal counted over a pinned corpus with Regulator's default and a corpus-matched byte-frequency distribution | Native RE2, JDK Pattern, Joni, or the `regex` crate for the selected regex language | Separate report section; excluded from headlines |
 | User-relevant adversarial and stress | Pathological inputs, reported failures, quadratic cases, and resource pressure that users can encounter | Applicable public APIs | Folded report section; excluded from headlines |
 
 Internal route probes, compiler experiments, synthetic scaling sweeps, memory
@@ -136,8 +137,9 @@ byte frequencies. Each counts every match of one literal over a pinned,
 checksummed corpus twice: once with Regulator's default uniform distribution
 and once with a distribution matched to the corpus, either a preset or one
 learned from separate sample lines of the same kind of log. Native RE2, JDK
-Pattern, and Joni have no such option and run unchanged against both. The
-learned distribution is built during benchmark setup, outside timing.
+Pattern, Joni, and the `regex` crate have no such option and run unchanged
+against both. The learned distribution is built during benchmark setup, outside
+timing.
 
 These rows carry their own `literal-probe` population. They are a small,
 deliberately chosen set rather than a sample of bulk text, so they never enter

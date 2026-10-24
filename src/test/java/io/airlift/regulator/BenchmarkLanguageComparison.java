@@ -51,7 +51,7 @@ public class BenchmarkLanguageComparison
     @State(Scope.Thread)
     public static class BenchmarkData
     {
-        @Param({"re2", "java", "trino", "jdk", "joni"})
+        @Param({"re2", "java", "trino", "rust", "jdk", "joni"})
         public String engine;
 
         @Param("required-workload-file")
@@ -108,6 +108,7 @@ public class BenchmarkLanguageComparison
             case Re2 re2 -> re2.find(source.bytes());
             case JavaRegexp java -> java.find(source.bytes());
             case TrinoRegexp trino -> trino.contains(source.bytes());
+            case RustRegexp rust -> rust.find(source.bytes());
             case Pattern jdk -> jdk.matcher(source.text()).find();
             case Regex joni -> new JoniCompiled(joni).contains(source);
             default -> throw new IllegalStateException("unhandled compiled pattern");
@@ -122,6 +123,7 @@ public class BenchmarkLanguageComparison
             case Re2 re2 -> re2.count(source.bytes());
             case JavaRegexp java -> java.count(source.bytes());
             case TrinoRegexp trino -> trino.count(source.bytes());
+            case RustRegexp rust -> rust.count(source.bytes());
             case Pattern jdk -> countMatches(jdk.matcher(source.text()));
             case Regex joni -> new JoniCompiled(joni).count(source);
             default -> throw new IllegalStateException("unhandled compiled pattern");
@@ -146,6 +148,7 @@ public class BenchmarkLanguageComparison
             case "re2" -> Re2.compile(inputs.pattern());
             case "java" -> JavaRegexp.compile(inputs.pattern());
             case "trino" -> TrinoRegexp.compile(inputs.pattern());
+            case "rust" -> RustRegexp.compile(inputs.pattern());
             case "jdk" -> Pattern.compile(inputs.patternText());
             case "joni" -> new Regex(
                     inputs.pattern().byteArray(),
@@ -169,6 +172,7 @@ public class BenchmarkLanguageComparison
             case Re2 re2 -> new SliceCompiled(re2, null, re2.matcher(source.bytes(), 0));
             case JavaRegexp java -> new SliceCompiled(null, java, java.matcher(source.bytes(), 0));
             case TrinoRegexp trino -> new TrinoCompiled(trino);
+            case RustRegexp rust -> new RustCompiled(rust, rust.matcher(source.bytes(), 0));
             case Pattern jdk -> new JdkCompiled(jdk.matcher(source.text()));
             case Regex joni -> new JoniCompiled(joni);
             default -> throw new IllegalStateException("unhandled compiled pattern");
@@ -230,6 +234,33 @@ public class BenchmarkLanguageComparison
         public List<String> matches(TestingLanguageBenchmarkInputs.Source source)
         {
             return pattern.extractAll(source.bytes()).stream().map(BenchmarkLanguageComparison::hex).toList();
+        }
+    }
+
+    private record RustCompiled(RustRegexp pattern, Re2Matcher matcher)
+            implements Compiled
+    {
+        @Override
+        public boolean contains(TestingLanguageBenchmarkInputs.Source source)
+        {
+            return pattern.find(source.bytes());
+        }
+
+        @Override
+        public long count(TestingLanguageBenchmarkInputs.Source source)
+        {
+            return pattern.count(source.bytes());
+        }
+
+        @Override
+        public List<String> matches(TestingLanguageBenchmarkInputs.Source source)
+        {
+            matcher.reset(source.bytes());
+            List<String> matches = new ArrayList<>();
+            while (matcher.find()) {
+                matches.add(hex(matcher.group()));
+            }
+            return matches;
         }
     }
 

@@ -12,7 +12,7 @@ from statistics import mean
 import sys
 
 from baseline_data import LIKE_INPUT_BYTES, baseline_rows, read_rows
-from language_data import LANGUAGES, MEMORY_MODES, PLATFORMS, digest, language_rows, outcome, reduce_hosts
+from language_data import MEMORY_MODES, PLATFORMS, RELEASE_1_0_LANGUAGES, digest, language_rows, outcome, reduce_hosts
 from publication_data import publication_data
 from report_data import validate_report
 
@@ -187,7 +187,7 @@ def build(arguments):
     report = {
         'schemaVersion': 2, 'sources': {'currentLabel': 'Final-v1 capture', 'currentCandidate': source['candidate_commit'],
                                       'engineTree': ENGINE_TREE, 'jdk': 'Temurin 25.0.4+7'},
-        'languages': LANGUAGES, 'platforms': PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
+        'languages': RELEASE_1_0_LANGUAGES, 'platforms': PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
         'methodology': [
             'Times are medians of all measured samples within each host, then medians across independent hosts. Ratios and deltas are calculated within each host before aggregation.',
             'Every shared-language case has three independent hosts. Existing baseline diagnostics have three primary hosts and, where required, one additional confirmation host. No noisy host is removed.',

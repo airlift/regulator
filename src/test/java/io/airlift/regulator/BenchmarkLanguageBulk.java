@@ -65,7 +65,7 @@ public class BenchmarkLanguageBulk
     @State(Scope.Thread)
     public static class BenchmarkData
     {
-        @Param({"re2", "java", "trino", "jdk", "joni"})
+        @Param({"re2", "java", "trino", "rust", "jdk", "joni"})
         public String engine;
 
         @Param("required-workload-file")
@@ -113,6 +113,7 @@ public class BenchmarkLanguageBulk
             sliceMatcher = input.model().equals("grep") ? null : switch (pattern) {
                 case Re2 re2 -> captures ? re2.matcher(EMPTY_SLICE) : re2.matcher(EMPTY_SLICE, 0);
                 case JavaRegexp java -> captures ? java.matcher(EMPTY_SLICE) : java.matcher(EMPTY_SLICE, 0);
+                case RustRegexp rust -> captures ? rust.matcher(EMPTY_SLICE) : rust.matcher(EMPTY_SLICE, 0);
                 default -> null;
             };
             if (pattern instanceof Pattern jdk) {
@@ -139,6 +140,10 @@ public class BenchmarkLanguageBulk
                         .setUnicodeCharacterClasses(input.unicode())
                         .setByteFrequencies(input.byteFrequencies()));
                 case "trino" -> TrinoRegexp.compile(patternBytes, TrinoRegexp.Options.defaults().setByteFrequencies(input.byteFrequencies()));
+                case "rust" -> RustRegexp.compile(patternBytes, RustRegexp.Options.defaults()
+                        .setCaseInsensitive(input.caseInsensitive())
+                        .setUnicode(input.unicode())
+                        .setByteFrequencies(input.byteFrequencies()));
                 case "jdk" -> Pattern.compile(patternText, flags);
                 case "joni" -> new Regex(
                         patternBytes.byteArray(),
@@ -161,11 +166,17 @@ public class BenchmarkLanguageBulk
                 else if (input.model().equals("grep") && pattern instanceof JavaRegexp java) {
                     result += java.find(source.bytes) ? 1 : 0;
                 }
+                else if (input.model().equals("grep") && pattern instanceof RustRegexp rust) {
+                    result += rust.find(source.bytes) ? 1 : 0;
+                }
                 else if (input.model().equals("count") && pattern instanceof Re2 re2) {
                     result += re2.count(source.bytes);
                 }
                 else if (input.model().equals("count") && pattern instanceof JavaRegexp java) {
                     result += java.count(source.bytes);
+                }
+                else if (input.model().equals("count") && pattern instanceof RustRegexp rust) {
+                    result += rust.count(source.bytes);
                 }
                 else if (pattern instanceof TrinoRegexp trino) {
                     result += switch (input.model()) {
@@ -233,6 +244,9 @@ public class BenchmarkLanguageBulk
                 }
                 else if (input.model().equals("grep") && pattern instanceof JavaRegexp java) {
                     writer.write(java.find(source.bytes) ? "1\n" : "0\n");
+                }
+                else if (input.model().equals("grep") && pattern instanceof RustRegexp rust) {
+                    writer.write(rust.find(source.bytes) ? "1\n" : "0\n");
                 }
                 else if (pattern instanceof TrinoRegexp trino) {
                     if (input.model().equals("grep")) {
@@ -348,14 +362,14 @@ public class BenchmarkLanguageBulk
     }
 
     /**
-     * Diagnostic for the original RE2/Java count-by-iteration path. Unlike count(),
+     * Diagnostic for the RE2/Java/Rust count-by-iteration path. Unlike count(),
      * this locates every match boundary even though only the count is consumed.
      */
     @Benchmark
     public long iterateMatches(BenchmarkData data)
     {
         if (!data.input.model().equals("count") || data.sliceMatcher == null) {
-            throw new IllegalArgumentException("iteration diagnostic requires RE2/Java count workload");
+            throw new IllegalArgumentException("iteration diagnostic requires RE2/Java/Rust count workload");
         }
         long count = 0;
         for (Source source : data.sources) {

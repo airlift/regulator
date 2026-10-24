@@ -20,6 +20,7 @@ separate.
 | RE2 | `Re2` | Pinned native RE2 |
 | Java regular expressions | `JavaRegexp` | The selected JDK's `java.util.regex.Pattern` |
 | Trino regular expressions | `TrinoRegexp` | Pinned Airlift Joni from the selected Trino revision |
+| Rust regular expressions | `RustRegexp` | The pinned Rust `regex` crate's `str` API |
 | Trino SQL LIKE | `TrinoLikePattern` | Trino's SQL LIKE execution route |
 
 LIKE compares directly with Trino's Slice-based matcher. For patterns eligible
@@ -29,11 +30,12 @@ and input conversion are excluded.
 
 Every report identifies the exact JDK build because `Pattern` implementation,
 Unicode data, and generated code are properties of that JDK. Native RE2, Trino,
-and Joni revisions remain pinned as required by the qualification protocol.
+Joni, the Rust toolchain, and the `regex` crate revisions remain pinned as
+required by the qualification protocol.
 
 ## Shared regex workload
 
-The RE2, Java, and Trino-regexp sections use one shared logical workload
+The RE2, Java, Trino-regexp, and Rust sections use one shared logical workload
 registry. A logical case has a stable identifier, input corpus, operation,
 result demand, and normalized expected result. Each language entry records one
 of these mappings:
@@ -41,6 +43,16 @@ of these mappings:
 - **identical:** the same pattern has the same meaning in both engines
 - **translated:** a recorded language-specific pattern has equivalent meaning
 - **not compatible:** an equivalent pattern or operation cannot be expressed
+
+One difference is allowed under identical: the Java, Trino, and Rust `\s`
+also matches vertical tab, which RE2's does not. No frozen input for a pattern
+that uses `\s` or `\S` contains a vertical tab, so this difference cannot
+change a result.
+
+In Unicode mode, `\d` and `\s` also match non-ASCII digits and spaces. The
+Unicode-mode Rust cases that use them are therefore translated to RE2's ASCII
+classes: bibleref and the lifecycle `trinoPhone` and `whitespace` workloads.
+Unicode-off bulk cases keep their ASCII classes unchanged.
 
 Translations are data in the manifest, not ad hoc changes in benchmark code.
 Each records the source pattern, translated pattern, reason, and verifier
@@ -68,6 +80,8 @@ Each engine receives the representation its public API accepts:
   same logical Unicode text.
 - Joni receives the precomputed byte representation used by the pinned Trino
   comparator.
+- The pinned Rust `regex` crate receives the identical UTF-8 bytes as a `str`,
+  validated outside timing.
 
 The default JDK timing excludes UTF-8-to-`String` conversion. If an integration
 needs to measure that cost, add a separate conversion-inclusive diagnostic.
@@ -171,6 +185,7 @@ language:
 | RE2 | Native RE2 |
 | Java regex | JDK `Pattern` |
 | Trino regexp | Joni |
+| Rust regex | `regex` crate |
 | LIKE | Trino |
 
 Exact lifecycle, operation, architecture, memory-mode, incompatible, and
@@ -180,8 +195,8 @@ timeout details remain in the interactive report.
 
 The collection tools are implemented in
 [`tools/re2-benchmark/language`](../../tools/re2-benchmark/language/README.md).
-It covers the existing 13 everyday workloads, all three Regulator frontends and
-their natural comparators, compilation, and single-use/reused contains and
+It covers the existing 13 everyday workloads, all four Regulator regex frontends
+and their natural comparators, compilation, and single-use/reused contains and
 count. It keeps immutable inputs, raw samples, allocation, phase-specific
 verification receipts, normalization sizes, and runner provenance in a
 layout-independent export. Verification is available separately from timing.
@@ -203,8 +218,8 @@ identity. Page-layout changes must preserve raw samples and workload IDs.
 
 The collection and report must preserve these requirements:
 
-- all four language views have their natural comparator
-- the three regex views share stable logical cases where semantics overlap
+- all five language views have their natural comparator
+- the four regex views share stable logical cases where semantics overlap
 - the JDK comparator has pinned provenance and verified representation rules
 - every regex language has representative single-use and reused measurements
 - not-compatible and did-not-finish states are explicit and non-aggregated

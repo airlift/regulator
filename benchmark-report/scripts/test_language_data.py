@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-from language_data import LANGUAGES, MEMORY_MODES, PLATFORMS, RELEASE_1_0_PLATFORMS, language_rows, outcome, reduce_hosts, timing, validate_language_report
+from language_data import MEMORY_MODES, PLATFORMS, RELEASE_1_0_LANGUAGES, RELEASE_1_0_PLATFORMS, language_rows, outcome, reduce_hosts, timing, validate_language_report
 
 
 def host(replica, candidate, comparator):
@@ -15,9 +15,9 @@ def host(replica, candidate, comparator):
             'comparator': outcome({'outcome': 'compared', 'samples_ns': [[comparator] * 10] * 5})}
 
 
-def report_fixture(platforms=PLATFORMS):
+def report_fixture(platforms=PLATFORMS, languages=RELEASE_1_0_LANGUAGES):
     rows = []
-    for language in LANGUAGES:
+    for language in languages:
         for platform in platforms:
             for mode in MEMORY_MODES:
                 operations = ('matches', 'compile', 'singleUse') if language == 'like' else ('compile', 'reusedContains', 'reusedCount', 'singleUseContains', 'singleUseCount', 'execute')
@@ -29,7 +29,7 @@ def report_fixture(platforms=PLATFORMS):
                                  'family': 'Fixture', 'source': source, 'inputBytes': None,
                                  'result': reduce_hosts([host(replica, 10, 20) for replica in (1, 2, 3)])})
     return {'schemaVersion': 2, 'sources': {'currentLabel': 'Fixture', 'currentCandidate': 'candidate', 'engineTree': 'engine', 'jdk': 'JDK'},
-            'languages': LANGUAGES, 'platforms': platforms, 'memoryModes': MEMORY_MODES,
+            'languages': languages, 'platforms': platforms, 'memoryModes': MEMORY_MODES,
             'methodology': ['Fixture only'], 'provenance': {'fixture': True}, 'rows': rows}
 
 

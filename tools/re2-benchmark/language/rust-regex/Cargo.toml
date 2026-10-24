@@ -1,0 +1,21 @@
+[package]
+name = "language-rust-regex"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+# The release Regulator's Rust language follows, with its default features,
+# resolved to the same graph as tools/rust-regex-golden/Cargo.lock.
+regex = "=1.13.1"
+
+# Rebar's pinned rust/regex engine profile, built for a generic target CPU.
+# Aborting keeps a panic from unwinding into the C++ harness.
+[profile.release]
+debug = true
+codegen-units = 1
+lto = "fat"
+panic = "abort"

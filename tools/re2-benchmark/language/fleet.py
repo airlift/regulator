@@ -19,6 +19,7 @@ import batching
 PLATFORMS = ("r9g", "r8i")
 # Archived plans are the 1.0 release campaign's, which also measured R8g.
 RELEASE_1_0_PLATFORMS = ("r9g", "r8g", "r8i")
+PARTITION_ID = rf"case-[0-9]{{4,}}-({'|'.join(collection.ENGINES)})"
 BATCH_OPERATION_BUDGET = 1
 DEFAULT_MAX_CONCURRENT_HOSTS = 64
 
@@ -151,11 +152,12 @@ def validate_plan(directory, allow_archived_schema):
     plan = collection.load(directory / "plan.json")
     source = directory / "source"
     manifest = collection.load(source / "manifest.json")
-    # Saved 1.0 plans measured three platforms. The oldest (schema 2) also
-    # predate recorded EC2 allocations.
-    archived = allow_archived_schema and plan.get("platforms") == list(RELEASE_1_0_PLATFORMS)
+    # Saved 1.0 plans measured three languages on three platforms. The oldest
+    # (schema 2) also predate recorded EC2 allocations.
+    archived = (allow_archived_schema and plan.get("platforms") == list(RELEASE_1_0_PLATFORMS) and
+                collection.has_release_1_0_languages(manifest))
     unallocated = archived and plan.get("schema_version") == 2
-    collection.validate_manifest(manifest, source)
+    collection.validate_manifest(manifest, source, archived)
     source_bracket.validate(manifest, source)
     if "selected_languages" in manifest or "parent_manifest_sha256" in manifest:
         raise ValueError("fleet source must be unpartitioned")
@@ -167,7 +169,7 @@ def validate_plan(directory, allow_archived_schema):
             (unallocated and "platform_allocations" in plan) or
             (not unallocated and plan.get("platform_allocations") != platform_allocations(manifest["suite"], platforms))):
         raise ValueError("invalid fleet protocol or source identity")
-    expected = {(case["id"], language) for case in manifest["cases"] for language in collection.ENGINES}
+    expected = {(case["id"], language) for case in manifest["cases"] for language in manifest["languages"]}
     if 'selection' in plan:
         selected = {tuple(identity) for identity in plan['selection']}
         if (not selected or not selected <= expected or
@@ -178,7 +180,7 @@ def validate_plan(directory, allow_archived_schema):
     partition_ids = set()
     cases = {case["id"]: case for case in manifest["cases"]}
     for partition in plan["partitions"]:
-        if not re.fullmatch(r"case-[0-9]{4,}-(re2|java|trino)", partition["id"]):
+        if not re.fullmatch(PARTITION_ID, partition["id"]):
             raise ValueError("invalid partition ID")
         identity = (partition["case"], partition["language"])
         if identity not in expected or identity in found or partition["id"] in partition_ids:
@@ -194,7 +196,7 @@ def validate_plan(directory, allow_archived_schema):
         actual = collection.load(path / "manifest.json")
         if actual != subset or collection.digest((path / "manifest.json").read_bytes()) != partition["manifest_sha256"]:
             raise ValueError("partition differs from its parent manifest")
-        collection.validate_manifest(actual, path)
+        collection.validate_manifest(actual, path, archived)
     if found != expected:
         raise ValueError("incomplete fleet coverage")
     expected_jobs = [{"id": f"{platform}/{partition['id']}/replica-{replica}", "platform": platform,
@@ -324,7 +326,7 @@ def validate_package(directory):
     collection.validate_manifest(manifest, directory)
     job = receipt["job"]
     if (job["platform"] not in PLATFORMS or type(job["replica"]) is not int or job["replica"] < 1 or
-            not re.fullmatch(r"case-[0-9]{4,}-(re2|java|trino)", job["partition"]) or
+            not re.fullmatch(PARTITION_ID, job["partition"]) or
             job["id"] != f"{job['platform']}/{job['partition']}/replica-{job['replica']}" or
             {key: job.get(key) for key in ("instance_type", "vcpus")} != platform_allocation(manifest["suite"], job["platform"]) or
             not re.fullmatch(r"[0-9a-f]{64}", receipt["plan_sha256"]) or
@@ -350,6 +352,10 @@ def verify(directory, results, java, classpath, native_runners):
     """Verify every partition locally, including agreement across language boundaries."""
     directory, results = directory.resolve(), results.resolve()
     plan = validate(directory)
+    # A runner missing for a later partition would otherwise strand a partial results directory.
+    for partition in plan["partitions"]:
+        collection.require_native_runners(
+            collection.load(directory / "partitions" / partition["id"] / "manifest.json"), native_runners)
     results.mkdir(parents=True, exist_ok=False)
     receipts = {}
     runner_hash = None

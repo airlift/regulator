@@ -5,21 +5,28 @@ import tempfile
 import unittest
 
 
-@unittest.skipUnless(os.environ.get("LANGUAGE_NATIVE_RUNNER"), "build and set LANGUAGE_NATIVE_RUNNER for native checks")
-class TestNativeRunner(unittest.TestCase):
+class NativeRunnerChecks:
+    """Each native comparator runs the same lifecycle checks through the shared harness."""
+
+    RUNNER = None
+    # Matches of a* in "ab": RE2 also reports the empty match where "a" ended; Rust skips it.
+    EMPTY_AFTER_MATCH = None
+
     def run_case(self, pattern, source, count, offset=3, operation=None):
+        runner = os.environ[self.RUNNER]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "input.tsv"
             path.write_text(pattern.encode().hex() + f"\n{offset}\t{count}\t" + source.encode().hex() + "\n")
-            command = [os.environ["LANGUAGE_NATIVE_RUNNER"], "--verify", str(path)] if operation is None else [
-                os.environ["LANGUAGE_NATIVE_RUNNER"], "--verify-operation", str(path), operation]
+            command = [runner, "--verify", str(path)] if operation is None else [
+                runner, "--verify-operation", str(path), operation]
             return subprocess.run(command,
                                   capture_output=True, text=True, timeout=10)
 
     def test_empty_matches_advance_and_terminate(self):
-        result = self.run_case("a*", "ab", 3)
+        count, trace = self.EMPTY_AFTER_MATCH
+        result = self.run_case("a*", "ab", count)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "3:61,,\n")
+        self.assertEqual(result.stdout, trace)
         result = self.run_case("a*", "", 1)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "1:\n")
@@ -35,17 +42,23 @@ class TestNativeRunner(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "1:" + source.encode().hex() + "\n")
 
+    def test_no_match_is_not_contained(self):
+        result = self.run_case("a", "b", 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "0:\n")
+
     def test_wrong_expected_result_fails(self):
         result = self.run_case("a", "a", 0)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("verification failed", result.stderr)
 
     def test_each_operation_has_its_own_checked_result(self):
+        count, _ = self.EMPTY_AFTER_MATCH
         for operation in ("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount"):
             with self.subTest(operation=operation):
-                result = self.run_case("a*", "ab", 3, operation=operation)
+                result = self.run_case("a*", "ab", count, operation=operation)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, "compiled\n" if operation == "compile" else "1\n" if operation.endswith("Contains") else "3\n")
+                self.assertEqual(result.stdout, "compiled\n" if operation == "compile" else "1\n" if operation.endswith("Contains") else f"{count}\n")
 
     def test_compile_does_not_execute_other_operations(self):
         result = self.run_case("a", "a", 0, operation="compile")
@@ -53,6 +66,19 @@ class TestNativeRunner(unittest.TestCase):
         self.assertEqual(result.stdout, "compiled\n")
         result = self.run_case("a", "a", 0, operation="reusedCount")
         self.assertNotEqual(result.returncode, 0)
+
+
+@unittest.skipUnless(os.environ.get("LANGUAGE_NATIVE_RUNNER"), "build and set LANGUAGE_NATIVE_RUNNER for native checks")
+class TestNativeRunner(NativeRunnerChecks, unittest.TestCase):
+    RUNNER = "LANGUAGE_NATIVE_RUNNER"
+    EMPTY_AFTER_MATCH = (3, "3:61,,\n")
+
+
+@unittest.skipUnless(os.environ.get("LANGUAGE_NATIVE_RUST_RUNNER"),
+                     "build and set LANGUAGE_NATIVE_RUST_RUNNER for native Rust checks")
+class TestNativeRustRunner(NativeRunnerChecks, unittest.TestCase):
+    RUNNER = "LANGUAGE_NATIVE_RUST_RUNNER"
+    EMPTY_AFTER_MATCH = (2, "2:61,\n")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ EXPECTED_PLATFORMS = {
 }
 EXPECTED_COMPARATORS = {
     "native-re2": "972a15cedd008d846f1a39b2e88ce48d7f166cbd",
+    "rust-regex": "1.13.1",
     "rebar": "463d00f31887e84c38467805b9e3122c314b9521",
     "trino": "c7503d170344c4e266f03fdb39e53c82aa7e3594",
     "airlift-joni": "2.1.5.3",

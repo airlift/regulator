@@ -113,6 +113,10 @@ Current language comparisons use these work contracts:
   operation loops but returns Slice lists and passes Slice-list captures to
   callbacks instead of constructing SQL Blocks. Separate correctness checks
   compare this adapter with Trino's SQL functions.
+- Rust counts, span sums, and capture counts follow the crate's iteration on
+  both sides, which skips an empty match ending where the previous match ended.
+  The crate side makes one call per input from C++ into the pinned `regex`
+  crate's `str` API and reuses its capture locations across matches.
 - LIKE construction uses prepared Slice patterns on Regulator and prepared String
   patterns on Trino LikeMatcher. This is a compiler-API comparison, not complete
   Slice-to-Trino-SQL conversion. JDK regex similarly receives prepared Strings.

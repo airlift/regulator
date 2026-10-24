@@ -1,7 +1,7 @@
 # Language comparison collection
 
 This suite measures ordinary regex operations and pattern lifecycles across
-the three regex languages. Run it alongside the baseline, Rebar,
+the four regex languages. Run it alongside the baseline, Rebar,
 Trino-operation, and LIKE shards, not instead of them.
 
 The current corpus is the 13 workloads in `everyday-trino-workloads.tsv`, with
@@ -12,34 +12,60 @@ eight rotating inputs each. Each workload runs through:
 | RE2 | `Re2` | Pinned native RE2 |
 | Java | `JavaRegexp` | JDK `Pattern` |
 | Trino | `TrinoRegexp` | Pinned Airlift Joni |
+| Rust | `RustRegexp` | Pinned Rust `regex` crate |
 
 Regulator runs with native access enabled and disabled. The comparator runs
 once per language and host, and supplies the comparison for both modes.
 Each engine measures compilation, single-use contains and count, and reused
-contains and count. That produces 585 engine observations and 390 paired rows
+contains and count. That produces 780 engine observations and 520 paired rows
 per architecture. These counts describe this additional suite, not the full
 qualification campaign.
 
 ## Measurement contracts
 
 JDK patterns and inputs are decoded strictly to `String` before timing.
-Regulator, Joni, and native RE2 receive identical UTF-8 bytes. Input rotation
-includes nonzero Slice offsets. No encoding conversion is timed.
+Regulator, Joni, native RE2, and the `regex` crate receive identical UTF-8
+bytes. The Rust comparator validates them as UTF-8 when it loads the workload
+and borrows them as `str` during timing. Input rotation includes nonzero Slice
+offsets. No encoding conversion is timed.
 
 Single use includes compilation and one public operation. Reused measurements
-retain the compiled pattern. RE2 and Java counts use their public `count` methods;
-JDK reuses `Matcher.reset`; Trino uses its public `contains` and `count`
-operations. Joni constructs a matcher for each byte-array input as its Trino
-route does. Compilation does not construct a matcher. Native compilation
-includes destruction of the compiled object; Java allocation and amortized GC
-are recorded by JMH. These lifetime costs are not assumed to be identical.
+retain the compiled pattern. RE2, Java, and Rust counts use their public
+`count` methods; JDK reuses `Matcher.reset`; Trino uses its public `contains`
+and `count` operations. Joni constructs a matcher for each byte-array input as
+its Trino route does. Compilation does not construct a matcher. Native
+compilation includes destruction of the compiled object; Java allocation and
+amortized GC are recorded by JMH. These lifetime costs are not assumed to be
+identical.
 
-Bulk boolean-line operations use `Re2.find` and `JavaRegexp.find`, not a
-boundary-producing matcher. Bulk counts use the public count methods. The
-separate `BenchmarkLanguageBulk.iterateMatches` diagnostic retains the original
-RE2/Java count-by-iteration path; it requires a `count` workload and is not part
-of the primary collector. Historical count-by-iteration measurements remain
-distinct from public-count measurements even when their input/result is identical.
+The Rust comparator is the pinned `regex` crate with its default features,
+linked as a static library behind a C interface. It builds each pattern with
+`RegexBuilder` as `tools/rust-regex-golden` does, setting only Unicode mode and
+case insensitivity, so the crate's default size and nest limits apply. Contains
+is `is_match` and count is `find_iter` counting; each makes one call across the
+interface per input. Span and capture counts use the crate's own iteration,
+with capture locations reused across matches, and the trace checks that loop
+against `captures_iter`. A panic aborts the process rather than unwinding into
+C++. The release profile is Rebar's `rust/regex` profile: fat LTO, one codegen
+unit, and `panic = "abort"`, for the generic CPU with no `RUSTFLAGS`. Rebar's
+own `rust/regex` engine instead runs the `regex-automata` meta engine with byte
+semantics and `perf-dfa-full`; this comparator measures the public `str` API
+that `RustRegexp` follows.
+
+Rust iteration skips an empty match that ends where the previous match ended,
+so `a*` matches twice in `ab` rather than three times as in RE2. Campaign
+expectations stay unchanged: collection checks Rust against the source's
+expected result, and cases where Rust iteration gives a different answer are
+marked not compatible. Only the runners' unit tests expect the crate's own
+counts.
+
+Bulk boolean-line operations use `Re2.find`, `JavaRegexp.find`, and
+`RustRegexp.find`, not a boundary-producing matcher. Bulk counts use the public
+count methods. The separate `BenchmarkLanguageBulk.iterateMatches` diagnostic
+retains the RE2/Java/Rust count-by-iteration path; it requires a `count`
+workload and is not part of the primary collector. Historical
+count-by-iteration measurements remain distinct from public-count measurements
+even when their input/result is identical.
 
 Verification checks existence, counts, and the ordered bytes of every whole
 match, independently of timing. Each of the five timed operations also has its
@@ -81,22 +107,40 @@ Use a patched Python with `tarfile` extraction filters, such as Python 3.9.17+
 or 3.12+. Expanding upstream TOML on the preparation machine additionally
 requires Python 3.11+. The workers do not parse TOML.
 
-Build the Java and pinned C++ runners, then prepare an immutable input manifest:
+The Rust runners need Cargo and rustc 1.97.0. CMake runs
+`cargo build --release --locked` from `rust-regex`, so the lock file is never
+rewritten. There, rustup's `cargo` and `rustc` proxies honor the crate's
+`rust-toolchain.toml` and select 1.97.0 themselves. To use the pinned binaries
+directly instead, put them first on `PATH`; with rustup:
+
+```sh
+export PATH="$(dirname "$(rustup which --toolchain 1.97.0 cargo)"):$PATH"
+```
+
+Build the Java and native runners, then prepare an immutable input manifest:
 
 ```sh
 ./mvnw test-compile
 ./mvnw -q dependency:build-classpath -DincludeScope=test \
   -Dmdep.outputFile=target/language-classpath.txt
-RE2_BENCHMARK_TARGETS=language_benchmark tools/re2-benchmark/build.sh
+RE2_BENCHMARK_TARGETS="language_benchmark language_bulk_benchmark language_rust_benchmark language_rust_bulk_benchmark" \
+  tools/re2-benchmark/build.sh
 python3 tools/re2-benchmark/language/collection.py prepare \
   --manifest-directory target/language-manifest
 ```
 
-The build records `language_benchmark.build.json` beside the native executable.
-It includes binary and source hashes, dependency revisions, compiler commands,
-and the CMake configuration. The source hash covers the engine adapter and the
-shared harness it includes. Rebuilding the C++ target directly requires
-refreshing this receipt with `native_build.py`.
+Each native runner writes its own receipt beside its executable, such as
+`language_benchmark.build.json` or `language_rust_benchmark.build.json`. A
+receipt includes binary and source hashes, dependency revisions, compiler
+commands, and the CMake configuration. The source hash covers the engine
+adapter and the shared harness it includes. Rebuilding a native target
+directly requires refreshing its receipt with `native_build.py`.
+
+The Rust runners' receipts also record the rustc and Cargo versions, the Cargo
+lock hash and resolved crates, and the Cargo command and environment. Their
+source hash also covers the shim crate. The crate lock must resolve the same
+`regex` graph as `tools/rust-regex-golden`, and `regex` must match its row in
+`baseline/comparators.tsv`.
 
 Each native runner is a shared harness, `language_harness.h` or
 `language_bulk_harness.h`, instantiated with one engine adapter. The harness
@@ -115,7 +159,8 @@ python3 tools/re2-benchmark/language/collection.py verify \
   --manifest-directory target/language-manifest \
   --results target/language-verification \
   --classpath "$LANGUAGE_CP" \
-  --native-runner target/re2-benchmark-build/language_benchmark
+  --native-runner target/re2-benchmark-build/language_benchmark \
+  --native-rust-runner target/re2-benchmark-build/language_rust_benchmark
 ```
 
 Preparation and verification refuse to reuse an existing output directory.
@@ -140,6 +185,7 @@ Tests:
 ./mvnw -Dtest=TestLanguageBenchmark test
 python3 -m unittest discover -s tools/re2-benchmark/language -p 'test_*.py'
 LANGUAGE_NATIVE_RUNNER=target/re2-benchmark-build/language_benchmark \
+LANGUAGE_NATIVE_RUST_RUNNER=target/re2-benchmark-build/language_rust_benchmark \
   python3 -m unittest discover -s tools/re2-benchmark/language -p 'test_native_*.py'
 ```
 
@@ -212,20 +258,21 @@ derives the host deadline from the checksummed manifest: each observation and
 operation receives its full 12,600-second process budget, each JVM observation
 receives another allocation-process budget, and the host receives 5,400
 seconds for setup and verification. The current Java and Trino slow batches
-therefore use `TIMEOUT_SECONDS=81000`; a native-RE2 comparison uses 68,400
-seconds. Transport rejects a different deadline, auxiliary diagnostic work, or
-multiple comparisons in a slow batch. Ordinary batches retain the
+therefore use `TIMEOUT_SECONDS=81000`; a native RE2 or Rust comparison uses
+68,400 seconds. Transport rejects a different deadline, auxiliary diagnostic
+work, or multiple comparisons in a slow batch. Ordinary batches retain the
 5,400-second host deadline. The general campaign controller still plans
 90-minute jobs; the slow profile requires direct wrapper scheduling with its
 recorded deadline, as in the archived follow-up controller.
 
 The original profile remains supported for reproducing earlier campaigns.
 JMH uses five forks, ten one-second warmups, ten one-second measurement
-iterations, an 8 GiB heap, G1, and the GC profiler. Native RE2 uses five Google
-Benchmark repetitions with a ten-second warmup and at least one second of
-measurement. Native results use elapsed time. Both protocols and timeout limits
-are saved in the manifest. An aggregate measurement-process timeout is a
-collection failure, not evidence that a single regex call timed out.
+iterations, an 8 GiB heap, G1, and the GC profiler. Native RE2 and Rust use
+five Google Benchmark repetitions with a ten-second warmup and at least one
+second of measurement. Native results use elapsed time. Both protocols and
+timeout limits are saved in the manifest. An aggregate measurement-process
+timeout is a collection failure, not evidence that a single regex call timed
+out.
 
 The result directory keeps:
 
@@ -259,7 +306,7 @@ python3 tools/re2-benchmark/language/fleet.py validate \
 
 Each partition contains one logical case and one language, with the comparator
 and both Regulator memory modes kept together. The everyday corpus produces
-39 partitions and 234 jobs across R9g and R8i, each with three independent
+52 partitions and 312 jobs across R9g and R8i, each with three independent
 host replicas. `--max-concurrent-hosts` records the intended concurrency in the
 plan and defaults to 64.
 `fleet.py` does not allocate or schedule hosts, so that field is not a capacity
@@ -272,7 +319,8 @@ python3 tools/re2-benchmark/language/fleet.py verify \
   --plan-directory target/language-fleet \
   --results target/language-fleet-verification \
   --classpath "$LANGUAGE_CP" \
-  --native-runner target/re2-benchmark-build/language_benchmark
+  --native-runner target/re2-benchmark-build/language_benchmark \
+  --native-rust-runner target/re2-benchmark-build/language_rust_benchmark
 ```
 
 This also compares semantic traces across language partitions. Verification
@@ -335,7 +383,7 @@ make its pattern unrepresentable for compilation.
 ### Bulk preflight
 
 `bulk.py` expands that inventory into byte-identical KLV inputs and probes the
-six engine mappings without collecting timings:
+eight engine mappings without collecting timings:
 
 ```sh
 python3 tools/re2-benchmark/language/bulk.py prepare \
@@ -345,16 +393,18 @@ python3 tools/re2-benchmark/language/bulk.py probe \
   --manifest-directory target/language-bulk \
   --results target/language-bulk-probe \
   --classpath "$LANGUAGE_CP" \
-  --native-runner target/re2-benchmark-build/language_bulk_benchmark
+  --native-runner target/re2-benchmark-build/language_bulk_benchmark \
+  --native-rust-runner target/re2-benchmark-build/language_rust_bulk_benchmark
 python3 tools/re2-benchmark/language/bulk.py summarize \
   --manifest-directory target/language-bulk \
   --results target/language-bulk-probe
 ```
 
-Build `language_bulk_benchmark` alongside `language_benchmark`. The Java
-adapter is `BenchmarkLanguageBulk`. Their unit tests cover compile, count,
-span-count, capture-count, grep, and grep-capture operations. Set
-`LANGUAGE_NATIVE_BULK_RUNNER` to include the native bulk tests in Python
+Build `language_bulk_benchmark` and `language_rust_bulk_benchmark` alongside
+the lifecycle runners. The Java adapter is `BenchmarkLanguageBulk`. Their unit
+tests cover compile, count, span-count, capture-count, grep, and grep-capture
+operations. Set `LANGUAGE_NATIVE_BULK_RUNNER` and
+`LANGUAGE_NATIVE_RUST_BULK_RUNNER` to include the native bulk tests in Python
 discovery.
 
 The probe retains aggregate results, ordered match/capture bytes, process logs,
@@ -378,9 +428,27 @@ options. Shorthand classes, line boundaries, and Unicode versions can therefore
 need explicit translations even when both engines parse the expression.
 
 The explicit mappings in `mappings.py` cover LF-only Java rules, named-group
-syntax, braced Unicode properties and code-point escapes. ASCII-word-boundary
-cases without an equivalent Trino assertion are not compatible. Byte-oriented
-non-ASCII escape cases are not silently converted into code-point matching.
+syntax, braced Unicode properties and code-point escapes. They also spell out
+RE2's ASCII `\d` and `\s` where Rust compiles them as Unicode classes: in
+bibleref and in the lifecycle `trinoPhone` and `whitespace` workloads.
+ASCII-word-boundary cases without an equivalent Trino assertion are not
+compatible. Byte-oriented non-ASCII escape cases are not silently converted
+into code-point matching.
+
+Rust accepts the source's named-capture and property syntax unchanged, but
+three groups are not compatible:
+
+- Sources that turn Unicode mode off and use a dot, negated class, or other
+  expression that can match bytes that are not UTF-8. Rust's `str` API rejects
+  these patterns, and so does `RustRegexp`; only the crate's bytes API accepts
+  them.
+- `.*` and `(?s).*` span counts, where Rust's empty-match rule reports
+  different matches than the source.
+- `\p{L}{256}`, which exceeds the crate's default 10 MiB compiled-size limit.
+  `RustRegexp` does not reproduce that estimate.
+
+As for Java and Trino, an execution over a malformed UTF-8 haystack is not
+compatible.
 
 Two execution workloads expand their Unicode properties to pinned RE2 ranges
 for every language and comparator. This preserves source membership despite
@@ -396,8 +464,10 @@ python3 tools/re2-benchmark/language/unicode_ranges.py \
 Omit `--check` to regenerate after an intentional upstream update. Review the
 source checksum, membership changes, and mapping results before accepting it.
 
-Run `collection.py verify` with the bulk manifest and native bulk runner to
-produce qualification-format correctness receipts for both memory modes.
+Run `collection.py verify` with the bulk manifest, `--native-runner` set to
+`language_bulk_benchmark`, and `--native-rust-runner` set to
+`language_rust_bulk_benchmark` to produce qualification-format correctness
+receipts for both memory modes.
 Unlike `bulk.py probe`, this requires repeatable operation timeouts and fails
 on any result disagreement. A completed operation whose trace times out is a
 verification failure, never an execution timeout. Raw traces remain on disk;
@@ -458,8 +528,8 @@ python3 tools/re2-benchmark/language/literal_probe.py prepare \
 
 The manifest uses the `language-bulk` suite and the `steady-state-v1` profile,
 so `collection.py verify`, `fleet.py prepare`, and `run-campaign.py
---language-plan` accept it unchanged. Its six cases produce 18 partitions and
-108 jobs. Smoke adds the learned-sample workload to the usual first workload
+--language-plan` accept it unchanged. Its six cases produce 24 partitions and
+144 jobs. Smoke adds the learned-sample workload to the usual first workload
 for each language.
 
 ## AWS dispatch and recovery

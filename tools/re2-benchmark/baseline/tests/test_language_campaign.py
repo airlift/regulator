@@ -115,7 +115,7 @@ class TestLanguageController(unittest.TestCase):
         self.execute()
         ledger = self.result_root / "accepted-language-sessions.json"
         accepted = CONTROLLER.read_accepted_sessions(ledger)
-        self.assertEqual(len(accepted), 6)
+        self.assertEqual(len(accepted), 8)
         attempts = (self.result_root / "job-attempts.tsv").read_bytes()
         self.execute(FAKE_MUST_NOT_RUN="1")
         self.assertEqual((self.result_root / "job-attempts.tsv").read_bytes(), attempts)
@@ -141,7 +141,7 @@ class TestLanguageController(unittest.TestCase):
             self.execute(FAKE_INTERRUPT_EPOCH="1")
         state = collection.load(self.arguments.shared_budget.state_path)
         self.assertEqual(state["reservations"], {})
-        self.assertEqual(len(state["completed"]), 7)
+        self.assertEqual(len(state["completed"]), 9)
         self.assertGreater(state["machine_hours"], 0)
         self.assertEqual({item["instance_type"] for item in state["completed"].values()},
                          {"r8i.large", "r9g.2xlarge"})

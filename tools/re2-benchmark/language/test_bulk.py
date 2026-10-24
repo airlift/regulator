@@ -16,7 +16,7 @@ import worker
 
 class TestBulkSummary(unittest.TestCase):
     def fixture(self):
-        manifest = {"cases": [{"id": "test", "model": "count", "expected_result": 53,
+        manifest = {"languages": collection.ENGINES, "cases": [{"id": "test", "model": "count", "expected_result": 53,
                                 "mappings": {language: {"status": "identical"} for language in collection.ENGINES}}]}
         evidence = {f"test/{language}/{engine}": {
             "execute": {"outcome": "completed", "result": "53"},
@@ -28,8 +28,16 @@ class TestBulkSummary(unittest.TestCase):
         manifest, evidence = self.fixture()
         summary = bulk.summarize(manifest, evidence)
         self.assertEqual(summary["issues"], [])
-        self.assertEqual(summary["observations"], 6)
+        self.assertEqual(summary["observations"], 8)
         self.assertFalse(summary["qualification_ready"])
+
+    def test_partition_probe_expects_only_its_selected_language(self):
+        manifest, evidence = self.fixture()
+        manifest["selected_languages"] = ["java"]
+        evidence = {key: value for key, value in evidence.items() if key.startswith("test/java/")}
+        summary = bulk.summarize(manifest, evidence)
+        self.assertEqual(summary["issues"], [])
+        self.assertEqual(summary["expected_observations"], 2)
 
     def test_scalar_and_trace_failures_stay_failures(self):
         manifest, evidence = self.fixture()
@@ -97,7 +105,7 @@ class TestBulkEvidence(unittest.TestCase):
 
     def test_full_memory_matrix_and_original_source_evidence(self):
         evidence = self.evidence()
-        self.assertEqual(len(evidence["receipts"]), 9)
+        self.assertEqual(len(evidence["receipts"]), 12)
         bulk.validate_evidence(self.manifest, evidence, self.root)
         del evidence["receipts"]["example/java/java/native"]
         with self.assertRaisesRegex(ValueError, "missing"):
@@ -142,7 +150,7 @@ class TestBulkEvidence(unittest.TestCase):
     def test_fleet_partitions_keep_bulk_operation_and_all_source_inputs(self):
         destination = self.root / "fleet"
         plan = fleet.prepare(self.directory, destination, replicas=1)
-        self.assertEqual(len(plan["jobs"]), 6)
+        self.assertEqual(len(plan["jobs"]), 8)
         for partition in plan["partitions"]:
             directory = destination / "partitions" / partition["id"]
             manifest = collection.load(directory / "manifest.json")
@@ -263,7 +271,7 @@ class TestBulkEvidence(unittest.TestCase):
         plan = fleet.prepare(self.directory, directory, replicas=1)
         package = self.root / "batch"
         batch = fleet.package_batch(directory, plan["host_batches"][0]["id"], package)
-        self.assertEqual(len(batch["packages"]), 3)
+        self.assertEqual(len(batch["packages"]), 4)
 
         def build(destination, *args):
             destination.mkdir()
@@ -276,9 +284,11 @@ class TestBulkEvidence(unittest.TestCase):
             worker.run(package, self.root / "worker", batch=True)
             self.assertEqual(java_build.call_count, 1)
             self.assertEqual(native_build.call_count, 1)
-            self.assertEqual(verify.call_count, 3)
+            self.assertEqual(native_build.call_args.kwargs["env"]["RE2_BENCHMARK_TARGETS"],
+                             "language_bulk_benchmark language_rust_bulk_benchmark")
+            self.assertEqual(verify.call_count, 4)
             self.assertCountEqual([call.args[0].name for call in verify.call_args_list],
-                                  ["case-0000-re2", "case-0000-java", "case-0000-trino"])
+                                  ["case-0000-re2", "case-0000-java", "case-0000-trino", "case-0000-rust"])
         batch["packages"].pop()
         collection.save(package / "batch.json", batch)
         with self.assertRaisesRegex(ValueError, "missing or duplicate"):
@@ -327,14 +337,14 @@ class TestBulkEvidence(unittest.TestCase):
 
         with patch.object(collection, "runner_identity", return_value=runners), \
                 patch.object(collection, "verify_command", side_effect=verified):
-            evidence = collection.verify(self.directory, results, "java", "classes", {"native-re2": "native"})
+            evidence = collection.verify(self.directory, results, "java", "classes", {"native-re2": "native", "native-rust": "native-rust"})
         bulk.validate_evidence(self.manifest, evidence, results)
         observations = {}
         for identity, case, language, engine, mode in collection.observations(self.manifest):
             row_id = identity + "/execute"
             path = results / row_id / "raw.json"
             workload = evidence["receipts"][identity]["command"][-1]
-            if engine == "native-re2":
+            if engine in collection.NATIVE_RUNNERS:
                 raw = {"benchmarks": [{"run_type": "iteration", "run_name": "execute", "time_unit": "ns",
                                        "real_time": 100} for _ in range(5)]}
             else:
@@ -353,8 +363,8 @@ class TestBulkEvidence(unittest.TestCase):
             "manifest_sha256": evidence["manifest_sha256"], "runners_sha256": evidence["runners_sha256"],
             "source_tree": "tree", "jvm_build": {"source_tree": "tree", "jvm": runners}})
         exported = collection.export(self.directory, results)
-        self.assertEqual(len(exported["observations"]), 9)
-        self.assertEqual(len(exported["comparisons"]), 6)
+        self.assertEqual(len(exported["observations"]), 12)
+        self.assertEqual(len(exported["comparisons"]), 8)
         for row in exported["comparisons"]:
             self.assertEqual(row["operation"], "execute")
             self.assertEqual(row["input_bytes_per_operation"], 3)

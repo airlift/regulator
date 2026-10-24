@@ -2,10 +2,10 @@
 
 This plan records the qualification requirements for a release campaign,
 which measures a published Regulator artifact on R9g and R8i for the RE2, Java,
-Trino, and LIKE languages.
+Trino, Rust, and LIKE languages.
 
-The 1.0 campaign measured `io.airlift:regulator:1.0` also on R8g. The
-[release results](RESULTS_1.0.md) report it and its
+The 1.0 campaign measured `io.airlift:regulator:1.0` without Rust and also on
+R8g. The [release results](RESULTS_1.0.md) report it and its
 [measurement-quality follow-up](MEASUREMENT_QUALITY.md). The preliminary
 development measurements remain a separate historical capture.
 
@@ -31,7 +31,7 @@ invalidate.
 The release campaign must answer four user-facing questions:
 
 1. How do reused public Slice operations compare with native RE2, JDK Pattern,
-   Joni, and Trino LIKE?
+   Joni, the Rust `regex` crate, and Trino LIKE?
 2. What overhead do compilation, first use, and repeated use add?
 3. How do the Trino-compatible extraction, split, and replacement operations
    compare with Joni?
@@ -60,7 +60,8 @@ Freeze one candidate commit only after all of the following are true:
 - the public API and benchmark corpus will not change during a comparison run
 - the reviewer-facing commit stack and current documentation agree with the
   candidate source
-- pinned native RE2 and every Java comparator can be built reproducibly
+- pinned native RE2, the pinned Rust toolchain and `regex` crate, and every
+  Java comparator can be built reproducibly
 - benchmark methods consume their results and have smoke tests for every
   parameter value
 - unsupported syntax is classified before timing; it is never recorded as a
@@ -86,6 +87,8 @@ inventory:
    `java.util.regex.Pattern`
 6. Regulator through `TrinoLikePattern`, compared with Trino's actual SQL LIKE
    route
+7. Regulator through `RustRegexp`, compared with the pinned Rust `regex`
+   crate's `str` API on validated UTF-8, built with the pinned Rust toolchain
 
 Direct engine entry points belong to conditional diagnostics. Pin and record
 them when such a diagnostic is required; do not add them to the routine public

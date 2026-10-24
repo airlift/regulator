@@ -1,0 +1,4 @@
+[toolchain]
+# Matches the Amazon Linux 2023 rust and cargo packages in baseline/platforms.tsv.
+channel = "1.97.0"
+profile = "minimal"
