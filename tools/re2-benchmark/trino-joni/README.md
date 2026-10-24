@@ -113,19 +113,19 @@ tools/re2-benchmark/trino-joni/run-rows.sh \
 
 `BenchmarkTrinoLikeRowsTrino` is the Trino LIKE twin of
 `BenchmarkTrinoLikeRows`, which matches the same rows with the LIKE pattern
-`%literal%`, or `%a%b%` for an ordered pair. It has the same parameters and one `matches` method, which calls
-Trino's `$like` function once per row, reading the pattern from the
-benchmark state where `BenchmarkTrinoLikeRows` binds it as a constant; C2
-folds none of the pattern's fields from a constant receiver, so the binding
-does not change Trino's compiled code. Trino's `$like_pattern` function
-compiles the same pattern bytes without an escape character; the setup of
-both benchmarks rejects a literal containing `_`, `%`, or `\`. The twin's
+`%literal%`, or `%a%b%` for an ordered pair. It has the same parameters and one
+`matches` method, which calls Trino's `$like` function once per row, reading
+the pattern from the benchmark state where `BenchmarkTrinoLikeRows` binds it as
+a constant; C2 folds none of the pattern's fields from a constant receiver, so
+the binding does not change Trino's compiled code. Trino's `$like_pattern`
+function compiles the same pattern bytes without an escape character; the setup
+of both benchmarks rejects a literal containing `_`, `%`, or `\`. The twin's
 setup checks each cell's hit rows with Trino's LIKE. Before timing, the
 verifier checks Regulator's interpreted `matches`, its generated
 `matchesGenerated`, and the timed Trino LIKE against the LIKE authority,
-Trino's `LikeMatcher` with optimization disabled, on every sampled row of
-every cell, over the same workloads as the Joni rows verifier.
-`run-like-rows.sh` runs it and passes its remaining arguments to JMH:
+Trino's `LikeMatcher` with optimization disabled, on every sampled row of every
+cell, over the same workloads as the Joni rows verifier. `run-like-rows.sh`
+runs it and passes its remaining arguments to JMH:
 
 ```bash
 tools/re2-benchmark/trino-joni/run-like-rows.sh \

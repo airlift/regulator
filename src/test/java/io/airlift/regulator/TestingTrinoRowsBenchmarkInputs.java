@@ -42,11 +42,11 @@ import static java.util.Objects.requireNonNull;
 /**
  * The rows and literals of the normative Trino row workloads, shared by {@code BenchmarkTrinoRows},
  * {@code BenchmarkTrinoLikeRows}, and their Joni and Trino LIKE twins so all of them time the same
- * cells. Each workload's rows and literals come from {@code trino-row-workloads.tsv} and
- * {@code trino-row-literals.tsv}, which {@code tools/re2-benchmark/trino-rows/trino_rows.py}
- * generates from pinned corpora; see its README for the sampling and literal rules. The
- * OpenSubtitles workloads read test resources; the others read a corpus directory provisioned by
- * the generator's {@code fetch} command.
+ * cells, except that the LIKE benchmarks skip the dot-star cells. Each workload's rows and literals
+ * come from {@code trino-row-workloads.tsv} and {@code trino-row-literals.tsv}, which
+ * {@code tools/re2-benchmark/trino-rows/trino_rows.py} generates from pinned corpora; see its
+ * README for the sampling and literal rules. The OpenSubtitles workloads read test resources; the
+ * others read a corpus directory provisioned by the generator's {@code fetch} command.
  */
 public final class TestingTrinoRowsBenchmarkInputs
 {
@@ -67,6 +67,18 @@ public final class TestingTrinoRowsBenchmarkInputs
     {
         return literalRows().stream()
                 .filter(row -> row.get("workload").equals(workload) && !row.get("pattern").isEmpty())
+                .map(row -> row.get("literal_id"))
+                .toList();
+    }
+
+    /**
+     * Returns the IDs of the workload's LIKE cells in manifest order: its literal IDs without the
+     * dot-star cells, whose LIKE pattern {@code %literal%} would repeat their grid or hand-picked cell.
+     */
+    public static List<String> likeLiteralIds(String workload)
+    {
+        return literalRows().stream()
+                .filter(row -> row.get("workload").equals(workload) && !row.get("pattern").isEmpty() && !row.get("group").equals("dotstar"))
                 .map(row -> row.get("literal_id"))
                 .toList();
     }

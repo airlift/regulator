@@ -3,7 +3,8 @@
 
 Every workload is 4,096 real rows, a stride sample of one corpus, or of six pooled
 loghub files, a grid of literals chosen by a seeded rule from the corpus rows
-outside that sample, and ordered pairs of the grid candidates in at least 1% of rows.
+outside that sample, ordered pairs of the grid candidates in at least 1% of rows, and
+each grid and hand-picked literal again inside .*literal.*.
 The generator writes the two manifests BenchmarkTrinoRows reads, or with --check
 compares them with the checked-in files. See README.md for the rules.
 """
@@ -260,6 +261,18 @@ def describe(workload, literal_id, group, tercile, band_name, candidates, litera
                 first_byte_frequency=f"{byte_counts[first] / row_bytes:.6f}", hit_rows=str(hit_rows), matches=str(matches))
 
 
+def dot_star(described):
+    """The dot-star cell of a grid or hand-picked cell: its literal searched by the pattern .*literal.*.
+
+    The cell keeps the literal's hit rows. A hit row holds one match, because the greedy .* on each
+    side spans the whole row, which holds no line feed; setup checks that count with every engine.
+    """
+    cell = dict(described, literal_id=f"dotstar-{described['literal_id']}", group="dotstar")
+    if described["pattern"]:
+        cell.update(pattern=f".*{described['pattern']}.*", matches=described["hit_rows"])
+    return cell
+
+
 def build_workload(workload, names, picked, corpora, directory):
     loaded = [lines(load(directory, corpora[name])) for name in names]
     populations = [len(rows) for rows in loaded]
@@ -296,7 +309,7 @@ def build_workload(workload, names, picked, corpora, directory):
         if band_name is not None:
             cells.setdefault((tercile_of[token[0]], band_name), []).append(token)
 
-    literal_rows = []
+    grid_rows = []
     for tercile in TERCILES:
         for band_name in BAND_NAMES:
             members = cells.get((tercile, band_name), [])
@@ -305,7 +318,8 @@ def build_workload(workload, names, picked, corpora, directory):
                                  (chosen,) if chosen is not None else (), sampled, byte_counts, row_bytes)
             if chosen is not None and int(described["hit_rows"]) != hits[chosen]:
                 raise ValueError(f"token run count disagrees with substring search: {workload} {chosen!r}")
-            literal_rows.append(described)
+            grid_rows.append(described)
+    literal_rows = list(grid_rows)
     # Millions of pairs are too many to keep, so each cell keeps its count and its lowest-ranked pair.
     pair_cells = {band_name: PairCell() for band_name in BAND_NAMES}
     selective_floor = bands()[1][1]
@@ -325,9 +339,11 @@ def build_workload(workload, names, picked, corpora, directory):
         if cell.pair and int(described["hit_rows"]) != cell.hit_rows:
             raise ValueError(f"ordered pair count disagrees with ordered search: {workload} {cell.pair!r}")
         literal_rows.append(described)
+    literal_rows += map(dot_star, grid_rows)
     for index, literal in enumerate(picked, 1):
-        literal_rows.append(describe(workload, f"picked-{index}", "picked", "-", "-", "-", (literal.encode("utf-8"),),
-                                     sampled, byte_counts, row_bytes))
+        described = describe(workload, f"picked-{index}", "picked", "-", "-", "-", (literal.encode("utf-8"),), sampled,
+                             byte_counts, row_bytes)
+        literal_rows += described, dot_star(described)
     return workload_row, literal_rows
 
 

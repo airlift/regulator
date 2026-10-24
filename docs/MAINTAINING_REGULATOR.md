@@ -208,8 +208,9 @@ Two rules are hard on each host the change's
 List every cell that loses to base beyond noise in the change's
 description, with its absolute ns/row, and weigh it against the wins; the
 reviewer decides. GH Archive's long rows are a normative workload, not an edge
-control. Hand-picked query literals and ordered pairs are each reported as
-their own flagged group and never enter a geomean.
+control. Hand-picked query literals, ordered pairs, and dot-star cells are each
+reported as their own flagged group and never enter a workload's grid geomean;
+each group may be summarized by its own geomean.
 
 Judge a change to a LIKE path Trino calls once per row, such as the contains
 search, the same way on the
