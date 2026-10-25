@@ -23,6 +23,15 @@ class TestGenerateManifest(unittest.TestCase):
             recorded = [GENERATE_MANIFEST.Row(**row) for row in csv.DictReader(source, delimiter="\t") if row["suite"] == "traditional"]
         self.assertEqual(sorted(generated), sorted(recorded))
 
+    def testSpecializedManifestFollowsTheCatalog(self):
+        generated = []
+        GENERATE_MANIFEST.add_specialized_rows(generated, BASELINE.parents[2])
+        with (BASELINE / "rows.tsv").open() as source:
+            recorded = [
+                GENERATE_MANIFEST.Row(**row) for row in csv.DictReader(source, delimiter="\t")
+                if row["suite"] in {"trino-specialized-patterns", "trino-like-specialized"}]
+        self.assertEqual(sorted(generated), sorted(recorded))
+
     def testDeclaredSuiteMustProduceRows(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root, discovery = self.create_fixture(Path(temporary_directory), [])

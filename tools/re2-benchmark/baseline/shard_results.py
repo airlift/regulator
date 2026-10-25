@@ -904,6 +904,15 @@ def jmh_runtime_seconds(row_count, process_count, warmup_iterations, measurement
     return row_count * process_count * (warmup_iterations + measurement_iterations) * iteration_seconds
 
 
+def jmh_startup_count(invocations, processes, forked_invocations, forked_rows, forked_processes):
+    """Count the JVMs the measured JMH invocations start.
+
+    Each in-process invocation starts its compiler-hints JVM and then its measured
+    processes; each forked invocation starts a launcher JVM and then its forks for each row.
+    """
+    return invocations * (processes + 1) + forked_invocations + forked_rows * forked_processes
+
+
 def estimate_jmh_runtime(arguments):
     measured_seconds = jmh_runtime_seconds(
         arguments.rows,
@@ -913,18 +922,20 @@ def estimate_jmh_runtime(arguments):
         arguments.iteration_seconds)
     forked_rows = getattr(arguments, "forked_rows", 0)
     forked_processes = getattr(arguments, "forked_processes", 0)
-    if min(forked_rows, forked_processes) < 0:
+    forked_invocations = getattr(arguments, "forked_invocations", 0)
+    if min(forked_rows, forked_processes, forked_invocations) < 0:
         raise ValueError("Forked JMH runtime inputs must not be negative")
-    if (forked_rows == 0) != (forked_processes == 0):
-        raise ValueError("Forked JMH rows and processes must either both be zero or both be positive")
+    if (forked_rows == 0) != (forked_processes == 0) or (forked_rows == 0) != (forked_invocations == 0):
+        raise ValueError("Forked JMH rows, processes, and invocations must either all be zero or all be positive")
     measured_seconds += jmh_runtime_seconds(
         forked_rows,
         forked_processes,
         arguments.warmup_iterations,
         arguments.measurement_iterations,
         arguments.iteration_seconds)
-    measured_startup_seconds = arguments.invocations * arguments.processes * arguments.startup_seconds
-    measured_startup_seconds += forked_rows * forked_processes * arguments.startup_seconds
+    measured_startup_seconds = jmh_startup_count(
+        arguments.invocations, arguments.processes, forked_invocations, forked_rows,
+        forked_processes) * arguments.startup_seconds
     calibration_seconds = jmh_runtime_seconds(
         arguments.calibration_rows,
         arguments.calibration_processes,
@@ -1086,6 +1097,7 @@ def parser():
     runtime_parser.add_argument("--processes", type=int, required=True)
     runtime_parser.add_argument("--forked-rows", type=int, default=0)
     runtime_parser.add_argument("--forked-processes", type=int, default=0)
+    runtime_parser.add_argument("--forked-invocations", type=int, default=0)
     runtime_parser.add_argument("--warmup-iterations", type=int, required=True)
     runtime_parser.add_argument("--measurement-iterations", type=int, required=True)
     runtime_parser.add_argument("--iteration-seconds", type=float, required=True)

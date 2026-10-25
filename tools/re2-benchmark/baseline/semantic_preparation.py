@@ -25,6 +25,8 @@ def digest(path):
 def build(session, shard):
     dispatch = load_dispatch(BASELINE / "shard-dispatch.tsv", shard)
     routes = applicable_routes(dispatch)
+    with (BASELINE / "rows.tsv").open(newline="") as source:
+        suites = {row["suite"] for row in csv.DictReader(source, delimiter="\t") if row["shard_id"] == shard}
     if {path.name for path in (session / "routes").iterdir()} != {route for route, _, _ in routes}:
         raise ValueError("semantic preparation must cover every required route")
     environment = dict(line.split("=", 1) for line in (session / "environment.txt").read_text().splitlines() if "=" in line)
@@ -61,6 +63,10 @@ def build(session, shard):
                 raise ValueError("missing pinned Trino differential verification")
             if not any(value.startswith("Verified ") and " everyday Regulator/Joni operation results (SHA-256 " in value for value in verified):
                 raise ValueError("missing everyday Trino differential verification")
+            if "trino-specialized-patterns" in suites and not any(
+                    value.startswith("Verified ") and " specialized Regulator/Joni operation results (SHA-256 " in value
+                    for value in verified):
+                raise ValueError("missing specialized Trino differential verification")
         if handler == "trino-final-line":
             required.add("Verified 176 Trino final-line operation comparisons")
         if handler == "trino-like":

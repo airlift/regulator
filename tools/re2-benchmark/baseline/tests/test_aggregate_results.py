@@ -28,6 +28,9 @@ aggregate_results = load_module("aggregate_results", BASELINE / "aggregate_resul
 render_report = load_module("render_report", BASELINE / "render_report.py")
 host_session = load_module("aggregate_host_session", BASELINE / "host_session.py")
 
+# The row count the checked-in manifest is reduced against.
+MANIFEST_ROW_COUNT = aggregate_results.parser().get_default("expected_manifest_rows")
+
 from acceptance import validate_confirmation_host_results, validate_host_results  # noqa: E402
 
 
@@ -49,12 +52,13 @@ def digest(path):
 
 
 class TestLikeComparisonCoverage(unittest.TestCase):
-    def test_lifecycle_sql_comparison_does_not_require_optional_dfa(self):
+    def test_like_candidates_pair_with_each_measured_comparator(self):
         manifest = read_tsv(BASELINE / 'rows.tsv')
-        for shard in ('like-compile', 'like-single-use', 'trino-like', 'like-dfa-single-use'):
+        for shard in ('like-compile', 'like-single-use', 'trino-like', 'like-dfa-single-use', 'trino-like-specialized'):
             with self.subTest(shard=shard):
                 rows = [row for row in manifest if row['shard_id'] == shard]
-                expected = {row['row_id'] for row in rows if row['system'] == 'regulator'}
+                # The generated LIKE variant pairs with the comparators as the interpreted one does.
+                expected = {row['row_id'] for row in rows if row['system'] in {'regulator', 'regulator-generated'}}
                 specs = aggregate_results.comparison_specs(rows)
                 self.assertEqual(expected, {candidate['row_id'] for _, candidate, comparator, _ in specs
                                             if comparator == 'trino-sql'})
@@ -772,7 +776,7 @@ class TestAggregateResults(unittest.TestCase):
 
     def test_checked_in_joni_applicability_records_only_unavailable_rows(self):
         path = BASELINE.parent / "manifests" / "rebar-joni-applicability.tsv"
-        manifest = aggregate_results.load_manifest(BASELINE / "rows.tsv", 5475)
+        manifest = aggregate_results.load_manifest(BASELINE / "rows.tsv", MANIFEST_ROW_COUNT)
         events = aggregate_results.load_rebar_joni_applicability(
             path, manifest, "test-campaign")
 
@@ -785,7 +789,7 @@ class TestAggregateResults(unittest.TestCase):
 
     def test_joni_applicability_must_match_frozen_rows(self):
         path = BASELINE.parent / "manifests" / "rebar-joni-applicability.tsv"
-        manifest = aggregate_results.load_manifest(BASELINE / "rows.tsv", 5475)
+        manifest = aggregate_results.load_manifest(BASELINE / "rows.tsv", MANIFEST_ROW_COUNT)
         manifest = [
             row for row in manifest
             if not (row["suite"].startswith("rebar-") and row["system"] == "joni")
@@ -798,7 +802,7 @@ class TestAggregateResults(unittest.TestCase):
 
     def test_joni_applicability_must_match_frozen_digest(self):
         path = BASELINE.parent / "manifests" / "rebar-joni-applicability.tsv"
-        manifest = aggregate_results.load_manifest(BASELINE / "rows.tsv", 5475)
+        manifest = aggregate_results.load_manifest(BASELINE / "rows.tsv", MANIFEST_ROW_COUNT)
         changed = next(
             row.copy() for row in manifest
             if row["suite"].startswith("rebar-") and row["system"] == "joni")

@@ -934,7 +934,7 @@ class TestRunCampaign(unittest.TestCase):
         self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 8 * 5400 + 3600)
         arguments.max_concurrent_per_platform = 10
         RUN_CAMPAIGN.validate_configuration(arguments, jobs)
-        self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 15 * 5400 + 3600)
+        self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 16 * 5400 + 3600)
 
     def test_campaign_phase_maps_to_execution_protocol(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1039,17 +1039,20 @@ done
             self.assertNotIn("TRINO_DIR", environment)
 
     def test_trino_checkout_is_required_only_for_jobs_that_use_it(self):
-        traditional = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot")
-        trino = RUN_CAMPAIGN.Job(
-            self.platform, "trino-operations", 1, 11, 1, "spot")
-        with tempfile.TemporaryDirectory() as temporary_directory, \
-                patch.dict(os.environ, {}, clear=True), \
-                patch.object(RUN_CAMPAIGN.subprocess, "run"):
-            root = Path(temporary_directory)
-            RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [traditional])
-            with self.assertRaisesRegex(SystemExit, "requires TRINO_DIR"):
-                RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [trino])
+        # Every shard whose route handler measures or verifies against pinned Trino needs the checkout.
+        trino_handlers = {"trino-operations", "trino-final-line", "trino-like", "lifecycle", "rebar"}
+        with (SCRIPT.parent / "shard-dispatch.tsv").open(newline="") as input_file:
+            dispatch = list(csv.DictReader(input_file, delimiter="\t"))
+        for row in dispatch:
+            job = RUN_CAMPAIGN.Job(self.platform, row["shard_id"], 1, 10, 1, "spot")
+            with self.subTest(shard=row["shard_id"]), tempfile.TemporaryDirectory() as temporary_directory, \
+                    patch.dict(os.environ, {}, clear=True), patch.object(RUN_CAMPAIGN.subprocess, "run"):
+                root = Path(temporary_directory)
+                if row["native_access_handler"] in trino_handlers:
+                    with self.assertRaisesRegex(SystemExit, "requires TRINO_DIR"):
+                        RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [job])
+                else:
+                    RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [job])
 
     def test_dependencies_reject_invalid_host_duration_plans(self):
         job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")

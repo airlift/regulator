@@ -16,6 +16,15 @@ The wrappers reject other modes. Standalone diagnostics remain outside the
 formal campaign and do not become accepted evidence merely by using the same
 benchmark classes.
 
+The `trino-specialized-patterns-a`, `trino-specialized-patterns-b`, and
+`trino-like-specialized` shards are in the formal campaign to answer what a
+pattern gains from the specialized engine and from the opt-in compiler. The
+report sets the regular engine, the specialized engine, and compiled beside each
+other and beside their comparator: Joni for Trino regex, and Trino SQL LIKE for
+the TPC-H LIKE workloads, which have no regular-engine variant. They measure
+warmed steady-state operations only, not compilation cost. The workloads are
+listed in [`specialized-patterns.tsv`](specialized-patterns.tsv).
+
 ## Enforcement
 
 `validate-mode-inventory.py` verifies that both AWS wrappers accept only

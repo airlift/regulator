@@ -114,12 +114,18 @@ REBAR_OFFICIAL_DIR=${REBAR_OFFICIAL_DIR:-"${HOME}/.cache/regulator/rebar-463d00f
 REBAR_COMPARATOR_ORDER=${REBAR_COMPARATOR_ORDER:-forward}
 JONI_COMPARATOR_ORDER=${JONI_COMPARATOR_ORDER:-forward}
 
+# The dispatch file names each shard's route handler, which decides the shard's Trino use.
+campaign_shard_handler()
+{
+    awk -F '\t' -v shard="${CAMPAIGN_SHARD_ID}" 'NR > 1 && $1 == shard {print $2}' \
+        "${REGULATOR_DIR}/tools/re2-benchmark/baseline/shard-dispatch.tsv"
+}
+
 campaign_uses_trino()
 {
     [[ "${CAMPAIGN_MODE}" == baseline-shard ]] || return 1
-    case "${CAMPAIGN_SHARD_ID}" in
-        trino-operations | trino-final-line | trino-like | lifecycle | lifecycle-shared-cold | rebar-*) return 0 ;;
-        like-compile | like-single-use | like-dfa-single-use) return 0 ;;
+    case "$(campaign_shard_handler)" in
+        trino-operations | trino-final-line | trino-like | lifecycle | rebar) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -192,10 +198,10 @@ if campaign_uses_trino "${CAMPAIGN_MODE}"; then
 else
     CAMPAIGN_USES_TRINO=false
 fi
-case "${CAMPAIGN_SHARD_ID}" in
+case "$(campaign_shard_handler)" in
     trino-operations | trino-final-line) JONI_EVIDENCE_SCOPE=trino-operation-comparison ;;
-    lifecycle | lifecycle-shared-cold) JONI_EVIDENCE_SCOPE=retained-memory-comparison ;;
-    rebar-*) JONI_EVIDENCE_SCOPE=rebar-bulk-text-comparison ;;
+    lifecycle) JONI_EVIDENCE_SCOPE=retained-memory-comparison ;;
+    rebar) JONI_EVIDENCE_SCOPE=rebar-bulk-text-comparison ;;
     *) JONI_EVIDENCE_SCOPE=not-used ;;
 esac
 case "${CAMPAIGN_ARCHITECTURES}" in

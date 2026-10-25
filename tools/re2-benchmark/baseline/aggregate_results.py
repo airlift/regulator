@@ -942,8 +942,9 @@ def comparison_specs(manifest_rows):
             for system in candidate_systems:
                 specs.append((logical_id, by_system[system], "joni", (by_system["joni"],)))
         for comparator in ("trino-optimized", "trino-sql"):
-            if by_system.keys() >= {"regulator", comparator}:
-                specs.append((logical_id, by_system["regulator"], comparator, (by_system[comparator],)))
+            if comparator in by_system:
+                for system in candidate_systems:
+                    specs.append((logical_id, by_system[system], comparator, (by_system[comparator],)))
         descriptors = {row["comparator"] for row in rows}
         if "general-route-control" in descriptors and by_system.keys() >= {
                 "regulator-native-access", "regulator-object-row"}:
@@ -1700,7 +1701,7 @@ def parser():
     argument_parser.add_argument("--artifact-index", type=Path, action="append", default=[])
     argument_parser.add_argument("--campaign-artifact", type=Path)
     argument_parser.add_argument("--output-dir", type=Path, required=True)
-    argument_parser.add_argument("--expected-manifest-rows", type=int, default=5475)
+    argument_parser.add_argument("--expected-manifest-rows", type=int, default=5522)
     return argument_parser
 
 

@@ -97,7 +97,9 @@ extract-all, which uses the Slice adapter's group form of pinned Trino's
 `regexp_extract_all` loop. Before timing, `SpecializedTrinoJoniVerifier`
 checks that Regulator's default compile, its regular engine, and its generated
 bytecode each return Joni's result for every input, and checks a frozen SHA-256
-over the inputs and results.
+over the inputs and results. It has no runner script: the baseline's
+`trino-specialized-patterns-a` and `trino-specialized-patterns-b` shards run it
+from [`run-shard.sh`](../baseline/run-shard.sh), one JMH launch per workload.
 
 `BenchmarkTrinoRowsJoni` is the Joni twin of the
 [normative Trino rows](../trino-rows/README.md) benchmark. It reads the same

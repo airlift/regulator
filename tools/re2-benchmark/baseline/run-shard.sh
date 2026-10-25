@@ -280,8 +280,14 @@ joni_jmh_row_count=$(awk -F '\t' '
     $4 == "joni" {count++}
     END {print count + 0}
 ' "${RESULT_DIR}/expected-rows.tsv")
+if [[ "${handler}" == trino-operations ]]; then
+    # A route can measure several Regulator variants, so count every non-Joni row, not just candidate_system's.
+    candidate_jmh_row_count=$(awk -F '\t' 'NR > 1 && $4 != "joni" {count++} END {print count + 0}' \
+        "${RESULT_DIR}/expected-rows.tsv")
+fi
 jmh_row_count=$((candidate_jmh_row_count + joni_jmh_row_count))
-if [[ "${SHARD_ID}" == like-compile || "${SHARD_ID}" == like-single-use || "${SHARD_ID}" == like-dfa-single-use ]]; then
+if [[ "${SHARD_ID}" == like-compile || "${SHARD_ID}" == like-single-use || "${SHARD_ID}" == like-dfa-single-use ||
+        "${SHARD_ID}" == trino-like-specialized ]]; then
     # Both implementations run through the same JMH runner. Include the SQL
     # comparator in the full-protocol duration budget, not just Regulator.
     candidate_jmh_row_count=$(awk 'END {print NR - 1}' "${RESULT_DIR}/expected-rows.tsv")
@@ -293,7 +299,11 @@ case "${handler}" in
             "${RESULT_DIR}/expected-rows.tsv")
         ;;
     traditional) jmh_invocation_count=1 ;;
-    trino-operations | trino-final-line)
+    trino-operations)
+        # One invocation per system: each Regulator variant and Joni.
+        jmh_invocation_count=$(tr ',' '\n' <<<"${systems}" | grep -c .)
+        ;;
+    trino-final-line)
         if [[ "${ROUTE}" == native-access ]]; then
             jmh_invocation_count=2
         else
@@ -317,6 +327,15 @@ esac
 joni_jmh_invocation_count=0
 if [[ ${joni_jmh_row_count} -gt 0 ]]; then
     joni_jmh_invocation_count=1
+fi
+# Specialized-pattern suites run each workload of each system in its own JMH invocation, so
+# each benchmark call site sees one pattern, as in a Trino query.
+jmh_invocation_per_workload=false
+if awk -F '\t' 'NR > 1 {n = split($3, part, "-"); for (i = 1; i <= n; i++) if (part[i] == "specialized") found = 1}
+        END {exit !found}' "${RESULT_DIR}/expected-rows.tsv"; then
+    jmh_invocation_per_workload=true
+    jmh_invocation_count=$(awk 'END {print NR - 1}' "${RESULT_DIR}/expected-rows.tsv")
+    joni_jmh_invocation_count=${joni_jmh_row_count}
 fi
 candidate_jmh_invocation_count=$((jmh_invocation_count - joni_jmh_invocation_count))
 
@@ -478,6 +497,7 @@ jmh_runtime_arguments=(
     --processes "${JMH_PROCESS_COUNT}" \
     --forked-rows "${joni_jmh_row_count}" \
     --forked-processes "$((joni_jmh_row_count > 0 ? JONI_JMH_FORKS : 0))" \
+    --forked-invocations "${joni_jmh_invocation_count}" \
     --warmup-iterations "${JMH_PROCESS_WARMUP_ITERATIONS}" \
     --measurement-iterations "${JMH_PROCESS_MEASUREMENT_ITERATIONS}" \
     --iteration-seconds "${jmh_iteration_seconds}" \
@@ -525,6 +545,7 @@ if [[ "${PLAN_ONLY}" == true ]]; then
         printf 'candidate_jmh_row_count=%s\n' "${candidate_jmh_row_count}"
         printf 'joni_jmh_row_count=%s\n' "${joni_jmh_row_count}"
         printf 'jmh_invocation_count=%s\n' "${jmh_invocation_count}"
+        printf 'joni_jmh_invocation_count=%s\n' "${joni_jmh_invocation_count}"
         printf 'jmh_process_warmup_iterations=%s\n' "${JMH_PROCESS_WARMUP_ITERATIONS}"
         printf 'jmh_process_measurement_iterations=%s\n' "${JMH_PROCESS_MEASUREMENT_ITERATIONS}"
         printf 'jmh_iteration_time=%s\n' "${JMH_PROCESS_TIME}"
@@ -646,6 +667,7 @@ manifest_sha256=$(sha256sum "${MANIFEST}" | awk '{print $1}')
     printf 'candidate_jmh_row_count=%s\n' "${candidate_jmh_row_count}"
     printf 'joni_jmh_row_count=%s\n' "${joni_jmh_row_count}"
     printf 'jmh_invocation_count=%s\n' "${jmh_invocation_count}"
+    printf 'joni_jmh_invocation_count=%s\n' "${joni_jmh_invocation_count}"
     printf 'jmh_process_warmup_iterations=%s\n' "${JMH_PROCESS_WARMUP_ITERATIONS}"
     printf 'jmh_process_measurement_iterations=%s\n' "${JMH_PROCESS_MEASUREMENT_ITERATIONS}"
     printf 'jmh_iteration_time=%s\n' "${JMH_PROCESS_TIME}"
@@ -830,6 +852,19 @@ prepare_trino_like()
     grep -Fx 'Verified 530255 Trino LIKE comparisons' "${semantic_log}" >/dev/null
     grep -Fx 'Verified 810155 escaped Trino LIKE comparisons' "${semantic_log}" >/dev/null
     grep -Fx 'Verified 9330 encoded Trino LIKE comparisons' "${semantic_log}" >/dev/null
+    if [[ "${SHARD_ID}" == trino-like-specialized ]]; then
+        javac \
+            -cp "${PINNED_TRINO_CLASSPATH}" \
+            -processorpath "${PINNED_TRINO_CLASSPATH}" \
+            -processor org.openjdk.jmh.generators.BenchmarkProcessor \
+            -d "${classes}" \
+            -s "${generated}" \
+            "${ROOT}/tools/re2-benchmark/trino-like/BenchmarkTrinoLikeTpch.java"
+        java "${route_jvm_arguments[@]}" -cp "${SPECIAL_CLASSPATH}" \
+            io.airlift.regulator.BenchmarkTrinoLikeTpch "${ROOT}" | tee -a "${semantic_log}"
+        grep -Fx 'Verified 4 TPC-H LIKE columns and 7 workloads in three engines' "${semantic_log}" >/dev/null
+        grep -Fx 'Verified 7 TPC-H LIKE workloads with generated bytecode' "${semantic_log}" >/dev/null
+    fi
 }
 
 prepare_rebar()
@@ -1618,25 +1653,106 @@ run_traditional_shard()
     fi
 }
 
+run_jmh_per_workload()
+{
+    # Runs each expected row of one system in its own JMH invocation, so each benchmark call site
+    # sees one pattern. The arguments are the row order (forward or reverse); the launch mode,
+    # in-process for Regulator's host JVM processes or forked for Joni's proper forks; the
+    # classpath; the result prefix; the system; and jmh_benchmark, the JMH method to filter on or
+    # - for the manifest benchmark. Any remaining arguments go to every invocation. Each
+    # invocation's raw results and log are named for the system, the manifest benchmark and its
+    # parameters. Afterwards JMH_INPUT_FILES holds every invocation's result files and
+    # JMH_PROCESS_ARGUMENTS the normalization arguments for their process groups.
+    local order=$1
+    local mode=$2
+    local classpath=$3
+    local prefix=$4
+    local system=$5
+    local jmh_benchmark=$6
+    shift 6
+    local launcher
+    local process_groups
+    case "${mode}" in
+        in-process) launcher=run_jmh_with_classpath; process_groups=${JMH_PROCESS_COUNT} ;;
+        forked) launcher=run_joni_jmh_with_classpath; process_groups=${JONI_JMH_FORKS} ;;
+        *) echo "Unknown per-workload launch mode: ${mode}" >&2; exit 1 ;;
+    esac
+    # Each parameter value becomes part of a file name and of one JMH -p value.
+    local parameters_pattern='^[A-Za-z0-9_]+=[A-Za-z0-9_.-]+(;[A-Za-z0-9_]+=[A-Za-z0-9_.-]+)*$'
+    local rows=()
+    local row
+    while IFS= read -r row; do
+        rows+=("${row}")
+    done < <(awk -F '\t' -v target_system="${system}" -v order="${order}" '
+        NR > 1 && $4 == target_system {rows[++count] = $5 "\t" $6}
+        END {
+            for (row_number = 1; row_number <= count; row_number++) {
+                print rows[order == "reverse" ? count + 1 - row_number : row_number]
+            }
+        }' "${RESULT_DIR}/expected-rows.tsv")
+    if [[ ${#rows[@]} -eq 0 ]]; then
+        echo "No expected ${prefix} rows for ${system}" >&2
+        exit 1
+    fi
+    local workload_input_files=()
+    local benchmark
+    local parameters
+    for row in "${rows[@]}"; do
+        IFS=$'\t' read -r benchmark parameters <<<"${row}"
+        if [[ ! "${parameters}" =~ ${parameters_pattern} ]]; then
+            echo "Cannot name a ${prefix} result file after ${system} parameters: ${parameters}" >&2
+            exit 1
+        fi
+        local label="${prefix}-${system}-${benchmark##*.}-${parameters//[=;]/-}"
+        local output="${RESULT_DIR}/raw/${label}.json"
+        local filter_benchmark=${jmh_benchmark}
+        if [[ "${filter_benchmark}" == - ]]; then
+            filter_benchmark=${benchmark}
+        fi
+        local parameter_arguments=()
+        local parameter
+        while IFS= read -r parameter; do
+            parameter_arguments+=(-p "${parameter}")
+        done < <(tr ';' '\n' <<<"${parameters}")
+        "${launcher}" "${classpath}" "^${filter_benchmark//./\\.}$" "${output}" "${parameter_arguments[@]}" "$@" |
+            tee "${RESULT_DIR}/logs/${label}.log"
+        if [[ "${mode}" == forked ]]; then
+            workload_input_files+=("${output}")
+        else
+            set_jmh_input_files "${output}"
+            workload_input_files+=("${JMH_INPUT_FILES[@]}")
+        fi
+    done
+    JMH_INPUT_FILES=("${workload_input_files[@]}")
+    JMH_PROCESS_ARGUMENTS=(--allow-mixed-process-sets --expected-process-groups "${process_groups}")
+}
+
 run_trino_operations_candidate()
 {
-    local filter
-    local output="${RESULT_DIR}/raw/trino-operations-${candidate_system}.json"
-    local normalized="${RESULT_DIR}/normalized/trino-operations-${candidate_system}.tsv"
-    filter=$(python3 "${RESULT_TOOL}" jmh-filter \
-        --manifest "${MANIFEST}" \
-        --shard "${SHARD_ID}" \
-        --system "${candidate_system}")
-    run_jmh "${filter}" "${output}" |
-        tee "${RESULT_DIR}/logs/trino-operations-${candidate_system}.log"
-    set_jmh_input_files "${output}"
+    local system=$1
+    local normalized="${RESULT_DIR}/normalized/trino-operations-${system}.tsv"
+    local process_arguments=("${mixed_process_arguments[@]}")
+    if [[ "${jmh_invocation_per_workload}" == true ]]; then
+        run_jmh_per_workload "${JMH_SUITE_ORDER}" in-process "${CLASSPATH}" trino-operations "${system}" -
+        process_arguments=("${JMH_PROCESS_ARGUMENTS[@]}")
+    else
+        local filter
+        local output="${RESULT_DIR}/raw/trino-operations-${system}.json"
+        filter=$(python3 "${RESULT_TOOL}" jmh-filter \
+            --manifest "${MANIFEST}" \
+            --shard "${SHARD_ID}" \
+            --system "${system}")
+        run_jmh "${filter}" "${output}" |
+            tee "${RESULT_DIR}/logs/trino-operations-${system}.log"
+        set_jmh_input_files "${output}"
+    fi
     python3 "${RESULT_TOOL}" normalize-jmh \
         --manifest "${MANIFEST}" \
         --shard "${SHARD_ID}" \
-        --system "${candidate_system}" \
+        --system "${system}" \
         --input "${JMH_INPUT_FILES[@]}" \
         "${secondary_metric_arguments[@]}" \
-        "${mixed_process_arguments[@]}" \
+        "${process_arguments[@]}" \
         --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
         "${precision_arguments[@]}" \
         --output "${normalized}"
@@ -1645,16 +1761,23 @@ run_trino_operations_candidate()
 
 run_trino_operations_joni()
 {
-    local filter
-    local output="${RESULT_DIR}/raw/trino-operations-joni.json"
     local normalized="${RESULT_DIR}/normalized/trino-operations-joni.tsv"
-    filter=$(python3 "${RESULT_TOOL}" jmh-filter \
-        --manifest "${MANIFEST}" \
-        --shard "${SHARD_ID}" \
-        --system joni)
-    run_joni_jmh_with_classpath "${PINNED_TRINO_CLASSPATH}" "${filter}" "${output}" |
-        tee "${RESULT_DIR}/logs/trino-operations-joni.log"
-    JMH_INPUT_FILES=("${output}")
+    local process_arguments=("${mixed_process_arguments[@]}")
+    if [[ "${jmh_invocation_per_workload}" == true ]]; then
+        # Joni keeps its forward workload order; only the Regulator variants reverse.
+        run_jmh_per_workload forward forked "${PINNED_TRINO_CLASSPATH}" trino-operations joni -
+        process_arguments=("${JMH_PROCESS_ARGUMENTS[@]}")
+    else
+        local filter
+        local output="${RESULT_DIR}/raw/trino-operations-joni.json"
+        filter=$(python3 "${RESULT_TOOL}" jmh-filter \
+            --manifest "${MANIFEST}" \
+            --shard "${SHARD_ID}" \
+            --system joni)
+        run_joni_jmh_with_classpath "${PINNED_TRINO_CLASSPATH}" "${filter}" "${output}" |
+            tee "${RESULT_DIR}/logs/trino-operations-joni.log"
+        JMH_INPUT_FILES=("${output}")
+    fi
     python3 "${RESULT_TOOL}" normalize-jmh \
         --manifest "${MANIFEST}" \
         --shard "${SHARD_ID}" \
@@ -1662,7 +1785,7 @@ run_trino_operations_joni()
         --input "${JMH_INPUT_FILES[@]}" \
         "${joni_process_arguments[@]}" \
         "${secondary_metric_arguments[@]}" \
-        "${mixed_process_arguments[@]}" \
+        "${process_arguments[@]}" \
         --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
         "${precision_arguments[@]}" \
         --output "${normalized}"
@@ -1682,12 +1805,32 @@ run_ordered_joni_comparison()
     fi
 }
 
+run_trino_operations_candidates()
+{
+    # Each Regulator variant runs in its own JVMs, so one variant's classes cannot change how
+    # C2 compiles another's. Even replicas run the variants in reverse order.
+    local candidates=()
+    local system
+    while IFS= read -r system; do
+        if [[ "${system}" == joni ]]; then
+            continue
+        elif [[ "${JMH_SUITE_ORDER}" == reverse ]]; then
+            candidates=("${system}" "${candidates[@]}")
+        else
+            candidates+=("${system}")
+        fi
+    done < <(tr ',' '\n' <<<"${systems}")
+    for system in "${candidates[@]}"; do
+        run_trino_operations_candidate "${system}"
+    done
+}
+
 run_trino_operations_shard()
 {
     if [[ "${ROUTE}" == native-access ]]; then
-        run_ordered_joni_comparison run_trino_operations_candidate run_trino_operations_joni
+        run_ordered_joni_comparison run_trino_operations_candidates run_trino_operations_joni
     else
-        run_trino_operations_candidate
+        run_trino_operations_candidates
     fi
 }
 
@@ -1774,26 +1917,41 @@ run_trino_like_system()
     local system=$1
     local method=$2
     local operation=${3:-matches}
-    local scenario_arguments=()
-    if [[ "${SHARD_ID}" == like-dfa-single-use ]]; then
-        scenario_arguments=(-p scenario=ANY_ASCII,ANY_MULTIBYTE)
+    local benchmark_class=io.airlift.regulator.benchmark.BenchmarkTrinoLike
+    local suite=trino-like
+    local process_arguments=()
+    if [[ "${SHARD_ID}" == trino-like-specialized ]]; then
+        benchmark_class=io.airlift.regulator.BenchmarkTrinoLikeTpch
+        suite=trino-like-specialized
     fi
-    local filter="^io\\.airlift\\.regulator\\.benchmark\\.BenchmarkTrinoLike\\.${method}$"
-    local output="${RESULT_DIR}/raw/trino-like-${system}.json"
     local normalized="${RESULT_DIR}/normalized/trino-like-${system}.tsv"
-    run_jmh_with_classpath "${SPECIAL_CLASSPATH}" "${filter}" "${output}" "${scenario_arguments[@]}" |
-        tee "${RESULT_DIR}/logs/trino-like-${system}.log"
-    set_jmh_input_files "${output}"
+    if [[ "${jmh_invocation_per_workload}" == true ]]; then
+        # The benchmark declares microseconds; the report keeps nanoseconds.
+        run_jmh_per_workload "${JMH_SUITE_ORDER}" in-process "${SPECIAL_CLASSPATH}" trino-like "${system}" \
+            "${benchmark_class}.${method}" -tu ns
+        process_arguments=("${JMH_PROCESS_ARGUMENTS[@]}")
+    else
+        local scenario_arguments=()
+        if [[ "${SHARD_ID}" == like-dfa-single-use ]]; then
+            scenario_arguments=(-p scenario=ANY_ASCII,ANY_MULTIBYTE)
+        fi
+        local filter="^${benchmark_class//./\\.}\\.${method}$"
+        local output="${RESULT_DIR}/raw/trino-like-${system}.json"
+        run_jmh_with_classpath "${SPECIAL_CLASSPATH}" "${filter}" "${output}" "${scenario_arguments[@]}" |
+            tee "${RESULT_DIR}/logs/trino-like-${system}.log"
+        set_jmh_input_files "${output}"
+    fi
     python3 "${RESULT_TOOL}" normalize-mapped-jmh \
         --manifest "${MANIFEST}" \
         --shard "${SHARD_ID}" \
-        --suite trino-like \
+        --suite "${suite}" \
         --system "${system}" \
         --input "${JMH_INPUT_FILES[@]}" \
         "${secondary_metric_arguments[@]}" \
+        "${process_arguments[@]}" \
         --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
         "${precision_arguments[@]}" \
-        --benchmark-class io.airlift.regulator.benchmark.BenchmarkTrinoLike \
+        --benchmark-class "${benchmark_class}" \
         --method-map "${method}=${operation}" \
         --output "${normalized}"
     normalized_files+=("${normalized}")
@@ -1814,6 +1972,18 @@ run_trino_like_shard()
         like-single-use)
             run_trino_like_system regulator candidateSingleUse singleUse
             run_trino_like_system trino-sql trinoSqlSingleUse singleUse
+            ;;
+        trino-like-specialized)
+            # Even replicas reverse the whole sequence, Trino SQL included.
+            if [[ "${JMH_SUITE_ORDER}" == reverse ]]; then
+                run_trino_like_system trino-sql trinoSql
+                run_trino_like_system regulator-generated candidateGenerated
+                run_trino_like_system regulator candidate
+            else
+                run_trino_like_system regulator candidate
+                run_trino_like_system regulator-generated candidateGenerated
+                run_trino_like_system trino-sql trinoSql
+            fi
             ;;
         *)
             run_trino_like_system regulator candidate

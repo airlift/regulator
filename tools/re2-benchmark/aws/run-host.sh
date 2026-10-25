@@ -41,8 +41,11 @@ RUST_PACKAGE=${RUST_PACKAGE:?RUST_PACKAGE is required}
 TIME_PACKAGE=${TIME_PACKAGE:?TIME_PACKAGE is required}
 REGULATOR_DIR=$(cd "$1" && pwd)
 TRINO_DIR=
-case "${RE2_CAMPAIGN_SHARD_ID:-}" in
-    like-compile | like-single-use | like-dfa-single-use | trino-operations | trino-final-line | trino-like | lifecycle | lifecycle-shared-cold | rebar-*)
+# The dispatch file names each shard's route handler, which decides the shard's Trino use.
+SHARD_HANDLER=$(awk -F '\t' -v shard="${RE2_CAMPAIGN_SHARD_ID:-}" 'NR > 1 && $1 == shard {print $2}' \
+    "${REGULATOR_DIR}/tools/re2-benchmark/baseline/shard-dispatch.tsv")
+case "${SHARD_HANDLER}" in
+    trino-operations | trino-final-line | trino-like | lifecycle | rebar)
         if [[ -z "$2" || ! -d "$2" ]]; then
             echo "Baseline shard ${RE2_CAMPAIGN_SHARD_ID} requires a Trino checkout" >&2
             exit 1

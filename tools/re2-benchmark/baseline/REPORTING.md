@@ -156,8 +156,9 @@ names or descriptive labels:
   compares each Regulator row with the median bracket score.
 - A family whose comparator is Joni compares each Regulator row with its
   same-host `joni` row.
-- A Trino LIKE family compares `regulator` separately with
-  `trino-optimized` and `trino-sql`.
+- A Trino LIKE family compares `regulator`, and `regulator-generated` where
+  it is measured, separately with each `trino-optimized` and `trino-sql` row
+  present.
 - A `general-route-control` family compares `regulator-native-access` with
   `regulator-object-row`.
 - Other manifest comparator labels do not create a ratio unless one of these
