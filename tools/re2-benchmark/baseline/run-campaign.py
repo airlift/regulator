@@ -49,6 +49,10 @@ MAX_REPLACEMENTS_PER_JOB = 2
 # launches use On-Demand so the phase's tail does not wait on Spot capacity or a reclaim.
 ON_DEMAND_TAIL_PERCENT = 10
 WRAPPER_NOT_CREATED = "wrapper process was not created"
+# run-shard.sh exits with this status when the numerical protocol rejects a row's measurements.
+PROTOCOL_REJECTION_STATUS = 42
+# run-shard.sh exits with this status when any check of a route's correctness stage fails.
+SEMANTIC_FAILURE_STATUS = 44
 # platforms.tsv pins each AMI by its ID in this region; other regions run the image of the same name.
 PINNED_AMI_REGION = "us-west-2"
 AMAZON_AMI_OWNER = "137112412989"

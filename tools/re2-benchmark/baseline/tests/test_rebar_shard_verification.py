@@ -1,5 +1,7 @@
 import csv
 import importlib.util
+import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -125,6 +127,31 @@ class TestRebarShardVerification(unittest.TestCase):
                 {"regulator-native-access", "native-re2-before"},
                 self.verification,
                 self.outcomes)
+
+    def testShardFailsCuratedVerificationAsSemanticFailure(self):
+        # A failed curated row is a final semantic failure, even when an earlier curated row also failed.
+        source = (BASELINE / "run-shard.sh").read_text()
+        functions = source[source.index("SEMANTIC_FAILURE_STATUS="):source.index("\n}\n", source.index("semantic_failure()")) + 3]
+        start = source.index('    python3 "${SCRIPT_DIR}/validate-rebar-shard-verification.py"')
+        statement = source[start:source.index("\n", source.index("semantic_failure", start)) + 1]
+        self.write_manifest()
+        with self.verification.open("w", newline="", encoding="utf-8") as output_file:
+            csv.writer(output_file).writerows([
+                ["curated/workload", "count", "regulator/re2", "candidate", "benchmark timed out"],
+                ["curated/workload", "count", "re2/pinned-host-tuned-before", "native",
+                 "count mismatch, expected 1, got 0"],
+                ["extended/workload", "count", "regulator/re2", "candidate", "OK"],
+                ["extended/workload", "count", "re2/pinned-host-tuned-before", "native", "OK"],
+            ])
+        (self.root / "raw").mkdir()
+        self.verification.rename(self.root / "raw/rebar-primary-verification.csv")
+        variables = {"SCRIPT_DIR": BASELINE, "SELECTION_MANIFEST": self.manifest, "SHARD_ID": "rebar-a",
+                     "primary_systems": "regulator-native-access,native-re2-before", "RESULT_DIR": self.root,
+                     "primary_verification_status": 1}
+        script = "set -euo pipefail\n" + "".join(f"{key}={shlex.quote(str(value))}\n" for key, value in variables.items())
+        result = subprocess.run(["bash"], input=script + functions + statement, text=True, capture_output=True)
+        self.assertEqual(44, result.returncode, result.stderr)
+        self.assertIn("Rebar primary verification failed", result.stderr)
 
     def testRejectsUnclassifiedExtendedFailure(self):
         self.write_manifest()

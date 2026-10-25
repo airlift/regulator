@@ -931,7 +931,27 @@ prepare_jmh_host_compiler_arguments()
     fi
 }
 
+# Any failure of the correctness stage is final: a semantic test, the DFA probe,
+# a differential or lifecycle verifier, its count of verified cases, Rebar's
+# curated verification, or the pinned Trino comparator's verification. Its own
+# status tells a unit controller to reject the unit rather than retry it, even
+# where the check could not run at all.
+SEMANTIC_FAILURE_STATUS=44
+semantic_failure()
+{
+    echo "$1" >&2
+    exit "${SEMANTIC_FAILURE_STATUS}"
+}
+
 semantic_log="${RESULT_DIR}/logs/semantic-tests.log"
+
+# Runs one semantic check, appending its output to the semantic log.
+run_semantic_verifier()
+{
+    local description=$1
+    shift
+    "$@" 2>&1 | tee -a "${semantic_log}" || semantic_failure "${description} failed"
+}
 semantic_report_dir="${RESULT_DIR}/semantic-reports"
 default_semantic_report_dir="${ROOT}/target/surefire-reports"
 mkdir -p "${semantic_report_dir}"
@@ -943,12 +963,13 @@ if [[ "${ROUTE}" == native-access ]]; then
     expected_native_access=true
     semantic_java_options='--enable-native-access=ALL-UNNAMED --illegal-native-access=deny'
 fi
-taskset --cpu-list "${CPU_LIST}" \
+: > "${semantic_log}"
+run_semantic_verifier "DFA absolute-pointer probe" \
+    taskset --cpu-list "${CPU_LIST}" \
     java "${route_jvm_arguments[@]}" \
     -Dio.airlift.regulator.dfa.native-reader-probe="${expected_native_access}" \
     -cp "${CLASSPATH}" \
-    io.airlift.regulator.DfaAbsolutePointerProbe "${expected_native_access}" \
-    2>&1 | tee "${semantic_log}"
+    io.airlift.regulator.DfaAbsolutePointerProbe "${expected_native_access}"
 # Units of one shard on one host share a route's Surefire semantic tests. The
 # receipt is keyed by the host epoch and candidate identity and verified by
 # hash; each unit still runs the native probe above and its handler's own
@@ -1013,15 +1034,13 @@ else
         surefire_logs+=("${RESULT_DIR}/logs/semantic-surefire.log")
     fi
     (
-        cd "${ROOT}"
-        JDK_JAVA_OPTIONS="${semantic_java_options}" \
-            ./mvnw "${MAVEN_ARGS[@]}" -q \
-            -Dtest="${semantic_tests}" test
-    ) 2>&1 | tee -a "${surefire_logs[@]}"
-    if ! compgen -G "${default_semantic_report_dir}/TEST-*.xml" >/dev/null; then
-        echo "Semantic tests produced no Surefire XML reports" >&2
-        exit 1
-    fi
+        cd "${ROOT}" &&
+            JDK_JAVA_OPTIONS="${semantic_java_options}" \
+                ./mvnw "${MAVEN_ARGS[@]}" -q \
+                -Dtest="${semantic_tests}" test
+    ) 2>&1 | tee -a "${surefire_logs[@]}" || semantic_failure "Semantic tests failed"
+    compgen -G "${default_semantic_report_dir}/TEST-*.xml" >/dev/null ||
+        semantic_failure "Semantic tests produced no Surefire XML reports"
     cp "${default_semantic_report_dir}"/TEST-*.xml "${semantic_report_dir}/"
     if [[ -n "${semantic_receipt_directory}" ]]; then
         store_semantic_receipt "${semantic_receipt_directory}" "${RESULT_DIR}/logs/semantic-surefire.log"
@@ -1036,19 +1055,23 @@ prepare_pinned_trino()
 {
     PINNED_TRINO_WORK_DIR="${SHARED_WORK_DIR}/pinned-trino"
     mkdir -p "${PINNED_TRINO_WORK_DIR}"
-    if ! TRINO_COMPARATOR_NATIVE_ACCESS="${expected_native_access}" \
+    # First check only the harness's identity and provenance; a harness that
+    # fails, before any semantic check runs against it, is replaced by a local
+    # build. Once its semantic verifiers have run, their verdict below is final.
+    if ! TRINO_COMPARATOR_IDENTITY_ONLY=true \
+            TRINO_COMPARATOR_NATIVE_ACCESS="${expected_native_access}" \
             TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
             "${ROOT}/tools/re2-benchmark/trino-joni/verify.sh" \
             >> "${semantic_log}" 2>&1; then
-        # A prebuilt harness this host cannot verify is replaced by a local build.
         rm -f "${SHARED_WORK_DIR}/engine-build/trino.sha256"
-        TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
+        TRINO_COMPARATOR_IDENTITY_ONLY=true TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
             "${ROOT}/tools/re2-benchmark/trino-joni/prepare.sh" 2>&1 | tee -a "${semantic_log}"
     fi
     trino_harness_build=$(prebuilt_engine trino || echo local)
-    TRINO_COMPARATOR_NATIVE_ACCESS="${expected_native_access}" \
+    run_semantic_verifier "Pinned Trino comparator verifier" \
+        env TRINO_COMPARATOR_IDENTITY_ONLY=false TRINO_COMPARATOR_NATIVE_ACCESS="${expected_native_access}" \
         TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
-        "${ROOT}/tools/re2-benchmark/trino-joni/verify.sh" 2>&1 | tee -a "${semantic_log}"
+        "${ROOT}/tools/re2-benchmark/trino-joni/verify.sh"
     PINNED_TRINO_CLASSPATH=$(cat "${PINNED_TRINO_WORK_DIR}/classpath.txt")
     if tr ':' '\n' <<<"${PINNED_TRINO_CLASSPATH}" | grep -Eq '/(com/google/re2j/re2j|io/trino/trino-re2j)/'; then
         echo "Pinned Trino classpath contains a historical RE2J artifact" >&2
@@ -1075,9 +1098,11 @@ prepare_final_line()
         -d "${classes}" \
         "${ROOT}/tools/re2-benchmark/trino-final-line/TrinoFinalLineDifferentialVerifier.java"
     SPECIAL_CLASSPATH="${classes}:${PINNED_TRINO_CLASSPATH}"
-    java "${route_jvm_arguments[@]}" -cp "${SPECIAL_CLASSPATH}" \
-        io.trino.operator.scalar.TrinoFinalLineDifferentialVerifier 2>&1 | tee -a "${semantic_log}"
-    grep -Fx 'Verified 176 Trino final-line operation comparisons' "${semantic_log}" >/dev/null
+    run_semantic_verifier "Trino final-line differential verifier" \
+        java "${route_jvm_arguments[@]}" -cp "${SPECIAL_CLASSPATH}" \
+        io.trino.operator.scalar.TrinoFinalLineDifferentialVerifier
+    grep -Fx 'Verified 176 Trino final-line operation comparisons' "${semantic_log}" >/dev/null ||
+        semantic_failure "Trino final-line differential verifier did not verify every comparison"
 }
 
 prepare_trino_like()
@@ -1099,14 +1124,18 @@ prepare_trino_like()
         -d "${classes}" \
         "${ROOT}/tools/re2-benchmark/trino-like/TrinoLikeDifferentialVerifier.java"
     SPECIAL_CLASSPATH="${classes}:${PINNED_TRINO_CLASSPATH}"
-    java "${route_jvm_arguments[@]}" -cp "${SPECIAL_CLASSPATH}" \
-        io.airlift.regulator.benchmark.BenchmarkTrinoLike | tee -a "${semantic_log}"
-    grep -Fx 'Verified 60 Trino LIKE lifecycle comparisons' "${semantic_log}" >/dev/null
-    java "${route_jvm_arguments[@]}" -cp "${SPECIAL_CLASSPATH}" \
-        TrinoLikeDifferentialVerifier 2>&1 | tee -a "${semantic_log}"
-    grep -Fx 'Verified 530255 Trino LIKE comparisons' "${semantic_log}" >/dev/null
-    grep -Fx 'Verified 810155 escaped Trino LIKE comparisons' "${semantic_log}" >/dev/null
-    grep -Fx 'Verified 9330 encoded Trino LIKE comparisons' "${semantic_log}" >/dev/null
+    run_semantic_verifier "Trino LIKE lifecycle verifier" \
+        java "${route_jvm_arguments[@]}" -cp "${SPECIAL_CLASSPATH}" \
+        io.airlift.regulator.benchmark.BenchmarkTrinoLike
+    grep -Fx 'Verified 60 Trino LIKE lifecycle comparisons' "${semantic_log}" >/dev/null ||
+        semantic_failure "Trino LIKE lifecycle verifier did not verify every comparison"
+    run_semantic_verifier "Trino LIKE differential verifier" \
+        java "${route_jvm_arguments[@]}" -cp "${SPECIAL_CLASSPATH}" \
+        TrinoLikeDifferentialVerifier
+    grep -Fx 'Verified 530255 Trino LIKE comparisons' "${semantic_log}" >/dev/null &&
+        grep -Fx 'Verified 810155 escaped Trino LIKE comparisons' "${semantic_log}" >/dev/null &&
+        grep -Fx 'Verified 9330 encoded Trino LIKE comparisons' "${semantic_log}" >/dev/null ||
+        semantic_failure "Trino LIKE differential verifier did not verify every comparison"
     if [[ "${SHARD_ID}" == trino-like-specialized ]]; then
         javac \
             -cp "${PINNED_TRINO_CLASSPATH}" \
@@ -1115,10 +1144,12 @@ prepare_trino_like()
             -d "${classes}" \
             -s "${generated}" \
             "${ROOT}/tools/re2-benchmark/trino-like/BenchmarkTrinoLikeTpch.java"
-        java "${route_jvm_arguments[@]}" -cp "${SPECIAL_CLASSPATH}" \
-            io.airlift.regulator.BenchmarkTrinoLikeTpch "${ROOT}" | tee -a "${semantic_log}"
-        grep -Fx 'Verified 4 TPC-H LIKE columns and 7 workloads in three engines' "${semantic_log}" >/dev/null
-        grep -Fx 'Verified 7 TPC-H LIKE workloads with generated bytecode' "${semantic_log}" >/dev/null
+        run_semantic_verifier "TPC-H LIKE verifier" \
+            java "${route_jvm_arguments[@]}" -cp "${SPECIAL_CLASSPATH}" \
+            io.airlift.regulator.BenchmarkTrinoLikeTpch "${ROOT}"
+        grep -Fx 'Verified 4 TPC-H LIKE columns and 7 workloads in three engines' "${semantic_log}" >/dev/null &&
+            grep -Fx 'Verified 7 TPC-H LIKE workloads with generated bytecode' "${semantic_log}" >/dev/null ||
+            semantic_failure "TPC-H LIKE verifier did not verify every workload"
     fi
 }
 
@@ -1310,7 +1341,8 @@ PY
         --systems "${primary_systems}" \
         --verification "${RESULT_DIR}/raw/rebar-primary-verification.csv" \
         --outcomes "${RESULT_DIR}/raw/rebar-outcomes.tsv" \
-        --command-status "${primary_verification_status}"
+        --command-status "${primary_verification_status}" ||
+        semantic_failure "Rebar primary verification failed"
     cat "${RESULT_DIR}/raw/rebar-primary-verification.csv" >> "${semantic_log}"
 
     if [[ -n "${REBAR_JONI_BENCHMARK_FILTER}" ]]; then
@@ -1339,7 +1371,8 @@ PY
             --verification "${RESULT_DIR}/raw/rebar-joni-verification.csv" \
             --outcomes "${RESULT_DIR}/raw/rebar-outcomes.tsv" \
             --command-status "${joni_verification_status}" \
-            --append
+            --append ||
+            semantic_failure "Rebar Joni verification failed"
         cat "${RESULT_DIR}/raw/rebar-joni-verification.csv" >> "${semantic_log}"
         REBAR_JONI_BENCHMARK_FILTER=$(python3 "${RESULT_TOOL}" jmh-filter \
             --manifest "${SELECTION_MANIFEST}" \
