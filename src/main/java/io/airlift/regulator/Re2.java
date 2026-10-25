@@ -72,9 +72,9 @@ public sealed class Re2
         OTHER,
     }
 
-    /// Selects the scan plan a Trino compile builds. Only tests request a mode other than
-    /// [#DEFAULT].
-    enum TrinoScanPlanMode
+    /// Selects the scan plan a Trino, Java, or Rust compile builds. Only tests request
+    /// [#FORCE_HANDOFF].
+    enum ScanPlanMode
     {
         // Builds the plan for every eligible pattern.
         DEFAULT,
@@ -819,11 +819,10 @@ public sealed class Re2
         return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.NONE, false);
     }
 
-    /// Compiles a pattern parsed by the Java frontend, with the scan plan of its shape. The caller
-    /// passes a private snapshot that it never mutates. A scan plan built with
-    /// `forceScanPlanHandoff` continues every unanchored search on the ordinary engine
-    /// before its first attempt; only tests request it.
-    static Re2 compileParsedForJava(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean forceScanPlanHandoff)
+    /// Compiles a pattern parsed by the Java frontend. The caller passes a private snapshot that it
+    /// never mutates. `scanPlanMode` decides whether the scan plan of an eligible shape is
+    /// built, and how it runs.
+    static Re2 compileParsedForJava(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
@@ -831,14 +830,22 @@ public sealed class Re2
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.JAVA, forceScanPlanHandoff);
+        return build(
+                pattern,
+                parsed,
+                flags,
+                maxMemory,
+                byteFrequencies,
+                false,
+                Compiler.Dialect.RE2,
+                scanPlanMode == ScanPlanMode.DISABLED ? TrinoScanPlan.Language.NONE : TrinoScanPlan.Language.JAVA,
+                scanPlanMode == ScanPlanMode.FORCE_HANDOFF);
     }
 
-    /// Compiles a pattern parsed by the Rust frontend, with the scan plan of its shape. The caller
-    /// passes a private snapshot that it never mutates. A scan plan built with
-    /// `forceScanPlanHandoff` continues every unanchored search on the ordinary engine
-    /// before its first attempt; only tests request it.
-    static Re2 compileParsedForRust(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean forceScanPlanHandoff)
+    /// Compiles a pattern parsed by the Rust frontend. The caller passes a private snapshot that it
+    /// never mutates. `scanPlanMode` decides whether the scan plan of an eligible shape is
+    /// built, and how it runs.
+    static Re2 compileParsedForRust(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
@@ -846,12 +853,21 @@ public sealed class Re2
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.RUST, forceScanPlanHandoff);
+        return build(
+                pattern,
+                parsed,
+                flags,
+                maxMemory,
+                byteFrequencies,
+                false,
+                Compiler.Dialect.RE2,
+                scanPlanMode == ScanPlanMode.DISABLED ? TrinoScanPlan.Language.NONE : TrinoScanPlan.Language.RUST,
+                scanPlanMode == ScanPlanMode.FORCE_HANDOFF);
     }
 
     /// The caller passes a private snapshot that it never mutates. `scanPlanMode` selects
     /// the scan plan to build.
-    static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, TrinoScanPlanMode scanPlanMode)
+    static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
@@ -902,8 +918,8 @@ public sealed class Re2
                 byteFrequencies,
                 false,
                 Compiler.Dialect.TRINO,
-                scanPlanMode == TrinoScanPlanMode.DISABLED ? TrinoScanPlan.Language.NONE : TrinoScanPlan.Language.TRINO,
-                scanPlanMode == TrinoScanPlanMode.FORCE_HANDOFF);
+                scanPlanMode == ScanPlanMode.DISABLED ? TrinoScanPlan.Language.NONE : TrinoScanPlan.Language.TRINO,
+                scanPlanMode == ScanPlanMode.FORCE_HANDOFF);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)

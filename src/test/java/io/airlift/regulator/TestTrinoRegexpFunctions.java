@@ -314,7 +314,7 @@ public class TestTrinoRegexpFunctions
     {
         Slice pattern = utf8("first(?s:.*)second(?s:.*)third");
         ParseResult parsed = TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL);
-        Re2 baseline = Re2.compileParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, 96L << 20, ByteFrequencies.uniform(), Re2.TrinoScanPlanMode.DEFAULT);
+        Re2 baseline = Re2.compileParsedForTrino(pattern, parsed, Regexp.LIKE_PERL, 96L << 20, ByteFrequencies.uniform(), Re2.ScanPlanMode.DEFAULT);
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
 
         long retainedSize = regexp.orderedLiteralMatcherRetainedSizeForDiagnostics();
