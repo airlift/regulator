@@ -17,10 +17,15 @@ if [[ $# -ne 3 ]]; then
 fi
 
 BENCHMARK_MODE=${RE2_BENCHMARK_MODE:-}
-if [[ "${BENCHMARK_MODE}" != baseline-shard && "${BENCHMARK_MODE}" != language-batch && "${BENCHMARK_MODE}" != engine-build ]]; then
-    echo "RE2_BENCHMARK_MODE must be baseline-shard, language-batch, or engine-build" >&2
-    exit 1
-fi
+case "${BENCHMARK_MODE}" in
+    baseline-shard | language-batch | engine-build | unit-worker) ;;
+    *)
+        echo "RE2_BENCHMARK_MODE must be baseline-shard, language-batch, engine-build, or unit-worker" >&2
+        exit 1
+        ;;
+esac
+# run-unit-worker.sh exits with its INTERRUPTED_STATUS after a Spot interruption notice.
+UNIT_WORKER_INTERRUPTED_STATUS=43
 CAMPAIGN_PROVENANCE=${CAMPAIGN_PROVENANCE:-}
 if [[ "${CAMPAIGN_PROVENANCE}" != qualification ]]; then
     echo "CAMPAIGN_PROVENANCE must be qualification" >&2
@@ -42,11 +47,12 @@ TIME_PACKAGE=${TIME_PACKAGE:?TIME_PACKAGE is required}
 REGULATOR_DIR=$(cd "$1" && pwd)
 TRINO_DIR=
 case "${BENCHMARK_MODE}:${RE2_CAMPAIGN_SHARD_ID:-}" in
-    engine-build:engine-build)
-        # The build phase's job is not a shard; it prepares the Trino harness among its engines.
+    engine-build:engine-build | unit-worker:unit-worker)
+        # Neither job is a shard: the build prepares the Trino harness among its engines,
+        # and a unit worker measures units of every shard.
         SHARD_HANDLER=${BENCHMARK_MODE}
         ;;
-    engine-build:* | *:engine-build)
+    engine-build:* | unit-worker:* | *:engine-build | *:unit-worker)
         echo "RE2_BENCHMARK_MODE=${BENCHMARK_MODE} disagrees with" \
             "RE2_CAMPAIGN_SHARD_ID=${RE2_CAMPAIGN_SHARD_ID:-unset}" >&2
         exit 1
@@ -58,7 +64,7 @@ case "${BENCHMARK_MODE}:${RE2_CAMPAIGN_SHARD_ID:-}" in
         ;;
 esac
 case "${SHARD_HANDLER}" in
-    engine-build | trino-operations | trino-final-line | trino-like | lifecycle | rebar)
+    engine-build | unit-worker | trino-operations | trino-final-line | trino-like | lifecycle | rebar)
         if [[ -z "$2" || ! -d "$2" ]]; then
             if [[ "${SHARD_HANDLER}" == "${BENCHMARK_MODE}" ]]; then
                 echo "The ${BENCHMARK_MODE} job requires a Trino checkout" >&2
@@ -96,7 +102,9 @@ install_packages()
 {
     sudo dnf install -y "${CMAKE_PACKAGE}" "${NATIVE_COMPILER_PACKAGE}" "${GLIBC_PACKAGE}" \
         "${TIME_PACKAGE}" git jq make ninja-build perf tar gzip
-    if [[ "${RE2_CAMPAIGN_SHARD_ID}" == rebar-* || "${BENCHMARK_MODE}" == engine-build ]]; then
+    # A unit worker measures units of every shard, Rebar's among them.
+    if [[ "${RE2_CAMPAIGN_SHARD_ID}" == rebar-* || "${BENCHMARK_MODE}" == engine-build ||
+            "${BENCHMARK_MODE}" == unit-worker ]]; then
         sudo dnf install -y abseil-cpp-devel "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
     elif [[ "${BENCHMARK_MODE}" == language-batch ]]; then
         # The Rust language comparator links the pinned regex crate.
@@ -326,7 +334,7 @@ record_environment
 export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
     export BASELINE_HEAP_SIZE=${BENCHMARK_HEAP_SIZE:-8g}
     export BASELINE_SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${REGULATOR_DIR}/target/baseline-shared}
-    if [[ "${BENCHMARK_MODE}" == baseline-shard ]]; then
+    if [[ "${BENCHMARK_MODE}" == baseline-shard || "${BENCHMARK_MODE}" == unit-worker ]]; then
         install_engine_build
     fi
     capacity_file="${RESULT_DIR}/host-capacity.txt"
@@ -349,6 +357,10 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
             "${REGULATOR_DIR}" "${RESULT_DIR}")
     elif [[ "${BENCHMARK_MODE}" == engine-build ]]; then
         session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/build-engines.sh" "${RESULT_DIR}")
+    elif [[ "${BENCHMARK_MODE}" == unit-worker ]]; then
+        # The worker keeps each unit outside the host evidence it leaves here.
+        session_command=("${REGULATOR_DIR}/tools/re2-benchmark/aws/run-unit-worker.sh"
+            "${RESULT_DIR}" /var/tmp/re2-units)
     else
         session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/run-host-session.sh"
             "${RE2_CAMPAIGN_SHARD_ID}" "${BASELINE_PROTOCOL}" "${RESULT_DIR}")
@@ -407,6 +419,10 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         printf 'minimum_available_disk_bytes=%s\n' "${minimum_available_disk_bytes}"
         printf 'capacity_status=%s\n' "${capacity_status}"
     } >> "${capacity_file}"
+    # A worker interrupted by Spot reports the interruption, not its truncated capacity.
+    if [[ "${BENCHMARK_MODE}" == unit-worker && ${host_session_status} -eq ${UNIT_WORKER_INTERRUPTED_STATUS} ]]; then
+        exit "${UNIT_WORKER_INTERRUPTED_STATUS}"
+    fi
     if [[ "${capacity_status}" != accepted ]]; then
         echo "Host capacity gate rejected the baseline session; see ${capacity_file}" >&2
         exit 1

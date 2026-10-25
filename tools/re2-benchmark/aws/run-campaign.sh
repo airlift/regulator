@@ -132,8 +132,9 @@ campaign_shard_handler()
 
 campaign_uses_trino()
 {
-    # The engine build prepares the pinned Trino harness for the platform's baseline hosts.
-    [[ "${CAMPAIGN_MODE}" == engine-build ]] && return 0
+    # The engine build prepares the pinned Trino harness for the platform's baseline hosts,
+    # and a unit worker measures units of every shard.
+    [[ "${CAMPAIGN_MODE}" == engine-build || "${CAMPAIGN_MODE}" == unit-worker ]] && return 0
     [[ "${CAMPAIGN_MODE}" == baseline-shard ]] || return 1
     case "$(campaign_shard_handler)" in
         trino-operations | trino-final-line | trino-like | lifecycle | rebar) return 0 ;;
@@ -177,11 +178,28 @@ benchmark_ami_name()
     esac
 }
 
-if [[ "${CAMPAIGN_MODE}" != baseline-shard && "${CAMPAIGN_MODE}" != language-batch && "${CAMPAIGN_MODE}" != engine-build ]]; then
-    echo "RE2 benchmark campaign mode must be baseline-shard, language-batch, or engine-build" >&2
+case "${CAMPAIGN_MODE}" in
+    baseline-shard | language-batch | engine-build | unit-worker) ;;
+    *)
+        echo "RE2 benchmark campaign mode must be baseline-shard, language-batch, engine-build, or unit-worker" >&2
+        exit 1
+        ;;
+esac
+# A unit worker leases units until its lifetime, after a baseline host's bootstrap budget.
+UNIT_WORKER_LIFETIME_SECONDS=${UNIT_WORKER_LIFETIME_SECONDS:-21600}
+if [[ ! "${UNIT_WORKER_LIFETIME_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "UNIT_WORKER_LIFETIME_SECONDS must be a positive number of seconds" >&2
     exit 1
 fi
-if [[ ( "${CAMPAIGN_MODE}" != language-batch && "${TIMEOUT_SECONDS}" != 5400 ) ||
+# run-unit-worker.sh exits with its INTERRUPTED_STATUS after a Spot interruption notice.
+UNIT_WORKER_INTERRUPTED_STATUS=43
+if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
+    if [[ "${TIMEOUT_SECONDS}" != $((UNIT_WORKER_LIFETIME_SECONDS + 5400)) || "${CAMPAIGN_SHARD_ID}" != unit-worker ]]; then
+        echo "A unit worker requires CAMPAIGN_SHARD_ID=unit-worker and TIMEOUT_SECONDS of its lifetime plus 5400," \
+            "found ${CAMPAIGN_SHARD_ID} and ${TIMEOUT_SECONDS}" >&2
+        exit 1
+    fi
+elif [[ ( "${CAMPAIGN_MODE}" != language-batch && "${TIMEOUT_SECONDS}" != 5400 ) ||
         ( "${CAMPAIGN_MODE}" == language-batch && "${TIMEOUT_SECONDS}" != 5400 &&
           "${TIMEOUT_SECONDS}" != 68400 && "${TIMEOUT_SECONDS}" != 81000 ) ]]; then
     echo "Formal baseline jobs require TIMEOUT_SECONDS=5400; isolated slow language jobs require their computed 68400- or 81000-second budget, found ${TIMEOUT_SECONDS}" >&2
@@ -224,6 +242,10 @@ case "$(campaign_shard_handler)" in
     rebar) JONI_EVIDENCE_SCOPE=rebar-bulk-text-comparison ;;
     *) JONI_EVIDENCE_SCOPE=not-used ;;
 esac
+if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
+    # Each leased unit's shard decides how it compares Joni.
+    JONI_EVIDENCE_SCOPE=unit-shard-comparison
+fi
 case "${CAMPAIGN_ARCHITECTURES}" in
     intel | arm) ;;
     *) echo "CAMPAIGN_ARCHITECTURES must be intel or arm: ${CAMPAIGN_ARCHITECTURES}" >&2; exit 1 ;;
@@ -243,9 +265,11 @@ if [[ "${CAMPAIGN_MODE}" == baseline-shard ]] &&
     exit 1
 fi
 if [[ -n "${ENGINE_BUILD_DIRECTORY}${ENGINE_BUILD_MANIFEST_SHA256}" ]] &&
-        { [[ "${CAMPAIGN_MODE}" != baseline-shard || ! -d "${ENGINE_BUILD_DIRECTORY}" ]] ||
+        { [[ ( "${CAMPAIGN_MODE}" != baseline-shard && "${CAMPAIGN_MODE}" != unit-worker ) ||
+              ! -d "${ENGINE_BUILD_DIRECTORY}" ]] ||
           [[ ! "${ENGINE_BUILD_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; }; then
-    echo "Prebuilt engines require a baseline shard, an engine build directory, and its manifest SHA-256" >&2
+    echo "Prebuilt engines require a baseline shard or unit worker, an engine build directory," \
+        "and its manifest SHA-256" >&2
     exit 1
 fi
 if [[ -n "${ENGINE_BUILD_DIRECTORY}" && -z "${TRANSFER_BUCKET}" ]]; then
@@ -994,6 +1018,13 @@ create_instance_profile()
 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}
 EOF
     local engine_build_statement=
+    local lease_statement=
+    if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
+        # A unit worker lists only its own lease keys, to tell a lease not yet
+        # written from one it cannot read.
+        lease_statement=",
+  {\"Effect\":\"Allow\",\"Action\":\"s3:ListBucket\",\"Resource\":\"arn:aws:s3:::${BUCKET}\",\"Condition\":{\"StringLike\":{\"s3:prefix\":\"${INPUT_PREFIX}/leases/*\"}}}"
+    fi
     if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
         # Read only the exact shared archives this session's host installs.
         engine_build_statement=",
@@ -1002,7 +1033,7 @@ EOF
     cat > "${SESSION_DIR}/instance-transfer-policy.json" <<EOF
 {"Version":"2012-10-17","Statement":[
   {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::${BUCKET}/${INPUT_PREFIX}/*"},
-  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::${BUCKET}/${RESULT_PREFIX}/*"}${engine_build_statement}
+  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::${BUCKET}/${RESULT_PREFIX}/*"}${engine_build_statement}${lease_statement}
 ]}
 EOF
 
@@ -1236,6 +1267,14 @@ export REBAR_SELECTED_DEFINITIONS_SHA256='${REBAR_SELECTED_DEFINITIONS_SHA256}'
 export BENCHMARK_HEAP_SIZE='${BENCHMARK_HEAP_SIZE:-8g}'
 export BENCHMARK_CPU_LIST='${BENCHMARK_CPU_LIST:-0}'
 export BENCHMARK_EXPECTED_VCPUS='${BENCHMARK_EXPECTED_VCPUS:-}'
+if [[ '${CAMPAIGN_MODE}' == unit-worker ]]; then
+    export RE2_CAMPAIGN_HOST_SESSION='${SESSION_ID}'
+    export BASELINE_REGION='${AWS_REGION}'
+    export UNIT_WORKER_BUCKET='${BUCKET}'
+    export UNIT_WORKER_LEASE_PREFIX='${INPUT_PREFIX}/leases'
+    export UNIT_WORKER_RESULT_PREFIX='${RESULT_PREFIX}'
+    export UNIT_WORKER_LIFETIME_SECONDS='${UNIT_WORKER_LIFETIME_SECONDS}'
+fi
 
 trino_directory=
 if [[ '${CAMPAIGN_USES_TRINO}' == true ]]; then
@@ -1422,7 +1461,7 @@ if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"
 fi
 
-if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* || "${CAMPAIGN_MODE}" == engine-build ]]; then
+if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* || "${CAMPAIGN_MODE}" == engine-build || "${CAMPAIGN_MODE}" == unit-worker ]]; then
     if [[ ! -d "${REBAR_OFFICIAL_DIR}/.git" ]]; then
         echo "Pinned Rebar checkout does not exist: ${REBAR_OFFICIAL_DIR}" >&2
         exit 1
@@ -1589,6 +1628,8 @@ placement_score=${CAMPAIGN_PLACEMENT_SCORE}
 bucket=${BUCKET}
 bucket_owned=${BUCKET_OWNED}
 object_prefix=${OBJECT_PREFIX}
+input_prefix=${INPUT_PREFIX}
+result_prefix=${RESULT_PREFIX}
 regulator_commit=${REGULATOR_COMMIT}
 regulator_snapshot_sha256=${REGULATOR_SHA256}
 regulator_content_sha256=${REGULATOR_CONTENT_SHA256}
@@ -1655,6 +1696,9 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                 echo "${label} run failed with status ${result_status}" >&2
                 if [[ "${result_status}" == 42 && "${CAMPAIGN_MODE}" == baseline-shard ]]; then
                     record_failure_classification protocol-qualification "remote-exit-status:${result_status}"
+                elif [[ "${result_status}" == "${UNIT_WORKER_INTERRUPTED_STATUS}" && "${CAMPAIGN_MODE}" == unit-worker ]]; then
+                    # The worker saw a Spot interruption notice and uploaded what it had.
+                    record_failure_classification retryable-spot spot-interruption-notice
                 else
                     record_failure_classification benchmark-failure "remote-exit-status:${result_status}"
                 fi
@@ -1705,7 +1749,7 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                     campaign_failed=1
                     continue
                 fi
-                if [[ "${CAMPAIGN_MODE}" == baseline-shard ]] &&
+                if [[ "${CAMPAIGN_MODE}" == baseline-shard || "${CAMPAIGN_MODE}" == unit-worker ]] &&
                         (! grep -Fqx "row_manifest_sha256=${BASELINE_ROW_MANIFEST_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "platform_manifest_sha256=${BASELINE_PLATFORM_MANIFEST_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "comparator_manifest_sha256=${BASELINE_COMPARATOR_MANIFEST_SHA256}" "${environment_manifest}" ||

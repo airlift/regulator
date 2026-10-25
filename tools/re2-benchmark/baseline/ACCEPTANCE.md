@@ -191,9 +191,7 @@ tools/re2-benchmark/baseline/validate-campaign-results.py \
 
 A campaign of work units keeps `accepted-units.tsv` instead: one
 `unit-receipt.tsv` row per accepted unit replica, added atomically like a host
-receipt. Hosts do not yet pull units, so no controller phase writes this ledger
-yet; `run-campaign.py` holds its persistence and recovery for the unit
-dispatcher. Each attempt is retained at
+receipt. Each attempt is retained at
 `units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>` under the
 result root. On restart, recovery revalidates every ledger row against that
 directory and adds a retained attempt the ledger lacks once it passes the same

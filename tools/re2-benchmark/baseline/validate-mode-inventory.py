@@ -4,16 +4,16 @@ import re
 from pathlib import Path
 
 
-EXPECTED = {"baseline-shard", "language-batch", "engine-build"}
+EXPECTED = {"baseline-shard", "language-batch", "engine-build", "unit-worker"}
 
 
 def shell_modes(path, variable):
+    """The modes a wrapper's mode case accepts: its empty branch, before the branch that rejects the rest."""
     source = path.read_text(encoding="utf-8")
-    guard = rf'"\$\{{{variable}\}}" != [a-z0-9-]+'
-    match = re.search(rf'if \[\[ ({guard}(?: && {guard})*) \]\]; then', source)
+    match = re.search(rf'case "\$\{{{variable}\}}" in\n\s+([a-z0-9-]+(?: \| [a-z0-9-]+)*)\) ;;\n\s+\*\)', source)
     if match is None:
         raise SystemExit(f"Could not locate {variable} mode parser in {path}")
-    return set(re.findall(r'!= ([a-z0-9-]+)', match.group(1)))
+    return set(match.group(1).split(" | "))
 
 
 def main():

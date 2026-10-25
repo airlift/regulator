@@ -28,6 +28,9 @@ ABSL_DIR=${ABSL_DIR:-"${DEPENDENCY_DIR}/abseil-cpp"}
 BENCHMARK_DIR=${BENCHMARK_DIR:-"${DEPENDENCY_DIR}/benchmark"}
 GOOGLETEST_DIR=${GOOGLETEST_DIR:-"${DEPENDENCY_DIR}/googletest"}
 
+# The pinned checkout is shared with the Rebar native build, which refuses a
+# dirty one, so the benchmark patches last only as long as this build.
+trap 'git -C "${RE2_DIR}" checkout -q -- re2/testing/regexp_benchmark.cc' EXIT
 git -C "${RE2_DIR}" checkout -q -- re2/testing/regexp_benchmark.cc
 git -C "${RE2_DIR}" apply "${SCRIPT_DIR}/random-text.patch"
 git -C "${RE2_DIR}" apply "${SCRIPT_DIR}/program-range.patch"

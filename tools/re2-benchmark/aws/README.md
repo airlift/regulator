@@ -1,9 +1,11 @@
 # AWS baseline qualification
 
-The AWS tools run three kinds of jobs: `baseline-shard`, `language-batch`, and
-`engine-build`. The first two are needed for full qualification; the third
-builds engines for the first. This guide gives the baseline commands;
-see the [language guide](../language/README.md) for language collection.
+The AWS tools run four kinds of jobs: `baseline-shard`, `language-batch`,
+`engine-build`, and `unit-worker`. The first two are needed for full
+qualification; `engine-build` builds engines for baseline hosts, and
+`unit-worker` measures baseline work units in place of whole shards. This
+guide gives the baseline commands; see the
+[language guide](../language/README.md) for language collection.
 
 `baseline/run-campaign.py` plans and controls the baseline engine build and the
 smoke, primary, and confirmation runs. `language/fleet.py` prepares language
@@ -450,22 +452,148 @@ The controllers use `run-campaign.sh` to run one AWS job. A
 `CAMPAIGN_MODE=baseline-shard` job selects one architecture, platform, shard,
 and replica. A `CAMPAIGN_MODE=language-batch` job selects one language batch and
 its frozen inputs. A `CAMPAIGN_MODE=engine-build` job builds one platform's
-engines. The wrapper verifies the archive, provisions an isolated instance,
-uploads inputs through a private temporary S3 location, downloads the result,
-and verifies instance, IAM, and S3 cleanup.
+engines, and a `CAMPAIGN_MODE=unit-worker` job leases [work
+units](#unit-workers). The wrapper verifies the archive, provisions an isolated
+instance, uploads inputs through a private temporary S3 location, downloads the
+result, and verifies instance, IAM, and S3 cleanup.
 
 The fleet controller should normally invoke this wrapper. Direct invocation is
 appropriate only while diagnosing one qualification job and still requires all
 pinned identity variables. The language fleet launches through the same
 controller and wrapper, so it uses the same launch regions.
 
-`run-host.sh` runs on the instance. It accepts the same three
+`run-host.sh` runs on the instance. It accepts the same
 modes, verifies the AMI, JDK, package, candidate, comparator, and manifest
 identities, and delegates to `baseline/run-host-session.sh`,
-`language/run-host-session.sh`, or `baseline/build-engines.sh`. Language
-batches and engine builds, like Rebar shards, install the pinned Cargo and Rust
-packages, because the Rust language comparator builds the pinned `regex` crate
-on the host and the engine build compiles Rebar.
+`language/run-host-session.sh`, `baseline/build-engines.sh`, or
+`run-unit-worker.sh`. Language batches, engine builds, and unit workers, like
+Rebar shards, install the pinned Cargo and Rust packages, because the Rust
+language comparator builds the pinned `regex` crate on the host, the engine
+build compiles Rebar, and a unit worker measures Rebar units.
+
+## Unit workers
+
+A `CAMPAIGN_MODE=unit-worker` job launches a host that measures the work units
+its controller leases to it, one at a time, instead of one shard. It requires
+`CAMPAIGN_SHARD_ID=unit-worker` and `TIMEOUT_SECONDS` of the worker lifetime,
+`UNIT_WORKER_LIFETIME_SECONDS` (default 21600), plus 5400. The host
+bootstraps as a baseline host does: packages, the JDK, the environment record,
+and the platform's prebuilt engines once the native target matches. It then
+runs `run-unit-worker.sh`, which runs `../baseline/run-unit.sh` for each lease.
+The wrapper's `session.txt` records the host session (`session`), `bucket`,
+`input_prefix`, and `result_prefix`; every key below is under one of those
+prefixes.
+
+| Key | Writer | Holds |
+|---|---|---|
+| `<input_prefix>/leases/<seq>.json` | controller | the host's lease `seq`, numbered from 1 |
+| `<result_prefix>/heartbeat/<seq>.json` | host | its state while it waits for, runs, or uploads lease `seq` |
+| `<result_prefix>/calibrations/<sha256>.json` | host | a calibration result, before the first unit referencing it |
+| `<result_prefix>/units/<seq>/result.tar.gz` | host | the unit directory of lease `seq` |
+| `<result_prefix>/units/<seq>/completion.json` | host | the attempt's completion marker, written last |
+| `<result_prefix>/events/<seq>-interrupted.tar.gz` | host | an interruption record and the partial unit |
+| the job's result key | host user data | the host evidence, once the worker exits |
+
+Every upload of `run-unit-worker.sh` except a heartbeat is one PUT with its
+SHA-256 checksum and `If-None-Match: *`, so no key is overwritten. Each request
+gives up after 5 seconds connecting or 30 reading, and a failed upload is
+retried every 5 seconds while the worker keeps watching for an interruption
+notice. An attempt starts only if its worst case of 35 seconds still ends within
+`UNIT_WORKER_UPLOAD_SECONDS` (90) of the upload's start, so the whole upload
+stays within that budget. Since a request whose connection stays alive can
+outlive the CLI's timeouts, every S3 call of the worker, heartbeats and lease
+reads too, runs under coreutils `timeout`, which ends it after 35 seconds or
+when the budget it runs in ends, whichever is first. The interruption bundle and
+the final heartbeat after it share one budget. The user data's upload of the
+host evidence, once the worker exits, is a plain `aws s3 cp` outside these
+rules. The host's role adds only `s3:ListBucket` restricted to
+`<input_prefix>/leases/`, so the worker tells a lease not yet written from one
+it cannot read.
+
+A lease is a JSON object:
+
+```json
+{"schema_version": 1, "campaign_id": "primary-20261024", "phase": "primary",
+ "platform": "r8i", "host_session": "20261024T120000Z-4242", "sequence": 3,
+ "unit_id": "<64 hex digits>", "replica_id": 2, "protocol": "qualification"}
+```
+
+A stop lease replaces `phase`, `unit_id`, `replica_id`, and `protocol` with
+`"stop": true`. The host reads lease `seq` only after lease `seq - 1`'s
+completion marker lands, so the controller may write one lease ahead. The host
+requires schema version 1 and its own sequence, host session, campaign, and
+platform, and a work lease's unit ID, replica 1 to 4, phase, and protocol; any
+other lease stops it. Each lease read is kept in the host evidence under
+`leases/`.
+
+A heartbeat is `{"schema_version": 1, "host_session", "instance_id",
+"sequence", "state", "unit_id", "replica_id", "timestamp", "stop_reason"}`,
+written every 30 seconds and at each state change once bootstrap ends. `state`
+is `waiting`, `running`, `uploading`, `stopped`, or `interrupted`; the unit,
+replica, and stop reason are `null` when they do not apply.
+
+A completion marker is `{"schema_version": 1, "host_session", "sequence",
+"campaign_id", "phase", "platform", "unit_id", "replica_id",
+"unit_attempt_id", "exit_status", "unit_status", "result_sha256",
+"calibration_before", "calibration_after", "calibration_chained",
+"started_at", "finished_at"}`. `unit_attempt_id` is `<host_session>/<seq>`,
+`unit_status` is `complete` or `failed`, and `result_sha256` is the digest of
+`result.tar.gz`. A failed unit, including one whose representative failed with
+status 42, is still uploaded and marked, and the host takes its next lease. A
+`result.tar.gz` without its completion marker is not a finished attempt.
+
+The worker polls the instance metadata service (IMDSv2) every 5 seconds and
+after each of its S3 calls, so a stalled S3 call delays a notice by at most that
+one call, and a stop with a notice already arrived, or arriving during its final
+heartbeat, is an interruption:
+
+- A rebalance recommendation lets the running unit finish and upload, then
+  stops the host.
+- A Spot instance-action notice stops leasing and kills the running unit's
+  process group. The host uploads `events/<seq>-interrupted.tar.gz`, holding
+  `interruption.json` (`schema_version`, `host_session`, `sequence`,
+  `unit_id`, `replica_id`, `notice_time`, `action`, `action_time`) and the
+  partial unit directory, then exits 43; its user data uploads the host
+  evidence if the instance lasts. A unit whose marker had not landed never
+  completes. The wrapper classifies status 43 as `retryable-spot`, and a host
+  that vanishes without uploading is classified as any other host.
+
+The worker stops, with its reason in the final heartbeat and
+`worker-session.txt`, on:
+
+| Reason | When | Status |
+|---|---|---|
+| `stop-lease` | it reads a stop lease | 0 |
+| `idle` | its next lease is absent for `UNIT_WORKER_IDLE_SECONDS` (600) | 0 |
+| `lifetime` | its lifetime has passed; no lease starts after it, a running unit finishes | 0 |
+| `rebalance` | a rebalance recommendation came during the last unit or wait | 0 |
+| `interrupted` | a Spot instance-action notice | 43 |
+| `invalid-lease`, `lease-unreadable`, `upload-failure` | a malformed lease, 12 failed lease reads in a row, or an upload, such as a calibration's, still failing at its bound | 1 |
+
+The host evidence holds the environment files, `engine-build.txt`,
+`host-capacity.txt`, `leases/`, `calibrations/`, `worker-leases.tsv` (each
+lease's outcome, status, calibrations, attempt ID, the attempt it chained from
+and after what gap, and the digest of its environment files),
+`worker-session.txt`, the shared semantic receipts, and the logs.
+
+Calibrations are host evidence. `run-unit.sh` stores each unit's calibrations
+once, as `calibrations/<sha256>.json`, and the unit's `unit-evidence.tsv`
+references them by digest. When the next lease starts within 60 seconds of
+the previous complete unit's after calibration, that calibration is the next
+unit's before and the next unit runs no before of its own; otherwise it
+calibrates before afresh. A chained unit's `unit-chain.txt` names the attempt it
+chained from, that attempt's after calibration, the gap, and the previous
+attempt's environment digest, and acceptance requires the lease before it on
+the same host, within 60 seconds, in the same environment. Accepting a worker's unit therefore needs its host's
+`calibrations/`, through `validate-unit-results.py --host-evidence`; see
+`../baseline/ACCEPTANCE.md`.
+
+The first accepted attempt of a platform, unit, and replica wins. A later
+completed attempt of the same unit replica, such as one leased again after a
+lost heartbeat, is recorded as superseded, not accepted, and does not halt the
+campaign. The unit recovery in `run-campaign.py` predates workers and still
+stops on two completed attempts; the unit dispatcher replaces that check with
+this rule.
 
 ## Recovery and evidence
 
