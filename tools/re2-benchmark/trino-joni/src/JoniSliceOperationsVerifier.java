@@ -37,13 +37,20 @@ public final class JoniSliceOperationsVerifier
             Slice pattern = utf8Slice(expression);
             JoniRegexp joni = joniRegexp(pattern);
             TrinoRegexp regulator = TrinoRegexp.compile(pattern);
+            int groupCount = joni.regex().numberOfCaptures();
+            if (regulator.capturingGroupCount() != groupCount) {
+                throw new AssertionError("capturing group count of %s: Regulator=%s, Joni=%s".formatted(expression, regulator.capturingGroupCount(), groupCount));
+            }
             for (String text : List.of("", "no match", "a ab", "éé💰a\n", "foofoobar", "a".repeat(32), "a\r\na\n")) {
                 Slice source = utf8Slice("padding" + text).slice(7, utf8Slice(text).length());
                 verify(source, joni);
-                equal(regulator.extractAll(source), JoniSliceOperations.extractAll(source, joni), "Regulator extractAll");
-                equal(regulator.split(source), JoniSliceOperations.split(source, joni), "Regulator split");
+                matchesAdapter(regulator.extractAll(source), JoniSliceOperations.extractAll(source, joni), "extractAll");
+                for (int group = 0; group <= groupCount; group++) {
+                    matchesAdapter(regulator.extractAll(source, group), JoniSliceOperations.extractAll(source, joni, group), "extractAll group " + group);
+                }
+                matchesAdapter(regulator.split(source), JoniSliceOperations.split(source, joni), "split");
                 for (Function<List<Slice>, Slice> callback : callbacks()) {
-                    equal(regulator.replace(source, callback), JoniSliceOperations.replace(source, joni, callback), "Regulator callback replacement");
+                    matchesAdapter(regulator.replace(source, callback), JoniSliceOperations.replace(source, joni, callback), "callback replacement");
                 }
             }
         }
@@ -53,6 +60,9 @@ public final class JoniSliceOperationsVerifier
     public static void verify(Slice source, JoniRegexp pattern)
     {
         equal(JoniSliceOperations.extractAll(source, pattern), values(JoniRegexpFunctions.regexpExtractAll(source, pattern)), "extractAll");
+        for (int group = 0; group <= pattern.regex().numberOfCaptures(); group++) {
+            equal(JoniSliceOperations.extractAll(source, pattern, group), values(JoniRegexpFunctions.regexpExtractAll(source, pattern, group)), "extractAll group " + group);
+        }
         equal(JoniSliceOperations.split(source, pattern), values(JoniRegexpFunctions.regexpSplit(source, pattern)), "split");
         for (Function<List<Slice>, Slice> callback : callbacks()) {
             List<List<Slice>> actualGroups = new ArrayList<>();
@@ -85,10 +95,17 @@ public final class JoniSliceOperationsVerifier
         return result;
     }
 
-    private static void equal(Object actual, Object expected, String operation)
+    private static void equal(Object adapter, Object pinned, String operation)
     {
-        if (!Objects.equals(actual, expected)) {
-            throw new AssertionError(operation + ": adapter=" + actual + ", pinned=" + expected);
+        if (!Objects.equals(adapter, pinned)) {
+            throw new AssertionError(operation + ": adapter=" + adapter + ", pinned=" + pinned);
+        }
+    }
+
+    private static void matchesAdapter(Object regulator, Object adapter, String operation)
+    {
+        if (!Objects.equals(regulator, adapter)) {
+            throw new AssertionError(operation + ": Regulator=" + regulator + ", adapter=" + adapter);
         }
     }
 }

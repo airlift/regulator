@@ -79,7 +79,9 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * {@code candidateGenerated} takes the state that compiles the generated pattern, so the forks of
  * the other methods load no generated LIKE class, which would change how C2 compiles the
  * interpreted {@code matches} call. The generated API is resolved reflectively, so this source
- * also runs against a Regulator build without it, where only that method fails.
+ * also runs against a Regulator build without it, where only that method fails. Each state's
+ * setup checks every row's result against Trino's SQL matcher before timing. Run each workload
+ * in its own JVM, as the baseline shard does, so each call site sees one pattern.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
@@ -101,7 +103,6 @@ public class BenchmarkTrinoLikeTpch
         private LikeMatcher trinoSql;
         private LikeMatcher trinoOptimized;
         private Slice[] rows;
-        private int expected;
 
         @Setup
         public void setup()
@@ -115,11 +116,8 @@ public class BenchmarkTrinoLikeTpch
             trinoOptimized = LikeMatcher.compile(workload.pattern(), Optional.empty(), true);
             rows = loadRows(workload.column());
 
-            BenchmarkTrinoLikeTpch benchmark = new BenchmarkTrinoLikeTpch();
-            expected = benchmark.trinoSql(this);
-            if (benchmark.candidate(this) != expected || benchmark.trinoOptimized(this) != expected) {
-                throw new IllegalStateException("benchmark outcome mismatch for " + workload);
-            }
+            verifyRows(workload, "candidate", candidate, trinoSql, rows);
+            verifyRows(workload, "trinoOptimized", row -> trinoMatches(trinoOptimized, row), trinoSql, rows);
         }
     }
 
@@ -135,8 +133,8 @@ public class BenchmarkTrinoLikeTpch
         {
             candidateGenerated = generatedCaller(Slices.utf8Slice(data.workload.pattern()));
             rows = data.rows;
-            if (candidateGenerated != null && new BenchmarkTrinoLikeTpch().candidateGenerated(this) != data.expected) {
-                throw new IllegalStateException("generated benchmark outcome mismatch for " + data.workload);
+            if (candidateGenerated != null) {
+                verifyRows(data.workload, "candidateGenerated", candidateGenerated, data.trinoSql, rows);
             }
         }
     }
@@ -248,12 +246,31 @@ public class BenchmarkTrinoLikeTpch
     {
         int count = 0;
         for (Slice row : rows) {
-            // Trino's LIKE function passes the value's backing array and offset to the matcher.
-            if (matcher.match(row.byteArray(), row.byteArrayOffset(), row.length())) {
+            if (trinoMatches(matcher, row)) {
                 count++;
             }
         }
         return count;
+    }
+
+    private static boolean trinoMatches(LikeMatcher matcher, Slice row)
+    {
+        // Trino's LIKE function passes the value's backing array and offset to the matcher.
+        return matcher.match(row.byteArray(), row.byteArrayOffset(), row.length());
+    }
+
+    /**
+     * Checks that {@code matches} matches exactly the rows Trino's SQL LIKE matcher matches, so a
+     * variant cannot pass with offsetting false positives and false negatives.
+     */
+    private static void verifyRows(Workload workload, String variant, Predicate<Slice> matches, LikeMatcher trinoSql, Slice[] rows)
+    {
+        for (int index = 0; index < rows.length; index++) {
+            Slice row = rows[index];
+            if (matches.test(row) != trinoMatches(trinoSql, row)) {
+                throw new IllegalStateException("%s differs from Trino SQL LIKE for %s at row %d".formatted(variant, workload.id(), index));
+            }
+        }
     }
 
     static byte[] loadColumn(Column column)
@@ -332,22 +349,16 @@ public class BenchmarkTrinoLikeTpch
             BenchmarkData data = new BenchmarkData();
             data.workload = workload;
             data.setup();
+            // Each setup checks its variants row by row against Trino's SQL matcher, so only that
+            // matcher's count needs the manifest's.
             int expected = Integer.parseInt(row.get("expected_count"));
-            int candidate = benchmark.candidate(data);
             int trinoSql = benchmark.trinoSql(data);
-            int trinoOptimized = benchmark.trinoOptimized(data);
-            if (candidate != expected || trinoSql != expected || trinoOptimized != expected) {
-                throw new IllegalStateException("TPC-H LIKE count mismatch for %s: expected %s, candidate %s, trinoSql %s, trinoOptimized %s"
-                        .formatted(workload.id(), expected, candidate, trinoSql, trinoOptimized));
+            if (trinoSql != expected) {
+                throw new IllegalStateException("TPC-H LIKE count mismatch for %s: expected %s, trinoSql %s".formatted(workload.id(), expected, trinoSql));
             }
             GeneratedData generatedData = new GeneratedData();
             generatedData.setup(data);
             if (generatedData.candidateGenerated != null) {
-                int candidateGenerated = benchmark.candidateGenerated(generatedData);
-                if (candidateGenerated != expected) {
-                    throw new IllegalStateException("TPC-H LIKE count mismatch for %s: expected %s, candidateGenerated %s"
-                            .formatted(workload.id(), expected, candidateGenerated));
-                }
                 generatedWorkloads++;
             }
             System.out.printf("%s\t%s\t%d\t%d\t%.2f%%\t%s%n",

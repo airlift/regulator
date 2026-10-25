@@ -3,8 +3,8 @@
 This comparator measures Regulator against Airlift Joni through equivalent
 Trino-shaped operations, and against Trino's LIKE functions on the normative
 LIKE rows described below. In the Joni comparison, both implementations
-consume the exact workload and input `Slice` produced by
-`TestingTrinoRegexpBenchmarkInputs`.
+consume the exact workload and input `Slice` produced by the matching Regulator
+benchmark's input class.
 
 The library-output comparisons use `JoniSliceOperations` for `extractAll`,
 `split`, and callback replacement. This adapter follows the pinned Trino search
@@ -88,6 +88,16 @@ origin is recorded as a designed control. Run its Joni side with:
 tools/re2-benchmark/trino-joni/run-everyday.sh \
     target/trino-joni-comparator/everyday-results.json
 ```
+
+`BenchmarkSpecializedTrinoJoni` is the Joni twin of
+`BenchmarkSpecializedTrinoRegexp`, the specialized-pattern workloads described
+in [`TRINO_SCAN_PLAN.md`](../../../docs/benchmarks/TRINO_SCAN_PLAN.md). Each
+workload has one operation: a template replacement, a group extract, or a group
+extract-all, which uses the Slice adapter's group form of pinned Trino's
+`regexp_extract_all` loop. Before timing, `SpecializedTrinoJoniVerifier`
+checks that Regulator's default compile, its regular engine, and its generated
+bytecode each return Joni's result for every input, and checks a frozen SHA-256
+over the inputs and results.
 
 `BenchmarkTrinoRowsJoni` is the Joni twin of the
 [normative Trino rows](../trino-rows/README.md) benchmark. It reads the same

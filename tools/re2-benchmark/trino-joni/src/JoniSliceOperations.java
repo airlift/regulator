@@ -28,6 +28,8 @@ import java.util.function.Function;
 import static io.airlift.slice.SliceUtf8.lengthOfCodePointFromStartByte;
 import static io.trino.operator.scalar.JoniRegexpFunctions.matcher;
 import static io.trino.operator.scalar.JoniRegexpFunctions.search;
+import static java.lang.Math.toIntExact;
+import static java.util.Objects.checkIndex;
 
 /**
  * Pinned Trino's Joni operation loops with Slice lists in place of SQL Blocks.
@@ -40,13 +42,26 @@ public final class JoniSliceOperations
 
     public static List<Slice> extractAll(Slice source, JoniRegexp pattern)
     {
+        return extractAll(source, pattern, 0);
+    }
+
+    /**
+     * Returns capturing group {@code groupIndex} of every match, or null where that group did not
+     * participate. An invalid {@code groupIndex} fails with a JDK exception rather than Trino's
+     * SQL error; no workload passes one.
+     */
+    public static List<Slice> extractAll(Slice source, JoniRegexp pattern, long groupIndex)
+    {
         Matcher matcher = matcher(source, pattern);
+        int group = checkIndex(toIntExact(groupIndex), matcher.getEagerRegion().numRegs);
         List<Slice> output = new ArrayList<>();
         int nextStart = 0;
         while (search(matcher, source, nextStart) != -1) {
             nextStart = nextStart(source, matcher);
             Region region = matcher.getEagerRegion();
-            output.add(source.slice(region.beg[0], region.end[0] - region.beg[0]));
+            int begin = region.beg[group];
+            int end = region.end[group];
+            output.add(begin == -1 || end == -1 ? null : source.slice(begin, end - begin));
         }
         return output;
     }

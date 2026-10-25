@@ -32,7 +32,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 public final class TestingEverydayTrinoRegexpBenchmarkInputs
 {
     private static final String RESOURCE = "/io/airlift/regulator/everyday-trino-workloads.tsv";
-    private static final Map<String, Input> INPUTS = loadInputs();
+    private static final Map<String, Input> INPUTS = loadInputs(RESOURCE);
 
     private TestingEverydayTrinoRegexpBenchmarkInputs() {}
 
@@ -50,30 +50,34 @@ public final class TestingEverydayTrinoRegexpBenchmarkInputs
         return input;
     }
 
-    private static Map<String, Input> loadInputs()
+    /**
+     * Loads the workloads of a resource with the columns of {@code everyday-trino-workloads.tsv},
+     * keyed by workload id in file order.
+     */
+    static Map<String, Input> loadInputs(String resource)
     {
-        InputStream inputStream = TestingEverydayTrinoRegexpBenchmarkInputs.class.getResourceAsStream(RESOURCE);
+        InputStream inputStream = TestingEverydayTrinoRegexpBenchmarkInputs.class.getResourceAsStream(resource);
         if (inputStream == null) {
-            throw new IllegalStateException("missing benchmark input resource: " + RESOURCE);
+            throw new IllegalStateException("missing benchmark input resource: " + resource);
         }
 
         Map<String, InputBuilder> builders = new LinkedHashMap<>();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, UTF_8))) {
             String header = reader.readLine();
             if (!"workload_id\tfamily\torigin\tsource_id\tslice_offset\texpected_match_count\tpattern\tsource".equals(header)) {
-                throw new IllegalStateException("unexpected benchmark input header: " + header);
+                throw new IllegalStateException("unexpected benchmark input header in %s: %s".formatted(resource, header));
             }
             String line;
             while ((line = reader.readLine()) != null) {
                 String[] fields = line.split("\t", -1);
                 if (fields.length != 8) {
-                    throw new IllegalStateException("unexpected benchmark input field count: " + line);
+                    throw new IllegalStateException("unexpected benchmark input field count in %s: %s".formatted(resource, line));
                 }
                 String workloadId = fields[0];
                 InputBuilder builder = builders.computeIfAbsent(
                         workloadId,
                         _ -> new InputBuilder(workloadId, fields[1], fields[2], fields[6]));
-                builder.add(fields);
+                builder.add(resource, fields);
             }
         }
         catch (IOException e) {
@@ -101,10 +105,10 @@ public final class TestingEverydayTrinoRegexpBenchmarkInputs
             this.pattern = pattern;
         }
 
-        private void add(String[] fields)
+        private void add(String resource, String[] fields)
         {
             if (!family.equals(fields[1]) || !origin.equals(fields[2]) || !pattern.equals(fields[6])) {
-                throw new IllegalStateException("inconsistent workload metadata: " + workloadId);
+                throw new IllegalStateException("inconsistent workload metadata in %s: %s".formatted(resource, workloadId));
             }
             int sliceOffset = Integer.parseInt(fields[4]);
             long expectedMatchCount = Long.parseLong(fields[5]);
