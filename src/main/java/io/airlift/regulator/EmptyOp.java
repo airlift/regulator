@@ -75,6 +75,8 @@ final class EmptyOp
                     EMPTY_RUST_UNICODE_VALID_AFTER;
     private static final int RUST_ASSERTIONS = RUST_CRLF_LINE | RUST_WORD_SIDES | RUST_UNICODE_WORD_ASSERTIONS;
 
+    // The JDK's Dollar assertions: $, multiline $, and \Z.
+    static final int JAVA_END_ASSERTIONS = EMPTY_JAVA_END_LINE | EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR;
     private static final int JAVA_WORD_BOUNDARIES = EMPTY_JAVA_WORD_BOUNDARY | EMPTY_JAVA_NO_WORD_BOUNDARY;
     private static final int JAVA_UNICODE_WORD_BOUNDARIES = EMPTY_JAVA_UNICODE_WORD_BOUNDARY | EMPTY_JAVA_NO_UNICODE_WORD_BOUNDARY;
     // Assertions that hold only at a code point boundary.
@@ -302,6 +304,18 @@ final class EmptyOp
             return false;
         }
         return isJavaLineTerminator(nextCodePoint) && nextPosition == end;
+    }
+
+    /**
+     * Returns the Java $ flags to clear when a CR precedes the context: at a context start on the
+     * LF of a CR LF, because the JDK's $ reads the CR before a matcher region.
+     */
+    static int javaEndFlagsRefusedAfterCarriageReturn(byte[] bytes, int begin, int end, int position)
+    {
+        if (position == begin && position < end && bytes[position] == '\n') {
+            return JAVA_END_ASSERTIONS;
+        }
+        return 0;
     }
 
     private static boolean isJavaLineTerminator(int codePoint)

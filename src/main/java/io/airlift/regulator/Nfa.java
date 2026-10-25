@@ -60,6 +60,26 @@ final class Nfa
             int[] submatch,
             Workspace workspace)
     {
+        return search(prog, context, start, end, anchored, matchKind, submatch, workspace, false);
+    }
+
+    /**
+     * Searches as {@link #search(Prog, Slice, int, int, boolean, Prog.MatchKind, int[])} does. When
+     * {@code carriageReturnBeforeContext} is set, a CR precedes {@code context}, so the Java $
+     * assertions do not match at the context start when the context begins with an LF, as the
+     * JDK's $ does not at the start of a region that splits a CR LF.
+     */
+    static boolean search(
+            Prog prog,
+            Slice context,
+            int start,
+            int end,
+            boolean anchored,
+            Prog.MatchKind matchKind,
+            int[] submatch,
+            Workspace workspace,
+            boolean carriageReturnBeforeContext)
+    {
         requireNonNull(prog, "prog is null");
         requireNonNull(context, "context is null");
         requireNonNull(matchKind, "matchKind is null");
@@ -106,7 +126,8 @@ final class Nfa
                     anchored,
                     longest,
                     endMatch,
-                    null);
+                    null,
+                    carriageReturnBeforeContext);
             return nfa.search();
         }
 
@@ -123,7 +144,8 @@ final class Nfa
                     anchored,
                     longest,
                     endMatch,
-                    workspace);
+                    workspace,
+                    carriageReturnBeforeContext);
             boolean matched = nfa.search();
             if (matched) {
                 nfa.writeSubmatch(submatch);
@@ -166,6 +188,24 @@ final class Nfa
             int[] groupZero,
             Workspace workspace)
     {
+        return searchGroupZero(prog, context, start, end, anchored, matchKind, groupZero, workspace, false);
+    }
+
+    /**
+     * Finds group zero as {@link #search(Prog, Slice, int, int, boolean, Prog.MatchKind, int[], Workspace, boolean)}
+     * does, with the same {@code carriageReturnBeforeContext} flag.
+     */
+    static boolean searchGroupZero(
+            Prog prog,
+            Slice context,
+            int start,
+            int end,
+            boolean anchored,
+            Prog.MatchKind matchKind,
+            int[] groupZero,
+            Workspace workspace,
+            boolean carriageReturnBeforeContext)
+    {
         requireNonNull(prog, "prog is null");
         requireNonNull(context, "context is null");
         requireNonNull(matchKind, "matchKind is null");
@@ -206,7 +246,8 @@ final class Nfa
                     anchored,
                     longest,
                     endMatch,
-                    workspace);
+                    workspace,
+                    carriageReturnBeforeContext);
             boolean matched = nfa.search();
             if (matched) {
                 nfa.writeGroupZero(groupZero);
@@ -249,7 +290,8 @@ final class Nfa
                     anchored || matchKind == Prog.MatchKind.FULL_MATCH,
                     matchKind != Prog.MatchKind.FIRST_MATCH,
                     matchKind == Prog.MatchKind.FULL_MATCH,
-                    workspace);
+                    workspace,
+                    false);
             if (!nfa.search()) {
                 return -1;
             }
@@ -384,6 +426,7 @@ final class Nfa
         private final boolean anchored;
         private final boolean longest;
         private final boolean endMatch;
+        private final boolean carriageReturnBeforeContext;
 
         private final NfaThreadQueue q0;
         private final NfaThreadQueue q1;
@@ -419,7 +462,8 @@ final class Nfa
                 boolean anchored,
                 boolean longest,
                 boolean endMatch,
-                Workspace workspace)
+                Workspace workspace,
+                boolean carriageReturnBeforeContext)
         {
             this.bytes = requireNonNull(bytes, "bytes is null");
             this.prog = requireNonNull(prog, "prog is null");
@@ -432,6 +476,7 @@ final class Nfa
             this.anchored = anchored;
             this.longest = longest;
             this.endMatch = endMatch;
+            this.carriageReturnBeforeContext = carriageReturnBeforeContext;
 
             this.matched = false;
             this.matchStart = -1;
@@ -840,7 +885,11 @@ final class Nfa
 
         private int emptyFlags(int position)
         {
-            return EmptyOp.contextFlags(bytes, ctxBegin, ctxEnd, position, prog.textDependentAssertions());
+            int flags = EmptyOp.contextFlags(bytes, ctxBegin, ctxEnd, position, prog.textDependentAssertions());
+            if (carriageReturnBeforeContext) {
+                flags &= ~EmptyOp.javaEndFlagsRefusedAfterCarriageReturn(bytes, ctxBegin, ctxEnd, position);
+            }
+            return flags;
         }
     }
 
@@ -1046,6 +1095,7 @@ final class Nfa
         private final boolean anchored;
         private final boolean longest;
         private final boolean endMatch;
+        private final boolean carriageReturnBeforeContext;
 
         private final CaptureThreadQueue q0;
         private final CaptureThreadQueue q1;
@@ -1077,7 +1127,8 @@ final class Nfa
                 boolean anchored,
                 boolean longest,
                 boolean endMatch,
-                Workspace workspace)
+                Workspace workspace,
+                boolean carriageReturnBeforeContext)
         {
             this.bytes = requireNonNull(bytes, "bytes is null");
             this.prog = requireNonNull(prog, "prog is null");
@@ -1092,6 +1143,7 @@ final class Nfa
             this.anchored = anchored;
             this.longest = longest;
             this.endMatch = endMatch;
+            this.carriageReturnBeforeContext = carriageReturnBeforeContext;
 
             // We always track at least $0 (two slots), even if the caller requested no submatches.
             this.ncapture = (submatchCount == 0) ? 2 : 2 * submatchCount;
@@ -1529,7 +1581,11 @@ final class Nfa
 
         private int emptyFlags(int position)
         {
-            return EmptyOp.contextFlags(bytes, ctxBegin, ctxEnd, position, prog.textDependentAssertions());
+            int flags = EmptyOp.contextFlags(bytes, ctxBegin, ctxEnd, position, prog.textDependentAssertions());
+            if (carriageReturnBeforeContext) {
+                flags &= ~EmptyOp.javaEndFlagsRefusedAfterCarriageReturn(bytes, ctxBegin, ctxEnd, position);
+            }
+            return flags;
         }
     }
 }

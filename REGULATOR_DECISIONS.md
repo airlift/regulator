@@ -247,6 +247,10 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   final-terminator rule for `$` and `\Z`. In the ordinary engine, programs
   containing those text-dependent assertions use BitState or NFA; protected DFA
   transition loops do not contain Java-language branches.
+- Java patterns use the shared `Re2Matcher`. A matcher region is the assertion
+  context, as a JDK region with default bounds is, except that, as in the JDK,
+  `$` and `\Z` do not match at the start of a nonempty region that splits a
+  CR LF (without `(?d)`).
 - Multiline `^` excludes end-of-input even with `UNIX_LINES`. In that mode
   the compiler combines LF-only beginning-of-line with Java's non-EOF
   assertion, using the same context-sensitive fallback. UNIX multiline `$`
@@ -1154,13 +1158,17 @@ remain relative to the complete logical Slice, consistent with Java Matcher and
 the one-shot APIs. DFA start-state analysis treats the region boundaries exactly
 like the boundaries of an actual Slice view. This is required for anchors, empty
 matches, word boundaries, and malformed or split UTF-8 input. Rust patterns are
-the exception; see [Rust Frontend](#rust-frontend).
+one exception; see [Rust Frontend](#rust-frontend). Java patterns are another:
+a Java region is the context, except that, as in the JDK, `$` and `\Z` do not
+match at the start of a nonempty region that splits a CR LF (without `(?d)`).
+Such a rare region runs the pattern on the NFA, which is told the CR precedes
+it; see [Java Regular-Subset Frontend](#java-regular-subset-frontend).
 
-The region is represented only in matcher and DFA setup state; protected DFA
-transition loops remain unchanged. A real Slice view is constructed lazily only
-when execution reaches a capture engine; a line rejected by DFA constructs no
-view. `MatchResult` retains the caller's original Slice and stores absolute
-logical offsets.
+The region is represented only in matcher and DFA setup state, plus an NFA flag
+for the Java CR case; protected DFA transition loops remain unchanged. A real
+Slice view is constructed lazily only when execution reaches a capture engine; a
+line rejected by DFA constructs no view. `MatchResult` retains the caller's
+original Slice and stores absolute logical offsets.
 
 ## Immutable Multi-Pattern APIs
 

@@ -1898,6 +1898,7 @@ public sealed class Re2
      * {@link Re2Matcher#find()} check runs ahead of the plan. Only a caller's single-byte matcher
      * can, and such a caller keeps the ordinary route. A Rust matcher over a partial region runs
      * its Rust search instead, which reaches the plan only when the region ends at the input end.
+     * A Java matcher region whose $ reads a CR before it runs the ordinary search instead.
      */
     TrinoScanPlan startAnchoredTrinoScanPlan()
     {
@@ -1931,7 +1932,8 @@ public sealed class Re2
      * Returns the case-sensitive scan plan that every capture search of this pattern runs, or
      * {@code null}. As for {@link #startAnchoredTrinoScanPlan()}, the compile-time scan strategy
      * is the whole decision, so no {@link #matchRegionInto} check runs ahead of the plan route of
-     * {@link #matchInternal} either. Only a caller's single-byte matcher can still answer first.
+     * {@link #matchInternal} either. Only a caller's single-byte matcher can still answer first,
+     * and a Java matcher region whose $ reads a CR before it runs on the NFA instead.
      */
     TrinoScanPlan caseSensitiveTrinoScanPlan()
     {
@@ -2576,6 +2578,43 @@ public sealed class Re2
                 anchor,
                 groups,
                 workspaces);
+    }
+
+    /**
+     * Returns whether a matcher region must read a CR before its start: the JDK's $ and \Z refuse
+     * the LF of a CR LF even at the start of a region that excludes the CR. A required prefix puts
+     * every Java $ or \Z assertion after the region start, so only a pattern without one reads it.
+     * Excluding a required prefix also guarantees that {@code partialProg} is the whole pattern, as
+     * {@link #matchRegionAfterCarriageReturnInto} needs. The test is deliberately conservative: a
+     * pattern such as {@code a$}, which never tests $ at the region start, still takes that route.
+     */
+    boolean readsCarriageReturnBeforeRegion()
+    {
+        return requiredPrefix == null && (partialProg.textDependentAssertions() & EmptyOp.JAVA_END_ASSERTIONS) != 0;
+    }
+
+    /**
+     * Matches a matcher region that starts on the LF of a CR LF, for a pattern that
+     * {@link #readsCarriageReturnBeforeRegion reads that CR}, with the anchors and region-relative
+     * groups of {@link #matchRegionInto}. The region alone cannot show the CR, so the semantic
+     * program runs on the NFA told that a CR precedes the region. The case is rare, so it skips
+     * every faster engine.
+     */
+    boolean matchRegionAfterCarriageReturnInto(Slice text, int contextStart, int contextEnd, int start, Anchor anchor, int[] groups, Re2Matcher workspaceOwner)
+    {
+        Slice context = logicalContext(text, contextStart, contextEnd);
+        int relativeStart = start - contextStart;
+        boolean anchored = anchor != Anchor.UNANCHORED;
+        // Java searches are leftmost-first.
+        Prog.MatchKind matchKind = anchor == Anchor.ANCHOR_BOTH ? Prog.MatchKind.FULL_MATCH : Prog.MatchKind.FIRST_MATCH;
+        Nfa.Workspace workspace = workspaceOwner.nfaWorkspace();
+        boolean matched = groups.length == 2
+                ? Nfa.searchGroupZero(partialProg, context, relativeStart, context.length(), anchored, matchKind, groups, workspace, true)
+                : Nfa.search(partialProg, context, relativeStart, context.length(), anchored, matchKind, groups, workspace, true);
+        if (matched) {
+            shiftGroupOffsets(groups, relativeStart);
+        }
+        return matched;
     }
 
     private boolean matchCompactBoundedCharacterClass(

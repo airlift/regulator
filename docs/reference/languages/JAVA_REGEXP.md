@@ -29,6 +29,14 @@ workspace on each call. Iterating with a matcher can cost less for short inputs
 or one-off counts; reusing that matcher can also avoid workspace allocations.
 Compare the complete operation on your workload.
 
+## Matching
+
+A matcher region set with `matcher.reset(input, start, end)` behaves like a JDK
+`Matcher.region` with default bounds: anchors and boundary assertions see only
+the region. As in the JDK, `$` and `\Z` still read the CR before the region,
+so outside Unix-lines mode (`(?d)`) they do not match at the start of a
+nonempty region that starts on the LF of a CR LF.
+
 ## Supported constructs
 
 | Category | Constructs |
