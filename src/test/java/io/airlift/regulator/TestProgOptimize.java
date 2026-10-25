@@ -14,8 +14,13 @@
 package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
+import java.util.Collections;
+
+import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 public class TestProgOptimize
 {
@@ -69,5 +74,42 @@ public class TestProgOptimize
         prog.optimize();
 
         assertThat(prog.inst(1).opcode()).isEqualTo(InstOp.ALT_MATCH);
+    }
+
+    @Test
+    @Timeout(30)
+    public void testOptimizeStaysLinear()
+    {
+        // Nested repeated captures loop back through every capture inside them, lazy any-byte loops
+        // under many groups share every closing capture, and many instructions share one nop chain,
+        // as Trino's nested nullable loops build. The old walks allocated nothing, so only the
+        // timeout guards these cases.
+        int depth = 200_000;
+        String nestedCaptures = "(".repeat(depth) + "a" + ")+".repeat(depth);
+        assertOptimizes(nestedCaptures);
+
+        int width = 200_000;
+        String sharedClosingCaptures = "(".repeat(width) + "(?:" + String.join("|", Collections.nCopies(width, "(\\C*?)")) + ")" + ")".repeat(width);
+        assertOptimizes(sharedClosingCaptures);
+
+        int chainLength = 400_000;
+        Prog sharedNops = new Prog();
+        for (int alt = 1; alt <= chainLength; alt++) {
+            sharedNops.add(Prog.Inst.createAlt(chainLength + 1, alt < chainLength ? alt + 1 : 2 * chainLength + 1));
+        }
+        for (int nop = chainLength + 1; nop <= 2 * chainLength; nop++) {
+            sharedNops.add(Prog.Inst.createNop(nop + 1));
+        }
+        sharedNops.add(Prog.Inst.createMatch(0));
+        sharedNops.setStart(1);
+        assertThatCode(sharedNops::optimize).doesNotThrowAnyException();
+    }
+
+    private static void assertOptimizes(String pattern)
+    {
+        Regexp regexp = RegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL).regexp();
+        Prog prog = Compiler.compileForBenchmark(regexp, false, Re2.Options.DEFAULT_MAX_MEMORY, Compiler.CompileStage.RAW);
+
+        assertThatCode(prog::optimize).doesNotThrowAnyException();
     }
 }

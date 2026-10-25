@@ -2509,30 +2509,31 @@ final class Prog
 
         // Eliminate nops. Most are taken out during compilation
         // but a few are hard to avoid.
+        // Many instructions can share one chain, so targets are remembered.
+        SparseIntArray nopTargets = null;
         queue.clear();
         addToQueue(queue, start);
         for (int queueIndex = 0; queueIndex < queue.size(); queueIndex++) {
             int id = queue.denseAt(queueIndex);
 
             Inst instruction = inst(id);
-            int outputId = instruction.out();
-            while (outputId != 0 && inst(outputId).opcode() == InstOp.NOP) {
-                outputId = inst(outputId).out();
+            if (nopTargets == null && isNopChain(instruction.out())) {
+                nopTargets = new SparseIntArray(size());
             }
-            instruction.setOut(outputId);
+            instruction.setOut(skipNops(instruction.out(), nopTargets));
             addToQueue(queue, instruction.out());
 
             if (instruction.opcode() == InstOp.ALT) {
-                int alternateOutputId = instruction.out1();
-                while (alternateOutputId != 0 && inst(alternateOutputId).opcode() == InstOp.NOP) {
-                    alternateOutputId = inst(alternateOutputId).out();
+                if (nopTargets == null && isNopChain(instruction.out1())) {
+                    nopTargets = new SparseIntArray(size());
                 }
-                instruction.setOut1(alternateOutputId);
+                instruction.setOut1(skipNops(instruction.out1(), nopTargets));
                 addToQueue(queue, instruction.out1());
             }
         }
 
         // Insert ALT_MATCH instructions.
+        SparseIntArray matchAnswers = null;
         queue.clear();
         addToQueue(queue, start);
         for (int queueIndex = 0; queueIndex < queue.size(); queueIndex++) {
@@ -2544,17 +2545,27 @@ final class Prog
             }
 
             if (instruction.opcode() == InstOp.ALT) {
+                // Many loops can share one long chain of captures, so answers are remembered,
+                // and the loop test comes first so loop-free programs never walk.
                 Inst firstBranch = inst(instruction.out());
                 Inst secondBranch = inst(instruction.out1());
+                int matchBranchId;
                 if (firstBranch.opcode() == InstOp.BYTE_RANGE && firstBranch.out() == id &&
-                        firstBranch.lo() == 0x00 && firstBranch.hi() == 0xFF &&
-                        isMatch(secondBranch)) {
-                    instruction.setOpcode(InstOp.ALT_MATCH);
+                        firstBranch.lo() == 0x00 && firstBranch.hi() == 0xFF) {
+                    matchBranchId = instruction.out1();
+                }
+                else if (secondBranch.opcode() == InstOp.BYTE_RANGE && secondBranch.out() == id &&
+                        secondBranch.lo() == 0x00 && secondBranch.hi() == 0xFF) {
+                    matchBranchId = instruction.out();
+                }
+                else {
                     continue;
                 }
-                if (isMatch(firstBranch) &&
-                        secondBranch.opcode() == InstOp.BYTE_RANGE && secondBranch.out() == id &&
-                        secondBranch.lo() == 0x00 && secondBranch.hi() == 0xFF) {
+                InstOp matchBranchOpcode = inst(matchBranchId).opcode();
+                if (matchAnswers == null && (matchBranchOpcode == InstOp.CAPTURE || matchBranchOpcode == InstOp.NOP)) {
+                    matchAnswers = new SparseIntArray(size());
+                }
+                if (isMatch(matchBranchId, matchAnswers)) {
                     instruction.setOpcode(InstOp.ALT_MATCH);
                 }
             }
@@ -3016,19 +3027,55 @@ final class Prog
         return EmptyOp.contextFlags(text, p);
     }
 
-    private boolean isMatch(Inst instruction)
+    private boolean isNopChain(int instructionId)
     {
+        return instructionId != 0 && inst(instructionId).opcode() == InstOp.NOP &&
+                inst(instructionId).out() != 0 && inst(inst(instructionId).out()).opcode() == InstOp.NOP;
+    }
+
+    private int skipNops(int instructionId, SparseIntArray nopTargets)
+    {
+        int endId = instructionId;
+        int targetId;
         while (true) {
-            switch (instruction.opcode()) {
-                case ALT, ALT_MATCH, BYTE_RANGE, FAIL, EMPTY_WIDTH -> {
-                    return false;
-                }
-                case CAPTURE, NOP -> instruction = inst(instruction.out());
-                case MATCH -> {
-                    return true;
-                }
+            if (endId == 0 || inst(endId).opcode() != InstOp.NOP) {
+                targetId = endId;
+                break;
+            }
+            if (nopTargets != null && nopTargets.hasIndex(endId)) {
+                targetId = nopTargets.getExisting(endId);
+                break;
+            }
+            endId = inst(endId).out();
+        }
+        if (nopTargets != null) {
+            for (int id = instructionId; id != endId; id = inst(id).out()) {
+                nopTargets.setNew(id, targetId);
             }
         }
+        return targetId;
+    }
+
+    private boolean isMatch(int instructionId, SparseIntArray matchAnswers)
+    {
+        int endId = instructionId;
+        boolean match;
+        while (true) {
+            Inst instruction = inst(endId);
+            if (instruction.opcode() != InstOp.CAPTURE && instruction.opcode() != InstOp.NOP) {
+                match = instruction.opcode() == InstOp.MATCH;
+                break;
+            }
+            if (matchAnswers.hasIndex(endId)) {
+                match = matchAnswers.getExisting(endId) != 0;
+                break;
+            }
+            endId = instruction.out();
+        }
+        for (int id = instructionId; id != endId; id = inst(id).out()) {
+            matchAnswers.setNew(id, match ? 1 : 0);
+        }
+        return match;
     }
 
     private void markSuccessors(
