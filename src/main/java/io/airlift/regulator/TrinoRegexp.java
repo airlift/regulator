@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import io.airlift.regulator.Re2.TrinoScanPlanMode;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
@@ -142,7 +143,7 @@ public sealed class TrinoRegexp
      */
     public static TrinoRegexp compile(Slice pattern, Options options)
     {
-        return compile(pattern, options, false);
+        return compile(pattern, options, TrinoScanPlanMode.DEFAULT);
     }
 
     /**
@@ -156,10 +157,19 @@ public sealed class TrinoRegexp
 
     static TrinoRegexp compileForcingScanPlanHandoffForTesting(Slice pattern, Options options)
     {
-        return compile(pattern, options, true);
+        return compile(pattern, options, TrinoScanPlanMode.FORCE_HANDOFF);
     }
 
-    private static TrinoRegexp compile(Slice pattern, Options options, boolean forceScanPlanHandoff)
+    /**
+     * Compiles {@code pattern} as {@link #compile(Slice)} does, but builds no scan plan, so the
+     * searches the plan would run use the ordinary engine.
+     */
+    static TrinoRegexp compileWithoutScanPlanForTesting(Slice pattern)
+    {
+        return compile(pattern, Options.defaults(), TrinoScanPlanMode.DISABLED);
+    }
+
+    private static TrinoRegexp compile(Slice pattern, Options options, TrinoScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
@@ -172,7 +182,7 @@ public sealed class TrinoRegexp
         if (literalAlternationMatcher != null && literalAlternationMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralAlternationTrinoRegexp(literalAlternationMatcher);
         }
-        Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, Regexp.LIKE_PERL, options.maxMemory(), options.byteFrequencies(), forceScanPlanHandoff);
+        Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, Regexp.LIKE_PERL, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
             return new BeginLineTrinoRegexp(compiledPattern);

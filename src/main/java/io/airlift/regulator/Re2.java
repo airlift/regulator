@@ -77,6 +77,21 @@ public sealed class Re2
         OTHER,
     }
 
+    /**
+     * Selects the scan plan a Trino compile builds. Only tests request a mode other than
+     * {@link #DEFAULT}.
+     */
+    enum TrinoScanPlanMode
+    {
+        // Builds the plan for every eligible pattern.
+        DEFAULT,
+        // Builds a plan that continues every unanchored search on the ordinary engine before its
+        // first attempt.
+        FORCE_HANDOFF,
+        // Builds no plan.
+        DISABLED,
+    }
+
     private static final byte BOOLEAN_FIND_GENERAL = 0;
     private static final byte BOOLEAN_FIND_EXACT_LITERAL = 1;
     private static final byte BOOLEAN_FIND_NULLABLE_START = 2;
@@ -849,27 +864,10 @@ public sealed class Re2
     }
 
     /**
-     * The caller passes a private snapshot that it never mutates. A scan plan built with
-     * {@code forceScanPlanHandoff} continues every unanchored search on the ordinary engine
-     * before its first attempt; only tests request it.
+     * The caller passes a private snapshot that it never mutates. {@code scanPlanMode} selects
+     * the scan plan to build.
      */
-    static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory, boolean forceScanPlanHandoff)
-    {
-        return compileParsedForTrino(pattern, parsed, flags, maxMemory, ByteFrequencies.uniform(), forceScanPlanHandoff);
-    }
-
-    /**
-     * The caller passes a private snapshot that it never mutates. A scan plan built with
-     * {@code forceScanPlanHandoff} continues every unanchored search on the ordinary engine
-     * before its first attempt; only tests request it.
-     */
-    static Re2 compileParsedForTrino(
-            Slice pattern,
-            ParseResult parsed,
-            int flags,
-            long maxMemory,
-            ByteFrequencies byteFrequencies,
-            boolean forceScanPlanHandoff)
+    static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, TrinoScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(parsed, "parsed is null");
@@ -912,7 +910,16 @@ public sealed class Re2
                         null);
             }
         }
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, TrinoScanPlan.Language.TRINO, forceScanPlanHandoff);
+        return build(
+                pattern,
+                parsed,
+                flags,
+                maxMemory,
+                byteFrequencies,
+                false,
+                Compiler.Dialect.TRINO,
+                scanPlanMode == TrinoScanPlanMode.DISABLED ? TrinoScanPlan.Language.NONE : TrinoScanPlan.Language.TRINO,
+                scanPlanMode == TrinoScanPlanMode.FORCE_HANDOFF);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)

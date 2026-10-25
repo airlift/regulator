@@ -2585,6 +2585,36 @@ public class TestTrinoScanPlan
         assertThat(anchored.extract(utf8Slice("https://www.host/path"), 1)).isEqualTo(utf8Slice("host"));
     }
 
+    @Test
+    public void testCompileWithoutScanPlanKeepsOperations()
+    {
+        // On these valid UTF-8 sources, every operation of each pattern reports what Joni reports
+        // when compiled without a scan plan, as it does with the scan plan and with its generated
+        // bytecode.
+        List<Slice> sources = List.of(
+                view("https://www.example.com/a?id=7&q=x"),
+                view("http://host:8080/p/é?k=v"),
+                view("ftp://host/path"),
+                view("https://host"),
+                view("level=info msg=\"done\" user_id=42"),
+                view("\"a\",\"\" b"),
+                view(""));
+        List<String> expressions = List.of(
+                URL,
+                "^https?://(www\\.)?([^/:]+)(?::([0-9]{1,5}))?/.*$",
+                "[?&]([^=]+)=",
+                "([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)",
+                "\"([^\"]*)\"");
+        for (String expression : expressions) {
+            Slice pattern = utf8Slice(expression);
+            Regex oracle = joniPattern(expression);
+            TrinoRegexp generated = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setGenerateBytecode(true));
+            verifyOperations(expression, TrinoRegexp.compile(pattern), source -> joniMatches(oracle, source), sources, true);
+            verifyOperations(expression + " without scan plan", TrinoRegexp.compileWithoutScanPlanForTesting(pattern), source -> joniMatches(oracle, source), sources, false);
+            verifyOperations(expression + " generated", generated, source -> joniMatches(oracle, source), sources, true);
+        }
+    }
+
     /**
      * Compiles {@code expression} with an ordinary engine that matches nothing, so only the
      * scan plan can report a match.
