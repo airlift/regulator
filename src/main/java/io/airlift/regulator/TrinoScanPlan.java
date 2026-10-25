@@ -2311,7 +2311,7 @@ final class TrinoScanPlan
                 return null;
             }
             boolean foldAscii = (expression.parseFlags() & Regexp.FOLD_CASE) != 0;
-            if (foldAscii && !Regexp.supportsAsciiFold(runes, caseFolding)) {
+            if (foldAscii && !Regexp.foldsAsAsciiPairs(expression.parseFlags(), runes, caseFolding)) {
                 return null;
             }
             if (!foldAscii && (expression.parseFlags() & Regexp.FULL_CASE_FOLD) != 0) {

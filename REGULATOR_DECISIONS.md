@@ -1547,14 +1547,18 @@ ranged boolean `find` use the ordinary engine only where both engines agree, so
 report one match sequence.
 
 Retain restricted ASCII case folding when every Unicode fold cycle remains in
-ASCII and requires no full multi-character fold. Folded plans use separate
-executors and strategy values. On R9g, folded anchored, optional, unanchored,
-run, and mixed workloads take 0.20 to 1.10 times the ordinary engine's time for
-`contains`, extraction, and replacement, with a geometric mean of 0.38. The
-accepted costs are folded optional boolean matching, at about 1.10 times the
-ordinary engine's time, and unanchored folded compilation, at about 1.19 times.
-Ordinary URL and mixed operations remain faster than the ordinary engine on R8i
-and R9g.
+ASCII and requires no full multi-character fold. An ASCII letter pair, such as
+`[Kk]` or a Java letter folded without `UNICODE_CASE`, matches only its two
+letters, as [Pinned Unicode Case Folding](#pinned-unicode-case-folding) states,
+so a plan folds it as that pair even for `k` and `s`, whose cycles leave ASCII.
+The pair is the same tree in every language, so this holds for each of them.
+Folded plans use separate executors and strategy values. On R9g, folded
+anchored, optional, unanchored, run, and mixed workloads take 0.20 to 1.10
+times the ordinary engine's time for `contains`, extraction, and replacement,
+with a geometric mean of 0.38. The accepted costs are folded optional boolean
+matching, at about 1.10 times the ordinary engine's time, and unanchored folded
+compilation, at about 1.19 times. Ordinary URL and mixed operations remain
+faster than the ordinary engine on R8i and R9g.
 
 Eligible scan plans intentionally add bounded cold compilation work and retained
 state. Accept that cost only while warm public operations materially improve on
@@ -1711,7 +1715,9 @@ specific to each language.
   ordinary engine. Java's default dot excludes some non-ASCII line terminators,
   so it reaches a plan only with `DOTALL` or `UNIX_LINES`, and multiline
   anchors, Java word boundaries, reluctant runs, and folds with a non-ASCII
-  member keep the ordinary engine, as they do in Trino.
+  member keep the ordinary engine, as they do in Trino. Java's `(?i)` without
+  `UNICODE_CASE` folds each letter as its ASCII pair, so `(?i)s` and `(?i)k`
+  reach a plan.
 - A Java plan must not be slower than the same pattern without it. On R9g and
   R8i, the 95 rows of `BenchmarkJavaScanPlan` without dotAll, five matching
   methods over the 19 workloads `URL`, `URL_SHORT`, `ANCHORED_HOST`,

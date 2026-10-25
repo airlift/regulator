@@ -150,15 +150,14 @@ final class TrinoScanPlanRun
                     return null;
                 }
                 if ((atom.parseFlags() & Regexp.FOLD_CASE) != 0) {
-                    if (!Regexp.supportsAsciiFold(new int[] {atom.rune()}, caseFolding)) {
+                    if (!Regexp.foldsAsAsciiPairs(atom.parseFlags(), new int[] {atom.rune()}, caseFolding)) {
                         return null;
                     }
-                    int member = atom.rune();
-                    do {
-                        members[member] = true;
-                        member = caseFolding.cycleFoldRune(member);
+                    int rune = atom.rune();
+                    members[rune] = true;
+                    if (('A' <= rune && rune <= 'Z') || ('a' <= rune && rune <= 'z')) {
+                        members[rune ^ 0x20] = true;
                     }
-                    while (member != atom.rune());
                 }
                 else {
                     if ((atom.parseFlags() & Regexp.FULL_CASE_FOLD) != 0) {

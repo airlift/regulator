@@ -243,6 +243,25 @@ final class Regexp
         return !caseFolding.requiresFullCaseFold(literalRunes);
     }
 
+    /// Returns whether ASCII case-insensitive comparison matches exactly the text that the compiler
+    /// matches for a case-folded literal with `parseFlags` and these runes. Without full case
+    /// folding, the compiler matches each ASCII letter's pair only, even for `k` and
+    /// `s`, whose fold orbits leave ASCII, so every ASCII literal qualifies. An ASCII letter
+    /// pair such as `[Kk]` simplifies to that form. With full case folding the compiler
+    /// matches the whole orbit, which [#supportsAsciiFold] checks.
+    static boolean foldsAsAsciiPairs(int parseFlags, int[] literalRunes, CaseFolding caseFolding)
+    {
+        if ((parseFlags & FULL_CASE_FOLD) != 0) {
+            return supportsAsciiFold(literalRunes, caseFolding);
+        }
+        for (int literalRune : literalRunes) {
+            if (literalRune > 0x7F) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// Returns the complete encoded literal matched by this expression, or `null` when the
     /// expression contains non-literal behavior or case folding. Captures are transparent because
     /// callers use this only when capture offsets are not requested.

@@ -67,6 +67,8 @@ public class TestRe2ScanPlan
             new PlanCase("x([^/]+)", "x/xéb"),
             // A partial delimited capture, ASCII-folded when case-insensitive.
             new PlanCase("^abc([^:]+):", "ABCé:d"),
+            // Explicit ASCII pairs, which match neither the long s nor the Kelvin sign.
+            new PlanCase("x[Ss][Kk]([^/]+)/", "xſkb/xsKb/xSké/"),
             // One two-byte character under a minimum of two characters.
             new PlanCase("^x([^/]{2,})", "xé"),
             new PlanCase("^x([^/]{2,})/", "xé/"),
@@ -188,12 +190,14 @@ public class TestRe2ScanPlan
                 Random random = new Random(planCase.expression().hashCode());
                 String description = planCase.expression() + " " + options.name();
                 // Never-newline takes the newline out of a leading run, which then stops at more
-                // than its delimiter, and never-capture leaves an unanchored pattern without the
-                // capture its plan needs, so the ordinary engine keeps those patterns.
+                // than its delimiter, never-capture leaves an unanchored pattern without the
+                // capture its plan needs, and case folding adds the long s and the Kelvin sign to
+                // an explicit pair, so the ordinary engine keeps those patterns.
                 int flags = options.options().parseFlags();
                 boolean leadingRun = planCase.expression().startsWith("([^");
                 boolean unanchored = !planCase.expression().startsWith("^");
-                boolean planned = !((flags & Regexp.NEVER_NEWLINE) != 0 && leadingRun) && !((flags & Regexp.NEVER_CAPTURE) != 0 && unanchored);
+                boolean foldedPair = (flags & Regexp.FOLD_CASE) != 0 && planCase.expression().contains("[Ss]");
+                boolean planned = !((flags & Regexp.NEVER_NEWLINE) != 0 && leadingRun) && !((flags & Regexp.NEVER_CAPTURE) != 0 && unanchored) && !foldedPair;
                 List<Slice> sources = sources(random, planCase.witness());
                 assertThat(assertPlanMatchesOrdinaryEngine(description, planCase.expression(), options.options(), sources)).as(description).isEqualTo(planned);
             }
