@@ -78,6 +78,12 @@ found under the artifact roots by its `unit-receipt.tsv`, must contain:
 - `routes/<route>/native-bracket.tsv` when that route measures native RE2
 - `unit-capacity.txt`
 
+A worker host records its calibrations once, in its host session's
+`calibrations/` directory beside its attempts. The host calibrations an attempt
+references belong to its artifact: the inventory lists them as
+`../calibrations/<sha256>.json`, they count in its `artifact_set_sha256`, and
+the campaign archive must bind them.
+
 The ledgers must pass campaign unit acceptance: every platform and checked-in
 unit of the selected shards, replicas 1, 2, and 3 of a unit on distinct EC2
 instances, and at most one replica-4 confirmation per platform and unit on an

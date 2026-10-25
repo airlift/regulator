@@ -20,6 +20,10 @@ PLAN_ONLY=${BASELINE_PLAN_ONLY:-false}
 PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
 # A measured unit runs itself as its measurement stage under GNU time.
 UNIT_STAGE=${BASELINE_UNIT_STAGE:-unit}
+# A worker host stores each unit's calibrations once in its host evidence, and
+# names the previous unit's after calibration there to chain as this unit's before.
+HOST_EVIDENCE=${BASELINE_UNIT_HOST_EVIDENCE:-}
+CHAINED_CALIBRATION=${BASELINE_UNIT_CALIBRATION_BEFORE:-}
 
 case "${PROTOCOL}" in
     smoke | qualification) ;;
@@ -46,6 +50,19 @@ case "${PROTOCOL_QUALIFICATION}" in
         exit 1
         ;;
 esac
+if [[ -n "${HOST_EVIDENCE}" ]]; then
+    HOST_EVIDENCE=$(cd "${HOST_EVIDENCE}" && pwd)
+fi
+if [[ -n "${CHAINED_CALIBRATION}" ]]; then
+    if [[ -z "${HOST_EVIDENCE}" || ! ${CHAINED_CALIBRATION} =~ ^[0-9a-f]{64}$ ]]; then
+        echo "BASELINE_UNIT_CALIBRATION_BEFORE must name a SHA-256 in BASELINE_UNIT_HOST_EVIDENCE" >&2
+        exit 1
+    fi
+    if [[ ! -s "${HOST_EVIDENCE}/calibrations/${CHAINED_CALIBRATION}.json" ]]; then
+        echo "Chained calibration is missing: ${HOST_EVIDENCE}/calibrations/${CHAINED_CALIBRATION}.json" >&2
+        exit 1
+    fi
+fi
 
 # The unit ID binds route-handler-order-v1: odd replicas run native access and
 # the candidate first, even replicas reverse both, so the order is not a knob.
@@ -130,7 +147,7 @@ if [[ "${PLAN_ONLY}" != true && "${UNIT_STAGE}" == unit ]]; then
     exit "${unit_status}"
 fi
 
-for output in routes route-plan.tsv expected-rows.tsv unit-rows.tsv calibration.tsv \
+for output in routes calibration-output route-plan.tsv expected-rows.tsv unit-rows.tsv calibration.tsv \
         observed-rows.tsv observed-rows.tsv.sha256 rebar-outcomes.tsv unit-session.tsv \
         unit-evidence.tsv unit-receipt.tsv status.txt; do
     if [[ -e "${RESULT_DIR}/${output}" ]]; then
@@ -163,10 +180,15 @@ environment_value()
     done | head -1
 }
 
+plan_arguments=()
+if [[ -n "${CHAINED_CALIBRATION}" ]]; then
+    plan_arguments+=(--chained-calibration)
+fi
 SHARD_ID=$(python3 "${UNIT_TOOL}" plan \
     --unit "${UNIT_ID}" \
     --replica "${REPLICA_ID}" \
-    --output-directory "${RESULT_DIR}")
+    --output-directory "${RESULT_DIR}" \
+    "${plan_arguments[@]}")
 
 # A host measures units of many shards, so the unit names the shard and the
 # caller names the replica.
@@ -200,19 +222,20 @@ if [[ "${PLAN_ONLY}" != true ]]; then
 fi
 
 mkdir -p "${RESULT_DIR}/routes"
+calibration_directory=
+if [[ -n "${HOST_EVIDENCE}" ]]; then
+    calibration_directory="${RESULT_DIR}/calibration-output"
+fi
 route_count=0
 while IFS=$'\t' read -r -u 3 route _ systems calibration; do
     route_count=$((route_count + 1))
     route_directory="${RESULT_DIR}/routes/${route}"
     mkdir -p "${route_directory}"
-    for environment_file in environment-manifest.txt environment.txt engine-build.txt; do
-        if [[ -f "${RESULT_DIR}/${environment_file}" ]]; then
-            cp "${RESULT_DIR}/${environment_file}" "${route_directory}/${environment_file}"
-        fi
-    done
+    python3 "${UNIT_TOOL}" copy-environment --source "${RESULT_DIR}" --target "${route_directory}"
     BASELINE_UNIT_DIRECTORY="${RESULT_DIR}" \
     BASELINE_UNIT_SYSTEMS="${systems}" \
     BASELINE_UNIT_CALIBRATION="${calibration}" \
+    BASELINE_UNIT_CALIBRATION_DIRECTORY="${calibration_directory}" \
     BASELINE_PLAN_ONLY="${PLAN_ONLY}" \
     BASELINE_DEFER_ACCEPTANCE=true \
     BASELINE_PROTOCOL_QUALIFICATION="${PROTOCOL_QUALIFICATION}" \
@@ -231,12 +254,43 @@ if [[ "${PLAN_ONLY}" == true ]]; then
     exit 0
 fi
 
+store_host_calibration()
+{
+    local source=$1
+    local digest
+    local stored
+    digest=$(sha256sum "${source}" | awk '{print $1}')
+    stored="${HOST_EVIDENCE}/calibrations/${digest}.json"
+    mkdir -p "${HOST_EVIDENCE}/calibrations"
+    if [[ -e "${stored}" ]]; then
+        if ! cmp -s "${source}" "${stored}"; then
+            echo "Host calibration differs from its stored digest: ${stored}" >&2
+            return 1
+        fi
+        rm "${source}"
+    else
+        mv "${source}" "${stored}"
+    fi
+    printf '%s\n' "${stored}"
+}
+
 # The unit calibrates before its first route and after its last. Chaining
 # replaces the before side with the previous unit's after on this host.
 first_route=$(awk -F '\t' 'NR == 2 {print $1}' "${RESULT_DIR}/route-plan.tsv")
 last_route=$(awk -F '\t' 'END {print $1}' "${RESULT_DIR}/route-plan.tsv")
 calibration_before="${RESULT_DIR}/routes/${first_route}/raw/calibration-before.json"
 calibration_after="${RESULT_DIR}/routes/${last_route}/raw/calibration-after.json"
+evidence_arguments=()
+if [[ -n "${HOST_EVIDENCE}" ]]; then
+    if [[ -n "${CHAINED_CALIBRATION}" ]]; then
+        calibration_before="${HOST_EVIDENCE}/calibrations/${CHAINED_CALIBRATION}.json"
+    else
+        calibration_before=$(store_host_calibration "${calibration_directory}/calibration-before.json")
+    fi
+    calibration_after=$(store_host_calibration "${calibration_directory}/calibration-after.json")
+    rmdir "${calibration_directory}"
+    evidence_arguments+=(--host-evidence "${HOST_EVIDENCE}")
+fi
 python3 "${RESULT_TOOL}" calibration \
     --before "${calibration_before}" \
     --after "${calibration_after}" \
@@ -255,9 +309,11 @@ python3 "${RESULT_TOOL}" validate-drift "${drift_arguments[@]}"
 python3 "${UNIT_TOOL}" combine \
     --unit-directory "${RESULT_DIR}" \
     --unit-attempt "${RE2_CAMPAIGN_HOST_SESSION}/${RE2_CAMPAIGN_LEASE_SEQUENCE}" \
-    --region "${BASELINE_REGION}"
+    --region "${BASELINE_REGION}" \
+    "${evidence_arguments[@]}"
 python3 "${SCRIPT_DIR}/validate-unit-results.py" \
     --unit-directory "${RESULT_DIR}" \
-    --receipt "${RESULT_DIR}/unit-receipt.tsv"
+    --receipt "${RESULT_DIR}/unit-receipt.tsv" \
+    "${evidence_arguments[@]}"
 
 echo "Completed unit ${UNIT_ID} ${PROTOCOL} replica ${REPLICA_ID}"

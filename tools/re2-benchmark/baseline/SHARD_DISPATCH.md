@@ -299,7 +299,11 @@ one a host session runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
   unit's before/after calibration drift must be within 5%. Native bracket
   drift is kept per row; above 5% it leaves only the affected comparisons
   unresolved during reduction.
-  Chaining replaces the before side with the previous unit's after.
+  With `BASELINE_UNIT_HOST_EVIDENCE`, a worker host's evidence directory, the
+  calibrations are stored there once as `calibrations/<sha256>.json` instead
+  of in the routes' raw artifacts. Chaining, by naming the previous unit's
+  after calibration there in `BASELINE_UNIT_CALIBRATION_BEFORE`, replaces this
+  unit's before side with it, so the first route runs no before calibration.
 - The route runs only the unit's representatives for its replica; replica 4
   runs replica 1's. A failed representative exits 42 and rejects only that
   unit attempt.

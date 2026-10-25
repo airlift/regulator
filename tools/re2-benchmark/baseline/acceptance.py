@@ -258,8 +258,13 @@ def verify_evidence_manifest(
         root,
         route_required=ROUTE_REQUIRED_ARTIFACTS,
         formal_required=FORMAL_HOST_ARTIFACTS,
-        capacity_artifact="host-capacity.txt"):
-    """Verify every bound artifact; a unit passes its own route, formal, and capacity artifacts."""
+        capacity_artifact="host-capacity.txt",
+        host_root=None):
+    """Verify every bound artifact; a unit passes its own route, formal, and capacity artifacts.
+
+    A unit measured on a worker host references that host's calibrations by
+    digest; host_root is the host evidence directory those references resolve in.
+    """
     rows = read_tsv(path, EVIDENCE_FIELDS, EVIDENCE_FIELDS)
     if not rows:
         raise ValidationError(f"{path} has no evidence rows")
@@ -269,12 +274,19 @@ def verify_evidence_manifest(
         raise ValidationError(f"{path} has duplicate artifacts: {format_values(duplicates)}")
     for line_number, row in enumerate(rows, 2):
         context = f"{path}:{line_number}"
-        artifact = safe_evidence_path(root, row["artifact"], context)
+        if row["verification"] == "host-sha256":
+            if row["route"] != "host":
+                raise ValidationError(f"{context} references host evidence from route {row['route']!r}")
+            if host_root is None:
+                raise ValidationError(f"{context} references host evidence without a host evidence directory")
+            artifact = safe_evidence_path(host_root, row["artifact"], context)
+        else:
+            artifact = safe_evidence_path(root, row["artifact"], context)
         if not artifact.is_file() or artifact.stat().st_size == 0:
             raise ValidationError(f"required evidence is missing or empty: {artifact}")
         if not SHA256.fullmatch(row["sha256"]):
             raise ValidationError(f"{context} has an invalid SHA-256 digest")
-        if row["verification"] == "sha256":
+        if row["verification"] in {"sha256", "host-sha256"}:
             digest = sha256_file(artifact)
         elif row["verification"] == "capacity-prefix-sha256":
             if row["artifact"] != capacity_artifact:
@@ -289,7 +301,8 @@ def verify_evidence_manifest(
         elif artifact.name == "observed-rows.tsv.sha256":
             verify_observed_rows_checksum(artifact)
 
-    listed = set(artifacts)
+    # Host references bind shared host files, never the unit's own artifacts.
+    listed = {row["artifact"] for row in rows if row["verification"] != "host-sha256"}
     if (root / capacity_artifact).is_file() and capacity_artifact not in listed:
         raise ValidationError(f"{capacity_artifact} exists but is not bound by {path.name}")
     for line_number, row in enumerate(rows, 2):

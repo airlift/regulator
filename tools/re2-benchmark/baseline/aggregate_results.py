@@ -399,13 +399,20 @@ def read_one(path, fields, exact=None):
     return rows[0]
 
 
-def file_set_digest(directory):
-    values = []
-    files = (item for item in directory.rglob("*") if item.is_file())
-    for path in sorted(files, key=lambda item: str(item.relative_to(directory))):
-        relative = str(path.relative_to(directory))
-        values.append(f"{relative}\0{path.stat().st_size}\0{sha256_file(path)}")
-    return stable_digest(values)
+def artifact_files(directory, evidence_rows):
+    """An accepted artifact's files by logical name: its own directory, then the host files it references.
+
+    A unit attempt references calibrations its host recorded once beside its attempts, named here from that
+    host session's directory, the attempt's parent."""
+    files = sorted(
+        ((str(item.relative_to(directory)), item) for item in directory.rglob("*") if item.is_file()),
+        key=lambda item: item[0])
+    host_artifacts = sorted(row["artifact"] for row in evidence_rows if row["verification"] == "host-sha256")
+    return [*files, *((f"../{artifact}", directory.parent / artifact) for artifact in host_artifacts)]
+
+
+def file_set_digest(files):
+    return stable_digest(f"{name}\0{path.stat().st_size}\0{sha256_file(path)}" for name, path in files)
 
 
 def read_calibration(path):
@@ -565,7 +572,8 @@ def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_
     if clean_artifact != {field: ledger_receipt[field] for field in fields}:
         raise ReductionError(f"artifact receipt does not match its ledger row: {directory}")
     try:
-        regenerated = unit_session.validate_unit_results(directory, manifest_path)
+        # A worker host's calibrations live once in its host session's directory, the attempt's parent.
+        regenerated = unit_session.validate_unit_results(directory, manifest_path, host_evidence=directory.parent)
     except (OSError, ValueError) as error:
         raise ReductionError(f"invalid unit evidence in {directory}: {error}") from error
     if regenerated != clean_artifact:
@@ -657,8 +665,8 @@ def verify_measurements(directory, artifact_receipt, confirmation, evidence_rows
             f"accepted session exceeds the 5% calibration drift gate: {directory}")
     return Session(
         artifact_receipt, directory, confirmation, calibration_drift, native_drift,
-        native_by_benchmark, file_set_digest(directory), tuple(evidence_rows), capacity,
-        tuple(rebar_outcomes)), observed
+        native_by_benchmark, file_set_digest(artifact_files(directory, evidence_rows)), tuple(evidence_rows),
+        capacity, tuple(rebar_outcomes)), observed
 
 
 def load_sessions(primary_receipts, confirmation_receipts, artifact_roots, session_directories,
@@ -767,8 +775,8 @@ def verify_campaign_source_manifest(campaign_artifact, source_manifest, sessions
         except ValueError as error:
             raise ReductionError(
                 f"accepted session is outside the archived campaign source: {session.directory}") from error
-        for path in (item for item in session.directory.rglob("*") if item.is_file()):
-            relative = relative_directory / path.relative_to(session.directory)
+        for name, path in artifact_files(session.directory, session.evidence_rows):
+            relative = relative_directory.parent / name[3:] if name.startswith("../") else relative_directory / name
             archive_path = "campaign-results/" + relative.as_posix()
             expected = source_manifest.get(archive_path)
             actual = (path.stat().st_size, sha256_file(path))
@@ -1578,10 +1586,7 @@ def build_inventory(sessions, artifact_indexes, campaign_artifact, units=False):
     rows = []
     for session in sessions:
         index = artifact_indexes.get(session.key, {})
-        for path in sorted(
-                (item for item in session.directory.rglob("*") if item.is_file()),
-                key=lambda item: str(item.relative_to(session.directory))):
-            name = str(path.relative_to(session.directory))
+        for name, path in artifact_files(session.directory, session.evidence_rows):
             rows.append({
                 **{field: session.receipt[field] for field in (
                     "campaign_id", "platform", "shard_id", "replica_id", "host_epoch")},

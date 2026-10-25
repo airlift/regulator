@@ -1814,6 +1814,8 @@ def unit_validation_context(root, arguments):
 def validate_unit_artifacts(root, arguments, result_root, receipt, context=None):
     """Revalidate a retained unit attempt from its evidence; the receipt must regenerate exactly.
 
+    Its host session's directory, the attempt's parent, holds the worker host's calibrations it
+    references.
     A pass over several attempts passes the unit_validation_context it resolved once.
     """
     tables, expected = context or unit_validation_context(root, arguments)
@@ -1824,7 +1826,7 @@ def validate_unit_artifacts(root, arguments, result_root, receipt, context=None)
             raise RuntimeError("unit attempt did not complete")
         validate_capacity(directory / "unit-capacity.txt")
         artifact_receipt = read_unit_receipt(directory / "unit-receipt.tsv")
-        regenerated = unit_session.validate_unit_results(directory, tables=tables)
+        regenerated = unit_session.validate_unit_results(directory, host_evidence=directory.parent, tables=tables)
     except (OSError, RuntimeError, ValueError) as error:
         raise UnsafeCampaignError(f"unit artifacts are not accepted for {identity}: {error}") from error
     if artifact_receipt != receipt or regenerated != receipt:

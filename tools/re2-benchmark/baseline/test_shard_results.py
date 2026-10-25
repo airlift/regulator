@@ -1163,6 +1163,15 @@ class TestShardResults(unittest.TestCase):
             self.assertEqual(["5", "5"], [row["sample_count"] for row in rows])
             self.assertEqual(["12", "13"], [row["score"] for row in rows])
 
+    def testStatisticsMatchTheHostPythonExactly(self):
+        # An Arm host's calibration samples; Python 3.9 there recorded this coefficient of variation,
+        # which later Pythons' statistics.stdev misses in the last bit.
+        metric = {"rawData": [[68.47069138523524], [68.7279953499649], [68.34972041129137]]}
+
+        _, _, coefficient_of_variation = SHARD_RESULTS.metric_statistics(metric)
+
+        self.assertEqual("0.0028196087686909693", SHARD_RESULTS.format_number(coefficient_of_variation))
+
     def testRuntimeEstimateIncludesInvocationsAndProcessStartup(self):
         arguments = type("Arguments", (), {
             "rows": 100,

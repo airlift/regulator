@@ -22,6 +22,9 @@ UNIT_TOOL="${SCRIPT_DIR}/unit_session.py"
 # run-unit.sh names a planned work unit; its route then measures only the unit's rows.
 UNIT_DIRECTORY=${BASELINE_UNIT_DIRECTORY:-}
 UNIT_CALIBRATION=${BASELINE_UNIT_CALIBRATION:-both}
+# On a worker host a unit's calibrations become host evidence, so they are
+# written outside the route's raw artifacts.
+UNIT_CALIBRATION_DIRECTORY=${BASELINE_UNIT_CALIBRATION_DIRECTORY:-}
 SELECTION_MANIFEST=${MANIFEST}
 PLAN_ONLY=${BASELINE_PLAN_ONLY:-false}
 DEFER_ACCEPTANCE=${BASELINE_DEFER_ACCEPTANCE:-false}
@@ -179,7 +182,7 @@ if [[ -n "${UNIT_DIRECTORY}" ]]; then
         echo "A work unit route defers acceptance to its unit" >&2
         exit 1
     fi
-elif [[ "${UNIT_CALIBRATION}" != both ]]; then
+elif [[ "${UNIT_CALIBRATION}" != both || -n "${UNIT_CALIBRATION_DIRECTORY}" ]]; then
     echo "Only a work unit route may split its calibrations" >&2
     exit 1
 fi
@@ -196,6 +199,8 @@ if [[ -n "${unexpected_existing}" ]]; then
     exit 1
 fi
 mkdir -p "${RESULT_DIR}/raw" "${RESULT_DIR}/logs" "${RESULT_DIR}/normalized"
+calibration_output_directory=${UNIT_CALIBRATION_DIRECTORY:-${RESULT_DIR}/raw}
+mkdir -p "${calibration_output_directory}"
 
 status_file="${RESULT_DIR}/status.txt"
 printf 'status=running\n' > "${status_file}"
@@ -1840,7 +1845,7 @@ if [[ "${UNIT_CALIBRATION}" == before || "${UNIT_CALIBRATION}" == both ]]; then
             "${calibration_parameters[@]}" |
             tee "${RESULT_DIR}/logs/calibration-prime.log"
     fi
-    run_calibration_jmh "${calibration_filter}" "${RESULT_DIR}/raw/calibration-before.json" \
+    run_calibration_jmh "${calibration_filter}" "${calibration_output_directory}/calibration-before.json" \
         "${calibration_parameters[@]}" |
         tee "${RESULT_DIR}/logs/calibration-before.log"
 fi
@@ -2594,7 +2599,7 @@ case "${handler}" in
 esac
 
 if [[ "${UNIT_CALIBRATION}" == after || "${UNIT_CALIBRATION}" == both ]]; then
-    run_calibration_jmh "${calibration_filter}" "${RESULT_DIR}/raw/calibration-after.json" \
+    run_calibration_jmh "${calibration_filter}" "${calibration_output_directory}/calibration-after.json" \
         "${calibration_parameters[@]}" |
         tee "${RESULT_DIR}/logs/calibration-after.log"
 fi
