@@ -253,6 +253,20 @@ The reducer writes:
 - `summary.json`: deterministic campaign counts and identity
 - `output-checksums.tsv`: checksums for every reducer output above
 
+The published
+[interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
+builds its `specialized-patterns` population from the
+`trino-specialized-patterns` and `trino-like-specialized` suites. The regex
+workloads are split between shards `trino-specialized-patterns-a` and `-b`, so
+their row IDs begin with the shard, but report row IDs name the suite. Each
+Regulator variant's ratio to its same-host comparator becomes one row.
+[`benchmark-report/scripts/baseline_data.py`](../../../benchmark-report/scripts/baseline_data.py)
+maps the rows to case IDs: a regular-engine or generated row's case ID adds
+`/regular-engine` or `/generated` to the specialized engine's, so the report
+can divide one variant's ratio by another's. The rows take their names,
+patterns, and descriptions from
+[`specialized-patterns.tsv`](specialized-patterns.tsv).
+
 The renderer verifies `output-checksums.tsv`, writes the Markdown report, and
 writes a sibling `.sha256` file. It does not use the current time, filesystem
 iteration order, or host locale, so identical reducer inputs produce identical

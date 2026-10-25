@@ -5,6 +5,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readData } from "./read-data.mjs";
 import { loadReportModule } from "./load-report-module.mjs";
+import { compactReport } from "./page-data.mjs";
 
 const { report: exports, context } = await loadReportModule();
 const { sorted, duration, comparisonText, tone, comparisonIssue, downloadData, displayResult, outcomeLabel, lifecycleRows, workloadSection, workloadCommentary, LanguageReport, RowEvidence } = exports;
@@ -204,7 +205,7 @@ assert.equal(probePair.distribution, 'Learned from sample logs');
 assertRatio(probePair.gain.ratio, 1 / 3);
 assert.throws(() => exports.literalProbeRows([probeRows[0]]), /Missing tuned literal-probe partner/);
 assert.throws(() => exports.literalProbeRows([probeRows[1]]), /Missing default literal-probe partner/);
-assert.equal(exports.distributionGain(probeRows[1].result, { ...result, state: 'did-not-finish', reason: 'timeout' }).state, 'did-not-finish');
+assert.equal(exports.variantGain(probeRows[1].result, { ...result, state: 'did-not-finish', reason: 'timeout' }).state, 'did-not-finish');
 const probeHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...groupedData, rows: [...groupedData.rows, ...probeRows] } }));
 const probeHeadings = [...probeHtml.matchAll(/<h2>(.*?)<\/h2>/g)].map(match => match[1]);
 assert.equal(probeHeadings.indexOf('Literal probe distributions'), probeHeadings.indexOf('Text processing workloads') + 1);
@@ -296,6 +297,119 @@ assert.equal(sorted(orderedLike, { key: 'name', descending: false }, entry => en
 const regexOrder = lifecycleRows(shuffledLikeRows.map(entry => ({ ...entry, language: 'java' })));
 assert.equal(regexOrder[0].reused.caseId, 'trino-like/ORDERED_DENSE_FALSE');
 delete context.window;
+
+// Each specialized pattern is one row: absolute variant times, gains over the page's
+// first measured variant with host speed cancelled, and the last variant against the comparator.
+// Rows are shaped as the baseline import emits them, each variant with gain warnings over every earlier one.
+const specializedSuites = { trino: ['trino-specialized-patterns', 'trino-specialized'], like: ['trino-like-specialized', 'trino-like-specialized'], re2: ['re2-specialized-patterns', 're2-specialized'] };
+const specialized = (language, workload, operation, variant, candidateNs, ratio, ratioInterval, gains, candidateUncertainty = .01) => {
+  const [suite, prefix] = specializedSuites[language];
+  return { ...reused, id: `baseline/${suite}/${workload}${language === 'like' ? '' : `/${operation}`}${variant}`, caseId: `${prefix}/${workload}${variant}`, name: workload,
+    operation, model: operation, language, population: 'specialized-patterns', family: 'Specialized engine and compiler', source: 'baseline', inputBytes: null,
+    ...(Object.keys(gains).length ? { variantGainWarnings: gains } : {}),
+    result: { ...result, candidateNs, comparatorNs: candidateNs / ratio, ratio, minimumRatio: ratio, maximumRatio: ratio, deltaNs: candidateNs - candidateNs / ratio,
+      uncertainty: { method: 'hierarchical-bootstrap-v1', level: .95, ratioInterval,
+        candidateIntervalNs: [candidateNs * (1 - candidateUncertainty), candidateNs * (1 + candidateUncertainty)],
+        comparatorIntervalNs: [candidateNs / ratio * .99, candidateNs / ratio * 1.01], forkMeanRangeNs: { candidate: null, comparator: null } } } };
+};
+const specializedVariants = (language, workload, operation, variants) => {
+  const rows = [];
+  for (const [variant, candidateNs, ratio, ratioInterval, candidateUncertainty] of variants) {
+    rows.push(specialized(language, workload, operation, variant, candidateNs, ratio, ratioInterval, Object.fromEntries(rows.map(earlier => [earlier.id, []])), candidateUncertainty));
+  }
+  return rows;
+};
+// Compiled code has its own Joni measurement: its gain divides comparator-relative ratios (0.2 / 2), not raw times (50 / 400).
+const trinoSpecialized = specializedVariants('trino', 'url-host', 'extract',
+  [['/regular-engine', 400, 2, [1.8, 2.2], .2], ['', 200, 1, [.9, 1.1]], ['/generated', 50, .2, [.15, .25], .3]]);
+const likeSpecialized = specializedVariants('like', 'Q02_TYPE_BRASS', 'matches', [['', 100, .5, [.4, .6]], ['/generated', 50, .25, [.2, .3]]])
+  .map(entry => ({ ...entry, workload: { pattern: '%BRASS', description: 'Matches part types that end in BRASS.', columnRows: 16384,
+    inputDescription: 'Each operation scans the first 16,384 rows of TPC-H part.type at scale factor 1.' } }));
+assert.throws(() => exports.specializedPatternRows([trinoSpecialized[2]]), /Missing specialized-engine partner/);
+assert.equal(exports.displayedMeasurements(trinoSpecialized).length, 3);
+// The three variants share one Joni measurement, which the quality summary counts once.
+assert.equal(exports.qualityDistribution(trinoSpecialized, 'candidate').count, 3);
+assert.equal(exports.qualityDistribution(trinoSpecialized, 'comparator').count, 1);
+assert.deepEqual(exports.summaryRatios({ ...data, rows: [...likeSummaryRows, ...likeSpecialized] }).like, likeSummary);
+const specializedPage = (language, rows, pageData = data) => {
+  context.window = { location: { hash: `#language=${language}&cpu=c9g&memory=native` } };
+  let html;
+  try {
+    html = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...pageData, rows } }));
+  } finally {
+    delete context.window;
+  }
+  const section = html.split('<h2>Specialized engine and compiler</h2>')[1]?.split('</section>')[0];
+  return { headings: [...html.matchAll(/<h2>(.*?)<\/h2>/g)].map(match => match[1]), section,
+    columns: section && [...section.matchAll(/<button type="button" class="sort-button"[^>]*>(.*?)<span/g)].map(match => match[1]) };
+};
+const regularClause = /the regular engine runs the same patterns without one/;
+// A second operation on one workload keeps its own row.
+const replaceSpecialized = specializedVariants('trino', 'url-host', 'replace',
+  [['/regular-engine', 300, 1, [.9, 1.1]], ['', 300, 1, [.9, 1.1]], ['/generated', 300, 1, [.9, 1.1]]]);
+const trinoPage = specializedPage('trino', [...data.rows, ...data.rows.map(entry => ({ ...entry, id: `trino-${entry.id}`, language: 'trino' })), ...trinoSpecialized, ...replaceSpecialized]);
+assert.deepEqual(trinoPage.headings, ['Everyday regex operations', 'Specialized engine and compiler', 'Regex pattern lifecycle', 'Measurement notes']);
+assert.deepEqual(trinoPage.columns, ['Pattern / operation', 'Joni', 'Regular engine', 'Specialized engine', 'Compiled',
+  'Specialized vs regular', 'Compiled vs regular', 'Compiled vs Joni']);
+assert.match(trinoPage.section, /url-host<small>extract<\/small>.*200.00 ns.*400.00 ns.*200.00 ns.*50.00 ns.*2.00× faster.*10.00× faster.*5.00× faster/s);
+assert.match(trinoPage.section, /url-host<small>replace<\/small>/);
+assert.equal(trinoPage.section.split('<tbody>')[1].match(/<tr>/g).length, 2);
+assert.match(trinoPage.section, /Compiled ratio divided by regular engine ratio: 0.1000×. Conservative interval 0.0682 to 0.1389×./);
+assert.match(trinoPage.section, regularClause);
+// Each variant's time carries its own uncertainty marker.
+assert.match(trinoPage.section, /400.00 ns<sup><button[^>]*title="Regulator timing uncertainty: 20.0%. Exceeds 5%."/);
+assert.match(trinoPage.section, /50.00 ns<sup><button[^>]*title="Regulator timing uncertainty: 30.0%. Exceeds 5%."/);
+assert.equal(trinoPage.section.match(/quality-marker/g).length, 2);
+assert.equal(specializedPage('re2', [...data.rows, ...trinoSpecialized]).section, undefined);
+const likePage = specializedPage('like', compactReport({ ...data, rows: [...likeRows, ...likeSpecialized] }, exports).rows);
+assert.deepEqual(likePage.headings, ['Specialized engine and compiler', 'LIKE pattern lifecycle']);
+assert.deepEqual(likePage.columns, ['Pattern', 'Trino SQL LIKE', 'Specialized engine', 'Compiled', 'Compiled vs specialized', 'Compiled vs Trino SQL LIKE']);
+assert.match(likePage.section, /Compiled ratio divided by specialized engine ratio: 0.5000×. Conservative interval 0.3333 to 0.7500×./);
+assert.doesNotMatch(likePage.section, /reused match/);
+assert.doesNotMatch(likePage.section, regularClause);
+// Each LIKE time scans many column rows, not one input.
+assert.match(likePage.section, /Each time is one scan of the first 16,384 rows of a TPC-H column\./);
+const likeDetails = renderToStaticMarkup(React.createElement(RowEvidence, { row: likeSpecialized[0], comparator: 'Trino SQL LIKE' }));
+assert.match(likeDetails, /Count the rows of one column that match a warmed LIKE pattern\..*first 16,384 rows of TPC-H part.type/s);
+assert.doesNotMatch(likeDetails, /one complete input/);
+// A language whose catalog rows the import accepts gets the section with its own comparator and variants.
+const re2Page = specializedPage('re2', [...data.rows, ...specializedVariants('re2', 'literal-prefix', 'contains', [['', 100, .5, [.4, .6]], ['/generated', 50, .25, [.2, .3]]])]);
+assert.deepEqual(re2Page.columns, ['Pattern / operation', 'native RE2', 'Specialized engine', 'Compiled', 'Compiled vs specialized', 'Compiled vs native RE2']);
+assert.match(re2Page.section, /literal-prefix<small>contains<\/small>/);
+
+// Without intervals, a gain cell shows the host-paired warnings the import supplies, not either variant's
+// warnings against Joni. Against Joni the regular engine is 0.8, 1.0 and 1.2 and compiled code 0.1, 0.125 and
+// 0.15, so the hosts disagree about Joni, yet compiled code is 0.125 of the regular engine on every host.
+const hostRun = (entry, candidates, warnings, gains) => {
+  const ratios = candidates.map(ns => ns / 100);
+  return { ...entry, ...(gains ? { variantGainWarnings: gains } : {}), result: { state: 'compared', candidateNs: candidates[1], comparatorNs: 100, ratio: ratios[1],
+    minimumRatio: ratios[0], maximumRatio: ratios[2], deltaNs: candidates[1] - 100, deltaNsPerByte: null, warnings,
+    hosts: candidates.map((ns, index) => ({ replica: index + 1, instanceId: `i-${index + 1}`, candidate: { state: 'compared', medianNs: ns }, comparator: { state: 'compared', medianNs: 100 } })) } };
+};
+const variation = 'Host ratio variation exceeds 5%';
+const disagree = 'Hosts disagree about which engine is faster';
+const [regularRun, specializedRun, compiledRun] = trinoSpecialized;
+const constantGain = [hostRun(regularRun, [80, 100, 120], [variation, disagree]),
+  hostRun(specializedRun, [50, 50, 50], [], { [regularRun.id]: [variation] }),
+  hostRun(compiledRun, [10, 12.5, 15], [variation], { [regularRun.id]: [], [specializedRun.id]: [variation] })];
+// Compiled code is 0.9, 1.0 and 1.1 of the regular engine, so those host pairs disagree about which variant is faster.
+const [regularCross, specializedCross, compiledCross] = replaceSpecialized;
+const crossingGain = [hostRun(regularCross, [100, 100, 100], []), hostRun(specializedCross, [100, 100, 100], [], { [regularCross.id]: [] }),
+  hostRun(compiledCross, [90, 100, 110], [variation], { [regularCross.id]: [variation, disagree], [specializedCross.id]: [variation, disagree] })];
+const preliminary = { ...data, publication: { status: 'preliminary', sourcePolicy: 'mixed-development-revisions', note: 'Preliminary.' } };
+const constantRows = compactReport({ ...preliminary, rows: [...constantGain, ...crossingGain] }, exports).rows;
+const constantPage = specializedPage('trino', constantRows, preliminary);
+const [constantRow, crossingRow] = ['extract', 'replace'].map(operation => constantPage.section.split('<tr>').find(cells => cells.includes(`<small>${operation}</small>`)));
+assert.match(constantRow, /100.00 ns.*100.00 ns.*50.00 ns.*12.50 ns.*2.00× faster.*8.00× faster.*8.00× faster/s);
+assert.doesNotMatch(constantRow, /no consistent winner/);
+assert.match(crossingRow, /Compiled ratio divided by regular engine ratio: 1.0000×.">no consistent winner/);
+assert.throws(() => specializedPage('trino', [constantGain[0], constantGain[1], { ...constantGain[2], variantGainWarnings: {} }]), /Missing host-paired gain warnings/);
+// The preliminary cells hide variation warnings; the row details keep every variant's full warnings.
+const [constantPattern] = exports.specializedPatternRows(constantRows.filter(entry => entry.operation === 'extract').map(entry => ({ ...entry, measurementWarnings: entry.result.warnings })));
+const constantDetails = renderToStaticMarkup(React.createElement(RowEvidence, { row: constantPattern.anchor, variants: constantPattern.evidence, comparator: 'Joni' }));
+assert.match(constantDetails, /<h4>Regular engine measurement variation<\/h4><p>Host ratio variation exceeds 5%. Hosts disagree about which engine is faster.<\/p>/);
+assert.match(constantDetails, /<h4>Compiled measurement variation<\/h4><p>Host ratio variation exceeds 5%.<\/p>/);
+assert.doesNotMatch(constantDetails, /Specialized engine measurement variation/);
 const classified = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...data, rows: [
   ...data.rows,
   { ...reused, id: 'timeout', name: 'Timed out', result: { state: 'did-not-finish', reason: 'execution exceeded 30 s on 2 attempts', hosts: [], warnings: [] } },
