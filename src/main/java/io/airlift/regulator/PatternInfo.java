@@ -17,15 +17,31 @@ import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
-/// Capture metadata for a validated pattern. The count excludes group zero (the whole match);
-/// named groups also have a numeric index. The name-to-index map is immutable.
-public record PatternInfo(int capturingGroupCount, Map<String, Integer> namedCapturingGroups)
+/// Capture metadata for a validated pattern.
+public final class PatternInfo
 {
-    public PatternInfo
+    private final int capturingGroupCount;
+    private final Map<String, Integer> namedCapturingGroups;
+
+    PatternInfo(int capturingGroupCount, Map<String, Integer> namedCapturingGroups)
     {
         if (capturingGroupCount < 0) {
             throw new IllegalArgumentException("capturingGroupCount is negative: " + capturingGroupCount);
         }
-        namedCapturingGroups = Map.copyOf(requireNonNull(namedCapturingGroups, "namedCapturingGroups is null"));
+        this.capturingGroupCount = capturingGroupCount;
+        this.namedCapturingGroups = Map.copyOf(requireNonNull(namedCapturingGroups, "namedCapturingGroups is null"));
+    }
+
+    /// Returns the number of capturing groups, excluding group zero (the whole match).
+    public int capturingGroupCount()
+    {
+        return capturingGroupCount;
+    }
+
+    /// Returns an immutable mapping from capture names to group numbers. Named groups also
+    /// count toward [#capturingGroupCount()].
+    public Map<String, Integer> namedCapturingGroups()
+    {
+        return namedCapturingGroups;
     }
 }
