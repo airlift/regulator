@@ -48,6 +48,9 @@ import static io.airlift.slice.Slices.utf8Slice;
 /// [RustRegexp] has no replacement, so there is no replace method. No compilation cache is
 /// involved.
 ///
+/// With `unicodePerlClasses=true`, `\d` and `\w` stay Rust's Unicode classes, so
+/// those patterns follow Rust's classes rather than RE2's.
+///
 /// With `scanPlan=false`, every pattern compiles without its scan plan, so the methods time the
 /// ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
 /// `-p scanPlan=true` this source also times a build without Rust scan plans. With
@@ -119,6 +122,10 @@ public class BenchmarkRustScanPlan
                 "LONG_HOST_MALFORMED",
                 "UNANCHORED_TAIL_4096_NON_ASCII",
                 "UNANCHORED_TAIL_4096_MALFORMED",
+                "FOLDED_HOST",
+                "FOLDED_KEY",
+                "PERL_ANCHORED",
+                "PERL_UNANCHORED",
         })
         public String workload;
 
@@ -132,6 +139,10 @@ public class BenchmarkRustScanPlan
         // the option.
         @Param("false")
         public boolean generateBytecode;
+
+        // Keep \d and \w as Rust's Unicode classes rather than ASCII ones.
+        @Param({"true", "false"})
+        public boolean unicodePerlClasses;
 
         Slice[] expressions;
         private RustRegexp.Options options;
@@ -162,7 +173,7 @@ public class BenchmarkRustScanPlan
             bounds = new int[2];
             extractionGroups = new int[count];
             for (int index = 0; index < count; index++) {
-                expressions[index] = utf8Slice(rustExpression(source.expressions[index].toStringUtf8()));
+                expressions[index] = utf8Slice(rustExpression(source.expressions[index].toStringUtf8(), unicodePerlClasses));
                 patterns[index] = compile(compiler, expressions[index], options);
                 matchers[index] = patterns[index].matcher(EMPTY_SLICE);
                 extractionGroups[index] = patterns[index].capturingGroupCount() == 0 ? 0 : 1;
@@ -233,9 +244,10 @@ public class BenchmarkRustScanPlan
 
     /// Returns `expression`, a [BenchmarkRe2ScanPlan] pattern, in Rust syntax. Only the
     /// Perl classes `\d` and `\w` differ in these patterns, and each turns off Unicode
-    /// mode for itself. Any other Perl class, or one inside a bracketed class, has no such rewrite,
-    /// so it throws [IllegalArgumentException].
-    static String rustExpression(String expression)
+    /// mode for itself unless `unicodePerlClasses` keeps it. Any other Perl class, or one
+    /// inside a bracketed class, has no such rewrite, so it throws
+    /// [IllegalArgumentException].
+    static String rustExpression(String expression, boolean unicodePerlClasses)
     {
         StringBuilder rust = new StringBuilder();
         boolean inClass = false;
@@ -246,7 +258,7 @@ public class BenchmarkRustScanPlan
                 if ("DsSW".indexOf(escaped) >= 0 || (inClass && (escaped == 'd' || escaped == 'w'))) {
                     throw new IllegalArgumentException("Perl class without a Rust rewrite: " + expression);
                 }
-                if (escaped == 'd' || escaped == 'w') {
+                if ((escaped == 'd' || escaped == 'w') && !unicodePerlClasses) {
                     rust.append("(?-u:\\").append(escaped).append(')');
                 }
                 else {

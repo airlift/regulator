@@ -38,7 +38,9 @@ public class TestBenchmarkRe2ScanPlan
             "LITERAL_CONTROLS",
             "DEEP_REJECTIONS",
             "FALLBACK",
-            "LOWERED_FALLBACK");
+            "LOWERED_FALLBACK",
+            "FOLDED_HOST",
+            "FOLDED_KEY");
     // Workloads whose plans are case-insensitive, so they keep the interpreter when generated
     // bytecode is requested.
     private static final Set<String> FOLDED = Set.of("FOLDED_ANCHORED", "FOLDED_OPTIONAL", "FOLDED_UNANCHORED", "FOLDED_MIXED");
@@ -121,13 +123,39 @@ public class TestBenchmarkRe2ScanPlan
             throws ReflectiveOperationException
     {
         for (String workload : BenchmarkRe2ScanPlan.workloads()) {
-            if (workload.equals(BenchmarkRe2ScanPlan.trinoWorkload(workload))) {
+            String trinoWorkload = BenchmarkRe2ScanPlan.trinoWorkload(workload);
+            boolean hasOwnPatterns = !BenchmarkTrinoScanPlan.workloads().contains(trinoWorkload);
+            if (!hasOwnPatterns && workload.equals(trinoWorkload)) {
                 continue;
             }
             for (boolean dotAll : new boolean[] {true, false}) {
                 BenchmarkRe2ScanPlan.BenchmarkData data = data(workload, dotAll, new Variant(true, false));
                 String description = workload + " dotAll=" + dotAll;
                 assertThat(data.inputs).as(description).hasSize(504);
+                if (hasOwnPatterns) {
+                    // At least three rows in four of a pattern whose sets have a non-ASCII member are
+                    // ASCII. Some of a fold's match through that member before the capture, and others
+                    // capture multibyte text. TestBenchmarkRustScanPlan checks that Unicode Perl
+                    // classes match some rows differently.
+                    Re2 pattern = data.patterns[0];
+                    assertThat(data.inputs).as(description)
+                            .filteredOn(input -> input.toStringUtf8().chars().allMatch(character -> character < 0x80))
+                            .hasSizeGreaterThanOrEqualTo(data.inputs.length * 3 / 4);
+                    if (workload.startsWith("FOLDED_")) {
+                        assertThat(data.inputs).as(description)
+                                .anySatisfy(input -> {
+                                    MatchResult match = pattern.findResult(input);
+                                    assertThat(match).isNotNull();
+                                    assertThat(input.slice(match.start(), match.start(1) - match.start()).toStringUtf8()).containsAnyOf("\u017F", "\u212A");
+                                })
+                                .anySatisfy(input -> {
+                                    MatchResult match = pattern.findResult(input);
+                                    assertThat(match).isNotNull();
+                                    assertThat(match.groupSlice(1).toStringUtf8()).matches("(?s).*[^\\x00-\\x7F].*");
+                                });
+                    }
+                    continue;
+                }
                 if (workload.endsWith("_NON_ASCII")) {
                     assertThat(data.inputs).as(description).allSatisfy(input -> {
                         assertThat(isValidUtf8(input)).isTrue();
