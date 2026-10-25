@@ -120,7 +120,8 @@ iteration counts while avoiding a new forked JVM for every row:
   semantic test, the DFA probe, a differential verifier or its count of
   verified cases, the curated Rebar verification, or the pinned Trino
   comparator's verification, including one that could not start. A host
-  session treats it as any other benchmark failure.
+  session treats it as any other benchmark failure; a unit campaign leaves the
+  unit unresolved without retrying it, and its phase is not accepted.
 - Fast allocating rows require special scrutiny because a 50 ms window can
   contain zero collections in most iterations and concentrate collection cost
   in one iteration that a median discards. The `countRegulator`

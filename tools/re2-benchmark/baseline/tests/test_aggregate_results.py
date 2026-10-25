@@ -1187,7 +1187,8 @@ class TestUnitCampaignReduction(unittest.TestCase):
     SCORES = {"native-re2-before": 100, "native-re2-after": 102, "regulator-native-access": 80,
               "regulator-object-row": 300}
 
-    def test_unit_attempts_reduce_owned_samples_paired_within_their_attempt(self):
+    def reduction(self, root):
+        """A chained unit campaign of the shard whose first unit is unstable on r8i, and a reducer over it."""
         unstable = next(unit for unit in UNIT_SESSION.work_units.load(BASELINE).values()
                         if (unit["shard_id"], unit["unit_index"]) == (self.SHARD, "1"))
         unstable_rows = {row_id for row_id in unstable["owned"] if row_id.endswith("/regulator-native-access")}
@@ -1198,22 +1199,35 @@ class TestUnitCampaignReduction(unittest.TestCase):
             # A copy measures its bracket again, here at another cost, beside the unit's own rows.
             return self.SCORES[row["system"]] * (2 if role == "copy" else 1)
 
+        campaign = UnitCampaign(root / "campaign-results", self.SHARD, score=score, host_calibrations=True,
+                                chained=True)
+        # The controller stages each lease's result under unit-results/ before it retains the accepted copy.
+        for receipt in campaign.receipts:
+            host_session, _, lease = receipt["unit_attempt_id"].rpartition("/")
+            shutil.copytree(campaign.directory(receipt),
+                            campaign.root / "unit-results" / host_session / f"lease-{lease}")
+        # The controller starts each phase with an empty semantic-rejection ledger beside its accepted units.
+        (root / UNIT_SESSION.SEMANTIC_REJECTIONS).write_text(
+            "\t".join(UNIT_SESSION.SEMANTIC_REJECTION_FIELDS) + "\n")
+
+        def aggregate(confirmations, unbound=lambda path: False):
+            artifact = root / "campaign-artifact.tsv"
+            write_campaign_artifact(campaign.root, artifact, "campaign", unbound)
+            return aggregate_results.aggregate(argparse.Namespace(
+                manifest=BASELINE / "rows.tsv", platforms=BASELINE / "platforms.tsv",
+                shards=BASELINE / "shards.tsv", selected_shards=[self.SHARD],
+                primary_receipts=[campaign.write_ledger(root / "accepted-units.tsv", campaign.receipts)],
+                confirmation_receipts=[campaign.write_ledger(root / "confirmation-units.tsv", confirmations)],
+                artifacts_root=[campaign.root], session_dir=[], events=[], rebar_exclusions=[],
+                rebar_joni_applicability=None, artifact_index=[], output_dir=root / "output",
+                campaign_artifact=artifact, expected_manifest_rows=MANIFEST_ROW_COUNT))
+
+        return campaign, unstable, unstable_rows, aggregate
+
+    def test_unit_attempts_reduce_owned_samples_paired_within_their_attempt(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            campaign = UnitCampaign(root / "campaign-results", self.SHARD, score=score, host_calibrations=True)
-
-            def aggregate(confirmations, unbound=lambda path: False):
-                artifact = root / "campaign-artifact.tsv"
-                write_campaign_artifact(campaign.root, artifact, "campaign", unbound)
-                return aggregate_results.aggregate(argparse.Namespace(
-                    manifest=BASELINE / "rows.tsv", platforms=BASELINE / "platforms.tsv",
-                    shards=BASELINE / "shards.tsv", selected_shards=[self.SHARD],
-                    primary_receipts=[campaign.write_ledger(root / "accepted-units.tsv", campaign.receipts)],
-                    confirmation_receipts=[campaign.write_ledger(root / "confirmation-units.tsv", confirmations)],
-                    artifacts_root=[campaign.root / "units"], session_dir=[], events=[], rebar_exclusions=[],
-                    rebar_joni_applicability=None, artifact_index=[], output_dir=root / "output",
-                    campaign_artifact=artifact, expected_manifest_rows=MANIFEST_ROW_COUNT))
-
+            _, unstable, unstable_rows, aggregate = self.reduction(root)
             summary = aggregate([])
             output = root / "output"
             host_rows = read_tsv(output / "host-rows.tsv")
@@ -1233,19 +1247,52 @@ class TestUnitCampaignReduction(unittest.TestCase):
                  for system in ("regulator-native-access", "regulator-object-row")})
             owners = {(row["unit_attempt_id"], row["row_id"]) for row in host_rows if row["role"] == "owner"}
             self.assertTrue(all((row["unit_attempt_id"], row["candidate_row_id"]) in owners for row in ratios))
+            # Scaling groups, too, take only owned samples.
+            scaling = read_tsv(output / "scaling.tsv")
+            self.assertTrue(scaling)
             self.assertTrue(all(
-                (row["unit_attempt_id"], row_id) in owners
-                for row in read_tsv(output / "scaling.tsv") for row_id in row["row_ids"].split(",")))
+                (row["unit_attempt_id"], row_id) in owners for row in scaling for row_id in row["row_ids"].split(",")))
             self.assertEqual(
                 [{"platform": "r8i", "shard_id": self.SHARD, "unit_id": unstable["unit_id"]}],
                 read_tsv(output / "confirmation-jobs.tsv"))
-            # An attempt's artifact includes the host calibrations it references, so the archive must bind them.
-            self.assertEqual(24 * 2, sum(
-                row["logical_name"].startswith("../calibrations/")
-                for row in read_tsv(output / "artifact-inventory.tsv")))
-            with self.assertRaisesRegex(aggregate_results.ReductionError, "not bound by the campaign archive"):
-                aggregate([], unbound=lambda path: path.parent.name == "calibrations")
 
+    def test_semantic_rejection_or_a_missing_rejection_ledger_refuses_the_phase(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _, unstable, _, aggregate = self.reduction(root)
+            rejections = root / UNIT_SESSION.SEMANTIC_REJECTIONS
+            # The phase is refused though another attempt of the unit was accepted.
+            with rejections.open("a") as ledger:
+                ledger.write(f"r8i\t{unstable['unit_id']}\t1\tr8i-session-9/1\n")
+            with self.assertRaisesRegex(aggregate_results.ReductionError,
+                                        r"semantic failure: \['r8i-session-9/1'\]"):
+                aggregate([])
+            rejections.unlink()
+            with self.assertRaisesRegex(aggregate_results.ReductionError, "no semantic-rejection ledger"):
+                aggregate([])
+
+    def test_campaign_archive_binds_each_attempts_calibrations_and_previous_completion(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _, _, _, aggregate = self.reduction(root)
+            aggregate([])
+            inventory = read_tsv(root / "output/artifact-inventory.tsv")
+            # An attempt's artifact includes the host calibrations it references, and each chained attempt the
+            # previous lease's completion marker it was checked against.
+            self.assertEqual(24 * 2, sum(row["logical_name"].startswith("../calibrations/") for row in inventory))
+            self.assertEqual(2 * 3 * 3, sum(
+                re.fullmatch(r"\.\./lease-[0-9]+-completion\.json", row["logical_name"]) is not None
+                for row in inventory))
+            for unbound in (lambda path: path.parent.name == "calibrations",
+                            lambda path: path.name.endswith("-completion.json")):
+                with self.assertRaisesRegex(aggregate_results.ReductionError, "not bound by the campaign archive"):
+                    aggregate([], unbound=unbound)
+
+    def test_confirmation_replica_settles_its_unit_only_on_another_instance(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            campaign, unstable, unstable_rows, aggregate = self.reduction(root)
+            output = root / "output"
             confirmation = campaign.add("r8i", unstable, 4, host=4)
             aggregate([confirmation])
             confirmed = next(row for row in read_tsv(output / "row-aggregates.tsv")
@@ -1255,6 +1302,23 @@ class TestUnitCampaignReduction(unittest.TestCase):
             reused = campaign.add("r8i", unstable, 4, host=1)
             with self.assertRaisesRegex(aggregate_results.ReductionError, "replicas of a unit share an EC2 instance"):
                 aggregate([reused])
+
+    def test_chain_claim_is_checked_against_the_previous_leases_retained_completion(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            campaign, unstable, _, aggregate = self.reduction(root)
+            # An attempt is refused when it claims to chain from a before calibration that its previous lease
+            # never took, even though its own evidence agrees with the claim.
+            honest = next(receipt for receipt in campaign.receipts if (
+                receipt["platform"], receipt["unit_id"], receipt["replica_id"]) == ("r8i", unstable["unit_id"], "1"))
+            shutil.rmtree(campaign.directory(honest))
+            campaign.receipts.remove(honest)
+            # Each chained lease of the host closed one point higher; its fourth closed at 104.
+            campaign.add("r8i", unstable, 1, host=1, chained_before=103.5)
+            with self.assertRaisesRegex(aggregate_results.ReductionError,
+                                        "does not chain from the completion of r8i-session-1/4: calibration_after"):
+                aggregate([])
+
 
 if __name__ == "__main__":
     unittest.main()

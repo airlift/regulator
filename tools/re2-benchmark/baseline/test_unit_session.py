@@ -16,6 +16,7 @@ from pathlib import Path
 BASELINE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASELINE))
 from acceptance import PROTOCOL_QUALIFICATION_FIELDS  # noqa: E402
+import unit_dispatch  # noqa: E402
 
 
 def load_module(name, path):
@@ -375,45 +376,66 @@ class UnitCampaign:
     PLATFORMS = {"r8i": ("intel", "r8i.large"), "r9g": ("arm", "r9g.large")}
 
     def __init__(self, root, shard_id, replicas=(1, 2, 3), score=lambda row, role, platform, replica: 1,
-                 host_calibrations=False):
+                 host_calibrations=False, chained=False):
         self.root = root
         self.shard_id = shard_id
         self.score = score
         self.host_calibrations = host_calibrations
+        # With chained host calibrations, each lease after a host's first takes its before from the lease before it.
+        self.chained = chained
+        self.completions = {}
         self.units = sorted(
             (unit for unit in UNIT_SESSION.work_units.load(BASELINE).values() if unit["shard_id"] == shard_id),
             key=lambda unit: int(unit["unit_index"]))
         self.leases = {}
         self.receipts = []
-        self.confirmations = []
         for platform in self.PLATFORMS:
             for replica in replicas:
                 for unit in self.units:
                     self.add(platform, unit, replica, host=replica)
 
-    def unit(self, unit_index):
-        return next(unit for unit in self.units if unit["unit_index"] == unit_index)
+    def directory(self, receipt):
+        return unit_dispatch.unit_attempt_directory(self.root, receipt)
 
-    def add(self, platform, unit, replica, host):
-        """Run one unit attempt as the next lease of the platform's host number host."""
+    def add(self, platform, unit, replica, host, chained_before=None):
+        """Run one unit attempt as the next lease of the platform's host number host.
+
+        A chained lease's before is its previous lease's after, unless chained_before names another score."""
         host_session = f"{platform}-session-{host}"
         lease = self.leases[host_session] = self.leases.get(host_session, 0) + 1
         directory = (self.root / "units" / platform / unit["unit_id"] / f"replica-{replica}" / host_session /
                      f"lease-{lease}")
         directory.mkdir(parents=True)
         architecture, instance_type = self.PLATFORMS[platform]
+        previous = self.completions.get(host_session) if self.chained else None
         fixture = UnitFixture(
             directory, self.shard_id, unit["unit_index"], str(replica), {
                 "campaign_id": "campaign", "platform": platform, "instance_id": f"i-{platform}-{host}",
                 "host_epoch": f"{platform}-epoch-{host}", "architecture": architecture,
                 "instance_type": instance_type, "availability_zone": "us-west-2a",
-            }, lambda row, role: self.score(row, role, platform, replica))
+            }, lambda row, role: self.score(row, role, platform, replica), chained=previous is not None)
+        scores = (100, 101)
         if self.host_calibrations:
+            if previous is not None:
+                marker, after = previous
+                scores = (after if chained_before is None else chained_before, after + 1)
+                # The controller retains the previous lease's own completion marker beside a chained attempt.
+                (directory.parent / f"lease-{lease - 1}-completion.json").write_text(json.dumps(marker))
             # A worker host stores its calibrations once, beside its attempts.
-            calibrations = [store_host_calibration(directory.parent, score) for score in (100, 101)]
+            calibrations = [store_host_calibration(directory.parent, score) for score in scores]
+            if previous is not None:
+                fixture.chain(calibrations[0], previous_attempt=f"{host_session}/{lease - 1}")
             fixture.calibrate_on_host(directory.parent, *calibrations)
+            self.completions[host_session] = ({
+                "schema_version": 1, "host_session": host_session, "sequence": lease, "campaign_id": "campaign",
+                "platform": platform, "unit_id": unit["unit_id"], "replica_id": replica,
+                "unit_attempt_id": f"{host_session}/{lease}", "exit_status": 0, "unit_status": "complete",
+                "calibration_before": calibrations[0].stem, "calibration_after": calibrations[1].stem,
+                "calibration_chained": previous is not None}, scores[1])
         receipt = fixture.accept(f"{host_session}/{lease}")
-        (self.confirmations if replica == 4 else self.receipts).append(receipt)
+        # A confirmation replica's receipt stays out of the campaign's primary receipts.
+        if replica != 4:
+            self.receipts.append(receipt)
         return receipt
 
     def write_ledger(self, path, receipts):

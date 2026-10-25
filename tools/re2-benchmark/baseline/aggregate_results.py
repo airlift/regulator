@@ -29,6 +29,7 @@ from acceptance import (
     verify_evidence_manifest,
 )
 import rebar_joni_applicability
+import unit_dispatch
 import unit_session
 from row_protocol import comparison_specs, identify_scaling_groups, logical_row_id, parse_parameters
 
@@ -383,12 +384,27 @@ def verify_unit_receipt_coverage(primary, confirmation, platforms, shards, manif
     return units
 
 
+def retained_unit_attempt(directory):
+    """Whether a unit attempt sits where the controller retains it, the directory its own receipt names:
+    units/<platform>/<unit>/replica-<n>/<host session>/lease-<n>."""
+    parents = directory.resolve().parents
+    if len(parents) <= 5 or parents[4].name != "units":
+        return False
+    fields = unit_session.UNIT_RECEIPT_FIELDS
+    receipt = read_one(directory / receipt_name(units=True), fields, fields)
+    return unit_dispatch.unit_attempt_directory(parents[5], receipt) == directory.resolve()
+
+
 def discover_session_directories(artifact_roots, session_directories, units=False):
     directories = {path.resolve() for path in session_directories}
     for root in artifact_roots:
         if not root.is_dir():
             raise ReductionError(f"artifact root does not exist: {root}")
-        directories.update(path.parent.resolve() for path in root.rglob(receipt_name(units)))
+        found = (path.parent for path in root.rglob(receipt_name(units)))
+        if units:
+            # A unit phase's unit-results/ holds the controller's staged copies of the same attempts.
+            found = (directory for directory in found if retained_unit_attempt(directory))
+        directories.update(directory.resolve() for directory in found)
     return sorted(directories, key=str)
 
 
@@ -402,12 +418,16 @@ def read_one(path, fields, exact=None):
 def artifact_files(directory, evidence_rows):
     """An accepted artifact's files by logical name: its own directory, then the host files it references.
 
-    A unit attempt references calibrations its host recorded once beside its attempts, named here from that
-    host session's directory, the attempt's parent."""
+    A unit attempt references calibrations its host recorded once beside its attempts, and a chained attempt
+    also references the completion marker of the lease its before calibration came from, which its controller
+    retained there.
+    Both are named here from that host session's directory, the attempt's parent."""
     files = sorted(
         ((str(item.relative_to(directory)), item) for item in directory.rglob("*") if item.is_file()),
         key=lambda item: item[0])
     host_artifacts = sorted(row["artifact"] for row in evidence_rows if row["verification"] == "host-sha256")
+    if (directory / "unit-chain.txt").is_file():
+        host_artifacts.append(unit_session.chain_predecessor_marker(directory))
     return [*files, *((f"../{artifact}", directory.parent / artifact) for artifact in host_artifacts)]
 
 
@@ -574,6 +594,7 @@ def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_
     try:
         # A worker host's calibrations live once in its host session's directory, the attempt's parent.
         regenerated = unit_session.validate_unit_results(directory, manifest_path, host_evidence=directory.parent)
+        unit_session.check_chain_predecessor(directory, directory.parent)
     except (OSError, ValueError) as error:
         raise ReductionError(f"invalid unit evidence in {directory}: {error}") from error
     if regenerated != clean_artifact:
@@ -1699,6 +1720,12 @@ def aggregate(arguments):
     primary = load_receipt_ledger(arguments.primary_receipts, False, units)
     confirmation = load_receipt_ledger(arguments.confirmation_receipts, True, units)
     if units:
+        # A unit campaign phase whose correctness stage rejected any attempt is not reduced.
+        for path in arguments.primary_receipts + arguments.confirmation_receipts:
+            try:
+                unit_session.check_semantic_rejections(path.parent)
+            except ValidationError as error:
+                raise ReductionError(str(error)) from error
         campaign_units = verify_unit_receipt_coverage(
             primary, confirmation, platforms, shards, manifest_rows, manifest_digest)
         session_fields = unit_session.UNIT_SESSION_FIELDS

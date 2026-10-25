@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import contextlib
 import csv
 import fcntl
 import hashlib
@@ -9,17 +10,20 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 import engine_build
 import unit_session
+import work_units
 from acceptance import RECEIPT_FIELDS, ValidationError, normalize_heap_size, validate_campaign, validate_host_results
 from topology import CONCURRENCY_SHARDS
 from fleet_budget import (
@@ -27,7 +31,12 @@ from fleet_budget import (
 from campaign_io import (
     JSON_LEDGER_WORKLOADS, UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
 from unit_dispatch import (
-    accepted_row, persist_accepted_unit, read_accepted_units, read_unit_receipt, unit_attempt_directory, unit_logical_identity)
+    UNIT_COMPLETION_FIELDS, accepted_row, calibration_key, completion_key, extract_unit_result,
+    get_unit_worker_result, heartbeat_key, heartbeat_sequence, interruption_key, list_unit_worker_results,
+    persist_accepted_unit, persist_semantic_rejection, put_unit_lease, read_accepted_units, read_semantic_rejections,
+    read_unit_attempts, read_unit_receipt, recovered_keys, result_key, retain_unit_attempt, shows_worker_start,
+    unit_attempt_directory, unit_logical_identity, unit_worker_instance_state, write_unit_attempt, write_unresolved,
+    write_unresolved_units)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
 import batch_acceptance
@@ -49,10 +58,37 @@ MAX_REPLACEMENTS_PER_JOB = 2
 # launches use On-Demand so the phase's tail does not wait on Spot capacity or a reclaim.
 ON_DEMAND_TAIL_PERCENT = 10
 WRAPPER_NOT_CREATED = "wrapper process was not created"
+UNIT_WORKER_SHARD = "unit-worker"
+UNIT_WORKER_LIFETIME_SECONDS = 6 * 60 * 60
+# The wrapper waits for a unit worker's host evidence through its lifetime, its last unit and upload.
+UNIT_WORKER_TIMEOUT_SECONDS = UNIT_WORKER_LIFETIME_SECONDS + 90 * 60
+# A worker whose heartbeat is this stale has lost its lease once EC2 no longer runs its instance,
+# and after the longer bound whatever EC2 reports.
+UNIT_HEARTBEAT_STALE_SECONDS = 10 * 60
+UNIT_HEARTBEAT_LOST_SECONDS = 30 * 60
+UNIT_POLL_SECONDS = 15
+# A unit pool's new Spot workers skip a region this long after it found no Spot capacity, and
+# while every region cools they launch On-Demand.
+SPOT_REGION_COOL_DOWN_SECONDS = 15 * 60
+# A Spot worker that stops for a rebalance recommendation this soon after launch, or before it
+# completes a unit, found its region short of Spot capacity, and the region cools as above.
+EARLY_REBALANCE_SECONDS = 15 * 60
+# A work item stays unresolved once this many of its leases failed, were interrupted, or were lost,
+# as a host job does; a lease released before it started does not count.
+MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
 # run-shard.sh exits with this status when the numerical protocol rejects a row's measurements.
 PROTOCOL_REJECTION_STATUS = 42
 # run-shard.sh exits with this status when any check of a route's correctness stage fails.
 SEMANTIC_FAILURE_STATUS = 44
+SEMANTIC_FAILURE_DETAIL = f"semantic failure: status {SEMANTIC_FAILURE_STATUS}"
+# A unit campaign phase's digest of the tooling that started it, beside its campaign state.
+TOOLING_DIGEST = "tooling-digest.txt"
+WORK_ITEM_FIELDS = (
+    "platform", "instance_class", "shard_id", "unit_id", "replica", "estimated_seconds", "excluded_instances")
+# Lease outcomes that spend one of the item's attempts.
+COUNTED_UNIT_OUTCOMES = frozenset(("failed", "interrupted", "lost"))
+# Lease outcomes after which the lease's host can no longer change what it became.
+SETTLED_UNIT_OUTCOMES = frozenset(("stop", "accepted", "superseded", "failed", "rejected", "interrupted"))
 # platforms.tsv pins each AMI by its ID in this region; other regions run the image of the same name.
 PINNED_AMI_REGION = "us-west-2"
 AMAZON_AMI_OWNER = "137112412989"
@@ -140,6 +176,27 @@ class Platform:
 
 
 @dataclass(frozen=True)
+class WorkItem:
+    """One replica of a work unit on one platform, measured by any unit worker of its pool."""
+    platform: str
+    instance_class: str
+    shard: str
+    unit_id: str
+    replica: int
+    estimated_seconds: float
+    # Instances a confirmation must avoid: those that measured the unit's primary replicas.
+    excluded_instances: frozenset = frozenset()
+
+    @property
+    def identity(self):
+        return f"{self.platform}/{self.unit_id}/replica-{self.replica}"
+
+    @property
+    def pool(self):
+        return self.platform, self.instance_class
+
+
+@dataclass(frozen=True)
 class Job:
     platform: Platform
     shard: str
@@ -188,8 +245,8 @@ def parse_args():
     parser.add_argument("--spot-only", action="store_true",
                         help="wait and retry on Spot; prohibit On-Demand launches and fallback")
     parser.add_argument("--refill-unresolved", action="store_true",
-                        help="resume an existing result root on On-Demand, giving each job that "
-                             "exhausted its replacements one more attempt")
+                        help="host-session campaigns only: resume an existing result root on On-Demand, "
+                             "giving each job that exhausted its replacements one more attempt")
     parser.add_argument("--spot-vcpu-reserve", type=int, default=SPOT_VCPU_SAFETY_RESERVE)
     parser.add_argument("--release-version", default="",
                         help="measure the pinned published JAR for this version instead of source-built classes")
@@ -214,6 +271,9 @@ def parse_args():
                              "when their native target matches")
     parser.add_argument("--local-engine-builds", action="store_true",
                         help="have every host build its own engines, as before the build phase existed")
+    parser.add_argument("--unit-workers", action="store_true",
+                        help="lease the phase's work units to unit worker hosts instead of running one host "
+                             "per shard replica")
     parser.add_argument("--transfer-bucket", action="append", default=[], metavar="REGION=BUCKET",
                         help="shared transfer bucket for hosts launched in REGION; regions without one "
                              "use a per-session bucket")
@@ -258,12 +318,18 @@ def execution_policy(arguments):
             "fleet_budget": str(arguments.shared_budget.policy_path) if getattr(arguments, "shared_budget", None) else None,
             "fleet_policy": arguments.shared_budget.policy if getattr(arguments, "shared_budget", None) else None,
             # Each platform's engine-build manifest SHA-256, or "local" when hosts build their own.
-            "engine_builds": getattr(arguments, "engine_build_policy", "local")}
+            "engine_builds": getattr(arguments, "engine_build_policy", "local"),
+            "unit_workers": getattr(arguments, "unit_workers", False)}
 
 
 def recorded_engine_builds(policy):
     # Policies recorded before the build phase existed had every host build locally.
     return policy.get("engine_builds", "local")
+
+
+def recorded_policy(policy):
+    # Policies recorded before unit workers existed ran one host per shard replica.
+    return {**policy, "engine_builds": recorded_engine_builds(policy), "unit_workers": policy.get("unit_workers", False)}
 
 
 def validate_execution_policy(arguments, result_root):
@@ -278,7 +344,7 @@ def validate_execution_policy(arguments, result_root):
         path = result_root / "refill-execution-policy.json"
     if path.exists():
         recorded = json.loads(path.read_text())
-        if {**recorded, "engine_builds": recorded_engine_builds(recorded)} != expected:
+        if recorded_policy(recorded) != expected:
             raise UnsafeCampaignError("campaign execution policy changed on restart")
         return
     temporary = path.with_suffix(".new")
@@ -423,6 +489,37 @@ def build_jobs(phase, platforms, shards, confirmation_jobs):
     ]
 
 
+def build_work_items(phase, platforms, units, shards, confirmation_units=()):
+    """Each platform's replicas of the phase's units: replica 1 in smoke, 1 to 3 in primary, and
+    the listed replica 4 confirmations."""
+    if phase == "confirmation":
+        selected = confirmation_units
+    else:
+        replicas = (1,) if phase == "smoke" else (1, 2, 3)
+        ordered = [unit_id for unit_id, unit in sorted(units.items(), key=lambda entry: (
+            entry[1]["shard_id"], int(entry[1]["unit_index"]))) if unit["shard_id"] in shards]
+        selected = [(platform.name, unit_id, replica, frozenset())
+                    for platform in platforms
+                    for unit_id in ordered
+                    for replica in replicas]
+    return [WorkItem(platform, units[unit_id]["instance_class"], units[unit_id]["shard_id"], unit_id, replica,
+                     float(units[unit_id]["estimated_seconds"]), instances)
+            for platform, unit_id, replica, instances in selected]
+
+
+def unit_worker_job(platform, instance_class, ordinal, host_epoch, market, spot_capacity_failures=()):
+    """A unit worker host of a pool; its replica is the worker's ordinal within the phase."""
+    if instance_class == "concurrency":
+        platform = allocated_platform(platform, platform.concurrency_instance_type, platform.concurrency_vcpus)
+    return Job(platform, UNIT_WORKER_SHARD, ordinal, host_epoch, 1, market, "unit-worker",
+               spot_capacity_failures=tuple(spot_capacity_failures))
+
+
+def unit_worker_pool(job):
+    concurrency = job.platform.concurrency_instance_type and job.platform.instance_type == job.platform.concurrency_instance_type
+    return job.platform.name, "concurrency" if concurrency else "ordinary"
+
+
 def concurrency_platform(platform, shard):
     if shard in CONCURRENCY_SHARDS and platform.concurrency_instance_type:
         return allocated_platform(platform, platform.concurrency_instance_type, platform.concurrency_vcpus)
@@ -444,7 +541,8 @@ def platform_has_capacity(candidate, running, arguments):
     return sum(job.platform.name == candidate.platform.name for _, job, _ in running.values()) < limit
 
 
-def validate_configuration(arguments, jobs, launched_jobs=None):
+def validate_configuration(arguments, jobs, launched_jobs=None, items=None):
+    """Check the campaign's limits and derive its phase deadline; items are a unit campaign's work."""
     campaign_heap_size(arguments)
     if getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) < 0:
         raise SystemExit("Spot vCPU reserve must not be negative")
@@ -472,7 +570,7 @@ def validate_configuration(arguments, jobs, launched_jobs=None):
     if getattr(arguments, "refill_unresolved", False) and (getattr(arguments, "spot_only", False) or budget):
         raise SystemExit("refill runs On-Demand without --spot-only or a shared fleet budget")
     # Each worker type launches only in the allowed regions that hold its image.
-    workers = [job.platform for job in jobs]
+    workers = campaign_worker_platforms(arguments, jobs, items)
     launchable = {platform.name: [region for region in regions if amis is None or (platform.name, region) in amis]
                   for platform in workers}
     fleet_limits, fleet_vcpus = {}, None
@@ -489,6 +587,12 @@ def validate_configuration(arguments, jobs, launched_jobs=None):
                          "the policy allows On-Demand in an allowed region holding each worker type's image")
     if getattr(arguments, "execute", False) and arguments.max_concurrent > DEFAULT_MAX_CONCURRENT and budget is None:
         raise SystemExit("more than 64 workers requires a shared fleet budget")
+    if items is not None and os.environ.get("BASELINE_JONI_JMH_TIME"):
+        # The override would shorten a unit's frozen JMH windows while its receipts claim them.
+        raise SystemExit("unit workers measure the frozen protocol; unset BASELINE_JONI_JMH_TIME")
+    if items is not None and budget and budget.policy["max_attempt_seconds"] < UNIT_WORKER_TIMEOUT_SECONDS + 15 * 60:
+        raise SystemExit("unit workers require a shared fleet max_attempt_seconds of at least "
+                         f"{UNIT_WORKER_TIMEOUT_SECONDS + 15 * 60}, a worker's lifetime, last unit and cleanup")
     if not arguments.campaign_id or len(arguments.campaign_id) > 63:
         raise SystemExit("campaign_id must contain 1-63 characters")
     if type(arguments.max_concurrent) is not int or arguments.max_concurrent < 1:
@@ -496,7 +600,7 @@ def validate_configuration(arguments, jobs, launched_jobs=None):
     per_platform = getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT)
     if type(per_platform) is not int or per_platform < 1:
         raise SystemExit("per-platform concurrency must be a positive integer")
-    if arguments.phase == "primary" and len(jobs) == 0:
+    if arguments.phase == "primary" and len(jobs if items is None else items) == 0:
         raise SystemExit("primary campaign has no jobs")
     # A refill's deadline only needs to fit the attempts it launches.
     launched_jobs = jobs if launched_jobs is None else launched_jobs
@@ -510,10 +614,13 @@ def validate_configuration(arguments, jobs, launched_jobs=None):
                                      if region in fleet_limits), default=0) for platform in workers):
             raise SystemExit("shared fleet vCPU limit cannot admit every worker type")
         vcpu_waves = math.ceil(sum(job.platform.vcpus for job in jobs) / fleet_vcpus)
-    bounded_waves = max(math.ceil(len(launched_jobs) / host_limit),
-                        max((math.ceil(count / per_platform) for count in counts.values()), default=0),
-                        vcpu_waves)
-    required_seconds = (bounded_waves + 1) * JOB_TIMEOUT_SECONDS
+    if items is None:
+        bounded_waves = max(math.ceil(len(launched_jobs) / host_limit),
+                            max((math.ceil(count / per_platform) for count in counts.values()), default=0),
+                            vcpu_waves)
+        required_seconds = (bounded_waves + 1) * JOB_TIMEOUT_SECONDS
+    else:
+        required_seconds = unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus)
     explicit_deadline = getattr(arguments, "phase_timeout_seconds", None)
     arguments.topology_deadline_seconds = (explicit_deadline if explicit_deadline is not None else
                                           max(PHASE_TIMEOUT_SECONDS[arguments.phase], required_seconds + 3600))
@@ -528,6 +635,34 @@ def validate_configuration(arguments, jobs, launched_jobs=None):
     epochs = [job.host_epoch for job in jobs]
     if len(epochs) != len(set(epochs)):
         raise SystemExit("campaign contains reused host epochs")
+
+
+def campaign_worker_platforms(arguments, jobs, items):
+    """The worker types a campaign launches: its host jobs' platforms, or its unit pools' hosts."""
+    if items is None:
+        return [job.platform for job in jobs]
+    platforms = getattr(arguments, "unit_platforms", {})
+    return [unit_worker_job(platforms[name], instance_class, 0, 0, "spot").platform
+            for name, instance_class in sorted({item.pool for item in items}) if name in platforms]
+
+
+def unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus):
+    """The wall clock the phase's units need: worker lifetimes of work at the concurrency limits,
+    plus one retry wave, each wave the wrapper's full worker timeout."""
+    platforms = getattr(arguments, "unit_platforms", {})
+    work = {}
+    vcpu_seconds = 0
+    for item in items:
+        work[item.platform] = work.get(item.platform, 0) + item.estimated_seconds
+        platform = platforms.get(item.platform)
+        if platform is not None:
+            vcpus = platform.concurrency_vcpus if item.instance_class == "concurrency" else platform.vcpus
+            vcpu_seconds += vcpus * item.estimated_seconds
+    lifetime = UNIT_WORKER_LIFETIME_SECONDS
+    waves = max([math.ceil(sum(work.values()) / (host_limit * lifetime))] +
+                [math.ceil(seconds / (min(per_platform, host_limit) * lifetime)) for seconds in work.values()] +
+                ([math.ceil(vcpu_seconds / (fleet_vcpus * lifetime))] if fleet_vcpus else []))
+    return (waves + 1) * UNIT_WORKER_TIMEOUT_SECONDS
 
 
 def validate_durable_paths(root, arguments, result_root):
@@ -638,12 +773,26 @@ def validate_source(root, arguments):
     arguments.engine_tree = engine_tree
 
 
+def tracked_tooling(root):
+    """The benchmark tooling files Git tracks, which the frozen inputs and the tooling digest hash."""
+    return [root / path for path in check_output(["git", "ls-files", "tools/re2-benchmark"], cwd=root).splitlines()]
+
+
+def tooling_digest(root):
+    """The SHA-256 of the tracked benchmark tooling, over each file's path and content."""
+    if not (root / ".git").exists():
+        raise UnsafeCampaignError("a unit campaign records the digest of its tracked tooling, so it runs from a Git "
+                                  "checkout")
+    digest = hashlib.sha256()
+    for path in tracked_tooling(root):
+        digest.update(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}\n".encode())
+    return digest.hexdigest()
+
+
 def frozen_input_fingerprint(root, arguments, jobs_path):
     if not (root / ".git").exists():
         return None
-    tool_paths = check_output(
-        ["git", "ls-files", "tools/re2-benchmark"], cwd=root).splitlines()
-    tracked_inputs = [root / path for path in tool_paths]
+    tracked_inputs = tracked_tooling(root)
     tracked_inputs.extend((
         arguments.candidate_archive,
         arguments.candidate_provenance,
@@ -758,7 +907,41 @@ def validate_phase_prerequisite(root, arguments, platforms, result_root, expecte
                 f"{phase} prerequisite uses a different candidate for {job.identity}: {mismatches}")
 
 
+def validate_unit_phase_prerequisite(root, arguments, result_root, expected_replicas, phase):
+    """Revalidate the accepted unit campaign of the previous phase and its retained attempts."""
+    if result_root is None:
+        raise SystemExit(f"{arguments.phase} execution requires --{phase}-results")
+    policy_path = result_root / "execution-policy.json"
+    recorded = recorded_policy(json.loads(policy_path.read_text())) if policy_path.exists() else {}
+    if not recorded.get("unit_workers"):
+        raise SystemExit(f"a unit {arguments.phase} requires a unit {phase} prerequisite")
+    check_prerequisite_engine_builds(arguments, recorded["engine_builds"], phase)
+    accepted_units = result_root / "accepted-units.tsv"
+    try:
+        unit_session.check_semantic_rejections(result_root)
+        unit_session.validate_unit_campaign(
+            campaign_manifest(root, arguments),
+            root / "tools/re2-benchmark/baseline/platforms.tsv",
+            campaign_shards(root, arguments),
+            accepted_units,
+            arguments.campaign_id,
+            expected_replicas,
+            selected_shards=getattr(arguments, "selected_shards", None))
+        context = None
+        for receipt in read_accepted_units(accepted_units):
+            context = context or unit_validation_context(root, arguments)
+            validate_unit_artifacts(root, arguments, result_root, receipt, context=context)
+    except (OSError, ValidationError, UnsafeCampaignError) as error:
+        raise SystemExit(f"{phase} prerequisite campaign is not accepted: {error}") from error
+
+
 def validate_prerequisites(root, arguments, platforms):
+    if getattr(arguments, "unit_workers", False):
+        if arguments.phase == "primary":
+            validate_unit_phase_prerequisite(root, arguments, arguments.smoke_results, (1,), "smoke")
+        elif arguments.phase == "confirmation":
+            validate_unit_phase_prerequisite(root, arguments, arguments.primary_results, (1, 2, 3), "primary")
+        return
     if language_campaign(arguments):
         if arguments.phase == "primary":
             if arguments.smoke_results is None:
@@ -1334,21 +1517,32 @@ def current_spot_capacity(arguments, campaign_id, running_jobs, region=None):
 
 
 def write_jobs(path, jobs, *, extend=False):
+    write_manifest(path, JOB_MANIFEST_FIELDS, [
+        (job.platform.name, job.shard, job.replica, job.host_epoch, job.attempt, job.market,
+         job.platform.instance_type, job.platform.architecture) for job in jobs], extend=extend)
+
+
+def write_work_items(path, items):
+    write_manifest(path, WORK_ITEM_FIELDS, [
+        (item.platform, item.instance_class, item.shard, item.unit_id, item.replica, f"{item.estimated_seconds:g}",
+         ",".join(sorted(item.excluded_instances)) or "-") for item in items])
+
+
+def write_manifest(path, fields, rows, *, extend=False):
+    """Freeze a manifest; a later write may only reproduce it or, with extend, append to it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(path.name + ".new")
     with temporary_path.open("w", newline="") as output_file:
         writer = csv.writer(output_file, delimiter="\t", lineterminator="\n")
-        writer.writerow(JOB_MANIFEST_FIELDS)
-        for job in jobs:
-            writer.writerow((job.platform.name, job.shard, job.replica, job.host_epoch, job.attempt, job.market,
-                             job.platform.instance_type, job.platform.architecture))
+        writer.writerow(fields)
+        writer.writerows(rows)
         output_file.flush()
         os.fsync(output_file.fileno())
     existing = path.read_bytes() if path.exists() else None
     written = temporary_path.read_bytes()
     if existing is not None and existing != written and not (extend and written.startswith(existing)):
         temporary_path.unlink()
-        raise UnsafeCampaignError(f"existing job manifest changed: {path}")
+        raise UnsafeCampaignError(f"existing manifest changed: {path}")
     os.replace(temporary_path, path)
     fsync_directory(path.parent)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1360,6 +1554,10 @@ def job_result_root(result_root, job):
             f"replica-{job.replica}" / f"epoch-{job.host_epoch}")
 
 
+def phase_protocol(arguments):
+    return getattr(arguments, "smoke_protocol", "smoke") if arguments.phase == "smoke" else "qualification"
+
+
 def job_environment(job, arguments, root, result_root):
     if getattr(arguments, "spot_only", False) and job.market != "spot":
         raise UnsafeCampaignError("Spot-only policy prohibits launching an On-Demand job")
@@ -1367,7 +1565,10 @@ def job_environment(job, arguments, root, result_root):
     if getattr(arguments, "shared_budget", None):
         environment["CAMPAIGN_SPOT_MAX_PRICE"] = str(arguments.shared_budget.policy["hourly_rates"][job.platform.instance_type]["spot"])
     architecture = job.platform.architecture
-    benchmark_protocol = getattr(arguments, "smoke_protocol", "smoke") if arguments.phase == "smoke" else "qualification"
+    benchmark_protocol = phase_protocol(arguments)
+    unit_worker = job.workload == "unit-worker"
+    # A concurrency-class unit worker measures multicore units, as a concurrency shard host does.
+    multicore = job.shard in CONCURRENCY_SHARDS or (unit_worker and unit_worker_pool(job)[1] == "concurrency")
     region = job.region or campaign_regions(arguments)[0]
     amis = getattr(arguments, "regional_amis", None)
     ami_id = job.platform.ami_id if amis is None else amis.get((job.platform.name, region))
@@ -1397,9 +1598,9 @@ def job_environment(job, arguments, root, result_root):
         "INSTANCE_MARKET_TYPE": job.market,
         "CAMPAIGN_SPOT_ONLY": "1" if getattr(arguments, "spot_only", False) else "0",
         "REGULATOR_RELEASE_VERSION": getattr(arguments, "release_version", ""),
-        "BENCHMARK_CPU_LIST": "0-7" if job.shard in CONCURRENCY_SHARDS else "0",
+        "BENCHMARK_CPU_LIST": "0-7" if multicore else "0",
         "BENCHMARK_EXPECTED_VCPUS": str(job.platform.vcpus),
-        "TIMEOUT_SECONDS": str(JOB_TIMEOUT_SECONDS),
+        "TIMEOUT_SECONDS": str(UNIT_WORKER_TIMEOUT_SECONDS if unit_worker else JOB_TIMEOUT_SECONDS),
         "RESULT_ROOT": str(job_result_root(result_root, job)),
         "TRINO_REVISION": "c7503d170344c4e266f03fdb39e53c82aa7e3594",
         "REBAR_COMPARATOR_ORDER": "forward" if job.replica % 2 else "reverse",
@@ -1415,11 +1616,14 @@ def job_environment(job, arguments, root, result_root):
         "BASELINE_EXPECTED_ENGINE_TREE": campaign_engine_tree(arguments),
         "BENCHMARK_HEAP_SIZE": campaign_heap_size(arguments),
     })
-    # Only baseline shards install engine builds; never pass the controller's own environment through.
+    if unit_worker:
+        environment["UNIT_WORKER_LIFETIME_SECONDS"] = str(UNIT_WORKER_LIFETIME_SECONDS)
+    # Only baseline shards and unit workers install engine builds; never pass the controller's own
+    # environment through.
     environment.pop("ENGINE_BUILD_DIRECTORY", None)
     environment.pop("ENGINE_BUILD_MANIFEST_SHA256", None)
     directories = getattr(arguments, "engine_build_directories", None)
-    if directories and job.workload == "baseline-shard":
+    if directories and job.workload in ("baseline-shard", "unit-worker"):
         environment["ENGINE_BUILD_DIRECTORY"] = str(directories[job.platform.name].resolve())
         environment["ENGINE_BUILD_MANIFEST_SHA256"] = arguments.engine_build_policy[job.platform.name]
     if language_campaign(arguments):
@@ -1722,7 +1926,8 @@ def write_attempt(path, job, outcome, detail="-"):
         os.fsync(output_file.fileno())
 
 
-def write_event(path, event_type, campaign_id, job, session, reason, details=""):
+def write_event(path, event_type, campaign_id, job, session, reason, details="", unit_id=None, unit_attempt_id=""):
+    """Append one campaign event; a unit campaign's events, given a unit_id, name the unit and attempt."""
     # A launch that failed before the host started leaves only the cleanup manifest.
     metadata = {}
     for name in ("cleanup-manifest.txt", "session.txt"):
@@ -1737,6 +1942,9 @@ def write_event(path, event_type, campaign_id, job, session, reason, details="")
         "host_epoch", "reason", "artifact_uri", "artifact_sha256", "region", "availability_zone",
         "placement_score", "failure_classification", "details",
     )
+    if unit_id is not None:
+        index = fields.index("host_epoch") + 1
+        fields = (*fields[:index], "unit_id", "unit_attempt_id", *fields[index:])
     write_header = not path.exists()
     if not write_header:
         # Resumed campaigns keep the event columns their file started with.
@@ -1755,6 +1963,8 @@ def write_event(path, event_type, campaign_id, job, session, reason, details="")
             "replica_id": str(job.replica),
             "instance_id": "" if instance_id in {"none", "None"} else instance_id,
             "host_epoch": str(job.host_epoch),
+            "unit_id": unit_id or "",
+            "unit_attempt_id": unit_attempt_id,
             "reason": reason,
             "artifact_uri": str(session),
             "artifact_sha256": "",
@@ -1815,15 +2025,16 @@ def unit_validation_context(root, arguments):
     }
 
 
-def validate_unit_artifacts(root, arguments, result_root, receipt, context=None):
-    """Revalidate a retained unit attempt from its evidence; the receipt must regenerate exactly.
+def validate_unit_artifacts(root, arguments, result_root, receipt, directory=None, context=None):
+    """Revalidate a unit attempt from its evidence; the receipt must regenerate exactly.
 
-    Its host session's directory, the attempt's parent, holds the worker host's calibrations it
-    references.
-    A pass over several attempts passes the unit_validation_context it resolved once.
+    The attempt is the retained one unless directory names another copy. Its host session's
+    directory, the attempt's parent, holds the worker host's calibrations it references and, for
+    a chained attempt, the completion marker of the lease its before calibration came from. A pass
+    over several attempts passes the unit_validation_context it resolved once.
     """
     tables, expected = context or unit_validation_context(root, arguments)
-    directory = unit_attempt_directory(result_root, receipt)
+    directory = directory or unit_attempt_directory(result_root, receipt)
     identity = f"{unit_logical_identity(receipt)} attempt {receipt['unit_attempt_id']}"
     try:
         if (directory / "status.txt").read_text() != "status=complete\n":
@@ -1831,6 +2042,7 @@ def validate_unit_artifacts(root, arguments, result_root, receipt, context=None)
         validate_capacity(directory / "unit-capacity.txt")
         artifact_receipt = read_unit_receipt(directory / "unit-receipt.tsv")
         regenerated = unit_session.validate_unit_results(directory, host_evidence=directory.parent, tables=tables)
+        unit_session.check_chain_predecessor(directory, directory.parent)
     except (OSError, RuntimeError, ValueError) as error:
         raise UnsafeCampaignError(f"unit artifacts are not accepted for {identity}: {error}") from error
     if artifact_receipt != receipt or regenerated != receipt:
@@ -2047,7 +2259,8 @@ def read_attempts(path):
         return list(reader)
 
 
-def recover_budget_reservations(budget, arguments, result_root, jobs, attempts_path):
+def recover_budget_reservations(budget, arguments, result_root, jobs, attempts_path, live=frozenset()):
+    """Release the reservations of attempts proven to have stopped, keeping those of live host epochs."""
     by_identity = {job.logical_identity: job for job in jobs}
     attempts = read_attempts(attempts_path)
     latest_by_epoch = {}
@@ -2060,11 +2273,14 @@ def recover_budget_reservations(budget, arguments, result_root, jobs, attempts_p
     for item in budget.reservations(result_root):
         if item["campaign_id"] != arguments.campaign_id or item["logical_identity"] not in by_identity:
             raise UnsafeCampaignError("shared fleet reservation identifies a different controller")
+        if item["host_epoch"] in live:
+            continue
         job = replace(by_identity[item["logical_identity"]], host_epoch=item["host_epoch"], attempt=item["attempt"])
         key = (job.platform.name, job.shard, job.replica, job.host_epoch)
         latest = latest_by_epoch.get(key)
+        # A reservation whose attempt was still waiting for capacity was made just before a stop.
         stopped_before_launch = latest is None or (
-            latest["outcome"] == "retryable-infrastructure" and
+            latest["outcome"] in ("retryable-infrastructure", "queued-capacity") and
             key not in started_epochs)
         if stopped_before_launch:
             # No attempt record, or the settled pre-Popen outcome, proves this
@@ -2261,7 +2477,7 @@ def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted, *, spot_onl
                 f"{base_job.logical_identity} has artifacts for epoch {latest_epoch} without an attempt record")
         # The attempt's launch record names its region and the regions its chain already moved past.
         start = starts_by_epoch.get((base_job.platform.name, base_job.shard, base_job.replica, latest_epoch))
-        launch = dict(item.split("=", 1) for item in start["detail"].split(";") if "=" in item) if start else {}
+        launch = launch_record(start) if start else {}
         previous_job = replace(
             base_job,
             host_epoch=latest_epoch,
@@ -2390,27 +2606,9 @@ def refill_launch_jobs(arguments, result_root, jobs):
 
 
 def write_unresolved_jobs(path, unresolved):
-    if not unresolved:
-        if path.exists():
-            path.unlink()
-        return
-    temporary_path = path.with_name(path.name + ".new")
-    with temporary_path.open("w", newline="") as output_file:
-        writer = csv.writer(output_file, delimiter="\t", lineterminator="\n")
-        writer.writerow(("platform", "shard_id", "replica", "host_epoch", "attempt", "market", "detail"))
-        for job, detail in unresolved:
-            writer.writerow((
-                job.platform.name,
-                job.shard,
-                job.replica,
-                job.host_epoch,
-                job.attempt,
-                job.market,
-                detail.replace("\t", " ").replace("\n", " ")))
-        output_file.flush()
-        os.fsync(output_file.fileno())
-    os.replace(temporary_path, path)
-    fsync_directory(path.parent)
+    write_unresolved(path, ("platform", "shard_id", "replica", "host_epoch", "attempt", "market", "detail"), [
+        (job.platform.name, job.shard, job.replica, job.host_epoch, job.attempt, job.market, detail)
+        for job, detail in unresolved])
 
 
 def campaign_started_at(path, arguments):
@@ -2532,18 +2730,6 @@ def aggregate_language_results(arguments, result_root, jobs, accepted):
         fsync_directory(result_root)
 
 
-def execute_jobs(arguments, root, result_root, jobs):
-    result_root.mkdir(parents=True, exist_ok=True)
-    lock_path = result_root / "controller.lock"
-    with lock_path.open("w") as lock_file:
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise UnsafeCampaignError(
-                f"another controller owns campaign result root {result_root}") from error
-        return execute_jobs_locked(arguments, root, result_root, jobs)
-
-
 def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now, running_jobs):
     """Place a launch candidate and reserve its capacity.
 
@@ -2633,9 +2819,10 @@ class WrapperStartError(RuntimeError):
     """The wrapper process did not start, so no host was launched and its job may be retried."""
 
 
-def start_wrapper(arguments, root, result_root, runner, attempts_path, job):
+def start_wrapper(arguments, root, result_root, runner, attempts_path, job, slot=None, slot_failures=0):
     """Record and start the wrapper for an admitted job; the caller records it as started.
 
+    A unit worker's starting record names its launch slot and the failures it inherited from the slot.
     Only a failed process start raises WrapperStartError; any other failure stops the campaign.
     """
     environment = job_environment(job, arguments, root, result_root)
@@ -2648,7 +2835,8 @@ def start_wrapper(arguments, root, result_root, runner, attempts_path, job):
             f"region={environment['AWS_REGION']};"
             f"placement_score={environment.get('CAMPAIGN_PLACEMENT_SCORE', '')}" +
             (f";spot_capacity_failures={','.join(job.spot_capacity_failures)}"
-             if job.spot_capacity_failures else ""))
+             if job.spot_capacity_failures else "") +
+            (f";slot={slot};slot_failures={slot_failures}" if slot is not None else ""))
         try:
             process = subprocess.Popen(
                 [str(runner), job.identity],
@@ -2663,6 +2851,49 @@ def start_wrapper(arguments, root, result_root, runner, attempts_path, job):
         log.close()
         raise
     return process, log
+
+
+def launch_record(row):
+    """The placement, and a unit worker's launch slot, that start_wrapper records in a starting row's detail."""
+    return dict(item.split("=", 1) for item in row["detail"].split(";") if "=" in item)
+
+
+def halt_and_clean_up(arguments, result_root, budget, running, error):
+    """Stop a controller that failed with error: halt the fleet budget, and terminate the running hosts,
+    as process ID to (process, job, log), and prove their cleanup. The caller then re-raises error."""
+    if budget:
+        # Stop the other collector's admissions and ask it to drain too.
+        # Cleanup must still run if persisting the stop marker fails.
+        try:
+            budget.halt(str(error) or type(error).__name__)
+        except (OSError, RuntimeError):
+            pass
+    try:
+        terminate_and_validate_cleanup(running, result_root)
+        if budget:
+            for _, job, _ in running.values():
+                budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
+    except RuntimeError as cleanup_error:
+        reason = str(error) or type(error).__name__
+        raise UnsafeCampaignError(f"{reason}; {cleanup_error}") from error
+
+
+@contextlib.contextmanager
+def controller_lock(result_root):
+    result_root.mkdir(parents=True, exist_ok=True)
+    lock_path = result_root / "controller.lock"
+    with lock_path.open("w") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            raise UnsafeCampaignError(
+                f"another controller owns campaign result root {result_root}") from error
+        yield
+
+
+def execute_jobs(arguments, root, result_root, jobs):
+    with controller_lock(result_root):
+        return execute_jobs_locked(arguments, root, result_root, jobs)
 
 
 def execute_jobs_locked(arguments, root, result_root, jobs):
@@ -2844,21 +3075,7 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
             if running or (pending and not launched):
                 time.sleep(1 if budget else 5)
     except (Exception, KeyboardInterrupt) as error:
-        if budget:
-            # Stop the other collector's admissions and ask it to drain too.
-            # Cleanup must still run if persisting the stop marker fails.
-            try:
-                budget.halt(str(error) or type(error).__name__)
-            except (OSError, RuntimeError):
-                pass
-        try:
-            terminate_and_validate_cleanup(running, result_root)
-            if budget:
-                for _, job, _ in running.values():
-                    budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
-        except RuntimeError as cleanup_error:
-            reason = str(error) or type(error).__name__
-            raise UnsafeCampaignError(f"{reason}; {cleanup_error}") from error
+        halt_and_clean_up(arguments, result_root, budget, running, error)
         raise
     write_unresolved_jobs(result_root / "unresolved-jobs.tsv", unresolved)
     if unresolved:
@@ -2875,6 +3092,958 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
             arguments.campaign_id,
             (1,) if arguments.phase == "smoke" else (1, 2, 3),
             selected_shards=getattr(arguments, 'selected_shards', None))
+
+
+def read_unit_workers(path, platforms):
+    """The phase's planned unit worker hosts, read from unit-workers.tsv."""
+    if not path.exists():
+        return []
+    by_name = {platform.name: platform for platform in platforms}
+    with path.open(newline="") as input_file:
+        reader = csv.DictReader(input_file, delimiter="\t")
+        if tuple(reader.fieldnames or ()) != JOB_MANIFEST_FIELDS:
+            raise UnsafeCampaignError(f"unexpected unit worker schema in {path}")
+        rows = list(reader)
+    jobs = []
+    for row in rows:
+        platform = by_name.get(row["platform"])
+        if platform is None or row["shard_id"] != UNIT_WORKER_SHARD:
+            raise UnsafeCampaignError(f"unit worker manifest names an unexpected worker: {row}")
+        instance_class = "concurrency" if row["instance_type"] == platform.concurrency_instance_type else "ordinary"
+        job = unit_worker_job(platform, instance_class, int(row["replica"]), int(row["host_epoch"]), row["market"])
+        if job.platform.instance_type != row["instance_type"]:
+            raise UnsafeCampaignError(f"unit worker manifest names an unexpected instance type: {row}")
+        jobs.append(job)
+    return jobs
+
+
+def holds_marker(path, worker, sequence):
+    """Whether path already holds the worker's completion marker for the lease, as completing that lease fetched it."""
+    try:
+        marker = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return marker.get("host_session") == worker.host_session and marker.get("sequence") == sequence
+
+
+class DetachedWrapper:
+    """A worker wrapper an earlier controller started, followed through its process ID and session."""
+
+    def __init__(self, process_id, job, detail, result_root):
+        self.pid = process_id
+        self.job = job
+        self.detail = detail
+        self.result_root = result_root
+
+    def poll(self):
+        if wrapper_process_id(self.job, self.detail) is not None:
+            return None
+        try:
+            session = single_session(self.result_root, self.job)
+        except (OSError, RuntimeError):
+            return 1
+        return 0 if (session / "campaign-success").is_file() else 1
+
+    def send_signal(self, sent_signal):
+        try:
+            os.kill(self.pid, sent_signal)
+        except ProcessLookupError:
+            pass
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while (status := self.poll()) is None:
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(f"wrapper {self.pid}", timeout)
+            time.sleep(5)
+        return status
+
+    def kill(self):
+        self.send_signal(signal.SIGKILL)
+
+
+@dataclass
+class UnitWorker:
+    """A unit worker host: its wrapper, its session, and the leases it was given."""
+    job: Job
+    process: object
+    log: object
+    session: Path = None
+    metadata: dict = None
+    # Each lease's work item identity, or None for a stop lease.
+    leases: dict = field(default_factory=dict)
+    # Leases with a final outcome, and leases requeued, lost with their host or released before they
+    # started, whose completion may still land.
+    settled: set = field(default_factory=set)
+    abandoned: set = field(default_factory=set)
+    unsent: set = field(default_factory=set)
+    units: set = field(default_factory=set)
+    started: bool = False
+    stopping: bool = False
+    lost: bool = False
+    # The launch slot this worker took over, as the host epoch of its first worker, and the slot's
+    # consecutive failures before a start.
+    slot: int = None
+    slot_failures: int = 0
+
+    @property
+    def pool(self):
+        return unit_worker_pool(self.job)
+
+    @property
+    def host_session(self):
+        return self.metadata["session"]
+
+    @property
+    def instance_id(self):
+        value = (self.metadata or {}).get(f"{self.job.platform.architecture}_instance_id", "")
+        return "" if value in ("none", "None") else value
+
+    def outstanding(self):
+        done = self.settled | self.abandoned
+        return sorted(sequence for sequence in self.leases if sequence not in done)
+
+    def open(self):
+        return not (self.stopping or self.lost)
+
+
+class UnitDispatcher:
+    """One phase's unit queue: the work items that remain, each worker's leases, and what each became.
+
+    Workers are host jobs in unit-worker mode, launched, budgeted and cleaned up as other hosts
+    are. unit-workers.tsv freezes each worker before its launch, and unit-attempts.tsv records
+    each lease before it is written and each outcome it reaches, so a restart rebuilds this state
+    from the ledgers, the live workers' uploads, and the uploads recovered while cleaning up exited workers.
+    """
+
+    def __init__(self, arguments, root, result_root, items, platforms):
+        self.arguments = arguments
+        self.root = root
+        self.result_root = result_root
+        self.items = {item.identity: item for item in items}
+        self.pools = sorted({item.pool for item in items})
+        self.platforms = {platform.name: platform for platform in platforms}
+        self.budget = getattr(arguments, "shared_budget", None)
+        self.spot_only = getattr(arguments, "spot_only", False)
+        self.attempts_path = result_root / "job-attempts.tsv"
+        self.leases_path = result_root / "unit-attempts.tsv"
+        self.workers_path = result_root / "unit-workers.tsv"
+        self.events_path = result_root / "campaign-events.tsv"
+        self.accepted_path = result_root / "accepted-units.tsv"
+        self.rejections_path = result_root / unit_session.SEMANTIC_REJECTIONS
+        self.jobs_path = result_root / "work-items.tsv"
+        self.runner = root / "tools/re2-benchmark/aws/run-campaign.sh"
+        # The frozen inputs' fingerprint, taken when the phase runs; each launch checks it.
+        self.fingerprint = None
+        self.accepted = {}
+        # Each leased item's live lease, as its worker's host epoch and lease sequence.
+        self.held = {}
+        self.failures = {}
+        self.on_demand_only = set()
+        self.unresolved = {}
+        # Each item an attempt found semantically wrong, by that attempt, as semantic-rejections.tsv lists it;
+        # no other attempt clears it.
+        self.semantic = {}
+        self.tail = set()
+        self.workers = {}
+        self.planned = read_unit_workers(self.workers_path, platforms)
+        self.next_ordinal = max((job.replica for job in self.planned), default=0) + 1
+        self.next_epoch = max([PHASE_HOST_EPOCH_START[arguments.phase] - 1] +
+                              [job.host_epoch for job in self.planned]) + 1
+        self.candidates = {}
+        self.pool_regions = {}
+        # Each pool's free launch slots, as (slot, consecutive failures), and the pools a slot gave up on.
+        self.free_slots = {}
+        self.exhausted = {}
+        self.pool_ready = {}
+        self.on_demand_ready = {}
+        # Each pool's On-Demand workers admitted in its tail, and the Spot workers they retired.
+        self.tail_on_demand = {}
+        self.retired = {}
+        # Each lease, as its worker's host epoch and sequence, that spent one of its item's attempts.
+        self.counted = set()
+        self.capacity_waits = set()
+        self.terminated = set()
+
+    def queued(self, pool=None):
+        return [item for identity, item in self.items.items()
+                if identity not in self.accepted and identity not in self.unresolved and identity not in self.held
+                and (pool is None or item.pool == pool)]
+
+    def on_demand(self, item):
+        return not self.spot_only and (item.identity in self.on_demand_only or item.pool in self.tail)
+
+    def pool_workers(self, pool):
+        return [worker for worker in self.workers.values() if worker.pool == pool]
+
+    def worker_session(self, worker):
+        if worker.session is None:
+            try:
+                worker.session = single_session(self.result_root, worker.job)
+            except (OSError, RuntimeError):
+                return False
+        if worker.metadata is None:
+            try:
+                metadata = read_properties(worker.session / "session.txt")
+            except (OSError, RuntimeError):
+                return False
+            # The wrapper renames session.txt into place; a read that lacks the session or its result
+            # prefix waits for the next poll.
+            if not metadata.get("session") or not metadata.get("result_prefix"):
+                return False
+            worker.metadata = metadata
+        return True
+
+    def recover(self):
+        """Adopt the live workers an earlier controller started, and settle the ones that exited.
+
+        Each launch slot is rebuilt from its latest worker's starting record: a live worker holds it, and
+        one that exited leaves it free with its count, or given up.
+        """
+        latest = {}
+        placements = {}
+        for row in read_attempts(self.attempts_path):
+            if row["shard_id"] == UNIT_WORKER_SHARD:
+                latest[int(row["host_epoch"])] = row
+                if row["outcome"] == "starting":
+                    placements[int(row["host_epoch"])] = launch_record(row)
+        slots = {}
+        for epoch, placement in placements.items():
+            placement["slot"] = int(placement["slot"])
+            placement["slot_failures"] = int(placement["slot_failures"])
+            slots[placement["slot"]] = max(slots.get(placement["slot"], epoch), epoch)
+        workers = {}
+        exited = []
+        for job in self.planned:
+            row = latest.get(job.host_epoch)
+            placement = placements.get(job.host_epoch)
+            if row is None or placement is None:
+                continue
+            slot, slot_failures = placement["slot"], placement["slot_failures"]
+            if row["outcome"] not in ("starting", "started"):
+                if slots[slot] == job.host_epoch:
+                    # The earlier controller settled this worker; its slot is as that settlement left it.
+                    self.release_slot(job, slot, slot_failures, self.recovered_start(job),
+                                      0 if row["outcome"] == "stopped" else 1, row["outcome"], row["detail"])
+                continue
+            # The starting record names the region the worker was placed in.
+            job = replace(job, market=row["market"], region=placement.get("region", ""),
+                          placement_score=placement.get("placement_score", ""))
+            process_id = None
+            for probe in range(2):
+                try:
+                    session = single_session(self.result_root, job)
+                except (OSError, RuntimeError):
+                    session = None
+                if session is not None and (session / "cleanup-manifest.txt").is_file():
+                    break
+                process_id = wrapper_process_id(job, row["detail"])
+                if process_id is not None:
+                    break
+                if probe == 0:
+                    time.sleep(2)
+            if process_id is not None:
+                log = (self.result_root / "controller-logs" / (job.identity.replace("/", "-") + ".log")).open("a")
+                # A live worker is registered at once, so a recovery step that fails still stops it.
+                workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
+                    job, DetachedWrapper(process_id, job, row["detail"], self.result_root), log,
+                    slot=slot, slot_failures=slot_failures)
+            elif session is not None and (session / "cleanup-manifest.txt").is_file():
+                workers[job.host_epoch] = UnitWorker(job, None, None, session=session,
+                                                     slot=slot, slot_failures=slot_failures)
+                exited.append(workers[job.host_epoch])
+            elif session is None and row["outcome"] == "starting":
+                write_attempt(self.attempts_path, job, "retryable-infrastructure", WRAPPER_NOT_CREATED)
+                self.release_slot(job, slot, slot_failures, False, 1, "retryable-infrastructure",
+                                  WRAPPER_NOT_CREATED)
+            else:
+                raise UnsafeCampaignError(f"detached unit worker {job.identity} exited without cleanup evidence")
+        if self.budget:
+            live = {epoch for epoch, worker in workers.items() if worker.process is not None}
+            recover_budget_reservations(self.budget, self.arguments, self.result_root, self.planned,
+                                        self.attempts_path, live)
+        self.accepted = recover_accepted_units(self.root, self.arguments, self.result_root, self.accepted_path)
+        for row in read_semantic_rejections(self.rejections_path):
+            identity = unit_logical_identity(row)
+            if identity not in self.items:
+                raise UnsafeCampaignError(f"semantic-rejection ledger names an unexpected work item: {identity}")
+            self.semantic.setdefault(identity, row["unit_attempt_id"])
+        outcomes = {}
+        for row in read_unit_attempts(self.leases_path):
+            epoch, sequence = int(row["host_epoch"]), int(row["sequence"])
+            identity = None if row["unit_id"] == "-" else f"{row['platform']}/{row['unit_id']}/replica-{row['replica']}"
+            if identity is not None and identity not in self.items:
+                raise UnsafeCampaignError(f"unit attempt ledger names an unexpected work item: {identity}")
+            outcomes.setdefault((epoch, sequence), (identity, set()))[1].add(row["outcome"])
+            if row["outcome"] == "rejected":
+                self.unresolved[identity] = row["detail"]
+            if row["outcome"] == "interrupted" and not self.spot_only:
+                self.on_demand_only.add(identity)
+            worker = workers.get(epoch)
+            if worker is None:
+                continue
+            self.worker_session(worker)
+            if row["outcome"] in ("leased", "stop"):
+                worker.leases[sequence] = identity
+                worker.unsent.add(sequence)
+                if identity is not None:
+                    worker.units.add(self.items[identity].unit_id)
+            if row["outcome"] == "stop":
+                worker.stopping = True
+            if row["outcome"] in SETTLED_UNIT_OUTCOMES:
+                worker.settled.add(sequence)
+            elif row["outcome"] in ("lost", "released"):
+                # A live worker's lease is abandoned only when its host was judged lost.
+                worker.abandoned.add(sequence)
+                worker.lost = True
+        for lease, (identity, seen) in outcomes.items():
+            if identity is not None and seen & COUNTED_UNIT_OUTCOMES:
+                self.count(self.items[identity], "earlier attempts", lease)
+        for identity in self.accepted:
+            self.unresolved.pop(identity, None)
+        for epoch, worker in self.workers.items():
+            for sequence in worker.outstanding():
+                if worker.leases[sequence] is not None:
+                    self.held[worker.leases[sequence]] = (epoch, sequence)
+        for worker in exited:
+            self.finish(worker, 0 if (worker.session / "campaign-success").is_file() else 1)
+
+    def recovered_start(self, job):
+        """Whether a settled worker's recovered uploads show it started, as its settlement judged."""
+        try:
+            objects = single_session(self.result_root, job) / "recovered-uploads" / "objects"
+        except (OSError, RuntimeError):
+            return False
+        return shows_worker_start(recovered_keys(objects))
+
+    def count(self, item, detail, lease):
+        """Spend one of the item's attempts, once per lease; an item that spent them all stays unresolved."""
+        if lease in self.counted:
+            return
+        self.counted.add(lease)
+        self.failures[item.identity] = self.failures.get(item.identity, 0) + 1
+        if self.failures[item.identity] >= MAX_UNIT_ATTEMPTS and item.identity not in self.accepted:
+            self.unresolved[item.identity] = f"{detail}; spent its {MAX_UNIT_ATTEMPTS} attempts"
+
+    def settle(self, worker, sequence, outcome, detail="-"):
+        identity = worker.leases[sequence]
+        write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail)
+        worker.settled.add(sequence)
+        if self.held.get(identity) == (worker.job.host_epoch, sequence):
+            del self.held[identity]
+
+    def abandon(self, worker, sequence, outcome, detail):
+        """Requeue a lease whose host was lost or exited; a completion that still lands is processed."""
+        identity = worker.leases[sequence]
+        write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail)
+        worker.abandoned.add(sequence)
+        if self.held.get(identity) == (worker.job.host_epoch, sequence):
+            del self.held[identity]
+        if outcome == "lost":
+            self.count(self.items[identity], detail, (worker.job.host_epoch, sequence))
+
+    def event_job(self, worker, item):
+        return replace(worker.job, shard=item.shard, replica=item.replica)
+
+    def event_unit(self, worker, sequence):
+        """The unit_id and unit_attempt_id keywords of a lease's events; a stop lease names no unit."""
+        identity = worker.leases.get(sequence)
+        if identity is None:
+            return {"unit_id": ""}
+        return {"unit_id": self.items[identity].unit_id,
+                "unit_attempt_id": unit_session.format_unit_attempt(worker.host_session, sequence)}
+
+    def reject(self, worker, sequence, detail):
+        """Leave the item unresolved without retrying it, as a rejected host job is, and let other work go on."""
+        item = self.items[worker.leases[sequence]]
+        self.settle(worker, sequence, "rejected", detail)
+        if item.identity not in self.accepted:
+            self.unresolved[item.identity] = detail
+        write_event(self.events_path, "rejected-session", self.arguments.campaign_id, self.event_job(worker, item),
+                    worker.session, "unit-rejected", detail, **self.event_unit(worker, sequence))
+
+    def interrupt(self, worker, sequence):
+        item = self.items[worker.leases[sequence]]
+        self.settle(worker, sequence, "interrupted", "spot-interruption-notice")
+        worker.stopping = True
+        if not self.spot_only:
+            self.on_demand_only.add(item.identity)
+        self.count(item, "Spot interruption", (worker.job.host_epoch, sequence))
+        write_event(self.events_path, "interruption", self.arguments.campaign_id, self.event_job(worker, item),
+                    worker.session, "spot-interruption-notice",
+                    f"replacement_market={'spot' if self.spot_only else 'on-demand'}",
+                    **self.event_unit(worker, sequence))
+
+    def complete(self, worker, sequence, keys, fetch):
+        """Accept, supersede, retry or reject one lease from its completion marker and result."""
+        item = self.items[worker.leases[sequence]]
+        attempt = unit_session.format_unit_attempt(worker.host_session, sequence)
+        staging = self.result_root / "unit-results" / worker.host_session
+        marker_path = staging / f"lease-{sequence}-completion.json"
+        fetch(completion_key(sequence), marker_path)
+        try:
+            marker = json.loads(marker_path.read_text())
+        except ValueError as error:
+            raise UnsafeCampaignError(f"unit completion marker {attempt} is not JSON") from error
+        absent = [key for key in UNIT_COMPLETION_FIELDS if key not in marker]
+        if absent:
+            raise UnsafeCampaignError(f"unit completion marker {attempt} lacks {absent}")
+        expected = {
+            "schema_version": 1, "host_session": worker.host_session, "sequence": sequence,
+            "campaign_id": self.arguments.campaign_id, "phase": self.arguments.phase, "platform": item.platform,
+            "unit_id": item.unit_id, "replica_id": item.replica, "unit_attempt_id": attempt,
+        }
+        mismatches = [key for key, value in expected.items() if marker.get(key) != value]
+        if mismatches:
+            raise UnsafeCampaignError(f"unit completion marker {attempt} does not match its lease: {mismatches}")
+        if marker.get("exit_status") == SEMANTIC_FAILURE_STATUS:
+            # A verdict that the semantics are wrong rejects the unit for good, before or after another attempt.
+            # Its ledger row is durable before the lease's outcome is.
+            persist_semantic_rejection(self.rejections_path, item, attempt)
+            self.semantic.setdefault(item.identity, attempt)
+            return self.reject(worker, sequence, SEMANTIC_FAILURE_DETAIL)
+        # A unit already settled needs none of this lease's evidence.
+        accepted = self.accepted.get(item.identity)
+        if accepted is not None:
+            if accepted["unit_attempt_id"] == attempt:
+                # The controller stopped after accepting this attempt, before recording its outcome.
+                self.settle(worker, sequence, "accepted")
+            else:
+                self.settle(worker, sequence, "superseded", f"{accepted['unit_attempt_id']} was accepted first")
+            return
+        if item.identity in self.semantic:
+            return self.settle(worker, sequence, "superseded",
+                               f"{self.semantic[item.identity]} was rejected for a semantic failure")
+        calibrations = [f"{digest}.json" for digest in (marker.get("calibration_before"), marker.get("calibration_after"))
+                        if digest]
+        if any(re.fullmatch(r"[0-9a-f]{64}\.json", name) is None for name in calibrations):
+            raise UnsafeCampaignError(f"unit completion marker {attempt} names an invalid calibration")
+        # The worker uploads a lease's calibrations before its completion marker.
+        missing = [name for name in calibrations if calibration_key(name) not in keys]
+        if missing:
+            return self.reject(worker, sequence, f"named host calibration is missing: {', '.join(missing)}")
+        archive = staging / f"lease-{sequence}.tar.gz"
+        fetch(result_key(sequence), archive)
+        for name in calibrations:
+            path = staging / "calibrations" / name
+            # A chained lease's before calibration is the after of the lease before it, already fetched.
+            if not path.is_file() or f"{engine_build.sha256_file(path)}.json" != name:
+                fetch(calibration_key(name), path)
+        if engine_build.sha256_file(archive) != marker.get("result_sha256"):
+            return self.reject(worker, sequence, "result archive does not match its completion marker")
+        directory = staging / f"lease-{sequence}"
+        try:
+            extract_unit_result(archive, directory)
+        except (OSError, tarfile.TarError) as error:
+            return self.reject(worker, sequence, f"result archive is unreadable: {error}")
+        predecessor = None
+        if (directory / "unit-chain.txt").is_file():
+            # A chained before must be the after calibration of the lease before it, by that lease's own marker.
+            predecessor = f"lease-{sequence - 1}-completion.json"
+            if completion_key(sequence - 1) in keys and not holds_marker(staging / predecessor, worker, sequence - 1):
+                fetch(completion_key(sequence - 1), staging / predecessor)
+        if marker.get("unit_status") != "complete" or marker.get("exit_status") != 0:
+            if marker.get("exit_status") == PROTOCOL_REJECTION_STATUS:
+                return self.reject(worker, sequence, f"numerical protocol rejection: status {PROTOCOL_REJECTION_STATUS}")
+            try:
+                capacity = read_properties(directory / "unit-capacity.txt")
+            except (OSError, RuntimeError):
+                capacity = {}
+            if capacity.get("capacity_status") == "rejected":
+                return self.reject(worker, sequence, "unit capacity gate rejected the host's resources")
+            detail = f"unit failed with status {marker.get('exit_status')}"
+            self.settle(worker, sequence, "failed", detail)
+            return self.count(item, detail, (worker.job.host_epoch, sequence))
+        try:
+            receipt = read_unit_receipt(directory / "unit-receipt.tsv")
+            if unit_logical_identity(receipt) != item.identity or receipt["unit_attempt_id"] != attempt:
+                raise RuntimeError(f"unit receipt names {unit_logical_identity(receipt)} attempt "
+                                   f"{receipt['unit_attempt_id']}, expected {item.identity} attempt {attempt}")
+            validate_unit_artifacts(self.root, self.arguments, self.result_root, receipt, directory)
+        except (OSError, RuntimeError) as error:
+            return self.reject(worker, sequence, f"artifact gate: {error}")
+        final = unit_attempt_directory(self.result_root, receipt)
+        retain_unit_attempt(directory, final, calibrations, predecessor)
+        self.accepted[item.identity] = persist_accepted_unit(self.accepted_path, final / "unit-receipt.tsv")
+        self.unresolved.pop(item.identity, None)
+        self.settle(worker, sequence, "accepted")
+
+    def lease_started(self, worker, sequence, keys, fetch):
+        """Whether the host began the lease, from its heartbeats."""
+        beats = {heartbeat_sequence(key) for key in keys} - {None}
+        if any(beat > sequence for beat in beats):
+            return True
+        if sequence not in beats:
+            return False
+        path = self.result_root / "unit-results" / worker.host_session / f"heartbeat-{sequence}.json"
+        fetch(heartbeat_key(sequence), path)
+        return json.loads(path.read_text()).get("unit_id") is not None
+
+    def interruption_names_unit(self, worker, sequence, fetch):
+        """Whether the lease's interruption bundle names a unit; a notice between units names none."""
+        path = self.result_root / "unit-results" / worker.host_session / f"lease-{sequence}-interrupted.tar.gz"
+        fetch(interruption_key(sequence), path)
+        try:
+            with tarfile.open(path, "r:gz") as bundle:
+                notice = json.load(bundle.extractfile("interruption.json"))
+        except (OSError, KeyError, AttributeError, ValueError, tarfile.TarError):
+            # An unreadable bundle is charged, as an interruption of the leased unit.
+            return True
+        return notice.get("unit_id") is not None
+
+    def reconcile(self, worker, keys, fetch, classification=None):
+        """Settle the worker's leases from its uploads; classification is that of an exited worker."""
+        for sequence in sorted(worker.leases):
+            if sequence in worker.settled or worker.leases[sequence] is None:
+                continue
+            if completion_key(sequence) in keys:
+                self.complete(worker, sequence, keys, fetch)
+            elif interruption_key(sequence) in keys:
+                if self.interruption_names_unit(worker, sequence, fetch):
+                    self.interrupt(worker, sequence)
+                elif sequence not in worker.abandoned:
+                    self.abandon(worker, sequence, "released", "Spot notice came before the lease started")
+            elif classification is not None and sequence not in worker.abandoned:
+                if not self.lease_started(worker, sequence, keys, fetch):
+                    self.abandon(worker, sequence, "released", "worker stopped before the lease started")
+                elif classification == "retryable-spot":
+                    # Status 43, or a reclaim that left no interruption record.
+                    self.interrupt(worker, sequence)
+                else:
+                    self.abandon(worker, sequence, "lost", f"worker exited: classification={classification}")
+
+    def poll(self, worker):
+        """Process a live worker's uploads and decide whether its host was lost."""
+        if not self.worker_session(worker):
+            return
+        try:
+            objects = list_unit_worker_results(self.arguments, worker)
+            keys = set(objects)
+            # Worker evidence shows the worker started, even one whose heartbeats never landed.
+            worker.started |= shows_worker_start(keys)
+
+            def fetch(key, path):
+                get_unit_worker_result(self.arguments, worker, key, path)
+
+            self.reconcile(worker, keys, fetch)
+            beats = {beat: modified for key, modified in objects.items()
+                     if (beat := heartbeat_sequence(key)) is not None}
+            if worker.lost or not beats or not worker.outstanding():
+                return
+            age = time.time() - beats[max(beats)]
+            if age < UNIT_HEARTBEAT_STALE_SECONDS or (
+                    age < UNIT_HEARTBEAT_LOST_SECONDS and
+                    unit_worker_instance_state(self.arguments, worker) in ("pending", "running", "unknown")):
+                return
+            worker.lost = True
+            for sequence in worker.outstanding():
+                if worker.leases[sequence] is None:
+                    continue
+                started = self.lease_started(worker, sequence, keys, fetch)
+                self.abandon(worker, sequence, "lost" if started else "released", f"heartbeat {age:.0f}s old")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            # S3 may be unavailable for a moment; the next poll, or cleanup's recovered uploads, retries.
+            return
+
+    def finish(self, worker, status):
+        """Settle an exited worker from its verified cleanup and the uploads cleanup recovered."""
+        try:
+            session, cleanup = validate_cleanup_manifest(self.result_root, worker.job)
+        except (OSError, RuntimeError) as error:
+            raise UnsafeCampaignError(
+                f"cleanup could not be proven for unit worker {worker.job.identity}: {error}") from error
+        validate_frozen_inputs(self.root, self.arguments, self.jobs_path, self.fingerprint)
+        if worker.log is not None:
+            worker.log.close()
+        if self.budget:
+            self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
+        self.workers.pop(worker.job.host_epoch, None)
+        classification = cleanup.get("failure_classification", "none")
+        detail = cleanup.get("failure_detail", "unknown")
+        objects = session / "recovered-uploads" / "objects"
+        keys = recovered_keys(objects)
+        if self.worker_session(worker):
+            def fetch(key, path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(objects / key, path)
+
+            self.reconcile(worker, keys, fetch, classification if status != 0 else "none")
+        worker.started |= shows_worker_start(keys)
+        write_attempt(self.attempts_path, worker.job, "stopped" if status == 0 else classification,
+                      "-" if status == 0 else detail)
+        pool = worker.pool
+        self.release_slot(worker.job, worker.slot, worker.slot_failures, worker.started, status,
+                          classification, detail, worker.job.host_epoch in self.terminated)
+        if worker.started:
+            rebalance = self.early_rebalance(worker, session, keys)
+            if rebalance is not None:
+                self.cool_down(pool, cleanup.get("aws_region") or worker.job.region)
+                write_event(self.events_path, "interruption", self.arguments.campaign_id, worker.job, session,
+                            "rebalance-recommendation", rebalance, unit_id="")
+            return
+        if status != 0 and worker.job.host_epoch not in self.terminated:
+            # Each launch that failed before its worker started is recorded as a host job's failure is.
+            retryable = classification in ("retryable-spot", "retryable-capacity", "retryable-infrastructure")
+            write_event(self.events_path, "interruption" if retryable else "rejected-session",
+                        self.arguments.campaign_id, worker.job, session, detail if retryable else "job-failure",
+                        f"status={status}; classification={classification}; detail={detail}", unit_id="")
+        if classification == "retryable-spot" and detail.startswith("launch-capacity:"):
+            # Spot moves past a region whose launch found no capacity, as a host job's replacement does.
+            self.cool_down(pool, cleanup.get("aws_region") or worker.job.region)
+        elif classification == "retryable-capacity":
+            self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
+
+    def cool_down(self, pool, region):
+        """Keep the pool's new Spot workers out of the region for its cool-down."""
+        self.pool_regions.setdefault(pool, {})[region] = time.monotonic()
+
+    def early_rebalance(self, worker, session, keys):
+        """Describe a Spot worker's stop for a rebalance recommendation that came early, or return None."""
+        evidence = session / worker.job.platform.architecture / "re2-results"
+        try:
+            stop = read_properties(evidence / "worker-session.txt")
+        except (OSError, RuntimeError):
+            return None
+        if worker.job.market != "spot" or stop.get("stop_reason") != "rebalance":
+            return None
+        completed = sum(key.startswith("units/") and key.endswith("/completion.json") for key in keys)
+        try:
+            launched = read_properties(evidence / "environment-manifest.txt")["instance_pending_time"]
+            seconds = (datetime.fromisoformat(stop["stopped_at"]) - datetime.fromisoformat(launched)).total_seconds()
+        except (OSError, RuntimeError, KeyError, ValueError):
+            seconds = None
+        if completed and (seconds is None or seconds > EARLY_REBALANCE_SECONDS):
+            return None
+        return f"units_completed={completed};seconds_after_launch={'unknown' if seconds is None else int(seconds)}"
+
+    def release_slot(self, job, slot, failures, started, status, classification, detail, terminated=False):
+        """Free the launch slot of an exited worker, from its exit as the attempts ledger records it.
+
+        A worker that started, by uploading worker evidence, clears its slot's count. One that failed before it
+        started passes the count, one higher, to its replacement, and a slot past its replacements gives up, as a
+        host job does, so its pool opens no new slot. A launch that found no capacity, or a wrapper never created,
+        booted nothing.
+        """
+        pool = unit_worker_pool(job)
+        if started:
+            failures = 0
+        elif (status != 0 and not terminated and detail != WRAPPER_NOT_CREATED and
+              classification != "retryable-capacity" and
+              not (classification == "retryable-spot" and detail.startswith("launch-capacity:"))):
+            failures += 1
+        if failures > MAX_REPLACEMENTS_PER_JOB:
+            self.exhausted[pool] = (f"unit worker {job.identity} failed before it started: {detail}; "
+                                    "the pool's workers exhausted their replacements")
+        else:
+            self.free_slots.setdefault(pool, []).append((slot, failures))
+
+    def resolve_unlaunchable(self, deadline_reached):
+        """Leave unresolved the queued items no worker can take: past the deadline, or in a pool that gave up."""
+        for item in self.queued():
+            if deadline_reached:
+                self.unresolved[item.identity] = f"{self.arguments.phase} campaign reached its wall-clock launch limit"
+            elif (item.pool in self.exhausted and not self.free_slots.get(item.pool) and
+                  not self.pool_workers(item.pool)):
+                self.unresolved[item.identity] = self.exhausted[item.pool]
+
+    def lease_document(self, worker, sequence):
+        document = {"schema_version": 1, "campaign_id": self.arguments.campaign_id,
+                    "platform": worker.job.platform.name, "host_session": worker.host_session, "sequence": sequence}
+        identity = worker.leases[sequence]
+        if identity is None:
+            return {**document, "stop": True}
+        item = self.items[identity]
+        return {**document, "phase": self.arguments.phase, "unit_id": item.unit_id, "replica_id": item.replica,
+                "protocol": phase_protocol(self.arguments)}
+
+    def issue(self, worker, item):
+        """Record a lease, or a stop lease without an item, before it is written."""
+        sequence = max(worker.leases, default=0) + 1
+        write_unit_attempt(self.leases_path, worker, sequence, item, "leased" if item else "stop")
+        worker.leases[sequence] = item.identity if item else None
+        worker.unsent.add(sequence)
+        if item is None:
+            worker.settled.add(sequence)
+            worker.stopping = True
+        else:
+            worker.units.add(item.unit_id)
+            self.held[item.identity] = (worker.job.host_epoch, sequence)
+
+    def send(self, worker):
+        for sequence in sorted(worker.unsent):
+            try:
+                put_unit_lease(self.arguments, worker, sequence, self.lease_document(worker, sequence))
+            except (OSError, subprocess.SubprocessError):
+                return
+            worker.unsent.discard(sequence)
+
+    def next_item(self, worker):
+        """The eligible queued item to lease next: On-Demand work first, then the longest. An item is
+        never a unit this host already held, nor one on an instance its replicas or confirmation
+        exclude, and On-Demand-only items go to On-Demand hosts; On-Demand hosts also take the rest."""
+        used = {}
+        for receipt in self.accepted.values():
+            used.setdefault((receipt["platform"], receipt["unit_id"]), set()).add(receipt["instance_id"])
+        on_demand_worker = worker.job.market == "on-demand"
+        # A Spot worker keeps taking its pool's tail items until an On-Demand worker replaces it.
+        candidates = [
+            item for item in self.queued(worker.pool)
+            if item.unit_id not in worker.units and worker.instance_id not in item.excluded_instances and
+            worker.instance_id not in used.get((item.platform, item.unit_id), ()) and
+            (on_demand_worker or self.spot_only or item.identity not in self.on_demand_only)]
+        return min(candidates, key=lambda item: (not self.on_demand(item), -item.estimated_seconds, item.identity),
+                   default=None)
+
+    def lease(self, worker):
+        """Keep the worker's next lease written one ahead of its current one, or stop it."""
+        if worker.metadata is None:
+            return
+        if (worker.open() and worker.job.market == "spot" and not self.spot_only and worker.pool in self.tail and
+                self.retired.get(worker.pool, 0) < self.tail_on_demand.get(worker.pool, 0)):
+            # A tail Spot worker retires once an On-Demand worker admitted in the tail replaces it.
+            self.retired[worker.pool] = self.retired.get(worker.pool, 0) + 1
+            self.issue(worker, None)
+        if worker.open() and worker.instance_id:
+            outstanding = worker.outstanding()
+            while len(outstanding) < 2:
+                # A worker leases ahead only while no waiting worker of its pool could take the item now.
+                waiting = sum(1 for other in self.pool_workers(worker.pool)
+                              if other is not worker and other.open() and not other.outstanding())
+                if outstanding and len(self.queued(worker.pool)) <= waiting:
+                    break
+                item = self.next_item(worker)
+                if item is None:
+                    if not outstanding or self.final(worker):
+                        self.issue(worker, None)
+                    break
+                self.issue(worker, item)
+                outstanding = worker.outstanding()
+        self.send(worker)
+
+    def final(self, worker):
+        """Whether the worker's pool can give it no further lease."""
+        others = {self.held[identity][0] for identity in self.held} - {worker.job.host_epoch}
+        return not self.queued(worker.pool) and not any(
+            self.workers[epoch].pool == worker.pool for epoch in others if epoch in self.workers)
+
+    def update_tail(self):
+        """Mark a pool for On-Demand replacement once its remaining estimated work falls to its tail share.
+
+        Its Spot workers keep taking tail items until an On-Demand worker admitted in the tail replaces them.
+        """
+        if self.spot_only:
+            return
+        for pool in self.pools:
+            items = [item for item in self.items.values() if item.pool == pool]
+            remaining = sum(item.estimated_seconds for item in items
+                            if item.identity not in self.accepted and item.identity not in self.unresolved)
+            if remaining <= sum(item.estimated_seconds for item in items) * ON_DEMAND_TAIL_PERCENT / 100:
+                self.tail.add(pool)
+
+    def pool_demand(self, pool, now):
+        """The market of the pool's next worker, if its queued items could use one more."""
+        if pool in self.exhausted and not self.free_slots.get(pool):
+            return None
+        queued = self.queued(pool)
+        waiting = [worker for worker in self.pool_workers(pool) if worker.open() and not worker.outstanding()]
+        on_demand = [item for item in queued if self.on_demand(item)]
+        if self.on_demand_ready.get(pool, 0) <= now:
+            if len(on_demand) > sum(worker.job.market == "on-demand" for worker in waiting):
+                return "on-demand"
+            spot = len(queued) - len(on_demand)
+        else:
+            # While On-Demand admission is refused, Spot workers take every item Spot may still run.
+            spot = sum(item.identity not in self.on_demand_only for item in queued)
+        if spot > 0 and len(queued) > len(waiting):
+            return "spot"
+        return None
+
+    def candidate(self, pool, market):
+        candidate = self.candidates.get(pool)
+        if candidate is None:
+            candidate = unit_worker_job(self.platforms[pool[0]], pool[1], self.next_ordinal, self.next_epoch, market)
+            self.next_ordinal += 1
+            self.next_epoch += 1
+            # The manifest names each worker before the budget can reserve its host epoch.
+            self.planned.append(candidate)
+            write_jobs(self.workers_path, self.planned, extend=True)
+            # A launch the budget defers keeps this worker for the pool's next launch.
+            self.candidates[pool] = candidate
+        now = time.monotonic()
+        cooling = self.pool_regions[pool] = {
+            region: failed_at for region, failed_at in self.pool_regions.get(pool, {}).items()
+            if now - failed_at < SPOT_REGION_COOL_DOWN_SECONDS}
+        candidate = replace(candidate, market=market, spot_capacity_failures=tuple(cooling))
+        if market == "spot" and not launch_placements(self.arguments, candidate):
+            # Each allowed region has found no Spot capacity for this pool within its cool-down.
+            if self.spot_only:
+                self.pool_regions.pop(pool, None)
+                candidate = replace(candidate, spot_capacity_failures=())
+            else:
+                candidate = replace(candidate, market="on-demand")
+        return candidate
+
+    def launch(self, now):
+        running = {worker.job.host_epoch: (worker.process, worker.job, worker.log) for worker in self.workers.values()}
+        blocked_vcpus = None
+        for pool in self.pools:
+            while len(self.workers) < self.arguments.max_concurrent and self.pool_ready.get(pool, 0) <= now:
+                market = self.pool_demand(pool, now)
+                # A worker is planned only once its platform has room for it.
+                if market is None or not platform_has_capacity(
+                        unit_worker_job(self.platforms[pool[0]], pool[1], 0, 0, market), running, self.arguments):
+                    break
+                candidate = self.candidate(pool, market)
+                if candidate.market == "on-demand" and self.on_demand_ready.get(pool, 0) > now:
+                    break
+                if self.budget and blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
+                    break
+                candidate, ready_at, admitted, scan, blocked = admit_launch(
+                    self.arguments, self.result_root, self.attempts_path, self.capacity_waits, candidate, now, now,
+                    [record[1] for record in running.values()])
+                self.candidates[pool] = candidate
+                if not admitted and candidate.market == "on-demand" and market == "on-demand":
+                    # The pool's Spot-eligible items need not wait for On-Demand admission.
+                    self.on_demand_ready[pool] = ready_at
+                    if self.pool_demand(pool, now) == "spot":
+                        continue
+                if not admitted:
+                    self.pool_ready[pool] = ready_at
+                    blocked_vcpus = blocked or blocked_vcpus
+                    if not scan:
+                        return
+                    break
+                worker = self.start(pool, candidate)
+                if worker is not None:
+                    running[candidate.host_epoch] = (worker.process, worker.job, worker.log)
+
+    def start(self, pool, job):
+        del self.candidates[pool]
+        # A launch takes over a free slot, and its failures, before it opens a new one named for it.
+        slots = self.free_slots.get(pool)
+        slot, slot_failures = slots.pop(0) if slots else (job.host_epoch, 0)
+        validate_frozen_inputs(self.root, self.arguments, self.jobs_path, self.fingerprint)
+        try:
+            process, log = start_wrapper(self.arguments, self.root, self.result_root, self.runner,
+                                         self.attempts_path, job, slot, slot_failures)
+        except WrapperStartError as error:
+            if self.budget:
+                self.budget.release(self.arguments.campaign_id, job.host_epoch, cleanup_verified=True)
+            detail = f"controller could not start wrapper: {error}"
+            write_attempt(self.attempts_path, job, "retryable-infrastructure", detail)
+            self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
+            self.release_slot(job, slot, slot_failures, False, 1, "retryable-infrastructure", detail)
+            return None
+        worker = self.workers[job.host_epoch] = UnitWorker(job, process, log, slot=slot, slot_failures=slot_failures)
+        if job.market == "on-demand" and pool in self.tail:
+            self.tail_on_demand[pool] = self.tail_on_demand.get(pool, 0) + 1
+        write_attempt(self.attempts_path, job, "started", f"wrapper_pid={process.pid}")
+        return worker
+
+    def start_campaign(self):
+        """The phase's start time. A first start records the tooling digest and an empty semantic-rejection
+        ledger before its campaign state; a restart must run the tooling that started the phase."""
+        state = self.result_root / "campaign-state.tsv"
+        digest_path = self.result_root / TOOLING_DIGEST
+        digest = tooling_digest(self.root)
+        if state.exists():
+            try:
+                recorded = read_properties(digest_path)["tooling_sha256"]
+            except (OSError, RuntimeError, KeyError) as error:
+                raise UnsafeCampaignError(
+                    f"unit campaign phase {self.result_root} records no tooling digest that can be read, so it "
+                    f"cannot be resumed: {error}") from error
+            if recorded != digest:
+                raise UnsafeCampaignError(
+                    f"unit campaign phase {self.result_root} was started by other tooling (tooling_sha256={recorded}, "
+                    f"now {digest}); resume it with the tooling that started it")
+            read_semantic_rejections(self.rejections_path)
+        else:
+            temporary = digest_path.with_name(digest_path.name + ".new")
+            with temporary.open("w") as output:
+                output.write(f"tooling_sha256={digest}\n")
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, digest_path)
+            write_ledger(self.rejections_path, [], unit_session.SEMANTIC_REJECTION_FIELDS)
+        return campaign_started_at(state, self.arguments)
+
+    def run(self):
+        arguments = self.arguments
+        validate_execution_policy(arguments, self.result_root)
+        self.fingerprint = frozen_input_fingerprint(self.root, arguments, self.jobs_path)
+        started_at = self.start_campaign()
+        remaining_seconds = max(0, phase_timeout(arguments) - max(0, time.time() - started_at))
+        deadline = time.monotonic() + remaining_seconds
+        try:
+            self.recover()
+            while True:
+                if self.budget:
+                    self.budget.check()
+                now = time.monotonic()
+                deadline_reached = now >= deadline
+                for worker in list(self.workers.values()):
+                    status = worker.process.poll()
+                    if status is None:
+                        self.poll(worker)
+                    else:
+                        self.finish(worker, status)
+                # Work handed back after the deadline, or to a pool that gave up, is not leased again.
+                self.resolve_unlaunchable(deadline_reached)
+                self.update_tail()
+                for worker in self.workers.values():
+                    self.lease(worker)
+                if not deadline_reached:
+                    self.launch(now)
+                drained = all(identity in self.accepted or identity in self.unresolved for identity in self.items)
+                for epoch, worker in self.workers.items():
+                    # A lost host is stopped at once; its cleanup still recovers a completion that lands.
+                    # Once nothing remains to lease, so is a host that never started.
+                    if (worker.lost or (drained and not worker.started)) and epoch not in self.terminated:
+                        self.terminated.add(epoch)
+                        worker.process.send_signal(signal.SIGTERM)
+                if not self.workers and not self.queued():
+                    break
+                time.sleep(UNIT_POLL_SECONDS)
+        except (Exception, KeyboardInterrupt) as error:
+            records = {worker.process.pid: (worker.process, worker.job, worker.log) for worker in self.workers.values()}
+            halt_and_clean_up(arguments, self.result_root, self.budget, records, error)
+            raise
+        # A semantic failure fails the campaign, as a host session's does, even where another attempt was accepted.
+        unresolved = [(item, SEMANTIC_FAILURE_DETAIL if identity in self.semantic else
+                       self.unresolved.get(identity, "not accepted"))
+                      for identity, item in sorted(self.items.items())
+                      if identity not in self.accepted or identity in self.semantic]
+        write_unresolved_units(self.result_root / "unresolved-units.tsv", unresolved)
+        if unresolved:
+            details = ", ".join(f"{item.identity} {detail}" for item, detail in unresolved)
+            raise SystemExit(f"campaign completed with unresolved units: {details}")
+        self.validate_phase()
+
+    def validate_phase(self):
+        """The phase gate: every unit replica of the phase accepted as one campaign."""
+        arguments = self.arguments
+        receipts, confirmations = self.accepted_path, ()
+        if arguments.phase == "confirmation":
+            receipts = arguments.primary_results / "accepted-units.tsv"
+            confirmations = read_accepted_units(self.accepted_path)
+        try:
+            unit_session.validate_unit_campaign(
+                campaign_manifest(self.root, arguments),
+                self.root / "tools/re2-benchmark/baseline/platforms.tsv",
+                campaign_shards(self.root, arguments),
+                receipts,
+                arguments.campaign_id,
+                (1,) if arguments.phase == "smoke" else (1, 2, 3),
+                selected_shards=getattr(arguments, "selected_shards", None),
+                confirmations=confirmations)
+        except (OSError, ValidationError) as error:
+            raise SystemExit(f"{arguments.phase} unit campaign is not accepted: {error}") from error
+
+
+def execute_units(arguments, root, result_root, items, platforms):
+    with controller_lock(result_root):
+        UnitDispatcher(arguments, root, result_root, items, platforms).run()
 
 
 def main():
@@ -2903,6 +4072,37 @@ def main():
                 len(arguments.selected_shards) != len(set(arguments.selected_shards))):
             raise SystemExit('invalid baseline shard selection')
         shards = arguments.selected_shards
+    if arguments.unit_workers:
+        if arguments.language_plan or arguments.phase == "build" or arguments.refill_unresolved:
+            raise SystemExit("unit workers run baseline smoke, primary, and confirmation work units only")
+        units = work_units.load(directory)
+        arguments.unit_platforms = {platform.name: platform for platform in platforms}
+        confirmation_units = ()
+        if arguments.phase == "confirmation":
+            if arguments.primary_results is None or arguments.confirmation_jobs is None:
+                raise SystemExit("unit confirmation requires --primary-results and --confirmation-jobs")
+            confirmation_units = read_confirmation_units(
+                arguments.confirmation_jobs, platforms, units,
+                read_accepted_units(arguments.primary_results / "accepted-units.tsv"))
+        items = build_work_items(arguments.phase, platforms, units, shards, confirmation_units)
+        validate_configuration(arguments, [], items=items)
+        validate_durable_paths(root, arguments, result_root)
+        items_path = result_root / "work-items.tsv"
+        write_work_items(items_path, items)
+        print(f"planned {len(items)} work items with maximum concurrency {arguments.max_concurrent}")
+        print(f"work item manifest: {items_path}")
+        if arguments.execute:
+            validate_source(root, arguments)
+            validate_dependencies(root, arguments, items)
+            resolve_engine_builds(root, arguments, platforms)
+            validate_prerequisites(root, arguments, platforms)
+            pools = sorted({item.pool for item in items})
+            workers = [unit_worker_job(arguments.unit_platforms[name], instance_class, 0, 0, "spot")
+                       for name, instance_class in pools]
+            validate_aws(arguments, platforms, workers)
+            upload_engine_builds(arguments, workers)
+            execute_units(arguments, root, result_root, items, platforms)
+        return
     if arguments.language_plan:
         if arguments.confirmation_jobs is not None or arguments.phase == "build":
             raise SystemExit("language plans cannot be combined with baseline confirmation jobs or engine builds")

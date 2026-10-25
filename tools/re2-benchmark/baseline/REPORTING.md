@@ -66,8 +66,14 @@ archive. `capacity.tsv` preserves these values for every accepted session.
 
 A campaign of work units supplies `accepted-units.tsv` ledgers in place of
 `accepted-sessions.tsv`; the reducer recognizes them by their `unit-receipt.tsv`
-columns and rejects a mix of the two. Each accepted unit attempt directory,
-found under the artifact roots by its `unit-receipt.tsv`, must contain:
+columns and rejects a mix of the two. It also refuses a phase root whose
+`semantic-rejections.tsv` is missing or lists an attempt that failed its
+correctness stage, as [unit dispatch](../aws/README.md#unit-dispatch)
+describes, whatever the unit's other attempts show. The reducer reads each
+accepted unit attempt where the controller retains it, at
+`units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>` under its
+phase root, the layout `unit_dispatch.py` owns, and ignores the controller's
+staged copies under `unit-results/`. Each attempt directory must contain:
 
 - `unit-receipt.tsv`
 - `unit-session.tsv`
@@ -82,7 +88,10 @@ A worker host records its calibrations once, in its host session's
 `calibrations/` directory beside its attempts. The host calibrations an attempt
 references belong to its artifact: the inventory lists them as
 `../calibrations/<sha256>.json`, they count in its `artifact_set_sha256`, and
-the campaign archive must bind them.
+the campaign archive must bind them. A chained attempt's artifact likewise
+includes `../lease-<n>-completion.json`, the completion marker of the lease its
+before calibration came from, which the controller retained beside it; the
+reducer requires that lease to have completed with that after calibration.
 
 The ledgers must pass campaign unit acceptance: every platform and checked-in
 unit of the selected shards, replicas 1, 2, and 3 of a unit on distinct EC2
@@ -358,6 +367,11 @@ python3 tools/re2-benchmark/baseline/render_report.py \
     --input-dir /durable/path/campaign/report-data \
     --output /durable/path/campaign/BASELINE_REPORT.md
 ```
+
+A unit campaign passes each phase root the same way, with `accepted-units.tsv`
+ledgers as its receipts and `semantic-rejections.tsv` beside each; the reducer
+reads the attempts retained under each root as
+[unit campaigns](#unit-campaigns) describes.
 
 The isolated tests use synthetic C8i, C8g, and C9g campaigns:
 
