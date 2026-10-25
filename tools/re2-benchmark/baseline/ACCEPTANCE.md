@@ -179,6 +179,43 @@ tools/re2-benchmark/baseline/validate-campaign-results.py \
     --accepted-sessions accepted-sessions.tsv
 ```
 
+A campaign of work units keeps `accepted-units.tsv` instead: one
+`unit-receipt.tsv` row per accepted unit replica, added atomically like a host
+receipt. Hosts do not yet pull units, so no controller phase writes this ledger
+yet; `run-campaign.py` holds its persistence and recovery for the unit
+dispatcher. Each attempt is retained at
+`units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>` under the
+result root. On restart, recovery revalidates every ledger row against that
+directory and adds a retained attempt the ledger lacks once it passes the same
+checks: final status, accepted capacity, a receipt regenerated from the
+evidence, and the frozen candidate. The first accepted attempt of a unit
+replica wins; a later attempt that also passes is superseded and stays out of
+the ledger.
+
+With `--accepted-units`, the campaign validator requires every platform and
+checked-in unit of the selected shards, with replicas 1, 2, and 3. It also
+requires:
+
+- the three replicas of a unit on distinct EC2 instances; different units may
+  share a host, its host epoch, and its host session
+- globally distinct unit attempt IDs, and each instance, host epoch, and host
+  session naming one host
+- the architecture and instance type pinned for the unit's shard
+- each receipt's owned and copied row counts and row-protocol digest
+  recomputed from the checked-in `units.tsv` and `row-protocol.tsv`, so every
+  receipt names the same frozen units and protocols
+- the frozen manifest digest and one candidate commit, engine tree, and
+  source-archive identity across all attempts
+
+A unit confirmation is replica `4`, at most one per platform and unit, on an
+instance none of that unit's replicas used.
+
+```bash
+tools/re2-benchmark/baseline/validate-campaign-results.py \
+    --campaign-id units-20261101 \
+    --accepted-units accepted-units.tsv
+```
+
 Run the isolated self-tests with:
 
 ```bash

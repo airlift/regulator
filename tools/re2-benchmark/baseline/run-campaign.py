@@ -19,13 +19,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import engine_build
+import unit_session
 from acceptance import RECEIPT_FIELDS, ValidationError, normalize_heap_size, validate_campaign, validate_host_results
 from topology import CONCURRENCY_SHARDS
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, REGION_PATTERN, BudgetError, FleetBudget, on_demand_regions, region_limits)
 from campaign_io import (
-    JSON_LEDGER_WORKLOADS, UnsafeCampaignError, aws_output, check_output, fsync_directory,
-    write_accepted_sessions)
+    JSON_LEDGER_WORKLOADS, UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
+from unit_dispatch import (
+    accepted_row, persist_accepted_unit, read_accepted_units, read_unit_receipt, unit_attempt_directory, unit_logical_identity)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
 import batch_acceptance
@@ -366,6 +368,32 @@ def read_confirmation_jobs(path, platforms, shards):
                 raise SystemExit(f"unknown confirmation shard: {row['shard_id']}")
             seen.add(key)
             selected.append((platform_by_name[row["platform"]], row["shard_id"], 4))
+    return selected
+
+
+def read_confirmation_units(path, platforms, units, primary_receipts):
+    """Replica 4 of each unstable unit, excluding the instances that measured its replicas 1 to 3.
+
+    Each platform and unit has one confirmation allowance, so a unit is listed at most once.
+    """
+    platform_names = {platform.name for platform in platforms}
+    used = {}
+    for receipt in primary_receipts:
+        used.setdefault((receipt["platform"], receipt["unit_id"]), set()).add(receipt["instance_id"])
+    selected = []
+    with path.open(newline="") as input_file:
+        for row in csv.DictReader(input_file, delimiter="\t"):
+            key = (row["platform"], row["unit_id"])
+            if key in {(platform, unit_id) for platform, unit_id, _, _ in selected}:
+                raise SystemExit(f"duplicate confirmation unit: {key}")
+            if row["platform"] not in platform_names:
+                raise SystemExit(f"unknown confirmation platform: {row['platform']}")
+            if units.get(row["unit_id"], {}).get("shard_id") != row["shard_id"]:
+                raise SystemExit(f"unknown confirmation unit: {row['shard_id']}/{row['unit_id']}")
+            if len(used.get(key, ())) != 3:
+                raise SystemExit(f"confirmation unit needs accepted primary replicas on three instances, "
+                                 f"found {len(used.get(key, ()))}: {key}")
+            selected.append((row["platform"], row["unit_id"], 4, frozenset(used[key])))
     return selected
 
 
@@ -1767,18 +1795,72 @@ def read_accepted_sessions(path):
 def persist_accepted_receipt(path, receipt_path):
     receipt = read_receipt(receipt_path)
     rows = read_accepted_sessions(path)
-    logical_identity = receipt_logical_identity(receipt)
-    existing = next(
-        (row for row in rows if receipt_logical_identity(row) == logical_identity),
-        None)
-    if existing is not None:
-        if existing != receipt:
-            raise UnsafeCampaignError(
-                f"conflicting accepted receipts for {logical_identity}: "
-                f"epochs {existing['host_epoch']} and {receipt['host_epoch']}")
-        return receipt
-    write_accepted_sessions(path, [*rows, receipt])
+    if accepted_row(rows, receipt, receipt_logical_identity, "host_epoch", "epochs") is None:
+        write_ledger(path, [*rows, receipt])
     return receipt
+
+
+def unit_validation_context(root, arguments):
+    """The unit tables and the frozen campaign that one pass over unit attempts checks each against."""
+    return unit_session.load_unit_tables(campaign_manifest(root, arguments)), {
+        "campaign_id": arguments.campaign_id,
+        "candidate_commit": check_output(["git", "rev-parse", candidate_revision(arguments)], cwd=root),
+        "candidate_archive_sha256": arguments.candidate_archive_sha256,
+        "engine_tree": campaign_engine_tree(arguments),
+        "heap_size": campaign_heap_size(arguments),
+    }
+
+
+def validate_unit_artifacts(root, arguments, result_root, receipt, context=None):
+    """Revalidate a retained unit attempt from its evidence; the receipt must regenerate exactly.
+
+    A pass over several attempts passes the unit_validation_context it resolved once.
+    """
+    tables, expected = context or unit_validation_context(root, arguments)
+    directory = unit_attempt_directory(result_root, receipt)
+    identity = f"{unit_logical_identity(receipt)} attempt {receipt['unit_attempt_id']}"
+    try:
+        if (directory / "status.txt").read_text() != "status=complete\n":
+            raise RuntimeError("unit attempt did not complete")
+        validate_capacity(directory / "unit-capacity.txt")
+        artifact_receipt = read_unit_receipt(directory / "unit-receipt.tsv")
+        regenerated = unit_session.validate_unit_results(directory, tables=tables)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise UnsafeCampaignError(f"unit artifacts are not accepted for {identity}: {error}") from error
+    if artifact_receipt != receipt or regenerated != receipt:
+        raise UnsafeCampaignError(f"accepted unit receipt cannot be reproduced from its artifacts: {identity}")
+    mismatches = [field for field, value in expected.items() if receipt[field] != value]
+    if mismatches:
+        raise UnsafeCampaignError(f"accepted unit receipt does not match the frozen campaign for {identity}: "
+                                  f"{mismatches}")
+
+
+def recover_accepted_units(root, arguments, result_root, accepted_units):
+    """Revalidate accepted-units.tsv against retained attempts and add a completed attempt it lacks.
+
+    The first accepted attempt of a unit replica wins; a later completed one is superseded.
+    """
+    accepted = {}
+    # The tables and frozen campaign are resolved once, for the first attempt the pass validates.
+    context = None
+    for receipt in read_accepted_units(accepted_units):
+        context = context or unit_validation_context(root, arguments)
+        validate_unit_artifacts(root, arguments, result_root, receipt, context=context)
+        accepted[unit_logical_identity(receipt)] = receipt
+    for receipt_path in sorted((result_root / "units").glob("*/*/replica-*/*/lease-*/unit-receipt.tsv")):
+        try:
+            receipt = read_unit_receipt(receipt_path)
+        except (OSError, RuntimeError) as error:
+            raise UnsafeCampaignError(f"invalid retained unit receipt {receipt_path}: {error}") from error
+        if unit_attempt_directory(result_root, receipt) != receipt_path.parent:
+            raise UnsafeCampaignError(f"unit receipt is not in its attempt's directory: {receipt_path}")
+        identity = unit_logical_identity(receipt)
+        if identity in accepted:
+            continue
+        context = context or unit_validation_context(root, arguments)
+        validate_unit_artifacts(root, arguments, result_root, receipt, context=context)
+        accepted[identity] = persist_accepted_unit(accepted_units, receipt_path)
+    return accepted
 
 
 def validate_receipt_candidate(root, arguments, result_root, job, receipt, receipt_path=None):

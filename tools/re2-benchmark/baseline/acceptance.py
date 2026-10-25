@@ -635,6 +635,21 @@ def load_shards(path):
     return shards
 
 
+def campaign_shards(manifest_rows, shards, selected_shards=None):
+    """The shards a campaign covers: all of the frozen manifest's, or a selection of them."""
+    manifest_shards = {row["shard_id"] for row in manifest_rows}
+    if manifest_shards != shards:
+        raise ValidationError(
+            f"manifest/shard mismatch: missing={sorted(shards - manifest_shards)}, "
+            f"unexpected={sorted(manifest_shards - shards)}")
+    if selected_shards is None:
+        return shards
+    selected = set(selected_shards)
+    if not selected or not selected <= shards or len(selected) != len(selected_shards):
+        raise ValidationError('invalid or duplicate selected shards')
+    return selected
+
+
 def validate_campaign(
         manifest_path,
         platforms_path,
@@ -645,20 +660,9 @@ def validate_campaign(
         selected_shards=None):
     manifest_rows = load_rows_manifest(manifest_path)
     platforms = load_platforms(platforms_path)
-    shards = load_shards(shards_path)
+    shards = campaign_shards(manifest_rows, load_shards(shards_path), selected_shards)
     receipts = read_tsv(receipts_path, RECEIPT_FIELDS, RECEIPT_FIELDS)
     manifest_digest = sha256_file(manifest_path)
-
-    manifest_shards = {row["shard_id"] for row in manifest_rows}
-    if manifest_shards != shards:
-        raise ValidationError(
-            f"manifest/shard mismatch: missing={sorted(shards - manifest_shards)}, "
-            f"unexpected={sorted(manifest_shards - shards)}")
-    if selected_shards is not None:
-        selected = set(selected_shards)
-        if not selected or not selected <= shards or len(selected) != len(selected_shards):
-            raise ValidationError('invalid or duplicate selected shards')
-        shards = selected
 
     expected_keys = {
         (platform, shard_id, replica_id)
