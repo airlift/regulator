@@ -231,7 +231,8 @@ line per unit with its counts and estimated seconds) and `unit-rows.tsv`
 (each unit's owned rows, copied rows, and representatives; one row ID
 contains a comma, so row lists are not packed into a column).
 `validate-units.py` regenerates both files byte for byte and checks them
-independently. `run-unit.sh` measures one unit; hosts do not yet pull units.
+independently. `run-unit.sh` measures one unit, and a unit worker host leases
+units one at a time (see [Unit workers](../aws/README.md#unit-workers)).
 
 - Atoms are the rows that must share a unit: every system of one logical row,
   which keeps both routes, native RE2 brackets, Joni, Trino, and route

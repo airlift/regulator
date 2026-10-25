@@ -17,7 +17,8 @@ class TestModeInventory(unittest.TestCase):
     def test_additional_mode_is_not_silently_ignored(self):
         with tempfile.TemporaryDirectory() as temporary:
             source = Path(temporary) / 'wrapper.sh'
-            source.write_text('if [[ "${MODE}" != baseline-shard && "${MODE}" != language-batch && "${MODE}" != surprise ]]; then\n')
+            source.write_text('case "${MODE}" in\n    baseline-shard | language-batch | surprise) ;;\n'
+                              '    *) exit 1 ;;\nesac\n')
             self.assertEqual(MODULE.shell_modes(source, 'MODE'), {'baseline-shard', 'language-batch', 'surprise'})
 
 

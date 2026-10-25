@@ -644,6 +644,10 @@ def environment_sha256(root):
         if (root / name).is_file()).encode()).hexdigest()
 
 
+def print_environment_sha256(arguments):
+    print(environment_sha256(arguments.directory))
+
+
 def copy_environment(arguments):
     """Copy the host's environment files into a unit or route directory, as environment_sha256 reads them."""
     for name in UNIT_ENVIRONMENT_FILES:
@@ -952,6 +956,10 @@ def parser():
     combine_parser.add_argument("--region", required=True)
     combine_parser.add_argument("--host-evidence", type=Path)
     combine_parser.set_defaults(function=combine)
+
+    environment_parser = subparsers.add_parser("environment-sha256")
+    environment_parser.add_argument("--directory", type=Path, required=True)
+    environment_parser.set_defaults(function=print_environment_sha256)
 
     copy_parser = subparsers.add_parser("copy-environment")
     copy_parser.add_argument("--source", type=Path, required=True)

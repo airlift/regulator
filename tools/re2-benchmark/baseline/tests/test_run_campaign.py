@@ -6,6 +6,8 @@ import importlib.util
 import io
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -683,18 +685,51 @@ class TestRunCampaign(unittest.TestCase):
         function = source[
             source.index("create_user_data()\n{"):
             source.index("\n}\n\nlaunch_instance()") + 2]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            user_data = Path(temporary_directory) / "user-data.sh"
-            script = (
-                f"{function}\n"
-                "CAMPAIGN_MODE=baseline-shard\n"
-                f"create_user_data test x86_64 result.tar.gz {user_data} ami url sha\n"
-                f"bash -n {user_data}\n")
+        for mode in ("baseline-shard", "unit-worker"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary_directory:
+                user_data = Path(temporary_directory) / "user-data.sh"
+                script = (
+                    f"{function}\n"
+                    f"CAMPAIGN_MODE={mode}\n"
+                    f"create_user_data test x86_64 result.tar.gz {user_data} ami url sha\n"
+                    f"bash -n {user_data}\n")
 
-            result = subprocess.run(
-                ["bash"], input=script, text=True, capture_output=True, check=False)
+                result = subprocess.run(
+                    ["bash"], input=script, text=True, capture_output=True, check=False)
 
-            self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_only_a_unit_worker_may_list_and_only_its_leases(self):
+        source = AWS_RUNNER.read_text()
+        function = source[
+            source.index("create_instance_profile()\n{"):
+            source.index("\n}\n\nsubnet_rotation()") + 2]
+        for mode in ("baseline-shard", "unit-worker"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary_directory:
+                script = (
+                    "aws_cli() { :; }\nsleep() { :; }\n"
+                    f"{function}\n"
+                    f"CAMPAIGN_MODE={mode} SESSION_DIR={shlex.quote(temporary_directory)} LOWER_SESSION_ID=session\n"
+                    "BUCKET=transfer INPUT_PREFIX=campaign/session/input RESULT_PREFIX=campaign/session/results\n"
+                    "ENGINE_BUILD_DIRECTORY=\n"
+                    "create_instance_profile\n")
+
+                result = subprocess.run(
+                    ["bash"], input=script, text=True, capture_output=True, check=False)
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                policy = json.loads((Path(temporary_directory) / "instance-transfer-policy.json").read_text())
+                listings = [statement for statement in policy["Statement"] if statement["Action"] == "s3:ListBucket"]
+                expected = [{
+                    "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::transfer",
+                    "Condition": {"StringLike": {"s3:prefix": "campaign/session/input/leases/*"}},
+                }] if mode == "unit-worker" else []
+                self.assertEqual(expected, listings)
+                self.assertEqual(
+                    [("s3:GetObject", "arn:aws:s3:::transfer/campaign/session/input/*"),
+                     ("s3:PutObject", "arn:aws:s3:::transfer/campaign/session/results/*")],
+                    [(statement["Action"], statement["Resource"]) for statement in policy["Statement"]
+                     if statement["Action"] != "s3:ListBucket"])
 
     def test_host_installs_rust_exactly_when_the_controller_expects_it(self):
         host = (AWS_RUNNER.parent / "run-host.sh").read_text()
@@ -1850,9 +1885,32 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
         self.assertIn('RE2_BENCHMARK_MODE must be baseline-shard', host_source)
         self.assertIn('CAMPAIGN_MODE=${CAMPAIGN_MODE:-baseline-shard}', campaign_source)
-        self.assertIn('"${CAMPAIGN_MODE}" != baseline-shard', campaign_source)
+        self.assertIn('case "${CAMPAIGN_MODE}" in\n    baseline-shard |', campaign_source)
         self.assertNotIn("run_trino_final_line_protocol_diagnostic", host_source)
         self.assertNotIn("TRINO_FINAL_LINE_PROTOCOL_DIAGNOSTIC", campaign_source)
+
+    def test_host_wrapper_takes_a_job_handler_from_its_mode_and_a_shard_handler_from_dispatch(self):
+        source = (SCRIPT.parents[1] / "aws" / "run-host.sh").read_text()
+        start = source.index('case "${BENCHMARK_MODE}:${RE2_CAMPAIGN_SHARD_ID:-}" in')
+        dispatch = source[start:source.index("\nesac\n", start) + 5]
+        for mode, shard, handler in (
+                ("engine-build", "engine-build", "engine-build"),
+                ("unit-worker", "unit-worker", "unit-worker"),
+                ("baseline-shard", "like-dfa-single-use", "trino-like"),
+                ("baseline-shard", "unit-worker", None),
+                ("unit-worker", "rebar-i", None),
+                ("engine-build", "", None)):
+            with self.subTest(mode=mode, shard=shard):
+                result = subprocess.run(
+                    ["bash", "-c", f'set -euo pipefail\n{dispatch}\nprintf "%s" "${{SHARD_HANDLER}}"'],
+                    env={**os.environ, "BENCHMARK_MODE": mode, "RE2_CAMPAIGN_SHARD_ID": shard,
+                         "REGULATOR_DIR": str(SCRIPT.parents[3])},
+                    capture_output=True, text=True)
+                if handler is None:
+                    self.assertEqual(1, result.returncode, result.stdout)
+                    self.assertIn(f"RE2_BENCHMARK_MODE={mode} disagrees with RE2_CAMPAIGN_SHARD_ID=", result.stderr)
+                else:
+                    self.assertEqual((0, handler), (result.returncode, result.stdout), result.stderr)
 
     def test_extended_rebar_manifest_check_is_concurrency_safe(self):
         generator = SCRIPT.parents[1] / "manifests" / "generate-extended-rebar.py"
@@ -1934,6 +1992,43 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             '"$repo_root/tools/re2-benchmark/manifests/rebar-revision.sh" "$rebar_root"',
             source)
         self.assertNotIn('git -C "$rebar_root" status', source)
+
+    def test_native_build_leaves_the_pinned_re2_checkout_clean(self):
+        # The traditional build's benchmark patches must not leave the checkout the Rebar build requires dirty.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools" / "re2-benchmark"
+            tools.mkdir(parents=True)
+            shutil.copy(SCRIPT.parents[1] / "build.sh", tools / "build.sh")
+            (tools / "fetch-dependencies.sh").write_text("#!/bin/sh\n")
+            (tools / "fetch-dependencies.sh").chmod(0o755)
+            re2 = root / "re2"
+            source = re2 / "re2" / "testing" / "regexp_benchmark.cc"
+            source.parent.mkdir(parents=True)
+            source.write_text("one\ntwo\n")
+            for command in (["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t",
+                                                          "commit", "-q", "-m", "pinned"]):
+                subprocess.run(["git", "-C", str(re2), *command], check=True)
+            for patch, content in (("random-text.patch", "one patched\ntwo\n"),
+                                   ("program-range.patch", "one patched\ntwo patched\n")):
+                source.write_text(content)
+                (tools / patch).write_text(subprocess.run(["git", "-C", str(re2), "diff"], capture_output=True,
+                                                          text=True, check=True).stdout)
+                subprocess.run(["git", "-C", str(re2), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(re2), "reset", "-q", "--hard", "HEAD"], check=True)
+            binary = root / "bin"
+            binary.mkdir()
+            for status in (0, 1):
+                with self.subTest(cmake_status=status):
+                    (binary / "cmake").write_text(f"#!/bin/sh\ngrep -q 'one patched' {source} || exit 9\nexit {status}\n")
+                    (binary / "cmake").chmod(0o755)
+                    result = subprocess.run(
+                        ["bash", str(tools / "build.sh")], capture_output=True, text=True,
+                        env={**os.environ, "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}", "RE2_DIR": str(re2),
+                             "RE2_BENCHMARK_BUILD_DIR": str(root / "build")})
+                    self.assertEqual(status, result.returncode, result.stderr)
+                    self.assertEqual("", subprocess.run(["git", "-C", str(re2), "status", "--porcelain"],
+                                                        capture_output=True, text=True, check=True).stdout)
 
     def test_native_rebar_build_uses_pinned_private_abseil(self):
         source = (SCRIPT.parents[1] / "rebar" / "build-native.sh").read_text()
