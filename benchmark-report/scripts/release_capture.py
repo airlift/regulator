@@ -1,10 +1,13 @@
 """Import complete release campaigns while retaining artifact and collector identities."""
 
+from contextlib import contextmanager
 import csv
+import gzip
 import hashlib
 import json
 from pathlib import Path
 import sys
+import tempfile
 
 from baseline_data import baseline_rows, read_rows
 from language_data import LANGUAGES, MEMORY_MODES, RELEASE_PLATFORMS, digest, language_rows
@@ -16,6 +19,7 @@ sys.path.insert(0, str(ROOT / 'tools/re2-benchmark/language'))
 import acceptance
 import fleet
 import released_artifact
+import retained_selection
 import topology
 
 
@@ -140,38 +144,55 @@ def validate_language_receipt_coverage(ledgers):
             raise ValueError('language ledger contains receipts outside the imported captures')
 
 
+@contextmanager
+def baseline_manifests(release):
+    """Yield the row and shard manifests a release's baseline receipts were accepted against."""
+    baseline = ROOT / 'tools/re2-benchmark/baseline'
+    if release['version'] != '1.0':
+        yield baseline / 'rows.tsv', baseline / 'shards.tsv'
+        return
+    # rows.tsv and shards.tsv grow after 1.0, so validate 1.0 receipts against the pinned 1.0 row manifest and its shard IDs.
+    rows = retained_selection.original_rows(baseline, load(baseline / 'remeasurement-protocol.json'))
+    with tempfile.TemporaryDirectory() as directory:
+        manifest, shard_manifest = Path(directory) / 'rows.tsv', Path(directory) / 'shards.tsv'
+        # Receipts record the manifest's checksum, so write its exact bytes rather than the parsed rows.
+        manifest.write_bytes(gzip.decompress((baseline / retained_selection.ORIGINAL_ROW_MANIFEST).read_bytes()))
+        shard_manifest.write_text(''.join(shard + '\n' for shard in ['shard_id', *sorted({row['shard_id'] for row in rows})]))
+        yield manifest, shard_manifest
+
+
 def validate_baseline(capture, release, collector, campaign_id, primary):
-    receipts_path = capture / 'accepted-sessions.tsv'
-    manifest = ROOT / 'tools/re2-benchmark/baseline/rows.tsv'
-    if primary:
-        acceptance.validate_campaign(manifest, manifest.with_name('platforms.tsv'), manifest.with_name('shards.tsv'),
-                                     receipts_path, campaign_id, (1, 2, 3))
-    receipts = read_rows(receipts_path)
-    platforms = acceptance.load_platforms(manifest.with_name('platforms.tsv'))
-    for receipt in receipts:
-        if (receipt['engine_tree'] != release['engine_tree'] or receipt['candidate_commit'] != collector['candidate_commit'] or
-                receipt['candidate_archive_sha256'] != collector['archive_sha256']):
-            raise ValueError('baseline receipt changed release source or collector')
-        if not primary and receipt['replica_id'] != '4':
-            raise ValueError('baseline confirmation requires the fourth independent host')
-        platform = platforms.get(receipt['platform'])
-        if (receipt['campaign_id'] != campaign_id or platform is None or
-                receipt['architecture'] != platform['architecture'] or
-                receipt['instance_type'] != topology.instance_type(platform, receipt['shard_id'])):
-            raise ValueError('baseline receipt changed campaign or worker topology')
-        base = capture / 'jobs' / receipt['platform'] / receipt['shard_id'] / ('replica-' + receipt['replica_id']) / ('epoch-' + receipt['host_epoch'])
-        paths = list(base.glob('*/' + receipt['architecture'] + '/re2-results'))
-        if len(paths) != 1:
-            raise ValueError('baseline accepted epoch has ambiguous artifacts')
-        session = paths[0]
-        validator = acceptance.validate_host_results if primary else acceptance.validate_confirmation_host_results
-        if validator(manifest, session / 'session.tsv', session / 'observed-rows.tsv') != receipt:
-            raise ValueError('baseline raw evidence differs from the accepted receipt')
-        released_artifact.validate_baseline(session, release)
-        cleanup = dict(line.split('=', 1) for line in (session.parents[1] / 'cleanup-manifest.txt').read_text().splitlines())
-        if any(cleanup.get(key) != 'verified' for key in ('cleanup_status', 'instances_terminated', 'iam_removed', 'bucket_removed')):
-            raise ValueError('baseline resource cleanup is incomplete')
-    return receipts
+    with baseline_manifests(release) as (manifest, shards):
+        receipts_path = capture / 'accepted-sessions.tsv'
+        platforms_path = ROOT / 'tools/re2-benchmark/baseline/platforms.tsv'
+        if primary:
+            acceptance.validate_campaign(manifest, platforms_path, shards, receipts_path, campaign_id, (1, 2, 3))
+        receipts = read_rows(receipts_path)
+        platforms = acceptance.load_platforms(platforms_path)
+        for receipt in receipts:
+            if (receipt['engine_tree'] != release['engine_tree'] or receipt['candidate_commit'] != collector['candidate_commit'] or
+                    receipt['candidate_archive_sha256'] != collector['archive_sha256']):
+                raise ValueError('baseline receipt changed release source or collector')
+            if not primary and receipt['replica_id'] != '4':
+                raise ValueError('baseline confirmation requires the fourth independent host')
+            platform = platforms.get(receipt['platform'])
+            if (receipt['campaign_id'] != campaign_id or platform is None or
+                    receipt['architecture'] != platform['architecture'] or
+                    receipt['instance_type'] != topology.instance_type(platform, receipt['shard_id'])):
+                raise ValueError('baseline receipt changed campaign or worker topology')
+            base = capture / 'jobs' / receipt['platform'] / receipt['shard_id'] / ('replica-' + receipt['replica_id']) / ('epoch-' + receipt['host_epoch'])
+            paths = list(base.glob('*/' + receipt['architecture'] + '/re2-results'))
+            if len(paths) != 1:
+                raise ValueError('baseline accepted epoch has ambiguous artifacts')
+            session = paths[0]
+            validator = acceptance.validate_host_results if primary else acceptance.validate_confirmation_host_results
+            if validator(manifest, session / 'session.tsv', session / 'observed-rows.tsv') != receipt:
+                raise ValueError('baseline raw evidence differs from the accepted receipt')
+            released_artifact.validate_baseline(session, release)
+            cleanup = dict(line.split('=', 1) for line in (session.parents[1] / 'cleanup-manifest.txt').read_text().splitlines())
+            if any(cleanup.get(key) != 'verified' for key in ('cleanup_status', 'instances_terminated', 'iam_removed', 'bucket_removed')):
+                raise ValueError('baseline resource cleanup is incomplete')
+        return receipts
 
 
 def validate_independent_baseline_hosts(receipts):

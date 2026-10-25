@@ -1,9 +1,12 @@
 import copy
 import csv
+import gzip
+import hashlib
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import release_capture
 
@@ -174,6 +177,26 @@ class TestReleaseCapture(unittest.TestCase):
             changed[1][field] = changed[0][field]
             with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'distinct hosts'):
                 release_capture.validate_independent_baseline_hosts(changed)
+
+    def test_1_0_baseline_manifests_are_the_pinned_rows_and_their_shards(self):
+        pinned = 'row_id\tshard_id\tsystem\nold/regulator\told\tregulator\n'
+        with tempfile.TemporaryDirectory() as directory, patch.object(release_capture, 'ROOT', Path(directory)):
+            baseline = Path(directory) / 'tools/re2-benchmark/baseline'
+            baseline.mkdir(parents=True)
+            (baseline / 'remeasurement-rows.tsv.gzip').write_bytes(gzip.compress(pinned.encode(), mtime=0))
+            (baseline / 'remeasurement-protocol.json').write_text(json.dumps(
+                {'original_row_manifest_sha256': hashlib.sha256(pinned.encode()).hexdigest()}))
+            # After 1.0 the live manifests gain rows and shards and rename the 1.0 shard.
+            (baseline / 'rows.tsv').write_text('row_id\tshard_id\tsystem\nold/regulator\trenamed\tregulator\nnew/regulator\tnew\tregulator\n')
+            (baseline / 'shards.tsv').write_text('shard_id\tdescription\nrenamed\tRenamed\nnew\tNew\n')
+            with release_capture.baseline_manifests(self.release) as (manifest, shards):
+                self.assertEqual(manifest.read_text(), pinned)
+                self.assertEqual(release_capture.acceptance.load_shards(shards), {'old'})
+            with release_capture.baseline_manifests({**self.release, 'version': '2.0'}) as (manifest, shards):
+                self.assertEqual((manifest, shards), (baseline / 'rows.tsv', baseline / 'shards.tsv'))
+            (baseline / 'remeasurement-rows.tsv.gzip').write_bytes(gzip.compress(b'changed', mtime=0))
+            with self.assertRaisesRegex(ValueError, 'original row manifest changed'), release_capture.baseline_manifests(self.release):
+                pass
 
     def test_rejects_missing_hosts_or_acceptance_receipts(self):
         self.data['hosts'].pop()

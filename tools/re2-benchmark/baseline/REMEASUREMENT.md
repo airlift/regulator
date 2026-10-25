@@ -5,6 +5,11 @@ comparators, release attestation and AWS transport. It collects fresh timing
 for `trino-operations` and `trino-final-line`. It does not rewrite the original
 baseline or convert diagnostic output into replacement results.
 
+The original manifest is the 1.0 `rows.tsv`, pinned as
+`remeasurement-rows.tsv.gzip` because the live manifest gains rows after 1.0.
+`remeasurement-protocol.json` and `remeasurement-retained-protocol.json` both
+record its uncompressed SHA-256.
+
 The frozen protocol is in `remeasurement-protocol.json`. Its independent pilot
 must pass before `qualified_by_pilot` can be enabled. The attestations under
 `qualification-evidence/` record the archived decision hash, evidence hashes,
