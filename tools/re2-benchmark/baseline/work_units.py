@@ -14,8 +14,6 @@ import statistics
 from collections import defaultdict
 from dataclasses import dataclass
 
-from aggregate_results import comparison_specs, identify_scaling_groups, logical_row_id, parse_parameters
-
 import row_protocol
 import topology
 import unit_cost
@@ -107,7 +105,7 @@ def split_axis(rows, excluded):
     """
     values = defaultdict(set)
     for row in rows:
-        for key, value in parse_parameters(row["parameters"]).items():
+        for key, value in row_protocol.parse_parameters(row["parameters"]).items():
             values[key].add(value)
     if not all(expressible(parameter_values) for parameter_values in values.values()):
         return None
@@ -123,7 +121,7 @@ def join_shared_requirements(partition, rows, protocols, scaling_groups, axes, l
     if logical_rows:
         logical = defaultdict(list)
         for row in rows:
-            logical[logical_row_id(row)].append(row["row_id"])
+            logical[row_protocol.logical_row_id(row)].append(row["row_id"])
         for logical_ids in logical.values():
             partition.join(logical_ids)
     for _, points in scaling_groups.values():
@@ -132,7 +130,7 @@ def join_shared_requirements(partition, rows, protocols, scaling_groups, axes, l
         axis = split_axis(selector_rows, axes[(shard_id, system, benchmark)])
         slices = defaultdict(list)
         for row in selector_rows:
-            slices[parse_parameters(row["parameters"])[axis] if axis else None].append(row["row_id"])
+            slices[row_protocol.parse_parameters(row["parameters"])[axis] if axis else None].append(row["row_id"])
         for slice_ids in slices.values():
             partition.join(slice_ids)
     if any(row["suite"] in WHOLE_SHARD_SUITES for row in rows):
@@ -189,7 +187,7 @@ def split_shared_comparators(rows, protocols, scaling_groups, axes, routes):
     partition = Partition(row["row_id"] for row in measured)
     join_shared_requirements(partition, measured, protocols, scaling_groups, axes, logical_rows=False)
     pairs = defaultdict(set)
-    for _, candidate, comparator_system, comparators in comparison_specs(rows):
+    for _, candidate, comparator_system, comparators in row_protocol.comparison_specs(rows):
         if comparator_system == "native-re2":
             pairs[candidate["row_id"]].update(row["row_id"] for row in comparators)
         else:
@@ -294,7 +292,7 @@ def unit_id(shard_id, owned, copies, representatives, protocols):
 
 
 def generate(manifest_rows, dispatch_rows, representatives, protocols):
-    scaling_groups = identify_scaling_groups(manifest_rows)
+    scaling_groups = row_protocol.identify_scaling_groups(manifest_rows)
     bindings = representative_bindings(representatives, protocols)
     by_id = {row["row_id"]: row for row in manifest_rows}
     shard_rows = defaultdict(list)

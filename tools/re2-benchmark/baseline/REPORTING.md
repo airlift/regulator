@@ -62,6 +62,36 @@ after available-memory values, and peak RSS no larger than physical memory.
 The finalized file is included in the artifact inventory and immutable campaign
 archive. `capacity.tsv` preserves these values for every accepted session.
 
+### Unit Campaigns
+
+A campaign of work units supplies `accepted-units.tsv` ledgers in place of
+`accepted-sessions.tsv`; the reducer recognizes them by their `unit-receipt.tsv`
+columns and rejects a mix of the two. Each accepted unit attempt directory,
+found under the artifact roots by its `unit-receipt.tsv`, must contain:
+
+- `unit-receipt.tsv`
+- `unit-session.tsv`
+- `unit-rows.tsv`
+- `observed-rows.tsv`, whose `role` column marks each row `owner` or `copy`
+- `unit-evidence.tsv`
+- `calibration.tsv`, the unit's own before and after calibration
+- `routes/<route>/native-bracket.tsv` when that route measures native RE2
+- `unit-capacity.txt`
+
+The ledgers must pass campaign unit acceptance: every platform and checked-in
+unit of the selected shards, replicas 1, 2, and 3 of a unit on distinct EC2
+instances, and at most one replica-4 confirmation per platform and unit on an
+instance none of its replicas used. Each attempt is reverified as unit
+acceptance does, and its receipt must regenerate from its evidence.
+
+A unit owns each of its rows or copies it. Every row has exactly one owner unit,
+whose three primary attempts and optional confirmation are that row's samples.
+A copy is a native bracket a unit measures again so that the rows it owns have
+a comparator measured beside them. It appears in `host-rows.tsv` with role
+`copy`, pairs with the candidates of its own attempt, and is never a row sample.
+Calibration drift, native-bracket drift, and finalized capacity come from each
+attempt's own files.
+
 ### Campaign Events
 
 Each `--events` file is TSV with required `event_type` and `reason` fields.
@@ -188,8 +218,12 @@ cost, so fewer retained bytes also produces a ratio below 1.
 
 ## Aggregation
 
-The host session is the independent unit. The reducer preserves all primary
-and confirmation hosts, then reports for every platform and manifest row:
+The host session is the independent unit, or in a unit campaign the unit
+attempt. Different units may share a host, but a row's samples come from the
+three primary attempts and the confirmation of its owner unit, each on its own
+instance. Same-host ratios pair a candidate with the comparators measured in
+the same unit attempt, owned or copied. The reducer preserves all primary and
+confirmation hosts, then reports for every platform and manifest row:
 
 - primary and all-host medians
 - minimum and maximum score
@@ -243,29 +277,42 @@ request confirmation. After confirmation, the all-host ratio CV determines
 whether ratio variability remains unresolved. A
 deterministic allocation violation or a serious but stable ratio does not. A
 platform/shard that already has a replica-4 session is omitted because its one
-confirmation allowance is spent.
+confirmation allowance is spent. In a unit campaign the schema is
+`platform, shard_id, unit_id`: instability selects the owner unit of the
+unstable row, and each platform and unit has one allowance. Its confirmation
+is that unit's replica 4 on an instance none of its replicas 1 to 3 used.
 
 ## Outputs
 
 The reducer writes:
 
-- `host-rows.tsv`: every accepted host measurement
+- `host-rows.tsv`: every accepted host measurement; in a unit campaign every
+  owned and copied row of each attempt, with `unit_id`, `unit_attempt_id`, and
+  `role`
 - `row-aggregates.tsv`: per-platform row statistics and unresolved state
 - `host-comparator-ratios.tsv`: every same-host ratio
 - `comparison-aggregates.tsv`: per-platform comparison statistics
 - `general-classes.tsv`: class summaries without serious outliers
 - `serious-outliers.tsv`: serious comparison rows
-- `scaling.tsv`: per-host scaling signatures
+- `scaling.tsv`: per-host scaling signatures, per unit attempt in a unit
+  campaign
 - `gap-ledger.tsv`: unresolved conditions, serious outliers, and events
 - `events.tsv`: interruptions, rejected sessions, and exclusions
 - `artifact-inventory.tsv`: file and retrieval checksums
 - `metadata.tsv`: run and retrieval metadata passthrough
-- `capacity.tsv`: finalized wall-time, peak-RSS, and host-memory evidence
+- `capacity.tsv`: finalized wall-time, peak-RSS, and host-memory evidence, from
+  `unit-capacity.txt` with `unit_capacity_sha256` in a unit campaign
 - `rebar-outcomes.tsv`: exact extended-corpus semantic mismatches by host
-- `confirmation-jobs.tsv`: unique primary-unstable platform/shard pairs still
-  eligible for the bounded replica-4 wave
+- `confirmation-jobs.tsv`: unique primary-unstable platform/shard pairs, or
+  `platform`, `shard_id`, `unit_id` rows in a unit campaign, still eligible
+  for the bounded replica-4 wave
 - `summary.json`: deterministic campaign counts and identity
 - `output-checksums.tsv`: checksums for every reducer output above
+
+Every per-session table of a unit campaign adds `unit_id` and
+`unit_attempt_id` after `host_epoch`. A host-session campaign's tables are
+unchanged except `events.tsv`, which adds the `region`, `availability_zone`,
+`placement_score`, and `failure_classification` columns of every campaign.
 
 The published
 [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)

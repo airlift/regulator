@@ -4,8 +4,6 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
-from aggregate_results import comparison_specs, identify_scaling_groups, logical_row_id, parse_parameters
-
 import row_protocol
 import work_units
 
@@ -78,15 +76,15 @@ def check_together(owner, row_ids, requirement):
 
 def check_requirements(units, manifest_rows, owner):
     by_unit = {unit["unit_id"]: set(unit["owned"]) | set(unit["copies"]) for unit in units.values()}
-    for _, points in identify_scaling_groups(manifest_rows).values():
+    for _, points in row_protocol.identify_scaling_groups(manifest_rows).values():
         check_together(owner, [row["row_id"] for row, _ in points], "scaling group")
-    for _, candidate, comparator_system, comparators in comparison_specs(manifest_rows):
+    for _, candidate, comparator_system, comparators in row_protocol.comparison_specs(manifest_rows):
         held = by_unit[owner[candidate["row_id"]]]
         if any(row["row_id"] not in held for row in comparators):
             raise ValueError(f"{candidate['row_id']} is not measured beside its {comparator_system} comparator")
     logical = defaultdict(list)
     for row in manifest_rows:
-        logical[logical_row_id(row)].append(row)
+        logical[row_protocol.logical_row_id(row)].append(row)
         if row["suite"] in work_units.WHOLE_SHARD_SUITES:
             logical[("whole shard", row["shard_id"])].append(row)
     for rows in logical.values():
@@ -111,7 +109,7 @@ def check_selectors(manifest_rows, protocols, owner):
         for row in rows:
             unit_id = owner[row["row_id"]]
             counts[unit_id] += 1
-            for key, value in parse_parameters(row["parameters"]).items():
+            for key, value in row_protocol.parse_parameters(row["parameters"]).items():
                 full[key].add(value)
                 portions[unit_id][key].add(value)
         split = set()

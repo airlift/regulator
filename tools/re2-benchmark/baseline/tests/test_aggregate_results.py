@@ -32,6 +32,7 @@ host_session = load_module("aggregate_host_session", BASELINE / "host_session.py
 MANIFEST_ROW_COUNT = aggregate_results.parser().get_default("expected_manifest_rows")
 
 from acceptance import validate_confirmation_host_results, validate_host_results  # noqa: E402
+from test_unit_session import UNIT_SESSION, UnitCampaign  # noqa: E402
 
 
 def write_tsv(path, fields, rows):
@@ -49,6 +50,28 @@ def read_tsv(path):
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_campaign_artifact(source_directory, artifact, campaign_id):
+    """Bind every retained file under the campaign source as its immutable archive would."""
+    source_manifest = artifact.with_name(artifact.name + ".source-manifest.tsv")
+    source_rows = []
+    for path in sorted(
+            (item for item in source_directory.rglob("*") if item.is_file()),
+            key=lambda item: str(item.relative_to(source_directory))):
+        source_rows.append({
+            "path": "campaign-results/" + str(path.relative_to(source_directory)),
+            "size": str(path.stat().st_size),
+            "sha256": digest(path),
+        })
+    write_tsv(source_manifest, aggregate_results.SOURCE_MANIFEST_FIELDS, source_rows)
+    write_tsv(artifact, aggregate_results.CAMPAIGN_ARTIFACT_FIELDS, ({
+        "s3_uri": "s3://baseline/campaign.tar.gz", "version_id": "immutable-version",
+        "archive_sha256": "9" * 64, "candidate_commit": "a" * 40,
+        "candidate_ref": "refs/benchmarks/test", "campaign_id": campaign_id,
+        "source_directory": str(source_directory.resolve()), "file_count": str(len(source_rows)),
+        "source_manifest_sha256": digest(source_manifest),
+    },))
 
 
 class TestLikeComparisonCoverage(unittest.TestCase):
@@ -131,23 +154,7 @@ class CampaignFixture:
         self.write_campaign_artifact()
 
     def write_campaign_artifact(self):
-        source_rows = []
-        for path in sorted(
-                (item for item in self.artifacts.rglob("*") if item.is_file()),
-                key=lambda item: str(item.relative_to(self.artifacts))):
-            source_rows.append({
-                "path": "campaign-results/" + str(path.relative_to(self.artifacts)),
-                "size": str(path.stat().st_size),
-                "sha256": digest(path),
-            })
-        write_tsv(self.campaign_source_manifest, aggregate_results.SOURCE_MANIFEST_FIELDS, source_rows)
-        write_tsv(self.campaign_artifact, aggregate_results.CAMPAIGN_ARTIFACT_FIELDS, ({
-            "s3_uri": "s3://baseline/campaign.tar.gz", "version_id": "immutable-version",
-            "archive_sha256": "9" * 64, "candidate_commit": "a" * 40,
-            "candidate_ref": "refs/benchmarks/test", "campaign_id": "test-campaign",
-            "source_directory": str(self.artifacts.resolve()), "file_count": str(len(source_rows)),
-            "source_manifest_sha256": digest(self.campaign_source_manifest),
-        },))
+        write_campaign_artifact(self.artifacts, self.campaign_artifact, "test-campaign")
 
     def _row(self, logical, suite, system, benchmark, parameters, comparator,
              allocation="recorded", expected="benchmark-self-check"):
@@ -1173,6 +1180,75 @@ class TestAggregateResults(unittest.TestCase):
         ], check=True, capture_output=True, text=True)
         self.assertIn("# Command-Line Baseline", report.read_text())
 
+
+class TestUnitCampaignReduction(unittest.TestCase):
+    # Units 1 and 3 own native brackets and native-access rows; units 2 and 4 own object rows and copy brackets.
+    SHARD = "traditional-extra-big-fixed"
+    SCORES = {"native-re2-before": 100, "native-re2-after": 102, "regulator-native-access": 80,
+              "regulator-object-row": 300}
+
+    def test_unit_attempts_reduce_owned_samples_paired_within_their_attempt(self):
+        unstable = next(unit for unit in UNIT_SESSION.work_units.load(BASELINE).values()
+                        if (unit["shard_id"], unit["unit_index"]) == (self.SHARD, "1"))
+        unstable_rows = {row_id for row_id in unstable["owned"] if row_id.endswith("/regulator-native-access")}
+
+        def score(row, role, platform, replica):
+            if platform == "r8i" and row["row_id"] in unstable_rows:
+                return {1: 60, 2: 80, 3: 100, 4: 80}[replica]
+            # A copy measures its bracket again, here at another cost, beside the unit's own rows.
+            return self.SCORES[row["system"]] * (2 if role == "copy" else 1)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            campaign = UnitCampaign(root / "campaign-results", self.SHARD, score=score)
+
+            def aggregate(confirmations):
+                artifact = root / "campaign-artifact.tsv"
+                write_campaign_artifact(campaign.root, artifact, "campaign")
+                return aggregate_results.aggregate(argparse.Namespace(
+                    manifest=BASELINE / "rows.tsv", platforms=BASELINE / "platforms.tsv",
+                    shards=BASELINE / "shards.tsv", selected_shards=[self.SHARD],
+                    primary_receipts=[campaign.write_ledger(root / "accepted-units.tsv", campaign.receipts)],
+                    confirmation_receipts=[campaign.write_ledger(root / "confirmation-units.tsv", confirmations)],
+                    artifacts_root=[campaign.root / "units"], session_dir=[], events=[], rebar_exclusions=[],
+                    rebar_joni_applicability=None, artifact_index=[], output_dir=root / "output",
+                    campaign_artifact=artifact, expected_manifest_rows=MANIFEST_ROW_COUNT))
+
+            summary = aggregate([])
+            output = root / "output"
+            host_rows = read_tsv(output / "host-rows.tsv")
+            self.assertEqual((24, 2 * 3 * 2 * 14), (
+                summary["primary_sessions"], sum(row["role"] == "copy" for row in host_rows)))
+            aggregates = {(row["platform"], row["row_id"]): row for row in read_tsv(output / "row-aggregates.tsv")}
+            bracket = next(row_id for row_id in unstable["owned"] if row_id.endswith("/native-re2-before"))
+            self.assertEqual(("3", "100"), (
+                aggregates[("r9g", bracket)]["host_count"], aggregates[("r9g", bracket)]["primary_median_score"]))
+            # A candidate pairs with the bracket measured in its own attempt: owned beside native access,
+            # copied beside object rows, though both attempts ran on one host.
+            ratios = [row for row in read_tsv(output / "host-comparator-ratios.tsv") if row["platform"] == "r9g"]
+            self.assertEqual(
+                {"regulator-native-access": {aggregate_results.format_number(80 / 101)},
+                 "regulator-object-row": {aggregate_results.format_number(300 / 202)}},
+                {system: {row["ratio"] for row in ratios if row["candidate_system"] == system}
+                 for system in ("regulator-native-access", "regulator-object-row")})
+            owners = {(row["unit_attempt_id"], row["row_id"]) for row in host_rows if row["role"] == "owner"}
+            self.assertTrue(all((row["unit_attempt_id"], row["candidate_row_id"]) in owners for row in ratios))
+            self.assertTrue(all(
+                (row["unit_attempt_id"], row_id) in owners
+                for row in read_tsv(output / "scaling.tsv") for row_id in row["row_ids"].split(",")))
+            self.assertEqual(
+                [{"platform": "r8i", "shard_id": self.SHARD, "unit_id": unstable["unit_id"]}],
+                read_tsv(output / "confirmation-jobs.tsv"))
+
+            confirmation = campaign.add("r8i", unstable, 4, host=4)
+            aggregate([confirmation])
+            confirmed = next(row for row in read_tsv(output / "row-aggregates.tsv")
+                             if (row["platform"], row["row_id"]) == ("r8i", min(unstable_rows)))
+            self.assertEqual("1", confirmed["confirmation_host_count"])
+            self.assertEqual([], read_tsv(output / "confirmation-jobs.tsv"))
+            reused = campaign.add("r8i", unstable, 4, host=1)
+            with self.assertRaisesRegex(aggregate_results.ReductionError, "replicas of a unit share an EC2 instance"):
+                aggregate([reused])
 
 if __name__ == "__main__":
     unittest.main()
