@@ -63,6 +63,13 @@ public class TestJavaScanPlan
             // ASCII-folded under ASCII and Unicode case.
             new PlanCase("(?i)^abc([^:]+):def\\z", "ABCé:DeF"),
             new PlanCase("(?iu)content-type:([^;]+);", "Content-Type:tëxt;"),
+            // ASCII case folds s, k, and i to their ASCII pair, not to the long s, the Kelvin
+            // sign, or the dotless i, in literals and in runs.
+            new PlanCase("(?i)^https?://([^/]+)/", "HTTPS://hoſt/"),
+            new PlanCase("(?i)https?://([^/]+)/", "HTTPſ://bad/ HTTPS://host/"),
+            new PlanCase("(?i)^xi([^/]+)/", "XIab/x\u0131b/"),
+            new PlanCase("(?i)k([^/]+)/", "Kx/Kéy/"),
+            new PlanCase("(?i)x(s+)(k+):", "xſK:xs\u212A:xSsKk:"),
             // Ending before a final LF under UNIX_LINES.
             new PlanCase("(?d)^x([a-z]+)$", "xab"),
             new PlanCase("(?d)x([^/]+)/\\Z", "x/xéb/"),

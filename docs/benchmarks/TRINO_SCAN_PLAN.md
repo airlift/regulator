@@ -26,7 +26,7 @@ contract, not importing RE2 syntax or changing Trino semantics.
 | Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal, exact one-byte ASCII set, or unbounded run of every byte except the one-byte literal after it |
 | End assertions | Optional; strict end, final-LF `$` (Trino's, or Java's under `UNIX_LINES`), and Java's final-terminator `$` are supported when present |
 | Terminal behavior | Partial-match success, dot-all `.*`, LF-excluding `.*`, and supported character-set runs |
-| Case folding | Restricted ASCII literal and run folds proven safe against the Unicode fold tables; separate folded executors; general Unicode folding uses the ordinary engine |
+| Case folding | Restricted ASCII literal and run folds proven safe against the Unicode fold tables, and ASCII letter pairs such as `[Kk]`, which match only their two letters; separate folded executors; general Unicode folding uses the ordinary engine |
 | Empty overall matches | Ordinary engine |
 | Program size | At most 32 operations plus one terminal operation |
 
@@ -349,7 +349,8 @@ keeps it. Java's default dot excludes the non-ASCII line terminators, which a
 run cannot represent, so a dot reaches a plan only with `DOTALL` or
 `UNIX_LINES`. As in Trino, multiline anchors, word boundaries, reluctant runs,
 and folds with a non-ASCII member, such as `(?iu)k`, keep the ordinary engine;
-Java's `(?i)` without Unicode case folds only ASCII letters.
+Java's `(?i)` without Unicode case folds each letter as its ASCII pair, so
+`(?i)s` and `(?i)k` reach a plan.
 `JavaRegexp.Options.setGenerateBytecode(true)` compiles a case-sensitive Java
 plan to an RE2 executor class, as [RE2 executor classes](#re2-executor-classes)
 describes.

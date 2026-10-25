@@ -272,6 +272,10 @@ public class TestTrinoScanPlan
         }
         verifyAgainstJoni("(?i)^K([a-h]+):$", List.of("Kabc:", "kBAG:", "Kabc:"), false);
         verifyAgainstJoni("(?i)^S([a-h]+):$", List.of("Sabc:", "sBAG:", "ſabc:"), false);
+        // An explicit pair matches only its two ASCII letters, so it reaches a plan even for k
+        // and s.
+        assertThat(TrinoRegexp.compile(utf8Slice("^[Ss][Kk]([a-h]+):$")).pattern().usesTrinoScanPlanForDiagnostics()).isTrue();
+        verifyAgainstJoni("^[Ss][Kk]([a-h]+):$", List.of("skabc:", "SKbag:", "ſkabc:", "sKabc:", "sKBAG:"));
     }
 
     @Test
