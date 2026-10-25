@@ -1213,6 +1213,7 @@ final class RustRegexpParser
                 throw errorAtCurrent(ErrorKind.UNICODE_CLASS_INVALID);
             }
             bumpAndBumpSpace();
+            // TeaVM's class library has no Character.toString(int), and parsing must compile with TeaVM.
             return new UnicodeClassAst(start, position, negated, UnicodeKind.ONE_LETTER, new String(Character.toChars(letter)), null, false);
         }
 

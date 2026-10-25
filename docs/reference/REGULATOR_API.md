@@ -78,6 +78,10 @@ Invalid syntax throws `RegexpParseException`. Compilation resource failures
 throw `RegexpCompileException`; `RegexpCompileMemoryLimitException` identifies a
 configured memory-budget failure rather than JVM heap exhaustion.
 
+`RustRegexp.parse` checks a Rust pattern without compiling a matching engine
+and returns its capture count and named groups as a `PatternInfo`. See
+[pattern validation and capture metadata](languages/RUST_REGEXP.md#pattern-validation-and-capture-metadata).
+
 Compiled patterns are immutable and safe to share across threads. They do not
 need to be closed. Lazily built DFA caches and optional native transition
 storage belong to the compiled pattern and are reclaimed when it is no longer

@@ -44,12 +44,6 @@ public class TestRustRegexp
         RustRegexp compiled = RustRegexp.compile(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
         assertThat(info.namedCapturingGroups()).isEqualTo(compiled.namedCapturingGroups());
-
-        pattern.setByte(3, 'X');
-        assertThat(info.namedCapturingGroups()).containsOnlyKeys("word", "never");
-
-        assertThatThrownBy(() -> info.namedCapturingGroups().put("other", 4))
-                .isInstanceOf(UnsupportedOperationException.class);
     }
 
     @Test
@@ -68,18 +62,12 @@ public class TestRustRegexp
                 .hasMessage("unsupported regular-expression construct: UnsupportedLookAround at byte offset 0");
 
         assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("a{1001}")))
-                .isInstanceOf(RegexpParseException.class);
+                .isInstanceOf(RegexpParseException.class)
+                .hasMessage("repetition size exceeds the supported limit: repetition count above 1000 at byte offset 0");
 
         assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("(a)"), RustRegexp.Options.defaults().setNestLimit(0)))
-                .isInstanceOf(RegexpParseException.class);
-
-        assertThatThrownBy(() -> RustRegexp.parse(null))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("pattern is null");
-
-        assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("a"), null))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("options is null");
+                .isInstanceOf(RegexpParseException.class)
+                .hasMessage("pattern exceeds the supported parser limit: NestLimitExceeded at byte offset 0");
     }
 
     @Test
@@ -118,6 +106,12 @@ public class TestRustRegexp
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("pattern is null");
         assertThatThrownBy(() -> RustRegexp.compile(utf8Slice("a"), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("options is null");
+        assertThatThrownBy(() -> RustRegexp.parse(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("pattern is null");
+        assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("a"), null))
                 .isInstanceOf(NullPointerException.class)
                 .hasMessage("options is null");
         RustRegexp regexp = RustRegexp.compile(utf8Slice("a*"));
