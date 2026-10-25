@@ -127,7 +127,8 @@ route as `find` does.
 
 A start-anchored plan, end-anchored or partial, matches only at the region
 start, and no `Re2Matcher.find` check runs ahead of it (except a Rust matcher
-over a partial region; see [RE2 patterns](#re2-patterns)). Its matchers
+over a partial region; see [RE2 patterns](#re2-patterns), and a Java matcher
+region whose `$` reads a CR before it, which runs on the NFA). Its matchers
 therefore call the plan entry directly, as does `extract` of a capture group,
 which also skips building a matcher. This removes the shared path's out-of-line
 calls from the capture path. Matchers given a single-byte matcher, `matches`,

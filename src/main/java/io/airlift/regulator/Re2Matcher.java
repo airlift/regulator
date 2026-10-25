@@ -47,6 +47,7 @@ public final class Re2Matcher
     // Re2.startAnchoredTrinoScanPlan.
     private final TrinoScanPlan startAnchoredScanPlan;
     private final boolean rustSearch;
+    private final boolean readsCarriageReturnBeforeRegion;
     private OnePass.Workspace onePassWorkspace;
     private BitState.Workspace bitStateWorkspace;
     private Nfa.Workspace nfaWorkspace;
@@ -59,6 +60,9 @@ public final class Re2Matcher
     private boolean groupZeroForwardCursorInitialized;
     // The region-relative end of the previous match, or -1, for Rust search semantics.
     private int previousMatchEnd = -1;
+    // Set at reset when the region starts on the LF of a CR LF and the pattern's Java $ reads that
+    // CR, so every search of the region runs on the NFA. See Re2.matchRegionAfterCarriageReturnInto.
+    private boolean regionStartsAfterCarriageReturn;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
 
     Re2Matcher(Re2 pattern, Slice input)
@@ -97,6 +101,7 @@ public final class Re2Matcher
                 groups.length == 2 && pattern.hasDirectLoweredGroupZeroSearch();
         this.startAnchoredScanPlan = this.singleByteMatcher == null ? pattern.startAnchoredTrinoScanPlan() : null;
         this.rustSearch = (pattern.flags() & Regexp.RUST_SEARCH) != 0;
+        this.readsCarriageReturnBeforeRegion = pattern.readsCarriageReturnBeforeRegion();
         reset(input);
     }
 
@@ -142,6 +147,7 @@ public final class Re2Matcher
         this.input = input;
         regionStart = start;
         regionEnd = end;
+        regionStartsAfterCarriageReturn = readsCarriageReturnBeforeRegion && start > 0 && start < end && input.getByte(start - 1) == '\r' && input.getByte(start) == '\n';
         if (candidateStartCursor != null) {
             candidateStartCursor.reset(end - start);
         }
@@ -177,12 +183,16 @@ public final class Re2Matcher
      * region can match. A later search fails as {@link #findGeneral} does. The plan reads the
      * region as its whole input, but a Rust search still sees the rest of the input, so a Rust
      * search of a partial region takes {@link #findRust}, which reaches the plan only when the
-     * region ends at the input end.
+     * region ends at the input end. A region whose Java $ reads a CR before it takes
+     * {@link #findGeneral}.
      */
     private boolean findWithStartAnchoredScanPlan()
     {
         if (rustSearch && isPartialRegion()) {
             return findRust();
+        }
+        if (regionStartsAfterCarriageReturn) {
+            return findGeneral();
         }
         if (nextFindStart == 0 && pattern.findWithStartAnchoredTrinoScanPlan(startAnchoredScanPlan, input, regionStart, regionEnd, groups)) {
             setMatchAndAdvance(groups[0], groups[1]);
@@ -219,6 +229,10 @@ public final class Re2Matcher
 
         if (rustSearch && isPartialRegion()) {
             return findNextWithInputContext();
+        }
+
+        if (regionStartsAfterCarriageReturn) {
+            return findNextAfterCarriageReturn();
         }
 
         if (singleByteMatcher != null) {
@@ -379,6 +393,19 @@ public final class Re2Matcher
         return true;
     }
 
+    // The pattern's $ reads a CR the region cannot show, so this search runs on the NFA through
+    // Re2.matchRegionAfterCarriageReturnInto.
+    private boolean findNextAfterCarriageReturn()
+    {
+        if (!pattern.matchRegionAfterCarriageReturnInto(input, regionStart, regionEnd, regionStart + nextFindStart, UNANCHORED, groups, this)) {
+            nextFindStart = regionLength() + 1;
+            invalidateMatch();
+            return false;
+        }
+        setMatchAndAdvance(groups[0], groups[1]);
+        return true;
+    }
+
     private boolean isPartialRegion()
     {
         return regionStart != 0 || regionEnd != input.length();
@@ -454,15 +481,10 @@ public final class Re2Matcher
         if (rustSearch) {
             return matchWithInputContext(anchor);
         }
-        if (!pattern.matchRegionInto(
-                input,
-                regionStart,
-                regionEnd,
-                regionStart,
-                regionEnd,
-                anchor,
-                groups,
-                this)) {
+        boolean matched = regionStartsAfterCarriageReturn
+                ? pattern.matchRegionAfterCarriageReturnInto(input, regionStart, regionEnd, regionStart, anchor, groups, this)
+                : pattern.matchRegionInto(input, regionStart, regionEnd, regionStart, regionEnd, anchor, groups, this);
+        if (!matched) {
             return false;
         }
         setMatchAndAdvance(groups[0], groups[1]);

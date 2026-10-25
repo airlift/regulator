@@ -129,6 +129,91 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
+    public void testRegionsMatchJdk()
+    {
+        // A matcher region reads as a JDK region with default bounds, so its assertions see only
+        // the region, except that the JDK's $ still refuses the LF of a CR LF the region start
+        // splits. One matcher per pattern is reset for every region, so state one region leaves
+        // behind would show in the next.
+        String startAnchoredPlan = "^[xy]([a-z]+)$";
+        String unanchoredPlan = "x([^/]+)/$";
+        assertThat(JavaRegexp.compile(utf8Slice(startAnchoredPlan)).matcher(utf8Slice("")).startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
+        assertThat(JavaRegexp.compile(utf8Slice(unanchoredPlan)).pattern().usesTrinoScanPlanForDiagnostics()).isTrue();
+        List<String> inputs = List.of("a\r\nb", "ab\r\n", "\r\nab", "a\nb", "\nab\n", "a\rb", "\r", "xaéy", "aáb", "a b a", "xab\r\n", "\r\nxé/\r\n");
+        for (String pattern : List.of(
+                "^",
+                "$",
+                "^$",
+                "a$",
+                "$\\n",
+                "\\Aa",
+                "a\\Z",
+                "a\\z",
+                "\\ba",
+                "a\\b",
+                "\\B",
+                "(?m)^a",
+                "(?m)$",
+                "(?d)a$",
+                "(?d)$",
+                "(?dm)$",
+                "(?U)\\bé",
+                "á\\b",
+                "x*",
+                "(a)(b)?",
+                "(b?)$",
+                startAnchoredPlan,
+                unanchoredPlan)) {
+            Pattern jdk = Pattern.compile(pattern);
+            Re2Matcher actual = JavaRegexp.compile(utf8Slice(pattern)).matcher(utf8Slice(""));
+            for (String input : inputs) {
+                Slice source = utf8Slice("padding" + input).slice(7, utf8Slice(input).length());
+                String escaped = input.replace("\r", "\\r").replace("\n", "\\n");
+                // Every input character is in the BMP, so every UTF-16 offset is a code point boundary.
+                for (int start = 0; start <= input.length(); start++) {
+                    for (int end = start; end <= input.length(); end++) {
+                        String description = "%s on [%s] [%s, %s)".formatted(pattern, escaped, start, end);
+                        Matcher expected = jdk.matcher(input).region(start, end);
+                        actual.reset(source, utf8Offset(input, start), utf8Offset(input, end));
+                        while (expected.find()) {
+                            assertSameMatch(description + " find", input, true, expected, actual.find() ? actual.toMatchResult() : null);
+                        }
+                        assertThat(actual.find()).as(description + " extra find").isFalse();
+                        assertSameMatch(description + " lookingAt", input, expected.lookingAt(), expected, actual.lookingAt() ? actual.toMatchResult() : null);
+                        assertSameMatch(description + " matches", input, expected.matches(), expected, actual.matches() ? actual.toMatchResult() : null);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void assertSameMatch(String description, String input, boolean expectedMatched, Matcher expected, MatchResult actual)
+    {
+        assertThat(actual != null).as(description).isEqualTo(expectedMatched);
+        if (expectedMatched) {
+            assertSameGroups(description, input, expected, actual);
+        }
+    }
+
+    private static void assertSameGroups(String description, String input, Matcher expected, MatchResult actual)
+    {
+        assertThat(actual.groupCount())
+                .as(description + " capturing group count")
+                .isEqualTo(expected.groupCount());
+        for (int group = 0; group <= expected.groupCount(); group++) {
+            assertThat(actual.start(group))
+                    .as(description + " group " + group + " start")
+                    .isEqualTo(utf8Offset(input, expected.start(group)));
+            assertThat(actual.end(group))
+                    .as(description + " group " + group + " end")
+                    .isEqualTo(utf8Offset(input, expected.end(group)));
+            assertThat(actual.groupUtf8(group))
+                    .as(description + " group " + group + " text")
+                    .isEqualTo(expected.group(group));
+        }
+    }
+
+    @Test
     public void testUnixMultilineCaretUsesContextSensitiveFallback()
     {
         String pattern = "(?dm)^";
@@ -437,20 +522,7 @@ public class TestJavaRegexpDifferential
             return;
         }
 
-        assertThat(actualResult.groupCount())
-                .as(description + " capturing group count")
-                .isEqualTo(jdkMatcher.groupCount());
-        for (int group = 0; group <= jdkMatcher.groupCount(); group++) {
-            assertThat(actualResult.start(group))
-                    .as(description + " group " + group + " start")
-                    .isEqualTo(utf8Offset(testCase.input(), jdkMatcher.start(group)));
-            assertThat(actualResult.end(group))
-                    .as(description + " group " + group + " end")
-                    .isEqualTo(utf8Offset(testCase.input(), jdkMatcher.end(group)));
-            assertThat(actualResult.groupUtf8(group))
-                    .as(description + " group " + group + " text")
-                    .isEqualTo(jdkMatcher.group(group));
-        }
+        assertSameGroups(description, testCase.input(), jdkMatcher, actualResult);
         for (String groupName : testCase.pattern().namedGroups().keySet()) {
             assertThat(actualResult.groupUtf8(groupName))
                     .as(description + " named group " + groupName)

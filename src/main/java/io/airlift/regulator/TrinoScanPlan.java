@@ -2099,9 +2099,10 @@ final class TrinoScanPlan
      * the JDK's non-multiline dollar does: the bytes from {@code cursor} to {@code end} are
      * exactly one line terminator, LF, CR, CR LF, U+0085, U+2028, or U+2029, and a final LF does
      * not follow a CR, since CR LF is one terminator. The CR before {@code cursor} counts only at
-     * or after {@code base}, the context start, as in the ordinary engine. The ordinary engine
-     * decodes the terminator strictly, so comparing its exact encoded bytes gives the same answer
-     * on every input, malformed UTF-8 included.
+     * or after {@code base}, the context start, as in {@code EmptyOp.contextFlags}; a matcher
+     * region that needs the Java CR-before-region correction bypasses scan plans. The ordinary
+     * engine decodes the terminator strictly, so comparing its exact encoded bytes gives the same
+     * answer on every input, malformed UTF-8 included.
      * Copied as {@code TrinoScanKernelSupport.endsBeforeJavaFinalTerminator}; keep the copy in step.
      */
     private static boolean endsBeforeJavaFinalTerminator(byte[] bytes, int base, int end, int cursor)

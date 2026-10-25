@@ -250,7 +250,10 @@ matching. In contrast,
 `matcher.reset(input, start, end)` makes the region itself the assertion
 context, matching a logical Slice view without allocating one on DFA-only paths.
 For Rust patterns a region keeps the complete Slice as context; see
-[Rust regexp](languages/RUST_REGEXP.md#matching).
+[Rust regexp](languages/RUST_REGEXP.md#matching). For Java patterns a region
+is the context, except that, as in the JDK, `$` and `\Z` do not match at the
+start of a nonempty region that splits a CR LF (without `(?d)`); see
+[Java regexp](languages/JAVA_REGEXP.md#matching).
 
 `Re2Matcher` is mutable and not thread-safe. Its capture buffer and execution
 workspaces are reused across `find`, `matches`, `lookingAt`, and `reset` calls.
