@@ -34,7 +34,7 @@ public final class PatternParsingCheck
         Slice pattern = wrappedBuffer(bytes, 2, bytes.length - 4);
         PatternInfo info = RustRegexp.parse(pattern);
         if (info.capturingGroupCount() != 2 || !info.namedCapturingGroups().equals(Map.of("letter", 1))) {
-            throw new AssertionError("Incorrect capture metadata: " + info);
+            throw new AssertionError("Incorrect capture metadata: " + info.capturingGroupCount() + " groups, names " + info.namedCapturingGroups());
         }
 
         if (!pattern.copy().equals(pattern) || !pattern.slice(0, 4).toStringUtf8().equals("(?i)")) {

@@ -32,11 +32,14 @@ public class TestRustRegexp
     @Test
     public void testParse()
     {
-        assertThat(RustRegexp.parse(utf8Slice("plain"))).isEqualTo(new PatternInfo(0, Map.of()));
+        PatternInfo plain = RustRegexp.parse(utf8Slice("plain"));
+        assertThat(plain.capturingGroupCount()).isZero();
+        assertThat(plain.namedCapturingGroups()).isEmpty();
 
         Slice pattern = utf8Slice("(?<word>\\w+)(b)?(?P<never>[^\\s\\S])");
         PatternInfo info = RustRegexp.parse(pattern);
-        assertThat(info).isEqualTo(new PatternInfo(3, Map.of("word", 1, "never", 3)));
+        assertThat(info.capturingGroupCount()).isEqualTo(3);
+        assertThat(info.namedCapturingGroups()).isEqualTo(Map.of("word", 1, "never", 3));
 
         RustRegexp compiled = RustRegexp.compile(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
@@ -52,11 +55,13 @@ public class TestRustRegexp
     @Test
     public void testParseOptionsAndErrors()
     {
-        assertThat(RustRegexp.parse(utf8Slice("#(ignored)\n(a)"), RustRegexp.Options.defaults().setComments(true)))
-                .isEqualTo(new PatternInfo(1, Map.of()));
+        PatternInfo comments = RustRegexp.parse(utf8Slice("#(ignored)\n(a)"), RustRegexp.Options.defaults().setComments(true));
+        assertThat(comments.capturingGroupCount()).isEqualTo(1);
+        assertThat(comments.namedCapturingGroups()).isEmpty();
 
-        assertThat(RustRegexp.parse(utf8Slice("a"), RustRegexp.Options.defaults().setMaxMemory(1)))
-                .isEqualTo(new PatternInfo(0, Map.of()));
+        PatternInfo tinyMemory = RustRegexp.parse(utf8Slice("a"), RustRegexp.Options.defaults().setMaxMemory(1));
+        assertThat(tinyMemory.capturingGroupCount()).isZero();
+        assertThat(tinyMemory.namedCapturingGroups()).isEmpty();
 
         assertThatThrownBy(() -> RustRegexp.parse(utf8Slice("(?=a)")))
                 .isInstanceOf(RegexpParseException.class)
