@@ -8,9 +8,11 @@ planned here instead of a handler's whole-method invocation. The combined
 unit is accepted on its own, by validate-unit-results.py.
 """
 import argparse
+import hashlib
 import json
 import math
 import re
+import shutil
 from pathlib import Path
 from typing import NoReturn
 
@@ -52,6 +54,7 @@ from shard_results import (
     MANIFEST_FIELDS,
     OBSERVED_FIELDS,
     REBAR_OUTCOME_FIELDS,
+    calibration_rows,
     combined_rows,
     exact_filter,
     load_manifest,
@@ -129,8 +132,13 @@ UNIT_HOST_ARTIFACTS = (
     "rebar-outcomes.tsv",
     "calibration.tsv",
     "unit-session.tsv",
+    "unit-chain.txt",
 )
 MAXIMUM_CALIBRATION_DRIFT = 0.05
+# A calibration serves as the next unit's before only this long after it was taken.
+CHAIN_WINDOW_SECONDS = 60
+# The files naming the host, JVM, and engines a unit ran with.
+UNIT_ENVIRONMENT_FILES = ("environment-manifest.txt", "environment.txt", "engine-build.txt")
 
 
 def load_unit(directory, unit_id):
@@ -185,10 +193,18 @@ def ordered_shares(shares, replica_id):
     return list(reversed(shares)) if int(replica_id) % 2 == 0 else list(shares)
 
 
-def calibrations(count):
+def calibrations(count, chained=False):
+    """Each route's calibrations; a chained unit's before is the previous unit's after on its host."""
+    if chained:
+        return ["none"] * (count - 1) + ["after"]
     if count == 1:
         return ["both"]
     return ["before"] + ["none"] * (count - 2) + ["after"]
+
+
+def chained_plan(route_plan):
+    """Whether the plan's first route takes its before calibration from the lease before; an empty plan does not."""
+    return bool(route_plan) and route_plan[0]["calibration"] not in {"before", "both"}
 
 
 def protocol_replica(replica_id):
@@ -201,13 +217,13 @@ def unit_representatives(unit, replica_id):
     return sorted(row_id for replica, row_id in unit["representatives"] if replica == target)
 
 
-def plan_routes(directory, unit, replica_id):
+def plan_routes(directory, unit, replica_id, chained=False):
     dispatch = host_session.load_dispatch(directory / "shard-dispatch.tsv", unit["shard_id"])
     shares = ordered_shares(
         route_shares(unit_rows(directory, unit), host_session.applicable_routes(dispatch)), replica_id)
     return [
         (route, handler, systems, share, calibration)
-        for (route, handler, systems, share), calibration in zip(shares, calibrations(len(shares)))]
+        for (route, handler, systems, share), calibration in zip(shares, calibrations(len(shares), chained))]
 
 
 def plan(arguments):
@@ -220,7 +236,8 @@ def plan(arguments):
         row for row in row_protocol.read_tsv(DIRECTORY / "unit-rows.tsv") if row["unit_id"] == unit["unit_id"]])
     write_tsv(output / "route-plan.tsv", ROUTE_PLAN_FIELDS, [
         {"route": route, "handler": handler, "systems": canonical_systems(systems), "calibration": calibration}
-        for route, handler, systems, _, calibration in plan_routes(DIRECTORY, unit, arguments.replica)])
+        for route, handler, systems, _, calibration in plan_routes(
+            DIRECTORY, unit, arguments.replica, arguments.chained_calibration)])
     print(unit["shard_id"])
 
 
@@ -428,12 +445,16 @@ def combine(arguments):
         "unit_attempt_id": arguments.unit_attempt,
         "region": arguments.region,
     }])
-    write_unit_evidence(root, route_plan)
+    write_unit_evidence(root, route_plan, arguments.host_evidence)
     print(f"Combined {len(rows)} unit rows")
 
 
-def write_unit_evidence(root, route_plan):
-    """Bind each route's artifacts and the unit's own, in the host-session evidence shape."""
+def write_unit_evidence(root, route_plan, host_evidence=None):
+    """Bind each route's artifacts and the unit's own, in the host-session evidence shape.
+
+    A unit measured on a worker host references its calibrations in the host's
+    evidence by digest, since a chained calibration serves two units.
+    """
     evidence = []
     for route in route_plan:
         systems = parse_systems(route["systems"], "route plan")
@@ -458,17 +479,27 @@ def write_unit_evidence(root, route_plan):
             "verification": "capacity-prefix-sha256",
             "sha256": capacity_prefix_sha256(root / "unit-capacity.txt"),
         })
+    if host_evidence is not None:
+        for row in read_tsv(root / "calibration.tsv", ("raw_result",)):
+            artifact = f"calibrations/{row['raw_result']}"
+            evidence.append({
+                "route": "host",
+                "artifact": artifact,
+                "verification": "host-sha256",
+                "sha256": sha256_file(host_evidence / artifact),
+            })
     write_tsv(root / "unit-evidence.tsv", EVIDENCE_FIELDS, sorted(
         evidence, key=lambda row: (row["route"], row["artifact"])))
-    verify_unit_evidence(root)
+    verify_unit_evidence(root, host_evidence)
 
 
-def verify_unit_evidence(root):
+def verify_unit_evidence(root, host_evidence=None):
     rows = verify_evidence_manifest(
         root / "unit-evidence.tsv", root,
         route_required=UNIT_ROUTE_REQUIRED_ARTIFACTS,
         formal_required=FORMAL_UNIT_ARTIFACTS,
-        capacity_artifact="unit-capacity.txt")
+        capacity_artifact="unit-capacity.txt",
+        host_root=host_evidence)
     return evidence_candidate_identity(rows, root)
 
 
@@ -534,12 +565,13 @@ def check_unit_rows(root, unit, manifest):
 
 def check_unit_routes(root, unit, session, protocols, manifest):
     """Routes ran in the unit's order with its calibrations, on the unit session's host."""
-    routes = plan_routes(DIRECTORY, unit, session["replica_id"])
+    recorded = read_tsv(root / "route-plan.tsv", ROUTE_PLAN_FIELDS, ROUTE_PLAN_FIELDS)
+    routes = plan_routes(DIRECTORY, unit, session["replica_id"], chained_plan(recorded))
     shares = {route: share for route, _, _, share, _ in routes}
     planned = [
         {"route": route, "handler": handler, "systems": canonical_systems(systems), "calibration": calibration}
         for route, handler, systems, _, calibration in routes]
-    if read_tsv(root / "route-plan.tsv", ROUTE_PLAN_FIELDS, ROUTE_PLAN_FIELDS) != planned:
+    if recorded != planned:
         reject(f"{root / 'route-plan.tsv'} is not the unit's plan for replica {session['replica_id']}")
     shard_rows = [row for row in manifest if row["shard_id"] == unit["shard_id"]]
     for route in planned:
@@ -605,17 +637,87 @@ def check_semantic_receipt(directory, metadata):
         reject(f"{directory / 'semantic-reports'} are not the files of its semantic receipt")
 
 
-def check_unit_calibration(root):
+def environment_sha256(root):
+    """One digest of a unit's environment files, as its worker records it for each lease."""
+    return hashlib.sha256("".join(
+        f"{name}  {sha256_file(root / name)}\n" for name in UNIT_ENVIRONMENT_FILES
+        if (root / name).is_file()).encode()).hexdigest()
+
+
+def copy_environment(arguments):
+    """Copy the host's environment files into a unit or route directory, as environment_sha256 reads them."""
+    for name in UNIT_ENVIRONMENT_FILES:
+        if (arguments.source / name).is_file():
+            shutil.copy(arguments.source / name, arguments.target / name)
+
+
+def check_unit_chain(root, session, planned, rows, evidence):
+    """A chained unit's before is the after calibration of the lease before it on the same host,
+    taken within the chain window, and that lease ran with the same JVM and engines."""
+    path = root / "unit-chain.txt"
+    if not chained_plan(planned):
+        if path.exists():
+            reject(f"{path} names a chained calibration for a unit that calibrated before afresh")
+        return
+    if "unit-chain.txt" not in {row["artifact"] for row in evidence}:
+        reject(f"{root / 'unit-evidence.tsv'} does not bind the chained calibration record {path.name}")
+    chain = read_properties(path)
+    host_session_id, lease = split_unit_attempt(session["unit_attempt_id"])
+    expected = {
+        "previous_attempt": format_unit_attempt(host_session_id, int(lease) - 1),
+        "calibration": rows[0].get("raw_result", "").removesuffix(".json"),
+        "previous_environment_sha256": environment_sha256(root),
+    }
+    problems = [field for field, value in expected.items() if chain.get(field) != value]
+    gap = chain.get("gap_seconds", "")
+    if not gap.isdigit() or int(gap) > CHAIN_WINDOW_SECONDS:
+        problems.append("gap_seconds")
+    if problems:
+        reject(f"{path} does not chain from the lease before it on its host: {', '.join(problems)}")
+
+
+def check_unit_calibration(root, planned, host_evidence, session):
+    """The unit's calibrations stayed within the drift limit.
+
+    Calibrations a unit references in its host's evidence must be those files,
+    and its calibration table must recompute from them. A chained unit, whose
+    before is the previous unit's after, can only reference them.
+    """
     path = root / "calibration.tsv"
     rows = read_tsv(path, ("phase", "score", "before_after_drift"))
     if [row["phase"] for row in rows] != ["before", "after"]:
         reject(f"{path} must hold one before and one after calibration")
+    evidence_path = root / "unit-evidence.tsv"
+    evidence = read_tsv(evidence_path, EVIDENCE_FIELDS, EVIDENCE_FIELDS)
+    references = {row["artifact"]: row["sha256"] for row in evidence if row["verification"] == "host-sha256"}
+    if references or chained_plan(planned):
+        expected = [f"calibrations/{row.get('raw_result')}" for row in rows]
+        if len(set(expected)) != 2 or set(references) != set(expected):
+            reject(f"{evidence_path} does not reference exactly the host calibrations of {path}")
+        if host_evidence is None:
+            reject(f"{path} references host calibrations without a host evidence directory")
+        files = []
+        for artifact in expected:
+            calibration_path = host_evidence / artifact
+            if not calibration_path.is_file():
+                reject(f"referenced host calibration is missing: {calibration_path}")
+            digest = sha256_file(calibration_path)
+            if digest != references[artifact] or calibration_path.name != f"{digest}.json":
+                reject(f"host calibration checksum mismatch: {calibration_path}")
+            files.append(calibration_path)
+        try:
+            recomputed = calibration_rows(*files)
+        except ValueError as error:
+            reject(f"{path} does not recompute from its host calibrations: {error}")
+        if recomputed != read_tsv(path, tuple(recomputed[0]), tuple(recomputed[0])):
+            reject(f"{path} does not recompute from its host calibrations")
     before, after = (float(row["score"]) for row in rows)
     if not (math.isfinite(before) and math.isfinite(after)) or min(before, after) <= 0:
         reject(f"{path} has invalid calibration scores")
     drift = abs(after - before) / min(before, after)
     if exceeds_published_limit(drift, MAXIMUM_CALIBRATION_DRIFT):
         reject(f"{path} drifted {drift:.4f}, above {MAXIMUM_CALIBRATION_DRIFT}")
+    check_unit_chain(root, session, planned, rows, evidence)
 
 
 def check_unit_representatives(root, unit, session, planned):
@@ -645,9 +747,11 @@ def load_unit_tables(manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTO
 
 
 def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTORY / "row-protocol.tsv",
-                          tables=None):
+                          host_evidence=None, tables=None):
     """Accept one unit attempt on its own and return its receipt.
 
+    host_evidence is the evidence directory of the worker host that measured
+    the unit, where the calibrations it references by digest are stored.
     tables, from load_unit_tables, replaces loading the manifest and protocol paths.
     """
     session = read_one_tsv(root / "unit-session.tsv", UNIT_SESSION_FIELDS)
@@ -665,8 +769,8 @@ def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_p
     unit = check_unit_identity(root, session, tables["units"], protocols)
     check_unit_rows(root, unit, manifest)
     planned = check_unit_routes(root, unit, session, protocols, manifest)
-    check_unit_calibration(root)
-    candidate_commit, candidate_archive_sha256, engine_tree, heap_size = verify_unit_evidence(root)
+    check_unit_calibration(root, planned, host_evidence, session)
+    candidate_commit, candidate_archive_sha256, engine_tree, heap_size = verify_unit_evidence(root, host_evidence)
     check_unit_representatives(root, unit, session, planned)
     return {
         **session,
@@ -686,6 +790,11 @@ def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_p
 
 def write_unit_receipt(path, receipt):
     write_tsv(path, UNIT_RECEIPT_FIELDS, [receipt])
+
+
+def format_unit_attempt(host_session_id, sequence):
+    """A unit attempt's ID: the host session that leased the unit and the lease's sequence there."""
+    return f"{host_session_id}/{sequence}"
 
 
 def split_unit_attempt(unit_attempt_id):
@@ -816,6 +925,7 @@ def parser():
     plan_parser.add_argument("--unit", required=True)
     plan_parser.add_argument("--replica", required=True)
     plan_parser.add_argument("--output-directory", type=Path, required=True)
+    plan_parser.add_argument("--chained-calibration", action="store_true")
     plan_parser.set_defaults(function=plan)
 
     selectors_parser = subparsers.add_parser("selectors")
@@ -840,7 +950,13 @@ def parser():
     combine_parser.add_argument("--unit-directory", type=Path, required=True)
     combine_parser.add_argument("--unit-attempt", required=True)
     combine_parser.add_argument("--region", required=True)
+    combine_parser.add_argument("--host-evidence", type=Path)
     combine_parser.set_defaults(function=combine)
+
+    copy_parser = subparsers.add_parser("copy-environment")
+    copy_parser.add_argument("--source", type=Path, required=True)
+    copy_parser.add_argument("--target", type=Path, required=True)
+    copy_parser.set_defaults(function=copy_environment)
     return argument_parser
 
 

@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import importlib.util
+import json
 import re
 import sys
 import tempfile
@@ -121,6 +122,43 @@ class TestUnitSession(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, re.escape(message)):
                     UNIT_SESSION.validate_unit_results(fixture.root)
 
+    def testWorkerUnitsShareTheCalibrationBetweenThem(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            host = Path(temporary_directory) / "host"
+            first_before, shared, second_after, drifted = (
+                store_host_calibration(host, score) for score in (100, 101, 102, 107.1))
+            first = UnitFixture(Path(temporary_directory) / "first", *COPY_UNIT)
+            first.calibrate_on_host(host, first_before, shared)
+            second = UnitFixture(Path(temporary_directory) / "second", *COPY_UNIT, chained=True)
+            second.chain(shared)
+            second.calibrate_on_host(host, shared, second_after)
+
+            for fixture in (first, second):
+                UNIT_SESSION.validate_unit_results(fixture.root, host_evidence=host)
+                evidence = {row["artifact"]: row for row in fixture.read("unit-evidence.tsv")}
+                self.assertEqual("host-sha256", evidence[f"calibrations/{shared.name}"]["verification"])
+            self.assertEqual(["after"], [route["calibration"] for route in second.read("route-plan.tsv")])
+
+            with self.assertRaisesRegex(ValueError, "without a host evidence directory"):
+                UNIT_SESSION.validate_unit_results(second.root)
+            # The link must name the lease before it on the host, within the chain window, in the same environment.
+            for link, problem in (({"previous_attempt": "host-session-1/1"}, "previous_attempt"),
+                                  ({"gap_seconds": "61"}, "gap_seconds"),
+                                  ({"previous_environment_sha256": "0" * 64}, "previous_environment_sha256")):
+                with self.subTest(problem=problem):
+                    second.chain(shared, **link)
+                    second.calibrate_on_host(host, shared, second_after)
+                    with self.assertRaisesRegex(ValueError, f"does not chain from the lease before it.*{problem}"):
+                        UNIT_SESSION.validate_unit_results(second.root, host_evidence=host)
+            second.chain(shared)
+            second.calibrate_on_host(host, shared, second_after)
+            second_after.unlink()
+            with self.assertRaisesRegex(ValueError, "referenced host calibration is missing"):
+                UNIT_SESSION.validate_unit_results(second.root, host_evidence=host)
+            second.calibrate_on_host(host, shared, drifted)
+            with self.assertRaisesRegex(ValueError, re.escape("drifted 0.0604")):
+                UNIT_SESSION.validate_unit_results(second.root, host_evidence=host)
+
     def testCampaignAcceptsEveryUnitReplicaOnItsOwnInstance(self):
         def validate(campaign, receipts, replicas=(1, 2, 3)):
             return UNIT_SESSION.validate_unit_campaign(
@@ -148,6 +186,19 @@ class TestUnitSession(unittest.TestCase):
                     for receipt in campaign.receipts[:-1]])
 
 
+def store_host_calibration(host, score):
+    """Store one calibration JMH result in a worker host's evidence, named by its digest."""
+    document = json.dumps([{
+        "benchmark": "io.airlift.regulator.BenchmarkExpressionPlans.findLiteral",
+        "params": {"workload": "KIB_LATE"},
+        "primaryMetric": {"score": score, "scoreUnit": "ns/op", "rawData": [[score]]},
+    }]).encode()
+    path = host / "calibrations" / f"{hashlib.sha256(document).hexdigest()}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(document)
+    return path
+
+
 class UnitFixture:
     """A unit attempt's directory as run-unit.sh leaves it, with fixture measurements."""
 
@@ -160,8 +211,10 @@ class UnitFixture:
     SMOKE_METADATA = ("jmh_process_count", "jmh_process_warmup_iterations", "jmh_process_measurement_iterations",
                       "jmh_iteration_time")
 
-    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row, role: 1):
+    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row, role: 1,
+                 chained=False):
         self.root = root
+        self.host_evidence = None
         units = UNIT_SESSION.work_units.load(BASELINE)
         self.unit = next(unit for unit in units.values()
                          if (unit["shard_id"], unit["unit_index"]) == (shard_id, unit_index))
@@ -171,14 +224,16 @@ class UnitFixture:
         self.score = score
         with contextlib.redirect_stdout(io.StringIO()):
             UNIT_SESSION.plan(type("Arguments", (), {
-                "unit": self.unit["unit_id"], "replica": self.replica, "output_directory": root})())
+                "unit": self.unit["unit_id"], "replica": self.replica, "output_directory": root,
+                "chained_calibration": chained})())
         representatives = UNIT_SESSION.row_protocol.read_tsv(BASELINE / "protocol-representatives.tsv")
         held = UNIT_SESSION.unit_representatives(self.unit, self.replica)
         (root / "unit-capacity.txt").write_text(
             "memory_total_bytes=34359738368\nmemory_available_before_bytes=30000000000\n"
             "swap_total_bytes=0\nswap_free_before_bytes=0\noom_kills_before=0\n")
         self.write_calibration(100, 101)
-        for route, _, systems, share, calibration in UNIT_SESSION.plan_routes(BASELINE, self.unit, self.replica):
+        for route, _, systems, share, calibration in UNIT_SESSION.plan_routes(
+                BASELINE, self.unit, self.replica, chained):
             route_representatives = [
                 row for row in representatives
                 if (row["shard_id"], row["replica_id"], row["route"]) == (shard_id, self.replica, route)
@@ -193,6 +248,20 @@ class UnitFixture:
         (self.root / "calibration.tsv").write_text(
             "phase\tscore\tscore_unit\tbefore_after_drift\n"
             f"before\t{before}\tns/op\t{drift}\nafter\t{after}\tns/op\t{drift}\n")
+
+    def chain(self, calibration, **link):
+        """Record the chained calibration link as the worker writes it for the attempt's lease."""
+        (self.root / "unit-chain.txt").write_text("".join(f"{name}={value}\n" for name, value in {
+            "previous_attempt": "host-session-1/2", "calibration": calibration.stem, "gap_seconds": "30",
+            "previous_environment_sha256": UNIT_SESSION.environment_sha256(self.root), **link}.items()))
+
+    def calibrate_on_host(self, host, before, after):
+        """Calibrate from a worker host's stored calibrations and combine, as run-unit.sh does there."""
+        (self.root / "calibration.tsv").unlink(missing_ok=True)
+        SHARD_RESULTS.calibration(type("Arguments", (), {
+            "before": before, "after": after, "output": self.root / "calibration.tsv"})())
+        self.host_evidence = host
+        self.combine()
 
     def create_route(self, route, systems, share, calibration, representatives):
         directory = self.root / "routes" / route
@@ -283,12 +352,14 @@ class UnitFixture:
     def combine(self, attempt="host-session-1/3"):
         with contextlib.redirect_stdout(io.StringIO()):
             UNIT_SESSION.combine(type("Arguments", (), {
-                "unit_directory": self.root, "unit_attempt": attempt, "region": "us-west-2"})())
+                "unit_directory": self.root, "unit_attempt": attempt,
+                "region": self.host["availability_zone"][:-1],
+                "host_evidence": self.host_evidence})())
 
     def accept(self, attempt):
         """Accept the attempt as run-unit.sh does, then finalize its capacity and status."""
         self.combine(attempt)
-        receipt = UNIT_SESSION.validate_unit_results(self.root)
+        receipt = UNIT_SESSION.validate_unit_results(self.root, host_evidence=self.host_evidence)
         UNIT_SESSION.write_unit_receipt(self.root / "unit-receipt.tsv", receipt)
         with (self.root / "unit-capacity.txt").open("a") as capacity:
             capacity.write("wall_seconds=600\nmaximum_resident_kibibytes=1048576\nexit_status=0\n"
@@ -303,10 +374,12 @@ class UnitCampaign:
 
     PLATFORMS = {"r8i": ("intel", "r8i.large"), "r9g": ("arm", "r9g.large")}
 
-    def __init__(self, root, shard_id, replicas=(1, 2, 3), score=lambda row, role, platform, replica: 1):
+    def __init__(self, root, shard_id, replicas=(1, 2, 3), score=lambda row, role, platform, replica: 1,
+                 host_calibrations=False):
         self.root = root
         self.shard_id = shard_id
         self.score = score
+        self.host_calibrations = host_calibrations
         self.units = sorted(
             (unit for unit in UNIT_SESSION.work_units.load(BASELINE).values() if unit["shard_id"] == shard_id),
             key=lambda unit: int(unit["unit_index"]))
@@ -335,6 +408,10 @@ class UnitCampaign:
                 "host_epoch": f"{platform}-epoch-{host}", "architecture": architecture,
                 "instance_type": instance_type, "availability_zone": "us-west-2a",
             }, lambda row, role: self.score(row, role, platform, replica))
+        if self.host_calibrations:
+            # A worker host stores its calibrations once, beside its attempts.
+            calibrations = [store_host_calibration(directory.parent, score) for score in (100, 101)]
+            fixture.calibrate_on_host(directory.parent, *calibrations)
         receipt = fixture.accept(f"{host_session}/{lease}")
         (self.confirmations if replica == 4 else self.receipts).append(receipt)
         return receipt

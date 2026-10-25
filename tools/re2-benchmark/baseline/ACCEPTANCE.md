@@ -108,7 +108,14 @@ is a distinct attempt. The validator rejects the attempt unless:
   calibration split included, and every route's session matches the unit
   session's host and the unit's shard
 - the unit's `calibration.tsv`, from the first route's before and the last
-  route's after calibration, drifted at most 5%
+  route's after calibration, drifted at most 5%; a unit measured on a worker
+  host recomputes it from the two host calibrations it references, each
+  present with its digest, and a chained unit, whose before is the previous
+  unit's after, must reference them
+- a chained unit's `unit-chain.txt`, bound in its evidence, names the lease
+  before it on the same host, that lease's after calibration as its before, a
+  gap of at most 60 seconds, and the same environment digest as its own; an
+  unchained unit has none
 - every route ran the frozen protocol: qualification or smoke, the default
   Joni JMH window, and exactly the JMH selectors that protocol plans for its
   share
@@ -125,7 +132,10 @@ its JMH selectors and no calibration of its own. Its `host` rows bind the
 environment and engine-build provenance, route plan, unit rows, expected and
 observed rows, Rebar outcomes, calibration, unit session, and the immutable
 prefix of `unit-capacity.txt`. As for hosts, GNU `time` completes that file
-only after acceptance returns.
+only after acceptance returns. A worker host's unit also has `host` rows with
+verification `host-sha256` for its calibrations, which live once in the host
+evidence as `calibrations/<sha256>.json`; `--host-evidence` names that
+directory.
 
 On success, the validator writes `unit-receipt.tsv`: the unit session, its
 shard and owned and copied row counts, the digest of the unit's frozen row
@@ -188,9 +198,9 @@ dispatcher. Each attempt is retained at
 result root. On restart, recovery revalidates every ledger row against that
 directory and adds a retained attempt the ledger lacks once it passes the same
 checks: final status, accepted capacity, a receipt regenerated from the
-evidence, and the frozen candidate. The first accepted attempt of a unit
-replica wins; a later attempt that also passes is superseded and stays out of
-the ledger.
+evidence and the host's calibrations, and the frozen candidate. The first
+accepted attempt of a unit replica wins; a later attempt that also passes is
+superseded and stays out of the ledger.
 
 With `--accepted-units`, the campaign validator requires every platform and
 checked-in unit of the selected shards, with replicas 1, 2, and 3. It also

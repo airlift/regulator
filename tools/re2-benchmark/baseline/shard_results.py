@@ -7,6 +7,7 @@ import json
 import math
 import re
 import statistics
+from fractions import Fraction
 from pathlib import Path
 
 import row_protocol
@@ -102,6 +103,19 @@ def selected_rows(manifest, shard, systems):
     return rows
 
 
+def sample_stdev(samples):
+    """statistics.stdev as Python 3.9, the hosts' Python, computes it, so any controller recomputes host
+    statistics exactly.
+
+    Later Pythons round an exact standard deviation once, which can differ in the last bit.
+    """
+    count = len(samples)
+    mean = float(sum(map(Fraction, samples)) / count)
+    squares = sum(Fraction((sample - mean) ** 2) for sample in samples)
+    deviations = sum(Fraction(sample - mean) for sample in samples)
+    return math.sqrt(float((squares - deviations ** 2 / count) / (count - 1)))
+
+
 def metric_statistics(metric):
     raw_data = metric.get("rawData") or []
     samples = [float(sample) for fork in raw_data for sample in fork]
@@ -112,7 +126,7 @@ def metric_statistics(metric):
         samples = [score]
     mean = statistics.fmean(samples)
     coefficient_of_variation = (
-        statistics.stdev(samples) / mean
+        sample_stdev(samples) / mean
         if len(samples) > 1 and mean != 0
         else 0.0
     )
@@ -740,8 +754,14 @@ def combine(arguments):
 
 
 def calibration(arguments):
+    rows = calibration_rows(arguments.before, arguments.after)
+    write_tsv(arguments.output, tuple(rows[0]), rows)
+
+
+def calibration_rows(before_path, after_path):
+    """The before/after calibration table of two calibration JMH results."""
     rows = []
-    for phase, path in (("before", arguments.before), ("after", arguments.after)):
+    for phase, path in (("before", before_path), ("after", after_path)):
         actual = jmh_results([path], require_one_process_group_per_file=False)
         if len(actual) != 1:
             raise ValueError(f"Expected one calibration row in {path}, found {len(actual)}")
@@ -765,8 +785,7 @@ def calibration(arguments):
     drift = abs(after - before) / min(before, after)
     for row in rows:
         row["before_after_drift"] = format_number(drift)
-    fields = tuple(rows[0])
-    write_tsv(arguments.output, fields, rows)
+    return rows
 
 
 class ProtocolQualificationError(ValueError):

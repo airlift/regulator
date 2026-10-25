@@ -52,12 +52,12 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def write_campaign_artifact(source_directory, artifact, campaign_id):
-    """Bind every retained file under the campaign source as its immutable archive would."""
+def write_campaign_artifact(source_directory, artifact, campaign_id, unbound=lambda path: False):
+    """Bind every retained file under the campaign source, except those unbound, as its immutable archive would."""
     source_manifest = artifact.with_name(artifact.name + ".source-manifest.tsv")
     source_rows = []
     for path in sorted(
-            (item for item in source_directory.rglob("*") if item.is_file()),
+            (item for item in source_directory.rglob("*") if item.is_file() and not unbound(item)),
             key=lambda item: str(item.relative_to(source_directory))):
         source_rows.append({
             "path": "campaign-results/" + str(path.relative_to(source_directory)),
@@ -1200,11 +1200,11 @@ class TestUnitCampaignReduction(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            campaign = UnitCampaign(root / "campaign-results", self.SHARD, score=score)
+            campaign = UnitCampaign(root / "campaign-results", self.SHARD, score=score, host_calibrations=True)
 
-            def aggregate(confirmations):
+            def aggregate(confirmations, unbound=lambda path: False):
                 artifact = root / "campaign-artifact.tsv"
-                write_campaign_artifact(campaign.root, artifact, "campaign")
+                write_campaign_artifact(campaign.root, artifact, "campaign", unbound)
                 return aggregate_results.aggregate(argparse.Namespace(
                     manifest=BASELINE / "rows.tsv", platforms=BASELINE / "platforms.tsv",
                     shards=BASELINE / "shards.tsv", selected_shards=[self.SHARD],
@@ -1239,6 +1239,12 @@ class TestUnitCampaignReduction(unittest.TestCase):
             self.assertEqual(
                 [{"platform": "r8i", "shard_id": self.SHARD, "unit_id": unstable["unit_id"]}],
                 read_tsv(output / "confirmation-jobs.tsv"))
+            # An attempt's artifact includes the host calibrations it references, so the archive must bind them.
+            self.assertEqual(24 * 2, sum(
+                row["logical_name"].startswith("../calibrations/")
+                for row in read_tsv(output / "artifact-inventory.tsv")))
+            with self.assertRaisesRegex(aggregate_results.ReductionError, "not bound by the campaign archive"):
+                aggregate([], unbound=lambda path: path.parent.name == "calibrations")
 
             confirmation = campaign.add("r8i", unstable, 4, host=4)
             aggregate([confirmation])
