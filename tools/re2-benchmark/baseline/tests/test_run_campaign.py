@@ -2854,38 +2854,70 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(sibling_process.signals, [RUN_CAMPAIGN.signal.SIGTERM])
             self.assertEqual(sibling_process.wait_timeouts, [15 * 60])
 
-    def test_attempt_ledger_failure_after_process_start_cleans_child(self):
+    def test_attempt_ledger_failure_stops_the_campaign_and_cleans_any_child(self):
+        # The starting record fails before the wrapper starts, the started record after it.
+        for failed_write, started in ((1, False), (2, True)):
+            with self.subTest(failed_write=failed_write), tempfile.TemporaryDirectory() as temporary_directory:
+                job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+                root = Path(temporary_directory)
+                result_root = root / "results"
+                result_root.mkdir()
+                process = FakeProcess(
+                    112,
+                    wait_action=lambda: self.write_cleanup_session(result_root, job))
+                real_write_attempt = RUN_CAMPAIGN.write_attempt
+                write_count = 0
+
+                def fail_one_attempt_write(*arguments, **keywords):
+                    nonlocal write_count
+                    write_count += 1
+                    if write_count == failed_write:
+                        raise OSError("simulated durable-ledger failure")
+                    return real_write_attempt(*arguments, **keywords)
+
+                # A one-job phase is all tail; keep this launch on Spot. A ledger failure mistaken for a failed
+                # start would be retried at once, starting a second wrapper.
+                wrappers = [process] if started else []
+                with patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=wrappers) as popen, \
+                        patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
+                        patch.object(RUN_CAMPAIGN, "CAPACITY_RETRY_SECONDS", 0), \
+                        patch.object(RUN_CAMPAIGN.time, "sleep"), \
+                        patch.object(
+                            RUN_CAMPAIGN,
+                            "write_attempt",
+                            side_effect=fail_one_attempt_write):
+                    with self.assertRaisesRegex(OSError, "simulated durable-ledger failure"):
+                        RUN_CAMPAIGN.execute_jobs(
+                            self.arguments(root), root, result_root, [job])
+
+                self.assertEqual(started, popen.called)
+                self.assertEqual([RUN_CAMPAIGN.signal.SIGTERM] if started else [], process.signals)
+                self.assertEqual([15 * 60] if started else [], process.wait_timeouts)
+
+    def test_wrapper_that_fails_to_start_is_retried_on_a_fresh_epoch(self):
         job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
             result_root.mkdir()
-            process = FakeProcess(
-                112,
-                wait_action=lambda: self.write_cleanup_session(result_root, job))
-            real_write_attempt = RUN_CAMPAIGN.write_attempt
-            write_count = 0
-
-            def fail_second_attempt_write(*arguments, **keywords):
-                nonlocal write_count
-                write_count += 1
-                if write_count == 2:
-                    raise OSError("simulated durable-ledger failure")
-                return real_write_attempt(*arguments, **keywords)
-
-            # A one-job phase is all tail; keep this launch on Spot.
-            with patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process), \
+            replacement = FakeProcess(
+                113, status=1, poll_action=lambda: self.write_cleanup_session(
+                    result_root, RUN_CAMPAIGN.replace(job, host_epoch=11, attempt=2),
+                    failure_classification="benchmark-failure"))
+            # A one-job phase is all tail; keep its retry on Spot.
+            with patch.object(RUN_CAMPAIGN.subprocess, "Popen",
+                              side_effect=[OSError("exec format error"), replacement]) as popen, \
                     patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
-                    patch.object(
-                        RUN_CAMPAIGN,
-                        "write_attempt",
-                        side_effect=fail_second_attempt_write):
-                with self.assertRaisesRegex(OSError, "simulated durable-ledger failure"):
-                    RUN_CAMPAIGN.execute_jobs(
-                        self.arguments(root), root, result_root, [job])
+                    patch.object(RUN_CAMPAIGN, "CAPACITY_RETRY_SECONDS", 0), \
+                    patch.object(RUN_CAMPAIGN.time, "sleep"):
+                with self.assertRaisesRegex(SystemExit, "campaign completed with unresolved jobs"):
+                    RUN_CAMPAIGN.execute_jobs(self.arguments(root), root, result_root, [job])
 
-            self.assertEqual(process.signals, [RUN_CAMPAIGN.signal.SIGTERM])
-            self.assertEqual(process.wait_timeouts, [15 * 60])
+            self.assertEqual(2, popen.call_count)
+            attempts = RUN_CAMPAIGN.read_attempts(result_root / "job-attempts.tsv")
+            self.assertIn(("10", "retryable-infrastructure", "controller could not start wrapper: exec format error"),
+                          [(row["host_epoch"], row["outcome"], row["detail"]) for row in attempts])
+            self.assertIn(("11", "started"), [(row["host_epoch"], row["outcome"]) for row in attempts])
 
     def test_frozen_fingerprint_ignores_unrelated_worktree_state(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

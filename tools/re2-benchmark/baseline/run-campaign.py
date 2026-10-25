@@ -2544,6 +2544,127 @@ def execute_jobs(arguments, root, result_root, jobs):
         return execute_jobs_locked(arguments, root, result_root, jobs)
 
 
+def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now, running_jobs):
+    """Place a launch candidate and reserve its capacity.
+
+    Returns the candidate as placed, when it may next be tried, whether it was admitted, whether
+    the launch scan may continue to later candidates, and the vCPU count a full fleet quota now
+    blocks, if any.
+    """
+    budget = getattr(arguments, "shared_budget", None)
+    spot_only = getattr(arguments, "spot_only", False)
+    placements = launch_placements(arguments, candidate)
+    candidate = place(candidate, placements[0])
+    # An unbudgeted Spot launch queries quota headroom only when Spot-only or above the proactive
+    # threshold; otherwise it takes the first placement and learns of a full region from EC2.
+    if candidate.market == "spot" and (
+            spot_only or arguments.max_concurrent > PROACTIVE_SPOT_CAPACITY_THRESHOLD) and budget is None:
+        placed, spot_capacities, error = place_with_headroom(
+            candidate, placements,
+            lambda region: current_spot_capacity(arguments, arguments.campaign_id, running_jobs, region))
+        if placed is None and error is not None:
+            wait_key = (candidate.identity, "spot-capacity-query")
+            if wait_key not in capacity_waits:
+                capacity_waits.add(wait_key)
+                write_attempt(attempts_path, candidate, "queued-capacity", f"Spot capacity query failed: {error}")
+            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
+        if placed is not None:
+            candidate = placed
+        elif spot_only:
+            wait_key = (candidate.identity, "spot-capacity")
+            if wait_key not in capacity_waits:
+                capacity_waits.add(wait_key)
+                write_attempt(attempts_path, candidate, "queued-capacity",
+                              "Spot-only policy waiting for quota; " + capacity_detail(spot_capacities))
+            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
+        else:
+            candidate = replace(candidate, market="on-demand")
+            wait_key = (candidate.identity, "spot-to-on-demand")
+            if wait_key not in capacity_waits:
+                capacity_waits.add(wait_key)
+                write_attempt(attempts_path, candidate, "queued-capacity",
+                              "Spot capacity exhausted; " + capacity_detail(spot_capacities))
+    if candidate.market == "on-demand" and budget is None:
+        placements = launch_placements(arguments, candidate)
+        placed, capacities, error = place_with_headroom(
+            candidate, placements,
+            lambda region: current_on_demand_capacity(arguments, arguments.campaign_id, running_jobs, region))
+        if placed is None and error is not None:
+            wait_key = (candidate.identity, "capacity-query")
+            if wait_key not in capacity_waits:
+                capacity_waits.add(wait_key)
+                write_attempt(attempts_path, candidate, "queued-capacity", f"capacity query failed: {error}")
+            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
+        if placed is None:
+            wait_key = (candidate.identity, "capacity")
+            if wait_key not in capacity_waits:
+                capacity_waits.add(wait_key)
+                write_attempt(attempts_path, candidate, "queued-capacity", capacity_detail(capacities))
+            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
+        candidate = placed
+    if budget:
+        for placement in placements:
+            try:
+                admitted, reason = budget.reserve(
+                    arguments.campaign_id, place(candidate, placement), result_root,
+                    lambda region=placement[0], market=candidate.market:
+                    shared_fleet_snapshot(arguments, region, market))
+            except BudgetError:
+                raise
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                admitted, reason = False, f"shared capacity query failed: {error}"
+            if admitted:
+                candidate = place(candidate, placement)
+                break
+            # Fleet-wide host, spending and launch-rate limits hold in every region.
+            if reason in ("fleet launch limit", "fleet spending or machine-hour ceiling"):
+                break
+        if not admitted:
+            if (candidate.identity, reason) not in capacity_waits:
+                capacity_waits.add((candidate.identity, reason))
+                write_attempt(attempts_path, candidate, "queued-capacity", reason)
+            if reason != "fleet quota or pending-launch limit" or candidate.platform.vcpus == 2:
+                return candidate, now + CAPACITY_RETRY_SECONDS, False, False, None
+            return candidate, now + CAPACITY_RETRY_SECONDS, False, True, candidate.platform.vcpus
+    return candidate, ready_at, True, False, None
+
+
+class WrapperStartError(RuntimeError):
+    """The wrapper process did not start, so no host was launched and its job may be retried."""
+
+
+def start_wrapper(arguments, root, result_root, runner, attempts_path, job):
+    """Record and start the wrapper for an admitted job; the caller records it as started.
+
+    Only a failed process start raises WrapperStartError; any other failure stops the campaign.
+    """
+    environment = job_environment(job, arguments, root, result_root)
+    log_path = result_root / "controller-logs" / (job.identity.replace("/", "-") + ".log")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log = log_path.open("w")
+    try:
+        write_attempt(
+            attempts_path, job, "starting",
+            f"region={environment['AWS_REGION']};"
+            f"placement_score={environment.get('CAMPAIGN_PLACEMENT_SCORE', '')}" +
+            (f";spot_capacity_failures={','.join(job.spot_capacity_failures)}"
+             if job.spot_capacity_failures else ""))
+        try:
+            process = subprocess.Popen(
+                [str(runner), job.identity],
+                cwd=root,
+                env=environment,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True)
+        except OSError as error:
+            raise WrapperStartError(error) from error
+    except BaseException:
+        log.close()
+        raise
+    return process, log
+
+
 def execute_jobs_locked(arguments, root, result_root, jobs):
     refill = getattr(arguments, "refill_unresolved", False)
     attempts_path = result_root / "job-attempts.tsv"
@@ -2608,125 +2729,23 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
                     if (candidate.market == "spot" and not getattr(arguments, "spot_only", False) and
                             len(pending) + len(running) <= tail_jobs):
                         candidate = replace(candidate, market="on-demand")
-                    placements = launch_placements(arguments, candidate)
-                    candidate = place(candidate, placements[0])
-                    running_jobs = [record[1] for record in running.values()]
-                    if candidate.market == "spot" and (
-                            getattr(arguments, "spot_only", False) or
-                            arguments.max_concurrent > PROACTIVE_SPOT_CAPACITY_THRESHOLD) and budget is None:
-                        placed, spot_capacities, error = place_with_headroom(
-                            candidate, placements,
-                            lambda region: current_spot_capacity(arguments, arguments.campaign_id, running_jobs, region))
-                        if placed is None and error is not None:
-                            pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
-                            wait_key = (candidate.identity, "spot-capacity-query")
-                            if wait_key not in capacity_waits:
-                                capacity_waits.add(wait_key)
-                                write_attempt(
-                                    attempts_path,
-                                    candidate,
-                                    "queued-capacity",
-                                    f"Spot capacity query failed: {error}")
-                            continue
-                        if placed is not None:
-                            candidate = placed
-                        elif getattr(arguments, "spot_only", False):
-                            pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
-                            wait_key = (candidate.identity, "spot-capacity")
-                            if wait_key not in capacity_waits:
-                                capacity_waits.add(wait_key)
-                                write_attempt(attempts_path, candidate, "queued-capacity",
-                                              "Spot-only policy waiting for quota; " +
-                                              capacity_detail(spot_capacities))
-                            continue
-                        else:
-                            candidate = replace(candidate, market="on-demand")
-                            pending[index] = (candidate, ready_at)
-                            wait_key = (candidate.identity, "spot-to-on-demand")
-                            if wait_key not in capacity_waits:
-                                capacity_waits.add(wait_key)
-                                write_attempt(
-                                    attempts_path,
-                                    candidate,
-                                    "queued-capacity",
-                                    "Spot capacity exhausted; " + capacity_detail(spot_capacities))
-                    if candidate.market == "on-demand" and budget is None:
-                        placements = launch_placements(arguments, candidate)
-                        placed, capacities, error = place_with_headroom(
-                            candidate, placements,
-                            lambda region: current_on_demand_capacity(arguments, arguments.campaign_id, running_jobs, region))
-                        if placed is None and error is not None:
-                            pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
-                            wait_key = (candidate.identity, "capacity-query")
-                            if wait_key not in capacity_waits:
-                                capacity_waits.add(wait_key)
-                                write_attempt(attempts_path, candidate, "queued-capacity", f"capacity query failed: {error}")
-                            continue
-                        if placed is None:
-                            pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
-                            wait_key = (candidate.identity, "capacity")
-                            if wait_key not in capacity_waits:
-                                capacity_waits.add(wait_key)
-                                write_attempt(
-                                    attempts_path,
-                                    candidate,
-                                    "queued-capacity",
-                                    capacity_detail(capacities))
-                            continue
-                        candidate = placed
-                    if budget:
-                        for placement in placements:
-                            try:
-                                admitted, reason = budget.reserve(
-                                    arguments.campaign_id, place(candidate, placement), result_root,
-                                    lambda region=placement[0], market=candidate.market:
-                                    shared_fleet_snapshot(arguments, region, market))
-                            except BudgetError:
-                                raise
-                            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
-                                admitted, reason = False, f"shared capacity query failed: {error}"
-                            if admitted:
-                                candidate = place(candidate, placement)
-                                break
-                            # Fleet-wide host, spending and launch-rate limits hold in every region.
-                            if reason in ("fleet launch limit", "fleet spending or machine-hour ceiling"):
-                                break
-                        if not admitted:
-                            pending[index] = (candidate, now + CAPACITY_RETRY_SECONDS)
-                            if (candidate.identity, reason) not in capacity_waits:
-                                capacity_waits.add((candidate.identity, reason))
-                                write_attempt(attempts_path, candidate, "queued-capacity", reason)
-                            if reason != "fleet quota or pending-launch limit" or candidate.platform.vcpus == 2:
-                                break
-                            blocked_vcpus = candidate.platform.vcpus
-                            continue
+                    candidate, ready_at, admitted, scan, blocked = admit_launch(
+                        arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now,
+                        [record[1] for record in running.values()])
                     pending[index] = (candidate, ready_at)
-                    selected_index = index
-                    break
+                    if admitted:
+                        selected_index = index
+                        break
+                    blocked_vcpus = blocked or blocked_vcpus
+                    if not scan:
+                        break
                 if selected_index is None:
                     break
                 job, _ = pending.pop(selected_index)
                 validate_frozen_inputs(root, arguments, jobs_path, expected_fingerprint)
-                environment = job_environment(job, arguments, root, result_root)
-                log_path = result_root / "controller-logs" / (job.identity.replace("/", "-") + ".log")
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                log = log_path.open("w")
-                write_attempt(
-                    attempts_path, job, "starting",
-                    f"region={environment['AWS_REGION']};"
-                    f"placement_score={environment.get('CAMPAIGN_PLACEMENT_SCORE', '')}" +
-                    (f";spot_capacity_failures={','.join(job.spot_capacity_failures)}"
-                     if job.spot_capacity_failures else ""))
                 try:
-                    process = subprocess.Popen(
-                        [str(runner), job.identity],
-                        cwd=root,
-                        env=environment,
-                        stdout=log,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True)
-                except OSError as error:
-                    log.close()
+                    process, log = start_wrapper(arguments, root, result_root, runner, attempts_path, job)
+                except WrapperStartError as error:
                     if budget:
                         budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
                     detail = f"controller could not start wrapper: {error}"
