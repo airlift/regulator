@@ -398,9 +398,13 @@ final class TrinoScanPlanRun
         return !matchesNonAscii && nonAsciiMembers == null;
     }
 
-    boolean isSingleByteAscii()
+    /// Returns whether the run reads exactly one character and each of its member bytes starts
+    /// a character: it holds only ASCII characters, or holds some non-ASCII characters but not all
+    /// and so has only lead bytes as member bytes above 0x7F. A run of every non-ASCII character
+    /// also holds the continuation bytes.
+    boolean isSingleCharacterOfStartBytes()
     {
-        return acceptsOnlyAscii() && minimum == 1 && maximum == 1;
+        return !matchesNonAscii && minimum == 1 && maximum == 1;
     }
 
     /// Returns whether every character of `other` is certainly a member: a sufficient
@@ -419,6 +423,13 @@ final class TrinoScanPlanRun
     boolean isComplementOf(byte value)
     {
         return inverted && needles != null && needles.length == 1 && needles[0] == value;
+    }
+
+    /// Returns whether the run holds every ASCII byte except `value`, and holds some
+    /// non-ASCII characters but not all.
+    boolean isAsciiComplementOf(byte value)
+    {
+        return asciiStopNeedles != null && asciiStopNeedles.length == 1 && asciiStopNeedles[0] == value;
     }
 
     boolean isVariable()

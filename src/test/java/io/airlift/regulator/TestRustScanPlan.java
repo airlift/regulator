@@ -74,7 +74,12 @@ public class TestRustScanPlan
             new PlanCase("^x(\\w+)", "xé\u0085"),
             // A fold to the Kelvin sign, and a range folded to it and the long s.
             new PlanCase("(?i)^k([^/]+)/", "\u212Aab/"),
-            new PlanCase("(?i)^x([a-z]+)/", "xaſ\u212Ab/"));
+            new PlanCase("(?i)^x([a-z]+)/", "xaſ\u212Ab/"),
+            // Unanchored searches led by a set of some non-ASCII characters, whose candidates are
+            // its ASCII members and lead bytes.
+            new PlanCase("\\d([0-9]+)=", "\u0663=1\u0663=\u066312="),
+            new PlanCase("(?i)key=([^;]+);", "kx;\u212Aey=v;"),
+            new PlanCase("(?i)s([a-z]+)=", "ſ=Sſab="));
     // Suffixes appended to each witness: none, LF, CR LF, CR, and U+2028. Rust's $ matches only
     // at the input end.
     private static final List<String> LINE_ENDS = List.of("", "\n", "\r\n", "\r", "\u2028");
@@ -102,8 +107,8 @@ public class TestRustScanPlan
         }
         // A plan anchors only at the input end, so multiline anchors, CRLF ones included, keep the
         // ordinary engine, as do word boundaries, Rust's start and end boundaries included,
-        // reluctant runs, and an unanchored search led by a Unicode Perl class, whose candidates
-        // are not single bytes.
+        // reluctant runs, and an unanchored search led by a variable run of a Unicode Perl class,
+        // each of whose candidates would rescan the rest of the run.
         for (String expression : List.of(
                 "(?m)^x([^/]+)/",
                 "(?m)x([^/]+)/$",
@@ -113,7 +118,7 @@ public class TestRustScanPlan
                 "(?-u:\\b)x([^/]+)/",
                 "\\b{start}x([^/]+)/",
                 "^x([^/]+?)/",
-                "\\d([0-9]+)=")) {
+                "(\\d+)zz")) {
             assertThat(RustRegexp.compile(utf8Slice(expression)).pattern().usesTrinoScanPlanForDiagnostics()).as(expression).isFalse();
             assertThat(RustRegexp.compile(utf8Slice(expression), GENERATING).usesGeneratedBytecode()).as(expression).isFalse();
         }
