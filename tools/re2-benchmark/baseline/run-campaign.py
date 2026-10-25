@@ -54,17 +54,8 @@ REFILL_ENVIRONMENT_SCOPES = {
                     ("shard",)),
 }
 PINNED_REBAR_COMMIT = "463d00f31887e84c38467805b9e3122c314b9521"
-TRINO_SHARDS = frozenset((
-    "trino-operations",
-    "trino-final-line",
-    "trino-like",
-    "like-compile",
-    "like-single-use",
-    "like-dfa-single-use",
-    "lifecycle",
-    "lifecycle-shared-cold",
-    *(f"rebar-{letter}" for letter in "abcdefghijklmnopqrst"),
-))
+# A shard needs the pinned Trino checkout when shard-dispatch.tsv gives it one of these handlers.
+TRINO_HANDLERS = frozenset({"trino-operations", "trino-final-line", "trino-like", "lifecycle", "rebar"})
 CANDIDATE_PROVENANCE_FIELDS = (
     "candidate_ref",
     "candidate_commit",
@@ -273,6 +264,16 @@ def campaign_shards(root, arguments):
 def read_shards(directory):
     with (directory / "shards.tsv").open(newline="") as input_file:
         return [row["shard_id"] for row in csv.DictReader(input_file, delimiter="\t")]
+
+
+def read_trino_shards(directory):
+    with (directory / "shard-dispatch.tsv").open(newline="") as input_file:
+        return frozenset(
+            row["shard_id"] for row in csv.DictReader(input_file, delimiter="\t")
+            if row["native_access_handler"] in TRINO_HANDLERS)
+
+
+TRINO_SHARDS = read_trino_shards(Path(__file__).resolve().parent)
 
 
 def read_confirmation_jobs(path, platforms, shards):

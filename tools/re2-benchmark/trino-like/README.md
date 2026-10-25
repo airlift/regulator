@@ -18,8 +18,11 @@ They are outside the headline corpus and routine CI timing runs.
 than synthetic filler. It matches the LIKE predicates of TPC-H queries 2, 9,
 13, 14, 16, and 20 over every row of a pinned TPC-H column sample and returns
 the match count. Queries 13 and 16 negate some predicates with `NOT LIKE`; the
-benchmark times the `LIKE` itself. It is not part of the baseline publication
-inventory.
+benchmark times the `LIKE` itself. The baseline's `trino-like-specialized`
+shard runs its `candidate`, `candidateGenerated`, and `trinoSql` methods for
+the queries 2, 9, 13, and 14 workloads. The report's "Specialized engine and
+compiler" section compares those three methods for each workload; the other
+methods and workloads remain outside the baseline publication inventory.
 
 `BenchmarkTrinoLike`, the baseline campaign's LIKE benchmark, and
 `BenchmarkTrinoLikeTpch` each have a `candidateGenerated` method that runs the

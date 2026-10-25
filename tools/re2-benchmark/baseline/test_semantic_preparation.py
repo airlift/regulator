@@ -85,6 +85,22 @@ class TestSemanticPreparation(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "mode or differential"):
                         preparation.build(session, "trino-like")
 
+    def test_specialized_semantics_require_the_specialized_verifier(self):
+        verified = ["Verified Slice adapter outputs and callback traces against pinned Trino",
+                    "Verified 1 paired Trino/Joni operation results (SHA-256 fixture)",
+                    "Verified 1 everyday Regulator/Joni operation results (SHA-256 fixture)"]
+        specialized = "Verified 1 specialized Regulator/Joni operation results (SHA-256 fixture)"
+        for shard in ("trino-specialized-patterns-a", "trino-specialized-patterns-b"):
+            for lines, accepted in ((verified + [specialized], True), (verified, False)):
+                with self.subTest(shard=shard, accepted=accepted), tempfile.TemporaryDirectory() as temp:
+                    session = Path(temp)
+                    self.write_session(session, shard, lines)
+                    if accepted:
+                        self.assertEqual(preparation.build(session, shard)["shard_id"], shard)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "missing specialized Trino differential"):
+                            preparation.build(session, shard)
+
     def test_missing_route_is_rejected(self):
         shutil.rmtree(self.session / "routes/object-row")
         with self.assertRaisesRegex(ValueError, "every required route"):

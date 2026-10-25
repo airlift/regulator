@@ -9,8 +9,8 @@ from pathlib import Path
 import topology
 
 
-EXPECTED_ROW_COUNT = 5475
-EXPECTED_SHARD_COUNT = 44
+EXPECTED_ROW_COUNT = 5522
+EXPECTED_SHARD_COUNT = 47
 EXPECTED_PLATFORMS = {
     "r8i": ("intel", "r8i.large", "2"),
     "r8g": ("arm", "r8g.large", "2"),

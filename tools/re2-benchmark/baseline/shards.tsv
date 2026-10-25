@@ -24,8 +24,11 @@ lifecycle-shared-cold	Shared-program cold-cache wave controls	baseline-shard
 retained-memory	Retained-memory census for Regulator and Joni	baseline-shard
 trino-final-line	Trino final-line operation matrix against Joni	baseline-shard
 trino-operations	Application-shaped and diagnostic Trino regular-expression operations against Joni	baseline-shard
+trino-specialized-patterns-a	Trino operations for the specialized engine and compiler section against Joni, workload partition A	baseline-shard
+trino-specialized-patterns-b	Trino operations for the specialized engine and compiler section against Joni, workload partition B	baseline-shard
 trino-search-edges	Regulator-only Trino search-edge diagnostics	baseline-shard
 trino-like	Trino LIKE against current Trino implementations	baseline-shard
+trino-like-specialized	TPC-H LIKE predicates for the specialized engine and compiler section against Trino SQL	baseline-shard
 like-compile	Trino LIKE pattern construction against Trino SQL	baseline-shard
 like-single-use	Trino LIKE construction and first match against Trino SQL	baseline-shard
 like-dfa-single-use	Trino LIKE first match for DFA-eligible patterns in both modes	baseline-shard
