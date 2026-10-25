@@ -16,9 +16,7 @@ package io.airlift.regulator;
 import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 
-/**
- * Matches a nonempty ASCII word-class run with the original dialect's endpoint assertions.
- */
+/// Matches a nonempty ASCII word-class run with the original dialect's endpoint assertions.
 final class WordRunMatcher
 {
     private final long lowMask;

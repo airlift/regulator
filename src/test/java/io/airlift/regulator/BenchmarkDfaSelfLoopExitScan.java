@@ -33,9 +33,7 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.regulator.Dfa.SEARCH_NO_MATCH;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 
-/**
- * Measures complete DFA searches through a stable self-loop with one to three exit bytes.
- */
+/// Measures complete DFA searches through a stable self-loop with one to three exit bytes.
 @State(Scope.Thread)
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)

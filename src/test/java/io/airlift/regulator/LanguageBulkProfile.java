@@ -20,9 +20,7 @@ import java.lang.reflect.Field;
 import java.nio.file.Path;
 import java.time.Duration;
 
-/**
- * Diagnostic execution of the exact bulk operation; elapsed time is not benchmark evidence.
- */
+/// Diagnostic execution of the exact bulk operation; elapsed time is not benchmark evidence.
 public final class LanguageBulkProfile
 {
     private LanguageBulkProfile() {}

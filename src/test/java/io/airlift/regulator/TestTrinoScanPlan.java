@@ -884,12 +884,10 @@ public class TestTrinoScanPlan
         return requireNonNull(analyze(expression, frequencies), expression).leadingLiteralProbeOffsetForDiagnostics();
     }
 
-    /**
-     * Compares {@link Re2Matcher#find()} over every region of {@code source} that starts and ends
-     * on a character boundary with Joni over the same bytes. Each region is also searched with
-     * a plan that continues every unanchored search on the ordinary engine, whose context must
-     * be the region.
-     */
+    /// Compares [Re2Matcher#find()] over every region of `source` that starts and ends
+    /// on a character boundary with Joni over the same bytes. Each region is also searched with
+    /// a plan that continues every unanchored search on the ordinary engine, whose context must
+    /// be the region.
     private static void verifyRegionsAgainstJoni(String expression, Slice source)
     {
         verifyRegionsAgainstJoni(expression, TrinoRegexp.Options.defaults(), source);
@@ -913,11 +911,9 @@ public class TestTrinoScanPlan
         }
     }
 
-    /**
-     * Compares {@link Re2Matcher#find()} over {@code [start, end)} of {@code input} with Joni over
-     * the same bytes, on the plan and on a plan that continues every unanchored search on the
-     * ordinary engine.
-     */
+    /// Compares [Re2Matcher#find()] over `[start, end)` of `input` with Joni over
+    /// the same bytes, on the plan and on a plan that continues every unanchored search on the
+    /// ordinary engine.
     private static void verifyRegionAgainstJoni(String expression, Slice input, int start, int end)
     {
         Slice pattern = utf8Slice(expression);
@@ -927,10 +923,8 @@ public class TestTrinoScanPlan
         verifyRegionAgainstJoni(oracle, TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern).pattern().matcher(input), input, start, end, description + " after handoff");
     }
 
-    /**
-     * Compares every match {@code matcher} finds in {@code [start, end)} of {@code input}, with
-     * the bounds of every group, to Joni's matches over the same bytes.
-     */
+    /// Compares every match `matcher` finds in `[start, end)` of `input`, with
+    /// the bounds of every group, to Joni's matches over the same bytes.
     private static void verifyRegionAgainstJoni(Regex oracle, Re2Matcher matcher, Slice input, int start, int end, String description)
     {
         matcher.reset(input, start, end);
@@ -2610,10 +2604,8 @@ public class TestTrinoScanPlan
         }
     }
 
-    /**
-     * Compiles {@code expression} with an ordinary engine that matches nothing, so only the
-     * scan plan can report a match.
-     */
+    /// Compiles `expression` with an ordinary engine that matches nothing, so only the
+    /// scan plan can report a match.
     private static TrinoRegexp withoutOrdinaryEngine(String expression)
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
@@ -2634,9 +2626,7 @@ public class TestTrinoScanPlan
         semantic.setStartUnanchored(0);
     }
 
-    /**
-     * Returns the scan plan for {@code expression}, or null when the plan does not admit it.
-     */
+    /// Returns the scan plan for `expression`, or null when the plan does not admit it.
     private static TrinoScanPlan analyze(String expression)
     {
         return analyze(expression, ByteFrequencies.uniform());
@@ -2654,10 +2644,8 @@ public class TestTrinoScanPlan
         return new Regex(pattern, 0, pattern.length, Option.DEFAULT, NonStrictUTF8Encoding.INSTANCE, Syntax.Java);
     }
 
-    /**
-     * Returns 400 views, each of up to 23 symbols drawn from {@code text} and then
-     * {@code malformed}, with a byte on either side outside the view.
-     */
+    /// Returns 400 views, each of up to 23 symbols drawn from `text` and then
+    /// `malformed`, with a byte on either side outside the view.
     static List<Slice> randomSources(long seed, List<String> text, List<byte[]> malformed)
     {
         List<byte[]> symbols = new ArrayList<>();
@@ -2680,9 +2668,7 @@ public class TestTrinoScanPlan
         return sources;
     }
 
-    /**
-     * Returns every match a capturing matcher finds, as start/end pairs for each group.
-     */
+    /// Returns every match a capturing matcher finds, as start/end pairs for each group.
     private static List<int[]> matcherMatches(TrinoRegexp regexp, Slice source)
     {
         TrinoRegexpMatcher matcher = regexp.matcher(source);
@@ -2893,11 +2879,9 @@ public class TestTrinoScanPlan
         }
     }
 
-    /**
-     * Adds anchored and bounded boolean calls to {@link #verifyAgainstJoni}. Ranges ending at
-     * the input end reach the scan plan; a matcher region is compared with the same bytes as a
-     * complete Slice, while a range keeps the complete Slice as assertion context.
-     */
+    /// Adds anchored and bounded boolean calls to [#verifyAgainstJoni]. Ranges ending at
+    /// the input end reach the scan plan; a matcher region is compared with the same bytes as a
+    /// complete Slice, while a range keeps the complete Slice as assertion context.
     private static void verifyBooleanCallsAgainstJoni(String expression, List<String> inputs)
     {
         verifyAgainstJoni(expression, inputs);
@@ -2951,12 +2935,10 @@ public class TestTrinoScanPlan
         verifySourcesAgainstJoni(expression, sources, scanPlan);
     }
 
-    /**
-     * Compares every public operation with Joni. On valid UTF-8 the operations are compared
-     * again with a plan that continues every unanchored search on the ordinary engine before its
-     * first attempt. Malformed sources are excluded from that run: past a handoff they may get
-     * the ordinary engine's answer rather than the plan's.
-     */
+    /// Compares every public operation with Joni. On valid UTF-8 the operations are compared
+    /// again with a plan that continues every unanchored search on the ordinary engine before its
+    /// first attempt. Malformed sources are excluded from that run: past a handoff they may get
+    /// the ordinary engine's answer rather than the plan's.
     private static void verifySourcesAgainstJoni(String expression, List<Slice> sources, boolean scanPlan)
     {
         verifySourcesAgainstJoni(expression, TrinoRegexp.Options.defaults(), sources, scanPlan);
@@ -2973,10 +2955,8 @@ public class TestTrinoScanPlan
         verifyOperations(expression + " after handoff", TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, options), source -> joniMatches(oracle, source), validSources, scanPlan);
     }
 
-    /**
-     * Compares every public operation of {@code regexp} on each source with the matches, as
-     * start/end pairs for each group, that {@code expectedMatches} returns for it.
-     */
+    /// Compares every public operation of `regexp` on each source with the matches, as
+    /// start/end pairs for each group, that `expectedMatches` returns for it.
     private static void verifyOperations(String description, TrinoRegexp regexp, Function<Slice, List<int[]>> expectedMatches, List<Slice> sources, boolean scanPlan)
     {
         assertThat(regexp.pattern().usesTrinoScanPlanForDiagnostics()).as(description).isEqualTo(scanPlan);
@@ -3053,10 +3033,8 @@ public class TestTrinoScanPlan
         }
     }
 
-    /**
-     * Returns every non-overlapping Joni match as start/end pairs for each group, searching again
-     * from the previous match end as Trino's Joni functions do.
-     */
+    /// Returns every non-overlapping Joni match as start/end pairs for each group, searching again
+    /// from the previous match end as Trino's Joni functions do.
     private static List<int[]> joniMatches(Regex oracle, Slice source)
     {
         int base = source.byteArrayOffset();

@@ -37,14 +37,12 @@ import static io.airlift.slice.SizeOf.sizeOfObjectArray;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
-/**
- * DFA-based regex search implementation (ported from upstream {@code re2/dfa.cc}).
- * <p>
- * Ordinary transitions use compact object-reference rows with an integer
- * sidecar for abnormal transitions. Eligible long forward searches can use
- * either a bounded depth-two table or an optional absolute-pointer
- * sidecar, while object rows remain authoritative for every fallback.
- */
+/// DFA-based regex search implementation (ported from upstream `re2/dfa.cc`).
+///
+/// Ordinary transitions use compact object-reference rows with an integer
+/// sidecar for abnormal transitions. Eligible long forward searches can use
+/// either a bounded depth-two table or an optional absolute-pointer
+/// sidecar, while object rows remain authoritative for every fallback.
 final class Dfa
 {
     static final long MAX_PAIRED_TRANSITION_MEMORY = 64 * 1024;
@@ -3841,10 +3839,8 @@ final class Dfa
         }
     }
 
-    /**
-     * Cold-path state metadata. Replaces the old per-state object with next[] array.
-     * The actual transitions live in the flat {@code DfaInstance.transitions[]} table.
-     */
+    /// Cold-path state metadata. Replaces the old per-state object with next[] array.
+    /// The actual transitions live in the flat `DfaInstance.transitions[]` table.
     record StateData(int[] inst, int flag, int offset) {}
 
     private record RestoredStates(int startOffset, int stateOffset) {}
@@ -3897,10 +3893,8 @@ final class Dfa
         }
     }
 
-    /**
-     * Append-only state lookup table. State construction is serialized, so insertion can stage all
-     * allocation before publishing either one empty slot or a fully populated replacement table.
-     */
+    /// Append-only state lookup table. State construction is serialized, so insertion can stage all
+    /// allocation before publishing either one empty slot or a fully populated replacement table.
     private static final class StateCache
     {
         private static final int INITIAL_CAPACITY = 16;
@@ -4030,10 +4024,8 @@ final class Dfa
                 boolean replacement) {}
     }
 
-    /**
-     * Work queue for DFA state construction.
-     * Ported from dfa.cc:368-418.
-     */
+    /// Work queue for DFA state construction.
+    /// Ported from dfa.cc:368-418.
     private static final class WorkQueue
     {
         private final SparseSet set;
@@ -4098,9 +4090,7 @@ final class Dfa
         }
     }
 
-    /**
-     * Saves a state so it can be restored after cache reset.
-     */
+    /// Saves a state so it can be restored after cache reset.
     private static class StateSaver
     {
         private final int[] inst;
@@ -5659,11 +5649,9 @@ final class Dfa
             return bytemap[c] & 0xFF;
         }
 
-        /**
-         * Compute and store the transition for the given state and byte.
-         * Returns the transition value (with possible T_MATCH_BIT), T_DEAD, or T_FULL_MATCH.
-         * Returns Integer.MIN_VALUE if allocation fails (cache exhaustion).
-         */
+        /// Compute and store the transition for the given state and byte.
+        /// Returns the transition value (with possible T_MATCH_BIT), T_DEAD, or T_FULL_MATCH.
+        /// Returns Integer.MIN_VALUE if allocation fails (cache exhaustion).
         int computeTransition(int stateOffset, int c)
         {
             int cls = byteMap(c);
@@ -6206,10 +6194,8 @@ final class Dfa
             }
         }
 
-        /**
-         * Adds id to the work queue, following empty arrows according to flag.
-         * Like upstream dfa.cc:837-919.
-         */
+        /// Adds id to the work queue, following empty arrows according to flag.
+        /// Like upstream dfa.cc:837-919.
         private void addToQueue(WorkQueue q, int id, int flag)
         {
             int stackPointer = 0;

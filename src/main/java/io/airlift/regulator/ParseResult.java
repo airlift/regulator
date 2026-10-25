@@ -17,10 +17,8 @@ import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * @param caseFolding the case folding of the pattern language, which every later stage of
- *         compilation applies
- */
+/// @param caseFolding the case folding of the pattern language, which every later stage of
+///         compilation applies
 record ParseResult(Regexp regexp, int capturingGroupCount, Map<Integer, String> capturingGroupNames, CaseFolding caseFolding)
 {
     ParseResult

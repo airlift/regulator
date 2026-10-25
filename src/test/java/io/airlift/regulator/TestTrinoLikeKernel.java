@@ -84,17 +84,15 @@ public class TestTrinoLikeKernel
             bytes(0xED, 0xA0, 0x80),
             bytes(0xF0, 0x9F, 0x98));
 
-    /**
-     * Patterns of every plan, with literals on either side of each inline comparison width, a
-     * literal longer than the inline comparisons, contained literals of one and of several bytes,
-     * gaps short enough to unroll and longer ones, and wildcards with and without non-ASCII code
-     * points. Each runs on a generated class whose handle has the type and result of
-     * {@link TrinoLikePattern#matches(Slice)}, and the same pattern compiled without the option
-     * keeps no generated code. In this package, the generated classes and the helpers they call
-     * invoke only {@link #GENERATED_CODE_CALLS}. Each runs with both emitter variants, and each
-     * search of a literal of two or more bytes verifies its candidates in a separate method and
-     * reads its broadcasts from fields only as on aarch64.
-     */
+    /// Patterns of every plan, with literals on either side of each inline comparison width, a
+    /// literal longer than the inline comparisons, contained literals of one and of several bytes,
+    /// gaps short enough to unroll and longer ones, and wildcards with and without non-ASCII code
+    /// points. Each runs on a generated class whose handle has the type and result of
+    /// [TrinoLikePattern#matches(Slice)], and the same pattern compiled without the option
+    /// keeps no generated code. In this package, the generated classes and the helpers they call
+    /// invoke only [#GENERATED_CODE_CALLS]. Each runs with both emitter variants, and each
+    /// search of a literal of two or more bytes verifies its candidates in a separate method and
+    /// reads its broadcasts from fields only as on aarch64.
     @Test
     public void testEveryPlanShape()
             throws Throwable
@@ -171,10 +169,8 @@ public class TestTrinoLikeKernel
                 .containsExactlyInAnyOrderElementsOf(GENERATED_CODE_CALLS);
     }
 
-    /**
-     * A generated pattern rejects a {@code null} input as the interpreter does; its handle checks
-     * nothing more than the input it reads.
-     */
+    /// A generated pattern rejects a `null` input as the interpreter does; its handle checks
+    /// nothing more than the input it reads.
     @Test
     public void testNullInput()
     {
@@ -188,11 +184,9 @@ public class TestTrinoLikeKernel
         }).isInstanceOf(NullPointerException.class);
     }
 
-    /**
-     * A wildcard automaton of more positions than one word holds carries its states between
-     * words. Patterns cross one and two word boundaries, with positions that loop and positions
-     * that match any character on either side of each boundary.
-     */
+    /// A wildcard automaton of more positions than one word holds carries its states between
+    /// words. Patterns cross one and two word boundaries, with positions that loop and positions
+    /// that match any character on either side of each boundary.
     @Test
     public void testMultiWordWildcard()
             throws Throwable
@@ -216,14 +210,12 @@ public class TestTrinoLikeKernel
         assertThat(positions.length).isGreaterThan(2 * Long.SIZE);
     }
 
-    /**
-     * A run of the first byte of a contained literal that also ends with that byte makes every
-     * position a candidate that compares several bytes before failing, so the search switches to
-     * KMP and continues from the next position. Generated kernels find the literal where the
-     * interpreter does. The test checks results only, not whether or where the generated copy
-     * switches; TestLiteralSearchKernel checks that for the interpreted copy. The run can overlap
-     * the literal. Each runs with both emitter variants.
-     */
+    /// A run of the first byte of a contained literal that also ends with that byte makes every
+    /// position a candidate that compares several bytes before failing, so the search switches to
+    /// KMP and continues from the next position. Generated kernels find the literal where the
+    /// interpreter does. The test checks results only, not whether or where the generated copy
+    /// switches; TestLiteralSearchKernel checks that for the interpreted copy. The run can overlap
+    /// the literal. Each runs with both emitter variants.
     @Test
     public void testCandidateBudgetSwitchesToKmp()
             throws Throwable
@@ -262,10 +254,8 @@ public class TestTrinoLikeKernel
         }
     }
 
-    /**
-     * A pattern whose class would have a method longer than HotSpot compiles stays interpreted,
-     * while a smaller pattern of the same shape has a class.
-     */
+    /// A pattern whose class would have a method longer than HotSpot compiles stays interpreted,
+    /// while a smaller pattern of the same shape has a class.
     @Test
     public void testHugeMethodFallsBackToInterpreter()
             throws Throwable
@@ -289,11 +279,9 @@ public class TestTrinoLikeKernel
         verifySameMatches(small, generated, TrinoLikePattern.compile(utf8Slice(small)), sources);
     }
 
-    /**
-     * The generator builds a wildcard automaton of 500 state words, the most that its size
-     * estimate admits, without exhausting a small thread stack, and the pattern, whose class is
-     * too large, matches as the interpreter does.
-     */
+    /// The generator builds a wildcard automaton of 500 state words, the most that its size
+    /// estimate admits, without exhausting a small thread stack, and the pattern, whose class is
+    /// too large, matches as the interpreter does.
     @Test
     public void testLargestBuiltWildcardFitsSmallStack()
             throws InterruptedException
@@ -331,10 +319,8 @@ public class TestTrinoLikeKernel
         }
     }
 
-    /**
-     * A wildcard of more distinct code points than its class could hold, whose masks would take
-     * a word per state for each code point, stays interpreted and matches as the interpreter does.
-     */
+    /// A wildcard of more distinct code points than its class could hold, whose masks would take
+    /// a word per state for each code point, stays interpreted and matches as the interpreter does.
     @Test
     public void testOversizedWildcardStaysInterpreted()
     {
@@ -348,10 +334,8 @@ public class TestTrinoLikeKernel
         assertThat(generated.matches(utf8Slice("x" + literal.substring(2)))).isFalse();
     }
 
-    /**
-     * Returns a wildcard pattern of {@code count} distinct code points from {@code first} between
-     * a leading {@code _%} and a trailing {@code %}, so each code point selects its own mask.
-     */
+    /// Returns a wildcard pattern of `count` distinct code points from `first` between
+    /// a leading `_%` and a trailing `%`, so each code point selects its own mask.
     private static String wildcardOfDistinctCodePoints(int first, int count)
     {
         StringBuilder pattern = new StringBuilder("_%");
@@ -361,12 +345,10 @@ public class TestTrinoLikeKernel
         return pattern.append('%').toString();
     }
 
-    /**
-     * Requires each search of a literal of two or more bytes in {@code classfile} to call the
-     * method that verifies its candidates, and the search and that method to read broadcast fields
-     * exactly when {@code aarch64} is true, and returns the number of such searches. A one-byte
-     * search has no candidates to verify.
-     */
+    /// Requires each search of a literal of two or more bytes in `classfile` to call the
+    /// method that verifies its candidates, and the search and that method to read broadcast fields
+    /// exactly when `aarch64` is true, and returns the number of such searches. A one-byte
+    /// search has no candidates to verify.
     private static int assertSplitSearches(String pattern, byte[] classfile, TrinoLikeKernelGenerator.Kernel kernel, boolean aarch64)
     {
         ClassModel model = ClassFile.of().parse(classfile);
@@ -399,10 +381,8 @@ public class TestTrinoLikeKernel
         return splitSearches;
     }
 
-    /**
-     * Returns the literals the generated class of {@code kernel} has a search method for, in the
-     * order of their numbers.
-     */
+    /// Returns the literals the generated class of `kernel` has a search method for, in the
+    /// order of their numbers.
     private static List<LiteralSearchKernel> searchedLiterals(TrinoLikeKernelGenerator.Kernel kernel)
     {
         return switch (kernel.region()) {
@@ -425,10 +405,8 @@ public class TestTrinoLikeKernel
         return method.code().orElseThrow().elementStream();
     }
 
-    /**
-     * Requires the generated pattern and its handle to give the interpreted result on each
-     * source.
-     */
+    /// Requires the generated pattern and its handle to give the interpreted result on each
+    /// source.
     private static void verifySameMatches(String pattern, TrinoLikePattern generated, TrinoLikePattern interpreted, List<Slice> sources)
             throws Throwable
     {
@@ -441,12 +419,10 @@ public class TestTrinoLikeKernel
         }
     }
 
-    /**
-     * Returns {@code count} sources built from {@code pattern}: each {@code %} becomes up to three
-     * random symbols or malformed sequences, each {@code _} one, and each other character itself
-     * or, occasionally, a random one. Each source appears as a view inside a larger array and as
-     * an exact-length copy, which has no readable byte past its end.
-     */
+    /// Returns `count` sources built from `pattern`: each `%` becomes up to three
+    /// random symbols or malformed sequences, each `_` one, and each other character itself
+    /// or, occasionally, a random one. Each source appears as a view inside a larger array and as
+    /// an exact-length copy, which has no readable byte past its end.
     private static List<Slice> sources(Random random, String pattern, int count)
     {
         List<Slice> sources = new ArrayList<>();
@@ -488,10 +464,8 @@ public class TestTrinoLikeKernel
         return view(value.getBytes(UTF_8));
     }
 
-    /**
-     * Returns a view of {@code text} at a non-zero offset of a larger array whose neighbors are
-     * continuation bytes, which a stray read would consume.
-     */
+    /// Returns a view of `text` at a non-zero offset of a larger array whose neighbors are
+    /// continuation bytes, which a stray read would consume.
     private static Slice view(byte[] text)
     {
         byte[] bytes = new byte[text.length + 6];

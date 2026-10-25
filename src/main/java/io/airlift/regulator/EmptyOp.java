@@ -306,10 +306,8 @@ final class EmptyOp
         return isJavaLineTerminator(nextCodePoint) && nextPosition == end;
     }
 
-    /**
-     * Returns the Java $ flags to clear when a CR precedes the context: at a context start on the
-     * LF of a CR LF, because the JDK's $ reads the CR before a matcher region.
-     */
+    /// Returns the Java $ flags to clear when a CR precedes the context: at a context start on the
+    /// LF of a CR LF, because the JDK's $ reads the CR before a matcher region.
     static int javaEndFlagsRefusedAfterCarriageReturn(byte[] bytes, int begin, int end, int position)
     {
         if (position == begin && position < end && bytes[position] == '\n') {

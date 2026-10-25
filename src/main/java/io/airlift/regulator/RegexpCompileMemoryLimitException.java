@@ -13,9 +13,7 @@
  */
 package io.airlift.regulator;
 
-/**
- * Thrown when compilation exceeds the configured regular-expression memory budget.
- */
+/// Thrown when compilation exceeds the configured regular-expression memory budget.
 public final class RegexpCompileMemoryLimitException
         extends RegexpCompileException
 {

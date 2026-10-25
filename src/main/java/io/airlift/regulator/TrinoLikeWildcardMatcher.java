@@ -22,11 +22,9 @@ import io.airlift.slice.Slice;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * Matches Trino LIKE patterns with {@code _} over UTF-8 characters. Malformed input is read one
- * maximal subpart at a time ({@link Utf8#characterWidth}); such a character is consumed by
- * {@code _} or {@code %} but never equals a literal code point.
- */
+/// Matches Trino LIKE patterns with `_` over UTF-8 characters. Malformed input is read one
+/// maximal subpart at a time ([Utf8#characterWidth]); such a character is consumed by
+/// `_` or `%` but never equals a literal code point.
 final class TrinoLikeWildcardMatcher
 {
     static final int MATCH_ANY = -1;
@@ -74,20 +72,16 @@ final class TrinoLikeWildcardMatcher
         }
     }
 
-    /**
-     * Returns what each pattern position matches, a code point or {@link #MATCH_ANY}, in pattern
-     * order. Position {@code i} leads from state {@code i} to state {@code i + 1}; the last state
-     * accepts.
-     */
+    /// Returns what each pattern position matches, a code point or [#MATCH_ANY], in pattern
+    /// order. Position `i` leads from state `i` to state `i + 1`; the last state
+    /// accepts.
     int[] positions()
     {
         return Arrays.copyOf(match, acceptState);
     }
 
-    /**
-     * Returns, for each state, whether a {@code %} before the next position lets it consume any
-     * character and stay.
-     */
+    /// Returns, for each state, whether a `%` before the next position lets it consume any
+    /// character and stay.
     boolean[] loopback()
     {
         return loopback.clone();

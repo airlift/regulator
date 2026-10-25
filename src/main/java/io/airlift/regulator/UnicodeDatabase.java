@@ -25,16 +25,14 @@ import java.util.function.IntPredicate;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 
-/**
- * The pinned Unicode Character Database data, read from the resource that
- * {@code tools/unicode-database/generate.py} writes. The generator documents the format.
- * <p>
- * The resource is read once, on first use, and each section is decoded once, on its own first
- * use, through a holder class, so a process that never folds case with a rule, or never uses a
- * property, decodes none of the data that only it needs. The character names are most of the
- * resource, and only Java's {@code \N{name}} reads them, so the first read keeps every other
- * section, and the names are read from the resource again on their own first use.
- */
+/// The pinned Unicode Character Database data, read from the resource that
+/// `tools/unicode-database/generate.py` writes. The generator documents the format.
+///
+/// The resource is read once, on first use, and each section is decoded once, on its own first
+/// use, through a holder class, so a process that never folds case with a rule, or never uses a
+/// property, decodes none of the data that only it needs. The character names are most of the
+/// resource, and only Java's `\N{name}` reads them, so the first read keeps every other
+/// section, and the names are read from the resource again on their own first use.
 final class UnicodeDatabase
 {
     static final String UNICODE_VERSION = "18.0.0";
@@ -69,216 +67,168 @@ final class UnicodeDatabase
 
     private UnicodeDatabase() {}
 
-    /**
-     * Returns the generation key: the SHA-256 that identifies the generator and the input manifest
-     * that wrote the database.
-     */
+    /// Returns the generation key: the SHA-256 that identifies the generator and the input manifest
+    /// that wrote the database.
     static byte[] generationKey()
     {
         return Resource.RESOURCE.generationKey.clone();
     }
 
-    /**
-     * Returns the simple case folding, CaseFolding.txt statuses C and S: the code points it
-     * changes and the code point each folds to.
-     */
+    /// Returns the simple case folding, CaseFolding.txt statuses C and S: the code points it
+    /// changes and the code point each folds to.
     static CodePointMappings simpleCaseFolding()
     {
         return SimpleCaseFolding.MAPPINGS;
     }
 
-    /**
-     * Returns the multi-character part of the full case folding, CaseFolding.txt status F: the
-     * code points it changes and the two or more code points each folds to. Every other code
-     * point fully folds as it simply folds.
-     */
+    /// Returns the multi-character part of the full case folding, CaseFolding.txt status F: the
+    /// code points it changes and the two or more code points each folds to. Every other code
+    /// point fully folds as it simply folds.
     static MultiCharacterMappings fullCaseFolding()
     {
         return FullCaseFolding.MAPPINGS;
     }
 
-    /**
-     * Returns the simple uppercase mappings, UnicodeData.txt field 12.
-     */
+    /// Returns the simple uppercase mappings, UnicodeData.txt field 12.
     static CodePointMappings simpleUppercaseMappings()
     {
         return SimpleUppercaseMappings.MAPPINGS;
     }
 
-    /**
-     * Returns the simple lowercase mappings, UnicodeData.txt field 13.
-     */
+    /// Returns the simple lowercase mappings, UnicodeData.txt field 13.
     static CodePointMappings simpleLowercaseMappings()
     {
         return SimpleLowercaseMappings.MAPPINGS;
     }
 
-    /**
-     * Returns the General_Category values of UnicodeData.txt field 2, such as Lu, and their code
-     * points. Unassigned code points, which have the value Cn, are in none.
-     */
+    /// Returns the General_Category values of UnicodeData.txt field 2, such as Lu, and their code
+    /// points. Unassigned code points, which have the value Cn, are in none.
     static PropertyValues generalCategories()
     {
         return GeneralCategories.VALUES;
     }
 
-    /**
-     * Returns the Script values of Scripts.txt, which are long names such as Old_Italic, and their
-     * code points. Code points of the default value, Unknown, are in none.
-     */
+    /// Returns the Script values of Scripts.txt, which are long names such as Old_Italic, and their
+    /// code points. Code points of the default value, Unknown, are in none.
     static PropertyValues scripts()
     {
         return Scripts.VALUES;
     }
 
-    /**
-     * Returns the short name of each script in PropertyValueAliases.txt, such as Ital, and its long
-     * name, such as Old_Italic. It lists scripts that Scripts.txt assigns no code point, such as
-     * Katakana_Or_Hiragana, and the default value, Unknown.
-     */
+    /// Returns the short name of each script in PropertyValueAliases.txt, such as Ital, and its long
+    /// name, such as Old_Italic. It lists scripts that Scripts.txt assigns no code point, such as
+    /// Katakana_Or_Hiragana, and the default value, Unknown.
     static Map<String, String> scriptShortNames()
     {
         return ScriptShortNames.NAMES;
     }
 
-    /**
-     * Returns the blocks of Blocks.txt, by names such as Latin-1 Supplement, and their code
-     * points. Code points of the default value, No_Block, are in none.
-     */
+    /// Returns the blocks of Blocks.txt, by names such as Latin-1 Supplement, and their code
+    /// points. Code points of the default value, No_Block, are in none.
     static PropertyValues blocks()
     {
         return Blocks.VALUES;
     }
 
-    /**
-     * Returns binary properties and the code points that have each: Bidi_Mirrored, the properties
-     * of PropList.txt and emoji-data.txt, and the binary properties of DerivedCoreProperties.txt.
-     * Two properties can share code points.
-     */
+    /// Returns binary properties and the code points that have each: Bidi_Mirrored, the properties
+    /// of PropList.txt and emoji-data.txt, and the binary properties of DerivedCoreProperties.txt.
+    /// Two properties can share code points.
     static PropertyValues binaryProperties()
     {
         return BinaryProperties.VALUES;
     }
 
-    /**
-     * Returns the Age values of DerivedAge.txt, versions such as 1.1, and their code points.
-     * Unassigned code points are in none.
-     */
+    /// Returns the Age values of DerivedAge.txt, versions such as 1.1, and their code points.
+    /// Unassigned code points are in none.
     static PropertyValues ages()
     {
         return Ages.VALUES;
     }
 
-    /**
-     * Returns the scripts of ScriptExtensions.txt, by short names such as Arab, and the code points
-     * whose list names each. A code point the file does not list has the extension of its Script
-     * value alone. Two scripts can share code points.
-     */
+    /// Returns the scripts of ScriptExtensions.txt, by short names such as Arab, and the code points
+    /// whose list names each. A code point the file does not list has the extension of its Script
+    /// value alone. Two scripts can share code points.
     static PropertyValues scriptExtensions()
     {
         return ScriptExtensions.VALUES;
     }
 
-    /**
-     * Returns the Grapheme_Cluster_Break values of GraphemeBreakProperty.txt, long names such as
-     * Regional_Indicator, and their code points. Code points of the default value, Other, are in
-     * none.
-     */
+    /// Returns the Grapheme_Cluster_Break values of GraphemeBreakProperty.txt, long names such as
+    /// Regional_Indicator, and their code points. Code points of the default value, Other, are in
+    /// none.
     static PropertyValues graphemeClusterBreaks()
     {
         return GraphemeClusterBreaks.VALUES;
     }
 
-    /**
-     * Returns the Word_Break values of WordBreakProperty.txt, long names such as ALetter, and their
-     * code points. Code points of the default value, Other, are in none.
-     */
+    /// Returns the Word_Break values of WordBreakProperty.txt, long names such as ALetter, and their
+    /// code points. Code points of the default value, Other, are in none.
     static PropertyValues wordBreaks()
     {
         return WordBreaks.VALUES;
     }
 
-    /**
-     * Returns the Sentence_Break values of SentenceBreakProperty.txt, long names such as ATerm, and
-     * their code points. Code points of the default value, Other, are in none.
-     */
+    /// Returns the Sentence_Break values of SentenceBreakProperty.txt, long names such as ATerm, and
+    /// their code points. Code points of the default value, Other, are in none.
     static PropertyValues sentenceBreaks()
     {
         return SentenceBreaks.VALUES;
     }
 
-    /**
-     * Returns the names of each property in PropertyAliases.txt, in ascending order of long name.
-     */
+    /// Returns the names of each property in PropertyAliases.txt, in ascending order of long name.
     static List<Aliases> propertyAliases()
     {
         return PropertyAliases.ALIASES;
     }
 
-    /**
-     * Returns the names of each value in PropertyValueAliases.txt of General_Category, Script,
-     * Age, and the three break properties, keyed by the property's short name, such as gc, and in
-     * ascending order of long name.
-     */
+    /// Returns the names of each value in PropertyValueAliases.txt of General_Category, Script,
+    /// Age, and the three break properties, keyed by the property's short name, such as gc, and in
+    /// ascending order of long name.
     static Map<String, List<Aliases>> propertyValueAliases()
     {
         return PropertyValueAliases.ALIASES;
     }
 
-    /**
-     * Returns the unconditional uppercase mappings of SpecialCasing.txt to two or more code
-     * points. Every other code point fully uppercases as it simply uppercases.
-     */
+    /// Returns the unconditional uppercase mappings of SpecialCasing.txt to two or more code
+    /// points. Every other code point fully uppercases as it simply uppercases.
     static MultiCharacterMappings fullUppercaseMappings()
     {
         return FullUppercaseMappings.MAPPINGS;
     }
 
-    /**
-     * Returns the unconditional lowercase mappings of SpecialCasing.txt to two or more code
-     * points. Every other code point fully lowercases as it simply lowercases, except where a
-     * conditional mapping, such as Final_Sigma, applies.
-     */
+    /// Returns the unconditional lowercase mappings of SpecialCasing.txt to two or more code
+    /// points. Every other code point fully lowercases as it simply lowercases, except where a
+    /// conditional mapping, such as Final_Sigma, applies.
     static MultiCharacterMappings fullLowercaseMappings()
     {
         return FullLowercaseMappings.MAPPINGS;
     }
 
-    /**
-     * Returns the Name of each code point that UnicodeData.txt field 1 names, such as LATIN SMALL
-     * LETTER A. Code points that the field gives a label in angle brackets, such as
-     * {@code <control>} or a range of CJK ideographs, have none.
-     */
+    /// Returns the Name of each code point that UnicodeData.txt field 1 names, such as LATIN SMALL
+    /// LETTER A. Code points that the field gives a label in angle brackets, such as
+    /// `<control>` or a range of CJK ideographs, have none.
     static CharacterNames names()
     {
         return Names.NAMES;
     }
 
-    /**
-     * Returns the Unicode_1_Name, UnicodeData.txt field 10, of each control code point that has
-     * one, such as LINE FEED (LF).
-     */
+    /// Returns the Unicode_1_Name, UnicodeData.txt field 10, of each control code point that has
+    /// one, such as LINE FEED (LF).
     static CharacterNames controlNames()
     {
         return ControlNames.NAMES;
     }
 
-    /**
-     * The names of a property or a property value: its short name, such as WSpace, its long name,
-     * such as White_Space, and its other aliases, such as space.
-     */
+    /// The names of a property or a property value: its short name, such as WSpace, its long name,
+    /// such as White_Space, and its other aliases, such as space.
     record Aliases(String shortName, String longName, List<String> otherAliases) {}
 
-    /**
-     * Code points in strictly ascending order and the code point each maps to; every other code
-     * point maps to itself. Holders must not modify the arrays.
-     */
+    /// Code points in strictly ascending order and the code point each maps to; every other code
+    /// point maps to itself. Holders must not modify the arrays.
     record CodePointMappings(int[] codePoints, int[] values)
     {
-        /**
-         * Returns the code point that {@code codePoint} maps to, which is itself if it has no
-         * mapping.
-         */
+        /// Returns the code point that `codePoint` maps to, which is itself if it has no
+        /// mapping.
         int map(int codePoint)
         {
             int index = Arrays.binarySearch(codePoints, codePoint);
@@ -286,16 +236,12 @@ final class UnicodeDatabase
         }
     }
 
-    /**
-     * Code points in strictly ascending order and the two or more code points each maps to.
-     * Holders must not modify the arrays.
-     */
+    /// Code points in strictly ascending order and the two or more code points each maps to.
+    /// Holders must not modify the arrays.
     record MultiCharacterMappings(int[] codePoints, int[][] values)
     {
-        /**
-         * Returns the code points that {@code codePoint} maps to, or null if it has no mapping.
-         * Holders must not modify the array.
-         */
+        /// Returns the code points that `codePoint` maps to, or null if it has no mapping.
+        /// Holders must not modify the array.
         int[] mapping(int codePoint)
         {
             int index = Arrays.binarySearch(codePoints, codePoint);
@@ -303,11 +249,9 @@ final class UnicodeDatabase
         }
     }
 
-    /**
-     * The values of a property and the code points that have each. A value's code points are
-     * ranges, as pairs of first and last code point, in ascending order; ranges neither overlap
-     * nor touch. Holders must not modify the arrays.
-     */
+    /// The values of a property and the code points that have each. A value's code points are
+    /// ranges, as pairs of first and last code point, in ascending order; ranges neither overlap
+    /// nor touch. Holders must not modify the arrays.
     static final class PropertyValues
     {
         private final List<String> names;
@@ -319,27 +263,21 @@ final class UnicodeDatabase
             this.ranges = ranges;
         }
 
-        /**
-         * Returns the value names in ascending order.
-         */
+        /// Returns the value names in ascending order.
         List<String> names()
         {
             return names;
         }
 
-        /**
-         * Returns the ranges of the named value, or null if the property has no such value.
-         */
+        /// Returns the ranges of the named value, or null if the property has no such value.
         int[] ranges(String name)
         {
             return ranges.get(name);
         }
     }
 
-    /**
-     * Code points and a name of each. A name is words of uppercase letters, digits, hyphens, and
-     * parentheses, separated by single spaces.
-     */
+    /// Code points and a name of each. A name is words of uppercase letters, digits, hyphens, and
+    /// parentheses, separated by single spaces.
     static final class CharacterNames
     {
         private final byte[] words;
@@ -373,9 +311,7 @@ final class UnicodeDatabase
             }
         }
 
-        /**
-         * Returns the name of {@code codePoint}, or null if it has none.
-         */
+        /// Returns the name of `codePoint`, or null if it has none.
         String name(int codePoint)
         {
             int index = Arrays.binarySearch(codePoints, codePoint);
@@ -403,9 +339,7 @@ final class UnicodeDatabase
             return name.toString();
         }
 
-        /**
-         * Returns the code point whose name is exactly {@code name}, or -1 if there is none.
-         */
+        /// Returns the code point whose name is exactly `name`, or -1 if there is none.
         int codePoint(String name)
         {
             // A name that ends in a hyphen and its code point, such as CJK COMPATIBILITY
@@ -833,9 +767,7 @@ final class UnicodeDatabase
         return (int) value;
     }
 
-    /**
-     * The header of the resource and the payload of each section it keeps.
-     */
+    /// The header of the resource and the payload of each section it keeps.
     private static final class Resource
     {
         private static final Resource RESOURCE = load(sectionId -> sectionId != SECTION_NAME);

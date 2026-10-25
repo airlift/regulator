@@ -36,11 +36,9 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
 import static io.trino.operator.scalar.JoniRegexpCasts.joniRegexp;
 
-/**
- * Joni twin of Regulator's {@code BenchmarkTrinoRows}: the same parameters, methods, rows, row order,
- * and setup checks, with each function answered by Trino's Joni functions, so every cell compares one
- * to one.
- */
+/// Joni twin of Regulator's `BenchmarkTrinoRows`: the same parameters, methods, rows, row order,
+/// and setup checks, with each function answered by Trino's Joni functions, so every cell compares one
+/// to one.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(5)

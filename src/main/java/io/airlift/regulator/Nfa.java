@@ -28,23 +28,21 @@ final class Nfa
     // handling have measured effects. Do not perform readability-only refactors in the search
     // implementations below without direct path tests and focused Intel and Graviton benchmarks.
 
-    /**
-     * Searches for a match in {@code text}.
-     * <p>
-     * This is a faithful port of upstream {@code re2/nfa.cc} and therefore:
-     * - runs in time linear in the length of the input (no catastrophic backtracking)
-     * - tracks capture groups (submatches)
-     * - notices a match only once it is one byte past it
-     * <p>
-     * If {@code anchored} is true, only considers matches starting at the beginning of {@code text}.
-     * Otherwise, finds the leftmost match at or after the beginning of {@code text}.
-     * <p>
-     * {@code matchKind} selects leftmost-first, leftmost-longest, or full-match behavior.
-     * <p>
-     * On success, writes up to {@code submatchCount = submatch.length / 2} pairs of offsets into
-     * {@code submatch}, in bytes, relative to the beginning of {@code text}. The 0th pair is the
-     * entire match. Unmatched groups are reported as {@code (-1,-1)}.
-     */
+    /// Searches for a match in `text`.
+    ///
+    /// This is a faithful port of upstream `re2/nfa.cc` and therefore:
+    /// - runs in time linear in the length of the input (no catastrophic backtracking)
+    /// - tracks capture groups (submatches)
+    /// - notices a match only once it is one byte past it
+    ///
+    /// If `anchored` is true, only considers matches starting at the beginning of `text`.
+    /// Otherwise, finds the leftmost match at or after the beginning of `text`.
+    ///
+    /// `matchKind` selects leftmost-first, leftmost-longest, or full-match behavior.
+    ///
+    /// On success, writes up to `submatchCount = submatch.length / 2` pairs of offsets into
+    /// `submatch`, in bytes, relative to the beginning of `text`. The 0th pair is the
+    /// entire match. Unmatched groups are reported as `(-1,-1)`.
     public static boolean search(Prog prog, Slice context, int start, int end, boolean anchored, Prog.MatchKind matchKind, int[] submatch)
     {
         return search(prog, context, start, end, anchored, matchKind, submatch, null);
@@ -63,12 +61,10 @@ final class Nfa
         return search(prog, context, start, end, anchored, matchKind, submatch, workspace, false);
     }
 
-    /**
-     * Searches as {@link #search(Prog, Slice, int, int, boolean, Prog.MatchKind, int[])} does. When
-     * {@code carriageReturnBeforeContext} is set, a CR precedes {@code context}, so the Java $
-     * assertions do not match at the context start when the context begins with an LF, as the
-     * JDK's $ does not at the start of a region that splits a CR LF.
-     */
+    /// Searches as [#search(Prog,Slice,int,int,boolean,Prog.MatchKind,int\[\])] does. When
+    /// `carriageReturnBeforeContext` is set, a CR precedes `context`, so the Java $
+    /// assertions do not match at the context start when the context begins with an LF, as the
+    /// JDK's $ does not at the start of a region that splits a CR LF.
     static boolean search(
             Prog prog,
             Slice context,
@@ -191,10 +187,8 @@ final class Nfa
         return searchGroupZero(prog, context, start, end, anchored, matchKind, groupZero, workspace, false);
     }
 
-    /**
-     * Finds group zero as {@link #search(Prog, Slice, int, int, boolean, Prog.MatchKind, int[], Workspace, boolean)}
-     * does, with the same {@code carriageReturnBeforeContext} flag.
-     */
+    /// Finds group zero as [#search(Prog,Slice,int,int,boolean,Prog.MatchKind,int\[\],Workspace,boolean)]
+    /// does, with the same `carriageReturnBeforeContext` flag.
     static boolean searchGroupZero(
             Prog prog,
             Slice context,
@@ -306,10 +300,8 @@ final class Nfa
         }
     }
 
-    /**
-     * Anchored full match (equivalent to RE2 {@code ANCHOR_BOTH}): the regexp must match
-     * starting at the beginning of {@code text} and ending at the end of {@code text}.
-     */
+    /// Anchored full match (equivalent to RE2 `ANCHOR_BOTH`): the regexp must match
+    /// starting at the beginning of `text` and ending at the end of `text`.
     public static boolean fullMatch(Prog prog, Slice text)
     {
         requireNonNull(prog, "prog is null");
@@ -318,10 +310,8 @@ final class Nfa
         return search(prog, text, 0, text.length(), true, Prog.MatchKind.FULL_MATCH, null);
     }
 
-    /**
-     * Unanchored partial match (equivalent to RE2 {@code ANCHOR_NONE} + {@code kFirstMatch}):
-     * finds a leftmost-first match anywhere in {@code text}.
-     */
+    /// Unanchored partial match (equivalent to RE2 `ANCHOR_NONE` + `kFirstMatch`):
+    /// finds a leftmost-first match anywhere in `text`.
     public static boolean partialMatch(Prog prog, Slice text)
     {
         requireNonNull(prog, "prog is null");

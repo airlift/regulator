@@ -26,10 +26,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 // Includes tests ported from upstream RE2: re2/testing/re2_test.cc.
 public class TestRe2EdgeCase
 {
-    /**
-     * Ported from TEST(RE2, NullVsEmptyString).
-     * Tests that empty Slice (zero length) matches .* pattern correctly.
-     */
+    /// Ported from TEST(RE2, NullVsEmptyString).
+    /// Tests that empty Slice (zero length) matches .* pattern correctly.
     @Test
     public void testEmptyStringMatch()
     {
@@ -39,10 +37,8 @@ public class TestRe2EdgeCase
         assertThat(re.matches(empty)).isTrue();
     }
 
-    /**
-     * Ported from TEST(RE2, NullVsEmptyStringSubmatches).
-     * Tests submatch behavior with empty input.
-     */
+    /// Ported from TEST(RE2, NullVsEmptyStringSubmatches).
+    /// Tests submatch behavior with empty input.
     @Test
     public void testEmptyStringSubmatches()
     {
@@ -71,10 +67,8 @@ public class TestRe2EdgeCase
         assertThat(result.groupSlice(2)).isNull();
     }
 
-    /**
-     * Extension of NullVsEmptyStringSubmatches.
-     * Tests matching non-empty input via the empty group branch.
-     */
+    /// Extension of NullVsEmptyStringSubmatches.
+    /// Tests matching non-empty input via the empty group branch.
     @Test
     public void testNonEmptyStringSubmatchesViaEmptyBranch()
     {
@@ -85,10 +79,8 @@ public class TestRe2EdgeCase
         assertThat(result.groupUtf8(1)).isEqualTo("");
     }
 
-    /**
-     * Extension of NullVsEmptyStringSubmatches.
-     * Tests leftmost-first matching semantics with alternation.
-     */
+    /// Extension of NullVsEmptyStringSubmatches.
+    /// Tests leftmost-first matching semantics with alternation.
     @Test
     public void testFooMatchSubmatches()
     {
@@ -99,10 +91,8 @@ public class TestRe2EdgeCase
         assertThat(result.groupUtf8(1)).isEqualTo("foo");
     }
 
-    /**
-     * Ported from TEST(RE2, RegexpToStringLossOfAnchor).
-     * Tests anchor preservation in POSIX vs Perl mode.
-     */
+    /// Ported from TEST(RE2, RegexpToStringLossOfAnchor).
+    /// Tests anchor preservation in POSIX vs Perl mode.
     @Test
     public void testRegexpToStringLossOfAnchor()
     {
@@ -152,10 +142,8 @@ public class TestRe2EdgeCase
         }
     }
 
-    /**
-     * Adapted from InitNULL test.
-     * Tests error handling for invalid patterns.
-     */
+    /// Adapted from InitNULL test.
+    /// Tests error handling for invalid patterns.
     @Test
     public void testDefaultInitialization()
     {
@@ -166,10 +154,8 @@ public class TestRe2EdgeCase
         assertThat(reValid).isNotNull();
     }
 
-    /**
-     * Adapted from LazyRE2 tests.
-     * Tests that default options use UTF-8 encoding and Latin1 options work.
-     */
+    /// Adapted from LazyRE2 tests.
+    /// Tests that default options use UTF-8 encoding and Latin1 options work.
     @Test
     public void testOptionsDefaults()
     {
@@ -177,9 +163,7 @@ public class TestRe2EdgeCase
         assertThat(Re2.Options.latin1().encoding()).isEqualTo(Re2.Options.Encoding.LATIN1);
     }
 
-    /**
-     * Additional edge case test for zero-length matches at various positions.
-     */
+    /// Additional edge case test for zero-length matches at various positions.
     @Test
     public void testZeroLengthMatchPositions()
     {
@@ -192,9 +176,7 @@ public class TestRe2EdgeCase
         assertThat(re.find(utf8("b"))).isTrue();
     }
 
-    /**
-     * Additional edge case test for alternation patterns with empty branches.
-     */
+    /// Additional edge case test for alternation patterns with empty branches.
     @Test
     public void testAlternationWithEmptyBranches()
     {

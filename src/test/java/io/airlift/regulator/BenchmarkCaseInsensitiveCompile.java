@@ -32,14 +32,12 @@ import org.openjdk.jmh.runner.options.Options;
 
 import java.util.concurrent.TimeUnit;
 
-/**
- * Measures case-insensitive compilation whose cost is dominated by case folding, for each regular
- * expression language. {@link #compileFoldHeavy} is the steady-state compile of patterns that fold
- * large classes or long non-ASCII literals. {@link #compileFirstCaseInsensitive} is the cold compile
- * of the first case-insensitive pattern in a fresh JVM, which includes building the case-folding
- * tables; each fork measures one compile. {@link #canonicalizeText} is the {@link FilteredRe2} text
- * canonicalization pass, which folds caller text with the same RE2 folding rule.
- */
+/// Measures case-insensitive compilation whose cost is dominated by case folding, for each regular
+/// expression language. [#compileFoldHeavy] is the steady-state compile of patterns that fold
+/// large classes or long non-ASCII literals. [#compileFirstCaseInsensitive] is the cold compile
+/// of the first case-insensitive pattern in a fresh JVM, which includes building the case-folding
+/// tables; each fork measures one compile. [#canonicalizeText] is the [FilteredRe2] text
+/// canonicalization pass, which folds caller text with the same RE2 folding rule.
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
 @BenchmarkMode(Mode.AverageTime)
@@ -66,9 +64,7 @@ public class BenchmarkCaseInsensitiveCompile
             };
         }
 
-        /**
-         * Returns {@code body} with the frontend's flag for case-insensitive matching beyond ASCII.
-         */
+        /// Returns `body` with the frontend's flag for case-insensitive matching beyond ASCII.
         String caseInsensitive(String body)
         {
             // Java folds only ASCII under (?i) unless UNICODE_CASE is also set.
@@ -97,9 +93,7 @@ public class BenchmarkCaseInsensitiveCompile
         }
     }
 
-    /**
-     * Text for {@link #canonicalizeText}: one sentence repeated to about 4 KB of UTF-8.
-     */
+    /// Text for [#canonicalizeText]: one sentence repeated to about 4 KB of UTF-8.
     public enum CanonicalText
     {
         ASCII("The quick brown fox jumps over the lazy dog; ERROR 42 at Main.run(Main.java:17). "),

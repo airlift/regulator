@@ -31,20 +31,18 @@ import static io.airlift.regulator.RegexpParserSupport.makeLiteralString;
 import static io.airlift.regulator.RegexpParserSupport.wouldExceedRepeatLimit;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Parses the pattern language of the Rust {@code regex} crate, pinned at regex 1.13.1 with
- * regex-syntax 0.8.11.
- * <p>
- * The crate rejects a pattern in three ordered stages: syntax errors while parsing, then the
- * nesting limit over the whole syntax tree, then translation errors in a post-order walk. A
- * single pass cannot reproduce which error wins, so this parser follows the same stages: it
- * builds a private syntax tree shaped like the crate's, checks the nesting limit, and translates
- * the tree into a {@link Regexp}. Every phase walks the tree with an explicit stack, so nesting
- * depth does not consume thread stack.
- * <p>
- * Constructs the crate accepts but Regulator does not support are recorded during translation
- * and reported only after translation succeeds, so a later crate error still takes precedence.
- */
+/// Parses the pattern language of the Rust `regex` crate, pinned at regex 1.13.1 with
+/// regex-syntax 0.8.11.
+///
+/// The crate rejects a pattern in three ordered stages: syntax errors while parsing, then the
+/// nesting limit over the whole syntax tree, then translation errors in a post-order walk. A
+/// single pass cannot reproduce which error wins, so this parser follows the same stages: it
+/// builds a private syntax tree shaped like the crate's, checks the nesting limit, and translates
+/// the tree into a [Regexp]. Every phase walks the tree with an explicit stack, so nesting
+/// depth does not consume thread stack.
+///
+/// Constructs the crate accepts but Regulator does not support are recorded during translation
+/// and reported only after translation succeeds, so a later crate error still takes precedence.
 final class RustRegexpParser
 {
     // Syntax options, kept separate from Regexp parse flags because the crate scopes them itself.

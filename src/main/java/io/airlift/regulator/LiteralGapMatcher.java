@@ -24,11 +24,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * Finds literal chains separated by a fixed number of UTF-8 characters. Literals compare raw bytes;
- * a gap steps over characters as {@link Utf8#characterWidth} reads them, so malformed input in a
- * gap counts one character per maximal subpart.
- */
+/// Finds literal chains separated by a fixed number of UTF-8 characters. Literals compare raw bytes;
+/// a gap steps over characters as [Utf8#characterWidth] reads them, so malformed input in a
+/// gap counts one character per maximal subpart.
 final class LiteralGapMatcher
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(LiteralGapMatcher.class);

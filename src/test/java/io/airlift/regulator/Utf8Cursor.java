@@ -17,16 +17,14 @@ import io.airlift.slice.Slice;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * A mutable cursor over a {@link Slice} for UTF-8 decoding.
- */
+/// A mutable cursor over a [Slice] for UTF-8 decoding.
 public final class Utf8Cursor
 {
     private final byte[] bytes;
     private final int start;
     private final int end;
 
-    // Absolute index into {@code bytes}.
+    // Absolute index into `bytes`.
     private int position;
 
     public Utf8Cursor(Slice slice)

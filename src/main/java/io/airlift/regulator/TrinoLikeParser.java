@@ -102,11 +102,9 @@ final class TrinoLikeParser
         return List.copyOf(result);
     }
 
-    /**
-     * Parses a pattern without an escape character when every byte is ASCII, so no code point
-     * decoding or UTF-8 validation is needed. Returns null for other patterns. For the
-     * patterns it accepts, the result must equal what {@link #parse} produces without an escape.
-     */
+    /// Parses a pattern without an escape character when every byte is ASCII, so no code point
+    /// decoding or UTF-8 validation is needed. Returns null for other patterns. For the
+    /// patterns it accepts, the result must equal what [#parse] produces without an escape.
     static List<Element> parseAsciiNoEscape(Slice pattern)
     {
         requireNonNull(pattern, "pattern is null");
@@ -161,11 +159,9 @@ final class TrinoLikeParser
         }
     }
 
-    /**
-     * Accumulates one literal. A literal is usually one contiguous run of pattern bytes, which is
-     * copied once; escapes fall back to an output buffer. Once the buffer exists, every later
-     * literal is built in it.
-     */
+    /// Accumulates one literal. A literal is usually one contiguous run of pattern bytes, which is
+    /// copied once; escapes fall back to an output buffer. Once the buffer exists, every later
+    /// literal is built in it.
     private static final class LiteralBuilder
     {
         private final Slice pattern;

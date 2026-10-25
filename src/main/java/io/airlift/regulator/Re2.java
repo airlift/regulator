@@ -23,12 +23,10 @@ import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * A compiled RE2 pattern.
- * <p>
- * Instances are immutable and thread-safe. Matching operates directly on {@link Slice} byte ranges;
- * offsets are byte offsets relative to the logical Slice, not its backing array.
- */
+/// A compiled RE2 pattern.
+///
+/// Instances are immutable and thread-safe. Matching operates directly on [Slice] byte ranges;
+/// offsets are byte offsets relative to the logical Slice, not its backing array.
 @SuppressWarnings("CharUsedInArithmeticContext")
 public sealed class Re2
         permits Re2.CompiledScanRe2
@@ -61,10 +59,8 @@ public sealed class Re2
         LOWERED_PROGRAM,
     }
 
-    /**
-     * How {@link #countMatches} counts a pattern with a case-sensitive scan plan. See
-     * {@link #trinoScanPlanCount()}.
-     */
+    /// How [#countMatches] counts a pattern with a case-sensitive scan plan. See
+    /// [#trinoScanPlanCount()].
     enum TrinoScanPlanCount
     {
         // countMatches loops over the plan's search, or declines so that the caller counts with
@@ -77,10 +73,8 @@ public sealed class Re2
         OTHER,
     }
 
-    /**
-     * Selects the scan plan a Trino compile builds. Only tests request a mode other than
-     * {@link #DEFAULT}.
-     */
+    /// Selects the scan plan a Trino compile builds. Only tests request a mode other than
+    /// [#DEFAULT].
     enum TrinoScanPlanMode
     {
         // Builds the plan for every eligible pattern.
@@ -152,9 +146,7 @@ public sealed class Re2
         ANCHOR_BOTH,
     }
 
-    /**
-     * The result of replacing every non-overlapping match.
-     */
+    /// The result of replacing every non-overlapping match.
     @SuppressFBWarnings(
             value = "EI_EXPOSE_REP",
             justification = "Slice values are deliberate zero-copy results")
@@ -162,10 +154,8 @@ public sealed class Re2
 
     record FanoutResult(int maxBucket, int[] histogram) {}
 
-    /**
-     * Mutable compilation options. Compilation snapshots every option, so later changes do not
-     * affect an existing {@link Re2}. Options instances are not thread-safe.
-     */
+    /// Mutable compilation options. Compilation snapshots every option, so later changes do not
+    /// affect an existing [Re2]. Options instances are not thread-safe.
     public static final class Options
     {
         public static final int DEFAULT_MAX_MEMORY = 96 << 20;
@@ -193,17 +183,13 @@ public sealed class Re2
 
         private Options() {}
 
-        /**
-         * Creates options for RE2's Perl-like UTF-8 syntax and leftmost-first matching.
-         */
+        /// Creates options for RE2's Perl-like UTF-8 syntax and leftmost-first matching.
         public static Options defaults()
         {
             return new Options();
         }
 
-        /**
-         * Creates UTF-8 POSIX options with leftmost-longest matching.
-         */
+        /// Creates UTF-8 POSIX options with leftmost-longest matching.
         public static Options posix()
         {
             Options options = new Options();
@@ -212,9 +198,7 @@ public sealed class Re2
             return options;
         }
 
-        /**
-         * Creates Perl-like options that interpret patterns and inputs as Latin-1 bytes.
-         */
+        /// Creates Perl-like options that interpret patterns and inputs as Latin-1 bytes.
         public static Options latin1()
         {
             Options options = new Options();
@@ -247,9 +231,7 @@ public sealed class Re2
             return maxMemory;
         }
 
-        /**
-         * Sets the positive compilation and DFA-cache memory budget in bytes.
-         */
+        /// Sets the positive compilation and DFA-cache memory budget in bytes.
         public Options setMaxMemory(long maxMemory)
         {
             if (maxMemory <= 0) {
@@ -264,11 +246,9 @@ public sealed class Re2
             return byteFrequencies;
         }
 
-        /**
-         * Sets the byte-frequency distribution that chooses which byte of a literal a candidate
-         * scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
-         * {@link ByteFrequencies#uniform()}, keeps first-byte scanning.
-         */
+        /// Sets the byte-frequency distribution that chooses which byte of a literal a candidate
+        /// scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+        /// [ByteFrequencies#uniform()], keeps first-byte scanning.
         public Options setByteFrequencies(ByteFrequencies byteFrequencies)
         {
             this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");
@@ -280,14 +260,12 @@ public sealed class Re2
             return generateBytecode;
         }
 
-        /**
-         * Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
-         * so each operation that would run its specialized scan runs dedicated bytecode instead.
-         * Operations that take another route keep it. Patterns that are not eligible, or whose
-         * class cannot be generated, compile as they do without this option. Disabled by default.
-         *
-         * @see Re2#usesGeneratedBytecode()
-         */
+        /// Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
+        /// so each operation that would run its specialized scan runs dedicated bytecode instead.
+        /// Operations that take another route keep it. Patterns that are not eligible, or whose
+        /// class cannot be generated, compile as they do without this option. Disabled by default.
+        ///
+        /// @see Re2#usesGeneratedBytecode()
         public Options setGenerateBytecode(boolean generateBytecode)
         {
             this.generateBytecode = generateBytecode;
@@ -550,11 +528,9 @@ public sealed class Re2
         this.boundedCharacterClassCounter = compactBoundedCharacterClass;
     }
 
-    /**
-     * Copies every field of {@code pattern}, which the caller then discards, except the named
-     * group map, which is computed on first use. Rerunning the main constructor would reserve
-     * its pattern's DFA memory a second time.
-     */
+    /// Copies every field of `pattern`, which the caller then discards, except the named
+    /// group map, which is computed on first use. Rerunning the main constructor would reserve
+    /// its pattern's DFA memory a second time.
     private Re2(Re2 pattern)
     {
         this.flags = pattern.flags;
@@ -583,9 +559,7 @@ public sealed class Re2
         this.singleByteMatcher = pattern.singleByteMatcher;
     }
 
-    /**
-     * Compiles a copied snapshot of {@code pattern} with {@link Options#defaults()}.
-     */
+    /// Compiles a copied snapshot of `pattern` with [Options#defaults()].
     public static Re2 compile(Slice pattern)
     {
         return compile(pattern, Options.defaults());
@@ -597,9 +571,7 @@ public sealed class Re2
         return compile(pattern.copy(), flags, Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), false, TrinoScanPlan.Language.RE2, false);
     }
 
-    /**
-     * Compiles a copied snapshot of {@code pattern} and the current option values.
-     */
+    /// Compiles a copied snapshot of `pattern` and the current option values.
     public static Re2 compile(Slice pattern, Options options)
     {
         requireNonNull(pattern, "pattern is null");
@@ -607,10 +579,8 @@ public sealed class Re2
         return compile(pattern.copy(), options, TrinoScanPlan.Language.RE2, false);
     }
 
-    /**
-     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but without a scan plan,
-     * so tests and benchmarks can compare a plan with the ordinary engine.
-     */
+    /// Compiles `pattern` as [#compile(Slice,Options)] does, but without a scan plan,
+    /// so tests and benchmarks can compare a plan with the ordinary engine.
     static Re2 compileWithoutScanPlanForTesting(Slice pattern, Options options)
     {
         requireNonNull(pattern, "pattern is null");
@@ -618,10 +588,8 @@ public sealed class Re2
         return compile(pattern.copy(), options, TrinoScanPlan.Language.NONE, false);
     }
 
-    /**
-     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but a scan plan
-     * continues every unanchored search on the ordinary engine before its first attempt.
-     */
+    /// Compiles `pattern` as [#compile(Slice,Options)] does, but a scan plan
+    /// continues every unanchored search on the ordinary engine before its first attempt.
     static Re2 compileForcingScanPlanHandoffForTesting(Slice pattern, Options options)
     {
         requireNonNull(pattern, "pattern is null");
@@ -635,34 +603,28 @@ public sealed class Re2
         return options.generateBytecode() ? withGeneratedBytecode(compiled) : compiled;
     }
 
-    /**
-     * Returns a copy of {@code compiled} whose case-sensitive scan plan runs a class generated for
-     * it, or {@code compiled} itself when the pattern is not eligible or the class cannot be
-     * generated. Only callers that enable generated bytecode call this, so patterns compiled
-     * without it never load the generated-code classes.
-     */
+    /// Returns a copy of `compiled` whose case-sensitive scan plan runs a class generated for
+    /// it, or `compiled` itself when the pattern is not eligible or the class cannot be
+    /// generated. Only callers that enable generated bytecode call this, so patterns compiled
+    /// without it never load the generated-code classes.
     static Re2 withGeneratedBytecode(Re2 compiled)
     {
         Re2 generated = CompiledScanRe2.create(compiled);
         return generated == null ? compiled : generated;
     }
 
-    /**
-     * Returns whether this compiled pattern has a class generated for it, which only
-     * {@link Options#setGenerateBytecode(boolean)} enables. Each operation of such a pattern that
-     * would run its specialized scan runs the generated class.
-     */
+    /// Returns whether this compiled pattern has a class generated for it, which only
+    /// [Options#setGenerateBytecode(boolean)] enables. Each operation of such a pattern that
+    /// would run its specialized scan runs the generated class.
     public boolean usesGeneratedBytecode()
     {
         return false;
     }
 
-    /**
-     * Replaces the first match using RE2 rewrite syntax ({@code \0} through {@code \9}).
-     * Returns {@code text} unchanged when there is no match.
-     *
-     * @throws RegexpRewriteException if the rewrite is invalid for this pattern
-     */
+    /// Replaces the first match using RE2 rewrite syntax (`\0` through `\9`).
+    /// Returns `text` unchanged when there is no match.
+    ///
+    /// @throws RegexpRewriteException if the rewrite is invalid for this pattern
     public Slice replaceFirst(Slice text, Slice rewrite)
     {
         requireNonNull(text, "text is null");
@@ -686,11 +648,9 @@ public sealed class Re2
         return out.slice();
     }
 
-    /**
-     * Replaces every non-overlapping match using RE2 rewrite syntax.
-     *
-     * @throws RegexpRewriteException if the rewrite is invalid for this pattern
-     */
+    /// Replaces every non-overlapping match using RE2 rewrite syntax.
+    ///
+    /// @throws RegexpRewriteException if the rewrite is invalid for this pattern
     public ReplaceAllResult replaceAll(Slice text, Slice rewrite)
     {
         requireNonNull(text, "text is null");
@@ -742,11 +702,9 @@ public sealed class Re2
         return new ReplaceAllResult(count, out.slice());
     }
 
-    /**
-     * Expands an RE2 rewrite against the first match, or returns {@code null} when no match exists.
-     *
-     * @throws RegexpRewriteException if the rewrite is invalid for this pattern
-     */
+    /// Expands an RE2 rewrite against the first match, or returns `null` when no match exists.
+    ///
+    /// @throws RegexpRewriteException if the rewrite is invalid for this pattern
     public Slice extract(Slice text, Slice rewrite)
     {
         requireNonNull(text, "text is null");
@@ -796,9 +754,7 @@ public sealed class Re2
         return maximumCaptureReference + 1;
     }
 
-    /**
-     * Returns a pattern that matches the supplied bytes literally.
-     */
+    /// Returns a pattern that matches the supplied bytes literally.
     public static Slice quote(Slice unquoted)
     {
         requireNonNull(unquoted, "unquoted is null");
@@ -840,25 +796,19 @@ public sealed class Re2
         return build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, scanPlanLanguage, forceScanPlanHandoff);
     }
 
-    /**
-     * The caller passes a private snapshot that it never mutates.
-     */
+    /// The caller passes a private snapshot that it never mutates.
     static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags)
     {
         return compileParsed(pattern, parsed, flags, Options.DEFAULT_MAX_MEMORY);
     }
 
-    /**
-     * The caller passes a private snapshot that it never mutates.
-     */
+    /// The caller passes a private snapshot that it never mutates.
     static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory)
     {
         return compileParsed(pattern, parsed, flags, maxMemory, ByteFrequencies.uniform());
     }
 
-    /**
-     * The caller passes a private snapshot that it never mutates.
-     */
+    /// The caller passes a private snapshot that it never mutates.
     static Re2 compileParsed(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies)
     {
         requireNonNull(pattern, "pattern is null");
@@ -870,12 +820,10 @@ public sealed class Re2
         return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.NONE, false);
     }
 
-    /**
-     * Compiles a pattern parsed by the Java frontend, with the scan plan of its shape. The caller
-     * passes a private snapshot that it never mutates. A scan plan built with
-     * {@code forceScanPlanHandoff} continues every unanchored search on the ordinary engine
-     * before its first attempt; only tests request it.
-     */
+    /// Compiles a pattern parsed by the Java frontend, with the scan plan of its shape. The caller
+    /// passes a private snapshot that it never mutates. A scan plan built with
+    /// `forceScanPlanHandoff` continues every unanchored search on the ordinary engine
+    /// before its first attempt; only tests request it.
     static Re2 compileParsedForJava(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean forceScanPlanHandoff)
     {
         requireNonNull(pattern, "pattern is null");
@@ -887,12 +835,10 @@ public sealed class Re2
         return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.JAVA, forceScanPlanHandoff);
     }
 
-    /**
-     * Compiles a pattern parsed by the Rust frontend, with the scan plan of its shape. The caller
-     * passes a private snapshot that it never mutates. A scan plan built with
-     * {@code forceScanPlanHandoff} continues every unanchored search on the ordinary engine
-     * before its first attempt; only tests request it.
-     */
+    /// Compiles a pattern parsed by the Rust frontend, with the scan plan of its shape. The caller
+    /// passes a private snapshot that it never mutates. A scan plan built with
+    /// `forceScanPlanHandoff` continues every unanchored search on the ordinary engine
+    /// before its first attempt; only tests request it.
     static Re2 compileParsedForRust(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean forceScanPlanHandoff)
     {
         requireNonNull(pattern, "pattern is null");
@@ -904,10 +850,8 @@ public sealed class Re2
         return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.RUST, forceScanPlanHandoff);
     }
 
-    /**
-     * The caller passes a private snapshot that it never mutates. {@code scanPlanMode} selects
-     * the scan plan to build.
-     */
+    /// The caller passes a private snapshot that it never mutates. `scanPlanMode` selects
+    /// the scan plan to build.
     static Re2 compileParsedForTrino(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, TrinoScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
@@ -1163,10 +1107,8 @@ public sealed class Re2
                 null);
     }
 
-    /**
-     * Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns
-     * null. Boolean contains and dot-star span matching share this search.
-     */
+    /// Creates a search for a CONTAINS plan whose literal is at least two bytes long, or returns
+    /// null. Boolean contains and dot-star span matching share this search.
     private static LiteralSearchKernel createLiteralSearch(BooleanPlans booleanPlans)
     {
         if (booleanPlans.partialMatchStrategy() != BooleanPartialMatchStrategy.CONTAINS || booleanPlans.literal().length() < 2) {
@@ -1250,9 +1192,7 @@ public sealed class Re2
         return (flags & TRINO_COMPILER_DIALECT_FLAG) == 0 ? Compiler.Dialect.RE2 : Compiler.Dialect.TRINO;
     }
 
-    /**
-     * Returns a copy of the compiled pattern bytes.
-     */
+    /// Returns a copy of the compiled pattern bytes.
     public Slice pattern()
     {
         return pattern.copy();
@@ -1263,9 +1203,7 @@ public sealed class Re2
         return capturingGroupCount;
     }
 
-    /**
-     * Returns an immutable mapping from capture names to group numbers.
-     */
+    /// Returns an immutable mapping from capture names to group numbers.
     public Map<String, Integer> namedCapturingGroups()
     {
         Map<String, Integer> cachedNamedCapturingGroups = namedCapturingGroups;
@@ -1290,28 +1228,22 @@ public sealed class Re2
         return namedCapturingGroups != null;
     }
 
-    /**
-     * Returns an immutable mapping from group numbers to capture names.
-     */
+    /// Returns an immutable mapping from group numbers to capture names.
     @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "The returned map is immutable")
     public Map<Integer, String> capturingGroupNames()
     {
         return capturingGroupNames;
     }
 
-    /**
-     * Package-private accessor for prefilter extraction (not for general use).
-     * Matches upstream RE2::Regexp() const.
-     */
+    /// Package-private accessor for prefilter extraction (not for general use).
+    /// Matches upstream RE2::Regexp() const.
     Regexp regexp()
     {
         return regexp;
     }
 
-    /**
-     * Returns the case folding of the pattern language. The expression analysis carries it, which
-     * keeps it off the compiled-pattern layout.
-     */
+    /// Returns the case folding of the pattern language. The expression analysis carries it, which
+    /// keeps it off the compiled-pattern layout.
     CaseFolding caseFolding()
     {
         return expressionAnalysis.caseFolding();
@@ -1385,28 +1317,22 @@ public sealed class Re2
                 trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_TRINO_SCAN;
     }
 
-    /**
-     * Returns whether full-Slice {@link #find(Slice)} dispatches to the scan plan rather than
-     * a retained literal kernel. Other calls reach the plan through the plan dispatch strategy.
-     */
+    /// Returns whether full-Slice [#find(Slice)] dispatches to the scan plan rather than
+    /// a retained literal kernel. Other calls reach the plan through the plan dispatch strategy.
     boolean usesTrinoScanPlanForFindForDiagnostics()
     {
         return booleanFindStrategy != BOOLEAN_FIND_GENERAL && booleanFindStrategy == trinoScanStrategy;
     }
 
-    /**
-     * Returns whether unanchored boolean searches may continue on the ordinary engine although
-     * calls that report match boundaries use the unanchored scan plan.
-     */
+    /// Returns whether unanchored boolean searches may continue on the ordinary engine although
+    /// calls that report match boundaries use the unanchored scan plan.
     boolean usesOrdinaryUnanchoredBooleanSearchForDiagnostics()
     {
         return ordinaryUnanchoredBooleanSearch;
     }
 
-    /**
-     * Returns whether unanchored boolean calls of a start-anchored plan run on the ordinary
-     * engine over short inputs although calls that report positions use the plan.
-     */
+    /// Returns whether unanchored boolean calls of a start-anchored plan run on the ordinary
+    /// engine over short inputs although calls that report positions use the plan.
     boolean usesOrdinaryShortBooleanMatchForDiagnostics()
     {
         return ordinaryShortBooleanMatch;
@@ -1535,22 +1461,18 @@ public sealed class Re2
         return ((long) matchStart << 32) | (matchEnd & 0xFFFF_FFFFL);
     }
 
-    /**
-     * Returns whether {@link #findExactLiteralSpan(Slice, int)} searches {@code remainingBytes}
-     * with the prefix scan rather than the substring search: when at least
-     * {@value #EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES} bytes remain, or when the byte
-     * frequencies chose a probe byte other than the literal's first byte.
-     */
+    /// Returns whether [#findExactLiteralSpan(Slice,int)] searches `remainingBytes`
+    /// with the prefix scan rather than the substring search: when at least
+    /// {@value #EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES} bytes remain, or when the byte
+    /// frequencies chose a probe byte other than the literal's first byte.
     boolean exactLiteralSpanUsesPrefixScan(int remainingBytes)
     {
         return remainingBytes >= EXACT_LITERAL_SPAN_PREFIX_SCAN_MINIMUM_BYTES || partialProg.prefixAccelProbeOffset() != 0;
     }
 
-    /**
-     * Answers {@link #findExactLiteralSpan(Slice, int)} with the prefix scan. It is out of line so
-     * that the short-row substring search stays small enough for C2 to inline into per-row callers
-     * without pulling the prefix scan in with it.
-     */
+    /// Answers [#findExactLiteralSpan(Slice,int)] with the prefix scan. It is out of line so
+    /// that the short-row substring search stays small enough for C2 to inline into per-row callers
+    /// without pulling the prefix scan in with it.
     private long findExactLiteralSpanWithPrefixScan(Slice input, int start)
     {
         int arrayMatchStart = findExactLiteral(input.byteArray(), input.byteArrayOffset() + start, input.length() - start);
@@ -1562,13 +1484,11 @@ public sealed class Re2
         return ((long) matchStart << 32) | (matchEnd & 0xFFFF_FFFFL);
     }
 
-    /**
-     * Returns the array position of the first occurrence of the nonempty exact literal in
-     * {@code [offset, offset + length)} of {@code bytes}, or {@code -1} when none occurs.
-     * Re2's boolean find and count of an exact-literal pattern search with this prefix scan, whose
-     * probe byte the compile-time byte frequencies chose. Span searches use it when
-     * {@link #exactLiteralSpanUsesPrefixScan(int)} says so.
-     */
+    /// Returns the array position of the first occurrence of the nonempty exact literal in
+    /// `[offset, offset + length)` of `bytes`, or `-1` when none occurs.
+    /// Re2's boolean find and count of an exact-literal pattern search with this prefix scan, whose
+    /// probe byte the compile-time byte frequencies chose. Span searches use it when
+    /// [#exactLiteralSpanUsesPrefixScan(int)] says so.
     private int findExactLiteral(byte[] bytes, int offset, int length)
     {
         return partialProg.prefixAccel(bytes, offset, length);
@@ -1618,9 +1538,7 @@ public sealed class Re2
         return fanout(prog);
     }
 
-    /**
-     * Returns whether the pattern has a match anywhere in {@code input} without allocating capture storage.
-     */
+    /// Returns whether the pattern has a match anywhere in `input` without allocating capture storage.
     public boolean find(Slice input)
     {
         requireNonNull(input, "input is null");
@@ -1648,13 +1566,11 @@ public sealed class Re2
         return matchInto(input, Anchor.UNANCHORED, null);
     }
 
-    /**
-     * Answers full-Slice {@link #find(Slice)}, and the count of a start-anchored plan, with the
-     * scan plan. It is out of line so that find stays small enough for C2 to inline into its
-     * callers. A short input of a plan that allows it runs on the ordinary engine; any other runs
-     * the plan's {@link TrinoScanPlan#booleanPlan()}, resolved at compile time. Calls that report
-     * positions never come here.
-     */
+    /// Answers full-Slice [#find(Slice)], and the count of a start-anchored plan, with the
+    /// scan plan. It is out of line so that find stays small enough for C2 to inline into its
+    /// callers. A short input of a plan that allows it runs on the ordinary engine; any other runs
+    /// the plan's [TrinoScanPlan#booleanPlan()], resolved at compile time. Calls that report
+    /// positions never come here.
     boolean findWithTrinoScanPlan(Slice input, byte strategy)
     {
         int length = input.length();
@@ -1677,25 +1593,21 @@ public sealed class Re2
         };
     }
 
-    /**
-     * Searches with the unanchored plan until its failed attempts are dense or exceed its work
-     * budget, then continues on the ordinary engine, which reaches this plan's matches without
-     * visiting each candidate.
-     */
+    /// Searches with the unanchored plan until its failed attempts are dense or exceed its work
+    /// budget, then continues on the ordinary engine, which reaches this plan's matches without
+    /// visiting each candidate.
     private boolean findWithOrdinaryHandoff(Slice input, boolean asciiFolded)
     {
         int result = booleanPlans.trinoScanPlan().searchBeforeHandoff(input, 0, input.length(), 0, asciiFolded);
         return finishTrinoScanSearch(input, 0, input.length(), result, Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
     }
 
-    /**
-     * Returns whether a scan-plan search that returned {@code result} matched. A
-     * {@link TrinoScanPlan#SEARCH_MATCHED} or {@link TrinoScanPlan#NO_MATCH} result is final. Any
-     * other result is the offset where the search handed off; the search then finishes on the
-     * ordinary engine with the context, anchor, and context-relative capture offsets the plan
-     * received. No match starts between the plan's search start and that offset. This route
-     * skips the plan, so the search cannot hand off again.
-     */
+    /// Returns whether a scan-plan search that returned `result` matched. A
+    /// [TrinoScanPlan#SEARCH_MATCHED] or [TrinoScanPlan#NO_MATCH] result is final. Any
+    /// other result is the offset where the search handed off; the search then finishes on the
+    /// ordinary engine with the context, anchor, and context-relative capture offsets the plan
+    /// received. No match starts between the plan's search start and that offset. This route
+    /// skips the plan, so the search cannot hand off again.
     private boolean finishTrinoScanSearch(
             Slice text,
             int contextStart,
@@ -1711,17 +1623,13 @@ public sealed class Re2
         return matchInternal(partialProg, text, contextStart, contextEnd, result, contextEnd, anchor, groupOffsets, workspaces, false);
     }
 
-    /**
-     * Returns whether the pattern has a match in {@code [start, end)}, retaining the complete Slice as assertion context.
-     */
+    /// Returns whether the pattern has a match in `[start, end)`, retaining the complete Slice as assertion context.
     public boolean find(Slice input, int start, int end)
     {
         return matchInto(input, start, end, Anchor.UNANCHORED, null);
     }
 
-    /**
-     * Returns whether the pattern matches at the beginning of {@code input} without allocating capture storage.
-     */
+    /// Returns whether the pattern matches at the beginning of `input` without allocating capture storage.
     public boolean lookingAt(Slice input)
     {
         BooleanPlanKind plan = booleanPlans.lookingAt();
@@ -1732,9 +1640,7 @@ public sealed class Re2
         return matchInto(input, Anchor.ANCHOR_START, null);
     }
 
-    /**
-     * Returns whether the pattern matches at {@code start} within {@code [start, end)}, retaining the complete Slice as assertion context.
-     */
+    /// Returns whether the pattern matches at `start` within `[start, end)`, retaining the complete Slice as assertion context.
     public boolean lookingAt(Slice input, int start, int end)
     {
         return matchInto(input, start, end, Anchor.ANCHOR_START, null);
@@ -1770,9 +1676,7 @@ public sealed class Re2
         };
     }
 
-    /**
-     * Returns whether the pattern matches all of {@code input} without allocating capture storage.
-     */
+    /// Returns whether the pattern matches all of `input` without allocating capture storage.
     public boolean matches(Slice input)
     {
         BooleanPlanKind plan = booleanPlans.matches();
@@ -1850,26 +1754,20 @@ public sealed class Re2
                 LiteralMatchKernel.matchesAt(input, finalLineEnd - literal.length(), literal);
     }
 
-    /**
-     * Returns whether the pattern matches all of {@code [start, end)}, retaining the complete Slice as assertion context.
-     */
+    /// Returns whether the pattern matches all of `[start, end)`, retaining the complete Slice as assertion context.
     public boolean matches(Slice input, int start, int end)
     {
         return matchInto(input, start, end, Anchor.ANCHOR_BOTH, null);
     }
 
-    /**
-     * Creates a mutable matcher retaining every capturing group.
-     */
+    /// Creates a mutable matcher retaining every capturing group.
     public Re2Matcher matcher(Slice input)
     {
         return new Re2Matcher(this, input);
     }
 
-    /**
-     * Creates a reusable matcher that retains group zero and the requested prefix of explicit
-     * capturing groups. Use zero when only complete-match boundaries are required.
-     */
+    /// Creates a reusable matcher that retains group zero and the requested prefix of explicit
+    /// capturing groups. Use zero when only complete-match boundaries are required.
     public Re2Matcher matcher(Slice input, int retainedCapturingGroupCount)
     {
         return new Re2Matcher(this, input, null, retainedCapturingGroupCount);
@@ -1890,16 +1788,14 @@ public sealed class Re2
         return new Re2Matcher(this, input, null, 0, false);
     }
 
-    /**
-     * Returns the start-anchored scan plan that an unanchored capture search may run directly
-     * through {@link #findWithStartAnchoredTrinoScanPlan}, or {@code null}. The compile-time scan
-     * strategy is the whole decision: a pattern with a scan plan never matches empty and has no
-     * candidate-start or group-zero cursor, direct lowered search, or lowered program, so no
-     * {@link Re2Matcher#find()} check runs ahead of the plan. Only a caller's single-byte matcher
-     * can, and such a caller keeps the ordinary route. A Rust matcher over a partial region runs
-     * its Rust search instead, which reaches the plan only when the region ends at the input end.
-     * A Java matcher region whose $ reads a CR before it runs the ordinary search instead.
-     */
+    /// Returns the start-anchored scan plan that an unanchored capture search may run directly
+    /// through [#findWithStartAnchoredTrinoScanPlan], or `null`. The compile-time scan
+    /// strategy is the whole decision: a pattern with a scan plan never matches empty and has no
+    /// candidate-start or group-zero cursor, direct lowered search, or lowered program, so no
+    /// [Re2Matcher#find()] check runs ahead of the plan. Only a caller's single-byte matcher
+    /// can, and such a caller keeps the ordinary route. A Rust matcher over a partial region runs
+    /// its Rust search instead, which reaches the plan only when the region ends at the input end.
+    /// A Java matcher region whose $ reads a CR before it runs the ordinary search instead.
     TrinoScanPlan startAnchoredTrinoScanPlan()
     {
         return switch (trinoScanStrategy) {
@@ -1909,13 +1805,11 @@ public sealed class Re2
         };
     }
 
-    /**
-     * Returns what {@link #matchRegionInto} returns, with the same groups, for an unanchored
-     * search of {@code [contextStart, contextEnd)} that starts at {@code contextStart}. The
-     * {@code plan} is this pattern's {@link #startAnchoredTrinoScanPlan()}, passed in so callers
-     * that retain it load nothing through this pattern's plans. The call skips the argument checks
-     * and strategy chain of {@link #matchInternal}, which are too large for C2 to inline.
-     */
+    /// Returns what [#matchRegionInto] returns, with the same groups, for an unanchored
+    /// search of `[contextStart, contextEnd)` that starts at `contextStart`. The
+    /// `plan` is this pattern's [#startAnchoredTrinoScanPlan()], passed in so callers
+    /// that retain it load nothing through this pattern's plans. The call skips the argument checks
+    /// and strategy chain of [#matchInternal], which are too large for C2 to inline.
     boolean findWithStartAnchoredTrinoScanPlan(TrinoScanPlan plan, Slice text, int contextStart, int contextEnd, int[] groups)
     {
         Arrays.fill(groups, -1);
@@ -1928,13 +1822,11 @@ public sealed class Re2
         };
     }
 
-    /**
-     * Returns the case-sensitive scan plan that every capture search of this pattern runs, or
-     * {@code null}. As for {@link #startAnchoredTrinoScanPlan()}, the compile-time scan strategy
-     * is the whole decision, so no {@link #matchRegionInto} check runs ahead of the plan route of
-     * {@link #matchInternal} either. Only a caller's single-byte matcher can still answer first,
-     * and a Java matcher region whose $ reads a CR before it runs on the NFA instead.
-     */
+    /// Returns the case-sensitive scan plan that every capture search of this pattern runs, or
+    /// `null`. As for [#startAnchoredTrinoScanPlan()], the compile-time scan strategy
+    /// is the whole decision, so no [#matchRegionInto] check runs ahead of the plan route of
+    /// [#matchInternal] either. Only a caller's single-byte matcher can still answer first,
+    /// and a Java matcher region whose $ reads a CR before it runs on the NFA instead.
     TrinoScanPlan caseSensitiveTrinoScanPlan()
     {
         return switch (trinoScanStrategy) {
@@ -1943,19 +1835,15 @@ public sealed class Re2
         };
     }
 
-    /**
-     * Returns whether group-zero matchers of this pattern use a single-byte matcher, without
-     * loading it.
-     */
+    /// Returns whether group-zero matchers of this pattern use a single-byte matcher, without
+    /// loading it.
     boolean hasSingleByteMatcher()
     {
         return singleByteMatcher != SingleByteMatcher.unsupported();
     }
 
-    /**
-     * Returns how {@link #countMatches} counts this pattern, following its checks in order, for a
-     * pattern with a {@link #caseSensitiveTrinoScanPlan()}.
-     */
+    /// Returns how [#countMatches] counts this pattern, following its checks in order, for a
+    /// pattern with a [#caseSensitiveTrinoScanPlan()].
     TrinoScanPlanCount trinoScanPlanCount()
     {
         if (trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_TRINO_SCAN) {
@@ -1975,10 +1863,8 @@ public sealed class Re2
         return TrinoScanPlanCount.OTHER;
     }
 
-    /**
-     * Continues on the ordinary engine an unanchored search of all of {@code text} that a
-     * scan-plan search handed off at {@code resume}, as {@link #finishTrinoScanSearch} does.
-     */
+    /// Continues on the ordinary engine an unanchored search of all of `text` that a
+    /// scan-plan search handed off at `resume`, as [#finishTrinoScanSearch] does.
     boolean continueTrinoScanSearch(Slice text, int resume, int[] groups)
     {
         return matchInternal(partialProg, text, 0, text.length(), resume, text.length(), Anchor.UNANCHORED, groups, NO_MATCH_WORKSPACES, false);
@@ -2184,11 +2070,9 @@ public sealed class Re2
         return Dfa.canReturnEmptyAtStart(partialProg, input, contextStart, contextEnd, start, matchKind);
     }
 
-    /**
-     * Returns the number of non-overlapping matches, including empty matches.
-     * Empty matches advance as in {@link Re2Matcher#find()}, by one code point
-     * in UTF-8 mode or one byte in Latin-1 mode. No capture values are returned.
-     */
+    /// Returns the number of non-overlapping matches, including empty matches.
+    /// Empty matches advance as in [Re2Matcher#find()], by one code point
+    /// in UTF-8 mode or one byte in Latin-1 mode. No capture values are returned.
     public long count(Slice input)
     {
         long optimizedCount = countMatches(input);
@@ -2266,12 +2150,10 @@ public sealed class Re2
         return Dfa.countMatches(partialProg, text, matchKind);
     }
 
-    /**
-     * Counts the group-zero matches {@link Re2Matcher#find()} would return. A plan never
-     * matches empty, so each search resumes at the previous match end. As in a find loop, each
-     * search starts on the plan with its own work budget, and one that hands off finds its
-     * match on the ordinary engine.
-     */
+    /// Counts the group-zero matches [Re2Matcher#find()] would return. A plan never
+    /// matches empty, so each search resumes at the previous match end. As in a find loop, each
+    /// search starts on the plan with its own work budget, and one that hands off finds its
+    /// match on the ordinary engine.
     long countUnanchoredTrinoScanMatches(Slice text, boolean asciiFolded)
     {
         // CompiledScanRe2 copies this loop; keep in step.
@@ -2395,54 +2277,42 @@ public sealed class Re2
         return counter;
     }
 
-    /**
-     * Finds a match and writes byte-offset start/end pairs into caller-owned storage.
-     * The buffer contains group zero followed by a prefix of capturing groups. Unmatched and
-     * unavailable groups are set to {@code -1, -1}. A {@code null} buffer requests no captures.
-     */
+    /// Finds a match and writes byte-offset start/end pairs into caller-owned storage.
+    /// The buffer contains group zero followed by a prefix of capturing groups. Unmatched and
+    /// unavailable groups are set to `-1, -1`. A `null` buffer requests no captures.
     public boolean findInto(Slice text, int[] groups)
     {
         return matchInto(text, Anchor.UNANCHORED, groups);
     }
 
-    /**
-     * Matches at the beginning of the input and writes byte-offset start/end pairs.
-     */
+    /// Matches at the beginning of the input and writes byte-offset start/end pairs.
     public boolean lookingAtInto(Slice text, int[] groups)
     {
         return matchInto(text, Anchor.ANCHOR_START, groups);
     }
 
-    /**
-     * Matches the complete input and writes byte-offset start/end pairs.
-     */
+    /// Matches the complete input and writes byte-offset start/end pairs.
     public boolean matchesInto(Slice text, int[] groups)
     {
         return matchInto(text, Anchor.ANCHOR_BOTH, groups);
     }
 
-    /**
-     * Finds a match in {@code [start, end)} while retaining the complete Slice as assertion context.
-     * Reported offsets are relative to the complete logical Slice.
-     */
+    /// Finds a match in `[start, end)` while retaining the complete Slice as assertion context.
+    /// Reported offsets are relative to the complete logical Slice.
     public boolean findInto(Slice text, int start, int end, int[] groups)
     {
         return matchInto(text, start, end, Anchor.UNANCHORED, groups);
     }
 
-    /**
-     * Matches at {@code start} within {@code [start, end)} while retaining the complete Slice as assertion context.
-     * Reported offsets are relative to the complete logical Slice.
-     */
+    /// Matches at `start` within `[start, end)` while retaining the complete Slice as assertion context.
+    /// Reported offsets are relative to the complete logical Slice.
     public boolean lookingAtInto(Slice text, int start, int end, int[] groups)
     {
         return matchInto(text, start, end, Anchor.ANCHOR_START, groups);
     }
 
-    /**
-     * Matches all of {@code [start, end)} while retaining the complete Slice as assertion context.
-     * Reported offsets are relative to the complete logical Slice.
-     */
+    /// Matches all of `[start, end)` while retaining the complete Slice as assertion context.
+    /// Reported offsets are relative to the complete logical Slice.
     public boolean matchesInto(Slice text, int start, int end, int[] groups)
     {
         return matchInto(text, start, end, Anchor.ANCHOR_BOTH, groups);
@@ -2580,26 +2450,22 @@ public sealed class Re2
                 workspaces);
     }
 
-    /**
-     * Returns whether a matcher region must read a CR before its start: the JDK's $ and \Z refuse
-     * the LF of a CR LF even at the start of a region that excludes the CR. A required prefix puts
-     * every Java $ or \Z assertion after the region start, so only a pattern without one reads it.
-     * Excluding a required prefix also guarantees that {@code partialProg} is the whole pattern, as
-     * {@link #matchRegionAfterCarriageReturnInto} needs. The test is deliberately conservative: a
-     * pattern such as {@code a$}, which never tests $ at the region start, still takes that route.
-     */
+    /// Returns whether a matcher region must read a CR before its start: the JDK's $ and \Z refuse
+    /// the LF of a CR LF even at the start of a region that excludes the CR. A required prefix puts
+    /// every Java $ or \Z assertion after the region start, so only a pattern without one reads it.
+    /// Excluding a required prefix also guarantees that `partialProg` is the whole pattern, as
+    /// [#matchRegionAfterCarriageReturnInto] needs. The test is deliberately conservative: a
+    /// pattern such as `a$`, which never tests $ at the region start, still takes that route.
     boolean readsCarriageReturnBeforeRegion()
     {
         return requiredPrefix == null && (partialProg.textDependentAssertions() & EmptyOp.JAVA_END_ASSERTIONS) != 0;
     }
 
-    /**
-     * Matches a matcher region that starts on the LF of a CR LF, for a pattern that
-     * {@link #readsCarriageReturnBeforeRegion reads that CR}, with the anchors and region-relative
-     * groups of {@link #matchRegionInto}. The region alone cannot show the CR, so the semantic
-     * program runs on the NFA told that a CR precedes the region. The case is rare, so it skips
-     * every faster engine.
-     */
+    /// Matches a matcher region that starts on the LF of a CR LF, for a pattern that
+    /// [reads that CR][#readsCarriageReturnBeforeRegion], with the anchors and region-relative
+    /// groups of [#matchRegionInto]. The region alone cannot show the CR, so the semantic
+    /// program runs on the NFA told that a CR precedes the region. The case is rare, so it skips
+    /// every faster engine.
     boolean matchRegionAfterCarriageReturnInto(Slice text, int contextStart, int contextEnd, int start, Anchor anchor, int[] groups, Re2Matcher workspaceOwner)
     {
         Slice context = logicalContext(text, contextStart, contextEnd);
@@ -2656,49 +2522,37 @@ public sealed class Re2
         return (Regexp) suffixRegexpOrFixedWidthMatcher;
     }
 
-    /**
-     * Returns an immutable snapshot of the first match, or {@code null} when no match exists.
-     */
+    /// Returns an immutable snapshot of the first match, or `null` when no match exists.
     public MatchResult findResult(Slice input)
     {
         return matchResult(input, Anchor.UNANCHORED);
     }
 
-    /**
-     * Returns an immutable snapshot of the first match in {@code [start, end)}, or {@code null}.
-     */
+    /// Returns an immutable snapshot of the first match in `[start, end)`, or `null`.
     public MatchResult findResult(Slice input, int start, int end)
     {
         return matchResult(input, start, end, Anchor.UNANCHORED);
     }
 
-    /**
-     * Returns an immutable snapshot when the pattern matches the complete input, or {@code null}.
-     */
+    /// Returns an immutable snapshot when the pattern matches the complete input, or `null`.
     public MatchResult matchesResult(Slice input)
     {
         return matchResult(input, Anchor.ANCHOR_BOTH);
     }
 
-    /**
-     * Returns an immutable snapshot when the pattern matches all of {@code [start, end)}, or {@code null}.
-     */
+    /// Returns an immutable snapshot when the pattern matches all of `[start, end)`, or `null`.
     public MatchResult matchesResult(Slice input, int start, int end)
     {
         return matchResult(input, start, end, Anchor.ANCHOR_BOTH);
     }
 
-    /**
-     * Returns an immutable snapshot of a match at the beginning of the input, or {@code null}.
-     */
+    /// Returns an immutable snapshot of a match at the beginning of the input, or `null`.
     public MatchResult lookingAtResult(Slice input)
     {
         return matchResult(input, Anchor.ANCHOR_START);
     }
 
-    /**
-     * Returns an immutable snapshot of a match at {@code start} within {@code [start, end)}, or {@code null}.
-     */
+    /// Returns an immutable snapshot of a match at `start` within `[start, end)`, or `null`.
     public MatchResult lookingAtResult(Slice input, int start, int end)
     {
         return matchResult(input, start, end, Anchor.ANCHOR_START);
@@ -2768,10 +2622,8 @@ public sealed class Re2
                 true);
     }
 
-    /**
-     * Returns whether an unanchored boolean call over {@code length} bytes of a start-anchored
-     * plan skips the plan for the ordinary engine. See {@link #ordinaryShortBooleanMatch}.
-     */
+    /// Returns whether an unanchored boolean call over `length` bytes of a start-anchored
+    /// plan skips the plan for the ordinary engine. See [#ordinaryShortBooleanMatch].
     private boolean matchesShortBooleanOnOrdinaryEngine(int length, Anchor anchor, int[] groupOffsets)
     {
         return ordinaryShortBooleanMatch && groupOffsets == null && anchor == Anchor.UNANCHORED && length <= MAX_ORDINARY_SHORT_BOOLEAN_MATCH_BYTES;
@@ -3551,22 +3403,18 @@ public sealed class Re2
         return value;
     }
 
-    /**
-     * Get or lazily compile the reverse program for this regex.
-     * <p>
-     * Used in {@code matchInto()} for:
-     * <ul>
-     * <li>Anchor-end quick rejection: when {@code prog.anchorEnd()}, runs reverse DFA anchored
-     *     from text end for constant-time rejection of non-matching text
-     * <li>Two-phase DFA search: forward DFA finds match end, reverse DFA finds match start
-     * </ul>
-     * <p>
-     * <b>Memory Budget:</b>
-     * Reverse program gets 1/3 of {@code maxMemory}, forward gets 2/3.
-     * This split matches upstream RE2::Init behavior.
-     *
-     * @return the reverse program, or null if compilation failed
-     */
+    /// Get or lazily compile the reverse program for this regex.
+    ///
+    /// Used in `matchInto()` for:
+    /// - Anchor-end quick rejection: when `prog.anchorEnd()`, runs reverse DFA anchored
+    ///   from text end for constant-time rejection of non-matching text
+    /// - Two-phase DFA search: forward DFA finds match end, reverse DFA finds match start
+    ///
+    /// **Memory Budget:**
+    /// Reverse program gets 1/3 of `maxMemory`, forward gets 2/3.
+    /// This split matches upstream RE2::Init behavior.
+    ///
+    /// @return the reverse program, or null if compilation failed
     private Prog reverseProg()
     {
         if (reverseProgComputed) {
@@ -3581,27 +3429,21 @@ public sealed class Re2
         return reverseProg;
     }
 
-    /**
-     * Compile the reverse program with appropriate memory budget (1/3 of total).
-     * <p>
-     * Memory allocation strategy (matching upstream):
-     * <ul>
-     * <li>Forward program: 2/3 of maxMemory (more common, can have 2 DFAs: first-match and longest-match)
-     * <li>Reverse program: 1/3 of maxMemory (less frequent, only used in two-phase search)
-     * </ul>
-     * <p>
-     * The {@code reversed=true} flag causes:
-     * <ul>
-     * <li>Right-to-left byte scanning in Dfa.search
-     * <li>Anchor flag swapping (^ becomes $, $ becomes ^)
-     * <li>Program marked with {@code prog.setReversed(true)}
-     * </ul>
-     * <p>
-     * <b>Optimization:</b> Uses the retained normalized reverse expression instead of re-parsing
-     * or re-simplifying the pattern.
-     *
-     * @return compiled reverse program, or null if compilation failed
-     */
+    /// Compile the reverse program with appropriate memory budget (1/3 of total).
+    ///
+    /// Memory allocation strategy (matching upstream):
+    /// - Forward program: 2/3 of maxMemory (more common, can have 2 DFAs: first-match and longest-match)
+    /// - Reverse program: 1/3 of maxMemory (less frequent, only used in two-phase search)
+    ///
+    /// The `reversed=true` flag causes:
+    /// - Right-to-left byte scanning in Dfa.search
+    /// - Anchor flag swapping (^ becomes $, $ becomes ^)
+    /// - Program marked with `prog.setReversed(true)`
+    ///
+    /// **Optimization:** Uses the retained normalized reverse expression instead of re-parsing
+    /// or re-simplifying the pattern.
+    ///
+    /// @return compiled reverse program, or null if compilation failed
     private Prog compileReverse()
     {
         Prog loweredProgram = booleanPlans.loweredProgram();
@@ -3726,16 +3568,14 @@ public sealed class Re2
         out.writeBytes(bytes, offset, length);
     }
 
-    /**
-     * A pattern whose case-sensitive scan plan was compiled to its own hidden class. Each call
-     * keeps the route it has without the class, decided once when the pattern compiles: one that
-     * would run the plan runs the generated class instead, and any other runs the inherited route.
-     * Short boolean calls that the interpreter hands to the ordinary engine to avoid its operation
-     * dispatch also stay on the generated class. A start-anchored plan runs its full plan rather
-     * than the save-free boolean plan, since the generated class guards each save with one branch
-     * on whether the caller asked for that group. Callers that never request generated bytecode
-     * never load this class.
-     */
+    /// A pattern whose case-sensitive scan plan was compiled to its own hidden class. Each call
+    /// keeps the route it has without the class, decided once when the pattern compiles: one that
+    /// would run the plan runs the generated class instead, and any other runs the inherited route.
+    /// Short boolean calls that the interpreter hands to the ordinary engine to avoid its operation
+    /// dispatch also stay on the generated class. A start-anchored plan runs its full plan rather
+    /// than the save-free boolean plan, since the generated class guards each save with one branch
+    /// on whether the caller asked for that group. Callers that never request generated bytecode
+    /// never load this class.
     private static final class CompiledScanRe2
             extends Re2
     {
@@ -3754,11 +3594,9 @@ public sealed class Re2
             this.ordinaryHandoff = ordinaryHandoff;
         }
 
-        /**
-         * Returns a copy of {@code pattern} with a generated class, or {@code null} when the
-         * pattern is not eligible or the class cannot be generated. The declared type keeps
-         * verification of the base class from loading this class.
-         */
+        /// Returns a copy of `pattern` with a generated class, or `null` when the
+        /// pattern is not eligible or the class cannot be generated. The declared type keeps
+        /// verification of the base class from loading this class.
         static Re2 create(Re2 pattern)
         {
             TrinoScanPlan plan = pattern.caseSensitiveTrinoScanPlan();
@@ -3831,11 +3669,9 @@ public sealed class Re2
             return scan.match(text, contextStart, contextEnd, false, groups);
         }
 
-        /**
-         * Runs the plan route of the base method on the generated class. Every other call,
-         * including an unanchored boolean search that the base method keeps on the ordinary
-         * engine, runs the base method.
-         */
+        /// Runs the plan route of the base method on the generated class. Every other call,
+        /// including an unanchored boolean search that the base method keeps on the ordinary
+        /// engine, runs the base method.
         @Override
         boolean matchInternal(Prog prog, Slice text, int contextStart, int contextEnd, int start, int end, Anchor anchor, int[] groupOffsets, MatchWorkspaces workspaces)
         {

@@ -19,13 +19,11 @@ import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * An immutable snapshot of one match's boundaries and group metadata.
- * <p>
- * Group offsets are byte offsets relative to the original logical Slice. Group slices are
- * zero-copy views and therefore retain the input's backing storage. Changes to mutable backing
- * storage remain visible through previously returned group slices.
- */
+/// An immutable snapshot of one match's boundaries and group metadata.
+///
+/// Group offsets are byte offsets relative to the original logical Slice. Group slices are
+/// zero-copy views and therefore retain the input's backing storage. Changes to mutable backing
+/// storage remain visible through previously returned group slices.
 public final class MatchResult
 {
     private final Slice text;
@@ -42,25 +40,19 @@ public final class MatchResult
         this.namedCapturingGroups = requireNonNull(namedCapturingGroups, "namedCapturingGroups is null");
     }
 
-    /**
-     * Returns the number of capturing groups, excluding group zero.
-     */
+    /// Returns the number of capturing groups, excluding group zero.
     public int groupCount()
     {
         return Math.max(0, (groups.length / 2) - 1);
     }
 
-    /**
-     * Returns the start byte offset of group zero.
-     */
+    /// Returns the start byte offset of group zero.
     public int start()
     {
         return start(0);
     }
 
-    /**
-     * Returns whether the group participated in the match.
-     */
+    /// Returns whether the group participated in the match.
     public boolean matched(int group)
     {
         checkGroup(group);
@@ -69,9 +61,7 @@ public final class MatchResult
         return start >= 0 && end >= start;
     }
 
-    /**
-     * Returns the start byte offset, or {@code -1} when the group did not participate.
-     */
+    /// Returns the start byte offset, or `-1` when the group did not participate.
     public int start(int group)
     {
         checkGroup(group);
@@ -81,9 +71,7 @@ public final class MatchResult
         return groups[group * 2];
     }
 
-    /**
-     * Returns the end byte offset, or {@code -1} when the group did not participate.
-     */
+    /// Returns the end byte offset, or `-1` when the group did not participate.
     public int end(int group)
     {
         checkGroup(group);
@@ -93,17 +81,13 @@ public final class MatchResult
         return groups[group * 2 + 1];
     }
 
-    /**
-     * Returns the end byte offset of group zero.
-     */
+    /// Returns the end byte offset of group zero.
     public int end()
     {
         return end(0);
     }
 
-    /**
-     * Returns the byte length, or {@code -1} when the group did not participate.
-     */
+    /// Returns the byte length, or `-1` when the group did not participate.
     public int length(int group)
     {
         int start = start(group);
@@ -113,17 +97,13 @@ public final class MatchResult
         return end(group) - start;
     }
 
-    /**
-     * Returns the byte length of group zero.
-     */
+    /// Returns the byte length of group zero.
     public int length()
     {
         return length(0);
     }
 
-    /**
-     * Returns a zero-copy group view, or {@code null} when the group did not participate.
-     */
+    /// Returns a zero-copy group view, or `null` when the group did not participate.
     public Slice groupSlice(int group)
     {
         int start = start(group);
@@ -134,27 +114,21 @@ public final class MatchResult
         return text.slice(start, end - start);
     }
 
-    /**
-     * Returns a zero-copy view of group zero.
-     */
+    /// Returns a zero-copy view of group zero.
     public Slice groupSlice()
     {
         return groupSlice(0);
     }
 
-    /**
-     * Returns a zero-copy named-group view, or {@code null} when the group did not participate.
-     *
-     * @throws IllegalArgumentException if the name is unknown
-     */
+    /// Returns a zero-copy named-group view, or `null` when the group did not participate.
+    ///
+    /// @throws IllegalArgumentException if the name is unknown
     public Slice groupSlice(String groupName)
     {
         return groupSlice(groupIndex(groupName));
     }
 
-    /**
-     * Decodes a group as UTF-8, or returns {@code null} when the group did not participate.
-     */
+    /// Decodes a group as UTF-8, or returns `null` when the group did not participate.
     public String groupUtf8(int group)
     {
         Slice slice = groupSlice(group);
@@ -164,39 +138,31 @@ public final class MatchResult
         return slice.toStringUtf8();
     }
 
-    /**
-     * Decodes group zero as UTF-8.
-     */
+    /// Decodes group zero as UTF-8.
     public String groupUtf8()
     {
         return groupUtf8(0);
     }
 
-    /**
-     * Decodes a named group as UTF-8, or returns {@code null} when it did not participate.
-     *
-     * @throws IllegalArgumentException if the name is unknown
-     */
+    /// Decodes a named group as UTF-8, or returns `null` when it did not participate.
+    ///
+    /// @throws IllegalArgumentException if the name is unknown
     public String groupUtf8(String groupName)
     {
         return groupUtf8(groupIndex(groupName));
     }
 
-    /**
-     * Parses a matched group as a decimal signed integer.
-     *
-     * @throws NumberFormatException if the group is unmatched, malformed, or out of range
-     */
+    /// Parses a matched group as a decimal signed integer.
+    ///
+    /// @throws NumberFormatException if the group is unmatched, malformed, or out of range
     public int parseInt(int group)
     {
         return parseInt(group, 10);
     }
 
-    /**
-     * Parses a matched group as a signed integer in the supplied radix.
-     *
-     * @throws NumberFormatException if the radix or group value is invalid
-     */
+    /// Parses a matched group as a signed integer in the supplied radix.
+    ///
+    /// @throws NumberFormatException if the radix or group value is invalid
     public int parseInt(int group, int radix)
     {
         long value = parseSignedLongGroup(group, radix);
@@ -206,41 +172,33 @@ public final class MatchResult
         return (int) value;
     }
 
-    /**
-     * Parses a matched group as a decimal signed long.
-     *
-     * @throws NumberFormatException if the group is unmatched, malformed, or out of range
-     */
+    /// Parses a matched group as a decimal signed long.
+    ///
+    /// @throws NumberFormatException if the group is unmatched, malformed, or out of range
     public long parseLong(int group)
     {
         return parseLong(group, 10);
     }
 
-    /**
-     * Parses a matched group as a signed long in the supplied radix.
-     *
-     * @throws NumberFormatException if the radix or group value is invalid
-     */
+    /// Parses a matched group as a signed long in the supplied radix.
+    ///
+    /// @throws NumberFormatException if the radix or group value is invalid
     public long parseLong(int group, int radix)
     {
         return parseSignedLongGroup(group, radix);
     }
 
-    /**
-     * Parses a matched group as a decimal unsigned 32-bit integer returned in a long.
-     *
-     * @throws NumberFormatException if the group is unmatched, malformed, or out of range
-     */
+    /// Parses a matched group as a decimal unsigned 32-bit integer returned in a long.
+    ///
+    /// @throws NumberFormatException if the group is unmatched, malformed, or out of range
     public long parseUnsignedInt(int group)
     {
         return parseUnsignedInt(group, 10);
     }
 
-    /**
-     * Parses a matched group as an unsigned 32-bit integer in the supplied radix.
-     *
-     * @throws NumberFormatException if the radix or group value is invalid
-     */
+    /// Parses a matched group as an unsigned 32-bit integer in the supplied radix.
+    ///
+    /// @throws NumberFormatException if the radix or group value is invalid
     public long parseUnsignedInt(int group, int radix)
     {
         long value = parseUnsignedLongGroup(group, radix);
@@ -250,21 +208,17 @@ public final class MatchResult
         return value;
     }
 
-    /**
-     * Parses a matched group as a decimal unsigned 64-bit value represented by raw long bits.
-     *
-     * @throws NumberFormatException if the group is unmatched, malformed, or out of range
-     */
+    /// Parses a matched group as a decimal unsigned 64-bit value represented by raw long bits.
+    ///
+    /// @throws NumberFormatException if the group is unmatched, malformed, or out of range
     public long parseUnsignedLong(int group)
     {
         return parseUnsignedLong(group, 10);
     }
 
-    /**
-     * Parses a matched group as an unsigned 64-bit value represented by raw long bits.
-     *
-     * @throws NumberFormatException if the radix or group value is invalid
-     */
+    /// Parses a matched group as an unsigned 64-bit value represented by raw long bits.
+    ///
+    /// @throws NumberFormatException if the radix or group value is invalid
     public long parseUnsignedLong(int group, int radix)
     {
         return parseUnsignedLongGroup(group, radix);

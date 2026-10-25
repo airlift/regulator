@@ -142,13 +142,11 @@ final class Regexp
         return parseFlags;
     }
 
-    /**
-     * Determines whether matches must be anchored with a fixed string prefix
-     * (i.e., the regexp is of the form {@code ^literal...} in one-line mode).
-     * If so, returns the prefix (as bytes), whether it is ASCII-case-folded,
-     * and the remaining regexp suffix. A fully case-folded literal is a prefix only when
-     * {@code caseFolding} keeps its folds within ASCII.
-     */
+    /// Determines whether matches must be anchored with a fixed string prefix
+    /// (i.e., the regexp is of the form `^literal...` in one-line mode).
+    /// If so, returns the prefix (as bytes), whether it is ASCII-case-folded,
+    /// and the remaining regexp suffix. A fully case-folded literal is a prefix only when
+    /// `caseFolding` keeps its folds within ASCII.
     RequiredPrefixResult requiredPrefix(CaseFolding caseFolding)
     {
         // The regexp must be of the form:
@@ -195,12 +193,10 @@ final class Regexp
         return new RequiredPrefixResult(Slices.wrappedBuffer(prefixBytes), foldCase, suffix);
     }
 
-    /**
-     * Determines whether matches must be unanchored with a fixed string prefix.
-     * This "sees through" capturing groups but does not try to glue multiple
-     * prefix fragments together. A fully case-folded literal is a prefix only when
-     * {@code caseFolding} keeps its folds within ASCII.
-     */
+    /// Determines whether matches must be unanchored with a fixed string prefix.
+    /// This "sees through" capturing groups but does not try to glue multiple
+    /// prefix fragments together. A fully case-folded literal is a prefix only when
+    /// `caseFolding` keeps its folds within ASCII.
     RequiredPrefixForAccelResult requiredPrefixForAccel(CaseFolding caseFolding)
     {
         // The regexp must either begin with or be a literal char or string.
@@ -229,11 +225,9 @@ final class Regexp
         return supportsAsciiFold(regexp.op == RegexpOp.LITERAL ? new int[] {regexp.rune} : regexp.runes, caseFolding);
     }
 
-    /**
-     * Returns whether ASCII case-insensitive comparison matches exactly the text that
-     * {@code caseFolding} matches for these literal runes. Call it only behind the literal's
-     * case-fold flag, so the full-fold table is built only for patterns that fold case.
-     */
+    /// Returns whether ASCII case-insensitive comparison matches exactly the text that
+    /// `caseFolding` matches for these literal runes. Call it only behind the literal's
+    /// case-fold flag, so the full-fold table is built only for patterns that fold case.
     static boolean supportsAsciiFold(int[] literalRunes, CaseFolding caseFolding)
     {
         for (int literalRune : literalRunes) {
@@ -249,11 +243,9 @@ final class Regexp
         return !caseFolding.requiresFullCaseFold(literalRunes);
     }
 
-    /**
-     * Returns the complete encoded literal matched by this expression, or {@code null} when the
-     * expression contains non-literal behavior or case folding. Captures are transparent because
-     * callers use this only when capture offsets are not requested.
-     */
+    /// Returns the complete encoded literal matched by this expression, or `null` when the
+    /// expression contains non-literal behavior or case folding. Captures are transparent because
+    /// callers use this only when capture offsets are not requested.
     Slice exactLiteral()
     {
         DynamicSliceOutput literal = new DynamicSliceOutput(16);
@@ -290,9 +282,7 @@ final class Regexp
         return literal.slice();
     }
 
-    /**
-     * Returns capturing group names keyed by capture number.
-     */
+    /// Returns capturing group names keyed by capture number.
     Map<Integer, String> captureNames()
     {
         HashMap<Integer, String> captureNames = null;
@@ -520,13 +510,11 @@ final class Regexp
         return starPlusOrQuest(RegexpOp.QUEST, parseFlags, child);
     }
 
-    /**
-     * Constructs a unary node without applying {@link #starPlusOrQuest} squashing rules.
-     * <p>
-     * This is needed for fidelity with upstream {@code simplify.cc}, which builds unary
-     * regexps directly (instead of calling {@code Regexp::Star/Plus/Quest}) so that
-     * simplification preserves forms like {@code (?:a+)*} rather than rewriting them to {@code a*}.
-     */
+    /// Constructs a unary node without applying [#starPlusOrQuest] squashing rules.
+    ///
+    /// This is needed for fidelity with upstream `simplify.cc`, which builds unary
+    /// regexps directly (instead of calling `Regexp::Star/Plus/Quest`) so that
+    /// simplification preserves forms like `(?:a+)*` rather than rewriting them to `a*`.
     static Regexp rawUnary(RegexpOp operator, int parseFlags, Regexp child)
     {
         requireNonNull(operator, "operator is null");
@@ -700,10 +688,8 @@ final class Regexp
         return values;
     }
 
-    /**
-     * Read-only list view of a node's children. Nodes keep the bare array so the view costs
-     * nothing when retained; building a node from another node's view reuses the array.
-     */
+    /// Read-only list view of a node's children. Nodes keep the bare array so the view costs
+    /// nothing when retained; building a node from another node's view reuses the array.
     private static final class ChildList
             extends AbstractList<Regexp>
             implements RandomAccess

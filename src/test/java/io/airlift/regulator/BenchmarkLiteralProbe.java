@@ -36,19 +36,17 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-/**
- * Unanchored searches led by a literal over synthetic application or access log lines, where
- * common letters make a first-byte scan stop every few bytes. Covers the RE2 prefix-acceleration
- * scan through {@code dfaSearch}, and the scan-plan leading-literal scan that the public RE2
- * ({@code re2Find}, {@code re2Count}) and Trino operations run on these literal-led patterns,
- * each compiled with the distribution {@link #backgroundFrequencies()} learns from the background
- * lines, as a caller learns from its own data. {@code SERVICE} and {@code TOKEN} literals probe a
- * rarer letter than their first byte and are expected wins. The rest keep the first byte and are
- * protected controls: {@code USER} and {@code ERROR} have no later byte more than four times
- * rarer than the first, {@code GET}, {@code URL}, and {@code HTTPS} begin with their rarest byte,
- * and {@code HTTPS} searches access log lines dense with slashes, the byte a punctuation probe
- * would choose.
- */
+/// Unanchored searches led by a literal over synthetic application or access log lines, where
+/// common letters make a first-byte scan stop every few bytes. Covers the RE2 prefix-acceleration
+/// scan through `dfaSearch`, and the scan-plan leading-literal scan that the public RE2
+/// (`re2Find`, `re2Count`) and Trino operations run on these literal-led patterns,
+/// each compiled with the distribution [#backgroundFrequencies()] learns from the background
+/// lines, as a caller learns from its own data. `SERVICE` and `TOKEN` literals probe a
+/// rarer letter than their first byte and are expected wins. The rest keep the first byte and are
+/// protected controls: `USER` and `ERROR` have no later byte more than four times
+/// rarer than the first, `GET`, `URL`, and `HTTPS` begin with their rarest byte,
+/// and `HTTPS` searches access log lines dense with slashes, the byte a punctuation probe
+/// would choose.
 @State(Scope.Thread)
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -98,9 +96,7 @@ public class BenchmarkLiteralProbe
         }
     }
 
-    /**
-     * Searches the whole input with the forward DFA, which scans with prefix acceleration.
-     */
+    /// Searches the whole input with the forward DFA, which scans with prefix acceleration.
     @Benchmark
     public long dfaSearch()
     {
@@ -141,11 +137,9 @@ public class BenchmarkLiteralProbe
         return inputShape == InputShape.LATE_MATCH ? 1 : lineCount;
     }
 
-    /**
-     * Returns whole log lines of the workload's format totalling at least {@code length} bytes.
-     * The workload's literal occurs once, in the last line ({@code LATE_MATCH}), or once per line
-     * ({@code EVERY_LINE}), and the rest of the text contains no workload's literal.
-     */
+    /// Returns whole log lines of the workload's format totalling at least `length` bytes.
+    /// The workload's literal occurs once, in the last line (`LATE_MATCH`), or once per line
+    /// (`EVERY_LINE`), and the rest of the text contains no workload's literal.
     static Slice logLines(Workload workload, InputShape inputShape, int length)
     {
         StringBuilder text = new StringBuilder(length + 256);
@@ -157,10 +151,8 @@ public class BenchmarkLiteralProbe
         return Slices.wrappedBuffer(text.toString().getBytes(UTF_8));
     }
 
-    /**
-     * Returns the distribution learned from 1,000 lines of each format without any workload's
-     * literal, about 230 KB.
-     */
+    /// Returns the distribution learned from 1,000 lines of each format without any workload's
+    /// literal, about 230 KB.
     static ByteFrequencies backgroundFrequencies()
     {
         ByteFrequencies.Builder builder = ByteFrequencies.builder();
@@ -187,9 +179,7 @@ public class BenchmarkLiteralProbe
         return String.format(Locale.ROOT, "2026-10-05 12:%02d:%02d.%03d %s [worker-%d] %s%s\n", line / 60 % 60, line % 60, line * 37 % 1000, level, line % 16, message, target);
     }
 
-    /**
-     * Returns an access log line with about a dozen slashes and no lowercase {@code h}.
-     */
+    /// Returns an access log line with about a dozen slashes and no lowercase `h`.
     private static String accessLine(int line, String target)
     {
         String method = switch (line % 3) {

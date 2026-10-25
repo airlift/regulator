@@ -27,11 +27,9 @@ import static io.airlift.regulator.Regexp.LATIN1;
 import static io.airlift.regulator.Regexp.NON_GREEDY;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Immutable operation-independent facts derived from one normalized expression walk.
- * Direction-specific start-byte and fixed-distance candidates remain program metadata because
- * they are derived from compiled instructions rather than expression semantics.
- */
+/// Immutable operation-independent facts derived from one normalized expression walk.
+/// Direction-specific start-byte and fixed-distance candidates remain program metadata because
+/// they are derived from compiled instructions rather than expression semantics.
 final class ExpressionAnalysis
 {
     private static final int MAX_RECURSIVE_DEPTH = 256;
@@ -50,10 +48,8 @@ final class ExpressionAnalysis
         REQUIRES_GENERAL_ENGINE,
     }
 
-    /**
-     * @param encoded the length in the {@link MatchLength} encoding, from which the minimum and
-     *         the fixed length are derived
-     */
+    /// @param encoded the length in the [MatchLength] encoding, from which the minimum and
+    ///         the fixed length are derived
     record Length(int maximum, int encoded)
     {
         int minimum()
@@ -108,10 +104,8 @@ final class ExpressionAnalysis
             return Slices.wrappedBuffer(literals.get(index).clone());
         }
 
-        /**
-         * Returns the analysis-owned literal for immutable compiled-pattern metadata.
-         * The returned bytes must not be modified.
-         */
+        /// Returns the analysis-owned literal for immutable compiled-pattern metadata.
+        /// The returned bytes must not be modified.
         Slice retainedLiteral(int index)
         {
             return Slices.wrappedBuffer(literals.get(index));
@@ -236,9 +230,7 @@ final class ExpressionAnalysis
         return Analyzer.analyzeNode(regexp, children, caseFolding);
     }
 
-    /**
-     * Returns the case folding of the pattern language, under which this analysis was derived.
-     */
+    /// Returns the case folding of the pattern language, under which this analysis was derived.
     CaseFolding caseFolding()
     {
         return caseFolding;
@@ -323,11 +315,9 @@ final class ExpressionAnalysis
         return List.of(new LiteralElement(Regexp.convertRunesToBytes(latin1, runes)));
     }
 
-    /**
-     * Refers to each child's elements instead of copying them, so analysis stays linear in the
-     * expression size; {@link #flatten} expands them once at the root. A child with a single
-     * element contributes it directly, so {@link #repeatedGap} still sees a lone gap.
-     */
+    /// Refers to each child's elements instead of copying them, so analysis stays linear in the
+    /// expression size; [#flatten] expands them once at the root. A child with a single
+    /// element contributes it directly, so [#repeatedGap] still sees a lone gap.
     private static List<Element> concatenateElements(List<Node> children)
     {
         List<Element> result = new ArrayList<>(children.size());

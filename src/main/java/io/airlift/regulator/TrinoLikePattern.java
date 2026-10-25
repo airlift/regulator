@@ -29,17 +29,15 @@ import java.util.OptionalInt;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * A compiled Trino SQL LIKE pattern over UTF-8 bytes.
- * <p>
- * The pattern syntax and matching on valid UTF-8 follow Trino's SQL execution path, with one
- * exception: a supplementary literal always matches itself, so {@code %😀_%} matches
- * {@code 😀x} here but not in Trino's SQL path. A pattern that is not valid UTF-8 throws
- * {@link TrinoLikePatternSyntaxException}, while Trino accepts it. Malformed input matches as if
- * each maximal invalid subpart had been replaced by U+FFFD, so it is one character that only
- * {@code _} or {@code %} consumes. This is intentionally a separate frontend from {@link Re2};
- * LIKE is not treated as a regex dialect.
- */
+/// A compiled Trino SQL LIKE pattern over UTF-8 bytes.
+///
+/// The pattern syntax and matching on valid UTF-8 follow Trino's SQL execution path, with one
+/// exception: a supplementary literal always matches itself, so `%😀_%` matches
+/// `😀x` here but not in Trino's SQL path. A pattern that is not valid UTF-8 throws
+/// [TrinoLikePatternSyntaxException], while Trino accepts it. Malformed input matches as if
+/// each maximal invalid subpart had been replaced by U+FFFD, so it is one character that only
+/// `_` or `%` consumes. This is intentionally a separate frontend from [Re2];
+/// LIKE is not treated as a regex dialect.
 public sealed class TrinoLikePattern
         permits TrinoLikePattern.CompiledTrinoLikePattern
 {
@@ -70,10 +68,8 @@ public sealed class TrinoLikePattern
         LITERAL_GAPS,
     }
 
-    /**
-     * Mutable compilation options. Compilation snapshots every option, so later changes do not
-     * affect an existing {@link TrinoLikePattern}. Options instances are not thread-safe.
-     */
+    /// Mutable compilation options. Compilation snapshots every option, so later changes do not
+    /// affect an existing [TrinoLikePattern]. Options instances are not thread-safe.
     public static final class Options
     {
         private boolean generateBytecode;
@@ -91,14 +87,12 @@ public sealed class TrinoLikePattern
             return generateBytecode;
         }
 
-        /**
-         * Experimental. When enabled, compilation generates a hidden class for the pattern, so
-         * {@link TrinoLikePattern#matches(Slice)} runs dedicated bytecode instead of the
-         * interpreted plan. A pattern whose class cannot be generated compiles as it does without
-         * this option. Disabled by default.
-         *
-         * @see TrinoLikePattern#usesGeneratedBytecode()
-         */
+        /// Experimental. When enabled, compilation generates a hidden class for the pattern, so
+        /// [TrinoLikePattern#matches(Slice)] runs dedicated bytecode instead of the
+        /// interpreted plan. A pattern whose class cannot be generated compiles as it does without
+        /// this option. Disabled by default.
+        ///
+        /// @see TrinoLikePattern#usesGeneratedBytecode()
         public Options setGenerateBytecode(boolean generateBytecode)
         {
             this.generateBytecode = generateBytecode;
@@ -110,11 +104,9 @@ public sealed class TrinoLikePattern
             return aarch64;
         }
 
-        /**
-         * Generates bytecode as on aarch64 when {@code aarch64} is true and as on every other
-         * architecture when it is false, whatever this JVM runs on; it takes effect only with
-         * {@link #setGenerateBytecode(boolean)}, and only tests call it.
-         */
+        /// Generates bytecode as on aarch64 when `aarch64` is true and as on every other
+        /// architecture when it is false, whatever this JVM runs on; it takes effect only with
+        /// [#setGenerateBytecode(boolean)], and only tests call it.
         Options setAarch64ForTesting(boolean aarch64)
         {
             this.aarch64 = aarch64;
@@ -391,22 +383,18 @@ public sealed class TrinoLikePattern
         this.shortLiteral = pattern.shortLiteral;
     }
 
-    /**
-     * Returns whether this compiled pattern has a class generated for it, which only
-     * {@link Options#setGenerateBytecode(boolean)} enables. {@link #matches(Slice)} of such a
-     * pattern runs the generated class, and {@link #generatedMatches()} returns its entry.
-     */
+    /// Returns whether this compiled pattern has a class generated for it, which only
+    /// [Options#setGenerateBytecode(boolean)] enables. [#matches(Slice)] of such a
+    /// pattern runs the generated class, and [#generatedMatches()] returns its entry.
     public boolean usesGeneratedBytecode()
     {
         return false;
     }
 
-    /**
-     * Returns a handle on the generated code of {@link #matches(Slice)}, of type
-     * {@code (Slice)boolean}, or empty when this pattern is interpreted. The handle checks its
-     * argument as {@link #matches(Slice)} does, except that it requires a non-null input but does
-     * not check it.
-     */
+    /// Returns a handle on the generated code of [#matches(Slice)], of type
+    /// `(Slice)boolean`, or empty when this pattern is interpreted. The handle checks its
+    /// argument as [#matches(Slice)] does, except that it requires a non-null input but does
+    /// not check it.
     public Optional<MethodHandle> generatedMatches()
     {
         return Optional.empty();
@@ -568,11 +556,9 @@ public sealed class TrinoLikePattern
         }
     }
 
-    /**
-     * A pattern compiled to its own hidden class, which {@link #matches(Slice)} calls instead of
-     * the interpreted plan. Callers that never enable {@link Options#setGenerateBytecode(boolean)}
-     * never load this class.
-     */
+    /// A pattern compiled to its own hidden class, which [#matches(Slice)] calls instead of
+    /// the interpreted plan. Callers that never enable [Options#setGenerateBytecode(boolean)]
+    /// never load this class.
     private static final class CompiledTrinoLikePattern
             extends TrinoLikePattern
     {
@@ -586,12 +572,10 @@ public sealed class TrinoLikePattern
             this.like = generated.like();
         }
 
-        /**
-         * Returns {@code pattern} with a generated class, generated as on aarch64 when
-         * {@code aarch64} is true, or {@code null} when the class cannot be generated or a method
-         * of it would be too large for HotSpot to compile. The declared type keeps verification
-         * of the base class from loading this class.
-         */
+        /// Returns `pattern` with a generated class, generated as on aarch64 when
+        /// `aarch64` is true, or `null` when the class cannot be generated or a method
+        /// of it would be too large for HotSpot to compile. The declared type keeps verification
+        /// of the base class from loading this class.
         static TrinoLikePattern create(TrinoLikePattern pattern, boolean aarch64)
         {
             TrinoLikeKernelGenerator.CompiledLike generated;

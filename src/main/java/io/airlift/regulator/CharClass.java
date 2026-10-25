@@ -41,9 +41,7 @@ record CharClass(boolean foldsAscii, int runeCount, RuneRange[] ranges)
         return ranges.length;
     }
 
-    /**
-     * Returns an unmodifiable view of the canonical ranges without copying them.
-     */
+    /// Returns an unmodifiable view of the canonical ranges without copying them.
     List<RuneRange> rangeView()
     {
         return Collections.unmodifiableList(Arrays.asList(ranges));

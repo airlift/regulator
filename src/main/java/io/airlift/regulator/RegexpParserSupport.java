@@ -19,10 +19,8 @@ import java.util.Deque;
 
 import static io.airlift.regulator.Regexp.MAX_REPEAT;
 
-/**
- * Language-neutral mechanics shared by the regexp parsers. A helper belongs here only while every
- * caller intentionally has the same semantics; dialect-specific behavior stays in the owning parser.
- */
+/// Language-neutral mechanics shared by the regexp parsers. A helper belongs here only while every
+/// caller intentionally has the same semantics; dialect-specific behavior stays in the owning parser.
 final class RegexpParserSupport
 {
     private RegexpParserSupport() {}

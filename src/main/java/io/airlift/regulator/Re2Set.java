@@ -20,25 +20,17 @@ import java.util.List;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * An immutable compiled set of patterns searched with a single many-match DFA traversal.
- * Pattern IDs are assigned by {@link Builder#add(Slice)} and remain stable after compilation.
- */
+/// An immutable compiled set of patterns searched with a single many-match DFA traversal.
+/// Pattern IDs are assigned by [Builder#add(Slice)] and remain stable after compilation.
 public final class Re2Set
 {
     public enum MatchMode
     {
-        /**
-         * Find a match anywhere in the input.
-         */
+        /// Find a match anywhere in the input.
         FIND,
-        /**
-         * Match only at the beginning of the input.
-         */
+        /// Match only at the beginning of the input.
         LOOKING_AT,
-        /**
-         * Match the complete input.
-         */
+        /// Match the complete input.
         FULL,
     }
 
@@ -53,18 +45,14 @@ public final class Re2Set
         this.maxMemoryBytes = maxMemoryBytes;
     }
 
-    /**
-     * Creates a single-use builder. The supplied options are copied immediately. A set has no
-     * literal prefix scan, so it does not use the options' byte frequencies.
-     */
+    /// Creates a single-use builder. The supplied options are copied immediately. A set has no
+    /// literal prefix scan, so it does not use the options' byte frequencies.
     public static Builder builder(Re2.Options options, MatchMode matchMode)
     {
         return new Builder(options, matchMode);
     }
 
-    /**
-     * Returns the number of compiled patterns.
-     */
+    /// Returns the number of compiled patterns.
     public int size()
     {
         return size;
@@ -75,11 +63,9 @@ public final class Re2Set
         return program == null ? null : program.cachedDfaIfPresent(Dfa.DfaInstance.Kind.MANY_MATCH);
     }
 
-    /**
-     * Returns whether at least one pattern matches without allocating result storage.
-     *
-     * @throws RegexpMatchMemoryLimitException if matching exhausts the configured memory budget
-     */
+    /// Returns whether at least one pattern matches without allocating result storage.
+    ///
+    /// @throws RegexpMatchMemoryLimitException if matching exhausts the configured memory budget
     public boolean matchesAny(Slice text)
     {
         requireNonNull(text, "text is null");
@@ -94,12 +80,10 @@ public final class Re2Set
         return result == Dfa.ManyMatchResult.MATCH;
     }
 
-    /**
-     * Returns the IDs of every matching pattern. The order is unspecified.
-     *
-     * @throws RegexpMatchMemoryLimitException if matching exhausts the configured memory budget;
-     *         no partial result is returned
-     */
+    /// Returns the IDs of every matching pattern. The order is unspecified.
+    ///
+    /// @throws RegexpMatchMemoryLimitException if matching exhausts the configured memory budget;
+    ///         no partial result is returned
     public int[] matchingPatternIds(Slice text)
     {
         requireNonNull(text, "text is null");
@@ -138,10 +122,8 @@ public final class Re2Set
             this.matchMode = requireNonNull(matchMode, "matchMode is null");
         }
 
-        /**
-         * Adds a copied pattern and returns its stable pattern ID. If validation or parsing fails,
-         * the builder remains unchanged.
-         */
+        /// Adds a copied pattern and returns its stable pattern ID. If validation or parsing fails,
+        /// the builder remains unchanged.
         public int add(Slice pattern)
         {
             requireNotBuilt();
@@ -167,18 +149,14 @@ public final class Re2Set
             return patternId;
         }
 
-        /**
-         * Returns the number of patterns added so far.
-         */
+        /// Returns the number of patterns added so far.
         public int size()
         {
             requireNotBuilt();
             return patterns.size();
         }
 
-        /**
-         * Compiles an immutable set and invalidates this builder.
-         */
+        /// Compiles an immutable set and invalidates this builder.
         public Re2Set build()
         {
             requireNotBuilt();

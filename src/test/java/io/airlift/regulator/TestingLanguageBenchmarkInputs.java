@@ -27,10 +27,8 @@ import java.util.List;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-/**
- * Materializes both public input representations before JMH starts timing. The wire format uses
- * hex so patterns, newlines, empty strings, and supplementary characters survive unchanged.
- */
+/// Materializes both public input representations before JMH starts timing. The wire format uses
+/// hex so patterns, newlines, empty strings, and supplementary characters survive unchanged.
 public record TestingLanguageBenchmarkInputs(Slice pattern, String patternText, List<Source> sources)
 {
     public record Source(Slice bytes, String text, long expectedCount) {}

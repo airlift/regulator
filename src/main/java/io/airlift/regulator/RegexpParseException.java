@@ -17,9 +17,7 @@ import io.airlift.slice.Slice;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * Thrown when a pattern cannot be parsed. Offsets refer to bytes in the logical pattern Slice.
- */
+/// Thrown when a pattern cannot be parsed. Offsets refer to bytes in the logical pattern Slice.
 public final class RegexpParseException
         extends IllegalArgumentException
 {
@@ -40,25 +38,19 @@ public final class RegexpParseException
         this.byteOffset = byteOffset;
     }
 
-    /**
-     * Returns the stable error category.
-     */
+    /// Returns the stable error category.
     public RegexpParseErrorCode errorCode()
     {
         return errorCode;
     }
 
-    /**
-     * Returns a copy of the invalid pattern bytes when available, otherwise {@code null}.
-     */
+    /// Returns a copy of the invalid pattern bytes when available, otherwise `null`.
     public Slice invalidPatternSegment()
     {
         return invalidPatternSegment == null ? null : invalidPatternSegment.copy();
     }
 
-    /**
-     * Returns the byte offset in the logical pattern, or {@code -1} when no offset is available.
-     */
+    /// Returns the byte offset in the logical pattern, or `-1` when no offset is available.
     public int byteOffset()
     {
         return byteOffset;

@@ -145,10 +145,8 @@ public class TestLiteralSearchKernel
         }
     }
 
-    /**
-     * Requires {@link LiteralSearchKernel#findContains} to switch to KMP at {@code kmpHandoff}, or
-     * not at all when it is -1, and to find the literal at {@code match}, or nowhere when it is -1.
-     */
+    /// Requires [LiteralSearchKernel#findContains] to switch to KMP at `kmpHandoff`, or
+    /// not at all when it is -1, and to find the literal at `match`, or nowhere when it is -1.
     private static void assertSearch(LiteralSearchKernel kernel, Slice input, int offset, int length, int kmpHandoff, int match)
     {
         assertThat(kernel.kmpHandoffOffsetForDiagnostics(input, offset, length)).isEqualTo(kmpHandoff);

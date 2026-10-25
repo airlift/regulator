@@ -19,13 +19,11 @@ import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * Resolves Rust regex Unicode class names with the names {@link RustUnicodePropertyTables} builds
- * from the pinned {@link UnicodeDatabase} by the crate's rules. Resolution follows the crate's
- * lookup order and errors exactly; membership then comes from the database through
- * {@link UnicodeGroups}. A value the crate names but has no class for, such as Unknown, is a
- * value the database assigns no code point.
- */
+/// Resolves Rust regex Unicode class names with the names [RustUnicodePropertyTables] builds
+/// from the pinned [UnicodeDatabase] by the crate's rules. Resolution follows the crate's
+/// lookup order and errors exactly; membership then comes from the database through
+/// [UnicodeGroups]. A value the crate names but has no class for, such as Unknown, is a
+/// value the database assigns no code point.
 final class RustUnicodeProperties
 {
     enum Status
@@ -35,9 +33,7 @@ final class RustUnicodeProperties
         PROPERTY_VALUE_NOT_FOUND,
     }
 
-    /**
-     * A resolved class or a crate lookup error.
-     */
+    /// A resolved class or a crate lookup error.
     record Resolution(Status status, CharClass charClass)
     {
         Resolution
@@ -57,9 +53,7 @@ final class RustUnicodeProperties
 
     private RustUnicodeProperties() {}
 
-    /**
-     * Resolves a one-letter ({@code \pL}) or bare-name ({@code \p{Greek}}) class.
-     */
+    /// Resolves a one-letter (`\pL`) or bare-name (`\p{Greek}`) class.
     static Resolution resolveName(String name)
     {
         String normalized = normalize(name);
@@ -83,9 +77,7 @@ final class RustUnicodeProperties
         return PROPERTY_NOT_FOUND;
     }
 
-    /**
-     * Resolves a {@code \p{name=value}} or {@code \p{name:value}} class.
-     */
+    /// Resolves a `\p{name=value}` or `\p{name:value}` class.
     static Resolution resolveValue(String name, String value)
     {
         String property = RustUnicodePropertyTables.PROPERTY_NAMES.get(normalize(name));
@@ -176,13 +168,11 @@ final class RustUnicodeProperties
         return Integer.parseInt(version.substring(0, dot)) * 1000 + Integer.parseInt(version.substring(dot + 1));
     }
 
-    /**
-     * Normalizes a name as the crate normalizes a query (UAX44-LM3): drops an {@code is} prefix
-     * from a name of two or more characters, drops spaces, underscores, hyphens, and non-ASCII
-     * characters, and lowercases ASCII letters, except that {@code isc} stays {@code isc}. The
-     * table names of {@link RustUnicodePropertyTables} keep the prefix of a two-character name,
-     * as the crate's table generator does.
-     */
+    /// Normalizes a name as the crate normalizes a query (UAX44-LM3): drops an `is` prefix
+    /// from a name of two or more characters, drops spaces, underscores, hyphens, and non-ASCII
+    /// characters, and lowercases ASCII letters, except that `isc` stays `isc`. The
+    /// table names of [RustUnicodePropertyTables] keep the prefix of a two-character name,
+    /// as the crate's table generator does.
     private static String normalize(String name)
     {
         boolean startsWithIs = name.length() >= 2 && (name.charAt(0) == 'i' || name.charAt(0) == 'I') && (name.charAt(1) == 's' || name.charAt(1) == 'S');

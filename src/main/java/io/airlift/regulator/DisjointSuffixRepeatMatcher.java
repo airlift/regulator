@@ -17,9 +17,7 @@ import io.airlift.slice.SizeOf;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 
-/**
- * Searches A B{n} x where A is ASCII and the ASCII suffix x is excluded from B.
- */
+/// Searches A B{n} x where A is ASCII and the ASCII suffix x is excluded from B.
 final class DisjointSuffixRepeatMatcher
 {
     private final long prefixLowMask;

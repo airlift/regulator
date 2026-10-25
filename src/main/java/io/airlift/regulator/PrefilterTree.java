@@ -22,10 +22,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Deduplicates prefilter nodes and determines which regular expressions may
- * match after their required atoms are found.
- */
+/// Deduplicates prefilter nodes and determines which regular expressions may
+/// match after their required atoms are found.
 final class PrefilterTree
 {
     private record PrefilterKey(PrefilterOp operation, Slice atom, List<Integer> childEntryIndexes)
@@ -69,9 +67,7 @@ final class PrefilterTree
         this.minimumAtomLength = minimumAtomLength;
     }
 
-    /**
-     * Adds a prefilter and returns its regular-expression index.
-     */
+    /// Adds a prefilter and returns its regular-expression index.
     int add(Prefilter prefilter)
     {
         int regexpIndex = regexpRootIndexes.size();
@@ -153,9 +149,7 @@ final class PrefilterTree
         return entryIndex;
     }
 
-    /**
-     * Compiles the prefilter tree and populates the atom list.
-     */
+    /// Compiles the prefilter tree and populates the atom list.
     void compile(List<Slice> outputAtoms)
     {
         if (regexpRootIndexes.isEmpty()) {
@@ -172,9 +166,7 @@ final class PrefilterTree
                 .forEach(outputAtoms::add);
     }
 
-    /**
-     * Finds every regular expression whose prefilter accepts the matched atoms.
-     */
+    /// Finds every regular expression whose prefilter accepts the matched atoms.
     int[] regexpMatches(int[] atomIndices)
     {
         int[] regexpIndices = new int[regexpRootIndexes.size()];

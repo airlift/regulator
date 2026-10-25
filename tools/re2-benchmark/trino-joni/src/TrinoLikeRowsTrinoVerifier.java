@@ -26,14 +26,12 @@ import java.util.Optional;
 
 import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
 
-/**
- * Checks that {@link BenchmarkTrinoLikeRowsTrino} times the cells of Regulator's
- * {@code BenchmarkTrinoLikeRows}: the same parameters, and on every sampled row of every cell, the
- * result of the LIKE authority, Trino's {@code LikeMatcher} with optimization disabled, from
- * Regulator's interpreted and generated methods and from the Trino LIKE functions the twin times. The
- * OpenSubtitles workloads read test resources; the others are checked only when the first argument
- * names a corpus directory provisioned by {@code trino_rows.py fetch}.
- */
+/// Checks that [BenchmarkTrinoLikeRowsTrino] times the cells of Regulator's
+/// `BenchmarkTrinoLikeRows`: the same parameters, and on every sampled row of every cell, the
+/// result of the LIKE authority, Trino's `LikeMatcher` with optimization disabled, from
+/// Regulator's interpreted and generated methods and from the Trino LIKE functions the twin times. The
+/// OpenSubtitles workloads read test resources; the others are checked only when the first argument
+/// names a corpus directory provisioned by `trino_rows.py fetch`.
 public final class TrinoLikeRowsTrinoVerifier
 {
     private static final List<String> PARAMETERS = List.of("workload", "literal", "corpusDirectory");

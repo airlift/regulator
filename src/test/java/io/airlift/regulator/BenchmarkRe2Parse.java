@@ -39,10 +39,8 @@ import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileRe2;
 import static io.airlift.regulator.Re2BenchmarkRunner.randomText;
 
-/**
- * Cached parse/extract benchmarks corresponding to upstream's anchored full-match rows.
- * The fixed-size cases contain 18 methods across NFA, OnePass, BitState, Backtrack, and Re2.
- */
+/// Cached parse/extract benchmarks corresponding to upstream's anchored full-match rows.
+/// The fixed-size cases contain 18 methods across NFA, OnePass, BitState, Backtrack, and Re2.
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @BenchmarkMode(Mode.AverageTime)

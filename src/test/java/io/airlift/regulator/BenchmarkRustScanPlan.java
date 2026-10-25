@@ -39,22 +39,20 @@ import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.airlift.slice.Slices.utf8Slice;
 
-/**
- * Public Rust operations over the workloads and rows of {@link BenchmarkRe2ScanPlan}, with each
- * pattern written in Rust syntax for the same match: {@code \d} and {@code \w} become
- * {@code (?-u:\d)} and {@code (?-u:\w)}, since Rust's Perl classes are Unicode and RE2's are
- * ASCII. The rest keeps its RE2 text: without multi-line mode Rust's {@code $} is the strict end,
- * as RE2's is; Rust's {@code (?i)} folds with simple case folding, as RE2's does, so {@code K} also
- * matches the Kelvin sign; and without dotAll Rust's dot excludes only {@code \n}, as RE2's does.
- * {@link RustRegexp} has no replacement, so there is no replace method. No compilation cache is
- * involved.
- * <p>
- * With {@code scanPlan=false}, every pattern compiles without its scan plan, so the methods time the
- * ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
- * {@code -p scanPlan=true} this source also times a build without Rust scan plans. With
- * {@code generateBytecode=true}, each pattern with a case-sensitive plan runs a class generated for
- * it; that option is also set reflectively, and only then.
- */
+/// Public Rust operations over the workloads and rows of [BenchmarkRe2ScanPlan], with each
+/// pattern written in Rust syntax for the same match: `\d` and `\w` become
+/// `(?-u:\d)` and `(?-u:\w)`, since Rust's Perl classes are Unicode and RE2's are
+/// ASCII. The rest keeps its RE2 text: without multi-line mode Rust's `$` is the strict end,
+/// as RE2's is; Rust's `(?i)` folds with simple case folding, as RE2's does, so `K` also
+/// matches the Kelvin sign; and without dotAll Rust's dot excludes only `\n`, as RE2's does.
+/// [RustRegexp] has no replacement, so there is no replace method. No compilation cache is
+/// involved.
+///
+/// With `scanPlan=false`, every pattern compiles without its scan plan, so the methods time the
+/// ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
+/// `-p scanPlan=true` this source also times a build without Rust scan plans. With
+/// `generateBytecode=true`, each pattern with a case-sensitive plan runs a class generated for
+/// it; that option is also set reflectively, and only then.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)
@@ -233,12 +231,10 @@ public class BenchmarkRustScanPlan
         return compile(data.compiler, data.expressions[data.patternIndex], data.options);
     }
 
-    /**
-     * Returns {@code expression}, a {@link BenchmarkRe2ScanPlan} pattern, in Rust syntax. Only the
-     * Perl classes {@code \d} and {@code \w} differ in these patterns, and each turns off Unicode
-     * mode for itself. Any other Perl class, or one inside a bracketed class, has no such rewrite,
-     * so it throws {@link IllegalArgumentException}.
-     */
+    /// Returns `expression`, a [BenchmarkRe2ScanPlan] pattern, in Rust syntax. Only the
+    /// Perl classes `\d` and `\w` differ in these patterns, and each turns off Unicode
+    /// mode for itself. Any other Perl class, or one inside a bracketed class, has no such rewrite,
+    /// so it throws [IllegalArgumentException].
     static String rustExpression(String expression)
     {
         StringBuilder rust = new StringBuilder();
@@ -269,10 +265,8 @@ public class BenchmarkRustScanPlan
         return rust.toString();
     }
 
-    /**
-     * Returns the handle that compiles a pattern through the public API, or through the compiler
-     * that disables scan plans.
-     */
+    /// Returns the handle that compiles a pattern through the public API, or through the compiler
+    /// that disables scan plans.
     private static MethodHandle compiler(boolean scanPlan)
     {
         MethodType type = MethodType.methodType(RustRegexp.class, Slice.class, RustRegexp.Options.class);
@@ -286,10 +280,8 @@ public class BenchmarkRustScanPlan
         }
     }
 
-    /**
-     * Returns default options that generate bytecode, resolved reflectively so that this source
-     * also runs against a build without the option when it is not requested.
-     */
+    /// Returns default options that generate bytecode, resolved reflectively so that this source
+    /// also runs against a build without the option when it is not requested.
     private static RustRegexp.Options generatingOptions()
     {
         RustRegexp.Options options = RustRegexp.Options.defaults();
@@ -312,9 +304,7 @@ public class BenchmarkRustScanPlan
         }
     }
 
-    /**
-     * Returns the {@code workload} parameter values in declaration order.
-     */
+    /// Returns the `workload` parameter values in declaration order.
     static List<String> workloads()
             throws NoSuchFieldException
     {

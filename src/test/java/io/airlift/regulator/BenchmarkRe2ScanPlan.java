@@ -42,18 +42,16 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-/**
- * Public RE2 operations over the patterns and rows of {@link BenchmarkTrinoScanPlan}, plus non-ASCII
- * and malformed UTF-8 rows for its URL, UNANCHORED_URL, LONG_HOST, and UNANCHORED_TAIL_4096
- * workloads, whose delimiter runs and tails cross that text. The patterns keep their Trino text, so
- * {@code $} is RE2's strict end. No compilation cache is involved.
- * <p>
- * With {@code scanPlan=false}, every pattern compiles without its scan plan, so the methods time the
- * ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
- * {@code -p scanPlan=true} this source also times a build without RE2 scan plans. With
- * {@code generateBytecode=true}, each pattern with a case-sensitive plan runs a class generated for
- * it; that option is also set reflectively, and only then.
- */
+/// Public RE2 operations over the patterns and rows of [BenchmarkTrinoScanPlan], plus non-ASCII
+/// and malformed UTF-8 rows for its URL, UNANCHORED_URL, LONG_HOST, and UNANCHORED_TAIL_4096
+/// workloads, whose delimiter runs and tails cross that text. The patterns keep their Trino text, so
+/// `$` is RE2's strict end. No compilation cache is involved.
+///
+/// With `scanPlan=false`, every pattern compiles without its scan plan, so the methods time the
+/// ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
+/// `-p scanPlan=true` this source also times a build without RE2 scan plans. With
+/// `generateBytecode=true`, each pattern with a case-sensitive plan runs a class generated for
+/// it; that option is also set reflectively, and only then.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)
@@ -268,10 +266,8 @@ public class BenchmarkRe2ScanPlan
         return compile(data.compiler, data.expressions[data.patternIndex], data.options);
     }
 
-    /**
-     * Returns the handle that compiles a pattern through the public API, or through the compiler
-     * that disables scan plans.
-     */
+    /// Returns the handle that compiles a pattern through the public API, or through the compiler
+    /// that disables scan plans.
     private static MethodHandle compiler(boolean scanPlan)
     {
         MethodType type = MethodType.methodType(Re2.class, Slice.class, Re2.Options.class);
@@ -285,10 +281,8 @@ public class BenchmarkRe2ScanPlan
         }
     }
 
-    /**
-     * Returns default options that generate bytecode, resolved reflectively so that this source
-     * also runs against a build without the option when it is not requested.
-     */
+    /// Returns default options that generate bytecode, resolved reflectively so that this source
+    /// also runs against a build without the option when it is not requested.
     private static Re2.Options generatingOptions()
     {
         Re2.Options options = Re2.Options.defaults();
@@ -311,18 +305,14 @@ public class BenchmarkRe2ScanPlan
         }
     }
 
-    /**
-     * Returns the {@code workload} parameter values in declaration order.
-     */
+    /// Returns the `workload` parameter values in declaration order.
     static List<String> workloads()
             throws NoSuchFieldException
     {
         return List.of(BenchmarkData.class.getDeclaredField("workload").getAnnotation(Param.class).value());
     }
 
-    /**
-     * Returns the {@link BenchmarkTrinoScanPlan} workload whose patterns a workload uses.
-     */
+    /// Returns the [BenchmarkTrinoScanPlan] workload whose patterns a workload uses.
     static String trinoWorkload(String workload)
     {
         for (String suffix : new String[] {NON_ASCII, MALFORMED}) {

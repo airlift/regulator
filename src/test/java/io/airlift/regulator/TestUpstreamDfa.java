@@ -38,10 +38,8 @@ public class TestUpstreamDfa
     private static final int END_TEXT = 256;
     private static final int MATCH_FLAG = 0x0100;
 
-    /**
-     * Test data for reverse DFA matching.
-     * Ported from RE2 dfa_test.cc ReverseTest structure.
-     */
+    /// Test data for reverse DFA matching.
+    /// Ported from RE2 dfa_test.cc ReverseTest structure.
     private record ReverseTest(String regexp, String text, boolean match) {}
 
     private record CallbackTest(String regexp, String dump, boolean hasExactJavaTopology)
@@ -189,9 +187,7 @@ public class TestUpstreamDfa
         }
     }
 
-    /**
-     * Test basic DFA search functionality with simple patterns.
-     */
+    /// Test basic DFA search functionality with simple patterns.
     @Test
     public void testBasicDfaSearch()
     {
@@ -224,9 +220,7 @@ public class TestUpstreamDfa
         assertSearch("a{2,4}", "a", false);
     }
 
-    /**
-     * Test DFA with anchored search mode.
-     */
+    /// Test DFA with anchored search mode.
     @Test
     public void testAnchoredSearch()
     {
@@ -251,12 +245,10 @@ public class TestUpstreamDfa
         assertThat(result3 >= 0).as("unanchored should find match").isTrue();
     }
 
-    /**
-     * Test DFA with earliestMatch mode.
-     * The earliestMatch flag causes the DFA to return as soon as any match is detected.
-     * Note: match detection is delayed by one byte in the DFA implementation (per upstream re2/dfa.cc),
-     * so the exact boundary position may not be the absolute minimum possible.
-     */
+    /// Test DFA with earliestMatch mode.
+    /// The earliestMatch flag causes the DFA to return as soon as any match is detected.
+    /// Note: match detection is delayed by one byte in the DFA implementation (per upstream re2/dfa.cc),
+    /// so the exact boundary position may not be the absolute minimum possible.
     @Test
     public void testEarliestMatchSearch()
     {
@@ -281,9 +273,7 @@ public class TestUpstreamDfa
         assertThat((int) result2).isLessThan(4);
     }
 
-    /**
-     * Test DFA with text/context separation.
-     */
+    /// Test DFA with text/context separation.
     @Test
     public void testTextContextSeparation()
     {
@@ -302,14 +292,12 @@ public class TestUpstreamDfa
         assertThat(result >= 0).as("should match after newline in context").isTrue();
     }
 
-    /**
-     * Test that DFA produces correct results even when cache is exhausted and must be reset.
-     * Ported from RE2 re2/testing/dfa_test.cc SingleThreaded.SearchDFA n=18 test.
-     *
-     * The pattern 0[01]{18}$ requires ~2^19 DFA states. With a constrained memory budget,
-     * the DFA must reset its cache multiple times during the search. Like the upstream test,
-     * the thrashing bailout is disabled so the DFA keeps going despite the high reset rate.
-     */
+    /// Test that DFA produces correct results even when cache is exhausted and must be reset.
+    /// Ported from RE2 re2/testing/dfa_test.cc SingleThreaded.SearchDFA n=18 test.
+    ///
+    /// The pattern `0[01]{18}$` requires ~2^19 DFA states. With a constrained memory budget,
+    /// the DFA must reset its cache multiple times during the search. Like the upstream test,
+    /// the thrashing bailout is disabled so the DFA keeps going despite the high reset rate.
     @Test
     public void testCacheExhaustionWithDeBruijnString()
     {
@@ -352,11 +340,9 @@ public class TestUpstreamDfa
         }
     }
 
-    /**
-     * Test that when the DFA cache thrashes (resets without progress), the search returns
-     * SEARCH_FAILED and the Re2 caller falls back to NFA, still producing correct results.
-     * Tested through the Re2 API so the full fallback path is exercised.
-     */
+    /// Test that when the DFA cache thrashes (resets without progress), the search returns
+    /// SEARCH_FAILED and the Re2 caller falls back to NFA, still producing correct results.
+    /// Tested through the Re2 API so the full fallback path is exercised.
     @Test
     public void testCacheThrashingFallsBackToNfa()
     {
@@ -556,15 +542,13 @@ public class TestUpstreamDfa
         return dump.isEmpty() ? 0 : dump.split(" ").length;
     }
 
-    /**
-     * Generates a De Bruijn string for the binary alphabet {0, 1}.
-     * The De Bruijn string B(2,n) contains every n-bit binary string as a substring exactly once.
-     *
-     * Ported from RE2 re2/testing/string_generator.cc DeBruijnString().
-     *
-     * @param n the length of substrings to cover (must be between 1 and 29)
-     * @return the De Bruijn string
-     */
+    /// Generates a De Bruijn string for the binary alphabet {0, 1}.
+    /// The De Bruijn string B(2,n) contains every n-bit binary string as a substring exactly once.
+    ///
+    /// Ported from RE2 re2/testing/string_generator.cc DeBruijnString().
+    ///
+    /// @param n the length of substrings to cover (must be between 1 and 29)
+    /// @return the De Bruijn string
     private static String deBruijnString(int n)
     {
         if (n < 1 || n > 29) {
@@ -606,9 +590,7 @@ public class TestUpstreamDfa
         return s.toString();
     }
 
-    /**
-     * Test the De Bruijn string generator itself.
-     */
+    /// Test the De Bruijn string generator itself.
     @Test
     public void testDeBruijnString()
     {

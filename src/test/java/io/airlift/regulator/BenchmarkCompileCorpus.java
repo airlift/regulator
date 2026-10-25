@@ -34,13 +34,11 @@ import org.openjdk.jmh.runner.options.Options;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Measures the complete setup cost (parse, simplify, analyze, compile, and plan
- * selection) of one pass over a fixed mixed corpus for each pattern language.
- * One operation compiles every pattern in the corpus once. The LIKE corpus always
- * supplies an escape character, so it measures the general LIKE parser; the no-escape parser
- * fast path has its own case and two bypass controls in {@link BenchmarkEverydayTrinoRegexp}.
- */
+/// Measures the complete setup cost (parse, simplify, analyze, compile, and plan
+/// selection) of one pass over a fixed mixed corpus for each pattern language.
+/// One operation compiles every pattern in the corpus once. The LIKE corpus always
+/// supplies an escape character, so it measures the general LIKE parser; the no-escape parser
+/// fast path has its own case and two bypass controls in [BenchmarkEverydayTrinoRegexp].
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
 @BenchmarkMode(Mode.AverageTime)
@@ -51,9 +49,7 @@ public class BenchmarkCompileCorpus
 {
     private static final String PARENS = "([ -~])*(A)(B)(C)(D)(E)(F)(G)(H)(I)(J)(K)(L)(M)(N)(O)(P)(Q)(R)(S)(T)(U)(V)(W)(X)(Y)(Z)$";
 
-    /**
-     * Patterns accepted by the RE2, Trino, and Java frontends with the same source text.
-     */
+    /// Patterns accepted by the RE2, Trino, and Java frontends with the same source text.
     static final List<String> SHARED_REGEXP_CORPUS = List.of(
             "(.*)-(\\d+)-of-(\\d+)",
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ$",
@@ -126,10 +122,8 @@ public class BenchmarkCompileCorpus
             "____-__-__",
             "%.jpg");
 
-    /**
-     * One frontend per corpus language. The measured loop calls the same method as the tests, so a
-     * wrong frontend or a dropped LIKE escape is visible to the test.
-     */
+    /// One frontend per corpus language. The measured loop calls the same method as the tests, so a
+    /// wrong frontend or a dropped LIKE escape is visible to the test.
     public enum Frontend
     {
         RE2,

@@ -47,9 +47,7 @@ final class SparseIntArray
         return denseIndex.length;
     }
 
-    /**
-     * Clears the array in O(1).
-     */
+    /// Clears the array in O(1).
     public void clear()
     {
         size = 0;

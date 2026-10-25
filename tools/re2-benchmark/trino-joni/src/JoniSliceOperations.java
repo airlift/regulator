@@ -31,11 +31,9 @@ import static io.trino.operator.scalar.JoniRegexpFunctions.search;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.checkIndex;
 
-/**
- * Pinned Trino's Joni operation loops with Slice lists in place of SQL Blocks.
- * This benchmark adapter changes output representation, not matching, empty-match advancement,
- * or callback semantics. The verifier compares it with the unmodified pinned SQL functions.
- */
+/// Pinned Trino's Joni operation loops with Slice lists in place of SQL Blocks.
+/// This benchmark adapter changes output representation, not matching, empty-match advancement,
+/// or callback semantics. The verifier compares it with the unmodified pinned SQL functions.
 public final class JoniSliceOperations
 {
     private JoniSliceOperations() {}
@@ -45,11 +43,9 @@ public final class JoniSliceOperations
         return extractAll(source, pattern, 0);
     }
 
-    /**
-     * Returns capturing group {@code groupIndex} of every match, or null where that group did not
-     * participate. An invalid {@code groupIndex} fails with a JDK exception rather than Trino's
-     * SQL error; no workload passes one.
-     */
+    /// Returns capturing group `groupIndex` of every match, or null where that group did not
+    /// participate. An invalid `groupIndex` fails with a JDK exception rather than Trino's
+    /// SQL error; no workload passes one.
     public static List<Slice> extractAll(Slice source, JoniRegexp pattern, long groupIndex)
     {
         Matcher matcher = matcher(source, pattern);

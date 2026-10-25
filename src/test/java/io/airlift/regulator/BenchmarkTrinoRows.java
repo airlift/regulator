@@ -33,16 +33,14 @@ import java.util.concurrent.TimeUnit;
 
 import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
 
-/**
- * Normative Trino rows: each method calls one Trino function once per row, as Trino calls it, over
- * 4,096 real corpus rows visited in one fixed shuffled order. {@link TestingTrinoRowsBenchmarkInputs}
- * supplies each workload's rows and literals. Grid literals are named {@code <tercile>-<band>} for the
- * frequency of their first byte and the share of rows containing them; {@code ordered-<band>} cells
- * search two grid candidates in order with {@code a(?s:.*)b}, named for the share of rows holding
- * both in that order; {@code picked-N} literals are hand-picked queries; {@code dotstar-<id>} cells
- * search the literal of grid or hand-picked cell {@code <id>} with {@code .*literal.*}. A cell
- * without a literal fails setup. Setup verifies the sampled rows' checksum and each cell's hit count.
- */
+/// Normative Trino rows: each method calls one Trino function once per row, as Trino calls it, over
+/// 4,096 real corpus rows visited in one fixed shuffled order. [TestingTrinoRowsBenchmarkInputs]
+/// supplies each workload's rows and literals. Grid literals are named `<tercile>-<band>` for the
+/// frequency of their first byte and the share of rows containing them; `ordered-<band>` cells
+/// search two grid candidates in order with `a(?s:.*)b`, named for the share of rows holding
+/// both in that order; `picked-N` literals are hand-picked queries; `dotstar-<id>` cells
+/// search the literal of grid or hand-picked cell `<id>` with `.*literal.*`. A cell
+/// without a literal fails setup. Setup verifies the sampled rows' checksum and each cell's hit count.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(5)

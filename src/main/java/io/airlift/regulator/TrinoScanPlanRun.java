@@ -17,9 +17,7 @@ import io.airlift.slice.SizeOf;
 
 import java.util.Arrays;
 
-/**
- * A greedy character-set run whose continuation needs no repetition backtracking.
- */
+/// A greedy character-set run whose continuation needs no repetition backtracking.
 final class TrinoScanPlanRun
 {
     static final int MATCHES_EVERY_BYTE = 256;
@@ -299,10 +297,8 @@ final class TrinoScanPlanRun
         return maximum < 0;
     }
 
-    /**
-     * Returns whether every member byte is ASCII, so the run never consumes a byte of a
-     * multibyte or malformed sequence.
-     */
+    /// Returns whether every member byte is ASCII, so the run never consumes a byte of a
+    /// multibyte or malformed sequence.
     boolean acceptsOnlyAscii()
     {
         return !matchesNonAscii;
@@ -319,9 +315,7 @@ final class TrinoScanPlanRun
                 (other.members2 & ~members2) == 0 && (other.members3 & ~members3) == 0;
     }
 
-    /**
-     * Returns whether {@code value} is the only byte that is not a member.
-     */
+    /// Returns whether `value` is the only byte that is not a member.
     boolean isComplementOf(byte value)
     {
         return inverted && needles != null && needles.length == 1 && needles[0] == value;
@@ -363,11 +357,9 @@ final class TrinoScanPlanRun
         return maximum < 0 ? scan(input, cursor, end) : cursor;
     }
 
-    /**
-     * Returns the position after the run's minimum characters, or {@code -1} when they are absent.
-     * It fails exactly when {@link #match} fails but reads no further than the minimum.
-     * Copied as {@code TrinoScanKernelSupport.runMatchMinimum}; keep the copy in step.
-     */
+    /// Returns the position after the run's minimum characters, or `-1` when they are absent.
+    /// It fails exactly when [#match] fails but reads no further than the minimum.
+    /// Copied as `TrinoScanKernelSupport.runMatchMinimum`; keep the copy in step.
     int matchMinimum(byte[] input, int cursor, int end)
     {
         for (int count = 0; count < minimum; count++) {
@@ -379,12 +371,10 @@ final class TrinoScanPlanRun
         return cursor;
     }
 
-    /**
-     * The RE2 version of {@link #match}, for a run that matches every non-ASCII character. It
-     * reads characters as RE2 does (see {@link Utf8#re2CharacterWidth}), so a rejected sequence
-     * ends the run like a non-member byte.
-     * Copied as {@code TrinoScanKernelSupport.re2RunMatch}; keep the copy in step.
-     */
+    /// The RE2 version of [#match], for a run that matches every non-ASCII character. It
+    /// reads characters as RE2 does (see [Utf8#re2CharacterWidth]), so a rejected sequence
+    /// ends the run like a non-member byte.
+    /// Copied as `TrinoScanKernelSupport.re2RunMatch`; keep the copy in step.
     int re2Match(byte[] input, int cursor, int end)
     {
         if (maximum < 0 && minimum <= 1) {
@@ -404,11 +394,9 @@ final class TrinoScanPlanRun
         return maximum < 0 ? re2Scan(input, cursor, end) : cursor;
     }
 
-    /**
-     * The RE2 version of {@link #matchMinimum}: the position after the run's minimum
-     * characters as {@link #re2Match} reads them, or {@code -1} when they are absent.
-     * Copied as {@code TrinoScanKernelSupport.re2RunMatchMinimum}; keep the copy in step.
-     */
+    /// The RE2 version of [#matchMinimum]: the position after the run's minimum
+    /// characters as [#re2Match] reads them, or `-1` when they are absent.
+    /// Copied as `TrinoScanKernelSupport.re2RunMatchMinimum`; keep the copy in step.
     int re2MatchMinimum(byte[] input, int cursor, int end)
     {
         for (int count = 0; count < minimum; count++) {
@@ -421,12 +409,10 @@ final class TrinoScanPlanRun
         return cursor;
     }
 
-    /**
-     * For a run of every character except the ASCII {@code delimiter}: returns the position
-     * where {@link #re2Match} stops when {@code delimiter} is there, or {@code -1} when the run
-     * fails or stops at a rejected sequence or the end.
-     * Copied as {@code TrinoScanKernelSupport.re2RunMatchBefore}; keep the copy in step.
-     */
+    /// For a run of every character except the ASCII `delimiter`: returns the position
+    /// where [#re2Match] stops when `delimiter` is there, or `-1` when the run
+    /// fails or stops at a rejected sequence or the end.
+    /// Copied as `TrinoScanKernelSupport.re2RunMatchBefore`; keep the copy in step.
     int re2MatchBefore(byte[] input, int cursor, int end, byte delimiter)
     {
         int stop = re2Match(input, cursor, end);
@@ -498,12 +484,10 @@ final class TrinoScanPlanRun
         return end;
     }
 
-    /**
-     * Returns the first member byte at or after {@code cursor}, or {@code -1} when none remains.
-     * Member sets of one to 64 bytes use the same vector scanners as the DFA's start-byte
-     * search; larger sets and their complements keep the plan's own scans.
-     * Copied as {@code TrinoScanKernelSupport.runFindCandidate}; keep the copy in step.
-     */
+    /// Returns the first member byte at or after `cursor`, or `-1` when none remains.
+    /// Member sets of one to 64 bytes use the same vector scanners as the DFA's start-byte
+    /// search; larger sets and their complements keep the plan's own scans.
+    /// Copied as `TrinoScanKernelSupport.runFindCandidate`; keep the copy in step.
     int findCandidate(byte[] input, int cursor, int end)
     {
         // Dense inputs usually have a candidate at the cursor, and large sets such as word

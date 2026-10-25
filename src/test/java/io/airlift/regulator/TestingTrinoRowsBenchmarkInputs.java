@@ -39,15 +39,13 @@ import java.util.zip.GZIPInputStream;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 
-/**
- * The rows and literals of the normative Trino row workloads, shared by {@code BenchmarkTrinoRows},
- * {@code BenchmarkTrinoLikeRows}, and their Joni and Trino LIKE twins so all of them time the same
- * cells, except that the LIKE benchmarks skip the dot-star cells. Each workload's rows and literals
- * come from {@code trino-row-workloads.tsv} and {@code trino-row-literals.tsv}, which
- * {@code tools/re2-benchmark/trino-rows/trino_rows.py} generates from pinned corpora; see its
- * README for the sampling and literal rules. The OpenSubtitles workloads read test resources; the
- * others read a corpus directory provisioned by the generator's {@code fetch} command.
- */
+/// The rows and literals of the normative Trino row workloads, shared by `BenchmarkTrinoRows`,
+/// `BenchmarkTrinoLikeRows`, and their Joni and Trino LIKE twins so all of them time the same
+/// cells, except that the LIKE benchmarks skip the dot-star cells. Each workload's rows and literals
+/// come from `trino-row-workloads.tsv` and `trino-row-literals.tsv`, which
+/// `tools/re2-benchmark/trino-rows/trino_rows.py` generates from pinned corpora; see its
+/// README for the sampling and literal rules. The OpenSubtitles workloads read test resources; the
+/// others read a corpus directory provisioned by the generator's `fetch` command.
 public final class TestingTrinoRowsBenchmarkInputs
 {
     public static final String MISSING_CORPUS_DIRECTORY = "required-corpus-directory";
@@ -60,9 +58,7 @@ public final class TestingTrinoRowsBenchmarkInputs
 
     private TestingTrinoRowsBenchmarkInputs() {}
 
-    /**
-     * Returns the IDs of the workload's literals in manifest order, without its empty cells.
-     */
+    /// Returns the IDs of the workload's literals in manifest order, without its empty cells.
     public static List<String> literalIds(String workload)
     {
         return literalRows().stream()
@@ -71,10 +67,8 @@ public final class TestingTrinoRowsBenchmarkInputs
                 .toList();
     }
 
-    /**
-     * Returns the IDs of the workload's LIKE cells in manifest order: its literal IDs without the
-     * dot-star cells, whose LIKE pattern {@code %literal%} would repeat their grid or hand-picked cell.
-     */
+    /// Returns the IDs of the workload's LIKE cells in manifest order: its literal IDs without the
+    /// dot-star cells, whose LIKE pattern `%literal%` would repeat their grid or hand-picked cell.
     public static List<String> likeLiteralIds(String workload)
     {
         return literalRows().stream()
@@ -83,21 +77,17 @@ public final class TestingTrinoRowsBenchmarkInputs
                 .toList();
     }
 
-    /**
-     * Returns whether the workload reads a corpus from the corpus directory rather than from test
-     * resources.
-     */
+    /// Returns whether the workload reads a corpus from the corpus directory rather than from test
+    /// resources.
     public static boolean readsCorpusDirectory(String workload)
     {
         return Arrays.stream(workloadRow(workload).get("sources").split(","))
                 .anyMatch(source -> !source.startsWith("/"));
     }
 
-    /**
-     * Returns the cell's literals, its pattern, and the workload's sampled rows, verified against the
-     * manifest's population sizes and checksum, shuffled and laid out back to back in one buffer, as
-     * a Trino block holds them. A cell without a literal fails.
-     */
+    /// Returns the cell's literals, its pattern, and the workload's sampled rows, verified against the
+    /// manifest's population sizes and checksum, shuffled and laid out back to back in one buffer, as
+    /// a Trino block holds them. A cell without a literal fails.
     public static Input create(String workload, String literalId, String corpusDirectory)
             throws IOException
     {
@@ -124,10 +114,8 @@ public final class TestingTrinoRowsBenchmarkInputs
                 Long.parseLong(literalRow.get("matches")));
     }
 
-    /**
-     * Returns the literals a cell searches: one literal, or the two of an ordered cell, which its
-     * pattern finds in order.
-     */
+    /// Returns the literals a cell searches: one literal, or the two of an ordered cell, which its
+    /// pattern finds in order.
     static List<Slice> literals(Map<String, String> literalRow)
     {
         return literalRow.get("second_literal").isEmpty()
@@ -135,11 +123,9 @@ public final class TestingTrinoRowsBenchmarkInputs
                 : List.of(Slices.utf8Slice(literalRow.get("literal")), Slices.utf8Slice(literalRow.get("second_literal")));
     }
 
-    /**
-     * Returns the LIKE pattern {@code %literal%}, or {@code %a%b%} for an ordered cell, which finds
-     * the literals in order anywhere in a row without an escape character. A literal containing
-     * {@code _}, {@code %}, or {@code \} fails, because the pattern would need an escape character.
-     */
+    /// Returns the LIKE pattern `%literal%`, or `%a%b%` for an ordered cell, which finds
+    /// the literals in order anywhere in a row without an escape character. A literal containing
+    /// `_`, `%`, or `\` fails, because the pattern would need an escape character.
     static Slice likePattern(String workload, String literalId, List<Slice> literals)
     {
         StringBuilder pattern = new StringBuilder("%");
@@ -155,19 +141,15 @@ public final class TestingTrinoRowsBenchmarkInputs
 
     public record Input(String workload, String literalId, List<Slice> literals, Slice pattern, List<Slice> sources, long hitRows, long matches)
     {
-        /**
-         * Returns the LIKE pattern {@code %literal%}, or {@code %a%b%} for an ordered cell. A
-         * literal containing {@code _}, {@code %}, or {@code \} fails.
-         */
+        /// Returns the LIKE pattern `%literal%`, or `%a%b%` for an ordered cell. A
+        /// literal containing `_`, `%`, or `\` fails.
         public Slice likePattern()
         {
             return TestingTrinoRowsBenchmarkInputs.likePattern(workload, literalId, literals);
         }
 
-        /**
-         * Checks that an engine finds the cell's pattern in the manifest's number of rows, with its
-         * number of non-overlapping matches.
-         */
+        /// Checks that an engine finds the cell's pattern in the manifest's number of rows, with its
+        /// number of non-overlapping matches.
         public void verifyHits(Predicate<Slice> contains, ToLongFunction<Slice> count)
         {
             long actualHitRows = 0;
@@ -182,9 +164,7 @@ public final class TestingTrinoRowsBenchmarkInputs
             }
         }
 
-        /**
-         * Checks that a LIKE pattern finds the cell's literals in the manifest's number of rows.
-         */
+        /// Checks that a LIKE pattern finds the cell's literals in the manifest's number of rows.
         public void verifyHitRows(Predicate<Slice> like)
         {
             long actualHitRows = sources.stream().filter(like).count();
@@ -194,10 +174,8 @@ public final class TestingTrinoRowsBenchmarkInputs
         }
     }
 
-    /**
-     * Returns the workload's sampled rows in manifest order: the stride sample of each corpus, in
-     * pooling order, verified against the manifest's population sizes and checksum.
-     */
+    /// Returns the workload's sampled rows in manifest order: the stride sample of each corpus, in
+    /// pooling order, verified against the manifest's population sizes and checksum.
     private static List<byte[]> loadRows(Map<String, String> workloadRow, String corpusDirectory)
             throws IOException
     {
@@ -226,9 +204,7 @@ public final class TestingTrinoRowsBenchmarkInputs
         return rows;
     }
 
-    /**
-     * Returns the nonempty lines without their line feed or CR LF terminator.
-     */
+    /// Returns the nonempty lines without their line feed or CR LF terminator.
     private static List<byte[]> lines(byte[] data)
     {
         List<byte[]> lines = new ArrayList<>();
@@ -288,9 +264,7 @@ public final class TestingTrinoRowsBenchmarkInputs
         return LITERAL_ROWS;
     }
 
-    /**
-     * Returns the manifest rows of the group's cells in every workload, without the empty cells.
-     */
+    /// Returns the manifest rows of the group's cells in every workload, without the empty cells.
     static List<Map<String, String>> cellRows(String group)
     {
         return literalRows().stream()

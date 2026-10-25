@@ -18,22 +18,18 @@ import io.airlift.slice.Slice;
 import java.util.List;
 import java.util.function.Function;
 
-/**
- * The Trino operations of one pattern whose scan plan was compiled to its own hidden class. Each
- * method delegates to the public static method of the class named for it with an {@code Entry}
- * suffix, such as {@code containsEntry}, which a caller can also bind directly. A generated class
- * is stateless and implements only the operations whose route reaches the plan; the others throw
- * {@link UnsupportedOperationException}.
- * <p>
- * The caller validates arguments as the matching {@link TrinoRegexp} operation does; only
- * {@code position} checks its start and occurrence itself.
- */
+/// The Trino operations of one pattern whose scan plan was compiled to its own hidden class. Each
+/// method delegates to the public static method of the class named for it with an `Entry`
+/// suffix, such as `containsEntry`, which a caller can also bind directly. A generated class
+/// is stateless and implements only the operations whose route reaches the plan; the others throw
+/// [UnsupportedOperationException].
+///
+/// The caller validates arguments as the matching [TrinoRegexp] operation does; only
+/// `position` checks its start and occurrence itself.
 interface CompiledTrinoScan
 {
-    /**
-     * Finds the first match that starts at or after byte offset {@code start}, writing its group
-     * offsets to {@code groups}, as a matcher retaining {@code groups.length / 2 - 1} groups does.
-     */
+    /// Finds the first match that starts at or after byte offset `start`, writing its group
+    /// offsets to `groups`, as a matcher retaining `groups.length / 2 - 1` groups does.
     boolean find(Slice input, int start, int[] groups);
 
     boolean contains(Slice input);

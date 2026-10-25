@@ -21,11 +21,9 @@ import io.airlift.slice.Slices;
 import java.util.List;
 import java.util.Map;
 
-/**
- * The specialized-pattern workloads: each applies one Trino operation to a rotation of inputs.
- * The URL workloads share a rotation in {@code specialized-trino-workloads.tsv}; the others
- * reuse their everyday rotation.
- */
+/// The specialized-pattern workloads: each applies one Trino operation to a rotation of inputs.
+/// The URL workloads share a rotation in `specialized-trino-workloads.tsv`; the others
+/// reuse their everyday rotation.
 public final class TestingSpecializedTrinoRegexpBenchmarkInputs
 {
     private static final String RESOURCE = "/io/airlift/regulator/specialized-trino-workloads.tsv";
@@ -97,11 +95,9 @@ public final class TestingSpecializedTrinoRegexpBenchmarkInputs
         }
     }
 
-    /**
-     * One workload: {@code replace} substitutes {@code replacement} for every match;
-     * {@code extract} returns capturing group {@code group} of the first match, and
-     * {@code extractAll} that group of every match.
-     */
+    /// One workload: `replace` substitutes `replacement` for every match;
+    /// `extract` returns capturing group `group` of the first match, and
+    /// `extractAll` that group of every match.
     public record Workload(Input input, Operation operation, int group, Slice replacement)
     {
         public String workloadId()

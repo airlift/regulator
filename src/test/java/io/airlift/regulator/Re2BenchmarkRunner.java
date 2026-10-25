@@ -23,35 +23,31 @@ import org.openjdk.jmh.runner.options.VerboseMode;
 
 import java.nio.charset.StandardCharsets;
 
-/**
- * Shared utilities for RE2 JMH benchmarks.
- *
- * <p>Command-line args: [filter] [forks] [warmupIters] [measIters] [iterTimeMs]
- *
- * <p>Examples:
- * <pre>
- *   # Calibrate a single method (1 fork, 20 warmup, 10 measurement, 200ms iterations):
- *   java ... BenchmarkRe2Search searchEasy0Re2 1 20 10 200
- *
- *   # Smoke test (1 fork, annotation defaults for iterations):
- *   java ... BenchmarkRe2Search BenchmarkRe2Search 1
- *
- *   # Full run (uses annotation defaults):
- *   java ... BenchmarkRe2Search
- * </pre>
- */
+/// Shared utilities for RE2 JMH benchmarks.
+///
+/// Command-line args: \[filter] \[forks] \[warmupIters] \[measIters] \[iterTimeMs]
+///
+/// Examples:
+/// ```bash
+///   # Calibrate a single method (1 fork, 20 warmup, 10 measurement, 200ms iterations):
+///   java ... BenchmarkRe2Search searchEasy0Re2 1 20 10 200
+///
+///   # Smoke test (1 fork, annotation defaults for iterations):
+///   java ... BenchmarkRe2Search BenchmarkRe2Search 1
+///
+///   # Full run (uses annotation defaults):
+///   java ... BenchmarkRe2Search
+/// ```
 public final class Re2BenchmarkRunner
 {
     private static final long CACHED_PROGRAM_MEMORY = 1L << 31;
 
     private Re2BenchmarkRunner() {}
 
-    /**
-     * Build JMH Options from a benchmark class and optional command-line args.
-     *
-     * @param benchmarkClass the JMH benchmark class
-     * @param args [filter] [forks] [warmupIters] [measIters] [iterTimeMs]
-     */
+    /// Build JMH Options from a benchmark class and optional command-line args.
+    ///
+    /// @param benchmarkClass the JMH benchmark class
+    /// @param args \[filter] \[forks] \[warmupIters] \[measIters] \[iterTimeMs]
     public static Options buildOptions(Class<?> benchmarkClass, String[] args)
     {
         String filter = (args.length >= 1) ? args[0] : benchmarkClass.getSimpleName();
@@ -78,9 +74,7 @@ public final class Re2BenchmarkRunner
         return builder.build();
     }
 
-    /**
-     * Generates the byte-identical corpus used by the patched native benchmark.
-     */
+    /// Generates the byte-identical corpus used by the patched native benchmark.
     public static byte[] randomText(int nbytes)
     {
         long randomState = 1;
@@ -98,9 +92,7 @@ public final class Re2BenchmarkRunner
         return text;
     }
 
-    /**
-     * Matches native SearchCachedDFA's boolean-only request and failure check.
-     */
+    /// Matches native SearchCachedDFA's boolean-only request and failure check.
     public static boolean searchDfaBoolean(Prog prog, Slice text, boolean anchored)
     {
         return dfaBooleanResult(Dfa.search(prog, text, anchored, Prog.MatchKind.FIRST_MATCH, false));

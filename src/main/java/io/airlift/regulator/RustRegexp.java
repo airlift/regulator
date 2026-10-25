@@ -20,25 +20,21 @@ import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * A compiled regular expression in the pattern language of the Rust {@code regex} crate, pinned at
- * regex 1.13.1, over Slice inputs.
- * <p>
- * Matching follows the crate's leftmost-first semantics. By default this is the crate's
- * {@code regex::Regex}, which matches valid UTF-8 input, and searches skip an empty match that
- * splits a UTF-8 character. With {@link Options#setBytes byte mode}, this is the crate's
- * {@code regex::bytes::Regex}, which matches arbitrary bytes. In both modes, iteration skips an
- * empty match adjacent to the previous match, and a search of a range or matcher region sees the
- * input outside it as assertion context, as in the crate's {@code Input::range}. Unicode
- * properties read Regulator's Unicode database. Repetition counts above 1,000 fail during
- * compilation. Match offsets are byte offsets, as in the crate.
- */
+/// A compiled regular expression in the pattern language of the Rust `regex` crate, pinned at
+/// regex 1.13.1, over Slice inputs.
+///
+/// Matching follows the crate's leftmost-first semantics. By default this is the crate's
+/// `regex::Regex`, which matches valid UTF-8 input, and searches skip an empty match that
+/// splits a UTF-8 character. With [byte mode][Options#setBytes], this is the crate's
+/// `regex::bytes::Regex`, which matches arbitrary bytes. In both modes, iteration skips an
+/// empty match adjacent to the previous match, and a search of a range or matcher region sees the
+/// input outside it as assertion context, as in the crate's `Input::range`. Unicode
+/// properties read Regulator's Unicode database. Repetition counts above 1,000 fail during
+/// compilation. Match offsets are byte offsets, as in the crate.
 public final class RustRegexp
 {
-    /**
-     * Mutable Rust-language compilation options. Compilation snapshots every option, so later
-     * changes do not affect an existing {@link RustRegexp}. Options instances are not thread-safe.
-     */
+    /// Mutable Rust-language compilation options. Compilation snapshots every option, so later
+    /// changes do not affect an existing [RustRegexp]. Options instances are not thread-safe.
     public static final class Options
     {
         private boolean caseInsensitive;
@@ -62,11 +58,9 @@ public final class RustRegexp
             return new Options();
         }
 
-        /**
-         * Creates the default options in byte mode.
-         *
-         * @see #setBytes(boolean)
-         */
+        /// Creates the default options in byte mode.
+        ///
+        /// @see #setBytes(boolean)
         public static Options bytes()
         {
             Options options = new Options();
@@ -92,77 +86,63 @@ public final class RustRegexp
             return this;
         }
 
-        /**
-         * Sets whether, in multi-line mode, {@code ^} and {@code $} treat {@code \r\n} as a line
-         * end, and {@code .} excludes {@code \r} unless it matches newlines; this is the {@code R} flag.
-         */
+        /// Sets whether, in multi-line mode, `^` and `$` treat `\r\n` as a line
+        /// end, and `.` excludes `\r` unless it matches newlines; this is the `R` flag.
         public Options setCrlf(boolean crlf)
         {
             this.crlf = crlf;
             return this;
         }
 
-        /**
-         * Sets whether greedy and lazy repetitions swap meaning, which is the {@code U} flag.
-         */
+        /// Sets whether greedy and lazy repetitions swap meaning, which is the `U` flag.
         public Options setSwapGreed(boolean swapGreed)
         {
             this.swapGreed = swapGreed;
             return this;
         }
 
-        /**
-         * Sets whether whitespace and {@code #} comments in the pattern are ignored, which is the
-         * crate's {@code ignore_whitespace} option and the {@code x} flag.
-         */
+        /// Sets whether whitespace and `#` comments in the pattern are ignored, which is the
+        /// crate's `ignore_whitespace` option and the `x` flag.
         public Options setComments(boolean comments)
         {
             this.comments = comments;
             return this;
         }
 
-        /**
-         * Sets whether Unicode mode is enabled, which is the default. Without it, {@code \d},
-         * {@code \s}, {@code \w}, and case folding use ASCII rules, a class can name a non-ASCII
-         * byte only in {@link #setBytes byte mode}, and outside byte mode constructs that could
-         * match part of a UTF-8 character fail.
-         */
+        /// Sets whether Unicode mode is enabled, which is the default. Without it, `\d`,
+        /// `\s`, `\w`, and case folding use ASCII rules, a class can name a non-ASCII
+        /// byte only in [byte mode][#setBytes], and outside byte mode constructs that could
+        /// match part of a UTF-8 character fail.
         public Options setUnicode(boolean unicode)
         {
             this.unicode = unicode;
             return this;
         }
 
-        /**
-         * Sets whether an escaped digit is an octal code point of up to three digits, such as
-         * {@code \141} for {@code a}. Without it, which is the default, an escaped digit is a
-         * backreference and fails.
-         */
+        /// Sets whether an escaped digit is an octal code point of up to three digits, such as
+        /// `\141` for `a`. Without it, which is the default, an escaped digit is a
+        /// backreference and fails.
         public Options setOctal(boolean octal)
         {
             this.octal = octal;
             return this;
         }
 
-        /**
-         * Sets whether the pattern is the crate's {@code regex::bytes::Regex}, which matches
-         * arbitrary bytes. In byte mode, with Unicode mode off, the dot, character classes, and
-         * two-digit {@code \xNN} escapes, such as {@code (?-u:.)} or {@code (?-u:\xFF)}, match a
-         * single byte even when it is not part of valid UTF-8. Outside a class, a non-ASCII literal,
-         * a braced {@code \x{...}} or Unicode escape, and an enabled octal escape keep their UTF-8
-         * encoding, and a construct in Unicode mode still matches only UTF-8. An empty match may
-         * split a UTF-8 character. Disabled by default.
-         */
+        /// Sets whether the pattern is the crate's `regex::bytes::Regex`, which matches
+        /// arbitrary bytes. In byte mode, with Unicode mode off, the dot, character classes, and
+        /// two-digit `\xNN` escapes, such as `(?-u:.)` or `(?-u:\xFF)`, match a
+        /// single byte even when it is not part of valid UTF-8. Outside a class, a non-ASCII literal,
+        /// a braced `\x{...}` or Unicode escape, and an enabled octal escape keep their UTF-8
+        /// encoding, and a construct in Unicode mode still matches only UTF-8. An empty match may
+        /// split a UTF-8 character. Disabled by default.
         public Options setBytes(boolean bytes)
         {
             this.bytes = bytes;
             return this;
         }
 
-        /**
-         * Sets the crate's limit on syntax nesting depth, which defaults to 250 and cannot be
-         * negative.
-         */
+        /// Sets the crate's limit on syntax nesting depth, which defaults to 250 and cannot be
+        /// negative.
         public Options setNestLimit(int nestLimit)
         {
             if (nestLimit < 0) {
@@ -177,17 +157,13 @@ public final class RustRegexp
             return nestLimit;
         }
 
-        /**
-         * Returns the compilation and DFA-cache memory budget in bytes.
-         */
+        /// Returns the compilation and DFA-cache memory budget in bytes.
         long maxMemory()
         {
             return maxMemory;
         }
 
-        /**
-         * Sets the positive compilation and DFA-cache memory budget in bytes.
-         */
+        /// Sets the positive compilation and DFA-cache memory budget in bytes.
         public Options setMaxMemory(long maxMemory)
         {
             if (maxMemory <= 0) {
@@ -197,19 +173,15 @@ public final class RustRegexp
             return this;
         }
 
-        /**
-         * Returns the byte-frequency distribution that chooses literal probe bytes.
-         */
+        /// Returns the byte-frequency distribution that chooses literal probe bytes.
         ByteFrequencies byteFrequencies()
         {
             return byteFrequencies;
         }
 
-        /**
-         * Sets the byte-frequency distribution that chooses which byte of a literal a candidate
-         * scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
-         * {@link ByteFrequencies#uniform()}, keeps first-byte scanning.
-         */
+        /// Sets the byte-frequency distribution that chooses which byte of a literal a candidate
+        /// scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+        /// [ByteFrequencies#uniform()], keeps first-byte scanning.
         public Options setByteFrequencies(ByteFrequencies byteFrequencies)
         {
             this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");
@@ -221,14 +193,12 @@ public final class RustRegexp
             return generateBytecode;
         }
 
-        /**
-         * Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
-         * so each operation that would run its specialized scan runs dedicated bytecode instead.
-         * Operations that take another route keep it. Patterns that are not eligible, or whose
-         * class cannot be generated, compile as they do without this option. Disabled by default.
-         *
-         * @see RustRegexp#usesGeneratedBytecode()
-         */
+        /// Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
+        /// so each operation that would run its specialized scan runs dedicated bytecode instead.
+        /// Operations that take another route keep it. Patterns that are not eligible, or whose
+        /// class cannot be generated, compile as they do without this option. Disabled by default.
+        ///
+        /// @see RustRegexp#usesGeneratedBytecode()
         public Options setGenerateBytecode(boolean generateBytecode)
         {
             this.generateBytecode = generateBytecode;
@@ -295,27 +265,21 @@ public final class RustRegexp
         return compile(pattern, Options.defaults());
     }
 
-    /**
-     * Compiles a copied snapshot of {@code pattern} and the current option values.
-     */
+    /// Compiles a copied snapshot of `pattern` and the current option values.
     public static RustRegexp compile(Slice pattern, Options options)
     {
         return compile(pattern, options, true, false);
     }
 
-    /**
-     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but without a scan plan,
-     * so tests and benchmarks can compare a plan with the ordinary engine.
-     */
+    /// Compiles `pattern` as [#compile(Slice,Options)] does, but without a scan plan,
+    /// so tests and benchmarks can compare a plan with the ordinary engine.
     static RustRegexp compileWithoutScanPlanForTesting(Slice pattern, Options options)
     {
         return compile(pattern, options, false, false);
     }
 
-    /**
-     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but a scan plan
-     * continues every unanchored search on the ordinary engine before its first attempt.
-     */
+    /// Compiles `pattern` as [#compile(Slice,Options)] does, but a scan plan
+    /// continues every unanchored search on the ordinary engine before its first attempt.
     static RustRegexp compileForcingScanPlanHandoffForTesting(Slice pattern, Options options)
     {
         return compile(pattern, options, true, true);
@@ -341,11 +305,9 @@ public final class RustRegexp
         return pattern;
     }
 
-    /**
-     * Returns whether this compiled pattern has a class generated for it, which only
-     * {@link Options#setGenerateBytecode(boolean)} enables. Each operation of such a pattern that
-     * would run its specialized scan runs the generated class.
-     */
+    /// Returns whether this compiled pattern has a class generated for it, which only
+    /// [Options#setGenerateBytecode(boolean)] enables. Each operation of such a pattern that
+    /// would run its specialized scan runs the generated class.
     public boolean usesGeneratedBytecode()
     {
         return pattern.usesGeneratedBytecode();
@@ -360,12 +322,10 @@ public final class RustRegexp
         return search(input, 0, input.length(), null);
     }
 
-    /**
-     * Returns the number of non-overlapping matches, including empty matches.
-     * As in the Rust crate, an empty match that ends where the previous match ended is skipped,
-     * and outside byte mode, so is one that splits a UTF-8 character. No capture values are
-     * returned.
-     */
+    /// Returns the number of non-overlapping matches, including empty matches.
+    /// As in the Rust crate, an empty match that ends where the previous match ended is skipped,
+    /// and outside byte mode, so is one that splits a UTF-8 character. No capture values are
+    /// returned.
     public long count(Slice input)
     {
         return pattern.count(input);
@@ -381,107 +341,81 @@ public final class RustRegexp
         return pattern.matches(requireNonNull(input, "input is null"));
     }
 
-    /**
-     * Returns whether the pattern has a match in {@code [start, end)}.
-     */
+    /// Returns whether the pattern has a match in `[start, end)`.
     public boolean find(Slice input, int start, int end)
     {
         return search(requireNonNull(input, "input is null"), start, end, null);
     }
 
-    /**
-     * Returns whether the pattern matches at {@code start} within {@code [start, end)}.
-     */
+    /// Returns whether the pattern matches at `start` within `[start, end)`.
     public boolean lookingAt(Slice input, int start, int end)
     {
         return pattern.lookingAt(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
     }
 
-    /**
-     * Returns whether the pattern matches all of {@code [start, end)}.
-     */
+    /// Returns whether the pattern matches all of `[start, end)`.
     public boolean matches(Slice input, int start, int end)
     {
         return pattern.matches(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
     }
 
-    /**
-     * Creates a mutable matcher retaining every capturing group.
-     */
+    /// Creates a mutable matcher retaining every capturing group.
     public Re2Matcher matcher(Slice input)
     {
         return pattern.matcher(requireNonNull(input, "input is null"));
     }
 
-    /**
-     * Creates a reusable matcher retaining group zero and the requested prefix of capturing groups.
-     */
+    /// Creates a reusable matcher retaining group zero and the requested prefix of capturing groups.
     public Re2Matcher matcher(Slice input, int retainedCapturingGroupCount)
     {
         return pattern.matcher(requireNonNull(input, "input is null"), retainedCapturingGroupCount);
     }
 
-    /**
-     * Finds a match and writes byte-offset start/end pairs into caller-owned storage.
-     */
+    /// Finds a match and writes byte-offset start/end pairs into caller-owned storage.
     public boolean findInto(Slice input, int[] groups)
     {
         return findInto(requireNonNull(input, "input is null"), 0, input.length(), groups);
     }
 
-    /**
-     * Finds a match in {@code [start, end)} and writes byte-offset start/end pairs.
-     */
+    /// Finds a match in `[start, end)` and writes byte-offset start/end pairs.
     public boolean findInto(Slice input, int start, int end, int[] groups)
     {
         return search(requireNonNull(input, "input is null"), start, end, groups);
     }
 
-    /**
-     * Matches at the beginning of the input and writes byte-offset start/end pairs.
-     */
+    /// Matches at the beginning of the input and writes byte-offset start/end pairs.
     public boolean lookingAtInto(Slice input, int[] groups)
     {
         return pattern.lookingAtInto(requireNonNull(input, "input is null"), groups);
     }
 
-    /**
-     * Matches at {@code start} within {@code [start, end)} and writes byte-offset start/end pairs.
-     */
+    /// Matches at `start` within `[start, end)` and writes byte-offset start/end pairs.
     public boolean lookingAtInto(Slice input, int start, int end, int[] groups)
     {
         boolean matched = pattern.lookingAtInto(requireNonNull(input, "input is null"), start, end, groups);
         return anchoredAt(input, start, matched, groups);
     }
 
-    /**
-     * Matches the complete input and writes byte-offset start/end pairs.
-     */
+    /// Matches the complete input and writes byte-offset start/end pairs.
     public boolean matchesInto(Slice input, int[] groups)
     {
         return pattern.matchesInto(requireNonNull(input, "input is null"), groups);
     }
 
-    /**
-     * Matches all of {@code [start, end)} and writes byte-offset start/end pairs.
-     */
+    /// Matches all of `[start, end)` and writes byte-offset start/end pairs.
     public boolean matchesInto(Slice input, int start, int end, int[] groups)
     {
         boolean matched = pattern.matchesInto(requireNonNull(input, "input is null"), start, end, groups);
         return anchoredAt(input, start, matched, groups);
     }
 
-    /**
-     * Returns the first match, or {@code null} when there is no match.
-     */
+    /// Returns the first match, or `null` when there is no match.
     public MatchResult findResult(Slice input)
     {
         return findResult(requireNonNull(input, "input is null"), 0, input.length());
     }
 
-    /**
-     * Returns the first match in {@code [start, end)}, or {@code null} when there is no match.
-     */
+    /// Returns the first match in `[start, end)`, or `null` when there is no match.
     public MatchResult findResult(Slice input, int start, int end)
     {
         requireNonNull(input, "input is null");
@@ -492,34 +426,26 @@ public final class RustRegexp
         return new MatchResult(input, groups, namedCapturingGroups());
     }
 
-    /**
-     * Returns the match at the beginning of the input, or {@code null} when there is no match.
-     */
+    /// Returns the match at the beginning of the input, or `null` when there is no match.
     public MatchResult lookingAtResult(Slice input)
     {
         return pattern.lookingAtResult(requireNonNull(input, "input is null"));
     }
 
-    /**
-     * Returns the match at {@code start} within {@code [start, end)}, or {@code null}.
-     */
+    /// Returns the match at `start` within `[start, end)`, or `null`.
     public MatchResult lookingAtResult(Slice input, int start, int end)
     {
         MatchResult result = pattern.lookingAtResult(requireNonNull(input, "input is null"), start, end);
         return isSearchStart(input, start) ? result : null;
     }
 
-    /**
-     * Returns the complete-input match, or {@code null} when there is no match.
-     */
+    /// Returns the complete-input match, or `null` when there is no match.
     public MatchResult matchesResult(Slice input)
     {
         return pattern.matchesResult(requireNonNull(input, "input is null"));
     }
 
-    /**
-     * Returns the complete-region match, or {@code null} when there is no match.
-     */
+    /// Returns the complete-region match, or `null` when there is no match.
     public MatchResult matchesResult(Slice input, int start, int end)
     {
         MatchResult result = pattern.matchesResult(requireNonNull(input, "input is null"), start, end);

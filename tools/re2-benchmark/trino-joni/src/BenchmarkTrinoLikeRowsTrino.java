@@ -34,16 +34,14 @@ import java.util.concurrent.TimeUnit;
 
 import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
 
-/**
- * Trino twin of Regulator's {@code BenchmarkTrinoLikeRows}: the same parameters, rows, row order,
- * LIKE pattern, and setup checks, with each row answered by Trino's LIKE functions, so every cell
- * compares one to one. Setup compiles the pattern with Trino's {@code $like_pattern} function,
- * without an escape character, and fails for a literal containing a LIKE metacharacter, as
- * Regulator's setup does. {@code matches} calls Trino's {@code $like} function once per row.
- * Unlike Regulator's benchmark, which binds its pattern as a constant, it reads the pattern from
- * the benchmark state, as {@code BenchmarkTrinoLikeTpch} does; C2 folds none of the pattern's
- * fields from a constant receiver, so the binding does not change Trino's compiled code.
- */
+/// Trino twin of Regulator's `BenchmarkTrinoLikeRows`: the same parameters, rows, row order,
+/// LIKE pattern, and setup checks, with each row answered by Trino's LIKE functions, so every cell
+/// compares one to one. Setup compiles the pattern with Trino's `$like_pattern` function,
+/// without an escape character, and fails for a literal containing a LIKE metacharacter, as
+/// Regulator's setup does. `matches` calls Trino's `$like` function once per row.
+/// Unlike Regulator's benchmark, which binds its pattern as a constant, it reads the pattern from
+/// the benchmark state, as `BenchmarkTrinoLikeTpch` does; C2 folds none of the pattern's
+/// fields from a constant receiver, so the binding does not change Trino's compiled code.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(5)

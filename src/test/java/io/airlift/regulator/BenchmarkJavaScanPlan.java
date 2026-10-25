@@ -39,28 +39,26 @@ import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.airlift.slice.Slices.utf8Slice;
 
-/**
- * Public Java operations over the workloads and rows of {@link BenchmarkRe2ScanPlan}, with each
- * pattern written in Java syntax for the same match: by default {@code $} becomes {@code \z},
- * since Java's {@code $} also matches before a final line terminator; {@code (?i)} becomes
- * {@code (?iu)}, since Java's {@code (?i)} folds only ASCII letters and RE2's folds {@code K} with
- * the Kelvin sign; and without dotAll the pattern sets UNIX_LINES, so that its dot excludes only
- * {@code \n}, as RE2's does. {@link JavaRegexp} has no replacement, so there is no replace method.
- * No compilation cache is involved.
- * <p>
- * With {@code javaDollar=true}, each {@code $} stays Java's {@code $}, so those patterns follow
- * Java's end rather than RE2's. With dotAll, {@code $} also matches before one final line
- * terminator, so those patterns time the plan's Java end; without dotAll, under UNIX_LINES, it
- * matches only before a final {@code \n}, which the plan's end-before-LF step checks. No row ends
- * in a terminator other than {@code \n}, so the Java end's CR, CR LF, U+0085, U+2028, and U+2029
- * checks are not timed.
- * <p>
- * With {@code scanPlan=false}, every pattern compiles without its scan plan, so the methods time the
- * ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
- * {@code -p scanPlan=true} this source also times a build without Java scan plans. With
- * {@code generateBytecode=true}, each pattern with a case-sensitive plan runs a class generated for
- * it; that option is also set reflectively, and only then.
- */
+/// Public Java operations over the workloads and rows of [BenchmarkRe2ScanPlan], with each
+/// pattern written in Java syntax for the same match: by default `$` becomes `\z`,
+/// since Java's `$` also matches before a final line terminator; `(?i)` becomes
+/// `(?iu)`, since Java's `(?i)` folds only ASCII letters and RE2's folds `K` with
+/// the Kelvin sign; and without dotAll the pattern sets UNIX_LINES, so that its dot excludes only
+/// `\n`, as RE2's does. [JavaRegexp] has no replacement, so there is no replace method.
+/// No compilation cache is involved.
+///
+/// With `javaDollar=true`, each `$` stays Java's `$`, so those patterns follow
+/// Java's end rather than RE2's. With dotAll, `$` also matches before one final line
+/// terminator, so those patterns time the plan's Java end; without dotAll, under UNIX_LINES, it
+/// matches only before a final `\n`, which the plan's end-before-LF step checks. No row ends
+/// in a terminator other than `\n`, so the Java end's CR, CR LF, U+0085, U+2028, and U+2029
+/// checks are not timed.
+///
+/// With `scanPlan=false`, every pattern compiles without its scan plan, so the methods time the
+/// ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
+/// `-p scanPlan=true` this source also times a build without Java scan plans. With
+/// `generateBytecode=true`, each pattern with a case-sensitive plan runs a class generated for
+/// it; that option is also set reflectively, and only then.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)
@@ -243,12 +241,10 @@ public class BenchmarkJavaScanPlan
         return compile(data.compiler, data.expressions[data.patternIndex], data.options);
     }
 
-    /**
-     * Returns {@code expression}, a {@link BenchmarkRe2ScanPlan} pattern, in Java syntax. Only
-     * {@code $}, {@code (?i)}, and the dot differ in these patterns: each {@code $} outside a class
-     * becomes {@code \z} unless {@code javaDollar} keeps it, {@code (?i)} adds Unicode case, and
-     * without dotAll, UNIX_LINES limits the dot to excluding {@code \n}.
-     */
+    /// Returns `expression`, a [BenchmarkRe2ScanPlan] pattern, in Java syntax. Only
+    /// `$`, `(?i)`, and the dot differ in these patterns: each `$` outside a class
+    /// becomes `\z` unless `javaDollar` keeps it, `(?i)` adds Unicode case, and
+    /// without dotAll, UNIX_LINES limits the dot to excluding `\n`.
     static String javaExpression(String expression, boolean dotAll, boolean javaDollar)
     {
         StringBuilder java = new StringBuilder(dotAll ? "" : "(?d)");
@@ -275,10 +271,8 @@ public class BenchmarkJavaScanPlan
         return java.toString();
     }
 
-    /**
-     * Returns the handle that compiles a pattern through the public API, or through the compiler
-     * that disables scan plans.
-     */
+    /// Returns the handle that compiles a pattern through the public API, or through the compiler
+    /// that disables scan plans.
     private static MethodHandle compiler(boolean scanPlan)
     {
         MethodType type = MethodType.methodType(JavaRegexp.class, Slice.class, JavaRegexp.Options.class);
@@ -292,10 +286,8 @@ public class BenchmarkJavaScanPlan
         }
     }
 
-    /**
-     * Returns default options that generate bytecode, resolved reflectively so that this source
-     * also runs against a build without the option when it is not requested.
-     */
+    /// Returns default options that generate bytecode, resolved reflectively so that this source
+    /// also runs against a build without the option when it is not requested.
     private static JavaRegexp.Options generatingOptions()
     {
         JavaRegexp.Options options = JavaRegexp.Options.defaults();
@@ -318,9 +310,7 @@ public class BenchmarkJavaScanPlan
         }
     }
 
-    /**
-     * Returns the {@code workload} parameter values in declaration order.
-     */
+    /// Returns the `workload` parameter values in declaration order.
     static List<String> workloads()
             throws NoSuchFieldException
     {

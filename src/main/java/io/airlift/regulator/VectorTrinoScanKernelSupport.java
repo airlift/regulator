@@ -18,12 +18,10 @@ import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 
-/**
- * Vector scans for {@link TrinoScanKernelSupport}: copies of the {@link VectorTrinoScanner}
- * and {@link VectorByteSetScanner} scans that the interpreter's helpers call, kept apart for
- * the reason given in {@link TrinoScanKernelSupport}. Callers must check
- * {@link VectorSupport#isAvailable()} first and use their scalar loops otherwise.
- */
+/// Vector scans for [TrinoScanKernelSupport]: copies of the [VectorTrinoScanner]
+/// and [VectorByteSetScanner] scans that the interpreter's helpers call, kept apart for
+/// the reason given in [TrinoScanKernelSupport]. Callers must check
+/// [VectorSupport#isAvailable()] first and use their scalar loops otherwise.
 final class VectorTrinoScanKernelSupport
 {
     // The plan's own scans use 128-bit vectors, and the byte-set scans shared with the DFA use
@@ -39,9 +37,7 @@ final class VectorTrinoScanKernelSupport
     // run scans broadcast their needles before the block loop because C2 does not
     // hoist per-block broadcasts out of it on aarch64 or x86.
 
-    /**
-     * A copy of {@code VectorTrinoScanner.findRunStop}.
-     */
+    /// A copy of `VectorTrinoScanner.findRunStop`.
     static int findRunStop(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
         int count = needles.length;
@@ -74,9 +70,7 @@ final class VectorTrinoScanKernelSupport
         return end;
     }
 
-    /**
-     * A copy of {@code VectorTrinoScanner.findRe2RunStop}.
-     */
+    /// A copy of `VectorTrinoScanner.findRe2RunStop`.
     static int findRe2RunStop(byte[] input, int cursor, int end, byte[] needles)
     {
         if (needles.length > 1) {
@@ -145,9 +139,7 @@ final class VectorTrinoScanKernelSupport
         return end;
     }
 
-    /**
-     * A copy of {@code VectorTrinoScanner.findRunCandidate}.
-     */
+    /// A copy of `VectorTrinoScanner.findRunCandidate`.
     static int findRunCandidate(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
         int count = needles.length;
@@ -180,9 +172,7 @@ final class VectorTrinoScanKernelSupport
         return -1;
     }
 
-    /**
-     * A copy of {@code VectorTrinoScanner.containsLiteral}.
-     */
+    /// A copy of `VectorTrinoScanner.containsLiteral`.
     static boolean containsLiteral(byte[] bytes, int cursor, int end, TrinoScanPlan.Step literal)
     {
         int lastOffset = literal.literal.length - 1;
@@ -210,9 +200,7 @@ final class VectorTrinoScanKernelSupport
         return false;
     }
 
-    /**
-     * A copy of {@code VectorTrinoScanner.findByte}.
-     */
+    /// A copy of `VectorTrinoScanner.findByte`.
     static int findByte(byte[] bytes, int cursor, int end, byte target)
     {
         ByteVector wanted = ByteVector.broadcast(SPECIES, target);
@@ -230,9 +218,7 @@ final class VectorTrinoScanKernelSupport
         return -1;
     }
 
-    /**
-     * A copy of {@code VectorByteSetScanner.find}.
-     */
+    /// A copy of `VectorByteSetScanner.find`.
     static int findByteSet(byte[] data, int offset, int length, byte first, byte second, byte third, int candidateCount)
     {
         return switch (candidateCount) {
@@ -243,9 +229,7 @@ final class VectorTrinoScanKernelSupport
         };
     }
 
-    /**
-     * A copy of {@code VectorByteSetScanner.findRange}.
-     */
+    /// A copy of `VectorByteSetScanner.findRange`.
     static int findRange(byte[] data, int offset, int length, int lowerBound, int upperBound)
     {
         ByteVector lowerBoundVector = ByteVector.broadcast(BYTE_SET_SPECIES, (byte) lowerBound);
@@ -271,9 +255,7 @@ final class VectorTrinoScanKernelSupport
         return -1;
     }
 
-    /**
-     * A copy of {@code VectorByteSetScanner.findNibbleTable}.
-     */
+    /// A copy of `VectorByteSetScanner.findNibbleTable`.
     static int findNibbleTable(byte[] data, int offset, int length, byte[] tables)
     {
         ByteVector lowNibbleTable = ByteVector.fromArray(BYTE_SET_SPECIES, tables, 0);

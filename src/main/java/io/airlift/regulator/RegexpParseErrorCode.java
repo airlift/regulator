@@ -13,9 +13,7 @@
  */
 package io.airlift.regulator;
 
-/**
- * The category of a regular-expression syntax error.
- */
+/// The category of a regular-expression syntax error.
 public enum RegexpParseErrorCode
 {
     INTERNAL_ERROR("internal parser error"),

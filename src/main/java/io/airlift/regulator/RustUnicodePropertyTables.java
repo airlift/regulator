@@ -20,14 +20,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
-/**
- * Unicode property names of the Rust regex crate, built from the property and value aliases of
- * the pinned {@link UnicodeDatabase} by the rules of ucd-generate, the crate's table generator.
- * Each name map, including each inner {@code PROPERTY_VALUES} map, maps normalized aliases to
- * canonical names, normalizing as ucd-generate does; the Age map instead maps them to the
- * database's Age values, such as 6.0. The maps hold names only; character membership also comes
- * from the database.
- */
+/// Unicode property names of the Rust regex crate, built from the property and value aliases of
+/// the pinned [UnicodeDatabase] by the rules of ucd-generate, the crate's table generator.
+/// Each name map, including each inner `PROPERTY_VALUES` map, maps normalized aliases to
+/// canonical names, normalizing as ucd-generate does; the Age map instead maps them to the
+/// database's Age values, such as 6.0. The maps hold names only; character membership also comes
+/// from the database.
 final class RustUnicodePropertyTables
 {
     // ucd-generate adds the UAX #51 emoji properties under their long names
@@ -96,13 +94,11 @@ final class RustUnicodePropertyTables
         }
     }
 
-    /**
-     * Normalizes a name as ucd-util's {@code symbolic_name_normalize} does (UAX44-LM3): drops an
-     * {@code is} prefix from a name longer than two characters, drops spaces, underscores,
-     * hyphens, and non-ASCII characters, and lowercases ASCII letters, except that {@code isc}
-     * stays {@code isc}. This differs from the crate's normalization of queries only for
-     * two-character names, whose prefix a query drops.
-     */
+    /// Normalizes a name as ucd-util's `symbolic_name_normalize` does (UAX44-LM3): drops an
+    /// `is` prefix from a name longer than two characters, drops spaces, underscores,
+    /// hyphens, and non-ASCII characters, and lowercases ASCII letters, except that `isc`
+    /// stays `isc`. This differs from the crate's normalization of queries only for
+    /// two-character names, whose prefix a query drops.
     private static String normalize(String name)
     {
         boolean startsWithIs = name.length() > 2 && (name.charAt(0) == 'i' || name.charAt(0) == 'I') && (name.charAt(1) == 's' || name.charAt(1) == 'S');

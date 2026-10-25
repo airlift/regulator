@@ -16,28 +16,22 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 
-/**
- * Minimal UTF-8 decoding utilities. The core engine assumes valid UTF-8 inputs (garbage in, garbage out),
- * except where a method states a rule for malformed input, as {@link #re2CharacterWidth} does.
- */
+/// Minimal UTF-8 decoding utilities. The core engine assumes valid UTF-8 inputs (garbage in, garbage out),
+/// except where a method states a rule for malformed input, as [#re2CharacterWidth] does.
 final class Utf8
 {
     static final int RUNE_ERROR = 0xFFFD;
 
     private Utf8() {}
 
-    /**
-     * Decodes a single UTF-8 code point starting at {@code index}.
-     * <p>
-     * Returns a packed long:
-     * <ul>
-     * <li>high 32 bits: width in bytes (0 at end)
-     * <li>low 32 bits: code point (unsigned)
-     * </ul>
-     * <p>
-     * For invalid sequences, returns {@code RUNE_ERROR} with width 1.
-     * Copied as {@code TrinoScanKernelSupport.decode}; keep the copy in step.
-     */
+    /// Decodes a single UTF-8 code point starting at `index`.
+    ///
+    /// Returns a packed long:
+    /// - high 32 bits: width in bytes (0 at end)
+    /// - low 32 bits: code point (unsigned)
+    ///
+    /// For invalid sequences, returns `RUNE_ERROR` with width 1.
+    /// Copied as `TrinoScanKernelSupport.decode`; keep the copy in step.
     static long decode(byte[] bytes, int index, int end)
     {
         if (index >= end) {
@@ -104,16 +98,14 @@ final class Utf8
         return pack(RUNE_ERROR, 1);
     }
 
-    /**
-     * Returns the width of the character starting at {@code index}, which must be before
-     * {@code end}, when malformed input is read as if each maximal subpart had been replaced by
-     * U+FFFD (Unicode chapter 3, "U+FFFD Substitution of Maximal Subparts"). A well-formed sequence
-     * is one character. Otherwise the character is the longest prefix of a well-formed sequence
-     * that a bad byte or {@code end} cuts off, or one byte when no well-formed sequence starts
-     * with it. Only continuation bytes can follow the first byte of a character, so every ASCII
-     * byte and every lead byte starts a new character.
-     * Copied as {@code TrinoLikeKernelSupport.characterWidth}; keep the copy in step.
-     */
+    /// Returns the width of the character starting at `index`, which must be before
+    /// `end`, when malformed input is read as if each maximal subpart had been replaced by
+    /// U+FFFD (Unicode chapter 3, "U+FFFD Substitution of Maximal Subparts"). A well-formed sequence
+    /// is one character. Otherwise the character is the longest prefix of a well-formed sequence
+    /// that a bad byte or `end` cuts off, or one byte when no well-formed sequence starts
+    /// with it. Only continuation bytes can follow the first byte of a character, so every ASCII
+    /// byte and every lead byte starts a new character.
+    /// Copied as `TrinoLikeKernelSupport.characterWidth`; keep the copy in step.
     static int characterWidth(byte[] bytes, int index, int end)
     {
         int b0 = bytes[index] & 0xFF;
@@ -147,16 +139,14 @@ final class Utf8
         return index + 3 < end && (bytes[index + 3] & 0xC0) == 0x80 ? 4 : 3;
     }
 
-    /**
-     * Returns the width of the non-ASCII character starting at {@code index}, which must be
-     * before {@code end}, as an RE2 class holding all of U+0080 through U+10FFFF reads it, or
-     * {@code 0} when that class rejects the bytes there. Such a class consumes a lead byte
-     * C2-DF, E0-EF, or F0-F4 followed by one, two, or three continuation bytes, so it accepts
-     * overlong three- and four-byte forms, encoded surrogates, and values above U+10FFFF. It
-     * rejects bare continuation bytes, C0, C1, F5-FF, and sequences that a non-continuation byte
-     * or {@code end} cuts short.
-     * Copied as {@code TrinoScanKernelSupport.re2CharacterWidth}; keep the copy in step.
-     */
+    /// Returns the width of the non-ASCII character starting at `index`, which must be
+    /// before `end`, as an RE2 class holding all of U+0080 through U+10FFFF reads it, or
+    /// `0` when that class rejects the bytes there. Such a class consumes a lead byte
+    /// C2-DF, E0-EF, or F0-F4 followed by one, two, or three continuation bytes, so it accepts
+    /// overlong three- and four-byte forms, encoded surrogates, and values above U+10FFFF. It
+    /// rejects bare continuation bytes, C0, C1, F5-FF, and sequences that a non-continuation byte
+    /// or `end` cuts short.
+    /// Copied as `TrinoScanKernelSupport.re2CharacterWidth`; keep the copy in step.
     static int re2CharacterWidth(byte[] bytes, int index, int end)
     {
         int b0 = bytes[index] & 0xFF;

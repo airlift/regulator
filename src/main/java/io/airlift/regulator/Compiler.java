@@ -53,45 +53,39 @@ final class Compiler
         return compile(regexp, false, 0);
     }
 
-    /**
-     * Compile a Regexp to a Prog, optionally in reverse mode for backward searching.
-     * <p>
-     * <b>Reverse Mode ({@code reversed=true}):</b>
-     * When compiling in reverse mode, two transformations occur:
-     * <ol>
-     * <li><b>Scan Direction:</b> Resulting program scans bytes right-to-left instead of left-to-right
-     * <li><b>Anchor Swapping:</b> Start/end anchor flags are swapped:
-     *     <ul>
-     *     <li>Pattern {@code ^abc} compiles to {@code program.anchorEnd=true, anchorStart=false}
-     *     <li>Pattern {@code abc$} compiles to {@code program.anchorStart=true, anchorEnd=false}
-     *     </ul>
-     * </ol>
-     * <p>
-     * This makes anchors semantically correct when scanning backward. For example, {@code ^}
-     * (begin-text) becomes the end anchor in a reversed program because when scanning right-to-left,
-     * the "beginning" of the text is reached at the end of the backward scan.
-     * <p>
-     * <b>Usage in Two-Phase Search:</b>
-     * <pre>{@code
-     * // Compile both directions with appropriate memory budgets
-     * Prog forward = Compiler.compile(regexp, false, maxMemory * 2/3);  // Normal left-to-right
-     * Prog reverse = Compiler.compile(regexp, true, maxMemory / 3);     // Reverse right-to-left
-     * // Phase 1: Forward finds match end
-     * long matchEnd = Dfa.search(forward, text, text, false, Prog.MatchKind.FIRST_MATCH, true);
-     * // Phase 2: Reverse finds match start
-     * Slice prefix = Slices.wrappedBuffer(text.byteArray(), 0, (int) matchEnd);
-     * long matchStart = Dfa.search(reverse, prefix, text, true, Prog.MatchKind.LONGEST_MATCH, true);
-     * }</pre>
-     * <p>
-     * See {@code REVERSE_DFA.md} for complete documentation.
-     *
-     * @param regexp the parsed regexp to compile
-     * @param reversed if true, compile for reverse (right-to-left) search
-     * @param maxMemory memory budget in bytes (0 = unlimited)
-     * @return compiled Prog
-     * @throws RegexpCompileMemoryLimitException if memory budget is insufficient
-     * @throws RegexpCompileException if compilation fails for a non-memory reason
-     */
+    /// Compile a Regexp to a Prog, optionally in reverse mode for backward searching.
+    ///
+    /// **Reverse Mode (`reversed=true`):**
+    /// When compiling in reverse mode, two transformations occur:
+    /// 1. **Scan Direction:** Resulting program scans bytes right-to-left instead of left-to-right
+    /// 2. **Anchor Swapping:** Start/end anchor flags are swapped:
+    ///    - Pattern `^abc` compiles to `program.anchorEnd=true, anchorStart=false`
+    ///    - Pattern `abc$` compiles to `program.anchorStart=true, anchorEnd=false`
+    ///
+    /// This makes anchors semantically correct when scanning backward. For example, `^`
+    /// (begin-text) becomes the end anchor in a reversed program because when scanning right-to-left,
+    /// the "beginning" of the text is reached at the end of the backward scan.
+    ///
+    /// **Usage in Two-Phase Search:**
+    /// ```java
+    /// // Compile both directions with appropriate memory budgets
+    /// Prog forward = Compiler.compile(regexp, false, maxMemory * 2/3);  // Normal left-to-right
+    /// Prog reverse = Compiler.compile(regexp, true, maxMemory / 3);     // Reverse right-to-left
+    /// // Phase 1: Forward finds match end
+    /// long matchEnd = Dfa.search(forward, text, text, false, Prog.MatchKind.FIRST_MATCH, true);
+    /// // Phase 2: Reverse finds match start
+    /// Slice prefix = Slices.wrappedBuffer(text.byteArray(), 0, (int) matchEnd);
+    /// long matchStart = Dfa.search(reverse, prefix, text, true, Prog.MatchKind.LONGEST_MATCH, true);
+    /// ```
+    ///
+    /// See `REVERSE_DFA.md` for complete documentation.
+    ///
+    /// @param regexp the parsed regexp to compile
+    /// @param reversed if true, compile for reverse (right-to-left) search
+    /// @param maxMemory memory budget in bytes (0 = unlimited)
+    /// @return compiled Prog
+    /// @throws RegexpCompileMemoryLimitException if memory budget is insufficient
+    /// @throws RegexpCompileException if compilation fails for a non-memory reason
     static Prog compile(Regexp regexp, boolean reversed, long maxMemory)
     {
         return compile(regexp, reversed, maxMemory, false, Dialect.RE2, CaseFolding.RE2, ByteFrequencies.uniform());
@@ -107,10 +101,8 @@ final class Compiler
         return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, ByteFrequencies.uniform());
     }
 
-    /**
-     * Compiles with {@code byteFrequencies} choosing the probe byte of a forward program's
-     * literal prefix scan.
-     */
+    /// Compiles with `byteFrequencies` choosing the probe byte of a forward program's
+    /// literal prefix scan.
     static Prog compileNormalized(Regexp regexp, boolean reversed, long maxMemory, Dialect dialect, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         return compile(regexp, reversed, maxMemory, true, dialect, caseFolding, byteFrequencies);
@@ -270,11 +262,9 @@ final class Compiler
                 DominatorElisionAnalysis.canSkipDominatorPass(regexp, reversed);
     }
 
-    /**
-     * Detects patterns that match every possible byte sequence, such as {@code \C*}.
-     * <p>
-     * UTF-8 {@code (?s).*} is deliberately excluded because it rejects invalid UTF-8.
-     */
+    /// Detects patterns that match every possible byte sequence, such as `\C*`.
+    ///
+    /// UTF-8 `(?s).*` is deliberately excluded because it rejects invalid UTF-8.
     private static boolean matchesAnyByteString(Regexp regexp)
     {
         if (regexp.op() != RegexpOp.STAR) {
@@ -527,12 +517,10 @@ final class Compiler
             maxInstructions = (int) availableInstructionCount;
         }
 
-        /**
-         * Compiles every node after its children, in the same order and with the same visit limit as
-         * {@link RegexpWalker#walkExponential}, without allocating per-node walker state. When a node
-         * is compiled, its children's fragments are the top {@code childCount} entries of the
-         * fragment stack.
-         */
+        /// Compiles every node after its children, in the same order and with the same visit limit as
+        /// [RegexpWalker#walkExponential], without allocating per-node walker state. When a node
+        /// is compiled, its children's fragments are the top `childCount` entries of the
+        /// fragment stack.
         private Fragment compileTree(Regexp root, int maxVisits)
         {
             Regexp[] nodes = new Regexp[16];
@@ -1624,9 +1612,7 @@ final class Compiler
         }
     }
 
-    /**
-     * Packs the head and tail output pointers into one primitive compiler value.
-     */
+    /// Packs the head and tail output pointers into one primitive compiler value.
     private static final class PatchList
     {
         static final long EMPTY = 0;

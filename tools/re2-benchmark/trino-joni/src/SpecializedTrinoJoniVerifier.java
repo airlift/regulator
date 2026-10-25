@@ -32,10 +32,8 @@ import java.util.function.IntFunction;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-/**
- * Checks that the specialized engine, the regular engine, and the compiled variant of every
- * specialized-pattern workload each return pinned Joni's result for every input.
- */
+/// Checks that the specialized engine, the regular engine, and the compiled variant of every
+/// specialized-pattern workload each return pinned Joni's result for every input.
 public final class SpecializedTrinoJoniVerifier
 {
     private static final String EXPECTED_RESULT_SHA256 = "86cb18b04c07ddea5e2d4bf7152c585e9bac81d3bd9a60c940ec1143eb7ad1a3";

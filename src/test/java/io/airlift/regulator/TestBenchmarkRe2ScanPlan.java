@@ -146,20 +146,16 @@ public class TestBenchmarkRe2ScanPlan
         }
     }
 
-    /**
-     * Returns whether the row's capture holds a sequence that RE2 accepts but that is not valid
-     * UTF-8.
-     */
+    /// Returns whether the row's capture holds a sequence that RE2 accepts but that is not valid
+    /// UTF-8.
     private static boolean consumesMalformed(Re2 pattern, Slice input)
     {
         MatchResult match = pattern.findResult(input);
         return match != null && !isValidUtf8(input.slice(match.start(1), match.end(1) - match.start(1)));
     }
 
-    /**
-     * Returns whether the row's capture stops at a sequence that RE2 rejects, or whether the row
-     * misses only because of such sequences, matching once their bytes become ASCII.
-     */
+    /// Returns whether the row's capture stops at a sequence that RE2 rejects, or whether the row
+    /// misses only because of such sequences, matching once their bytes become ASCII.
     private static boolean stopsAtMalformed(Re2 pattern, Slice input)
     {
         byte[] bytes = input.getBytes();
@@ -181,10 +177,8 @@ public class TestBenchmarkRe2ScanPlan
         return rejected && pattern.find(wrappedBuffer(bytes));
     }
 
-    /**
-     * Returns the width of the character that RE2's classes read at {@code index}, or 0 at a
-     * sequence they reject.
-     */
+    /// Returns the width of the character that RE2's classes read at `index`, or 0 at a
+    /// sequence they reject.
     private static int re2Width(byte[] bytes, int index)
     {
         return bytes[index] >= 0 ? 1 : Utf8.re2CharacterWidth(bytes, index, bytes.length);

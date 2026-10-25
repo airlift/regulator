@@ -36,9 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/**
- * Deterministic differential coverage for the supported Java 25 regular-expression subset.
- */
+/// Deterministic differential coverage for the supported Java 25 regular-expression subset.
 public class TestJavaRegexpDifferential
 {
     private static final String CORPUS_IDENTITY = "java-regexp-differential-v1-java25";
