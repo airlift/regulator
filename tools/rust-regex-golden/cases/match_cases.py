@@ -336,6 +336,26 @@ for name, pattern, text in [
 case("octal_case_insensitive", "\\101", "a", "io")
 case("octal_verbose_space", "\\1 41", "\x0141", "xo")
 
+section("Scan-plan shapes")
+# Regulator compiles each of these patterns with a scan plan under default
+# options; a window keeps the whole input as context, so a search of one that
+# ends early takes the ordinary engine.
+url_host = "^https?://(?:www\\.)?([^/]+)/.*$"
+case("scan_plan_url_host", url_host, "https://www.h\u00f6st/p\u00e4th")
+case("scan_plan_url_host_trailing_newline", url_host, "https://www.h\u00f6st/p\u00e4th\n")
+case("scan_plan_url_dot_all", "(?s)\\Ahttps?://([^/]+)/(.*)\\z", "https://example.com/p\u00e4th/\u8def\u5f84\n?q=1")
+case("scan_plan_unanchored_run", "x([^/]+)/", "x/x\u00e9b/xc/")
+case("scan_plan_query_parameter", "[?&]([^=]+)=", "https://h/p?a=1&b\u00e9=2&c")
+case("scan_plan_optional_groups", "^(a)?(b)?abcd([0-9]+)/$", "ababcd12/")
+case("scan_plan_optional_groups_near_miss", "^(a)?(b)?abcd([0-9]+)/$", "ababcd12")
+case("scan_plan_folded_anchored", "(?i)^abc([^:]+):def$", "aBc\u212a\u00e9:DeF")
+case("scan_plan_folded_anchored_near_miss", "(?i)^abc([^:]+):def$", "ABC\u212a:DEX")
+case("scan_plan_folded_unanchored", "(?i)content-type:([^;]+);", "X: 1\r\nContent-TYPE:text/h\u00e9ml; charset=utf-8")
+case("scan_plan_swap_greed", "(?U)^x([^/]+?)/", "x\u00e9b/c/")
+case("scan_plan_crlf_dot", "(?R)^x(.+)$", "x\u00e9b\r")
+window("scan_plan_window_anchored_after_start", "^x([^/]+)", "xx\u00e9b/c", 1, 7)
+window("scan_plan_window_url_before_end", "^https?://([^/]+)/", "https://h\u00f6st/p", 0, 13)
+
 section("Bytes API: byte constructs")
 # Options ending in "bytes" select regex::bytes::Regex. "\xFF" in Unicode mode
 # is U+00FF, encoded as c3 bf.

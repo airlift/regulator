@@ -31,6 +31,19 @@ public class TestRustRegexpOptions
 
         assertThat(regexp.matches(utf8Slice("ABC"))).isTrue();
 
+        // The compiled scan plan's leading-literal probe, chosen by the distribution at
+        // compilation, is retained; the prefix scan of the same pattern keeps the first byte.
+        options = RustRegexp.Options.defaults().setByteFrequencies(TestingByteFrequencies.learnedJsonRecords());
+        regexp = RustRegexp.compile(utf8Slice("été=([a-z]+)"), options);
+
+        options.setByteFrequencies(ByteFrequencies.uniform());
+
+        assertThat(regexp.pattern().caseSensitiveTrinoScanPlan().leadingLiteralProbeOffsetForDiagnostics()).isEqualTo(5);
+        assertThat(regexp.pattern().forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
+        Re2 uniform = RustRegexp.compile(utf8Slice("été=([a-z]+)"), options).pattern();
+        assertThat(uniform.caseSensitiveTrinoScanPlan().leadingLiteralProbeOffsetForDiagnostics()).isZero();
+        assertThat(uniform.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
+
         // The compiled probe offset, chosen by the distribution at compilation, is retained.
         options = RustRegexp.Options.defaults().setByteFrequencies(TestingByteFrequencies.rareNonLetters());
         regexp = RustRegexp.compile(utf8Slice("https://(\\S+)"), options);

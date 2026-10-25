@@ -297,8 +297,10 @@ UTF-16 code-unit offsets.
   mode, and the matcher lets an empty match split a character.
 - Outside byte mode, inputs are not validated. The crate's `Regex` only
   accepts valid UTF-8, so results on malformed input are unspecified rather
-  than an error, and valid input pays no validation scan. Byte mode needs no
-  validation either: its results match the crate on any input.
+  than an error, and valid input pays no validation scan. A pattern that runs
+  on a scan plan still reports what the ordinary engine reports on malformed
+  input; see [RE2 Scan Plans](#re2-scan-plans). Byte mode needs no validation
+  either: its results match the crate on any input.
 - CRLF multi-line anchors, Unicode `\b` and `\B`, and the start, end, and
   half word boundaries are Rust-only empty-width predicates, evaluated only
   when a program contains one. Like Java's text-dependent assertions, they keep
@@ -980,9 +982,9 @@ distribution built from byte counts with `fromCounts`, or one learned from
 sample data with `builder()`. A compiled pattern keeps only the chosen offsets.
 
 Under a chosen distribution, case-sensitive multi-byte prefixes with an ASCII
-first byte, and multi-byte leading literals in scan plans (Trino, RE2, and
-Java), scan for one probe byte. Every distribution follows one rule: the probe
-is the rarest byte after the first, earliest on ties, used only when its
+first byte, and multi-byte leading literals in scan plans (Trino, RE2, Java,
+and Rust), scan for one probe byte. Every distribution follows one rule: the
+probe is the rarest byte after the first, earliest on ties, used only when its
 estimated probability is less than a quarter of the first byte's; otherwise the
 probe remains offset 0. The factor keeps the first byte when the estimate is
 close, because an estimate is not the searched text. Each probe hit is shifted
@@ -1033,7 +1035,7 @@ any ASCII byte. Bytes at or above `0x80` are pinned to the most common ASCII
 value, so no preset probes them. Outside scan plans, `RustRegexp`, `Re2`, and
 `JavaRegexp` scans move the probe only for multi-byte, case-sensitive literals
 with an ASCII first byte, so a literal led by encoded text keeps first-byte
-scanning there. Scan plans (Trino, RE2, and Java) move a plan's leading
+scanning there. Scan plans (Trino, RE2, Java, and Rust) move a plan's leading
 literal, including one led by encoded text, to a rarer ASCII byte.
 `tools/byte-frequencies` pins every source of both preset tables and regenerates
 them exactly; only the derived numbers are committed.
@@ -1405,10 +1407,10 @@ character runs, optional bodies, nested captures, and terminal tails. Preserve
 specified matching and capture behavior on valid UTF-8. Malformed Trino input
 has a garbage-in, garbage-out contract, while bounded input access and normal
 matcher lifecycle behavior remain required. This does not authorize a public
-malformed-input opt-in. RE2 and Java patterns select the same plans, which
-report the ordinary engine's results on malformed input too, as described in
-[RE2 Scan Plans](#re2-scan-plans). By default the plan performs no
-runtime code generation; an experimental option may compile the plan into its
+malformed-input opt-in. RE2, Java, and Rust patterns select the same plans,
+which report the ordinary engine's results on malformed input too, as described
+in [RE2 Scan Plans](#re2-scan-plans). By default the plan performs no runtime
+code generation; an experimental option may compile the plan into its
 own class, as described in
 [Generated Trino Scan Kernels](#generated-trino-scan-kernels). The ordinary
 semantic program remains the fallback. The
@@ -1598,9 +1600,9 @@ shapes, ASCII-folded ones included, reached by the same operations with the
 same memory charge, and on by default. Trino captures and extraction run about
 eight times faster on a plan than on the ordinary engine, and nothing in those
 shapes is specific to Trino. The frontend chooses a plan's language explicitly,
-so `Re2.compileParsed` builds none. Java patterns select the same plans under
-these decisions; the last bullets record the rules and measurements specific to
-Java.
+so `Re2.compileParsed` builds none. Java and Rust patterns select the same
+plans under these decisions; the last bullets record the rules and measurements
+specific to each language.
 
 - An RE2 plan reports exactly what the ordinary engine reports on every input,
   including malformed UTF-8; RE2 has no garbage-in, garbage-out contract. Only
@@ -1612,8 +1614,8 @@ Java.
   continuation bytes, `C0`, `C1`, `F5`-`FF`, and truncated sequences. Trino plans
   are unchanged.
 - The analysis, builder, proofs, budgets, candidate scans, and routing stay
-  shared, so a coverage change reaches the Trino, RE2, and Java frontends.
-  Every skip proof holds under the RE2 rule, as the
+  shared, so a coverage change reaches the Trino, RE2, Java, and Rust
+  frontends. Every skip proof holds under the RE2 rule, as the
   [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md#re2-patterns) restates.
 - Longest-match patterns build no plan, because a plan reports leftmost-first
   matches, and Latin-1 patterns build none, as in Trino.
@@ -1702,6 +1704,47 @@ Java.
   [Trino Specialized Byte Scans](#trino-specialized-byte-scans), and a Java end
   cannot, since the DFA cannot evaluate it; they still take 0.14 to 0.16 times
   the ordinary engine's time.
+- Rust patterns select the same plans, with the same routing and memory charge.
+  The Rust frontend compiles to the same byte ranges as RE2, so a Rust plan
+  reads input by the RE2 rule and reports what the ordinary engine reports on
+  every input, which on valid UTF-8 is the pinned crate's result. Without
+  multi-line mode Rust's `$` is the strict end, and Rust's dot and `(?i)` match
+  as RE2's do, so those reach a plan unchanged. Byte mode compiles as Latin-1
+  and builds no plan, as RE2's Latin-1 patterns do. The frontend declines it
+  explicitly, because only byte constructs carry the Latin-1 node flag that the
+  analysis rejects. Multiline anchors, CRLF ones included, word boundaries,
+  including Rust's start, end, and half word boundaries, reluctant runs, Unicode
+  Perl classes, and folds with a non-ASCII member, such as `(?i)k`, keep the
+  ordinary engine.
+- A Rust range or matcher region keeps the whole input as assertion context, as
+  the crate's `Input::range` does, while a matcher's start-anchored plan reads
+  its region as the whole input. A Rust matcher therefore runs that plan
+  directly only over the whole input; a partial region takes the Rust search
+  route, where the plan answers only a region that ends at the input end, as for
+  a range.
+- A Rust plan must not be slower than the same pattern without it. On R9g and
+  R8i, the 125 rows of `BenchmarkRustScanPlan` without dotAll, five matching
+  methods over the 19 workloads of the Java measurement and the `NON_ASCII` and
+  `MALFORMED` variants of `UNANCHORED_URL`, `LONG_HOST`, and
+  `UNANCHORED_TAIL_4096`, take a geometric mean of 0.215 and 0.221 times the
+  ordinary engine's time. Over the Java measurement's 95 rows they take 0.215
+  and 0.219 times, and Java plans took 0.217 and 0.218. One row fails the bar
+  and is accepted as a known exception: on R8i, `OPTIONAL_RETRY` `contains`
+  takes 1.115 times the ordinary engine's time, 58.2 ns against 52.2 ns, in one
+  of two identical builds, and 1.031 times, 53.8 ns, in the other. It exceeds
+  R8i's A/A spread over rows with one mode, 8.2%, but not its spread over all
+  rows, 17.8%. The Java plan also takes 1.027 times there, and on R9g the row
+  takes 0.934 times. Adding Rust plans, with the matcher check that sends a
+  Rust partial region to the Rust search, moved no other language's row beyond
+  noise: against the build before Rust plans, 71 rows of the scan-plan
+  benchmarks take a geometric mean of 1.002 and 0.997 times their earlier
+  time, and none is slower beyond the spread between identical builds. Those
+  rows are the `BenchmarkTrinoScanPlan` workloads `URL`, `ANCHORED_HOST`,
+  `OPTIONALS`, `OPTIONAL_RETRY`, `RETRY_64`, and `MIXED`; the
+  `BenchmarkRe2ScanPlan` workloads `URL`, `ANCHORED_HOST`, `OPTIONALS`,
+  `OPTIONAL_RETRY`, `RETRY_64`, `LONG_HOST`, `MIXED`, and `URL_MALFORMED`; and
+  the `BenchmarkJavaScanPlan` workloads `URL`, `ANCHORED_HOST`, `OPTIONALS`,
+  `LONG_HOST`, and `URL_MALFORMED`.
 
 ## Generated Trino Scan Kernels
 

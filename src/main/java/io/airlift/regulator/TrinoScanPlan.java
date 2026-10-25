@@ -25,14 +25,14 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * A scan over literals, deterministic runs, and bounded optional captures, for the Trino, RE2, and
- * Java frontends; no other frontend builds one. A Trino plan preserves valid UTF-8 behavior, and
- * malformed input has Trino's garbage-in, garbage-out contract. An RE2 or Java plan reads each
- * non-ASCII character as RE2's classes do (see {@link Utf8#re2CharacterWidth}), as the ordinary
- * engine compiled for both languages does, so it agrees with that engine on every input, malformed
- * UTF-8 included. The languages share the analysis and the executors; in an RE2 or Java plan, each
- * run admitting non-ASCII characters, and each delimited capture, becomes an {@code RE2_}
- * operation, and a Trino plan never contains one.
+ * A scan over literals, deterministic runs, and bounded optional captures, for the Trino, RE2,
+ * Java, and Rust frontends; no other frontend builds one. A Trino plan preserves valid UTF-8
+ * behavior, and malformed input has Trino's garbage-in, garbage-out contract. An RE2, Java, or Rust
+ * plan reads each non-ASCII character as RE2's classes do (see {@link Utf8#re2CharacterWidth}), as
+ * the ordinary engine compiled for those languages does, so it agrees with that engine on every
+ * input, malformed UTF-8 included. The languages share the analysis and the executors; in an RE2,
+ * Java, or Rust plan, each run admitting non-ASCII characters, and each delimited capture, becomes
+ * an {@code RE2_} operation, and a Trino plan never contains one.
  */
 final class TrinoScanPlan
 {
@@ -87,10 +87,10 @@ final class TrinoScanPlan
         RUN,
         SAVE,
         FORK,
-        // In an RE2 or Java plan, a RUN whose set holds every non-ASCII character.
+        // In an RE2, Java, or Rust plan, a RUN whose set holds every non-ASCII character.
         RE2_RUN,
-        // A DELIMITED_CAPTURE of an RE2 or Java plan: a captured RE2_RUN of every character
-        // except an ASCII delimiter, and the delimiter.
+        // A DELIMITED_CAPTURE of an RE2, Java, or Rust plan: a captured RE2_RUN of every
+        // character except an ASCII delimiter, and the delimiter.
         RE2_DELIMITED_CAPTURE,
     }
 
@@ -104,6 +104,7 @@ final class TrinoScanPlan
         TRINO,
         RE2,
         JAVA,
+        RUST,
     }
 
     private enum StartKind
@@ -162,8 +163,9 @@ final class TrinoScanPlan
     // scan when failed candidates are dense. That density handoff, and ranged boolean find on
     // the ordinary engine, depend on the input's shape rather than on the work spent, so they
     // need engines that agree on every input, malformed UTF-8 included: a plan that consumes
-    // only ASCII bytes matches only ASCII bytes. An RE2 or Java plan agrees with the ordinary
-    // engine on every input but keeps this rule, so that every language routes each shape alike.
+    // only ASCII bytes matches only ASCII bytes. An RE2, Java, or Rust plan agrees with the
+    // ordinary engine on every input but keeps this rule, so that every language routes each
+    // shape alike.
     // Every unanchored search, of any plan, also continues on the ordinary engine once its failed
     // attempts exceed the work budget. Both engines agree on valid UTF-8; on malformed input that
     // continuation may give the ordinary engine's answer. Every operation applies the same budget
@@ -177,9 +179,9 @@ final class TrinoScanPlan
     // than the DFA makes transitions, and its faster run scans cannot repay them. A plan with a
     // boolean tail keeps the plan, since its attempt stops at the run's minimum; without one the
     // attempt reads as far as the DFA does. The input's length picks the engine, so as for the
-    // density handoff both engines must agree on every input: an RE2 or Java plan always does,
-    // and a Trino plan does when it consumes only ASCII bytes. Calls that report boundaries or
-    // captures always run the plan.
+    // density handoff both engines must agree on every input: an RE2, Java, or Rust plan always
+    // does, and a Trino plan does when it consumes only ASCII bytes. Calls that report boundaries
+    // or captures always run the plan.
     private final boolean allowsOrdinaryShortBooleanMatch;
     // WORK_BUDGET_BYTES, or a negative value with which every unanchored search hands off
     // before its first attempt. Only tests select the negative value.
@@ -428,17 +430,18 @@ final class TrinoScanPlan
 
     /**
      * Analyzes {@code expression} for {@code language}, which is {@link Language#TRINO},
-     * {@link Language#RE2}, or {@link Language#JAVA}. The languages admit the same shapes, except
-     * that a Java end admits fewer runs before it, and a Java plan reads input as an RE2 plan does.
-     * Only Java's default {@code $} and {@code \Z} build a Java end.
+     * {@link Language#RE2}, {@link Language#JAVA}, or {@link Language#RUST}. The languages admit
+     * the same shapes, except that a Java end admits fewer runs before it. Only Java's default
+     * {@code $} and {@code \Z} build a Java end. An RE2, Java, or Rust plan reads input by RE2's
+     * rules.
      */
     static TrinoScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
-        // The RE2 and Java frontends compile to the same byte ranges, so their plans read
-        // characters as RE2's classes do.
+        // The RE2, Java, and Rust frontends compile in the RE2 dialect to the same byte ranges,
+        // so their plans read characters as RE2's classes do.
         boolean re2Characters = switch (language) {
             case TRINO -> false;
-            case RE2, JAVA -> true;
+            case RE2, JAVA, RUST -> true;
             case NONE -> throw new IllegalArgumentException("scan plan language is NONE, which builds no plan");
         };
         StartKind startKind = startKind(expression, 0);
@@ -1739,9 +1742,9 @@ final class TrinoScanPlan
         if (isRun(leading)) {
             // A failed minimum-width check must not retry from a continuation byte of
             // otherwise valid UTF-8. In a Trino plan, malformed input retains Trino's unspecified
-            // behavior. In an RE2 or Java plan this skips only the continuation bytes of a valid
-            // character, where RE2 starts no match, and advances one byte from the start of an
-            // invalid sequence.
+            // behavior. In an RE2, Java, or Rust plan this skips only the continuation bytes of a
+            // valid character, where RE2 starts no match, and advances one byte from the start of
+            // an invalid sequence.
             return candidate + Utf8.decodedWidth(Utf8.decode(bytes, candidate, end));
         }
         return candidate + 1;
@@ -2263,7 +2266,7 @@ final class TrinoScanPlan
          * depends on the input, since each candidate inside one run rescans the rest of it, so
          * the ordinary engine keeps those patterns. The exception is an unbounded run of every
          * byte except the one-byte case-sensitive literal that follows it: the run stops only
-         * at that byte, which the literal then matches, or, in an RE2 or Java plan, at a
+         * at that byte, which the literal then matches, or, in an RE2, Java, or Rust plan, at a
          * sequence RE2 rejects, where the attempt fails and the search resumes at the run end.
          */
         private boolean canSearchUnanchored()
@@ -2615,10 +2618,10 @@ final class TrinoScanPlan
         }
 
         /**
-         * Compacts captured runs and tails. An RE2 or Java plan converts a captured run that ends
-         * at its delimiter into an RE2 delimited capture, which validates the characters it skips,
-         * and keeps a final run as a run before END, since a tail would skip bytes unchecked; each
-         * swap is one for one, so the operation limit admits the same shapes.
+         * Compacts captured runs and tails. An RE2, Java, or Rust plan converts a captured run
+         * that ends at its delimiter into an RE2 delimited capture, which validates the characters
+         * it skips, and keeps a final run as a run before END, since a tail would skip bytes
+         * unchecked; each swap is one for one, so the operation limit admits the same shapes.
          */
         private void compact(int captureCount, boolean anchoredEnd, boolean re2Characters)
         {
