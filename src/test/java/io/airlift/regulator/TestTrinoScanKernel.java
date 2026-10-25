@@ -86,6 +86,8 @@ public class TestTrinoScanKernel
             "TrinoScanKernelSupport.re2RunMatch",
             "TrinoScanKernelSupport.re2RunMatchBefore",
             "TrinoScanKernelSupport.re2RunMatchMinimum",
+            "TrinoScanKernelSupport.re2SetRunMatch",
+            "TrinoScanKernelSupport.re2SetRunMatchMinimum",
             "TrinoScanKernelSupport.readInt",
             "TrinoScanKernelSupport.readLong",
             "TrinoScanKernelSupport.readShort",
@@ -96,6 +98,7 @@ public class TestTrinoScanKernel
             "TrinoScanPlan$Step.last",
             "TrinoScanPlan$Step.lastOffset",
             "TrinoScanPlan$Step.width",
+            "TrinoScanPlanRun.asciiStopNeedles",
             "TrinoScanPlanRun.candidateNibbleTables",
             "TrinoScanPlanRun.candidateScan",
             "TrinoScanPlanRun.highestMember",
@@ -106,7 +109,11 @@ public class TestTrinoScanKernel
             "TrinoScanPlanRun.members",
             "TrinoScanPlanRun.minimum",
             "TrinoScanPlanRun.needles",
+            "TrinoScanPlanRun.nonAsciiMembers",
             "Utf8.decodedWidth",
+            "Utf8MemberTable.lastBytes",
+            "Utf8MemberTable.leads",
+            "Utf8MemberTable.nodes",
             "VectorSupport.isAvailable",
             "VectorTrinoScanKernelSupport.containsLiteral",
             "VectorTrinoScanKernelSupport.findByte",
@@ -272,14 +279,14 @@ public class TestTrinoScanKernel
         // The RE2 executor class of each attempt kind, whose run steps read characters as RE2 does.
         // TestRe2ScanPlan compares their results with the ordinary engine.
         Set<String> re2Kinds = new LinkedHashSet<>();
-        for (String expression : List.of("^https?://([^/]+)/.*$", "^https?://([^/]+)/", "^x([^/]+)", "x([^/]+)", "([^:]+):")) {
+        for (String expression : List.of("^https?://([^/]+)/.*$", "^https?://([^/]+)/", "^x([^/]+)", "x([^/]+)", "([^:]+):", "^x([^/\\x{85}]+)")) {
             Re2 re2 = Re2.compile(utf8Slice(expression), Re2.Options.defaults().setGenerateBytecode(true));
             assertThat(re2.usesGeneratedBytecode()).as(expression).isTrue();
             boolean ordinaryHandoff = re2.usesTrinoScanPlanForFindForDiagnostics() && re2.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
             invoked.addAll(invokedMethods(TrinoScanKernelGenerator.re2ClassfileForDiagnostics(re2.caseSensitiveTrinoScanPlan(), ordinaryHandoff)));
             re2Kinds.addAll(List.of(re2.caseSensitiveTrinoScanPlan().operationsForDiagnostics().split(",")));
         }
-        assertThat(re2Kinds).contains("RE2_RUN", "RE2_DELIMITED_CAPTURE");
+        assertThat(re2Kinds).contains("RE2_RUN", "RE2_SET_RUN", "RE2_DELIMITED_CAPTURE");
         // A Java end, whose class checks the final line terminator. TestJavaScanPlan compares its
         // results with the JDK.
         Re2 javaEnd = JavaRegexp.compile(utf8Slice("^x([a-z]+)$"), JavaRegexp.Options.defaults().setGenerateBytecode(true)).pattern();

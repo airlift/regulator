@@ -1929,8 +1929,10 @@ cannot be generated or defined is silently interpreted, nothing generated
 loads without the option, generated code calls its own copies of the
 interpreter's helpers, and the class is defined in Regulator's package and is
 not charged to the memory budget. RE2 runs and delimited captures call copies
-of the RE2 run reader and its vector stop scan, so a generated plan reports
-what the ordinary engine reports on every input, malformed UTF-8 included.
+of the RE2 run reader and its vector stop scan, and runs of some non-ASCII
+characters also call a copy of their member reader, so a generated plan
+reports what the ordinary engine reports on every input, malformed UTF-8
+included.
 `JavaRegexp.Options.setGenerateBytecode` and
 `RustRegexp.Options.setGenerateBytecode` apply these decisions to Java and Rust
 plans; the last bullets record the rules and measurements specific to each.
@@ -1948,9 +1950,8 @@ plans; the last bullets record the rules and measurements specific to each.
   guarded object layout, do not change. Released versions had a final `Re2`;
   the LIKE generator made the same change to `TrinoLikePattern`.
 - Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
-  stays interpreted, as in Trino, and so for now does a plan with a run of
-  some non-ASCII characters but not all. Unlike Trino, a single-byte matcher or
-  a count that skips the plan does not exclude a pattern, because only the calls
+  stays interpreted, as in Trino. Unlike Trino, a single-byte matcher or a
+  count that skips the plan does not exclude a pattern, because only the calls
   that reach the plan change.
 - Short boolean calls that the interpreter hands to the DFA stay on the
   generated class, as in Trino. Boolean calls of a start-anchored plan run its
@@ -2021,6 +2022,20 @@ plans; the last bullets record the rules and measurements specific to each.
   generation takes 453 to 715 us per pattern on R9g and 1024 to 1602 us on R8i,
   against 4 to 13 us and 5 to 16 us for the interpreted plan and 3 to 11 us and
   4 to 12 us for the ordinary engine.
+- Generated classes read a set of some non-ASCII characters with a copy of the
+  interpreter's reader, full lead entries and lead-byte width included. With
+  the trie walk for every lead, generated Java `URL_NON_ASCII` `contains` and
+  `count` with `javaLineTerminators=true` took 0.93 to 0.94 times the ordinary
+  engine's time on R9g and 1.08 to 1.09 on R8i; with full lead entries and the
+  lead-byte width they take 0.60 and 0.85 to 0.87. With the trie walk, the
+  generated classes of the plans that need these sets took a geometric mean of
+  0.648 and 0.687 times the interpreted plan's time over 205 rows, and over the
+  43 other rows of the reader measurement in [RE2 Scan Plans](#re2-scan-plans),
+  the reader takes 0.892 and 0.949 times the trie walk's generated time. On
+  R8i, Rust `PERL_UNANCHORED` `contains` and `count` with Unicode `\d` take
+  1.06 to 1.07 times their time with full lead entries alone, 22.7 ns against
+  21.4 ns for `contains`, still 0.42 to 0.51 times the ordinary engine's; this
+  loss is accepted. The reader does not change compilation with generation.
 
 ## Generated Trino LIKE Kernels
 

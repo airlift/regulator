@@ -45,8 +45,8 @@ final class Utf8MemberTable
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(Utf8MemberTable.class);
     private static final int NODE_ENTRIES = 64;
-    private static final int WIDTH_SHIFT = 24;
-    private static final int NODE_MASK = (1 << WIDTH_SHIFT) - 1;
+    static final int WIDTH_SHIFT = 24;
+    static final int NODE_MASK = (1 << WIDTH_SHIFT) - 1;
     // Marks a full lead entry, whose low 16 bits are the lowest and highest second byte.
     private static final int FULL_LEAD = 1 << 31;
 
@@ -84,6 +84,7 @@ final class Utf8MemberTable
 
     /// Returns the width of the member whose encoding starts at `cursor`, or 0 when none
     /// does. The byte at `cursor`, which must be before `end`, is at or above 0x80.
+    /// Copied as `TrinoScanKernelSupport.memberWidth`; keep the copy in step.
     int memberWidth(byte[] input, int cursor, int end)
     {
         int first = input[cursor];
@@ -125,6 +126,23 @@ final class Utf8MemberTable
     boolean isLead(int value)
     {
         return leads[value & 0x7F] != 0;
+    }
+
+    // These accessors serve the copy of memberWidth in TrinoScanKernelSupport.
+
+    int[] leads()
+    {
+        return leads;
+    }
+
+    int[] nodes()
+    {
+        return nodes;
+    }
+
+    long[] lastBytes()
+    {
+        return lastBytes;
     }
 
     long estimatedRetainedSize()

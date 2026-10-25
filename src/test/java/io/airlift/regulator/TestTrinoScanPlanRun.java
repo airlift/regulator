@@ -137,6 +137,8 @@ public class TestTrinoScanPlanRun
                 int expectedStop = result == null ? -1 : result.end();
                 int stop = run.re2SetMatch(sequence, 0, sequence.length);
                 assertThat(stop).as(description).isEqualTo(expectedStop);
+                // Generated kernels read the set by a copy of the run's reader.
+                assertThat(TrinoScanKernelSupport.re2SetRunMatch(run, sequence, 0, sequence.length)).as("kernel " + description).isEqualTo(expectedStop);
                 if (stop > 0) {
                     // Each character the run reads starts with a member byte.
                     assertThat(run.members()[sequence[0] & 0xFF]).as(description).isTrue();

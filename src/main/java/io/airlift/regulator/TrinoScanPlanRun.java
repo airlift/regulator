@@ -361,6 +361,11 @@ final class TrinoScanPlanRun
         return nonAsciiMembers;
     }
 
+    byte[] asciiStopNeedles()
+    {
+        return asciiStopNeedles;
+    }
+
     int candidateScan()
     {
         return candidateScan;
@@ -564,6 +569,7 @@ final class TrinoScanPlanRun
     /// reads a non-ASCII character as the ordinary engine does, by the exact encodings of the
     /// run's members (see [Utf8MemberTable]), so any other sequence ends the run like a
     /// non-member byte.
+    /// Copied as `TrinoScanKernelSupport.re2SetRunMatch`; keep the copy in step.
     int re2SetMatch(byte[] input, int cursor, int end)
     {
         if (maximum < 0 && minimum <= 1) {
@@ -586,6 +592,7 @@ final class TrinoScanPlanRun
     /// The version of [#re2MatchMinimum] for a run of some non-ASCII characters but not all:
     /// the position after the run's minimum characters as [#re2SetMatch] reads them, or
     /// `-1` when they are absent.
+    /// Copied as `TrinoScanKernelSupport.re2SetRunMatchMinimum`; keep the copy in step.
     int re2SetMatchMinimum(byte[] input, int cursor, int end)
     {
         for (int count = 0; count < minimum; count++) {
@@ -598,6 +605,7 @@ final class TrinoScanPlanRun
         return cursor;
     }
 
+    // Copied as TrinoScanKernelSupport.re2SetRunMemberWidth; keep the copy in step.
     private int re2SetMemberWidth(byte[] input, int cursor, int end)
     {
         if (cursor >= end) {
@@ -610,6 +618,7 @@ final class TrinoScanPlanRun
         return members[value] ? 1 : 0;
     }
 
+    // Copied as TrinoScanKernelSupport.re2SetRunScan; keep the copy in step.
     private int re2SetScan(byte[] input, int cursor, int end)
     {
         while (true) {
