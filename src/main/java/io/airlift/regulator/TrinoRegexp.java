@@ -14,7 +14,7 @@
 package io.airlift.regulator;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import io.airlift.regulator.Re2.TrinoScanPlanMode;
+import io.airlift.regulator.Re2.ScanPlanMode;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceUtf8;
@@ -154,7 +154,7 @@ public sealed class TrinoRegexp
     /// Compiles a copied snapshot of `pattern` and the current option values.
     public static TrinoRegexp compile(Slice pattern, Options options)
     {
-        return compile(pattern, options, TrinoScanPlanMode.DEFAULT);
+        return compile(pattern, options, ScanPlanMode.DEFAULT);
     }
 
     /// Compiles `pattern` so that every unanchored scan-plan search continues on the
@@ -166,17 +166,17 @@ public sealed class TrinoRegexp
 
     static TrinoRegexp compileForcingScanPlanHandoffForTesting(Slice pattern, Options options)
     {
-        return compile(pattern, options, TrinoScanPlanMode.FORCE_HANDOFF);
+        return compile(pattern, options, ScanPlanMode.FORCE_HANDOFF);
     }
 
     /// Compiles `pattern` as [#compile(Slice)] does, but builds no scan plan, so the
     /// searches the plan would run use the ordinary engine.
     static TrinoRegexp compileWithoutScanPlanForTesting(Slice pattern)
     {
-        return compile(pattern, Options.defaults(), TrinoScanPlanMode.DISABLED);
+        return compile(pattern, Options.defaults(), ScanPlanMode.DISABLED);
     }
 
-    private static TrinoRegexp compile(Slice pattern, Options options, TrinoScanPlanMode scanPlanMode)
+    private static TrinoRegexp compile(Slice pattern, Options options, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");

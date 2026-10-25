@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.Re2.ScanPlanMode;
 import io.airlift.slice.Slice;
 
 import java.util.Map;
@@ -208,33 +209,31 @@ public final class JavaRegexp
     /// Compiles a copied snapshot of `pattern` and the current option values.
     public static JavaRegexp compile(Slice pattern, Options options)
     {
-        return compile(pattern, options, true, false);
+        return compile(pattern, options, ScanPlanMode.DEFAULT);
     }
 
     /// Compiles `pattern` as [#compile(Slice,Options)] does, but without a scan plan,
     /// so tests and benchmarks can compare a plan with the ordinary engine.
     static JavaRegexp compileWithoutScanPlanForTesting(Slice pattern, Options options)
     {
-        return compile(pattern, options, false, false);
+        return compile(pattern, options, ScanPlanMode.DISABLED);
     }
 
     /// Compiles `pattern` as [#compile(Slice,Options)] does, but a scan plan
     /// continues every unanchored search on the ordinary engine before its first attempt.
     static JavaRegexp compileForcingScanPlanHandoffForTesting(Slice pattern, Options options)
     {
-        return compile(pattern, options, true, true);
+        return compile(pattern, options, ScanPlanMode.FORCE_HANDOFF);
     }
 
-    private static JavaRegexp compile(Slice pattern, Options options, boolean scanPlan, boolean forceScanPlanHandoff)
+    private static JavaRegexp compile(Slice pattern, Options options, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
         int parseFlags = options.parseFlags();
         ParseResult parsed = JavaRegexpParser.parse(patternCopy, parseFlags);
-        Re2 compiled = scanPlan
-                ? Re2.compileParsedForJava(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), forceScanPlanHandoff)
-                : Re2.compileParsed(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies());
+        Re2 compiled = Re2.compileParsedForJava(patternCopy, parsed, parseFlags, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
         return new JavaRegexp(options.generateBytecode() ? Re2.withGeneratedBytecode(compiled) : compiled);
     }
 
