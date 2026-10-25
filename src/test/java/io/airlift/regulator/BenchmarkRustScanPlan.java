@@ -1,0 +1,268 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.airlift.regulator;
+
+import io.airlift.slice.Slice;
+import org.openjdk.jmh.annotations.Benchmark;
+import org.openjdk.jmh.annotations.BenchmarkMode;
+import org.openjdk.jmh.annotations.Fork;
+import org.openjdk.jmh.annotations.Measurement;
+import org.openjdk.jmh.annotations.Mode;
+import org.openjdk.jmh.annotations.OutputTimeUnit;
+import org.openjdk.jmh.annotations.Param;
+import org.openjdk.jmh.annotations.Scope;
+import org.openjdk.jmh.annotations.Setup;
+import org.openjdk.jmh.annotations.State;
+import org.openjdk.jmh.annotations.Warmup;
+import org.openjdk.jmh.runner.Runner;
+import org.openjdk.jmh.runner.options.Options;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
+import static io.airlift.slice.Slices.EMPTY_SLICE;
+import static io.airlift.slice.Slices.utf8Slice;
+
+/**
+ * Public Rust operations over the workloads and rows of {@link BenchmarkRe2ScanPlan}, with each
+ * pattern written in Rust syntax for the same match: {@code \d} and {@code \w} become
+ * {@code (?-u:\d)} and {@code (?-u:\w)}, since Rust's Perl classes are Unicode and RE2's are
+ * ASCII. The rest keeps its RE2 text: without multi-line mode Rust's {@code $} is the strict end,
+ * as RE2's is; Rust's {@code (?i)} folds with simple case folding, as RE2's does, so {@code K} also
+ * matches the Kelvin sign; and without dotAll Rust's dot excludes only {@code \n}, as RE2's does.
+ * {@link RustRegexp} has no replacement, so there is no replace method. No compilation cache is
+ * involved.
+ */
+@BenchmarkMode(Mode.AverageTime)
+@OutputTimeUnit(TimeUnit.NANOSECONDS)
+@Fork(3)
+@Warmup(iterations = 5, time = 1)
+@Measurement(iterations = 5, time = 1)
+public class BenchmarkRustScanPlan
+{
+    @State(Scope.Thread)
+    public static class BenchmarkData
+    {
+        // The BenchmarkRe2ScanPlan workloads.
+        @Param({
+                "URL",
+                "URL_SHORT",
+                "URL_128",
+                "URL_4096",
+                "ANCHORED_PREFIX",
+                "ANCHORED_QUERY",
+                "ANCHORED_HOST",
+                "ANCHORED_HOST_4096",
+                "ANCHORED_WWW_HOST",
+                "UNANCHORED_URL",
+                "UNANCHORED_END",
+                "UNANCHORED_RUN",
+                "UNANCHORED_RUN_LEADING",
+                "UNANCHORED_SET",
+                "UNANCHORED_MIXED",
+                "UNANCHORED_TAIL_4096",
+                "LONG_UNANCHORED_RUN",
+                "FOLDED_ANCHORED",
+                "FOLDED_OPTIONAL",
+                "FOLDED_UNANCHORED",
+                "FOLDED_RUN",
+                "FOLDED_MIXED",
+                "LITERAL_REPEATS",
+                "LITERAL_CONTROLS",
+                "DEEP_REJECTIONS",
+                "MIXED",
+                "LONG_PATH",
+                "LONG_HOST",
+                "FAMILY",
+                "DIVERSE",
+                "FALLBACK",
+                "SETS",
+                "BOUNDED",
+                "LONG_SET",
+                "LONG_ASCII",
+                "SET_MIXED",
+                "OPTIONALS",
+                "OPTIONAL_RETRY",
+                "OPTIONAL_MIXED",
+                "LONG_OPTIONAL",
+                "RETRY_64",
+                "RETRY_127",
+                "RETRY_128",
+                "RETRY_256",
+                "LONG_RETRY",
+                "LOWERED_FALLBACK",
+                "URL_NON_ASCII",
+                "URL_MALFORMED",
+                "UNANCHORED_URL_NON_ASCII",
+                "UNANCHORED_URL_MALFORMED",
+                "LONG_HOST_NON_ASCII",
+                "LONG_HOST_MALFORMED",
+                "UNANCHORED_TAIL_4096_NON_ASCII",
+                "UNANCHORED_TAIL_4096_MALFORMED",
+        })
+        public String workload;
+
+        @Param({"true", "false"})
+        public boolean dotAll;
+
+        Slice[] expressions;
+        private RustRegexp.Options options;
+        RustRegexp[] patterns;
+        private Re2Matcher[] matchers;
+        private int[] bounds;
+        private int[] extractionGroups;
+        Slice[] inputs;
+        private int cursor;
+        private int patternIndex;
+
+        @Setup
+        public void setup()
+        {
+            BenchmarkRe2ScanPlan.BenchmarkData source = new BenchmarkRe2ScanPlan.BenchmarkData();
+            source.workload = workload;
+            source.dotAll = dotAll;
+            source.scanPlan = true;
+            source.setup();
+
+            options = RustRegexp.Options.defaults();
+            int count = source.expressions.length;
+            expressions = new Slice[count];
+            patterns = new RustRegexp[count];
+            matchers = new Re2Matcher[count];
+            bounds = new int[2];
+            extractionGroups = new int[count];
+            for (int index = 0; index < count; index++) {
+                expressions[index] = utf8Slice(rustExpression(source.expressions[index].toStringUtf8()));
+                patterns[index] = RustRegexp.compile(expressions[index], options);
+                matchers[index] = patterns[index].matcher(EMPTY_SLICE);
+                extractionGroups[index] = patterns[index].capturingGroupCount() == 0 ? 0 : 1;
+            }
+            inputs = source.inputs;
+        }
+
+        private Slice next()
+        {
+            int row = cursor++;
+            if (cursor == inputs.length) {
+                cursor = 0;
+            }
+            patternIndex = row % patterns.length;
+            return inputs[row];
+        }
+    }
+
+    @Benchmark
+    public boolean contains(BenchmarkData data)
+    {
+        Slice input = data.next();
+        return data.patterns[data.patternIndex].find(input);
+    }
+
+    @Benchmark
+    public long count(BenchmarkData data)
+    {
+        Slice input = data.next();
+        return data.patterns[data.patternIndex].count(input);
+    }
+
+    @Benchmark
+    public long boundaries(BenchmarkData data)
+    {
+        Slice input = data.next();
+        int[] bounds = data.bounds;
+        return data.patterns[data.patternIndex].findInto(input, bounds) ? ((long) bounds[0] << 32) | bounds[1] : -1;
+    }
+
+    @Benchmark
+    public Slice extract(BenchmarkData data)
+    {
+        Slice input = data.next();
+        Re2Matcher matcher = data.matchers[data.patternIndex];
+        return matcher.reset(input).find() ? matcher.group(data.extractionGroups[data.patternIndex]) : null;
+    }
+
+    @Benchmark
+    public List<Slice> extractAll(BenchmarkData data)
+    {
+        Slice input = data.next();
+        Re2Matcher matcher = data.matchers[data.patternIndex].reset(input);
+        int group = data.extractionGroups[data.patternIndex];
+        List<Slice> matches = new ArrayList<>();
+        while (matcher.find()) {
+            matches.add(matcher.group(group));
+        }
+        return matches;
+    }
+
+    @Benchmark
+    public RustRegexp compile(BenchmarkData data)
+    {
+        data.next();
+        return RustRegexp.compile(data.expressions[data.patternIndex], data.options);
+    }
+
+    /**
+     * Returns {@code expression}, a {@link BenchmarkRe2ScanPlan} pattern, in Rust syntax. Only the
+     * Perl classes {@code \d} and {@code \w} differ in these patterns, and each turns off Unicode
+     * mode for itself. Any other Perl class, or one inside a bracketed class, has no such rewrite,
+     * so it throws {@link IllegalArgumentException}.
+     */
+    static String rustExpression(String expression)
+    {
+        StringBuilder rust = new StringBuilder();
+        boolean inClass = false;
+        for (int index = 0; index < expression.length(); index++) {
+            char character = expression.charAt(index);
+            if (character == '\\') {
+                char escaped = expression.charAt(++index);
+                if ("DsSW".indexOf(escaped) >= 0 || (inClass && (escaped == 'd' || escaped == 'w'))) {
+                    throw new IllegalArgumentException("Perl class without a Rust rewrite: " + expression);
+                }
+                if (escaped == 'd' || escaped == 'w') {
+                    rust.append("(?-u:\\").append(escaped).append(')');
+                }
+                else {
+                    rust.append(character).append(escaped);
+                }
+                continue;
+            }
+            if (character == '[') {
+                inClass = true;
+            }
+            else if (character == ']') {
+                inClass = false;
+            }
+            rust.append(character);
+        }
+        return rust.toString();
+    }
+
+    /**
+     * Returns the {@code workload} parameter values in declaration order.
+     */
+    static List<String> workloads()
+            throws NoSuchFieldException
+    {
+        return List.of(BenchmarkData.class.getDeclaredField("workload").getAnnotation(Param.class).value());
+    }
+
+    public static void main(String[] args)
+            throws Exception
+    {
+        Options options = buildOptions(BenchmarkRustScanPlan.class, args);
+        new Runner(options).run();
+    }
+}
