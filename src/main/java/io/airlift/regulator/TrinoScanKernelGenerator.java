@@ -85,9 +85,9 @@ import static java.util.Objects.requireNonNull;
  * operation the pattern routes to the plan. The class implements {@link CompiledTrinoScan} by
  * delegating to those entries, so a caller can also bind an entry directly.
  * <p>
- * An RE2 or Java pattern, a {@link Re2} compiled in the RE2 dialect, gets a smaller class from the
- * same attempt loop: an RE2 executor class, which implements {@link CompiledRe2Scan} with the plan
- * methods it replaces, while the pattern keeps its own routing.
+ * An RE2, Java, or Rust pattern, a {@link Re2} compiled in the RE2 dialect, gets a smaller class
+ * from the same attempt loop: an RE2 executor class, which implements {@link CompiledRe2Scan} with
+ * the plan methods it replaces, while the pattern keeps its own routing.
  * <p>
  * Setting the system property {@value #DUMP_DIRECTORY_PROPERTY} writes each generated class to
  * that directory before it is defined.
@@ -289,9 +289,10 @@ final class TrinoScanKernelGenerator
     }
 
     /**
-     * Generates and defines the executor class of an RE2 or Java pattern for its case-sensitive
-     * scan {@code plan}, with a {@code searchBeforeHandoff} entry when {@code ordinaryHandoff} says
-     * that full-Slice find hands off to the ordinary engine. Failures propagate.
+     * Generates and defines the executor class of an RE2, Java, or Rust pattern for its
+     * case-sensitive scan {@code plan}, with a {@code searchBeforeHandoff} entry when
+     * {@code ordinaryHandoff} says that full-Slice find hands off to the ordinary engine. Failures
+     * propagate.
      */
     static CompiledRe2Scan generateCompiledRe2Scan(TrinoScanPlan plan, boolean ordinaryHandoff)
     {

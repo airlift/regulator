@@ -1814,8 +1814,9 @@ interpreter's helpers, and the class is defined in Regulator's package and is
 not charged to the memory budget. RE2 runs and delimited captures call copies
 of the RE2 run reader and its vector stop scan, so a generated plan reports
 what the ordinary engine reports on every input, malformed UTF-8 included.
-`JavaRegexp.Options.setGenerateBytecode` applies these decisions to Java plans;
-the last bullet records its measurements.
+`JavaRegexp.Options.setGenerateBytecode` and
+`RustRegexp.Options.setGenerateBytecode` apply these decisions to Java and Rust
+plans; the last bullets record the rules and measurements specific to each.
 
 - The class is an executor, not a set of operation entries. It replaces the
   plan's attempt, or an unanchored plan's region search, with the same
@@ -1883,6 +1884,23 @@ the last bullet records its measurements.
   times the ordinary engine's; no row is slower than the interpreted plan, and
   R8i `LONG_HOST` is within noise. Their compilation takes 0.47 to 0.69 ms per
   pattern on R9g and 1.11 to 1.52 ms on R8i.
+- `RustRegexp.Options.setGenerateBytecode` gives Rust patterns the same executor
+  classes under the same rules. A Rust plan is an RE2 plan, so the emitter,
+  eligibility, and routes are RE2's, and `RustRegexp` holds the generated `Re2`
+  subclass. Byte-mode patterns build no plan, so the option leaves them
+  unchanged. On R9g and R8i, the 45 matching rows of `BenchmarkRustScanPlan`
+  with `generateBytecode=true`, on the `URL`, `ANCHORED_HOST`,
+  `UNANCHORED_URL`, `UNANCHORED_TAIL_4096`, `OPTIONALS`, `OPTIONAL_RETRY`,
+  `LONG_HOST`, `URL_MALFORMED`, and `UNANCHORED_URL_MALFORMED` workloads, take
+  a geometric mean of 0.536 and 0.597 times the interpreted plan's time and
+  0.113 and 0.123 times the ordinary engine's, excluding compilation. Over the
+  40 of those rows that the Java measurement shares, Rust classes take 0.535
+  and 0.604 times and Java classes took 0.530 and 0.606. No generated row is
+  slower than the interpreted plan or the ordinary engine beyond noise, and R8i
+  `LONG_HOST`, RE2's exception, is within noise for Rust. Compilation with
+  generation takes 453 to 715 us per pattern on R9g and 1024 to 1602 us on R8i,
+  against 4 to 13 us and 5 to 16 us for the interpreted plan and 3 to 11 us and
+  4 to 12 us for the ordinary engine.
 
 ## Generated Trino LIKE Kernels
 

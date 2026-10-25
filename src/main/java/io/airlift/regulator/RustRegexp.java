@@ -53,6 +53,7 @@ public final class RustRegexp
         private int nestLimit = RustRegexpParser.DEFAULT_NEST_LIMIT;
         private long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
         private ByteFrequencies byteFrequencies = ByteFrequencies.uniform();
+        private boolean generateBytecode;
 
         private Options() {}
 
@@ -215,6 +216,25 @@ public final class RustRegexp
             return this;
         }
 
+        boolean generateBytecode()
+        {
+            return generateBytecode;
+        }
+
+        /**
+         * Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
+         * so each operation that would run its specialized scan runs dedicated bytecode instead.
+         * Operations that take another route keep it. Patterns that are not eligible, or whose
+         * class cannot be generated, compile as they do without this option. Disabled by default.
+         *
+         * @see RustRegexp#usesGeneratedBytecode()
+         */
+        public Options setGenerateBytecode(boolean generateBytecode)
+        {
+            this.generateBytecode = generateBytecode;
+            return this;
+        }
+
         int syntaxFlags()
         {
             int flags = 0;
@@ -313,12 +333,22 @@ public final class RustRegexp
         Re2 compiled = scanPlan && (compileFlags & Regexp.LATIN1) == 0
                 ? Re2.compileParsedForRust(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), forceScanPlanHandoff)
                 : Re2.compileParsed(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies());
-        return new RustRegexp(compiled);
+        return new RustRegexp(options.generateBytecode() ? Re2.withGeneratedBytecode(compiled) : compiled);
     }
 
     Re2 pattern()
     {
         return pattern;
+    }
+
+    /**
+     * Returns whether this compiled pattern has a class generated for it, which only
+     * {@link Options#setGenerateBytecode(boolean)} enables. Each operation of such a pattern that
+     * would run its specialized scan runs the generated class.
+     */
+    public boolean usesGeneratedBytecode()
+    {
+        return pattern.usesGeneratedBytecode();
     }
 
     public boolean find(Slice input)

@@ -51,7 +51,9 @@ import static io.airlift.slice.Slices.utf8Slice;
  * <p>
  * With {@code scanPlan=false}, every pattern compiles without its scan plan, so the methods time the
  * ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
- * {@code -p scanPlan=true} this source also times a build without Rust scan plans.
+ * {@code -p scanPlan=true} this source also times a build without Rust scan plans. With
+ * {@code generateBytecode=true}, each pattern with a case-sensitive plan runs a class generated for
+ * it; that option is also set reflectively, and only then.
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -128,6 +130,11 @@ public class BenchmarkRustScanPlan
         @Param({"true", "false"})
         public boolean scanPlan;
 
+        // Experimental per-pattern scan kernels; false compiles every pattern as it would without
+        // the option.
+        @Param("false")
+        public boolean generateBytecode;
+
         Slice[] expressions;
         private RustRegexp.Options options;
         private MethodHandle compiler;
@@ -148,7 +155,7 @@ public class BenchmarkRustScanPlan
             source.scanPlan = true;
             source.setup();
 
-            options = RustRegexp.Options.defaults();
+            options = generateBytecode ? generatingOptions() : RustRegexp.Options.defaults();
             compiler = compiler(scanPlan);
             int count = source.expressions.length;
             expressions = new Slice[count];
@@ -277,6 +284,22 @@ public class BenchmarkRustScanPlan
         catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Cannot find RustRegexp." + (scanPlan ? "compile" : "compileWithoutScanPlanForTesting"), e);
         }
+    }
+
+    /**
+     * Returns default options that generate bytecode, resolved reflectively so that this source
+     * also runs against a build without the option when it is not requested.
+     */
+    private static RustRegexp.Options generatingOptions()
+    {
+        RustRegexp.Options options = RustRegexp.Options.defaults();
+        try {
+            RustRegexp.Options.class.getMethod("setGenerateBytecode", boolean.class).invoke(options, true);
+        }
+        catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Cannot find RustRegexp.Options.setGenerateBytecode", e);
+        }
+        return options;
     }
 
     private static RustRegexp compile(MethodHandle compiler, Slice expression, RustRegexp.Options options)
