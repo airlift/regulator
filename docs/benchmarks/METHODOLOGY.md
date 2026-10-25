@@ -149,6 +149,7 @@ Representative JMH classes include:
 | `BenchmarkClickBenchRegexp` | [ClickBench URL pattern](CLICKBENCH_REGEXP.md): dot-all matching, capture, replacement, and host/path scaling |
 | `BenchmarkExpressionPlans` | Direct expression plans and general controls |
 | `BenchmarkEverydayTrinoRegexp` | Application-shaped Trino operations over rotating Slice values |
+| `BenchmarkSpecializedTrinoRegexp` | [Specialized-pattern workloads](TRINO_SCAN_PLAN.md#benchmarks): one Trino operation per workload with the regular engine, the specialized engine, and the compiled pattern const-bound the way an engine like Trino binds it, each pattern in its own JVM |
 | `BenchmarkTrinoRegexp` | Fixed-haystack Trino operation diagnostics |
 | `BenchmarkTrinoRows` | [Normative Trino rows](#normative-trino-rows): one Trino function per real corpus row, for literals, ordered pairs, and `.*literal.*` |
 | `BenchmarkTrinoLikeRows` | [Normative Trino rows](#normative-trino-rows): one Trino LIKE contains or ordered match per real corpus row, interpreted or generated |
