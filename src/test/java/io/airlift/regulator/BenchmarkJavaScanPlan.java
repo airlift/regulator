@@ -54,6 +54,12 @@ import static io.airlift.slice.Slices.utf8Slice;
 /// in a terminator other than `\n`, so the Java end's CR, CR LF, U+0085, U+2028, and U+2029
 /// checks are not timed.
 ///
+/// With `javaLineTerminators=true`, a pattern without dotAll does not set UNIX_LINES, so its
+/// dot is Java's default dot, which also excludes CR, U+0085, U+2028, and U+2029, and with
+/// `javaDollar=true` its `$` is Java's default end. No row holds CR, U+0085, U+2028,
+/// or U+2029, so the default dot's extra exclusions are not timed. With dotAll the option changes
+/// nothing.
+///
 /// With `scanPlan=false`, every pattern compiles without its scan plan, so the methods time the
 /// ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
 /// `-p scanPlan=true` this source also times a build without Java scan plans. With
@@ -125,6 +131,10 @@ public class BenchmarkJavaScanPlan
                 "LONG_HOST_MALFORMED",
                 "UNANCHORED_TAIL_4096_NON_ASCII",
                 "UNANCHORED_TAIL_4096_MALFORMED",
+                "FOLDED_HOST",
+                "FOLDED_KEY",
+                "PERL_ANCHORED",
+                "PERL_UNANCHORED",
         })
         public String workload;
 
@@ -142,6 +152,10 @@ public class BenchmarkJavaScanPlan
         // Keep each $ as Java's $ rather than \z.
         @Param({"true", "false"})
         public boolean javaDollar;
+
+        // Without dotAll, keep Java's line terminators rather than setting UNIX_LINES.
+        @Param({"true", "false"})
+        public boolean javaLineTerminators;
 
         Slice[] expressions;
         private JavaRegexp.Options options;
@@ -172,7 +186,7 @@ public class BenchmarkJavaScanPlan
             bounds = new int[2];
             extractionGroups = new int[count];
             for (int index = 0; index < count; index++) {
-                expressions[index] = utf8Slice(javaExpression(source.expressions[index].toStringUtf8(), dotAll, javaDollar));
+                expressions[index] = utf8Slice(javaExpression(source.expressions[index].toStringUtf8(), dotAll, javaDollar, javaLineTerminators));
                 patterns[index] = compile(compiler, expressions[index], options);
                 matchers[index] = patterns[index].matcher(EMPTY_SLICE);
                 extractionGroups[index] = patterns[index].capturingGroupCount() == 0 ? 0 : 1;
@@ -244,10 +258,11 @@ public class BenchmarkJavaScanPlan
     /// Returns `expression`, a [BenchmarkRe2ScanPlan] pattern, in Java syntax. Only
     /// `$`, `(?i)`, and the dot differ in these patterns: each `$` outside a class
     /// becomes `\z` unless `javaDollar` keeps it, `(?i)` adds Unicode case, and
-    /// without dotAll, UNIX_LINES limits the dot to excluding `\n`.
-    static String javaExpression(String expression, boolean dotAll, boolean javaDollar)
+    /// without dotAll, UNIX_LINES limits the dot to excluding `\n` unless
+    /// `javaLineTerminators` keeps Java's line terminators.
+    static String javaExpression(String expression, boolean dotAll, boolean javaDollar, boolean javaLineTerminators)
     {
-        StringBuilder java = new StringBuilder(dotAll ? "" : "(?d)");
+        StringBuilder java = new StringBuilder(dotAll || javaLineTerminators ? "" : "(?d)");
         boolean inClass = false;
         for (int index = 0; index < expression.length(); index++) {
             char character = expression.charAt(index);

@@ -34,6 +34,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
@@ -45,7 +46,12 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 /// Public RE2 operations over the patterns and rows of [BenchmarkTrinoScanPlan], plus non-ASCII
 /// and malformed UTF-8 rows for its URL, UNANCHORED_URL, LONG_HOST, and UNANCHORED_TAIL_4096
 /// workloads, whose delimiter runs and tails cross that text. The patterns keep their Trino text, so
-/// `$` is RE2's strict end. No compilation cache is involved.
+/// `$` is RE2's strict end. Four more workloads have patterns of their own over mostly ASCII
+/// rows. FOLDED_HOST folds the `s` of https, whose case fold includes the long s, and
+/// FOLDED_KEY the `k` of key, whose fold includes the Kelvin sign; a few rows of each match
+/// through that non-ASCII member. PERL_ANCHORED and PERL_UNANCHORED capture with `\d` and
+/// `\w`, and a few rows hold a non-ASCII letter or digit, which only Unicode Perl classes
+/// match. No compilation cache is involved.
 ///
 /// With `scanPlan=false`, every pattern compiles without its scan plan, so the methods time the
 /// ordinary engine on the same rows. The without-plan compile is resolved reflectively, so with
@@ -61,6 +67,14 @@ public class BenchmarkRe2ScanPlan
 {
     private static final String NON_ASCII = "_NON_ASCII";
     private static final String MALFORMED = "_MALFORMED";
+    // Patterns whose sets have a non-ASCII member in some language: case-insensitive patterns whose
+    // folds include the long s of https and the Kelvin sign of key, and Perl classes, which are
+    // ASCII in RE2 and Unicode in Rust by default.
+    private static final Map<String, String> OWN_PATTERNS = Map.of(
+            "FOLDED_HOST", "(?i)^https?://([^/]+)/",
+            "FOLDED_KEY", "(?i)key=([^;]+);",
+            "PERL_ANCHORED", "^(\\w+)-(\\d+)/",
+            "PERL_UNANCHORED", "id=(\\d+)&");
 
     // Accepted by RE2's UTF-8 classes even though they are not valid UTF-8: an overlong
     // three-byte form, an encoded surrogate, and a four-byte form above U+10FFFF.
@@ -81,7 +95,8 @@ public class BenchmarkRe2ScanPlan
     @State(Scope.Thread)
     public static class BenchmarkData
     {
-        // The BenchmarkTrinoScanPlan workloads, then the same patterns over non-ASCII and malformed rows.
+        // The BenchmarkTrinoScanPlan workloads, then the same patterns over non-ASCII and malformed
+        // rows, then the patterns whose sets have a non-ASCII member in some language.
         @Param({
                 "URL",
                 "URL_SHORT",
@@ -137,6 +152,10 @@ public class BenchmarkRe2ScanPlan
                 "LONG_HOST_MALFORMED",
                 "UNANCHORED_TAIL_4096_NON_ASCII",
                 "UNANCHORED_TAIL_4096_MALFORMED",
+                "FOLDED_HOST",
+                "FOLDED_KEY",
+                "PERL_ANCHORED",
+                "PERL_UNANCHORED",
         })
         public String workload;
 
@@ -166,14 +185,20 @@ public class BenchmarkRe2ScanPlan
         @Setup
         public void setup()
         {
+            String expression = OWN_PATTERNS.get(workload);
             BenchmarkTrinoScanPlan.BenchmarkData source = new BenchmarkTrinoScanPlan.BenchmarkData();
-            source.workload = trinoWorkload(workload);
-            source.dotAll = dotAll;
-            source.setup();
+            if (expression == null) {
+                source.workload = trinoWorkload(workload);
+                source.dotAll = dotAll;
+                source.setup();
+                expressions = source.expressions;
+            }
+            else {
+                expressions = new Slice[] {utf8Slice((dotAll ? "(?s)" : "") + expression)};
+            }
 
             options = generateBytecode ? generatingOptions() : Re2.Options.defaults();
             compiler = compiler(scanPlan);
-            expressions = source.expressions;
             int count = expressions.length;
             patterns = new Re2[count];
             matchers = new Re2Matcher[count];
@@ -187,6 +212,13 @@ public class BenchmarkRe2ScanPlan
                 rewrites[index] = utf8Slice("\\" + extractionGroups[index]);
             }
 
+            if (expression != null) {
+                inputs = new Slice[504];
+                for (int row = 0; row < inputs.length; row++) {
+                    inputs[row] = offsetInput(ownPatternRow(workload, row).getBytes(UTF_8));
+                }
+                return;
+            }
             if (workload.equals(source.workload)) {
                 inputs = source.inputs;
                 return;
@@ -312,7 +344,9 @@ public class BenchmarkRe2ScanPlan
         return List.of(BenchmarkData.class.getDeclaredField("workload").getAnnotation(Param.class).value());
     }
 
-    /// Returns the [BenchmarkTrinoScanPlan] workload whose patterns a workload uses.
+    /// Returns the [BenchmarkTrinoScanPlan] workload whose patterns a workload uses, or the
+    /// workload itself for a pattern whose sets have a non-ASCII member, which is this benchmark's
+    /// own.
     static String trinoWorkload(String workload)
     {
         for (String suffix : new String[] {NON_ASCII, MALFORMED}) {
@@ -343,6 +377,58 @@ public class BenchmarkRe2ScanPlan
                 yield prefix + "路".repeat(remaining / 3) + "y".repeat(remaining % 3);
             }
             default -> throw new IllegalArgumentException("no non-ASCII rows for workload: " + trinoWorkload);
+        };
+    }
+
+    // At least six rows in eight are ASCII. Of the others, a fold has one that matches through its
+    // non-ASCII member and one with a multibyte capture. PERL_ANCHORED has one with a non-ASCII
+    // letter and one with Arabic-Indic digits, and PERL_UNANCHORED one with those digits; only a
+    // Unicode class matches them.
+    private static String ownPatternRow(String workload, int row)
+    {
+        String host = "host" + row + ".example.com";
+        return switch (workload) {
+            case "FOLDED_HOST" -> switch (row % 8) {
+                case 0 -> "https://" + host + "/path";
+                case 1 -> "HTTPS://HOST" + row + ".EXAMPLE.COM/PATH";
+                case 2 -> "Http://www." + host + "/";
+                case 3 -> "hTtPs://例え.テスト/道";
+                case 4 -> "https://" + host;
+                case 5 -> "ftp://" + host + "/path";
+                case 6 -> "http\u017F://" + host + "/path";
+                default -> "HTTPS://" + host + "/?key=value";
+            };
+            case "FOLDED_KEY" -> "x".repeat((row % 4) * 32) + switch ((row / 4) % 8) {
+                case 0 -> "key=value;";
+                case 1 -> "KEY=VALUE;";
+                case 2 -> "KeY=例;";
+                case 3 -> "key=missing";
+                case 4 -> "monkey=banana;";
+                case 5 -> "keys=1;";
+                case 6 -> "\u212Aey=kelvin;";
+                default -> "key=;";
+            };
+            case "PERL_ANCHORED" -> switch (row % 8) {
+                case 0 -> "order_" + row + "-" + row + "/items";
+                case 1 -> "SKU" + row + "-" + (row * 7) + "/";
+                case 2 -> "item-42/";
+                case 3 -> "café-" + row + "/";
+                case 4 -> "item-\u0663\u0664/";
+                case 5 -> "item-/";
+                case 6 -> "-" + row + "/";
+                default -> "item_" + row + "-" + row;
+            };
+            case "PERL_UNANCHORED" -> "/search" + "x".repeat((row % 4) * 16) + switch ((row / 4) % 8) {
+                case 0 -> "?id=" + row + "&page=2";
+                case 1 -> "?page=2&id=" + row + "&sort=asc";
+                case 2 -> "?uid=" + row + "&x=1";
+                case 3 -> "?id=\u0663\u0664&x=1";
+                case 4 -> "?id=" + row;
+                case 5 -> "?id=&x=1";
+                case 6 -> "?name=id&id=7&";
+                default -> "?ID=" + row + "&";
+            };
+            default -> throw new IllegalArgumentException("no own-pattern rows for workload: " + workload);
         };
     }
 
