@@ -18,7 +18,6 @@ import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
@@ -1204,21 +1203,14 @@ public sealed class Re2
     }
 
     /// Returns an immutable mapping from capture names to group numbers.
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "The returned map is immutable")
     public Map<String, Integer> namedCapturingGroups()
     {
         Map<String, Integer> cachedNamedCapturingGroups = namedCapturingGroups;
         if (cachedNamedCapturingGroups != null) {
             return cachedNamedCapturingGroups;
         }
-        if (capturingGroupNames.isEmpty()) {
-            cachedNamedCapturingGroups = Map.of();
-        }
-        else {
-            // A name used by several groups refers to the first of them.
-            HashMap<String, Integer> firstGroups = new HashMap<>();
-            capturingGroupNames.forEach((group, name) -> firstGroups.merge(name, group, Math::min));
-            cachedNamedCapturingGroups = Map.copyOf(firstGroups);
-        }
+        cachedNamedCapturingGroups = ParseResult.namedCapturingGroups(capturingGroupNames);
         namedCapturingGroups = cachedNamedCapturingGroups;
         return cachedNamedCapturingGroups;
     }

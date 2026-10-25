@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
@@ -29,5 +30,18 @@ record ParseResult(Regexp regexp, int capturingGroupCount, Map<Integer, String> 
         if (capturingGroupCount < 0) {
             throw new IllegalArgumentException("capturingGroupCount is negative: " + capturingGroupCount);
         }
+    }
+
+    /// Inverts group-to-name mappings into an immutable mapping from capture names to group
+    /// numbers.
+    static Map<String, Integer> namedCapturingGroups(Map<Integer, String> capturingGroupNames)
+    {
+        if (capturingGroupNames.isEmpty()) {
+            return Map.of();
+        }
+        // A name used by several groups refers to the first of them.
+        HashMap<String, Integer> firstGroups = new HashMap<>();
+        capturingGroupNames.forEach((group, name) -> firstGroups.merge(name, group, Math::min));
+        return Map.copyOf(firstGroups);
     }
 }

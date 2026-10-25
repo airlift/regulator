@@ -16,7 +16,6 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
@@ -275,9 +274,7 @@ public final class RustRegexp
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         ParseResult parsed = RustRegexpParser.parse(pattern, options.syntaxFlags(), options.nestLimit());
-        Map<String, Integer> names = new HashMap<>();
-        parsed.capturingGroupNames().forEach((group, name) -> names.put(name, group));
-        return new PatternInfo(parsed.capturingGroupCount(), names);
+        return new PatternInfo(parsed.capturingGroupCount(), ParseResult.namedCapturingGroups(parsed.capturingGroupNames()));
     }
 
     public static RustRegexp compile(Slice pattern)
