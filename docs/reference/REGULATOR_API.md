@@ -95,12 +95,12 @@ byte unless the caller chooses a byte distribution with `setByteFrequencies` on
 first-byte scanning. A distribution that matches the searched data lets the
 search scan for a rarer byte of the literal instead. Outside scan plans,
 `RustRegexp`, `Re2`, and `JavaRegexp` move the scan only for a multi-byte
-literal whose first byte is ASCII; scan plans (Trino, RE2, and Java) also move
-it for a plan's leading literal led by a non-ASCII byte. Byte frequencies do not
-affect `TrinoRegexp` contains of a contained literal such as `.*lit.*`, its
-dot-star literal spans, or its ordered literals such as `a(?s:.*)b`, which scan
-for the first and last bytes of a multi-byte literal together, nor the other
-languages' contains of a contained literal, which uses `Slice.indexOf`. A
+literal whose first byte is ASCII; scan plans (Trino, RE2, Java, and Rust) also
+move it for a plan's leading literal led by a non-ASCII byte. Byte frequencies
+do not affect `TrinoRegexp` contains of a contained literal such as `.*lit.*`,
+its dot-star literal spans, or its ordered literals such as `a(?s:.*)b`, which
+scan for the first and last bytes of a multi-byte literal together, nor the
+other languages' contains of a contained literal, which uses `Slice.indexOf`. A
 distribution that does not match the data can make literal scans several times
 slower per byte than first-byte scanning, because it moves the scan onto bytes
 that are common in the searched text; it never changes what matches, and the
@@ -286,10 +286,10 @@ The APIs are familiar, but their representations and capabilities differ:
 
 `Re2`, `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` are separate compilers
 for different pattern languages. They use the same matching engine after
-compilation. `Re2`, `TrinoRegexp`, and `JavaRegexp` patterns of a few common
-extraction shapes also select a [scan plan](../benchmarks/TRINO_SCAN_PLAN.md),
-which runs those shapes over the input bytes. A plan agrees with the ordinary
-engine on valid UTF-8, and RE2 and Java plans also agree on malformed input.
+compilation. Their patterns of a few common extraction shapes also select a
+[scan plan](../benchmarks/TRINO_SCAN_PLAN.md), which runs those shapes over the
+input bytes. A plan agrees with the ordinary engine on valid UTF-8, and RE2,
+Java, and Rust plans also agree on malformed input.
 
 Java `(?U)` and character-class intersection are examples of syntax whose
 meaning depends on the language. Consult the

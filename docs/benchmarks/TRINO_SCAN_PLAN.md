@@ -3,9 +3,9 @@
 The scan plan recognizes a bounded family of Trino patterns and executes
 literals, deterministic character runs, and captures over Slice bytes. It
 targets `contains`, match boundaries, captures, extraction, and replacement
-through the public APIs. RE2 and Java patterns select the same plans, which
-report the ordinary engine's results on malformed input too, as described in
-[RE2 patterns](#re2-patterns).
+through the public APIs. RE2, Java, and Rust patterns select the same plans,
+which report the ordinary engine's results on malformed input too, as described
+in [RE2 patterns](#re2-patterns).
 
 ## Coverage
 
@@ -121,15 +121,16 @@ Any other boolean strategy is replaced by the plan. Boundary, capture, range,
 and count calls reach the plan through its own strategy either way. Unanchored
 plans count with a loop over the plan's search that resumes at each match end,
 not the DFA count. For a Trino plan this keeps `count` in agreement with
-`extract`, `position`, and `extractAll` on malformed bytes; an RE2 or Java plan
-agrees with the ordinary engine anyway, and its count takes the plan route as
-`find` does.
+`extract`, `position`, and `extractAll` on malformed bytes; an RE2, Java, or
+Rust plan agrees with the ordinary engine anyway, and its count takes the plan
+route as `find` does.
 
 A start-anchored plan, end-anchored or partial, matches only at the region
-start, and no `Re2Matcher.find` check runs ahead of it. Its matchers therefore
-call the plan entry directly, as does `extract` of a capture group, which also
-skips building a matcher. This removes the shared path's out-of-line calls
-from the capture path. Matchers given a single-byte matcher, `matches`,
+start, and no `Re2Matcher.find` check runs ahead of it (except a Rust matcher
+over a partial region; see [RE2 patterns](#re2-patterns)). Its matchers
+therefore call the plan entry directly, as does `extract` of a capture group,
+which also skips building a matcher. This removes the shared path's out-of-line
+calls from the capture path. Matchers given a single-byte matcher, `matches`,
 `lookingAt`, and unanchored plans keep shared capture matching.
 
 Boolean `find` and `count` of a start-anchored plan run on the ordinary engine's
@@ -141,7 +142,7 @@ described below. Without a boolean tail the attempt reads as far as the DFA, so
 on a short input the plan only adds dispatch. Longer inputs, and calls that
 return boundaries or captures, run the plan. Because the input length picks the
 engine, both engines must agree on every input, as for the density handoff
-below: an RE2 or Java plan always does, and a Trino plan does when every
+below: an RE2, Java, or Rust plan always does, and a Trino plan does when every
 consuming operation accepts only ASCII bytes. The pattern's boolean route
 without a plan must also be the DFA, so a Trino final-line end or a Java
 final-terminator end, which the DFA cannot evaluate, keeps the plan. In
@@ -268,8 +269,8 @@ input end. Ordinary dot scans for LF; a single terminal LF is left outside the
 match for `$`, but is rejected by strict end or a full-match operation.
 Replacement preserves any unmatched suffix. Malformed input follows Trino's
 garbage-in, garbage-out contract; no UTF-8 validation pass or exact agreement on
-malformed bytes is promised. RE2 and Java plans agree with the ordinary engine
-on malformed input, as described in [RE2 patterns](#re2-patterns).
+malformed bytes is promised. RE2, Java, and Rust plans agree with the ordinary
+engine on malformed input, as described in [RE2 patterns](#re2-patterns).
 
 For unanchored plans that begin with a literal or with a run whose minimum is at
 least one, the executor scans for a byte that can start the leading operation
@@ -316,7 +317,7 @@ expression; a literal-leading scan keeps its candidate-byte route.
 
 ## RE2 patterns
 
-The frontend chooses a plan's language: Trino, RE2, Java, or none.
+The frontend chooses a plan's language: Trino, RE2, Java, Rust, or none.
 `Re2.compile` analyzes every pattern with the same builder, proofs, budgets,
 and candidate scans as `TrinoRegexp`, so the same shapes select a plan,
 ASCII-folded ones included, and every `Re2` operation reaches the plan through
@@ -351,6 +352,21 @@ Java's `(?i)` without Unicode case folds only ASCII letters.
 `JavaRegexp.Options.setGenerateBytecode(true)` compiles a case-sensitive Java
 plan to an RE2 executor class, as [RE2 executor classes](#re2-executor-classes)
 describes.
+
+`RustRegexp.compile` analyzes every pattern the same way, and a Rust plan reads
+input by the RE2 rule below, so it reports what the ordinary engine reports on
+every input, which on valid UTF-8 is the crate's result. Without multi-line mode
+Rust's `$` is the strict end, and Rust's dot and `(?i)` match as RE2's do, so
+those reach a plan unchanged, as do runs that `(?U)` makes greedy and the
+CRLF-mode dot. Byte mode builds no plan. Only byte constructs carry the Latin-1
+flag the analysis checks, so the analysis alone would still admit an ASCII-only
+byte-mode pattern. Multiline anchors, CRLF ones included, word boundaries,
+including Rust's start, end, and half word boundaries, reluctant runs, Unicode
+Perl classes such as `\w`, and folds with a non-ASCII member, such as `(?i)k`,
+keep the ordinary engine. A Rust range or matcher region keeps the whole input
+as assertion context, so a matcher runs its start-anchored plan directly only
+over the whole input; a partial region reaches the plan, as a range does, only
+when it ends at the input end.
 
 An RE2 plan reports exactly what the ordinary engine reports on every input,
 including malformed UTF-8. A class holding every character from U+0080 through
@@ -442,6 +458,18 @@ a generated class, exactly when its RE2 pattern does, under either end. The
 decisions record holds the results for
 [plans](../../REGULATOR_DECISIONS.md#re2-scan-plans) and
 [generated classes](../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels).
+
+`TestRustScanPlan` checks which Rust constructs select a plan, that byte mode
+selects none, and that public calls reach the plan. It compares the public
+operations of the planned and forced-handoff compiles of each plan shape against
+the no-plan compile, on valid UTF-8 with line terminators appended after the
+witness and on malformed input, including ranges, regions, repeated finds, and
+counts. `BenchmarkRustScanPlan` runs the `BenchmarkRe2ScanPlan` workloads and
+rows through public Rust operations, each pattern written in Rust syntax for the
+same match, with and without the scan plan; `TestBenchmarkRustScanPlan` confirms
+that each Rust pattern selects a plan exactly when its RE2 pattern does. The
+decisions record holds
+[the results](../../REGULATOR_DECISIONS.md#re2-scan-plans).
 
 ## Correctness and measurement
 

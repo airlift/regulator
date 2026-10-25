@@ -280,11 +280,40 @@ public final class RustRegexp
      */
     public static RustRegexp compile(Slice pattern, Options options)
     {
+        return compile(pattern, options, true, false);
+    }
+
+    /**
+     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but without a scan plan,
+     * so tests and benchmarks can compare a plan with the ordinary engine.
+     */
+    static RustRegexp compileWithoutScanPlanForTesting(Slice pattern, Options options)
+    {
+        return compile(pattern, options, false, false);
+    }
+
+    /**
+     * Compiles {@code pattern} as {@link #compile(Slice, Options)} does, but a scan plan
+     * continues every unanchored search on the ordinary engine before its first attempt.
+     */
+    static RustRegexp compileForcingScanPlanHandoffForTesting(Slice pattern, Options options)
+    {
+        return compile(pattern, options, true, true);
+    }
+
+    private static RustRegexp compile(Slice pattern, Options options, boolean scanPlan, boolean forceScanPlanHandoff)
+    {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
         ParseResult parsed = RustRegexpParser.parse(patternCopy, options.syntaxFlags(), options.nestLimit());
-        return new RustRegexp(Re2.compileParsed(patternCopy, parsed, options.compileFlags(), options.maxMemory(), options.byteFrequencies()));
+        int compileFlags = options.compileFlags();
+        // Byte mode builds no scan plan. Only byte constructs carry the Latin-1 flag the analysis
+        // checks, so the analysis alone would still admit an ASCII-only byte-mode pattern.
+        Re2 compiled = scanPlan && (compileFlags & Regexp.LATIN1) == 0
+                ? Re2.compileParsedForRust(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies(), forceScanPlanHandoff)
+                : Re2.compileParsed(patternCopy, parsed, compileFlags, options.maxMemory(), options.byteFrequencies());
+        return new RustRegexp(compiled);
     }
 
     Re2 pattern()

@@ -888,6 +888,23 @@ public sealed class Re2
     }
 
     /**
+     * Compiles a pattern parsed by the Rust frontend, with the scan plan of its shape. The caller
+     * passes a private snapshot that it never mutates. A scan plan built with
+     * {@code forceScanPlanHandoff} continues every unanchored search on the ordinary engine
+     * before its first attempt; only tests request it.
+     */
+    static Re2 compileParsedForRust(Slice pattern, ParseResult parsed, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean forceScanPlanHandoff)
+    {
+        requireNonNull(pattern, "pattern is null");
+        requireNonNull(parsed, "parsed is null");
+        requireNonNull(byteFrequencies, "byteFrequencies is null");
+        if (maxMemory <= 0) {
+            throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
+        }
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.RUST, forceScanPlanHandoff);
+    }
+
+    /**
      * The caller passes a private snapshot that it never mutates. {@code scanPlanMode} selects
      * the scan plan to build.
      */
@@ -1879,7 +1896,8 @@ public sealed class Re2
      * strategy is the whole decision: a pattern with a scan plan never matches empty and has no
      * candidate-start or group-zero cursor, direct lowered search, or lowered program, so no
      * {@link Re2Matcher#find()} check runs ahead of the plan. Only a caller's single-byte matcher
-     * can, and such a caller keeps the ordinary route.
+     * can, and such a caller keeps the ordinary route. A Rust matcher over a partial region runs
+     * its Rust search instead, which reaches the plan only when the region ends at the input end.
      */
     TrinoScanPlan startAnchoredTrinoScanPlan()
     {
@@ -2189,8 +2207,8 @@ public sealed class Re2
         requireNonNull(text, "text is null");
         // Count through an unanchored plan so that count agrees with find. A Trino plan gives
         // malformed UTF-8 bytes the membership find gives them, which the DFA count would reject.
-        // An RE2 or Java plan agrees with the ordinary engine, and its count takes the plan route
-        // as find does.
+        // An RE2, Java, or Rust plan agrees with the ordinary engine, and its count takes the plan
+        // route as find does.
         if (trinoScanStrategy == BOOLEAN_FIND_UNANCHORED_TRINO_SCAN) {
             return countUnanchoredTrinoScanMatches(text, false);
         }

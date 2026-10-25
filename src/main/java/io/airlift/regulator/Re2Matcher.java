@@ -43,7 +43,7 @@ public final class Re2Matcher
     private final boolean enableGroupZeroForwardCursor;
     private final boolean hasLoweredCandidateSearch;
     private final boolean hasDirectLoweredGroupZeroSearch;
-    // Set when find() runs the pattern's start-anchored scan plan directly. See
+    // The pattern's start-anchored scan plan that find() can run directly. See
     // Re2.startAnchoredTrinoScanPlan.
     private final TrinoScanPlan startAnchoredScanPlan;
     private final boolean rustSearch;
@@ -174,10 +174,16 @@ public final class Re2Matcher
 
     /**
      * The start-anchored plan matches only at the region start, so only the first search of the
-     * region can match. A later search fails as {@link #findGeneral} does.
+     * region can match. A later search fails as {@link #findGeneral} does. The plan reads the
+     * region as its whole input, but a Rust search still sees the rest of the input, so a Rust
+     * search of a partial region takes {@link #findRust}, which reaches the plan only when the
+     * region ends at the input end.
      */
     private boolean findWithStartAnchoredScanPlan()
     {
+        if (rustSearch && isPartialRegion()) {
+            return findRust();
+        }
         if (nextFindStart == 0 && pattern.findWithStartAnchoredTrinoScanPlan(startAnchoredScanPlan, input, regionStart, regionEnd, groups)) {
             setMatchAndAdvance(groups[0], groups[1]);
             return true;
