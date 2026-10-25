@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE module PUBLIC
+        "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+        "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<module name="Checker">
+    <module name="RegexpSingleline">
+        <property name="fileExtensions" value="java" />
+        <property name="format" value="^\s*/\*\*" />
+        <property name="message" value="Use Markdown documentation comments (///)." />
+    </module>
+</module>

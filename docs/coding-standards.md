@@ -37,5 +37,11 @@ non-obvious performance constraints. Preserve these explanations in dense
 parser, concurrency, and bit-level code. Remove comments that only restate
 obvious code, and check the remaining text against the implementation.
 
+Write documentation comments as Markdown `///` comments, not `/** */`. Use
+Markdown syntax: backticks for code, `[reference]` links, lists, and fenced
+code blocks. Keep block tags such as `@param`, and inline tags that have no
+Markdown equivalent, such as `{@value}`. The style checks reject `/** */`
+comments, including in the benchmark tools' Java.
+
 Empty `catch` blocks must contain a short comment explaining why ignoring the
 exception is intentional. These comments are required by the style checks.
