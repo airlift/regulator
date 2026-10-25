@@ -139,6 +139,10 @@ MAXIMUM_CALIBRATION_DRIFT = 0.05
 CHAIN_WINDOW_SECONDS = 60
 # The files naming the host, JVM, and engines a unit ran with.
 UNIT_ENVIRONMENT_FILES = ("environment-manifest.txt", "environment.txt", "engine-build.txt")
+# Each unit attempt a phase's correctness stage rejected, beside its accepted-units.tsv. The controller writes
+# its header when the phase starts, so a unit campaign phase without it is incomplete.
+SEMANTIC_REJECTIONS = "semantic-rejections.tsv"
+SEMANTIC_REJECTION_FIELDS = ("platform", "unit_id", "replica_id", "unit_attempt_id")
 
 
 def load_unit(directory, unit_id):
@@ -680,6 +684,50 @@ def check_unit_chain(root, session, planned, rows, evidence):
         reject(f"{path} does not chain from the lease before it on its host: {', '.join(problems)}")
 
 
+def chain_predecessor_marker(root):
+    """The name, in its host's evidence directory, of the completion marker of the lease a chained
+    unit's before calibration came from, or None for a unit that calibrated before afresh."""
+    path = root / "unit-chain.txt"
+    if not path.is_file():
+        return None
+    return predecessor_marker_name(path, read_properties(path))
+
+
+def predecessor_marker_name(path, chain):
+    lease = split_unit_attempt(chain.get("previous_attempt", ""))[1]
+    if not lease.isdigit():
+        reject(f"{path} names no previous lease")
+    return f"lease-{lease}-completion.json"
+
+
+def check_chain_predecessor(root, host_evidence):
+    """A chained unit's link agrees with its previous lease's own completion marker, which its
+    controller retained in the host's evidence directory: that lease completed, and its after
+    calibration is the one the link names. The worker's own link record alone proves neither."""
+    chain_path = root / "unit-chain.txt"
+    if not chain_path.is_file():
+        return
+    chain = read_properties(chain_path)
+    path = host_evidence / predecessor_marker_name(chain_path, chain)
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        reject(f"completion marker of the chained calibration's lease is missing: {path}")
+    except ValueError:
+        marker = None
+    if not isinstance(marker, dict):
+        reject(f"completion marker of the chained calibration's lease is not a JSON object: {path}")
+    host_session_id, lease = split_unit_attempt(chain["previous_attempt"])
+    expected = {
+        "host_session": host_session_id, "sequence": int(lease), "unit_attempt_id": chain["previous_attempt"],
+        "unit_status": "complete", "calibration_after": chain.get("calibration"),
+    }
+    problems = [field for field, value in expected.items() if marker.get(field) != value]
+    if problems:
+        reject(f"{root / 'unit-chain.txt'} does not chain from the completion of {chain['previous_attempt']}: "
+               f"{', '.join(problems)}")
+
+
 def check_unit_calibration(root, planned, host_evidence, session):
     """The unit's calibrations stayed within the drift limit.
 
@@ -807,6 +855,20 @@ def split_unit_attempt(unit_attempt_id):
     return host_session_id, sequence
 
 
+def check_semantic_rejections(result_root):
+    """A unit campaign phase is accepted only when its semantic-rejection ledger exists and lists no attempt.
+
+    A semantic rejection is final: no attempt of the unit accepted before or after it clears it.
+    """
+    path = result_root / SEMANTIC_REJECTIONS
+    if not path.is_file():
+        reject(f"unit campaign phase has no semantic-rejection ledger: {path}")
+    rows = read_tsv(path, SEMANTIC_REJECTION_FIELDS, SEMANTIC_REJECTION_FIELDS)
+    if rows:
+        reject(f"unit campaign phase rejected unit attempts for a semantic failure: "
+               f"{format_values(row['unit_attempt_id'] for row in rows)}")
+
+
 def check_unit_campaign(receipts, platforms, units, protocols, manifest_digest, campaign_id,
                         expected_replica_ids=(1, 2, 3), confirmations=()):
     """Accept a campaign's unit receipts as a whole.
@@ -902,15 +964,18 @@ def check_unit_campaign(receipts, platforms, units, protocols, manifest_digest, 
 
 def validate_unit_campaign(manifest_path, platforms_path, shards_path, receipts_path, campaign_id,
                            expected_replica_ids=(1, 2, 3), selected_shards=None,
-                           protocol_path=DIRECTORY / "row-protocol.tsv"):
-    """Validate an accepted-units.tsv ledger against the checked-in units of the campaign's shards."""
+                           protocol_path=DIRECTORY / "row-protocol.tsv", confirmations=()):
+    """Validate an accepted-units.tsv ledger against the checked-in units of the campaign's shards.
+
+    confirmations are the accepted replica 4 receipts of the campaign's confirmation phase.
+    """
     manifest_rows = load_rows_manifest(manifest_path)
     shards = campaign_shards(manifest_rows, load_shards(shards_path), selected_shards)
     platforms = load_platforms(platforms_path)
     units = {unit_id: unit for unit_id, unit in work_units.load(DIRECTORY).items() if unit["shard_id"] in shards}
     receipts = read_tsv(receipts_path, UNIT_RECEIPT_FIELDS, UNIT_RECEIPT_FIELDS)
     check_unit_campaign(receipts, platforms, units, row_protocol.load(protocol_path), sha256_file(manifest_path),
-                        campaign_id, expected_replica_ids)
+                        campaign_id, expected_replica_ids, confirmations)
     return {
         "campaign_id": campaign_id,
         "platform_count": len(platforms),

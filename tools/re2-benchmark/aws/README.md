@@ -158,18 +158,19 @@ is the maximum Spot bid; `total` includes storage and other hourly costs, and
 validates the policy when loading it. Freeze it with the job inventory; changing
 it requires a new campaign rather than a resume.
 
-The neighboring `fleet-state.json` coordinates both collectors with `flock`.
-It counts instances, outstanding requests, and launches not yet visible to
-EC2. Reservations remain until verified cleanup; crashes never expire them.
-A failed benchmark or rejected artifact leaves that job unaccepted and
-unresolved after its cleanup is proven. Independent jobs continue, including
-queued work. These rejections do not trigger automatic retries or weaken the
-acceptance gates. Unproven cleanup, changed frozen inputs, conflicting accepted
+The neighboring `fleet-state.json` coordinates both collectors with `flock`. It
+counts instances, outstanding requests, and launches not yet visible to EC2.
+Reservations remain until verified cleanup; crashes never expire them. In a
+host-session campaign, a failed benchmark or rejected artifact leaves that job
+unaccepted and unresolved after its cleanup is proven. Independent jobs
+continue, including queued work. These rejections do not trigger automatic
+retries or weaken the acceptance gates; [unit dispatch](#unit-dispatch) has its
+own retry rules. Unproven cleanup, changed frozen inputs, conflicting accepted
 identities and shared resource-policy failures halt both collectors. See the
-[protocol rules](../baseline/SHARD_DISPATCH.md#jmh-protocol).
-Preserve the policy and state together across restarts. More than 64 executing
-workers requires this shared policy. Ramp from canaries to the approved cap,
-using the configured pending-launch limit and frozen launch interval.
+[protocol rules](../baseline/SHARD_DISPATCH.md#jmh-protocol). Preserve the
+policy and state together across restarts. More than 64 executing workers
+requires this shared policy. Ramp from canaries to the approved cap, using the
+configured pending-launch limit and frozen launch interval.
 
 The controller defaults to 64 concurrent workers. Set `--max-concurrent` and
 `--max-concurrent-per-platform` for the planned campaign; the shared policy
@@ -178,7 +179,7 @@ workers, reserved headroom, unrelated Spot use, and spending reservations can
 reduce actual concurrency. Derived phase deadlines use the configured host,
 per-platform, and shared vCPU limits, plus one retry wave and a capacity
 allowance; the shared limit is the sum of the allowed regions' `max_vcpus`.
-Every worker type must fit the largest
+Every worker type, including each unit pool's host, must fit the largest
 `max_vcpus` among the allowed regions that hold its image. Without a shared
 policy, deadline planning uses host counts; live quota shortages can require
 a larger explicit deadline. An explicit
@@ -337,6 +338,17 @@ duration. The selection is frozen on execution and cannot change on resume.
 Spot jobs wait when quota or capacity prevents a launch. An interrupted job
 restarts after verified cleanup: on a fresh Spot host with `--spot-only`, and
 otherwise On-Demand.
+
+Add `--unit-workers` to smoke, primary, or confirmation to measure the phase's
+work units on [unit workers](#unit-workers) instead of one host per shard
+replica. The plan then writes `work-items.tsv`: replica 1 of every unit of the
+selected shards in smoke, replicas 1 to 3 in primary, and replica 4 of each
+`--confirmation-jobs` row, which then names `platform`, `shard_id`, and
+`unit_id`. The execution policy records the mode, a unit primary requires a
+unit smoke, and a unit confirmation requires a unit primary. A shared fleet
+budget must allow `max_attempt_seconds` of at least 27900, a worker's timeout
+plus 15 minutes. Each phase is still its own controller run; pipelining a
+shard's primary behind its accepted smoke is future work.
 
 Set `AWS_PROFILE` before any execution command when selecting a named profile;
 otherwise the AWS CLI uses its standard credential chain. `TRINO_DIR` is
@@ -584,16 +596,104 @@ unit's before and the next unit runs no before of its own; otherwise it
 calibrates before afresh. A chained unit's `unit-chain.txt` names the attempt it
 chained from, that attempt's after calibration, the gap, and the previous
 attempt's environment digest, and acceptance requires the lease before it on
-the same host, within 60 seconds, in the same environment. Accepting a worker's unit therefore needs its host's
-`calibrations/`, through `validate-unit-results.py --host-evidence`; see
-`../baseline/ACCEPTANCE.md`.
+the same host, within 60 seconds, in the same environment. The controller
+checks that link against the previous lease's own completion marker, which must
+show it complete with the named after calibration, and retains that marker
+beside the accepted attempt as `lease-<n>-completion.json`. Accepting a
+worker's unit therefore needs its host's `calibrations/`, through
+`validate-unit-results.py --host-evidence`; see
+[unit acceptance](../baseline/ACCEPTANCE.md).
 
 The first accepted attempt of a platform, unit, and replica wins. A later
 completed attempt of the same unit replica, such as one leased again after a
 lost heartbeat, is recorded as superseded, not accepted, and does not halt the
-campaign. The unit recovery in `run-campaign.py` predates workers and still
-stops on two completed attempts; the unit dispatcher replaces that check with
-this rule.
+campaign.
+
+### Unit dispatch
+
+With `--unit-workers`, the controller keeps a queue of the phase's work items
+and a pool of workers per platform and instance class; a concurrency-class
+unit runs on the platform's `.2xlarge` type. Each worker is a job of the
+controller's ordinary launch path, so regions, placement scores, Spot launch
+retries in the next region, `--max-concurrent`, the per-platform limit, and
+the shared budget apply to it, and its reservation lasts until its cleanup is
+verified. `unit-workers.tsv` freezes each worker before its launch. A pool
+launches a worker only while its queued items outnumber its idle workers.
+
+When several regions are allowed, a worker whose Spot launch found no capacity
+in any zone of its region cools that region for its pool for 15 minutes, and
+the pool's new Spot workers launch elsewhere meanwhile. While every allowed
+region cools, the pool's new workers launch On-Demand, and Spot resumes in each
+region once its cool-down ends; a `--spot-only` pool instead tries every region
+again at once. A restarted controller forgets the cool-downs.
+
+Once a worker's session exists, the controller writes its first lease and
+keeps one lease written ahead while no idle worker of the pool could take the
+item. It leases On-Demand work first, then the longest eligible item, never a
+unit the host already leased, and never to an instance a confirmation excludes
+or another replica of the unit used. An item requeued for On-Demand only goes
+to an On-Demand host, and On-Demand hosts also take every other item. When
+the pool can give a worker nothing more, the worker gets a stop lease. Each
+lease, and each outcome it reaches, is a row of `unit-attempts.tsv`, written
+before the lease is.
+
+The controller polls each worker's uploads. A completion marker's result must
+match `result_sha256` and its lease; the attempt then passes the unit gate
+against the host's calibrations, is retained, and is added to
+`accepted-units.tsv`. Other outcomes:
+
+- An interruption record, or a status-43 exit while a lease ran, records an
+  `interruption` event and requeues the unit for On-Demand only. A record
+  that names no unit, from a notice while the host waited for its next lease,
+  releases that lease without spending an attempt.
+- A Spot worker that stops for a rebalance recommendation before any of its
+  units reached a completion marker, or within 15 minutes of its launch, records
+  an `interruption` event with reason `rebalance-recommendation` and cools its
+  region for its pool, as a Spot launch without capacity does.
+- A heartbeat 30 minutes old, or 10 minutes old on an instance no longer
+  running, marks the host lost: its started lease is requeued, an unstarted
+  one is released, and its wrapper is stopped. Cleanup still recovers a
+  completion that lands, which is accepted if it is first and superseded
+  otherwise.
+- A failed unit is requeued. A unit replica gets 3 attempts across failures,
+  interruptions, and lost hosts, then stays unresolved.
+- A worker that fails before its first lease passes its launch slot to a
+  replacement. A worker whose uploads include a heartbeat, a completion or an
+  interruption bundle has started, even if no heartbeat landed. The host
+  evidence its user data uploads on exit, even after a failed bootstrap, does
+  not show a start. A slot whose worker has failed 3 times gives up, and once the
+  pool has no worker or slot left, its queued work stays unresolved. Each
+  worker's `starting` record in `job-attempts.tsv` names its slot (`slot`, the
+  host epoch of the slot's first worker) and the failures it inherited
+  (`slot_failures`), so a restarted controller resumes every slot's count.
+- A status-42 protocol rejection, a status-44 semantic failure, a rejected
+  unit capacity, a marker naming a calibration missing from S3, a result that
+  does not match its marker, and a failed artifact gate leave the unit
+  unresolved without a retry while other work continues.
+- Status 44 means the route's correctness stage failed: a semantic test, the
+  DFA probe, a differential verifier or its count of verified cases, the
+  curated Rebar verification, or the pinned Trino comparator's verification,
+  including a check that could not start. The controller records the attempt
+  in `semantic-rejections.tsv` (`platform`, `unit_id`, `replica_id`,
+  `unit_attempt_id`) before it acts on it. No other attempt of the unit clears
+  it, whether it completed before or after; the unit is listed unresolved, and
+  the phase prerequisite and the reducer refuse a phase whose ledger lists a
+  rejection or is missing, as a host session's semantic failure would be.
+- Work queued after the phase deadline, including work a lost, failed, or
+  interrupted lease hands back, stays unresolved.
+- A marker that names another lease, unproven cleanup, and changed frozen
+  inputs stop the campaign as unsafe.
+
+When a pool's remaining estimated work falls to 10% of its total, its remaining
+items become On-Demand work, leased first, and On-Demand workers launch for them
+within the budget's On-Demand allowance. Each Spot worker of the pool gets a
+stop lease only once an On-Demand worker has been admitted to replace it; until
+then it keeps taking the pool's items. While the budget refuses an On-Demand
+launch, the pool's Spot launches go on for the items Spot may run. A
+`--spot-only` campaign never switches. Once every item is accepted or
+unresolved, the controller waits for every worker's verified cleanup, lists the
+unresolved items in `unresolved-units.tsv`, and otherwise validates the phase's
+accepted units as one campaign.
 
 ## Recovery and evidence
 
@@ -602,13 +702,25 @@ On restart, it revalidates saved artifacts, recovers receipts written just
 before interruption, and skips accepted jobs. Conflicting receipts, changed
 inputs, or unverifiable resources stop the campaign.
 
+A unit-worker phase restarts from its ledgers, and only with the tooling that
+started it: `tooling-digest.txt` records a digest of the tracked benchmark
+tooling when the phase starts, and a restart that finds a different digest, or
+none, is refused. The controller adopts each worker whose wrapper is still
+running, rewrites its outstanding leases, which must match what was written,
+and settles each exited worker from its recovered uploads, so no accepted unit
+runs again and no unit is leased to two live hosts. A unit rejected for a
+semantic failure stays unresolved across restarts, and a refill does not take
+unit workers, so measuring it again means running the whole phase again in a
+new result root.
+
 Failed jobs record their failure type. A session that fails before its first
 RunInstances request, in setup such as the default VPC lookup or the instance
 profile, is `retryable-infrastructure`, since no instance can exist; cleanup
-still removes and verifies the bucket and profile it created. Unclassified
-benchmark failures and invalid artifacts remain unresolved after verified
-cleanup while independent jobs continue. Unverifiable cleanup and other unsafe
-controller failures stop admissions across both collectors.
+still removes and verifies the bucket and profile it created. In a host-session
+campaign, unclassified benchmark failures and invalid artifacts remain
+unresolved after verified cleanup while independent jobs continue; [unit
+dispatch](#unit-dispatch) retries a failed unit instead. Unverifiable cleanup
+and other unsafe controller failures stop admissions across both collectors.
 
 A Spot-only campaign can exhaust its retries when one platform runs out of
 Spot capacity. Once no job awaits an ordinary retry, rerun the phase in the
@@ -640,7 +752,9 @@ After verifying instance termination, the wrapper inventories and downloads
 all uploaded result objects into the session's `recovered-uploads` directory.
 It records each object's size and local SHA-256 before deleting the transfer
 prefix. A failed inventory or download retains that prefix and fails cleanup.
-Recovered uploads are raw evidence and do not become accepted sessions.
+A host session's recovered uploads are raw evidence and do not become
+accepted sessions; a unit worker's are settled as
+[unit dispatch](#unit-dispatch) describes.
 
 This covers late uploads and results available when a controller aborts.
 Measurements still on an interrupted or forcibly terminated host may never

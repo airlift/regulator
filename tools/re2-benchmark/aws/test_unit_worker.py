@@ -5,6 +5,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -13,6 +14,8 @@ from pathlib import Path
 
 
 DIRECTORY = Path(__file__).resolve().parent
+sys.path.insert(0, str(DIRECTORY.parent / 'baseline'))
+from unit_dispatch import UNIT_COMPLETION_FIELDS
 UNIT = {name: hashlib.sha256(name.encode()).hexdigest() for name in ('first', 'second', 'third')}
 
 # S3 as the aws CLI calls it from a unit worker: exact-key listings, reads, and
@@ -297,6 +300,8 @@ class TestUnitWorker(unittest.TestCase):
             self.assertTrue(all(run['replica_environment'] == run['replica'] and run['orders'] == [None, None]
                                 for run in runs))
             completions = [worker.json(f'units/{sequence}/completion.json') for sequence in (1, 2, 3)]
+            for completion in completions:
+                self.assertLessEqual(set(UNIT_COMPLETION_FIELDS), set(completion))
             self.assertEqual(['complete'] * 3, [completion['unit_status'] for completion in completions])
             for sequence, completion in enumerate(completions, 1):
                 result = worker.object(f'units/{sequence}/result.tar.gz').read_bytes()

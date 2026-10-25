@@ -115,7 +115,10 @@ is a distinct attempt. The validator rejects the attempt unless:
 - a chained unit's `unit-chain.txt`, bound in its evidence, names the lease
   before it on the same host, that lease's after calibration as its before, a
   gap of at most 60 seconds, and the same environment digest as its own; an
-  unchained unit has none
+  unchained unit has none. The controller and the reducer also check that link
+  against the previous lease's own completion marker, retained in the host
+  session's directory as `lease-<n>-completion.json`: that lease completed, and
+  its after calibration is the one the link names
 - every route ran the frozen protocol: qualification or smoke, the default
   Joni JMH window, and exactly the JMH selectors that protocol plans for its
   share
@@ -191,14 +194,24 @@ tools/re2-benchmark/baseline/validate-campaign-results.py \
 
 A campaign of work units keeps `accepted-units.tsv` instead: one
 `unit-receipt.tsv` row per accepted unit replica, added atomically like a host
-receipt. Each attempt is retained at
+receipt. A `--unit-workers` phase leases units to worker hosts and writes this
+ledger (`../aws/README.md`). Each attempt is retained at
 `units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>` under the
-result root. On restart, recovery revalidates every ledger row against that
-directory and adds a retained attempt the ledger lacks once it passes the same
-checks: final status, accepted capacity, a receipt regenerated from the
-evidence and the host's calibrations, and the frozen candidate. The first
-accepted attempt of a unit replica wins; a later attempt that also passes is
-superseded and stays out of the ledger.
+result root, beside the host session's `calibrations/` it references. On
+restart, recovery revalidates every ledger row against that directory and
+adds a retained attempt the ledger lacks once it passes the same checks: final
+status, accepted capacity, a receipt regenerated from the evidence and the
+host's calibrations, and the frozen candidate. The first accepted attempt of a
+unit replica wins; a later attempt that also passes, such as one leased again
+after its host was judged lost, is superseded and stays out of the ledger. The
+controller writes `semantic-rejections.tsv` beside the ledger when the phase
+starts and adds each attempt that exited 44, a failed correctness stage,
+atomically by `platform`, `unit_id`, `replica_id`, and `unit_attempt_id`
+before acting on it. The phase ends by validating the ledger as the campaign
+below, and a unit primary or confirmation revalidates the previous phase's
+ledger and attempts first, refusing a previous phase whose rejection ledger is
+missing or lists an attempt, even when another attempt of that unit was
+accepted.
 
 With `--accepted-units`, the campaign validator requires every platform and
 checked-in unit of the selected shards, with replicas 1, 2, and 3. It also
@@ -214,9 +227,14 @@ requires:
   receipt names the same frozen units and protocols
 - the frozen manifest digest and one candidate commit, engine tree, and
   source-archive identity across all attempts
+- a `semantic-rejections.tsv` beside the ledger that lists no attempt
 
-A unit confirmation is replica `4`, at most one per platform and unit, on an
-instance none of that unit's replicas used.
+The controller's phase gate applies the same checks, except that it requires
+only replica 1 for a smoke phase and leaves the rejection ledger to the next
+phase's prerequisite and the reducer. A unit confirmation is replica `4`, at
+most one per platform and unit, on an instance none of that unit's replicas
+used; only the confirmation phase gate checks this, against the primary
+ledger. The command below validates primary coverage.
 
 ```bash
 tools/re2-benchmark/baseline/validate-campaign-results.py \

@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from acceptance import ValidationError, validate_campaign
-from unit_session import validate_unit_campaign
+from unit_session import check_semantic_rejections, validate_unit_campaign
 
 
 def parse_args():
@@ -26,6 +26,8 @@ def main():
     arguments = parse_args()
     try:
         if arguments.accepted_units is not None:
+            # A phase whose correctness stage rejected any attempt is refused, as the controller refuses it.
+            check_semantic_rejections(arguments.accepted_units.parent)
             result = validate_unit_campaign(
                 arguments.manifest,
                 arguments.platforms,

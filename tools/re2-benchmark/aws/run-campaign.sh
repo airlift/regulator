@@ -1612,7 +1612,8 @@ if includes_architecture arm; then
     pending+=(arm)
 fi
 
-cat > "${SESSION_DIR}/session.txt" <<EOF
+# The controller reads session.txt while the wrapper runs, so it appears only whole.
+cat > "${SESSION_DIR}/session.txt.new" <<EOF
 session=${SESSION_ID}
 baseline_campaign=${CAMPAIGN_ID}
 platform=${CAMPAIGN_PLATFORM}
@@ -1669,6 +1670,7 @@ arm_instance_type=${ARM_INSTANCE_TYPE}
 arm_instance_id=${ARM_INSTANCE_ID}
 arm_availability_zone=${ARM_AVAILABILITY_ZONE}
 EOF
+mv "${SESSION_DIR}/session.txt.new" "${SESSION_DIR}/session.txt"
 
 echo "Started ${CAMPAIGN_ARCHITECTURES}: Intel ${INTEL_INSTANCE_ID}, Arm ${ARM_INSTANCE_ID}"
 echo "Artifacts: ${SESSION_DIR}"
