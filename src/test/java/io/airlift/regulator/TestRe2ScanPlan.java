@@ -381,8 +381,8 @@ public class TestRe2ScanPlan
         Re2.Options generating = options.copy().setGenerateBytecode(true);
         Re2 generated = Re2.compile(pattern, generating);
         Re2 generatedHandoff = Re2.compileForcingScanPlanHandoffForTesting(pattern, generating);
-        // Every case-sensitive plan generates, except one with a run of some non-ASCII characters.
-        boolean generates = actual.caseSensitiveTrinoScanPlan() != null && !hasSetRun(actual);
+        // Every case-sensitive plan generates.
+        boolean generates = actual.caseSensitiveTrinoScanPlan() != null;
         assertThat(generated.usesGeneratedBytecode()).as(description).isEqualTo(generates);
         assertThat(generatedHandoff.usesGeneratedBytecode()).as(description).isEqualTo(generates);
         for (Slice source : sources) {
@@ -396,14 +396,6 @@ public class TestRe2ScanPlan
             }
         }
         return true;
-    }
-
-    /// Returns whether the pattern's plan has a run of some non-ASCII characters but not all, for
-    /// which no bytecode is generated.
-    static boolean hasSetRun(Re2 pattern)
-    {
-        TrinoScanPlan plan = pattern.caseSensitiveTrinoScanPlan();
-        return plan != null && plan.operationsForDiagnostics().contains("RE2_SET_RUN");
     }
 
     /// Returns the results of the public matching operations on `source`: boolean and

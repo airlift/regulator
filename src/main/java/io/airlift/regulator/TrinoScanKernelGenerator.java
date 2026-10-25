@@ -390,11 +390,11 @@ final class TrinoScanKernelGenerator
         {
             Step step = plan.step(index);
             boolean supported = switch (step.kind()) {
-                case LITERAL, OPTIONAL, RUN, RE2_RUN, SAVE, FORK -> true;
+                case LITERAL, OPTIONAL, RUN, RE2_RUN, RE2_SET_RUN, SAVE, FORK -> true;
                 case END -> attempt != Attempt.PARTIAL;
                 case DELIMITED_CAPTURE, RE2_DELIMITED_CAPTURE -> attempt != Attempt.UNANCHORED;
                 case DOT_ALL_TAIL, LINE_TAIL -> attempt == Attempt.END_ANCHORED;
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL, RE2_SET_RUN -> false;
+                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> false;
             };
             if (!supported) {
                 throw new IllegalArgumentException("%s scan kernel cannot run %s".formatted(attempt, step.kind()));
@@ -555,19 +555,21 @@ final class TrinoScanKernelGenerator
                 }
                 case RUN -> emitRun(index, step, "runMatch", "runMatchMinimum");
                 case RE2_RUN -> emitRun(index, step, "re2RunMatch", "re2RunMatchMinimum");
+                case RE2_SET_RUN -> emitRun(index, step, "re2SetRunMatch", "re2SetRunMatchMinimum");
                 case SAVE -> body.append(IfStatement.builder()
                         .condition(groups.isNotNull().and(constantInt(step.slot()).lessThan(groups.length())))
                         .then(groups.setElement(constantInt(step.slot()), cursor.subtract(base)))
                         .build());
                 case FORK -> emitPush(index);
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL, RE2_SET_RUN -> throw new IllegalStateException("unexpected " + step.kind());
+                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> throw new IllegalStateException("unexpected " + step.kind());
             }
         }
 
         /// Emits a run that calls the [TrinoScanKernelSupport] methods named `match` and
         /// `matchMinimum`: `runMatch` and `runMatchMinimum` for a `RUN`, and
         /// `re2RunMatch` and `re2RunMatchMinimum`, which read characters as RE2 does,
-        /// for an `RE2_RUN`.
+        /// for an `RE2_RUN`. An `RE2_SET_RUN` calls `re2SetRunMatch` and
+        /// `re2SetRunMatchMinimum`, which read characters by the run's member encodings.
         private void emitRun(int index, Step step, String match, String matchMinimum)
         {
             BytecodeExpression run = boundConstant(step.run(), TrinoScanPlanRun.class);

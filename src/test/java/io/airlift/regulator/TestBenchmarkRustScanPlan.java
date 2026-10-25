@@ -49,12 +49,13 @@ public class TestBenchmarkRustScanPlan
                         BenchmarkRustScanPlan.BenchmarkData compile = data(workload, dotAll, unicodePerlClasses, variant);
                         // The rows are the RE2 benchmark's, and each Rust pattern matches what its RE2
                         // pattern matches, or with unicodePerlClasses=true what the ordinary engine
-                        // matches. Outside byte mode, results on malformed UTF-8 are unspecified,
-                        // so on the malformed rows the RE2 result stands for Regulator's ordinary engine,
-                        // which decodes malformed input by RE2's rules. With scanPlan=true, each Rust
-                        // pattern selects a plan exactly when its RE2 pattern does, and a generated
-                        // class when generateBytecode=true unless it has a Unicode Perl class, which
-                        // holds some non-ASCII characters; with scanPlan=false, it selects neither.
+                        // matches. Outside byte mode, results on malformed UTF-8 are unspecified;
+                        // with ASCII Perl classes the RE2 result stands for Regulator's ordinary
+                        // engine on the malformed rows, since that engine decodes malformed input by
+                        // RE2's rules. With scanPlan=true, each Rust pattern selects a plan, and a
+                        // generated class when generateBytecode=true, exactly when its RE2 pattern
+                        // does, Unicode Perl classes included; with scanPlan=false, it selects
+                        // neither.
                         BenchmarkRe2ScanPlan.BenchmarkData re2 = re2Data(workload, dotAll, generateBytecode);
                         assertThat(contains.inputs).as(state).isEqualTo(re2.inputs);
                         boolean[] unicodeClasses = new boolean[contains.patterns.length];
@@ -67,7 +68,7 @@ public class TestBenchmarkRustScanPlan
                                     .isEqualTo(scanPlan && re2.patterns[index].usesTrinoScanPlanForDiagnostics());
                             assertThat(contains.patterns[index].usesGeneratedBytecode())
                                     .as("%s pattern %s", state, index)
-                                    .isEqualTo(scanPlan && !unicodeClasses[index] && re2.patterns[index].usesGeneratedBytecode());
+                                    .isEqualTo(scanPlan && re2.patterns[index].usesGeneratedBytecode());
                             assertThat(contains.expressions[index].toStringUtf8().contains("(?-u:"))
                                     .as("%s pattern %s", state, index)
                                     .isEqualTo(!unicodePerlClasses && perlClass);

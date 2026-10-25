@@ -51,24 +51,23 @@ public class TestBenchmarkJavaScanPlan
                             BenchmarkJavaScanPlan.BenchmarkData extractAll = data(workload, dotAll, javaDollar, javaLineTerminators, variant);
                             BenchmarkJavaScanPlan.BenchmarkData compile = data(workload, dotAll, javaDollar, javaLineTerminators, variant);
                             // The rows are the RE2 benchmark's, and each Java pattern matches what its
-                            // RE2 pattern matches, or with javaDollar=true or javaLineTerminators=true
-                            // what the ordinary engine matches, since some rows hold a line
-                            // terminator. With scanPlan=true, each Java pattern selects a plan exactly
-                            // when its RE2 pattern does, with Java's $ and default dot too, and a
-                            // generated class when generateBytecode=true unless it has the default
-                            // dot, which excludes some non-ASCII characters; with scanPlan=false, it
-                            // selects neither.
+                            // RE2 pattern matches, or what the ordinary engine matches with
+                            // javaDollar=true, since some rows hold a line terminator, and with
+                            // javaLineTerminators=true, since on the malformed rows the default dot
+                            // rejects some sequences that RE2's dot accepts. With scanPlan=true, each
+                            // Java pattern selects a plan, and a generated class when
+                            // generateBytecode=true, exactly when its RE2 pattern does, with Java's $
+                            // and default dot too; with scanPlan=false, it selects neither.
                             BenchmarkRe2ScanPlan.BenchmarkData re2 = re2Data(workload, dotAll, generateBytecode);
                             assertThat(contains.inputs).as(state).isEqualTo(re2.inputs);
                             for (int index = 0; index < contains.patterns.length; index++) {
                                 String re2Expression = re2.expressions[index].toStringUtf8();
-                                boolean javaDot = javaLineTerminators && !dotAll && hasDot(re2Expression);
                                 assertThat(contains.patterns[index].pattern().usesTrinoScanPlanForDiagnostics())
                                         .as("%s pattern %s", state, index)
                                         .isEqualTo(scanPlan && re2.patterns[index].usesTrinoScanPlanForDiagnostics());
                                 assertThat(contains.patterns[index].usesGeneratedBytecode())
                                         .as("%s pattern %s", state, index)
-                                        .isEqualTo(scanPlan && !javaDot && re2.patterns[index].usesGeneratedBytecode());
+                                        .isEqualTo(scanPlan && re2.patterns[index].usesGeneratedBytecode());
                                 assertThat(contains.expressions[index].toStringUtf8().contains("$"))
                                         .as("%s pattern %s", state, index)
                                         .isEqualTo(javaDollar && re2Expression.contains("$"));
@@ -137,28 +136,6 @@ public class TestBenchmarkJavaScanPlan
             bounds.add(match.end(group));
         }
         return bounds;
-    }
-
-    /// Returns whether `expression` has a dot outside a class.
-    private static boolean hasDot(String expression)
-    {
-        boolean inClass = false;
-        for (int index = 0; index < expression.length(); index++) {
-            char character = expression.charAt(index);
-            if (character == '\\') {
-                index++;
-            }
-            else if (character == '[') {
-                inClass = true;
-            }
-            else if (character == ']') {
-                inClass = false;
-            }
-            else if (character == '.' && !inClass) {
-                return true;
-            }
-        }
-        return false;
     }
 
     private record Variant(boolean scanPlan, boolean generateBytecode) {}
