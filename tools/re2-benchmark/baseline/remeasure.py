@@ -5,7 +5,6 @@ The earlier baseline and diagnostic artifacts are never relabeled as replacement
 """
 
 import argparse
-import csv
 import hashlib
 import importlib.util
 import json
@@ -102,11 +101,7 @@ def partition_plan(shard, partition, protocol):
             type(protocol.get("iteration_seconds")) is not int or protocol.get("iteration_seconds") != 1 or
             protocol.get("gc") != "G1" or protocol.get("cpu_allowance") != "0,1" or protocol.get("heap") != "8g"):
         raise ValueError("unrecognized replacement protocol")
-    manifest = BASELINE / "rows.tsv"
-    if digest(manifest) != protocol["original_row_manifest_sha256"]:
-        raise ValueError("original row manifest changed")
-    with manifest.open() as source:
-        rows = [row for row in csv.DictReader(source, delimiter="\t") if row["shard_id"] == shard]
+    rows = [row for row in retained_selection.original_rows(BASELINE, protocol) if row["shard_id"] == shard]
     groups = {}
     for row in rows:
         identity = row["row_id"].rsplit("/", 1)[0]

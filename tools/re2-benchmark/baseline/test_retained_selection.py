@@ -1,4 +1,6 @@
 import csv
+import gzip
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -13,8 +15,8 @@ class TestRetainedSelection(unittest.TestCase):
         self.protocol = json.loads(Path(__file__).with_name("remeasurement-retained-protocol.json").read_text())
 
     def test_exact_original_work_is_preserved_across_partitions(self):
-        with (remeasure.BASELINE / "rows.tsv").open() as source:
-            rows = list(csv.DictReader(source, delimiter="\t"))
+        content = gzip.decompress((remeasure.BASELINE / remeasure.retained_selection.ORIGINAL_ROW_MANIFEST).read_bytes()).decode()
+        rows = list(csv.DictReader(content.splitlines(), delimiter="\t"))
         original = {row["row_id"]: row for row in rows}
         selected = set(self.protocol["selected_logical_rows"])
         expected = {(row["row_id"], route) for row in rows
@@ -73,6 +75,16 @@ class TestRetainedSelection(unittest.TestCase):
             self.assertEqual([s["benchmark"].split(".")[-1] for s in plan["selections"]],
                              ["candidate" + suffix, "candidate" + suffix, "trinoSql" + suffix] +
                              (["trinoOptimized"] if count == 4 else []))
+
+    def test_pinned_original_manifest_is_the_released_baseline(self):
+        content = gzip.decompress((remeasure.BASELINE / remeasure.retained_selection.ORIGINAL_ROW_MANIFEST).read_bytes())
+        digest = hashlib.sha256(content).hexdigest()
+        evidence = json.loads((remeasure.ROOT / "docs/benchmarks/results-1.0/baseline-evidence.json").read_text())
+        self.assertEqual(evidence["summary"]["manifest_sha256"], digest)
+        remeasurement = json.loads((remeasure.BASELINE / "remeasurement-protocol.json").read_text())
+        for name, protocol in (("remeasurement", remeasurement), ("retained", self.protocol)):
+            with self.subTest(protocol=name):
+                self.assertEqual(protocol["original_row_manifest_sha256"], digest)
 
     def test_changed_source_and_invalid_selection_fail_closed(self):
         selected = self.protocol["selected_logical_rows"]

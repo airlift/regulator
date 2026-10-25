@@ -1,7 +1,18 @@
 """Exact original-row selections for the retained baseline follow-up."""
 import csv
+import gzip
 import hashlib
 from pathlib import Path
+
+# The 1.0 baseline row manifest, pinned because rows.tsv keeps growing after 1.0.
+ORIGINAL_ROW_MANIFEST = 'remeasurement-rows.tsv.gzip'
+
+
+def original_rows(base, protocol):
+    content = gzip.decompress((Path(base) / ORIGINAL_ROW_MANIFEST).read_bytes())
+    if hashlib.sha256(content).hexdigest() != protocol['original_row_manifest_sha256']:
+        raise ValueError('original row manifest changed')
+    return list(csv.DictReader(content.decode().splitlines(), delimiter='\t'))
 
 
 def timing_protocol(shard, protocol):
@@ -32,21 +43,18 @@ def partition_plan(base, shard, partition, protocol):
             or type(protocol.get('iteration_seconds')) is not int or protocol.get('iteration_seconds') != 1
             or protocol.get('gc') != 'G1' or protocol.get('cpu_allowance') != '0,1' or protocol.get('heap') != '8g'):
         raise ValueError('unrecognized retained baseline protocol')
-    path = Path(base) / 'rows.tsv'
-    if hashlib.sha256(path.read_bytes()).hexdigest() != protocol['original_row_manifest_sha256']:
-        raise ValueError('original row manifest changed')
+    rows = original_rows(base, protocol)
     selected = protocol['selected_logical_rows']
     if not selected or selected != sorted(set(selected)):
         raise ValueError('retained selection must be nonempty, sorted and unique')
     groups = {}
-    with path.open() as source:
-        for row in csv.DictReader(source, delimiter='\t'):
-            identity = row['row_id'].rsplit('/', 1)[0]
-            if identity in selected:
-                systems = groups.setdefault(identity, {})
-                if row['system'] in systems:
-                    raise ValueError('duplicate original baseline system')
-                systems[row['system']] = row
+    for row in rows:
+        identity = row['row_id'].rsplit('/', 1)[0]
+        if identity in selected:
+            systems = groups.setdefault(identity, {})
+            if row['system'] in systems:
+                raise ValueError('duplicate original baseline system')
+            systems[row['system']] = row
     if set(groups) != set(selected):
         raise ValueError('unknown retained baseline identity')
     size = timing_protocol(shard, protocol)['operations_per_partition']

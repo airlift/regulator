@@ -1,5 +1,6 @@
 import copy
 import csv
+import gzip
 import json
 from pathlib import Path
 import tempfile
@@ -14,9 +15,9 @@ class TestRemeasurement(unittest.TestCase):
         self.protocol = json.loads((remeasure.BASELINE / "remeasurement-protocol.json").read_text())
 
     def test_partition_coverage_preserves_every_original_row(self):
-        with (remeasure.BASELINE / "rows.tsv").open() as source:
-            original = {row["row_id"]: row for row in csv.DictReader(source, delimiter="\t")
-                        if row["shard_id"] in remeasure.SHARDS}
+        content = gzip.decompress((remeasure.BASELINE / remeasure.retained_selection.ORIGINAL_ROW_MANIFEST).read_bytes()).decode()
+        original = {row["row_id"]: row for row in csv.DictReader(content.splitlines(), delimiter="\t")
+                    if row["shard_id"] in remeasure.SHARDS}
         selected = {}
         for shard, partitions in (("trino-operations", 46), ("trino-final-line", 44)):
             for partition in range(partitions):
