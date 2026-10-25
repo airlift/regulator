@@ -482,6 +482,9 @@ final class Compiler
         private final RuneCache runeCache = new RuneCache();
         private final Fragment runeRange = new Fragment();
         private final CaseFolding caseFolding;
+        // Trino nullable loops share one clone table, grown by doubling, so its allocation stays
+        // proportional to the program however many loops the pattern has.
+        private SparseIntArray nullableLoopClones;
 
         boolean reversed;
         boolean setAnchorBoth;
@@ -829,21 +832,27 @@ final class Compiler
 
             Fragment emptyExit = noOperation();
             int originalInstructionLimit = program.size();
-            int[] clones = new int[originalInstructionLimit];
-            clones[consumedExit.begin] = emptyExit.begin;
-            SparseSet pending = new SparseSet(originalInstructionLimit);
+            if (nullableLoopClones == null) {
+                nullableLoopClones = new SparseIntArray(originalInstructionLimit);
+            }
+            else if (nullableLoopClones.maxSize() < originalInstructionLimit) {
+                nullableLoopClones.resize(Math.max(originalInstructionLimit, nullableLoopClones.maxSize() * 2));
+            }
+            SparseIntArray clones = nullableLoopClones;
+            clones.clear();
             int loopEntry = clonePreConsumptionInstruction(
                     fragment.begin,
                     consumedExit.begin,
                     emptyExit.begin,
                     clones,
-                    pending,
                     originalInstructionLimit);
 
-            for (int pendingIndex = 0; pendingIndex < pending.size(); pendingIndex++) {
-                int originalId = pending.denseAt(pendingIndex);
+            // The clone table is also the work queue: clones made while linking are visited later in
+            // this loop.
+            for (int cloneIndex = 0; cloneIndex < clones.size(); cloneIndex++) {
+                int originalId = clones.denseIndexAt(cloneIndex);
                 Prog.Inst original = program.inst(originalId);
-                Prog.Inst clone = program.inst(clones[originalId]);
+                Prog.Inst clone = program.inst(clones.denseValueAt(cloneIndex));
                 switch (original.opcode()) {
                     case ALT -> {
                         clone.setOut(clonePreConsumptionInstruction(
@@ -851,14 +860,12 @@ final class Compiler
                                 consumedExit.begin,
                                 emptyExit.begin,
                                 clones,
-                                pending,
                                 originalInstructionLimit));
                         clone.setOut1(clonePreConsumptionInstruction(
                                 original.out1(),
                                 consumedExit.begin,
                                 emptyExit.begin,
                                 clones,
-                                pending,
                                 originalInstructionLimit));
                     }
                     case CAPTURE, EMPTY_WIDTH, NOP -> clone.setOut(clonePreConsumptionInstruction(
@@ -866,9 +873,10 @@ final class Compiler
                             consumedExit.begin,
                             emptyExit.begin,
                             clones,
-                            pending,
                             originalInstructionLimit));
-                    case BYTE_RANGE -> throw new AssertionError("byte instructions are not pending");
+                    case BYTE_RANGE -> {
+                        // A byte clone keeps its original successor.
+                    }
                     case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + original.opcode());
                 }
             }
@@ -887,8 +895,7 @@ final class Compiler
                 int originalId,
                 int consumedExit,
                 int emptyExit,
-                int[] clones,
-                SparseSet pending,
+                SparseIntArray clones,
                 int originalInstructionLimit)
         {
             if (originalId == consumedExit) {
@@ -897,9 +904,8 @@ final class Compiler
             if (originalId <= 0 || originalId >= originalInstructionLimit) {
                 throw new RegexpCompileException("invalid nullable-loop instruction: " + originalId);
             }
-            int existing = clones[originalId];
-            if (existing != 0) {
-                return existing;
+            if (clones.hasIndex(originalId)) {
+                return clones.getExisting(originalId);
             }
 
             Prog.Inst original = program.inst(originalId);
@@ -911,16 +917,14 @@ final class Compiler
                 case ALT -> {
                     clone.setOut(0);
                     clone.setOut1(0);
-                    pending.insertNew(originalId);
                 }
                 case CAPTURE, EMPTY_WIDTH, NOP -> {
                     clone.setOut(0);
-                    pending.insertNew(originalId);
                 }
                 case ALT_MATCH, MATCH, FAIL -> throw new RegexpCompileException("invalid nullable-loop instruction: " + original.opcode());
             }
             int cloneId = add(clone);
-            clones[originalId] = cloneId;
+            clones.setNew(originalId, cloneId);
             return cloneId;
         }
 

@@ -137,6 +137,42 @@ public class TestCompilerAllocations
         assertThat(allocatedBytes / (iterations * (long) expressions.size())).isLessThan(128);
     }
 
+    @Test
+    public void testTrinoSiblingNullableLoopsAllocateWithTheirProgram()
+    {
+        // The program grows linearly with the loops, and the clone table must not grow with the
+        // square of the loop count.
+        assertTrinoCompileAllocation("(?:a|)*".repeat(4_000), 8_003, 32_000_000);
+    }
+
+    @Test
+    public void testTrinoNestedNullableLoopsAllocateWithTheirProgram()
+    {
+        // Each loop clones the epsilon-reachable part of the loops inside it, so the program grows
+        // with the square of the depth, and the clone table must not grow with the depth cubed.
+        String pattern = "(?:^|a?)";
+        for (int depth = 0; depth < 320; depth++) {
+            pattern = "(?:a?|" + pattern + ")*";
+        }
+        assertTrinoCompileAllocation(pattern, 52_324, 128_000_000);
+    }
+
+    private static void assertTrinoCompileAllocation(String pattern, int instructionCount, long maxAllocatedBytes)
+    {
+        ThreadMXBean threadBean = allocatedMemoryBean();
+        ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(pattern), Regexp.LIKE_PERL);
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+
+        long threadId = Thread.currentThread().threadId();
+        long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
+        Prog program = Compiler.compileNormalized(regexp, false, 64 << 20, Compiler.Dialect.TRINO, parsed.caseFolding());
+        long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
+
+        // The count proves the pattern still reaches the nullable-loop lowering.
+        assertThat(program.size()).isEqualTo(instructionCount);
+        assertThat(allocatedBytes).isLessThan(maxAllocatedBytes);
+    }
+
     private static ThreadMXBean allocatedMemoryBean()
     {
         ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();
