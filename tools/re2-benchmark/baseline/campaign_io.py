@@ -1,4 +1,4 @@
-"""Durable ledger writes, command output and the unsafe-campaign error of the campaign controller."""
+"""Durable ledger writes, command output and the unsafe-campaign error that host and unit campaigns share."""
 
 import csv
 import json
@@ -39,17 +39,18 @@ def aws_output(arguments, region=None):
     return command
 
 
-def write_accepted_sessions(path, rows):
+def write_ledger(path, rows, fields=RECEIPT_FIELDS,
+                 key=lambda row: (row["platform"], row["shard_id"], int(row["replica_id"]))):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(path.name + ".new")
-    rows = sorted(rows, key=lambda row: (row["platform"], row["shard_id"], int(row["replica_id"])))
+    rows = sorted(rows, key=key)
     with temporary_path.open("w", newline="") as output_file:
         if path.suffix == ".json":
             json.dump({"schema_version": 1, "workload": JSON_LEDGER_WORKLOADS[path.name], "receipts": rows},
                       output_file, sort_keys=True)
             output_file.write("\n")
         else:
-            writer = csv.DictWriter(output_file, fieldnames=RECEIPT_FIELDS, delimiter="\t", lineterminator="\n")
+            writer = csv.DictWriter(output_file, fieldnames=fields, delimiter="\t", lineterminator="\n")
             writer.writeheader()
             writer.writerows(rows)
         output_file.flush()

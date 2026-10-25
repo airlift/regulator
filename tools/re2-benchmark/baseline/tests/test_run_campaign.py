@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import test_fleet_budget
+from test_unit_session import UnitCampaign
 
 
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
@@ -2642,6 +2643,39 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             RUN_CAMPAIGN.persist_accepted_receipt(ledger, first_path)
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "conflicting"):
                 RUN_CAMPAIGN.persist_accepted_receipt(ledger, second_path)
+
+    def test_unit_ledger_recovers_retained_attempts_and_confirms_on_new_instances(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result_root = Path(temporary_directory) / "results"
+            campaign = UnitCampaign(result_root, "like-dfa-single-use")
+            ledger = result_root / "accepted-units.tsv"
+            receipt = campaign.receipts[0]
+            arguments = SimpleNamespace(
+                campaign_id=receipt["campaign_id"], candidate_archive_sha256=receipt["candidate_archive_sha256"],
+                engine_tree=receipt["engine_tree"], heap_size=receipt["heap_size"])
+
+            def recover():
+                return RUN_CAMPAIGN.recover_accepted_units(SCRIPT.parents[3], arguments, result_root, ledger)
+
+            with patch.object(RUN_CAMPAIGN, "check_output", return_value=receipt["candidate_commit"]):
+                recover()
+                # A restart revalidates the ledger against the retained attempts.
+                self.assertEqual(len(recover()), 6)
+                self.assertEqual(
+                    sorted(campaign.receipts, key=RUN_CAMPAIGN.unit_logical_identity),
+                    sorted(RUN_CAMPAIGN.read_accepted_units(ledger), key=RUN_CAMPAIGN.unit_logical_identity))
+                unit = campaign.units[0]
+                confirmations = Path(temporary_directory) / "confirmation-jobs.tsv"
+                confirmations.write_text(
+                    f"platform\tshard_id\tunit_id\nr8i\t{unit['shard_id']}\t{unit['unit_id']}\n")
+                self.assertEqual(
+                    [("r8i", unit["unit_id"], 4, frozenset({"i-r8i-1", "i-r8i-2", "i-r8i-3"}))],
+                    RUN_CAMPAIGN.read_confirmation_units(
+                        confirmations, [self.platform], {unit["unit_id"]: unit}, campaign.receipts))
+                # A replica's later completion is superseded: the first accepted attempt stays.
+                first = {RUN_CAMPAIGN.unit_logical_identity(accepted): accepted for accepted in campaign.receipts}
+                campaign.add("r8i", unit, 2, host=4)
+                self.assertEqual(first, recover())
 
     def test_on_demand_capacity_accounts_for_unrelated_work_and_local_reservations(self):
         running_job = RUN_CAMPAIGN.Job(

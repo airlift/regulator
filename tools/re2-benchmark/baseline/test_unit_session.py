@@ -121,29 +121,62 @@ class TestUnitSession(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, re.escape(message)):
                     UNIT_SESSION.validate_unit_results(fixture.root)
 
+    def testCampaignAcceptsEveryUnitReplicaOnItsOwnInstance(self):
+        def validate(campaign, receipts, replicas=(1, 2, 3)):
+            return UNIT_SESSION.validate_unit_campaign(
+                BASELINE / "rows.tsv", BASELINE / "platforms.tsv", BASELINE / "shards.tsv",
+                campaign.write_ledger(campaign.root / "accepted-units.tsv", receipts), "campaign", replicas,
+                [campaign.shard_id])
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            smoke = UnitCampaign(Path(temporary_directory) / "smoke", "like-dfa-single-use", replicas=(1,))
+            self.assertEqual(2, validate(smoke, smoke.receipts, (1,))["accepted_attempts"])
+
+            campaign = UnitCampaign(Path(temporary_directory) / "campaign", "like-dfa-single-use")
+            summary = validate(campaign, campaign.receipts)
+            self.assertEqual(
+                (1, 6, 36), (summary["unit_count"], summary["accepted_attempts"], summary["accepted_rows"]))
+            missing = f"missing=[('r8i', '{campaign.units[0]['unit_id']}', '2')]"
+            with self.assertRaisesRegex(ValueError, re.escape(missing)):
+                validate(campaign, [receipt for receipt in campaign.receipts
+                                    if (receipt["platform"], receipt["replica_id"]) != ("r8i", "2")])
+            # Replica 2 measured again on the host that measured replica 1.
+            repeated = campaign.add("r8i", campaign.units[0], 2, host=1)
+            with self.assertRaisesRegex(ValueError, "replicas of a unit share an EC2 instance"):
+                validate(campaign, [
+                    repeated if (receipt["platform"], receipt["replica_id"]) == ("r8i", "2") else receipt
+                    for receipt in campaign.receipts[:-1]])
+
 
 class UnitFixture:
     """A unit attempt's directory as run-unit.sh leaves it, with fixture measurements."""
 
+    HOST = {
+        "campaign_id": "campaign", "platform": "r8i", "instance_id": "i-1", "host_epoch": "epoch-1",
+        "architecture": "intel", "instance_type": "r8i.2xlarge", "availability_zone": "us-west-2a",
+    }
     # The route's JMH process settings, as run-shard.sh records them.
     SMOKE = ("5", "10", "10", "1s")
     SMOKE_METADATA = ("jmh_process_count", "jmh_process_warmup_iterations", "jmh_process_measurement_iterations",
                       "jmh_iteration_time")
 
-    def __init__(self, root, shard_id, unit_index):
+    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row, role: 1):
         self.root = root
         units = UNIT_SESSION.work_units.load(BASELINE)
         self.unit = next(unit for unit in units.values()
                          if (unit["shard_id"], unit["unit_index"]) == (shard_id, unit_index))
         self.protocols = UNIT_SESSION.row_protocol.load(BASELINE / "row-protocol.tsv")
-        self.replica = min([replica for replica, _ in self.unit["representatives"]] or ["1"])
+        self.replica = replica or min([replica for replica, _ in self.unit["representatives"]] or ["1"])
+        self.host = host or self.HOST
+        self.score = score
         with contextlib.redirect_stdout(io.StringIO()):
             UNIT_SESSION.plan(type("Arguments", (), {
                 "unit": self.unit["unit_id"], "replica": self.replica, "output_directory": root})())
         representatives = UNIT_SESSION.row_protocol.read_tsv(BASELINE / "protocol-representatives.tsv")
         held = UNIT_SESSION.unit_representatives(self.unit, self.replica)
         (root / "unit-capacity.txt").write_text(
-            "memory_total_bytes=34359738368\nmemory_available_before_bytes=30000000000\n")
+            "memory_total_bytes=34359738368\nmemory_available_before_bytes=30000000000\n"
+            "swap_total_bytes=0\nswap_free_before_bytes=0\noom_kills_before=0\n")
         self.write_calibration(100, 101)
         for route, _, systems, share, calibration in UNIT_SESSION.plan_routes(BASELINE, self.unit, self.replica):
             route_representatives = [
@@ -158,31 +191,37 @@ class UnitFixture:
     def write_calibration(self, before, after):
         drift = abs(after - before) / min(before, after)
         (self.root / "calibration.tsv").write_text(
-            "phase\tscore\tbefore_after_drift\n"
-            f"before\t{before}\t{drift}\nafter\t{after}\t{drift}\n")
+            "phase\tscore\tscore_unit\tbefore_after_drift\n"
+            f"before\t{before}\tns/op\t{drift}\nafter\t{after}\tns/op\t{drift}\n")
 
     def create_route(self, route, systems, share, calibration, representatives):
         directory = self.root / "routes" / route
         (directory / "semantic-reports").mkdir(parents=True)
         SHARD_RESULTS.write_tsv(directory / "route-session.tsv", HOST_SESSION.SESSION_FIELDS, [{
-            "schema_version": "2", "campaign_id": "campaign", "platform": "r8i",
-            "shard_id": self.unit["shard_id"], "replica_id": self.replica, "instance_id": "i-1",
-            "host_epoch": "epoch-1", "architecture": "intel", "instance_type": "r8i.2xlarge",
-            "availability_zone": "us-west-2a", "systems": ",".join(sorted(systems)),
+            "schema_version": "2", **self.host, "shard_id": self.unit["shard_id"], "replica_id": self.replica,
+            "systems": ",".join(sorted(systems)),
         }])
         observed = directory / "observed-rows.tsv"
         SHARD_RESULTS.write_tsv(observed, SHARD_RESULTS.OBSERVED_FIELDS, [{
-            "row_id": row["row_id"], "shard_id": row["shard_id"], "system": row["system"], "score": "1",
+            "row_id": row["row_id"], "shard_id": row["shard_id"], "system": row["system"],
+            "score": str(self.score(row, "copy" if row["row_id"] in self.unit["copies"] else "owner")),
             "score_unit": "ns/op", "allocation_bytes": "0", "result_checksum": "0" * 64, "outcome": "accepted",
         } for row in sorted(share, key=lambda row: row["row_id"])])
         (directory / "observed-rows.tsv.sha256").write_text(
             hashlib.sha256(observed.read_bytes()).hexdigest() + "  observed-rows.tsv\n")
-        for name in ("semantic-gate.tsv", "semantic-evidence.tsv", "native-bracket.tsv"):
+        for name in ("semantic-gate.tsv", "semantic-evidence.tsv"):
             (directory / name).write_text("evidence\n")
         shard_rows = [row for row in UNIT_SESSION.load_manifest(BASELINE / "rows.tsv")
                       if row["shard_id"] == self.unit["shard_id"]]
         SHARD_RESULTS.write_tsv(directory / "jmh-selectors.tsv", UNIT_SESSION.SELECTOR_FIELDS, UNIT_SESSION.selectors(
             share, shard_rows, self.protocols, "qualification", dict(zip(UNIT_SESSION.SMOKE_SETTINGS, self.SMOKE))))
+        if UNIT_SESSION.work_units.NATIVE_COMPARATOR_SYSTEMS <= set(systems):
+            SHARD_RESULTS.write_tsv(
+                directory / "native-bracket.tsv",
+                ("benchmark", "before_score_ns", "after_score_ns", "before_after_drift"),
+                [{"benchmark": f"{row['benchmark']}[{row['parameters']}]", "before_score_ns": "100",
+                  "after_score_ns": "101", "before_after_drift": "0.01"}
+                 for row in share if row["system"] == "native-re2-before"])
         report = directory / "semantic-reports" / "TEST-Fixture.xml"
         report.write_text("<testsuite/>\n")
         (directory / "semantic-receipt.sha256").write_text(
@@ -241,10 +280,68 @@ class UnitFixture:
     def write_observed(self, rows):
         SHARD_RESULTS.write_tsv(self.root / "observed-rows.tsv", UNIT_SESSION.UNIT_OBSERVED_FIELDS, rows)
 
-    def combine(self):
+    def combine(self, attempt="host-session-1/3"):
         with contextlib.redirect_stdout(io.StringIO()):
             UNIT_SESSION.combine(type("Arguments", (), {
-                "unit_directory": self.root, "unit_attempt": "host-session-1/3", "region": "us-west-2"})())
+                "unit_directory": self.root, "unit_attempt": attempt, "region": "us-west-2"})())
+
+    def accept(self, attempt):
+        """Accept the attempt as run-unit.sh does, then finalize its capacity and status."""
+        self.combine(attempt)
+        receipt = UNIT_SESSION.validate_unit_results(self.root)
+        UNIT_SESSION.write_unit_receipt(self.root / "unit-receipt.tsv", receipt)
+        with (self.root / "unit-capacity.txt").open("a") as capacity:
+            capacity.write("wall_seconds=600\nmaximum_resident_kibibytes=1048576\nexit_status=0\n"
+                           "memory_available_after_bytes=29000000000\nminimum_available_memory_bytes=3435973837\n"
+                           "swap_free_after_bytes=0\noom_kills_after=0\ncapacity_status=accepted\n")
+        (self.root / "status.txt").write_text("status=complete\n")
+        return receipt
+
+
+class UnitCampaign:
+    """A unit campaign's retained attempts: one host per platform and replica runs each unit of a shard."""
+
+    PLATFORMS = {"r8i": ("intel", "r8i.large"), "r9g": ("arm", "r9g.large")}
+
+    def __init__(self, root, shard_id, replicas=(1, 2, 3), score=lambda row, role, platform, replica: 1):
+        self.root = root
+        self.shard_id = shard_id
+        self.score = score
+        self.units = sorted(
+            (unit for unit in UNIT_SESSION.work_units.load(BASELINE).values() if unit["shard_id"] == shard_id),
+            key=lambda unit: int(unit["unit_index"]))
+        self.leases = {}
+        self.receipts = []
+        self.confirmations = []
+        for platform in self.PLATFORMS:
+            for replica in replicas:
+                for unit in self.units:
+                    self.add(platform, unit, replica, host=replica)
+
+    def unit(self, unit_index):
+        return next(unit for unit in self.units if unit["unit_index"] == unit_index)
+
+    def add(self, platform, unit, replica, host):
+        """Run one unit attempt as the next lease of the platform's host number host."""
+        host_session = f"{platform}-session-{host}"
+        lease = self.leases[host_session] = self.leases.get(host_session, 0) + 1
+        directory = (self.root / "units" / platform / unit["unit_id"] / f"replica-{replica}" / host_session /
+                     f"lease-{lease}")
+        directory.mkdir(parents=True)
+        architecture, instance_type = self.PLATFORMS[platform]
+        fixture = UnitFixture(
+            directory, self.shard_id, unit["unit_index"], str(replica), {
+                "campaign_id": "campaign", "platform": platform, "instance_id": f"i-{platform}-{host}",
+                "host_epoch": f"{platform}-epoch-{host}", "architecture": architecture,
+                "instance_type": instance_type, "availability_zone": "us-west-2a",
+            }, lambda row, role: self.score(row, role, platform, replica))
+        receipt = fixture.accept(f"{host_session}/{lease}")
+        (self.confirmations if replica == 4 else self.receipts).append(receipt)
+        return receipt
+
+    def write_ledger(self, path, receipts):
+        SHARD_RESULTS.write_tsv(path, UNIT_SESSION.UNIT_RECEIPT_FIELDS, receipts)
+        return path
 
 
 if __name__ == "__main__":

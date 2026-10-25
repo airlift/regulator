@@ -18,21 +18,30 @@ from aggregate_results import parse_parameters
 
 import host_session
 import row_protocol
+import topology
 import unit_cost
 import work_units
 from acceptance import (
     EVIDENCE_FIELDS,
     FORMAL_UNIT_ARTIFACTS,
+    GIT_OBJECT_ID,
     SESSION_FIELDS,
     SHA256,
     UNIT_ROUTE_REQUIRED_ARTIFACTS,
     ValidationError,
+    campaign_shards,
     canonical_systems,
     capacity_prefix_sha256,
     duplicate_values,
     evidence_candidate_identity,
     exceeds_published_limit,
     format_values,
+    load_platforms,
+    load_rows_manifest,
+    load_shards,
+    normalize_heap_size,
+    parse_confirmation_replica,
+    parse_primary_replica,
     parse_systems,
     read_one_tsv,
     read_properties,
@@ -624,8 +633,25 @@ def check_unit_representatives(root, unit, session, planned):
                f"{format_values(expected)}")
 
 
-def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTORY / "row-protocol.tsv"):
-    """Accept one unit attempt on its own and return its receipt."""
+def load_unit_tables(manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTORY / "row-protocol.tsv"):
+    """The manifest, frozen protocols, and work units a unit attempt is validated against.
+
+    A pass over several attempts loads them once and passes them to each.
+    """
+    return {
+        "manifest": load_manifest(manifest_path),
+        "manifest_sha256": sha256_file(manifest_path),
+        "protocols": row_protocol.load(protocol_path),
+        "units": work_units.load(DIRECTORY),
+    }
+
+
+def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTORY / "row-protocol.tsv",
+                          tables=None):
+    """Accept one unit attempt on its own and return its receipt.
+
+    tables, from load_unit_tables, replaces loading the manifest and protocol paths.
+    """
     session = read_one_tsv(root / "unit-session.tsv", UNIT_SESSION_FIELDS)
     if session["schema_version"] != UNIT_SCHEMA_VERSION:
         reject(f"{root / 'unit-session.tsv'} schema_version must be {UNIT_SCHEMA_VERSION}")
@@ -635,9 +661,10 @@ def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_p
         reject(f"{root / 'unit-session.tsv'} unit_attempt_id must be <host_session>/<lease_seq>")
     if not session["availability_zone"].startswith(session["region"]):
         reject(f"{root / 'unit-session.tsv'} availability zone is outside region {session['region']}")
-    protocols = row_protocol.load(protocol_path)
-    manifest = load_manifest(manifest_path)
-    unit = check_unit_identity(root, session, work_units.load(DIRECTORY), protocols)
+    tables = tables or load_unit_tables(manifest_path, protocol_path)
+    protocols = tables["protocols"]
+    manifest = tables["manifest"]
+    unit = check_unit_identity(root, session, tables["units"], protocols)
     check_unit_rows(root, unit, manifest)
     planned = check_unit_routes(root, unit, session, protocols, manifest)
     check_unit_calibration(root)
@@ -649,7 +676,7 @@ def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_p
         "owned_row_count": str(len(unit["owned"])),
         "copied_row_count": str(len(unit["copies"])),
         "row_protocol_sha256": work_units.protocol_digest([*unit["owned"], *unit["copies"]], protocols),
-        "manifest_sha256": sha256_file(manifest_path),
+        "manifest_sha256": tables["manifest_sha256"],
         "observed_rows_sha256": sha256_file(root / "observed-rows.tsv"),
         "evidence_manifest_sha256": sha256_file(root / "unit-evidence.tsv"),
         "candidate_commit": candidate_commit,
@@ -661,6 +688,126 @@ def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_p
 
 def write_unit_receipt(path, receipt):
     write_tsv(path, UNIT_RECEIPT_FIELDS, [receipt])
+
+
+def split_unit_attempt(unit_attempt_id):
+    """The host session and lease sequence of a unit attempt's ID; the sequence stays text."""
+    host_session_id, _, sequence = unit_attempt_id.rpartition("/")
+    return host_session_id, sequence
+
+
+def check_unit_campaign(receipts, platforms, units, protocols, manifest_digest, campaign_id,
+                        expected_replica_ids=(1, 2, 3), confirmations=()):
+    """Accept a campaign's unit receipts as a whole.
+
+    Every unit runs on every platform for each expected replica, the replicas of a unit run on
+    distinct EC2 instances, and every attempt measured the same candidate. Different units may
+    share a host. A confirmation is replica 4, at most one per platform and unit, on an instance
+    none of that unit's replicas used.
+    """
+    expected = {
+        (platform, unit_id, str(replica))
+        for platform in platforms for unit_id in units for replica in expected_replica_ids}
+    observed = []
+    confirmed = []
+    instances_by_unit = {}
+    hosts = {}
+    candidate_identities = set()
+    for receipt, confirmation in [*((row, False) for row in receipts), *((row, True) for row in confirmations)]:
+        context = f"unit attempt {receipt['unit_attempt_id']!r}"
+        if receipt["schema_version"] != UNIT_SCHEMA_VERSION:
+            reject(f"{context} schema_version must be {UNIT_SCHEMA_VERSION}")
+        if receipt["campaign_id"] != campaign_id:
+            reject(f"{context} campaign_id is {receipt['campaign_id']!r}, expected {campaign_id!r}")
+        if UNIT_ATTEMPT.fullmatch(receipt["unit_attempt_id"]) is None:
+            reject(f"{context} unit_attempt_id must be <host_session>/<lease_seq>")
+        platform = platforms.get(receipt["platform"])
+        unit = units.get(receipt["unit_id"])
+        if platform is None or unit is None:
+            reject(f"{context} has an unexpected platform {receipt['platform']!r} or unit {receipt['unit_id']!r}")
+        if receipt["shard_id"] != unit["shard_id"]:
+            reject(f"{context} names shard {receipt['shard_id']!r}, not its unit's {unit['shard_id']!r}")
+        if receipt["architecture"] != platform["architecture"] or \
+                receipt["instance_type"] != topology.instance_type(platform, unit["shard_id"]):
+            reject(f"{context} does not match the frozen platform {receipt['platform']}")
+        if confirmation:
+            parse_confirmation_replica(receipt["replica_id"], context)
+            confirmed.append((receipt["platform"], receipt["unit_id"]))
+        else:
+            parse_primary_replica(receipt["replica_id"], context)
+            observed.append((receipt["platform"], receipt["unit_id"], receipt["replica_id"]))
+        if (receipt["owned_row_count"], receipt["copied_row_count"]) != (
+                str(len(unit["owned"])), str(len(unit["copies"]))):
+            reject(f"{context} row counts differ from unit {receipt['unit_id']}")
+        if receipt["row_protocol_sha256"] != work_units.protocol_digest([*unit["owned"], *unit["copies"]], protocols):
+            reject(f"{context} row_protocol_sha256 differs from the frozen row protocols")
+        if receipt["manifest_sha256"] != manifest_digest:
+            reject(f"{context} manifest_sha256 does not match the frozen manifest")
+        for field in ("observed_rows_sha256", "evidence_manifest_sha256"):
+            if SHA256.fullmatch(receipt[field]) is None:
+                reject(f"{context} {field} is not a lowercase SHA-256 digest")
+        for field in ("candidate_commit", "engine_tree"):
+            if GIT_OBJECT_ID.fullmatch(receipt[field]) is None:
+                reject(f"{context} {field} is not a Git object ID")
+        if receipt["candidate_archive_sha256"] != "not-recorded" and \
+                SHA256.fullmatch(receipt["candidate_archive_sha256"]) is None:
+            reject(f"{context} candidate_archive_sha256 is invalid")
+        candidate_identities.add((
+            receipt["candidate_commit"], receipt["candidate_archive_sha256"], receipt["engine_tree"],
+            normalize_heap_size(receipt["heap_size"])))
+        instances_by_unit.setdefault((receipt["platform"], receipt["unit_id"]), []).append(receipt["instance_id"])
+        for identity, host in (
+                (("instance", receipt["instance_id"]), receipt["host_epoch"]),
+                (("host epoch", receipt["host_epoch"]), receipt["instance_id"]),
+                (("host session", split_unit_attempt(receipt["unit_attempt_id"])[0]), receipt["host_epoch"])):
+            hosts.setdefault(identity, set()).add((host, receipt["platform"], receipt["instance_type"]))
+
+    duplicates = duplicate_values(observed)
+    missing = sorted(expected - set(observed))
+    unexpected = sorted(set(observed) - expected)
+    if duplicates or missing or unexpected:
+        reject(
+            "campaign unit coverage failed: "
+            f"missing={format_values(missing)}; "
+            f"duplicate={format_values(duplicates)}; "
+            f"unexpected={format_values(unexpected)}")
+    unknown = sorted(set(confirmed) - {(platform, unit_id) for platform, unit_id, _ in expected})
+    repeated = duplicate_values(confirmed)
+    if repeated or unknown:
+        reject(f"confirmation must hold at most one attempt per platform and unit of the campaign: "
+               f"duplicate={format_values(repeated)}; unexpected={format_values(unknown)}")
+    attempts = duplicate_values(receipt["unit_attempt_id"] for receipt in [*receipts, *confirmations])
+    if attempts:
+        reject(f"campaign reuses unit attempt IDs: {format_values(attempts)}")
+    shared = sorted(key for key, instances in instances_by_unit.items() if duplicate_values(instances))
+    if shared:
+        reject(f"replicas of a unit share an EC2 instance: {format_values(shared)}")
+    ambiguous = sorted(f"{kind} {value}" for (kind, value), names in hosts.items() if len(names) > 1)
+    if ambiguous:
+        reject(f"one host identity names several hosts: {format_values(ambiguous)}")
+    if len(candidate_identities) != 1:
+        reject(f"campaign contains multiple candidate identities: {format_values(sorted(candidate_identities))}")
+
+
+def validate_unit_campaign(manifest_path, platforms_path, shards_path, receipts_path, campaign_id,
+                           expected_replica_ids=(1, 2, 3), selected_shards=None,
+                           protocol_path=DIRECTORY / "row-protocol.tsv"):
+    """Validate an accepted-units.tsv ledger against the checked-in units of the campaign's shards."""
+    manifest_rows = load_rows_manifest(manifest_path)
+    shards = campaign_shards(manifest_rows, load_shards(shards_path), selected_shards)
+    platforms = load_platforms(platforms_path)
+    units = {unit_id: unit for unit_id, unit in work_units.load(DIRECTORY).items() if unit["shard_id"] in shards}
+    receipts = read_tsv(receipts_path, UNIT_RECEIPT_FIELDS, UNIT_RECEIPT_FIELDS)
+    check_unit_campaign(receipts, platforms, units, row_protocol.load(protocol_path), sha256_file(manifest_path),
+                        campaign_id, expected_replica_ids)
+    return {
+        "campaign_id": campaign_id,
+        "platform_count": len(platforms),
+        "shard_count": len(shards),
+        "unit_count": len(units),
+        "accepted_attempts": len(receipts),
+        "accepted_rows": sum(int(receipt["owned_row_count"]) for receipt in receipts),
+    }
 
 
 def parser():
