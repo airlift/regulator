@@ -398,6 +398,14 @@ are one process, not independent forks. Before/after native invocations form
 two process observations. The [analysis instructions](../../benchmark-report/analysis/README.md)
 provide the exact estimator, limitations and independent replay command.
 
+In a campaign of work units, the unit attempt takes the host's place: processes
+nest within a unit attempt, and a row's independent samples are the attempts of
+the one unit that owns it, its three replicas on distinct instances. Different
+units may share a host. A unit that copies a native bracket measures it again
+only to pair with the rows it owns; the copy is never a sample of the bracket
+row. The [reduction rules](../../tools/re2-benchmark/baseline/REPORTING.md#unit-campaigns)
+define ownership and pairing.
+
 Three or four hosts cannot establish a distribution-free precision guarantee
 or rule out unobserved machine or compiler states. Show observed host and process
 ranges separately from intervals around a mean. An interval crossing parity

@@ -178,6 +178,9 @@ instance between independent host sessions.
 
 Run three independent host sessions on each of R8i and R9g. A session is a
 fresh instance or reboot followed by the complete randomized benchmark order.
+A campaign of work units samples unit attempts on distinct instances instead;
+see the [unit-campaign definition](METHODOLOGY.md#statistics) of an independent
+sample.
 
 ## Workload manifest
 

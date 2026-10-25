@@ -14,8 +14,6 @@ import re
 from pathlib import Path
 from typing import NoReturn
 
-from aggregate_results import parse_parameters
-
 import host_session
 import row_protocol
 import topology
@@ -228,7 +226,7 @@ def plan(arguments):
 
 def parameter_block(rows):
     """The Cartesian -p block selecting exactly these rows, or None when JMH cannot express a value."""
-    parsed = [parse_parameters(row["parameters"]) for row in rows]
+    parsed = [row_protocol.parse_parameters(row["parameters"]) for row in rows]
     names = sorted(parsed[0])
     if any(sorted(parameters) != names for parameters in parsed):
         raise ValueError(f"Rows of {rows[0]['benchmark']} do not share parameter names")

@@ -13,8 +13,6 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from aggregate_results import parse_parameters
-
 import host_session
 import row_protocol
 import unit_session
@@ -44,7 +42,8 @@ def row_key(system, benchmark, parameters):
 def check_selectors(label, share, shard_rows, protocols, protocol_name, selectors):
     """Each selector expands to rows of the share, and together they measure every JMH row once."""
     jmh = {
-        row_key(row["system"], row_protocol.jmh_benchmark(row), parse_parameters(row["parameters"])): row
+        row_key(row["system"], row_protocol.jmh_benchmark(row),
+                row_protocol.parse_parameters(row["parameters"])): row
         for row in share if protocols[row["row_id"]]["execution"] in work_units.JMH_EXECUTIONS}
     measured = []
     for selector in selectors:
@@ -61,8 +60,8 @@ def check_selectors(label, share, shard_rows, protocols, protocol_name, selector
             if len(expanded) != len(whole):
                 raise SystemExit(f"{label} selector {selector['selector']} runs {method} whole with "
                                  f"{len(expanded)} of its {len(whole)} rows")
-            values = {name: sorted({parse_parameters(row["parameters"])[name] for row in whole})
-                      for name in parse_parameters(whole[0]["parameters"])}
+            values = {name: sorted({row_protocol.parse_parameters(row["parameters"])[name] for row in whole})
+                      for name in row_protocol.parse_parameters(whole[0]["parameters"])}
             if all(work_units.expressible(parameter_values) for parameter_values in values.values()):
                 raise SystemExit(f"{label} selector {selector['selector']} runs {method} whole, though JMH could "
                                  f"select each of its values: {values}")

@@ -1,6 +1,10 @@
-"""Frozen qualification protocol of every manifest row."""
+"""Frozen qualification protocol of every manifest row, and the row identities, comparisons, and scaling
+groups that the reducer and the work-unit planner share."""
 import csv
+import hashlib
 import io
+import re
+from collections import defaultdict
 
 
 FIELDS = (
@@ -60,6 +64,7 @@ TRINO_LIKE_SPECIALIZED_METHODS = {
     "regulator-generated": "candidateGenerated",
     "trino-sql": "trinoSql",
 }
+SIZE_KEY = re.compile(r"(?:size|length|count|captures?|groups?|repetitions?)$", re.IGNORECASE)
 
 
 def read_tsv(path):
@@ -225,3 +230,74 @@ def load(path):
                 raise ValueError(f"duplicate row protocol for {row['row_id']}")
             protocols[row["row_id"]] = row
     return protocols
+
+
+def parse_parameters(value):
+    if value == "-":
+        return {}
+    result = {}
+    entries = re.split(r";(?=[A-Za-z_][A-Za-z0-9_.-]*=)", value)
+    for entry in entries:
+        key, separator, item = entry.partition("=")
+        if not separator or not key or key in result:
+            raise ValueError(f"invalid manifest parameters: {value!r}")
+        result[key] = item
+    return result
+
+
+def canonical_parameters(parameters):
+    return ";".join(f"{key}={parameters[key]}" for key in sorted(parameters)) or "-"
+
+
+def logical_row_id(row):
+    suffix = "/" + row["system"]
+    if not row["row_id"].endswith(suffix):
+        raise ValueError(f"row ID does not end with its system: {row['row_id']}")
+    return row["row_id"][:-len(suffix)]
+
+
+def comparison_specs(manifest_rows):
+    groups = defaultdict(list)
+    for row in manifest_rows:
+        groups[logical_row_id(row)].append(row)
+    specs = []
+    for logical_id, rows in groups.items():
+        by_system = {row["system"]: row for row in rows}
+        candidate_systems = [system for system in by_system if system.startswith("regulator")]
+        if "native-re2-before" in by_system and "native-re2-after" in by_system:
+            for system in candidate_systems:
+                specs.append((logical_id, by_system[system], "native-re2", (
+                    by_system["native-re2-before"], by_system["native-re2-after"])))
+        if "joni" in by_system:
+            for system in candidate_systems:
+                specs.append((logical_id, by_system[system], "joni", (by_system["joni"],)))
+        for comparator in ("trino-optimized", "trino-sql"):
+            if comparator in by_system:
+                for system in candidate_systems:
+                    specs.append((logical_id, by_system[system], comparator, (by_system[comparator],)))
+        descriptors = {row["comparator"] for row in rows}
+        if "general-route-control" in descriptors and by_system.keys() >= {
+                "regulator-native-access", "regulator-object-row"}:
+            specs.append((logical_id, by_system["regulator-native-access"], "regulator-object-row", (
+                by_system["regulator-object-row"],)))
+    return sorted(specs, key=lambda item: (item[1]["row_id"], item[2]))
+
+
+def identify_scaling_groups(manifest_rows):
+    candidate_groups = defaultdict(list)
+    for row in manifest_rows:
+        parameters = parse_parameters(row["parameters"])
+        for key, value in parameters.items():
+            if SIZE_KEY.search(key) and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+                others = dict(parameters)
+                del others[key]
+                identity = (row["shard_id"], row["suite"], row["system"], row["benchmark"], key,
+                            canonical_parameters(others))
+                candidate_groups[identity].append((row, float(value)))
+    result = {}
+    for identity, points in candidate_groups.items():
+        sizes = {size for _, size in points}
+        if len(sizes) >= 3:
+            group_id = hashlib.sha256("\0".join(identity).encode()).hexdigest()[:16]
+            result[group_id] = (identity, sorted(points, key=lambda point: point[1]))
+    return result

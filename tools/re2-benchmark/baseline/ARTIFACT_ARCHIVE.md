@@ -26,6 +26,9 @@ The tool also writes the same manifest bytes beside the retrieval metadata as
 metadata record its SHA-256. The reducer uses this exported copy to prove that
 each recursively verified host artifact, including finalized capacity
 evidence, is part of the immutable archive without downloading the archive.
+A unit campaign's result tree archives the same way: every file of each
+accepted unit attempt directory, including its finalized `unit-capacity.txt`,
+must appear in the manifest with its exact size and digest.
 
 ## Permanent S3 storage
 
