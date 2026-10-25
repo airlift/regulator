@@ -23,7 +23,7 @@ contract, not importing RE2 syntax or changing Trino semantics.
 | Captures | Capture-free plans plus mandatory, nested, and optional captures; named groups also work; up to 16 subject to the operation limit |
 | Optional bodies | Literals, runs, captures, and nested optionals; at most four forks, sharing the optional budget |
 | Repetitions | Greedy single-character `?`, `*`, `+`, exact and bounded counts up to 1000; unbounded minimum counts; exact and finite capture-free literal-sequence repeats |
-| Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal, exact one-byte ASCII set, or unbounded run of every byte except the one-byte literal after it |
+| Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal, exact one-byte ASCII set, or unbounded run of every byte except the one-byte literal after it; in RE2, Java, and Rust plans also one character of a set of some non-ASCII characters, or an unbounded run of such a set holding every ASCII byte except that literal |
 | End assertions | Optional; strict end, final-LF `$` (Trino's, or Java's under `UNIX_LINES`), and Java's final-terminator `$` are supported when present |
 | Terminal behavior | Partial-match success, dot-all `.*`, LF-excluding `.*`, and supported character-set runs |
 | Case folding | Restricted ASCII literal and run folds proven safe against the Unicode fold tables, and ASCII letter pairs such as `[Kk]`, which match only their two letters; separate folded executors; in RE2, Java, and Rust plans, folds that add non-ASCII members, such as `k` with the Kelvin sign, as sets of some non-ASCII characters; other Unicode folding uses the ordinary engine |
@@ -57,7 +57,9 @@ another regex language or to Joni.
 stripping. It requires proof that a successful match consumes input. An
 unanchored plan must begin, after capture saves, with a literal, an exact
 one-byte ASCII set, or an unbounded run of every byte except the one-byte
-case-sensitive literal that follows it, such as `([^/]+)/`. It must also contain
+case-sensitive literal that follows it, such as `([^/]+)/`; an RE2, Java, or
+Rust plan may also begin with a set of some non-ASCII characters, as
+[RE2 patterns](#re2-patterns) describes. It must also contain
 a capture and a variable run so the capture-free and fixed-width routes
 retain precedence. Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, and
 `(\w+)@(\w+)`, keep the ordinary engine: each failed candidate inside a run
@@ -285,19 +287,23 @@ byte alone starts no attempt, the scan resumes after it, and a literal that does
 not fit before the logical end is never a candidate. ASCII-folded leading
 literals use the first-byte scan alone. A literal or ASCII-only set
 cannot match a valid UTF-8 continuation byte. A leading run set that admits
-non-ASCII characters admits every non-ASCII byte, so from a character boundary
-its first candidate is an ASCII byte or a lead byte; a set of only some
-non-ASCII characters never leads an unanchored plan, whose candidates are a
-leading literal or a single ASCII byte. On malformed input the scan makes the
-same attempts as trying each position, because a failed position advances only
-over bytes that cannot start the run. Candidate scans first test one byte, or
+every non-ASCII character, as any Trino set that admits one does, admits every
+non-ASCII byte, so from a character boundary its first candidate is an ASCII
+byte or a lead byte. A set of only some non-ASCII characters, in an RE2, Java,
+or Rust plan, has as member bytes its ASCII members and the lead bytes of its
+members' encodings, never a continuation byte, so its candidate scan finds every
+byte that can start one of its characters, and the attempt reads the character
+there by the set's exact encodings; `(?i)key=` finds `K`, `k`, and `E2`, the
+lead of the Kelvin sign. On malformed input the scan makes the same attempts as
+trying each position, because a failed position advances only over bytes that
+cannot start the run. Candidate scans first test one byte, or
 sixteen bytes for sets scanned with nibble tables, because dense inputs and
 large sets such as word characters usually have a candidate within a few bytes
 of the cursor. They then reuse the DFA's start-byte scanners when the Vector API
 is available. Sets of one to three bytes compare each byte for equality.
 Contiguous ranges of four to 64 bytes use a range comparison. Other sets of at
 most 64 bytes use nibble lookup tables, which are charged to the plan's retained
-size. Larger sets and sets that admit non-ASCII bytes use the plan's own scan:
+size. Larger sets and sets of every non-ASCII character use the plan's own scan:
 complements of small sets use vector equality, and other sets use the byte
 table. A leading run whose minimum is zero can match anywhere, so every position
 is attempted. For a leading unbounded run, a failed attempt resumes at the run
@@ -444,22 +450,44 @@ class calls copies of the RE2 run reader and the member reader for them.
 Every skip proof holds under this rule:
 
 - A literal-leading candidate scan skips only positions where the literal does
-  not start. A run-leading one skips only ASCII bytes outside the run; a
-  non-ASCII run still admits every byte at or above `0x80`, and a set of some
-  non-ASCII characters never leads an unanchored plan. Either scan visits a
-  superset of the possible starts.
+  not start. A run-leading one whose set holds every non-ASCII character skips
+  only ASCII bytes outside the run, since it admits every byte at or above
+  `0x80`. A set of some non-ASCII characters skips only bytes that start none of
+  its characters: its member bytes above `0x7F` are the lead bytes of its
+  members' encodings, and a character of it starts at one of them or at an ASCII
+  member. Each candidate scan visits a superset of the possible starts, in
+  increasing order, and the first start that matches is the ordinary engine's
+  leftmost one.
+- A set of some non-ASCII characters leads an unanchored plan only as a single
+  character, such as `(?i)s([a-z]+)=`, `[éè]([a-z]+)=`, or Rust's
+  `\d([0-9]+)=`, or as an unbounded run of every ASCII byte except the one-byte
+  literal after it, such as `([^/\x{85}]+)/`. That run stops at the literal,
+  or at a non-ASCII sequence it does not read, where the literal fails. The
+  search resumes at the run end, where that sequence's lead byte can also start
+  members and is attempted once more, so with a minimum of at most one, each
+  stop costs at most two failed attempts and none rescans the run. A larger
+  minimum adds failed attempts only inside a run shorter than it, each reading
+  fewer member characters than the minimum, so for a given pattern the cost
+  stays linear in the input. Other variable leading runs of such sets, such as
+  Rust's `(\d+)zz`, keep the ordinary engine, as ASCII ones do.
 - A failed or empty attempt advances by one strictly decoded character. A
   strictly valid sequence is one RE2 character of the same width, and a
   continuation byte inside it starts no RE2 match, while an invalid sequence
-  advances one byte, so no start is skipped.
+  advances one byte, so no start is skipped. A leading set of some non-ASCII
+  characters that fails at a lead byte whose sequence it does not read, as
+  `(?i)k` does at the first byte of `E2 E2 84 AA`, therefore retries at the
+  next byte, where the Kelvin sign starts.
 - Resuming at a leading run's end, and after a leading single character, holds
   because RE2's reading is deterministic from a character start: an attempt
   from any byte the run consumed either starts no match at a continuation byte
-  or reaches the same run end in the same state. Every RE2 run, whether it
-  reads a set's exact encodings or every non-ASCII character, takes a
-  character's width from its lead byte, so a leading ASCII character and a
-  following set of some non-ASCII characters that contains it
-  read the same characters from any character start.
+  or reaches the same run end in the same state. Every RE2 run, whether it reads
+  a set's exact encodings or every non-ASCII character, takes a character's
+  width from its lead byte, so a leading ASCII character and a following set of
+  some non-ASCII characters that contains it read the same characters from any
+  character start, as do a leading character of some non-ASCII characters and a
+  following run of every non-ASCII character. A leading single character of such
+  a set reads only exact encodings, so the bytes after its start that a failed
+  attempt skips are that character's continuation bytes.
 - A variable run stops where a backtracking match would because its member
   bytes are disjoint from the first bytes of its continuation. Every run reads
   a character only from one of its member bytes, and a set of some non-ASCII
@@ -489,19 +517,18 @@ and RE2 sets. `BenchmarkRe2ScanPlan` runs the `BenchmarkTrinoScanPlan` patterns
 and rows through public RE2 operations, plus non-ASCII and malformed rows for
 the URL, unanchored URL, long-host, and unanchored-tail shapes. `FOLDED_HOST`
 and `FOLDED_KEY` fold an `s` and a `k`, whose folds include the long s and the
-Kelvin sign. `FOLDED_HOST` plans with its `s` as a set of some non-ASCII
-characters, interpreted as every folded plan is, while `FOLDED_KEY`, an
-unanchored search led by its `k`, keeps the ordinary engine; their rows are
-mostly ASCII, and one in eight matches through that member. In
-`DEEP_REJECTIONS`, the folded `K` that rejects the first pattern in Trino is
-such a set, so in RE2 that pattern alone selects a plan. `PERL_ANCHORED` and
-`PERL_UNANCHORED` capture with `\d` and `\w`, which RE2 plans as ASCII classes;
-their rows are mostly ASCII, and a few hold a non-ASCII letter or Unicode
-digits. With `scanPlan=false` `BenchmarkRe2ScanPlan` compiles each pattern
-without its plan, so the same rows measure the ordinary engine. That compile is
-resolved reflectively, so the source also runs on a build without RE2 plans with
-`-p scanPlan=true`. With `generateBytecode=true` it compiles each pattern with
-generated bytecode, set reflectively and only then.
+Kelvin sign. Each plans with that letter as a set of some non-ASCII characters,
+`FOLDED_KEY` as an unanchored search led by its `k`, and both are interpreted as
+every folded plan is; their rows are mostly ASCII, and one in eight matches
+through that member. In `DEEP_REJECTIONS`, the folded `K` that rejects the first
+pattern in Trino is such a set, so in RE2 that pattern alone selects a plan.
+`PERL_ANCHORED` and `PERL_UNANCHORED` capture with `\d` and `\w`, which RE2
+plans as ASCII classes; their rows are mostly ASCII, and a few hold a non-ASCII
+letter or Unicode digits. With `scanPlan=false` `BenchmarkRe2ScanPlan` compiles
+each pattern without its plan, so the same rows measure the ordinary engine.
+That compile is resolved reflectively, so the source also runs on a build
+without RE2 plans with `-p scanPlan=true`. With `generateBytecode=true` it
+compiles each pattern with generated bytecode, set reflectively and only then.
 
 `TestJavaScanPlan` checks which Java constructs select a plan and compares the
 planned and forced-handoff compiles of each plan shape, with and without

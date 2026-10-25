@@ -39,12 +39,11 @@ public class TestBenchmarkRe2ScanPlan
             "LITERAL_CONTROLS",
             "DEEP_REJECTIONS",
             "FALLBACK",
-            "LOWERED_FALLBACK",
-            // An unanchored search led by the k that folds to the Kelvin sign.
-            "FOLDED_KEY");
+            "LOWERED_FALLBACK");
     // Workloads whose plans are case-insensitive, so they keep the interpreter when generated
-    // bytecode is requested.
-    private static final Set<String> FOLDED = Set.of("FOLDED_ANCHORED", "FOLDED_OPTIONAL", "FOLDED_UNANCHORED", "FOLDED_MIXED", "FOLDED_HOST");
+    // bytecode is requested. FOLDED_KEY is an unanchored search led by the k that folds to the
+    // Kelvin sign.
+    private static final Set<String> FOLDED = Set.of("FOLDED_ANCHORED", "FOLDED_OPTIONAL", "FOLDED_UNANCHORED", "FOLDED_MIXED", "FOLDED_HOST", "FOLDED_KEY");
     // The first pattern in DEEP_REJECTIONS selects an interpreted RE2 plan because RE2 supports
     // its Unicode K fold, which Trino rejects.
     private static final String PARTLY_PLANNED = "DEEP_REJECTIONS";

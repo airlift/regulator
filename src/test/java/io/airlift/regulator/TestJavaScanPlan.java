@@ -99,7 +99,12 @@ public class TestJavaScanPlan
             // Unicode case folds k to the Kelvin sign, and [a-z] also to the long s and the
             // dotless i.
             new PlanCase("(?iu)^k([^/]+)/", "\u212Aab/"),
-            new PlanCase("(?iu)^x([a-z]+)/", "xaſ\u212A\u0131b/"));
+            new PlanCase("(?iu)^x([a-z]+)/", "xaſ\u212A\u0131b/"),
+            // Unanchored searches led by a set of some non-ASCII characters, whose candidates are
+            // its ASCII members and lead bytes.
+            new PlanCase("(?iu)key=([^;]+);", "kx;\u212Aey=v;"),
+            new PlanCase("(?iu)s([a-z]+)=", "ſ=Sſab="),
+            new PlanCase("[éè]([a-z]+)=", "àa=é=èab="));
     // Each line end after the witness: none, every Java line terminator, CR LF, and two
     // terminators, which a Java end does not precede.
     private static final List<String> LINE_ENDS = List.of("", "\n", "\r\n", "\r", "\u0085", "\u2028", "\u2029", "\n\n");

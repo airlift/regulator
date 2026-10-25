@@ -119,7 +119,16 @@ public class TestRe2ScanPlan
             new PlanCase("^x([a-z]+)/", "xaſ\u212Ab/"),
             // A failed attempt resumes at the end of a run of some non-ASCII characters that
             // contains the leading set.
-            new PlanCase("([0-9][0-9é]*)=x", "1é=y 2é=x"));
+            new PlanCase("([0-9][0-9é]*)=x", "1é=y 2é=x"),
+            // Unanchored searches led by a set of some non-ASCII characters, whose candidates are
+            // its ASCII members and lead bytes, such as the k of key= when case-insensitive. A
+            // candidate lead byte that starts no member, such as the C3 of à or a lone C5 or E2
+            // before a member with that lead, fails and resumes past it, and a run of every ASCII
+            // byte but its delimiter stops at U+0085.
+            new PlanCase("[éè]([a-z]+)=", "àa=é=èab="),
+            new PlanCase("[sS\\x{17F}]([a-z]+)=", HexFormat.of().parseHex("c5c5bf613d")),
+            new PlanCase("key=([^;]+);", HexFormat.of().parseHex("6b783be2e284aa65793d763b6b65793d773b")),
+            new PlanCase("([^/\\x{85}]+)/", "a\u0085b/c/"));
 
     private record NamedOptions(String name, Re2.Options options) {}
 
@@ -203,9 +212,10 @@ public class TestRe2ScanPlan
         assertThat(Re2.compile(utf8Slice(eligible), Re2.Options.defaults().setLongestMatch(true)).usesTrinoScanPlanForDiagnostics()).isFalse();
         assertThat(Re2.compile(utf8Slice(eligible), Re2.Options.latin1()).usesTrinoScanPlanForDiagnostics()).isFalse();
         assertThat(Re2.compileWithoutScanPlanForTesting(utf8Slice(eligible), Re2.Options.defaults()).usesTrinoScanPlanForDiagnostics()).isFalse();
-        // Lazy runs, lazy tails, and nullable patterns, and unanchored searches led by a run of
-        // some non-ASCII characters, whose candidates are not single bytes.
-        for (String expression : List.of("^([^/]+?)/$", "^([^/]+)/.*?$", "^([a-z]*)$", "[éè]([a-z]+)=", "([^/\\x{85}]+)/")) {
+        // Lazy runs, lazy tails, nullable patterns, and an unanchored search led by a variable
+        // run of some non-ASCII characters keep the ordinary engine, unless that run is unbounded
+        // and holds every ASCII byte but the delimiter after it.
+        for (String expression : List.of("^([^/]+?)/$", "^([^/]+)/.*?$", "^([a-z]*)$", "([éè]+)([a-z]+)=", "([^/:\\x{85}]+)/")) {
             assertThat(Re2.compile(utf8Slice(expression)).usesTrinoScanPlanForDiagnostics()).as(expression).isFalse();
             assertThat(Re2.compile(utf8Slice(expression), Re2.Options.defaults().setGenerateBytecode(true)).usesGeneratedBytecode()).as(expression).isFalse();
         }

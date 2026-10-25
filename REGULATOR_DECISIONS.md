@@ -1448,7 +1448,8 @@ case-sensitive literal that follows it, and must contain a capture and a
 variable run. A capture-free plan must contain a character run or a variable
 literal repeat. These rules keep capture-free, fixed-width, and literal-only
 patterns on their direct routes. A lowered final-line plan takes precedence
-over a run-leading scan.
+over a run-leading scan. RE2, Java, and Rust plans may also be led by a set of
+some non-ASCII characters, as [RE2 Scan Plans](#re2-scan-plans) records.
 
 Other leading runs, such as `(\d+)zz`, `([0-9]+)a`, `(\w+)@(\w+)`, and
 `([a-z]+)-([0-9]+)`, keep the ordinary engine, plain or ASCII-folded, as do
@@ -1652,12 +1653,18 @@ measurements specific to each language.
   every non-ASCII byte alike.
 - The analysis, builder, proofs, budgets, candidate scans, and routing stay
   shared, so a coverage change reaches the Trino, RE2, Java, and Rust
-  frontends. Every skip proof holds under the RE2 rule, as the
+  frontends, except a change for sets of some non-ASCII characters, which Trino
+  plans decline. Every skip proof holds under the RE2 rule, as the
   [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md#re2-patterns) restates.
-  An unanchored search led by a set of some non-ASCII characters, such as
-  `(?i)key=` led by the k that folds to the Kelvin sign, keeps the ordinary
-  engine, since an unanchored plan's candidates are a leading literal or a
-  single ASCII byte.
+  An unanchored search may also be led by one character of a set of some
+  non-ASCII characters, such as `(?i)key=([^;]+);` led by the `k` that folds to
+  the Kelvin sign, or by an unbounded run of such a set that holds every ASCII
+  byte except the one-byte literal after it, such as `([^/\x{85}]+)/`. The set
+  never holds a continuation byte, so its candidate scan finds exactly the
+  bytes that can start one of its characters, and each attempt reads the
+  character there by the set's exact encodings. Other variable leading runs of
+  such sets, such as Rust's `(\d+)zz`, keep the ordinary engine, as ASCII ones
+  do.
 - Longest-match patterns build no plan, because a plan reports leftmost-first
   matches, and Latin-1 patterns build none, as in Trino.
 - An experimental option compiles a case-sensitive RE2 plan into its own
@@ -1850,6 +1857,13 @@ measurements specific to each language.
   `boundaries` with Unicode `\d` takes 43.6 ns, against 40.9 ns with full lead
   entries alone, 41.3 ns with the trie walk, and 84 ns with the ordinary
   engine.
+- The lead-byte width pays off where a run reads many multibyte members whose
+  lead byte is not a full entry. In a development probe of Rust's `\d(\d*)zz`,
+  an unanchored search led by one Unicode digit, over runs of two-byte
+  Arabic-Indic digits, the plan took 1.03 to 1.20 times the ordinary engine's
+  time at 1 and 4 KiB and 1.22 to 1.80 at 64 bytes on R9g and R8i, with the
+  trie walk for every lead or with full lead entries alone. With the lead-byte
+  width it takes 0.32 to 0.45 and 0.57 to 0.99.
 - Alternatives rejected for this reader:
   - A reader for sets of every character except a few code points still took
     1.08 to 1.10 times the ordinary engine's time on R9g `URL_NON_ASCII`

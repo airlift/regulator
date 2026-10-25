@@ -1664,8 +1664,12 @@ final class TrinoScanPlan
     ///
     /// A leading run with a positive minimum must match its first byte, and only zero-width
     /// saves precede it, so every skipped byte would fail its attempt without advancing further
-    /// than this scan. The run analysis gives all non-ASCII bytes the same membership, so from a
-    /// character boundary the first member byte of valid UTF-8 is never a continuation byte.
+    /// than this scan. A Trino run that admits one non-ASCII byte admits all of them, as does a run
+    /// of every non-ASCII character in an RE2, Java, or Rust plan, so from a character boundary the
+    /// first member byte of valid UTF-8 is never a continuation byte. A set of some non-ASCII
+    /// characters has only lead bytes as member bytes above 0x7F, so it finds its candidates at
+    /// ASCII members and at lead bytes; the attempt then reads the character there by the set's
+    /// exact encodings.
     private static int nextCandidate(byte[] bytes, int candidate, int end, Step leading)
     {
         if (leading.kind == Kind.LITERAL) {
@@ -1777,7 +1781,10 @@ final class TrinoScanPlan
             // otherwise valid UTF-8. In a Trino plan, malformed input retains Trino's unspecified
             // behavior. In an RE2, Java, or Rust plan this skips only the continuation bytes of a
             // valid character, where RE2 starts no match, and advances one byte from the start of
-            // an invalid sequence.
+            // an invalid sequence. A leading set of some non-ASCII characters fails at a lead byte
+            // whose sequence it does not read, such as E2 E2 84 AA for RE2's (?i)k, and this
+            // advances to the next byte, the start of the Kelvin sign; past a valid character
+            // outside the set it skips only that character's continuation bytes.
             return candidate + Utf8.decodedWidth(Utf8.decode(bytes, candidate, end));
         }
         return candidate + 1;
@@ -2353,12 +2360,27 @@ final class TrinoScanPlan
 
         /// Returns whether an unanchored search may attempt a match at each candidate of the
         /// leading operation, past capture saves. That operation must be a literal or a single
-        /// ASCII character. After any other leading run, the number of attempts that fail
-        /// depends on the input, since each candidate inside one run rescans the rest of it, so
-        /// the ordinary engine keeps those patterns. The exception is an unbounded run of every
-        /// byte except the one-byte case-sensitive literal that follows it: the run stops only
-        /// at that byte, which the literal then matches, or, in an RE2, Java, or Rust plan, at a
-        /// sequence RE2 rejects, where the attempt fails and the search resumes at the run end.
+        /// character whose member bytes each start a character: an ASCII character or, in an
+        /// RE2, Java, or Rust plan, one of a set of some non-ASCII characters, whose member
+        /// bytes above 0x7F are the lead bytes of its members' encodings. A continuation byte
+        /// is then never a candidate, every start the ordinary engine can match from is one,
+        /// and a failed attempt skips only the continuation bytes of the character it read.
+        /// A run of every non-ASCII character admits continuation bytes, so it cannot lead as a
+        /// single character.
+        ///
+        /// After any other leading run, the number of attempts that fail depends on the input,
+        /// since each candidate inside one run rescans the rest of it, so the ordinary engine
+        /// keeps those patterns. The exception is an unbounded run of every byte except the
+        /// one-byte case-sensitive literal that follows it: the run stops only at that byte,
+        /// which the literal then matches, or, in an RE2, Java, or Rust plan, at a sequence RE2
+        /// rejects, where the attempt fails and the search resumes at the run end. In those
+        /// plans a run that holds every ASCII byte except the literal, and some non-ASCII characters
+        /// but not all, also stops at a non-ASCII character outside it, which the literal fails on
+        /// in the same way. That character's lead byte can also start members, so the search
+        /// attempts once more there, and with a minimum of at most one, each stop costs at most two
+        /// failed attempts and none rescans the run. A larger minimum adds failed attempts only
+        /// inside a run shorter than it, each reading fewer member characters than the minimum, so
+        /// for a given pattern the cost stays linear in the input.
         private boolean canSearchUnanchored()
         {
             for (int index = 0; index < steps.size(); index++) {
@@ -2372,7 +2394,7 @@ final class TrinoScanPlan
                 if (step.kind != Kind.RUN) {
                     return false;
                 }
-                return step.run.isSingleByteAscii() || (step.run.isUnbounded() && stopsOnlyAtFollowingByte(step.run, index + 1));
+                return step.run.isSingleCharacterOfStartBytes() || (step.run.isUnbounded() && stopsOnlyAtFollowingByte(step.run, index + 1));
             }
             return false;
         }
@@ -2384,7 +2406,7 @@ final class TrinoScanPlan
                 if (step.kind == Kind.SAVE) {
                     continue;
                 }
-                return step.kind == Kind.LITERAL && step.literal.length == 1 && run.isComplementOf(step.literal[0]);
+                return step.kind == Kind.LITERAL && step.literal.length == 1 && (run.isComplementOf(step.literal[0]) || run.isAsciiComplementOf(step.literal[0]));
             }
             return false;
         }
