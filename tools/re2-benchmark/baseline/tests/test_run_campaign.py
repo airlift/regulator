@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -1858,6 +1859,202 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         self.assertNotIn("-Dsurefire.reportsDirectory=", source)
         self.assertIn('default_semantic_report_dir="${ROOT}/target/surefire-reports"', source)
         self.assertIn('cp "${default_semantic_report_dir}"/TEST-*.xml "${semantic_report_dir}/"', source)
+
+    def semantic_verifier_script(self, source, directory):
+        """The run-shard.sh semantic-verifier functions, set up for a native-access route under directory."""
+        functions = source[source.index("SEMANTIC_FAILURE_STATUS="):source.index("\n}\n", source.index(
+            "run_semantic_verifier()")) + 3]
+        quoted = shlex.quote(str(directory))
+        return (f"set -euo pipefail\nRESULT_DIR={quoted}\nmkdir -p \"${{RESULT_DIR}}/logs\"\nROOT={quoted}\n"
+                f"SHARED_WORK_DIR={quoted}/shared\nROUTE=native-access\nCPU_LIST=0\nCLASSPATH=fixture\n"
+                f"route_jvm_arguments=()\n{functions}\n")
+
+    def test_failed_semantic_checks_exit_with_the_semantic_failure_status(self):
+        source = (SCRIPT.parent / "run-shard.sh").read_text()
+
+        self.assertIn(f"SEMANTIC_FAILURE_STATUS={RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS}\n", source)
+        statements = re.sub(r"(\\|\|\||&&)\n\s*", r"\1 ", source).splitlines()
+        # A verifier that verified too few cases, and Rebar's curated verification, fail as a verdict.
+        checks = [statement for statement in statements if "grep -Fx 'Verified" in statement or (
+            "validate-rebar-shard-verification.py" in statement and "--measurement" not in statement)]
+        self.assertEqual(6, len(checks), checks)
+        self.assertTrue(all("|| semantic_failure " in statement for statement in checks), checks)
+        # The DFA probe, every Java verifier, and the pinned Trino comparator's verification fail as a verdict.
+        # Only the identity check of a prebuilt harness, whose failure rebuilds it, runs bare.
+        verifiers = [statement for statement in statements if re.search(
+            r" (io\.airlift\.regulator\.DfaAbsolutePointerProbe|\S*Verifier|\S*BenchmarkTrinoLike\S*)( |$)",
+            statement) and " java " in statement]
+        verifiers += [statement for statement in statements
+                      if "trino-joni/verify.sh" in statement and not statement.lstrip().startswith("if ")]
+        self.assertEqual(6, len(verifiers), verifiers)
+        self.assertTrue(all(statement.lstrip().startswith("run_semantic_verifier ") for statement in verifiers),
+                        verifiers)
+
+        probe = source[source.index("expected_native_access=false\n"):source.index("# Units of one shard on one host")]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prefix = self.semantic_verifier_script(source, temporary)
+            # The DFA probe runs its check on another thread, so its assertion reaches main wrapped.
+            for output, status, expected in (
+                    ('Exception in thread "main" java.util.concurrent.ExecutionException: java.lang.AssertionError: '
+                     'unexpected native-access capability', 1, RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS),
+                    ("OK enabled", 0, 0)):
+                with self.subTest(output=output):
+                    script = (prefix + "taskset() { shift 2; \"$@\"; }\n"
+                              f"java() {{ echo {shlex.quote(output)} >&2; return {status}; }}\n" + probe)
+                    result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
+                    self.assertEqual(expected, result.returncode, result.stderr)
+                    self.assertIn(output, (root / "logs" / "semantic-tests.log").read_text())
+
+    def test_prebuilt_trino_harness_is_rebuilt_only_when_its_identity_fails(self):
+        source = (SCRIPT.parent / "run-shard.sh").read_text()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prefix = self.semantic_verifier_script(source, temporary)
+            # A prebuilt Trino harness is rebuilt only when its identity fails, before any semantic check runs;
+            # an identity-only setting in the environment does not reach the full verification.
+            comparator = root / "tools/re2-benchmark/trino-joni"
+            comparator.mkdir(parents=True)
+            (comparator / "verify.sh").write_text(
+                '#!/bin/bash\nprintf fixture > "${TRINO_COMPARATOR_WORK_DIR}/classpath.txt"\n'
+                '[[ -f "${TRINO_COMPARATOR_WORK_DIR}/rebuilt" ]] || [[ "${FAIL}" == semantics ]] || exit 1\n'
+                '[[ "${TRINO_COMPARATOR_IDENTITY_ONLY:-false}" == true || "${FAIL}" != semantics ]] || exit 1\n')
+            (comparator / "prepare.sh").write_text('#!/bin/bash\ntouch "${TRINO_COMPARATOR_WORK_DIR}/rebuilt"\n')
+            for script_path in comparator.iterdir():
+                script_path.chmod(0o755)
+            for failure, identity_only, expected, rebuilt in (
+                    ("semantics", "", RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS, False),
+                    ("semantics", "export TRINO_COMPARATOR_IDENTITY_ONLY=true\n",
+                     RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS, False),
+                    ("identity", "", 0, True)):
+                with self.subTest(failure=failure, identity_only=bool(identity_only)):
+                    shutil.rmtree(root / "shared", ignore_errors=True)
+                    (root / "shared/engine-build").mkdir(parents=True)
+                    (root / "shared/engine-build/trino.sha256").write_text("a" * 64)
+                    script = (prefix + identity_only + "expected_native_access=true\n"
+                              + shell_functions(source, "prebuilt_engine", "prepare_pinned_trino")
+                              + f"FAIL={failure} prepare_pinned_trino\n")
+                    result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
+                    self.assertEqual(expected, result.returncode, result.stderr)
+                    self.assertEqual(rebuilt, (root / "shared/pinned-trino/rebuilt").exists())
+
+            # A cached harness whose Rebar runner reports no version fails the real identity check, so it is
+            # rebuilt before any semantic check runs; the full verification then runs each verifier once.
+            shutil.rmtree(comparator)
+            shutil.copytree(SCRIPT.parents[1] / "trino-joni", comparator, ignore=shutil.ignore_patterns("prepare.sh"))
+            (comparator / "prepare.sh").write_text('#!/bin/bash\ntouch "${TRINO_COMPARATOR_WORK_DIR}/rebuilt"\n')
+            (comparator / "prepare.sh").chmod(0o755)
+            verify = (comparator / "verify.sh").read_text()
+            pins = dict(line.split("=", 1) for line in (comparator / "pins.env").read_text().splitlines())
+            version = pins["TRINO_COMPARATOR_JONI_VERSION"]
+            joni = root / f"repository/io/airlift/joni/{version}/joni-{version}.jar"
+            joni.parent.mkdir(parents=True)
+            joni.write_text("fixture joni")
+            pins["TRINO_COMPARATOR_JONI_SHA256"] = hashlib.sha256(joni.read_bytes()).hexdigest()
+            (comparator / "pins.env").write_text("".join(f"{name}={value}\n" for name, value in pins.items()))
+            provenance = [f"{key}={pins[pin]}" for key, pin in re.findall(r'grep -Fqx "(\w+)=\$\{(\w+)\}"', verify)]
+            provenance += [f"{key}={hashlib.sha256((comparator / name).read_bytes()).hexdigest()}"
+                           for key, name in re.findall(r'grep -Fqx "(\w+)=\$\(sha256 "\$\{SCRIPT_DIR\}/(\S+)"\)"',
+                                                         verify)]
+            shutil.rmtree(root / "shared", ignore_errors=True)
+            work = root / "shared/pinned-trino"
+            work.mkdir(parents=True)
+            (root / "shared/engine-build").mkdir()
+            (root / "shared/engine-build/trino.sha256").write_text("a" * 64)
+            (work / "provenance.properties").write_text("".join(f"{line}\n" for line in provenance))
+            (work / "classpath.txt").write_text(str(joni))
+            (work / "joni-jar.path").write_text(str(joni))
+            (root / "benchmarks.txt").write_text(verify.split("<<'EOF'\n")[1].split("\nEOF\n")[0] + "\n")
+            binary = root / "bin"
+            binary.mkdir()
+            (binary / "java").write_text(
+                '#!/bin/bash\ncase " $* " in\n'
+                f'    *" org.openjdk.jmh.Main "*) cat {shlex.quote(str(root / "benchmarks.txt"))} ;;\n'
+                '    *" io.airlift.regulator.RebarJoniRunner --version "*)\n'
+                '        [[ -f "${TRINO_COMPARATOR_WORK_DIR}/rebuilt" ]] && echo "Trino Joni 2.1.5.3" ;;\n'
+                f'    *) for argument; do [[ ${{argument}} != *Verifier ]] || echo "${{argument}}" '
+                f'>> {shlex.quote(str(root / "verifiers"))}; '
+                'done ;;\nesac\n')
+            (binary / "java").chmod(0o755)
+            script = (prefix + "expected_native_access=true\n"
+                      + shell_functions(source, "prebuilt_engine", "prepare_pinned_trino") + "prepare_pinned_trino\n")
+            result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False,
+                                    env={**os.environ, "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}"})
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue((work / "rebuilt").exists())
+            verifier_classes = sorted(set(re.findall(r"io\.trino\.operator\.scalar\.(\w+Verifier)\b", verify)))
+            self.assertEqual(6, len(verifier_classes), verifier_classes)
+            self.assertEqual([f"io.trino.operator.scalar.{verifier}" for verifier in verifier_classes],
+                             sorted((root / "verifiers").read_text().splitlines()))
+
+            # The real verification refuses an unknown identity-only setting and a classpath entry not on this host.
+            missing = root / "repository/missing.jar"
+            for identity_only, classpath, message in (
+                    ("yes", str(joni), "TRINO_COMPARATOR_IDENTITY_ONLY must be true or false: yes"),
+                    ("true", f"{joni}:{missing}", f"Comparator classpath entry is missing: {missing}")):
+                with self.subTest(refusal=message):
+                    (work / "classpath.txt").write_text(classpath)
+                    result = subprocess.run(
+                        [comparator / "verify.sh"], text=True, capture_output=True, check=False,
+                        env={**os.environ, "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}",
+                             "TRINO_COMPARATOR_WORK_DIR": str(work), "TRINO_COMPARATOR_IDENTITY_ONLY": identity_only})
+                    self.assertEqual(1, result.returncode, result.stderr)
+                    self.assertIn(message, result.stderr)
+
+    def test_semantic_failure_outranks_a_rejected_unit_capacity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            # The unit's own script, beside a stubbed planner and shard, on a host whose swap is in use.
+            baseline = root / "tools/re2-benchmark/baseline"
+            baseline.mkdir(parents=True)
+            proc = root / "proc"
+            proc.mkdir()
+            (proc / "meminfo").write_text("MemTotal: 64000000 kB\nMemAvailable: 60000000 kB\n"
+                                          "SwapTotal: 1024 kB\nSwapFree: 0 kB\n")
+            (proc / "vmstat").write_text("oom_kill 0\n")
+            binary = root / "bin"
+            binary.mkdir()
+            (binary / "df").write_text("#!/bin/bash\nprintf 'Avail\\n999999999999\\n'\n")
+            (binary / "time").write_text(
+                '#!/bin/bash\nfor argument; do case "${argument}" in --output=*) output=${argument#--output=};; '
+                '--*) ;; *) break;; esac; shift; done\n"$@"\nstatus=$?\n'
+                'printf "wall_seconds=1\\nmaximum_resident_kibibytes=1\\nexit_status=%s\\n" "${status}" >> "${output}"\n'
+                'exit "${status}"\n')
+            source = (SCRIPT.parent / "run-unit.sh").read_text()
+            (baseline / "run-unit.sh").write_text(
+                source.replace("/proc/", f"{proc}/").replace("/usr/bin/time", str(binary / "time")))
+            (baseline / "unit_session.py").write_text(
+                "import sys\nfrom pathlib import Path\n"
+                "if sys.argv[1] == 'copy-environment':\n    sys.exit()\n"
+                "output = Path(sys.argv[sys.argv.index('--output-directory') + 1])\n"
+                "(output / 'route-plan.tsv').write_text('route\\trows\\tsystems\\tcalibration\\n"
+                "native-access\\t1\\tregulator\\tbefore\\n')\nprint('traditional-search')\n")
+            (baseline / "run-shard.sh").write_text('#!/bin/bash\nexit "${SHARD_STATUS}"\n')
+            for script_path in (*binary.iterdir(), baseline / "run-unit.sh", baseline / "run-shard.sh"):
+                script_path.chmod(0o755)
+            environment = {name: value for name, value in os.environ.items()
+                           if not name.startswith(("BASELINE_", "RE2_", "JONI_", "REBAR_"))}
+            environment.update({
+                "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}", "RE2_CAMPAIGN_ID": "campaign",
+                "RE2_CAMPAIGN_PLATFORM": "r8i", "RE2_CAMPAIGN_HOST_EPOCH": "1",
+                "RE2_ENGINEERING_ARCHITECTURE": "intel", "BASELINE_INSTANCE_ID": "i-1",
+                "BASELINE_INSTANCE_TYPE": "r8i.large", "BASELINE_AVAILABILITY_ZONE": "us-west-2a",
+                "RE2_CAMPAIGN_HOST_SESSION": "host-session-1", "RE2_CAMPAIGN_LEASE_SEQUENCE": "1"})
+            # A semantic failure stays the unit's verdict; any other failure, a protocol rejection among them,
+            # is the capacity gate's.
+            for shard_status, expected in ((RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS,
+                                            RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS),
+                                           (RUN_CAMPAIGN.PROTOCOL_REJECTION_STATUS, 1)):
+                with self.subTest(shard_status=shard_status):
+                    unit = root / f"unit-{shard_status}"
+                    result = subprocess.run(
+                        [str(baseline / "run-unit.sh"), "unit", "qualification", "1", str(unit)],
+                        env={**environment, "SHARD_STATUS": str(shard_status)},
+                        capture_output=True, text=True, check=False)
+                    self.assertEqual(expected, result.returncode, result.stderr)
+                    capacity = (unit / "unit-capacity.txt").read_text()
+                    self.assertIn(f"exit_status={shard_status}\n", capacity)
+                    self.assertIn("capacity_status=rejected\n", capacity)
 
     def test_missing_package_version_is_one_property_value(self):
         source = (SCRIPT.parents[1] / "aws" / "run-host.sh").read_text()

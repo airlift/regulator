@@ -114,8 +114,13 @@ iteration counts while avoiding a new forked JVM for every row:
   measurements remain evidence; they are not accepted final samples.
 - Numerical protocol rejection has exit status 42. It leaves the host
   unaccepted and the campaign incomplete, without terminating unrelated jobs
-  or automatically retrying the rejected timings. Malformed evidence, semantic
-  failures, and resource failures retain the shared fleet stop behavior.
+  or automatically retrying the rejected timings. Malformed evidence and
+  resource failures retain the shared fleet stop behavior.
+- A failed check of a route's correctness stage has exit status 44: a
+  semantic test, the DFA probe, a differential verifier or its count of
+  verified cases, the curated Rebar verification, or the pinned Trino
+  comparator's verification, including one that could not start. A host
+  session treats it as any other benchmark failure.
 - Fast allocating rows require special scrutiny because a 50 ms window can
   contain zero collections in most iterations and concentrate collection cost
   in one iteration that a median discards. The `countRegulator`

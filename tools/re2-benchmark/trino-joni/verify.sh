@@ -9,6 +9,8 @@ source "${SCRIPT_DIR}/pins.env"
 WORK_DIR=${TRINO_COMPARATOR_WORK_DIR:-${REGULATOR_DIR}/target/trino-joni-comparator}
 ROWS_CORPUS_DIRECTORY=${TRINO_COMPARATOR_ROWS_CORPUS_DIRECTORY:-}
 NATIVE_ACCESS=${TRINO_COMPARATOR_NATIVE_ACCESS:-true}
+# Checks only the prepared harness's identity and provenance, before any of its semantic verifiers.
+IDENTITY_ONLY=${TRINO_COMPARATOR_IDENTITY_ONLY:-false}
 CLASSPATH_FILE=${WORK_DIR}/classpath.txt
 PROVENANCE_FILE=${WORK_DIR}/provenance.properties
 JONI_JAR_PATH_FILE=${WORK_DIR}/joni-jar.path
@@ -25,6 +27,10 @@ case "${NATIVE_ACCESS}" in
         exit 1
         ;;
 esac
+if [[ "${IDENTITY_ONLY}" != true && "${IDENTITY_ONLY}" != false ]]; then
+    echo "TRINO_COMPARATOR_IDENTITY_ONLY must be true or false: ${IDENTITY_ONLY}" >&2
+    exit 1
+fi
 
 sha256()
 {
@@ -130,6 +136,11 @@ io.trino.operator.scalar.BenchmarkTrinoRowsJoni.replace
 io.trino.operator.scalar.BenchmarkTrinoRowsJoni.split
 EOF
 diff -u "${expected_benchmarks}" "${actual_benchmarks}"
+# The Rebar runner is part of the harness, so a harness built without it fails its identity.
+"${SCRIPT_DIR}/run-rebar.sh" --version | grep -F 'Trino Joni 2.1.5.3' >/dev/null
+if [[ "${IDENTITY_ONLY}" == true ]]; then
+    exit 0
+fi
 
 java \
     --add-modules jdk.incubator.vector \
@@ -162,8 +173,6 @@ java \
     -cp "${classpath}" \
     io.trino.operator.scalar.TrinoLikeRowsTrinoVerifier \
     ${ROWS_CORPUS_DIRECTORY:+"${ROWS_CORPUS_DIRECTORY}"}
-
-"${SCRIPT_DIR}/run-rebar.sh" --version | grep -F 'Trino Joni 2.1.5.3' >/dev/null
 
 java --add-modules jdk.incubator.vector "${java_access_arguments[@]}" -cp "${classpath}" \
     io.trino.operator.scalar.JoniSliceOperationsVerifier

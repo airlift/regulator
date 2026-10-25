@@ -24,6 +24,8 @@ UNIT_STAGE=${BASELINE_UNIT_STAGE:-unit}
 # names the previous unit's after calibration there to chain as this unit's before.
 HOST_EVIDENCE=${BASELINE_UNIT_HOST_EVIDENCE:-}
 CHAINED_CALIBRATION=${BASELINE_UNIT_CALIBRATION_BEFORE:-}
+# run-shard.sh's status for a failed correctness stage, which a unit controller rejects rather than retries.
+SEMANTIC_FAILURE_STATUS=44
 
 case "${PROTOCOL}" in
     smoke | qualification) ;;
@@ -141,6 +143,10 @@ if [[ "${PLAN_ONLY}" != true && "${UNIT_STAGE}" == unit ]]; then
     } >> "${capacity_file}"
     if [[ "${capacity_status}" != accepted ]]; then
         echo "Unit capacity gate rejected unit ${UNIT_ID}; see ${capacity_file}" >&2
+        # A semantic failure is final whatever the unit's capacity, so its own status reaches the controller.
+        if ((unit_status == SEMANTIC_FAILURE_STATUS)); then
+            exit "${unit_status}"
+        fi
         exit 1
     fi
     # Preserve the representative rejection status only after resource checks.

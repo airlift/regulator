@@ -41,6 +41,12 @@ tools/re2-benchmark/trino-joni/prepare.sh
 tools/re2-benchmark/trino-joni/verify.sh
 ```
 
+With `TRINO_COMPARATOR_IDENTITY_ONLY=true`, both stop verifying after the
+harness's identity and provenance checks, including the Rebar runner's
+version, before any semantic verifier runs.
+A baseline shard uses this to decide whether to rebuild a prebuilt harness, and
+then runs the full verification once.
+
 `TRINO_COMPARATOR_TRINO_GIT_SOURCE` may point to a local Trino Git repository
 to avoid downloading objects. The source repository is read only; the pinned
 commit is archived and extracted beneath Regulator's `target/` directory.

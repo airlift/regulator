@@ -27,12 +27,16 @@ class TestSemanticIdentity(unittest.TestCase):
     def test_native_probe_options_do_not_reach_measurements(self):
         source = (BASE / "run-shard.sh").read_text()
         options = source[source.index("route_jvm_arguments=("):source.index("prepare_jmh_host_compiler_arguments()")]
+        start = source.index("SEMANTIC_FAILURE_STATUS=")
+        functions = source[start:source.index("\n}\n", source.index("run_semantic_verifier()")) + 3]
         probe = source[source.index("expected_native_access=false\n"):source.index("# Units of one shard on one host")]
         for route in ("native-access", "object-row"):
             with self.subTest(route=route), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 script = "set -euo pipefail\n"
                 script += f"ROUTE={shlex.quote(route)}\nHEAP_SIZE=8g\nCPU_LIST=0\nCLASSPATH=fixture\nUNIT_DIRECTORY=\n"
+                script += f"RESULT_DIR={shlex.quote(str(root))}\nmkdir -p {shlex.quote(str(root / 'logs'))}\n"
+                script += functions
                 script += f"semantic_log={shlex.quote(str(root / 'probe.log'))}\n"
                 script += 'taskset() { shift 2; "$@"; }\njava() { printf "%s\\n" "$@"; }\n'
                 script += options + probe
