@@ -16,55 +16,45 @@ package io.airlift.regulator;
 import io.airlift.regulator.UnicodeDatabase.CodePointMappings;
 import io.airlift.regulator.UnicodeDatabase.MultiCharacterMappings;
 
-/**
- * The locale-independent case conversions and comparison of {@link String} and
- * {@link Character}, from the pinned Unicode database, with which the parsers normalize property
- * and character names as the JDK does. Property and character names are ASCII, but a name in a
- * pattern can hold any text, and the JDK's conversions take some non-ASCII characters to ASCII,
- * such as the long s to S and the Kelvin sign to k.
- */
+/// The locale-independent case conversions and comparison of [String] and
+/// [Character], from the pinned Unicode database, with which the parsers normalize property
+/// and character names as the JDK does. Property and character names are ASCII, but a name in a
+/// pattern can hold any text, and the JDK's conversions take some non-ASCII characters to ASCII,
+/// such as the long s to S and the Kelvin sign to k.
 final class UnicodeCase
 {
     private UnicodeCase() {}
 
-    /**
-     * Returns the simple uppercase mapping of {@code codePoint}, as
-     * {@code Character.toUpperCase} does.
-     */
+    /// Returns the simple uppercase mapping of `codePoint`, as
+    /// `Character.toUpperCase` does.
     static int toUpperCase(int codePoint)
     {
         return UnicodeDatabase.simpleUppercaseMappings().map(codePoint);
     }
 
-    /**
-     * Returns {@code value} uppercased, as {@code value.toUpperCase(Locale.ROOT)} does: by the
-     * unconditional uppercase mappings of SpecialCasing.txt, such as sharp s to SS, and otherwise
-     * by the simple mappings.
-     */
+    /// Returns `value` uppercased, as `value.toUpperCase(Locale.ROOT)` does: by the
+    /// unconditional uppercase mappings of SpecialCasing.txt, such as sharp s to SS, and otherwise
+    /// by the simple mappings.
     static String toUpperCase(String value)
     {
         return convert(value, UnicodeDatabase.fullUppercaseMappings(), UnicodeDatabase.simpleUppercaseMappings());
     }
 
-    /**
-     * Returns {@code value} lowercased, as {@code value.toLowerCase(Locale.ROOT)} does: by the
-     * unconditional lowercase mappings of SpecialCasing.txt, such as capital I with dot above to
-     * i and a combining dot above, and otherwise by the simple mappings. It omits the one
-     * condition that applies without a locale, Final_Sigma, which chooses between the final and
-     * other small sigmas; every caller compares the result with ASCII names, which neither
-     * matches.
-     */
+    /// Returns `value` lowercased, as `value.toLowerCase(Locale.ROOT)` does: by the
+    /// unconditional lowercase mappings of SpecialCasing.txt, such as capital I with dot above to
+    /// i and a combining dot above, and otherwise by the simple mappings. It omits the one
+    /// condition that applies without a locale, Final_Sigma, which chooses between the final and
+    /// other small sigmas; every caller compares the result with ASCII names, which neither
+    /// matches.
     static String toLowerCase(String value)
     {
         return convert(value, UnicodeDatabase.fullLowercaseMappings(), UnicodeDatabase.simpleLowercaseMappings());
     }
 
-    /**
-     * Returns whether {@code left} and {@code right} are equal ignoring case, as
-     * {@code left.equalsIgnoreCase(right)} does: they have the same length, and each pair of
-     * code points is equal, has equal simple uppercase mappings, or has equal simple lowercase
-     * mappings of those.
-     */
+    /// Returns whether `left` and `right` are equal ignoring case, as
+    /// `left.equalsIgnoreCase(right)` does: they have the same length, and each pair of
+    /// code points is equal, has equal simple uppercase mappings, or has equal simple lowercase
+    /// mappings of those.
     static boolean equalsIgnoreCase(String left, String right)
     {
         if (left.length() != right.length()) {

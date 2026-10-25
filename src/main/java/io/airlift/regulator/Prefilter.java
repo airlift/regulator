@@ -29,9 +29,7 @@ import static io.airlift.regulator.Prefilter.PrefilterOp.ATOM;
 import static io.airlift.regulator.Prefilter.PrefilterOp.NONE;
 import static io.airlift.regulator.Prefilter.PrefilterOp.OR;
 
-/**
- * Extracts byte-string guards from a regular expression.
- */
+/// Extracts byte-string guards from a regular expression.
 final class Prefilter
 {
     enum PrefilterOp

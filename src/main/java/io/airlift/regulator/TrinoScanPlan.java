@@ -24,16 +24,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * A scan over literals, deterministic runs, and bounded optional captures, for the Trino, RE2,
- * Java, and Rust frontends; no other frontend builds one. A Trino plan preserves valid UTF-8
- * behavior, and malformed input has Trino's garbage-in, garbage-out contract. An RE2, Java, or Rust
- * plan reads each non-ASCII character as RE2's classes do (see {@link Utf8#re2CharacterWidth}), as
- * the ordinary engine compiled for those languages does, so it agrees with that engine on every
- * input, malformed UTF-8 included. The languages share the analysis and the executors; in an RE2,
- * Java, or Rust plan, each run admitting non-ASCII characters, and each delimited capture, becomes
- * an {@code RE2_} operation, and a Trino plan never contains one.
- */
+/// A scan over literals, deterministic runs, and bounded optional captures, for the Trino, RE2,
+/// Java, and Rust frontends; no other frontend builds one. A Trino plan preserves valid UTF-8
+/// behavior, and malformed input has Trino's garbage-in, garbage-out contract. An RE2, Java, or Rust
+/// plan reads each non-ASCII character as RE2's classes do (see [Utf8#re2CharacterWidth]), as
+/// the ordinary engine compiled for those languages does, so it agrees with that engine on every
+/// input, malformed UTF-8 included. The languages share the analysis and the executors; in an RE2,
+/// Java, or Rust plan, each run admitting non-ASCII characters, and each delimited capture, becomes
+/// an `RE2_` operation, and a Trino plan never contains one.
 final class TrinoScanPlan
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoScanPlan.class);
@@ -94,10 +92,8 @@ final class TrinoScanPlan
         RE2_DELIMITED_CAPTURE,
     }
 
-    /**
-     * The frontend whose semantics a plan follows. {@code NONE} is a frontend's choice to build
-     * no plan, which the frontend checks before it analyzes; {@link #analyze} rejects it.
-     */
+    /// The frontend whose semantics a plan follows. `NONE` is a frontend's choice to build
+    /// no plan, which the frontend checks before it analyzes; [#analyze] rejects it.
     enum Language
     {
         NONE,
@@ -226,11 +222,9 @@ final class TrinoScanPlan
         throw new IllegalStateException("scan plan has only capture saves");
     }
 
-    /**
-     * Marks each RUN whose continuation in the final partial operation list is nullable.
-     * Nullable means some continuation succeeds on every suffix: literal and delimiter
-     * operations can fail, while a skipped optional or fork arm resumes on a nullable path.
-     */
+    /// Marks each RUN whose continuation in the final partial operation list is nullable.
+    /// Nullable means some continuation succeeds on every suffix: literal and delimiter
+    /// operations can fail, while a skipped optional or fork arm resumes on a nullable path.
     private static boolean[] findBooleanTails(Step[] steps)
     {
         boolean[] nullable = new boolean[steps.length + 1];
@@ -250,12 +244,10 @@ final class TrinoScanPlan
         return booleanTails;
     }
 
-    /**
-     * Returns the longest LITERAL operation after the leading one that every successful attempt
-     * executes, or {@code -1}. Only a FORK skips operations, and it skips only those between
-     * itself and its target. A leading literal already drives the candidate scan, so a plan
-     * that starts with a literal has no separate required literal.
-     */
+    /// Returns the longest LITERAL operation after the leading one that every successful attempt
+    /// executes, or `-1`. Only a FORK skips operations, and it skips only those between
+    /// itself and its target. A leading literal already drives the candidate scan, so a plan
+    /// that starts with a literal has no separate required literal.
     private static int findRequiredLiteralOperation(Step[] steps, int leadingOperation)
     {
         Kind leading = steps[leadingOperation].kind;
@@ -277,26 +269,24 @@ final class TrinoScanPlan
         return required;
     }
 
-    /**
-     * Returns the operation whose run end becomes the next candidate after a failed attempt.
-     * That is the leading operation, except when a single-character leading run is followed,
-     * past zero-width saves alone, by an unbounded run without a minimum whose set contains the
-     * leading set. It is then that second run.
-     * <p>
-     * Runs never give back bytes. A failed attempt at {@code p} matched the leading character
-     * and then the second run up to its end {@code e}, and failed with every retry exhausted;
-     * each retry lies at or after {@code e}. Every byte in {@code (p, e)} is a member of the
-     * second run: the leading character's other bytes are non-ASCII, and a set holding one
-     * non-ASCII byte holds all of them. An attempt at a start in {@code (p, e)} therefore fails
-     * on the leading character, or matches a character that ends by {@code e}. In a Trino plan,
-     * {@code e} holds an ASCII byte or is the end, and no decoded character spans an ASCII byte.
-     * An RE2 run may also stop at a sequence RE2 rejects. A start inside a character the run
-     * read is a continuation byte, which RE2 rejects as a leading character; from any other
-     * start RE2 reads the same characters, which end at {@code e}, and {@code e} still starts
-     * the rejected sequence. The second run then stops at {@code e} again, so that attempt
-     * reaches {@code e} with the same operations and retries, differs only in saved positions,
-     * and fails as well.
-     */
+    /// Returns the operation whose run end becomes the next candidate after a failed attempt.
+    /// That is the leading operation, except when a single-character leading run is followed,
+    /// past zero-width saves alone, by an unbounded run without a minimum whose set contains the
+    /// leading set. It is then that second run.
+    ///
+    /// Runs never give back bytes. A failed attempt at `p` matched the leading character
+    /// and then the second run up to its end `e`, and failed with every retry exhausted;
+    /// each retry lies at or after `e`. Every byte in `(p, e)` is a member of the
+    /// second run: the leading character's other bytes are non-ASCII, and a set holding one
+    /// non-ASCII byte holds all of them. An attempt at a start in `(p, e)` therefore fails
+    /// on the leading character, or matches a character that ends by `e`. In a Trino plan,
+    /// `e` holds an ASCII byte or is the end, and no decoded character spans an ASCII byte.
+    /// An RE2 run may also stop at a sequence RE2 rejects. A start inside a character the run
+    /// read is a continuation byte, which RE2 rejects as a leading character; from any other
+    /// start RE2 reads the same characters, which end at `e`, and `e` still starts
+    /// the rejected sequence. The second run then stops at `e` again, so that attempt
+    /// reaches `e` with the same operations and retries, differs only in saved positions,
+    /// and fails as well.
     private static int findFailureResumeOperation(Step[] steps, int leadingOperation)
     {
         Step leading = steps[leadingOperation];
@@ -316,10 +306,8 @@ final class TrinoScanPlan
         return leadingOperation;
     }
 
-    /**
-     * Returns the operations without capture saves, each fork targeting the first retained
-     * operation at or after its target.
-     */
+    /// Returns the operations without capture saves, each fork targeting the first retained
+    /// operation at or after its target.
     private static List<Step> withoutSaves(Step[] steps)
     {
         // remaining[index] counts the operations before index that are not saves.
@@ -379,11 +367,9 @@ final class TrinoScanPlan
         return false;
     }
 
-    /**
-     * Returns whether every consuming operation accepts only ASCII bytes and every other
-     * operation is zero-width. Each match then consists of ASCII bytes alone, and the plan and
-     * the ordinary engine agree on malformed UTF-8 as they do on valid input.
-     */
+    /// Returns whether every consuming operation accepts only ASCII bytes and every other
+    /// operation is zero-width. Each match then consists of ASCII bytes alone, and the plan and
+    /// the ordinary engine agree on malformed UTF-8 as they do on valid input.
     private static boolean consumesOnlyAscii(Step[] steps)
     {
         for (Step step : steps) {
@@ -409,32 +395,26 @@ final class TrinoScanPlan
         return true;
     }
 
-    /**
-     * Analyzes {@code expression}. A plan built with {@code forceHandoff} hands every unanchored
-     * search to the ordinary engine before its first attempt, so tests can run the continuation
-     * on every input.
-     */
+    /// Analyzes `expression`. A plan built with `forceHandoff` hands every unanchored
+    /// search to the ordinary engine before its first attempt, so tests can run the continuation
+    /// on every input.
     static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding)
     {
         return analyze(expression, captureCount, forceHandoff, caseFolding, ByteFrequencies.uniform());
     }
 
-    /**
-     * Analyzes {@code expression}, with {@code byteFrequencies} choosing the probe byte of a
-     * case-sensitive leading literal.
-     */
+    /// Analyzes `expression`, with `byteFrequencies` choosing the probe byte of a
+    /// case-sensitive leading literal.
     static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         return analyze(expression, captureCount, Language.TRINO, forceHandoff, caseFolding, byteFrequencies);
     }
 
-    /**
-     * Analyzes {@code expression} for {@code language}, which is {@link Language#TRINO},
-     * {@link Language#RE2}, {@link Language#JAVA}, or {@link Language#RUST}. The languages admit
-     * the same shapes, except that a Java end admits fewer runs before it. Only Java's default
-     * {@code $} and {@code \Z} build a Java end. An RE2, Java, or Rust plan reads input by RE2's
-     * rules.
-     */
+    /// Analyzes `expression` for `language`, which is [Language#TRINO],
+    /// [Language#RE2], [Language#JAVA], or [Language#RUST]. The languages admit
+    /// the same shapes, except that a Java end admits fewer runs before it. Only Java's default
+    /// `$` and `\Z` build a Java end. An RE2, Java, or Rust plan reads input by RE2's
+    /// rules.
     static TrinoScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         // The RE2, Java, and Rust frontends compile in the RE2 dialect to the same byte ranges,
@@ -515,10 +495,8 @@ final class TrinoScanPlan
         return anchoredStart;
     }
 
-    /**
-     * Returns the plan whose executors answer a call of this plan that reports no positions:
-     * for a start-anchored plan with a fork, the same operations without capture saves.
-     */
+    /// Returns the plan whose executors answer a call of this plan that reports no positions:
+    /// for a start-anchored plan with a fork, the same operations without capture saves.
     TrinoScanPlan booleanPlan()
     {
         return booleanPlan;
@@ -644,40 +622,32 @@ final class TrinoScanPlan
         return String.join(",", operations);
     }
 
-    /**
-     * Returns the literal whose absence ends an unanchored search after its first failed
-     * attempt, or {@code null} when the plan has none.
-     */
+    /// Returns the literal whose absence ends an unanchored search after its first failed
+    /// attempt, or `null` when the plan has none.
     byte[] requiredLiteralForDiagnostics()
     {
         return requiredLiteralOperation < 0 ? null : steps[requiredLiteralOperation].literal.clone();
     }
 
-    /**
-     * Returns the offset of the leading literal byte that an unanchored candidate scan probes,
-     * or {@code -1} when the plan does not start with a case-sensitive literal.
-     */
+    /// Returns the offset of the leading literal byte that an unanchored candidate scan probes,
+    /// or `-1` when the plan does not start with a case-sensitive literal.
     int leadingLiteralProbeOffsetForDiagnostics()
     {
         return steps[leadingOperation].kind == Kind.LITERAL ? leadingProbeOffset : -1;
     }
 
-    /**
-     * Returns whether {@code [start, end)} of {@code input} lacks the required literal, so an
-     * unanchored search of that range stops after its first failed attempt.
-     */
+    /// Returns whether `[start, end)` of `input` lacks the required literal, so an
+    /// unanchored search of that range stops after its first failed attempt.
     boolean lacksRequiredLiteralForDiagnostics(Slice input, int start, int end)
     {
         int base = input.byteArrayOffset();
         return requiredLiteralOperation >= 0 && !containsRequiredLiteral(input.byteArray(), base + start, base + end);
     }
 
-    /**
-     * Returns the number of capture-free attempts at the candidates an unanchored plan selects
-     * over the whole input, resuming after each failed attempt where the searches resume. This
-     * models candidate traversal alone: it applies no work budget, required-literal check, or
-     * handoff, so a search may make fewer attempts.
-     */
+    /// Returns the number of capture-free attempts at the candidates an unanchored plan selects
+    /// over the whole input, resuming after each failed attempt where the searches resume. This
+    /// models candidate traversal alone: it applies no work budget, required-literal check, or
+    /// handoff, so a search may make fewer attempts.
     int candidateAttemptsForDiagnostics(Slice input)
     {
         byte[] bytes = input.byteArray();
@@ -710,10 +680,8 @@ final class TrinoScanPlan
         return attempts;
     }
 
-    /**
-     * Returns the position at which one capture-free partial attempt at {@code start} stopped
-     * reading, relative to the input, or a negative value when the attempt failed.
-     */
+    /// Returns the position at which one capture-free partial attempt at `start` stopped
+    /// reading, relative to the input, or a negative value when the attempt failed.
     int booleanAttemptEndForDiagnostics(Slice input, int start)
     {
         int offset = input.byteArrayOffset();
@@ -724,10 +692,8 @@ final class TrinoScanPlan
         return result < 0 ? -1 : (int) result - offset;
     }
 
-    /**
-     * Returns the raw result of one case-sensitive unanchored attempt at {@code start}: the match
-     * end within the backing array, or the encoded failure.
-     */
+    /// Returns the raw result of one case-sensitive unanchored attempt at `start`: the match
+    /// end within the backing array, or the encoded failure.
     long unanchoredAttemptForDiagnostics(Slice input, int start, boolean fullMatch, int[] groups)
     {
         int offset = input.byteArrayOffset();
@@ -1378,14 +1344,12 @@ final class TrinoScanPlan
         }
     }
 
-    /**
-     * Searches for a match that starts in {@code [start, contextEnd)}, or only at {@code start}
-     * when {@code anchored}. Returns {@link #SEARCH_MATCHED}, {@link #NO_MATCH}, or the
-     * Slice-relative offset where the search must continue on the ordinary engine, with the same
-     * context, because its failed attempts exceeded the work budget. No match starts between
-     * {@code start} and that offset. Groups are relative to {@code contextStart} and are cleared
-     * unless the search matched. The budget belongs to this call, so every search starts afresh.
-     */
+    /// Searches for a match that starts in `[start, contextEnd)`, or only at `start`
+    /// when `anchored`. Returns [#SEARCH_MATCHED], [#NO_MATCH], or the
+    /// Slice-relative offset where the search must continue on the ordinary engine, with the same
+    /// context, because its failed attempts exceeded the work budget. No match starts between
+    /// `start` and that offset. Groups are relative to `contextStart` and are cleared
+    /// unless the search matched. The budget belongs to this call, so every search starts afresh.
     int search(Slice input, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
     {
         if (wholeLiteralCandidates && !anchored) {
@@ -1438,11 +1402,9 @@ final class TrinoScanPlan
         return NO_MATCH;
     }
 
-    /**
-     * The {@link #search} of a plan that uses the ASCII-folded executor, with the same results.
-     * It is a separate copy rather than a flag on search: separate hot loops keep each
-     * C2-compiled shape simple.
-     */
+    /// The [#search] of a plan that uses the ASCII-folded executor, with the same results.
+    /// It is a separate copy rather than a flag on search: separate hot loops keep each
+    /// C2-compiled shape simple.
     int searchAsciiFolded(Slice input, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups)
     {
         if (wholeLiteralCandidates && !anchored) {
@@ -1495,13 +1457,11 @@ final class TrinoScanPlan
         return NO_MATCH;
     }
 
-    /**
-     * The unanchored search of {@link #search} and {@link #searchAsciiFolded} for a plan led by a
-     * case-sensitive literal of two or more bytes. Each probe-byte candidate is checked for the
-     * rest of the literal before an attempt, so an attempt starts only where the whole literal
-     * occurs. The loop is separate so that the candidate loop of every other plan has no
-     * whole-literal check. A literal-led plan has no separate required literal.
-     */
+    /// The unanchored search of [#search] and [#searchAsciiFolded] for a plan led by a
+    /// case-sensitive literal of two or more bytes. Each probe-byte candidate is checked for the
+    /// rest of the literal before an attempt, so an attempt starts only where the whole literal
+    /// occurs. The loop is separate so that the candidate loop of every other plan has no
+    /// whole-literal check. A literal-led plan has no separate required literal.
     private int searchWholeLiteralCandidates(Slice input, int contextStart, int contextEnd, int start, boolean asciiFolded, boolean fullMatch, int[] groups)
     {
         byte[] bytes = input.byteArray();
@@ -1536,10 +1496,8 @@ final class TrinoScanPlan
         return NO_MATCH;
     }
 
-    /**
-     * Ends a search that continues on the ordinary engine at {@code resume}, leaving the groups
-     * as a search without a match does.
-     */
+    /// Ends a search that continues on the ordinary engine at `resume`, leaving the groups
+    /// as a search without a match does.
     private static int handOff(int[] groups, int resume)
     {
         if (groups != null) {
@@ -1548,12 +1506,10 @@ final class TrinoScanPlan
         return resume;
     }
 
-    /**
-     * Unanchored boolean search that also stops once its failed attempts are dense, for a caller
-     * that continues on an engine which does not visit each candidate. Returns
-     * {@link #SEARCH_MATCHED}, {@link #NO_MATCH}, or the Slice-relative offset where the search
-     * must continue. No match starts between {@code start} and that offset.
-     */
+    /// Unanchored boolean search that also stops once its failed attempts are dense, for a caller
+    /// that continues on an engine which does not visit each candidate. Returns
+    /// [#SEARCH_MATCHED], [#NO_MATCH], or the Slice-relative offset where the search
+    /// must continue. No match starts between `start` and that offset.
     int searchBeforeHandoff(Slice input, int contextStart, int contextEnd, int start, boolean asciiFolded)
     {
         byte[] bytes = input.byteArray();
@@ -1598,11 +1554,9 @@ final class TrinoScanPlan
         return NO_MATCH;
     }
 
-    /**
-     * Returns whether the required literal occurs in {@code [cursor, end)}. Every match of an
-     * unanchored search lies in that range and contains the literal.
-     * Copied as {@code TrinoScanKernelSupport.containsRequiredLiteral}; keep the copy in step.
-     */
+    /// Returns whether the required literal occurs in `[cursor, end)`. Every match of an
+    /// unanchored search lies in that range and contains the literal.
+    /// Copied as `TrinoScanKernelSupport.containsRequiredLiteral`; keep the copy in step.
     private boolean containsRequiredLiteral(byte[] bytes, int cursor, int end)
     {
         Step literal = steps[requiredLiteralOperation];
@@ -1618,15 +1572,13 @@ final class TrinoScanPlan
         return false;
     }
 
-    /**
-     * Returns the first position at or after {@code candidate} where the leading operation can
-     * match, or {@code -1} when none remains.
-     * <p>
-     * A leading run with a positive minimum must match its first byte, and only zero-width
-     * saves precede it, so every skipped byte would fail its attempt without advancing further
-     * than this scan. The run analysis gives all non-ASCII bytes the same membership, so from a
-     * character boundary the first member byte of valid UTF-8 is never a continuation byte.
-     */
+    /// Returns the first position at or after `candidate` where the leading operation can
+    /// match, or `-1` when none remains.
+    ///
+    /// A leading run with a positive minimum must match its first byte, and only zero-width
+    /// saves precede it, so every skipped byte would fail its attempt without advancing further
+    /// than this scan. The run analysis gives all non-ASCII bytes the same membership, so from a
+    /// character boundary the first member byte of valid UTF-8 is never a continuation byte.
     private static int nextCandidate(byte[] bytes, int candidate, int end, Step leading)
     {
         if (leading.kind == Kind.LITERAL) {
@@ -1652,12 +1604,10 @@ final class TrinoScanPlan
         return candidate;
     }
 
-    /**
-     * Returns the first position at or after {@code candidate} where the whole case-sensitive
-     * leading {@code literal} occurs, or {@code -1} when none remains, scanning for the byte at
-     * {@code probeOffset}. The result is the first whole occurrence for any probe, so the
-     * attempts of a search, and with them its work budget, do not depend on it.
-     */
+    /// Returns the first position at or after `candidate` where the whole case-sensitive
+    /// leading `literal` occurs, or `-1` when none remains, scanning for the byte at
+    /// `probeOffset`. The result is the first whole occurrence for any probe, so the
+    /// attempts of a search, and with them its work budget, do not depend on it.
     private static int findLeadingLiteral(byte[] bytes, int candidate, int end, byte[] literal, int probeOffset)
     {
         // A probe moved off the first byte runs its own loop, so a first-byte probe keeps the
@@ -1668,12 +1618,10 @@ final class TrinoScanPlan
         return findLiteral(bytes, candidate, end, literal);
     }
 
-    /**
-     * Returns the first position at or after {@code candidate} where the whole {@code literal}
-     * occurs, or {@code -1} when none remains. A literal that does not fit before {@code end} is
-     * never a candidate, so no byte at or past {@code end} is read.
-     * Copied as {@code TrinoScanKernelSupport.findLiteral}; keep the copy in step.
-     */
+    /// Returns the first position at or after `candidate` where the whole `literal`
+    /// occurs, or `-1` when none remains. A literal that does not fit before `end` is
+    /// never a candidate, so no byte at or past `end` is read.
+    /// Copied as `TrinoScanKernelSupport.findLiteral`; keep the copy in step.
     private static int findLiteral(byte[] bytes, int candidate, int end, byte[] literal)
     {
         // A start after this limit leaves too few bytes for the literal.
@@ -1691,16 +1639,14 @@ final class TrinoScanPlan
         return -1;
     }
 
-    /**
-     * Returns the first position at or after {@code candidate} where the whole {@code literal}
-     * occurs, or {@code -1} when none remains, scanning for the byte at {@code probeOffset},
-     * which {@link ByteFrequencies} moved off a common first byte. A literal that does not fit
-     * before {@code end} is never a candidate, so no byte at or past {@code end} is read.
-     * <p>
-     * The scan searches a range shifted by the probe offset, so every candidate starts at or
-     * after {@code candidate}.
-     * Copied as {@code TrinoScanKernelSupport.findLiteralAtProbe}; keep the copy in step.
-     */
+    /// Returns the first position at or after `candidate` where the whole `literal`
+    /// occurs, or `-1` when none remains, scanning for the byte at `probeOffset`,
+    /// which [ByteFrequencies] moved off a common first byte. A literal that does not fit
+    /// before `end` is never a candidate, so no byte at or past `end` is read.
+    ///
+    /// The scan searches a range shifted by the probe offset, so every candidate starts at or
+    /// after `candidate`.
+    /// Copied as `TrinoScanKernelSupport.findLiteralAtProbe`; keep the copy in step.
     private static int findLiteralAtProbe(byte[] bytes, int candidate, int end, byte[] literal, int probeOffset)
     {
         byte probe = literal[probeOffset];
@@ -2065,13 +2011,11 @@ final class TrinoScanPlan
         }
     }
 
-    /**
-     * Encodes a failed unanchored attempt as a negative value: the complement of a long holding
-     * the furthest position any of its unbounded scans reached in the high word and the run end
-     * where the next attempt may start in the low word. A successful attempt returns its
-     * nonnegative end.
-     * The search loop measures its work from the first and resumes from the second.
-     */
+    /// Encodes a failed unanchored attempt as a negative value: the complement of a long holding
+    /// the furthest position any of its unbounded scans reached in the high word and the run end
+    /// where the next attempt may start in the low word. A successful attempt returns its
+    /// nonnegative end.
+    /// The search loop measures its work from the first and resumes from the second.
     private static long failedAttempt(int resumeRunEnd, int scanned)
     {
         return ~(((long) scanned << 32) | resumeRunEnd);
@@ -2094,17 +2038,15 @@ final class TrinoScanPlan
         }
     }
 
-    /**
-     * Returns whether Java's default {@code $} matches at {@code cursor} before {@code end}, as
-     * the JDK's non-multiline dollar does: the bytes from {@code cursor} to {@code end} are
-     * exactly one line terminator, LF, CR, CR LF, U+0085, U+2028, or U+2029, and a final LF does
-     * not follow a CR, since CR LF is one terminator. The CR before {@code cursor} counts only at
-     * or after {@code base}, the context start, as in {@code EmptyOp.contextFlags}; a matcher
-     * region that needs the Java CR-before-region correction bypasses scan plans. The ordinary
-     * engine decodes the terminator strictly, so comparing its exact encoded bytes gives the same
-     * answer on every input, malformed UTF-8 included.
-     * Copied as {@code TrinoScanKernelSupport.endsBeforeJavaFinalTerminator}; keep the copy in step.
-     */
+    /// Returns whether Java's default `$` matches at `cursor` before `end`, as
+    /// the JDK's non-multiline dollar does: the bytes from `cursor` to `end` are
+    /// exactly one line terminator, LF, CR, CR LF, U+0085, U+2028, or U+2029, and a final LF does
+    /// not follow a CR, since CR LF is one terminator. The CR before `cursor` counts only at
+    /// or after `base`, the context start, as in `EmptyOp.contextFlags`; a matcher
+    /// region that needs the Java CR-before-region correction bypasses scan plans. The ordinary
+    /// engine decodes the terminator strictly, so comparing its exact encoded bytes gives the same
+    /// answer on every input, malformed UTF-8 included.
+    /// Copied as `TrinoScanKernelSupport.endsBeforeJavaFinalTerminator`; keep the copy in step.
     private static boolean endsBeforeJavaFinalTerminator(byte[] bytes, int base, int end, int cursor)
     {
         return switch (end - cursor) {
@@ -2152,10 +2094,8 @@ final class TrinoScanPlan
         private static final int INSTANCE_SIZE = SizeOf.instanceSize(Branch.class);
     }
 
-    /**
-     * Lowers an expression to scan operations. A start-anchored plan with at most three simple
-     * captured runs and no forks is then compacted into delimited captures and tails.
-     */
+    /// Lowers an expression to scan operations. A start-anchored plan with at most three simple
+    /// captured runs and no forks is then compacted into delimited captures and tails.
     private static final class Builder
     {
         private static final int MAX_EMIT_DEPTH = 16;
@@ -2260,16 +2200,14 @@ final class TrinoScanPlan
             return true;
         }
 
-        /**
-         * Returns whether an unanchored search may attempt a match at each candidate of the
-         * leading operation, past capture saves. That operation must be a literal or a single
-         * ASCII character. After any other leading run, the number of attempts that fail
-         * depends on the input, since each candidate inside one run rescans the rest of it, so
-         * the ordinary engine keeps those patterns. The exception is an unbounded run of every
-         * byte except the one-byte case-sensitive literal that follows it: the run stops only
-         * at that byte, which the literal then matches, or, in an RE2, Java, or Rust plan, at a
-         * sequence RE2 rejects, where the attempt fails and the search resumes at the run end.
-         */
+        /// Returns whether an unanchored search may attempt a match at each candidate of the
+        /// leading operation, past capture saves. That operation must be a literal or a single
+        /// ASCII character. After any other leading run, the number of attempts that fail
+        /// depends on the input, since each candidate inside one run rescans the rest of it, so
+        /// the ordinary engine keeps those patterns. The exception is an unbounded run of every
+        /// byte except the one-byte case-sensitive literal that follows it: the run stops only
+        /// at that byte, which the literal then matches, or, in an RE2, Java, or Rust plan, at a
+        /// sequence RE2 rejects, where the attempt fails and the search resumes at the run end.
         private boolean canSearchUnanchored()
         {
             for (int index = 0; index < steps.size(); index++) {
@@ -2525,11 +2463,9 @@ final class TrinoScanPlan
             return true;
         }
 
-        /**
-         * Returns whether every variable run stops where a backtracking match would, and the plan
-         * cannot match without consuming input. With {@code javaFinalEnd}, the end also matches
-         * before one final line terminator; see {@link #stopsWhereJavaFinalEndAllows}.
-         */
+        /// Returns whether every variable run stops where a backtracking match would, and the plan
+        /// cannot match without consuming input. With `javaFinalEnd`, the end also matches
+        /// before one final line terminator; see [#stopsWhereJavaFinalEndAllows].
         private boolean verifyContinuations(boolean javaFinalEnd)
         {
             // The graph only moves forward. Propagate possible first bytes through capture
@@ -2581,22 +2517,20 @@ final class TrinoScanPlan
             return !nullable[0];
         }
 
-        /**
-         * Returns whether a variable run that can reach a Java end without consuming more input
-         * stops where the JDK's backtracking match would. The end also matches before one final
-         * line terminator, up to three bytes before the end, and the JDK gives back run
-         * characters to reach one: {@code ^x([^\n]+)$} on {@code "xab\r\n"} gives back the CR,
-         * since the end refuses the position between CR and LF. A run never gives back, so this
-         * planner accepts only a run that admits every terminator byte or none. A run that admits
-         * none (only ASCII bytes other than CR and LF) never consumes a terminator byte, so no
-         * shorter stop starts the final one. An unbounded run that admits all (CR, LF, and every
-         * non-ASCII character) reads a final terminator it reaches as members through to the end,
-         * where the end matches, so the longest stop wins. The run's other continuations start
-         * with bytes outside it, as for every run, so a shorter stop has no other path. A bounded
-         * run that admits terminators may stop at its maximum inside the final terminator, so it
-         * is rejected. Both readings hold on malformed input: a terminator is valid UTF-8, its
-         * first byte continues no sequence, and every run reads it whole.
-         */
+        /// Returns whether a variable run that can reach a Java end without consuming more input
+        /// stops where the JDK's backtracking match would. The end also matches before one final
+        /// line terminator, up to three bytes before the end, and the JDK gives back run
+        /// characters to reach one: `^x([^\n]+)$` on `"xab\r\n"` gives back the CR,
+        /// since the end refuses the position between CR and LF. A run never gives back, so this
+        /// planner accepts only a run that admits every terminator byte or none. A run that admits
+        /// none (only ASCII bytes other than CR and LF) never consumes a terminator byte, so no
+        /// shorter stop starts the final one. An unbounded run that admits all (CR, LF, and every
+        /// non-ASCII character) reads a final terminator it reaches as members through to the end,
+        /// where the end matches, so the longest stop wins. The run's other continuations start
+        /// with bytes outside it, as for every run, so a shorter stop has no other path. A bounded
+        /// run that admits terminators may stop at its maximum inside the final terminator, so it
+        /// is rejected. Both readings hold on malformed input: a terminator is valid UTF-8, its
+        /// first byte continues no sequence, and every run reads it whole.
         private static boolean stopsWhereJavaFinalEndAllows(TrinoScanPlanRun run)
         {
             boolean[] members = run.members();
@@ -2618,12 +2552,10 @@ final class TrinoScanPlan
             }
         }
 
-        /**
-         * Compacts captured runs and tails. An RE2, Java, or Rust plan converts a captured run
-         * that ends at its delimiter into an RE2 delimited capture, which validates the characters
-         * it skips, and keeps a final run as a run before END, since a tail would skip bytes
-         * unchecked; each swap is one for one, so the operation limit admits the same shapes.
-         */
+        /// Compacts captured runs and tails. An RE2, Java, or Rust plan converts a captured run
+        /// that ends at its delimiter into an RE2 delimited capture, which validates the characters
+        /// it skips, and keeps a final run as a run before END, since a tail would skip bytes
+        /// unchecked; each swap is one for one, so the operation limit admits the same shapes.
         private void compact(int captureCount, boolean anchoredEnd, boolean re2Characters)
         {
             // Compaction applies only to plans with at most three simple captured
@@ -2678,10 +2610,8 @@ final class TrinoScanPlan
             steps.addAll(compacted);
         }
 
-        /**
-         * Replaces each run that matches every non-ASCII character with an RE2 run. Runs of ASCII
-         * bytes alone already match as RE2 does, as do literals, which compare exact bytes.
-         */
+        /// Replaces each run that matches every non-ASCII character with an RE2 run. Runs of ASCII
+        /// bytes alone already match as RE2 does, as do literals, which compare exact bytes.
         private void useRe2Runs()
         {
             steps.replaceAll(step -> step.kind == Kind.RUN && step.run.matchesNonAscii() ? Step.re2Run(step.slot, step.run) : step);

@@ -303,10 +303,8 @@ public class TestPrefixProbeAcceleration
         assertThat(matcher.find()).isFalse();
     }
 
-    /**
-     * Matches of {@code literal}, each extended by the longest following run of ASCII digits when
-     * {@code digitRun} is set, in order and without overlap.
-     */
+    /// Matches of `literal`, each extended by the longest following run of ASCII digits when
+    /// `digitRun` is set, in order and without overlap.
     private static List<int[]> referenceMatches(byte[] data, byte[] literal, boolean digitRun)
     {
         List<int[]> matches = new ArrayList<>();
@@ -365,10 +363,8 @@ public class TestPrefixProbeAcceleration
         return Slices.wrappedBuffer(value.getBytes(ISO_8859_1));
     }
 
-    /**
-     * Configures {@code prefix} under {@link TestingByteFrequencies#learnedJsonRecords()}, which
-     * moves the probes of several {@link #LITERALS} off their first byte.
-     */
+    /// Configures `prefix` under [TestingByteFrequencies#learnedJsonRecords()], which
+    /// moves the probes of several [#LITERALS] off their first byte.
     private static Prog configuredProgram(byte[] prefix, boolean foldCase)
     {
         return configuredProgram(prefix, foldCase, JSON_RECORDS);

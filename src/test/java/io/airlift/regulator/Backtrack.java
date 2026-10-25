@@ -24,12 +24,10 @@ public final class Backtrack
 {
     private Backtrack() {}
 
-    /**
-     * Testing-only backtracking engine (ported from upstream {@code re2/testing/backtrack.cc}).
-     * <p>
-     * This exists primarily as a simple reference implementation for cross-checking.
-     * It is not intended for production use.
-     */
+    /// Testing-only backtracking engine (ported from upstream `re2/testing/backtrack.cc`).
+    ///
+    /// This exists primarily as a simple reference implementation for cross-checking.
+    /// It is not intended for production use.
     public static boolean search(Prog prog, Slice context, int start, int end, boolean anchored, boolean longest, int[] submatch)
     {
         requireNonNull(prog, "prog is null");

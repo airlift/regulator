@@ -29,12 +29,10 @@ import java.util.StringJoiner;
 
 import static io.airlift.slice.Slices.wrappedBuffer;
 
-/**
- * Byte-oriented runner for the official Rebar benchmark protocol.
- * <p>
- * This lives with benchmark sources so the protocol adapter and its timing machinery are not part
- * of the published Slice API.
- */
+/// Byte-oriented runner for the official Rebar benchmark protocol.
+///
+/// This lives with benchmark sources so the protocol adapter and its timing machinery are not part
+/// of the published Slice API.
 public final class RebarRunner
 {
     private RebarRunner() {}

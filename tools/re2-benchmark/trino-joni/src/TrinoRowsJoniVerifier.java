@@ -27,12 +27,10 @@ import java.util.Objects;
 import static io.airlift.regulator.TestingTrinoRowsBenchmarkInputs.MISSING_CORPUS_DIRECTORY;
 import static io.trino.operator.scalar.JoniRegexpCasts.joniRegexp;
 
-/**
- * Checks that {@link BenchmarkTrinoRowsJoni} times the cells of Regulator's {@code BenchmarkTrinoRows}:
- * the same parameters, and on every sampled row of every cell, the same result from each benchmark
- * method. The OpenSubtitles workloads read test resources; the others are checked only when the first
- * argument names a corpus directory provisioned by {@code trino_rows.py fetch}.
- */
+/// Checks that [BenchmarkTrinoRowsJoni] times the cells of Regulator's `BenchmarkTrinoRows`:
+/// the same parameters, and on every sampled row of every cell, the same result from each benchmark
+/// method. The OpenSubtitles workloads read test resources; the others are checked only when the first
+/// argument names a corpus directory provisioned by `trino_rows.py fetch`.
 public final class TrinoRowsJoniVerifier
 {
     private static final List<String> PARAMETERS = List.of("workload", "literal", "corpusDirectory");

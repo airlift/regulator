@@ -22,9 +22,7 @@ import static io.airlift.regulator.ExpressionAnalysis.Gap.NONE;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_BYTES;
 import static io.airlift.regulator.ExpressionAnalysis.Gap.ZERO_OR_MORE_CODE_POINTS;
 
-/**
- * Finds a sequence of byte literals in left-to-right order.
- */
+/// Finds a sequence of byte literals in left-to-right order.
 final class OrderedLiteralMatcher
 {
     private static final int INSTANCE_SIZE = SizeOf.instanceSize(OrderedLiteralMatcher.class);

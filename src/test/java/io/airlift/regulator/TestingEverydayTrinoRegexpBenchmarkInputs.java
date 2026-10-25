@@ -50,10 +50,8 @@ public final class TestingEverydayTrinoRegexpBenchmarkInputs
         return input;
     }
 
-    /**
-     * Loads the workloads of a resource with the columns of {@code everyday-trino-workloads.tsv},
-     * keyed by workload id in file order.
-     */
+    /// Loads the workloads of a resource with the columns of `everyday-trino-workloads.tsv`,
+    /// keyed by workload id in file order.
     static Map<String, Input> loadInputs(String resource)
     {
         InputStream inputStream = TestingEverydayTrinoRegexpBenchmarkInputs.class.getResourceAsStream(resource);

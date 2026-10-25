@@ -33,10 +33,8 @@ import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 import static io.airlift.slice.Slices.allocate;
 import static io.airlift.slice.Slices.utf8Slice;
 
-/**
- * ClickBench q29's URL pattern under RE2 semantics. See docs/benchmarks/CLICKBENCH_REGEXP.md.
- * These synthetic inputs isolate hostname scanning from path scanning; they are not ClickBench data.
- */
+/// ClickBench q29's URL pattern under RE2 semantics. See docs/benchmarks/CLICKBENCH_REGEXP.md.
+/// These synthetic inputs isolate hostname scanning from path scanning; they are not ClickBench data.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)

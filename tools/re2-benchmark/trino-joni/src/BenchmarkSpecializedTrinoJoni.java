@@ -36,13 +36,11 @@ import java.util.concurrent.TimeUnit;
 
 import static io.trino.operator.scalar.JoniRegexpCasts.joniRegexp;
 
-/**
- * This repository's Joni harness for {@code BenchmarkSpecializedTrinoRegexp}: each workload's
- * operation on pinned Joni, over the same inputs. Replace and extract call pinned Trino's Joni
- * functions; extract-all calls {@link JoniSliceOperations}, which runs pinned Trino's loop but
- * returns a Slice list in place of a SQL Block. The baseline shards run each workload in separate
- * JVMs, as they do for the Regulator variants.
- */
+/// This repository's Joni harness for `BenchmarkSpecializedTrinoRegexp`: each workload's
+/// operation on pinned Joni, over the same inputs. Replace and extract call pinned Trino's Joni
+/// functions; extract-all calls [JoniSliceOperations], which runs pinned Trino's loop but
+/// returns a Slice list in place of a SQL Block. The baseline shards run each workload in separate
+/// JVMs, as they do for the Regulator variants.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)

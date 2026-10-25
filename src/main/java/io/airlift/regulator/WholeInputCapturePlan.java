@@ -17,9 +17,7 @@ import io.airlift.slice.SizeOf;
 
 import java.util.Arrays;
 
-/**
- * Capture endpoints for one anchored, greedy run that accepts every valid UTF-8 code point.
- */
+/// Capture endpoints for one anchored, greedy run that accepts every valid UTF-8 code point.
 final class WholeInputCapturePlan
 {
     private final boolean[] atEnd;

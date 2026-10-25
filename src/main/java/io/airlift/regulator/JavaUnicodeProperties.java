@@ -34,14 +34,12 @@ import static io.airlift.regulator.UnicodeGroups.union;
 import static io.airlift.regulator.UnicodeGroups.word;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Resolves the Unicode property names of Java patterns to the classes {@link UnicodeGroups}
- * builds from the pinned {@link UnicodeDatabase}; {@link TrinoRegexpParser} maps its names other
- * than the POSIX ones onto them. The names cover aliases, blocks, binary properties, and the
- * properties of {@link Character}; each property is computed as the JDK computes it. A Java
- * pattern must give the JDK's results, so keep the JDK's computation even where the database
- * stores a Unicode property of the same name.
- */
+/// Resolves the Unicode property names of Java patterns to the classes [UnicodeGroups]
+/// builds from the pinned [UnicodeDatabase]; [TrinoRegexpParser] maps its names other
+/// than the POSIX ones onto them. The names cover aliases, blocks, binary properties, and the
+/// properties of [Character]; each property is computed as the JDK computes it. A Java
+/// pattern must give the JDK's results, so keep the JDK's computation even where the database
+/// stores a Unicode property of the same name.
 final class JavaUnicodeProperties
 {
     // The script of every code point that Scripts.txt omits, Character.UnicodeScript.UNKNOWN.
@@ -62,20 +60,16 @@ final class JavaUnicodeProperties
 
     private JavaUnicodeProperties() {}
 
-    /**
-     * Returns the long names of the Java and Trino scripts, which are the scripts of Scripts.txt
-     * and Unknown.
-     */
+    /// Returns the long names of the Java and Trino scripts, which are the scripts of Scripts.txt
+    /// and Unknown.
     static List<String> scriptNames()
     {
         return ScriptNames.NAMES;
     }
 
-    /**
-     * Returns the class of a Java property name, such as Lu, IsGreek, InBasicLatin, script=Greek,
-     * IsAlphabetic, or javaLowerCase, or null if the name is not one. {@link TrinoRegexpParser}
-     * maps its names other than the POSIX ones onto these.
-     */
+    /// Returns the class of a Java property name, such as Lu, IsGreek, InBasicLatin, script=Greek,
+    /// IsAlphabetic, or javaLowerCase, or null if the name is not one. [TrinoRegexpParser]
+    /// maps its names other than the POSIX ones onto these.
     public static CharClass lookup(String name)
     {
         requireNonNull(name, "name is null");
@@ -313,11 +307,9 @@ final class JavaUnicodeProperties
         return cached("java:IdentifierIgnorable", () -> union(codePoints(0x00, 0x08, 0x0E, 0x1B, 0x7F, 0x9F), categories("Cf")));
     }
 
-    /**
-     * Returns the identifier of the block of {@code codePoint}, which
-     * {@code Character.UnicodeBlock.of(codePoint).toString()} returns, such as
-     * LATIN_1_SUPPLEMENT, or null if the code point is in no block.
-     */
+    /// Returns the identifier of the block of `codePoint`, which
+    /// `Character.UnicodeBlock.of(codePoint).toString()` returns, such as
+    /// LATIN_1_SUPPLEMENT, or null if the code point is in no block.
     static String javaBlockIdentifier(int codePoint)
     {
         int index = Arrays.binarySearch(BlockNames.FIRST_CODE_POINTS, codePoint);

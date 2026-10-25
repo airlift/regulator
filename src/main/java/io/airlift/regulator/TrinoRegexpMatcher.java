@@ -18,14 +18,12 @@ import io.airlift.slice.Slice;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * Reusable, non-overlapping match iteration for a compiled Trino regular expression.
- * Offsets are bytes relative to the logical input Slice; end offsets are exclusive.
- * <p>
- * Each matcher owns its mutable search and capture state and is not thread-safe. Separate matchers
- * may share a compiled pattern. Group values are zero-copy views: they survive reset but reflect
- * mutations to their original input storage. Do not mutate input while matching it.
- */
+/// Reusable, non-overlapping match iteration for a compiled Trino regular expression.
+/// Offsets are bytes relative to the logical input Slice; end offsets are exclusive.
+///
+/// Each matcher owns its mutable search and capture state and is not thread-safe. Separate matchers
+/// may share a compiled pattern. Group values are zero-copy views: they survive reset but reflect
+/// mutations to their original input storage. Do not mutate input while matching it.
 public sealed class TrinoRegexpMatcher
         permits TrinoRegexpMatcher.CompiledScanMatcher
 {
@@ -37,9 +35,7 @@ public sealed class TrinoRegexpMatcher
     private int nextStart;
     private boolean exhausted;
 
-    /**
-     * For a subclass that keeps its own state; the base class's matching state is unused.
-     */
+    /// For a subclass that keeps its own state; the base class's matching state is unused.
     private TrinoRegexpMatcher()
     {
         matcher = null;
@@ -73,9 +69,7 @@ public sealed class TrinoRegexpMatcher
         reset(input);
     }
 
-    /**
-     * Resets iteration to the complete logical input and invalidates the current match.
-     */
+    /// Resets iteration to the complete logical input and invalidates the current match.
     @SuppressFBWarnings(value = "EI_EXPOSE_REP2", justification = "The matcher retains caller-owned input for zero-copy group views")
     public TrinoRegexpMatcher reset(Slice input)
     {
@@ -92,10 +86,8 @@ public sealed class TrinoRegexpMatcher
         return this;
     }
 
-    /**
-     * Finds the next non-overlapping match. Empty matches advance by one UTF-8 code point;
-     * a terminal empty match is returned once. Failure invalidates the current match.
-     */
+    /// Finds the next non-overlapping match. Empty matches advance by one UTF-8 code point;
+    /// a terminal empty match is returned once. Failure invalidates the current match.
     public boolean find()
     {
         if (matcher != null) {
@@ -114,19 +106,15 @@ public sealed class TrinoRegexpMatcher
         return true;
     }
 
-    /**
-     * Returns the retained capturing-group count, excluding group zero.
-     */
+    /// Returns the retained capturing-group count, excluding group zero.
     public int groupCount()
     {
         return matcher == null ? 0 : matcher.groupCount();
     }
 
-    /**
-     * Returns whether a retained group participated in the current match.
-     *
-     * @throws IllegalStateException if no successful match is current
-     */
+    /// Returns whether a retained group participated in the current match.
+    ///
+    /// @throws IllegalStateException if no successful match is current
     public boolean matched(int group)
     {
         if (matcher != null) {
@@ -141,11 +129,9 @@ public sealed class TrinoRegexpMatcher
         return start(0);
     }
 
-    /**
-     * Returns a group's start byte offset, or {@code -1} when it did not participate.
-     *
-     * @throws IllegalStateException if no successful match is current
-     */
+    /// Returns a group's start byte offset, or `-1` when it did not participate.
+    ///
+    /// @throws IllegalStateException if no successful match is current
     public int start(int group)
     {
         if (matcher != null) {
@@ -160,11 +146,9 @@ public sealed class TrinoRegexpMatcher
         return end(0);
     }
 
-    /**
-     * Returns a group's end byte offset, or {@code -1} when it did not participate.
-     *
-     * @throws IllegalStateException if no successful match is current
-     */
+    /// Returns a group's end byte offset, or `-1` when it did not participate.
+    ///
+    /// @throws IllegalStateException if no successful match is current
     public int end(int group)
     {
         if (matcher != null) {
@@ -179,11 +163,9 @@ public sealed class TrinoRegexpMatcher
         return group(0);
     }
 
-    /**
-     * Returns a zero-copy group view, or {@code null} when it did not participate.
-     *
-     * @throws IllegalStateException if no successful match is current
-     */
+    /// Returns a zero-copy group view, or `null` when it did not participate.
+    ///
+    /// @throws IllegalStateException if no successful match is current
     public Slice group(int group)
     {
         if (matcher != null) {
@@ -193,10 +175,8 @@ public sealed class TrinoRegexpMatcher
         return input.slice(start, end(group) - start);
     }
 
-    /**
-     * Returns a matcher retaining {@code retainedCapturingGroupCount} groups whose finds run the
-     * generated class of a compiled scan.
-     */
+    /// Returns a matcher retaining `retainedCapturingGroupCount` groups whose finds run the
+    /// generated class of a compiled scan.
     static TrinoRegexpMatcher compiledScan(CompiledTrinoScan scan, Slice input, int retainedCapturingGroupCount)
     {
         return CompiledScanMatcher.create(scan, input, retainedCapturingGroupCount);
@@ -212,11 +192,9 @@ public sealed class TrinoRegexpMatcher
         }
     }
 
-    /**
-     * A matcher whose finds run a generated {@link CompiledTrinoScan}, with the results and
-     * exceptions of the interpreted matcher it replaces. A scan plan never matches empty, so each
-     * find resumes at the previous match end.
-     */
+    /// A matcher whose finds run a generated [CompiledTrinoScan], with the results and
+    /// exceptions of the interpreted matcher it replaces. A scan plan never matches empty, so each
+    /// find resumes at the previous match end.
     private static final class CompiledScanMatcher
             extends TrinoRegexpMatcher
     {
@@ -234,10 +212,8 @@ public sealed class TrinoRegexpMatcher
             reset(input);
         }
 
-        /**
-         * The declared type keeps verification of {@link TrinoRegexpMatcher} from loading this
-         * class.
-         */
+        /// The declared type keeps verification of [TrinoRegexpMatcher] from loading this
+        /// class.
         static TrinoRegexpMatcher create(CompiledTrinoScan scan, Slice input, int retainedCapturingGroupCount)
         {
             return new CompiledScanMatcher(scan, input, retainedCapturingGroupCount);

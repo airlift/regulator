@@ -25,19 +25,17 @@ import java.util.List;
 
 import static io.airlift.slice.Slices.utf8Slice;
 
-/**
- * Reports what generated scan classes cost for 1, 100, and 10,000 distinct patterns, or for the
- * counts given as arguments: generation, definition, and instantiation time per class, emitted
- * method bytecode and classfile size per class, and growth of metaspace, compressed class space,
- * and code cache, after definition and again after each class has found matches often enough to
- * be compiled. Memory pools are shared with everything else in the JVM, so run each count in its
- * own JVM for figures that are not cumulative.
- * <p>
- * The figures are cold first-use costs: the timer and the memory baseline start just before the
- * first class is generated, so in a fresh JVM they include loading the generator and the
- * classfile library. The code-cache figures are snapshots taken immediately after defining and
- * after exercising the classes, without waiting for background compilation.
- */
+/// Reports what generated scan classes cost for 1, 100, and 10,000 distinct patterns, or for the
+/// counts given as arguments: generation, definition, and instantiation time per class, emitted
+/// method bytecode and classfile size per class, and growth of metaspace, compressed class space,
+/// and code cache, after definition and again after each class has found matches often enough to
+/// be compiled. Memory pools are shared with everything else in the JVM, so run each count in its
+/// own JVM for figures that are not cumulative.
+///
+/// The figures are cold first-use costs: the timer and the memory baseline start just before the
+/// first class is generated, so in a fresh JVM they include loading the generator and the
+/// classfile library. The code-cache figures are snapshots taken immediately after defining and
+/// after exercising the classes, without waiting for background compilation.
 public final class BenchmarkTrinoScanKernelCost
 {
     private static final int[] DEFAULT_COUNTS = {1, 100, 10_000};
@@ -109,11 +107,9 @@ public final class BenchmarkTrinoScanKernelCost
                 (run.codeCache() - before.codeCache()));
     }
 
-    /**
-     * Returns the routes of {@code count} distinct end-anchored patterns, compiled without
-     * generated code, that cycle through the four {@code OPTIONAL_MIXED} shapes of
-     * {@link BenchmarkTrinoScanPlan}.
-     */
+    /// Returns the routes of `count` distinct end-anchored patterns, compiled without
+    /// generated code, that cycle through the four `OPTIONAL_MIXED` shapes of
+    /// [BenchmarkTrinoScanPlan].
     static List<TrinoScanKernelGenerator.Routes> routes(int count)
     {
         List<TrinoScanKernelGenerator.Routes> routes = new ArrayList<>(count);

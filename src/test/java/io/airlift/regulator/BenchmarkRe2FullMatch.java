@@ -37,9 +37,7 @@ import static io.airlift.regulator.Re2BenchmarkRunner.compileRe2Latin1;
 import static io.airlift.regulator.Re2BenchmarkRunner.randomText;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 
-/**
- * Full-match scaling benchmarks for UTF-8 and Latin1 execution.
- */
+/// Full-match scaling benchmarks for UTF-8 and Latin1 execution.
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @BenchmarkMode(Mode.AverageTime)

@@ -75,12 +75,10 @@ final class LiteralSearchKernel
         return prefixShifts.clone();
     }
 
-    /**
-     * Returns the Slice-relative offset of the first occurrence of the literal in the range, or
-     * -1. Requires a one-byte literal; OrderedLiteralMatcher and LiteralGapMatcher call it for such
-     * literals and {@link #findContains} for longer ones. TrinoLikeKernelGenerator emits a copy of
-     * its scan for each one-byte literal of a generated LIKE pattern; keep the copy in step.
-     */
+    /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
+    /// `-1`. Requires a one-byte literal; OrderedLiteralMatcher and LiteralGapMatcher call it for such
+    /// literals and [#findContains] for longer ones. TrinoLikeKernelGenerator emits a copy of
+    /// its scan for each one-byte literal of a generated LIKE pattern; keep the copy in step.
     int findSingleByte(Slice input, int offset, int length)
     {
         requireNonNull(input, "input is null");
@@ -114,13 +112,11 @@ final class LiteralSearchKernel
         return -1;
     }
 
-    /**
-     * Returns the Slice-relative offset of the first occurrence of the literal in the range, or
-     * -1, for a literal of at least two bytes and a valid range. LIKE and Trino regexp contains,
-     * Trino dot-star spans, OrderedLiteralMatcher, and LiteralGapMatcher's first literal call it
-     * for such literals. Its word scan makes no call until it finds a possible candidate, and a
-     * separate method verifies the candidates.
-     */
+    /// Returns the Slice-relative offset of the first occurrence of the literal in the range, or
+    /// `-1`, for a literal of at least two bytes and a valid range. LIKE and Trino regexp contains,
+    /// Trino dot-star spans, OrderedLiteralMatcher, and LiteralGapMatcher's first literal call it
+    /// for such literals. Its word scan makes no call until it finds a possible candidate, and a
+    /// separate method verifies the candidates.
     int findContains(Slice input, int offset, int length)
     {
         if (literal.length > length) {
@@ -137,11 +133,9 @@ final class LiteralSearchKernel
         return matchOffset < 0 ? -1 : matchOffset - inputOffset;
     }
 
-    /**
-     * Returns the Slice-relative offset where {@link #findContains} continues with KMP; only tests
-     * call it. Returns -1 when the search ends, with or without a match, before it switches to
-     * KMP, when the range is invalid, and when the literal is a single byte.
-     */
+    /// Returns the Slice-relative offset where [#findContains] continues with KMP; only tests
+    /// call it. Returns -1 when the search ends, with or without a match, before it switches to
+    /// KMP, when the range is invalid, and when the literal is a single byte.
     int kmpHandoffOffsetForDiagnostics(Slice input, int offset, int length)
     {
         requireNonNull(input, "input is null");
@@ -164,13 +158,11 @@ final class LiteralSearchKernel
         return Arrays.equals(input.byteArray(), inputOffset, inputOffset + literal.length, literal, 0, literal.length);
     }
 
-    /**
-     * Skips to the first word, or tail position, holding a possible candidate, and returns
-     * {@link #verifyContainsCandidates} from there, or -1. The word loop makes no call until it
-     * finds a possible candidate and has no inner loop, so C2 keeps it innermost and unrolls it,
-     * and it reads LOW_BITS from {@link #lowBits}. TrinoLikeKernelGenerator emits a copy of this
-     * scan; keep the copies in step.
-     */
+    /// Skips to the first word, or tail position, holding a possible candidate, and returns
+    /// [#verifyContainsCandidates] from there, or -1. The word loop makes no call until it
+    /// finds a possible candidate and has no inner loop, so C2 keeps it innermost and unrolls it,
+    /// and it reads LOW_BITS from [#lowBits]. TrinoLikeKernelGenerator emits a copy of this
+    /// scan; keep the copies in step.
     private int skipToContainsCandidate(byte[] input, int searchStart, int searchEnd)
     {
         int backOffset = literal.length - 1;
@@ -199,16 +191,14 @@ final class LiteralSearchKernel
         return -1;
     }
 
-    /**
-     * Verifies possible candidates selected by the first-and-last-byte masks, in order from
-     * {@code verifyStart}, the word or tail position where {@link #skipToContainsCandidate} found
-     * the first one. Returns the match position, -1 when there is no match, or {@code -2 - resume}
-     * when the search must continue with {@link #findKmp} at {@code resume}; returning the handoff,
-     * rather than running KMP here, lets {@link #kmpHandoffOffsetForDiagnostics} observe it. The
-     * KMP handoff counts from {@code searchStart}, because the bytes skipped to reach
-     * {@code verifyStart} count as covered. The word loop reads LOW_BITS from {@link #lowBits}, as
-     * the scan does. TrinoLikeKernelGenerator emits a copy of this method; keep the copies in step.
-     */
+    /// Verifies possible candidates selected by the first-and-last-byte masks, in order from
+    /// `verifyStart`, the word or tail position where [#skipToContainsCandidate] found
+    /// the first one. Returns the match position, -1 when there is no match, or `-2 - resume`
+    /// when the search must continue with [#findKmp] at `resume`; returning the handoff,
+    /// rather than running KMP here, lets [#kmpHandoffOffsetForDiagnostics] observe it. The
+    /// KMP handoff counts from `searchStart`, because the bytes skipped to reach
+    /// `verifyStart` count as covered. The word loop reads LOW_BITS from [#lowBits], as
+    /// the scan does. TrinoLikeKernelGenerator emits a copy of this method; keep the copies in step.
     private int verifyContainsCandidates(byte[] input, int searchStart, int verifyStart, int searchEnd)
     {
         int candidateCount = searchEnd - searchStart - literal.length + 1;

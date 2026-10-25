@@ -506,15 +506,13 @@ final class JavaRegexpParser
             STAR, PLUS, QUEST, REPEAT
         }
 
-        /**
-         * Whether a repeated atom that holds a capture can match the empty string, which makes the
-         * repetition a nullable repeated capture. Must agree with ExpressionAnalysis.canMatchEmpty
-         * for parse trees. The walk reads each node's children in order up to the first that
-         * decides it, and stops at the repetitions earlier checks recorded. Every walk starts at
-         * the atom of a repetition being checked, and once checked that repetition is recorded or
-         * matches the empty string, so a later walk stops there and never enters a node an earlier
-         * walk entered. The checks therefore stay linear in the pattern.
-         */
+        /// Whether a repeated atom that holds a capture can match the empty string, which makes the
+        /// repetition a nullable repeated capture. Must agree with ExpressionAnalysis.canMatchEmpty
+        /// for parse trees. The walk reads each node's children in order up to the first that
+        /// decides it, and stops at the repetitions earlier checks recorded. Every walk starts at
+        /// the atom of a repetition being checked, and once checked that repetition is recorded or
+        /// matches the empty string, so a later walk stops there and never enters a node an earlier
+        /// walk entered. The checks therefore stay linear in the pattern.
         private boolean canMatchEmpty(Regexp atom)
         {
             // The nodes whose value waits on a child, with the index of that child.

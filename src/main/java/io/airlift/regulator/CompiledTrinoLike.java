@@ -15,13 +15,11 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 
-/**
- * One Trino LIKE pattern compiled to its own hidden class. The method delegates to the public
- * static {@code matchesEntry} method of the class, which a caller can also bind directly. A
- * generated class is stateless.
- * <p>
- * The caller rejects a {@code null} input as {@link TrinoLikePattern#matches(Slice)} does.
- */
+/// One Trino LIKE pattern compiled to its own hidden class. The method delegates to the public
+/// static `matchesEntry` method of the class, which a caller can also bind directly. A
+/// generated class is stateless.
+///
+/// The caller rejects a `null` input as [TrinoLikePattern#matches(Slice)] does.
 interface CompiledTrinoLike
 {
     boolean matches(Slice input);

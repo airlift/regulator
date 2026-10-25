@@ -32,10 +32,8 @@ import org.openjdk.jmh.runner.options.Options;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Practical pattern benchmarks + compile cost benchmarks.
- * 5 practical + 5 compile phases + 6 per-pattern compile = 16 benchmark points.
- */
+/// Practical pattern benchmarks + compile cost benchmarks.
+/// 5 practical + 5 compile phases + 6 per-pattern compile = 16 benchmark points.
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @BenchmarkMode(Mode.AverageTime)

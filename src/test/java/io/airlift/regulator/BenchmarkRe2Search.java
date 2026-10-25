@@ -36,10 +36,8 @@ import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileRe2;
 import static io.airlift.regulator.Re2BenchmarkRunner.randomText;
 
-/**
- * DFA + Re2 API search benchmarks (failed match on random text).
- * 5 patterns x 2 engines x 8 sizes = 80 benchmark points.
- */
+/// DFA + Re2 API search benchmarks (failed match on random text).
+/// 5 patterns x 2 engines x 8 sizes = 80 benchmark points.
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @BenchmarkMode(Mode.AverageTime)

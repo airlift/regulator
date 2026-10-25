@@ -17,17 +17,15 @@ import java.util.Map;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 
-/**
- * The character names of {@code Character.getName} and {@code Character.codePointOf}, which
- * Java's {@code \N{name}} reads, from the pinned Unicode database.
- * <p>
- * The JDK names a code point by its Name in UnicodeData.txt; a control code point by its
- * Unicode_1_Name, with the exceptions below; and any other assigned code point by its block's
- * identifier, with spaces for underscores, a space, and the code point in uppercase hexadecimal
- * without leading zeros, such as CJK UNIFIED IDEOGRAPHS 4E00. It accepts neither the aliases of
- * NameAliases.txt nor the names that Unicode derives for ranges, such as CJK UNIFIED
- * IDEOGRAPH-4E00.
- */
+/// The character names of `Character.getName` and `Character.codePointOf`, which
+/// Java's `\N{name}` reads, from the pinned Unicode database.
+///
+/// The JDK names a code point by its Name in UnicodeData.txt; a control code point by its
+/// Unicode_1_Name, with the exceptions below; and any other assigned code point by its block's
+/// identifier, with spaces for underscores, a space, and the code point in uppercase hexadecimal
+/// without leading zeros, such as CJK UNIFIED IDEOGRAPHS 4E00. It accepts neither the aliases of
+/// NameAliases.txt nor the names that Unicode derives for ranges, such as CJK UNIFIED
+/// IDEOGRAPH-4E00.
 final class JavaCharacterNames
 {
     // The JDK build tool that writes the JDK's names,
@@ -42,10 +40,8 @@ final class JavaCharacterNames
 
     private JavaCharacterNames() {}
 
-    /**
-     * Returns the name of {@code codePoint}, from 0 through {@code RUNEMAX}, as
-     * {@code Character.getName} does, or null if the code point is unassigned.
-     */
+    /// Returns the name of `codePoint`, from 0 through `RUNEMAX`, as
+    /// `Character.getName` does, or null if the code point is unassigned.
     static String getName(int codePoint)
     {
         String name = UnicodeDatabase.names().name(codePoint);
@@ -66,12 +62,10 @@ final class JavaCharacterNames
         return block == null ? hex : block.replace('_', ' ') + " " + hex;
     }
 
-    /**
-     * Returns the code point that {@code Character.codePointOf(name)} returns, or -1 where it
-     * throws: the code point whose name is {@code name} without leading and trailing characters
-     * up to U+0020, as {@code String.trim} removes, and uppercased, as
-     * {@code toUpperCase(Locale.ROOT)} does.
-     */
+    /// Returns the code point that `Character.codePointOf(name)` returns, or -1 where it
+    /// throws: the code point whose name is `name` without leading and trailing characters
+    /// up to U+0020, as `String.trim` removes, and uppercased, as
+    /// `toUpperCase(Locale.ROOT)` does.
     static int codePointOf(String name)
     {
         int start = 0;

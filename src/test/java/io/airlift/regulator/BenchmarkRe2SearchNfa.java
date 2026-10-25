@@ -35,10 +35,8 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static io.airlift.regulator.Re2BenchmarkRunner.randomText;
 
-/**
- * NFA search benchmarks (failed match on random text).
- * 5 patterns x 1 engine x 6 sizes = 30 benchmark points.
- */
+/// NFA search benchmarks (failed match on random text).
+/// 5 patterns x 1 engine x 6 sizes = 30 benchmark points.
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @BenchmarkMode(Mode.AverageTime)

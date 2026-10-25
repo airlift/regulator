@@ -23,10 +23,8 @@ import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * Full case-fold mappings that join the simple folding of one {@link CaseFolding} with
- * multi-character folds. Only a rule with multi-character folds, the Trino rule, builds them.
- */
+/// Full case-fold mappings that join the simple folding of one [CaseFolding] with
+/// multi-character folds. Only a rule with multi-character folds, the Trino rule, builds them.
 final class UnicodeFullCaseFold
 {
     record FoldToken(int[] foldedRunes, CharClass sourceRunes)
@@ -116,10 +114,8 @@ final class UnicodeFullCaseFold
         return data.multiCharacterTokens;
     }
 
-    /**
-     * Returns the tokens whose folded sequence begins with {@code foldedRune}, in the order of
-     * {@link #multiCharacterTokens()}.
-     */
+    /// Returns the tokens whose folded sequence begins with `foldedRune`, in the order of
+    /// [#multiCharacterTokens()].
     List<FoldToken> multiCharacterTokensStartingWith(int foldedRune)
     {
         int start = data.firstTokenIndex(foldedRune);
@@ -127,9 +123,7 @@ final class UnicodeFullCaseFold
         return data.multiCharacterTokens.subList(start, end);
     }
 
-    /**
-     * Returns the length of the longest folded sequence of a multi-character token.
-     */
+    /// Returns the length of the longest folded sequence of a multi-character token.
     int maximumTokenLength()
     {
         return data.maximumTokenLength;
@@ -245,10 +239,8 @@ final class UnicodeFullCaseFold
         return Utf8.encodedLength(rune);
     }
 
-    /**
-     * Returns the full case folding that joins the simple folding of {@code caseFolding} with
-     * {@code multiCharacterFolds}, whose folded runes are already simple folds.
-     */
+    /// Returns the full case folding that joins the simple folding of `caseFolding` with
+    /// `multiCharacterFolds`, whose folded runes are already simple folds.
     static UnicodeFullCaseFold withMultiCharacterFolds(CaseFolding caseFolding, MultiCharacterMappings multiCharacterFolds)
     {
         int[] sources = multiCharacterFolds.codePoints();
@@ -277,10 +269,8 @@ final class UnicodeFullCaseFold
         return Integer.compare(left.length, right.length);
     }
 
-    /**
-     * Mappings and tokens with primitive lookup tables. Mapped runes are sorted for binary search.
-     * Tokens are sorted by folded sequence, so tokens sharing a first rune are contiguous.
-     */
+    /// Mappings and tokens with primitive lookup tables. Mapped runes are sorted for binary search.
+    /// Tokens are sorted by folded sequence, so tokens sharing a first rune are contiguous.
     private static final class Data
     {
         private final List<FoldToken> multiCharacterTokens;

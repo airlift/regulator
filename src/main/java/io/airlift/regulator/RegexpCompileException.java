@@ -13,9 +13,7 @@
  */
 package io.airlift.regulator;
 
-/**
- * Thrown when a valid regular expression cannot be compiled into an executable program.
- */
+/// Thrown when a valid regular expression cannot be compiled into an executable program.
 public sealed class RegexpCompileException
         extends RuntimeException
         permits RegexpCompileMemoryLimitException

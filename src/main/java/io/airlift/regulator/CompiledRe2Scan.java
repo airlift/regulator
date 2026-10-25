@@ -15,31 +15,23 @@ package io.airlift.regulator;
 
 import io.airlift.slice.Slice;
 
-/**
- * The RE2 executor class of one RE2, Java, or Rust pattern, a {@link Re2} compiled in the RE2
- * dialect, whose case-sensitive scan plan was compiled to its own hidden class. Each method returns
- * what the {@link TrinoScanPlan} method it names returns, with the same groups. A start-anchored
- * plan implements only {@code match}, and an unanchored plan only {@code search} and, when
- * full-Slice find hands off to the ordinary engine, {@code searchBeforeHandoff}; the others throw
- * {@link UnsupportedOperationException}. A generated class is stateless and never calls back into
- * the pattern; the pattern itself finishes a search that handed off.
- */
+/// The RE2 executor class of one RE2, Java, or Rust pattern, a [Re2] compiled in the RE2
+/// dialect, whose case-sensitive scan plan was compiled to its own hidden class. Each method returns
+/// what the [TrinoScanPlan] method it names returns, with the same groups. A start-anchored
+/// plan implements only `match`, and an unanchored plan only `search` and, when
+/// full-Slice find hands off to the ordinary engine, `searchBeforeHandoff`; the others throw
+/// [UnsupportedOperationException]. A generated class is stateless and never calls back into
+/// the pattern; the pattern itself finishes a search that handed off.
 interface CompiledRe2Scan
 {
-    /**
-     * The attempt of a start-anchored plan, as {@link TrinoScanPlan#matchEndAnchored} or
-     * {@link TrinoScanPlan#matchPartial}.
-     */
+    /// The attempt of a start-anchored plan, as [TrinoScanPlan#matchEndAnchored] or
+    /// [TrinoScanPlan#matchPartial].
     boolean match(Slice input, int contextStart, int contextEnd, boolean fullMatch, int[] groups);
 
-    /**
-     * The search of an unanchored plan, as {@link TrinoScanPlan#search}.
-     */
+    /// The search of an unanchored plan, as [TrinoScanPlan#search].
     int search(Slice input, int contextStart, int contextEnd, int start, boolean anchored, boolean fullMatch, int[] groups);
 
-    /**
-     * The capture-free search of all of {@code input} that full-Slice find runs, as
-     * {@link TrinoScanPlan#searchBeforeHandoff}.
-     */
+    /// The capture-free search of all of `input` that full-Slice find runs, as
+    /// [TrinoScanPlan#searchBeforeHandoff].
     int searchBeforeHandoff(Slice input);
 }

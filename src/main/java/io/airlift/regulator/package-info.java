@@ -12,8 +12,6 @@
  * limitations under the License.
  */
 
-/**
- * A byte-oriented Java port of RE2 with {@link io.airlift.slice.Slice} inputs and outputs.
- * Compiled patterns are thread-safe; matchers are mutable and must not be shared between threads.
- */
+/// A byte-oriented Java port of RE2 with [io.airlift.slice.Slice] inputs and outputs.
+/// Compiled patterns are thread-safe; matchers are mutable and must not be shared between threads.
 package io.airlift.regulator;

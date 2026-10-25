@@ -372,13 +372,11 @@ public class TestRe2Allocations
         return allocatedBytes / 10;
     }
 
-    /**
-     * Runs {@code operations} three times, checks each result, and returns the fewest bytes the
-     * current thread allocated in one run. An allocation per operation appears in every run. A
-     * one-time allocation does not: when a counter overflow requests a C2 compile, the compile
-     * broker loads the method's signature classes on the requesting thread, which can add tens of
-     * kilobytes to one run.
-     */
+    /// Runs `operations` three times, checks each result, and returns the fewest bytes the
+    /// current thread allocated in one run. An allocation per operation appears in every run. A
+    /// one-time allocation does not: when a counter overflow requests a C2 compile, the compile
+    /// broker loads the method's signature classes on the requesting thread, which can add tens of
+    /// kilobytes to one run.
     private static long minimumAllocatedBytes(long expectedResult, LongSupplier operations)
     {
         ThreadMXBean threadBean = (ThreadMXBean) ManagementFactory.getThreadMXBean();

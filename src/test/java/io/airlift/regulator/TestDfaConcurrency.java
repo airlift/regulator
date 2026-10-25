@@ -231,12 +231,10 @@ public class TestDfaConcurrency
         }
     }
 
-    /**
-     * Generates a De Bruijn string for the binary alphabet {0, 1}.
-     * The De Bruijn string B(2,n) contains every n-bit binary string as a substring exactly once.
-     *
-     * Ported from RE2 re2/testing/string_generator.cc DeBruijnString().
-     */
+    /// Generates a De Bruijn string for the binary alphabet {0, 1}.
+    /// The De Bruijn string B(2,n) contains every n-bit binary string as a substring exactly once.
+    ///
+    /// Ported from RE2 re2/testing/string_generator.cc DeBruijnString().
     private static String deBruijnString(int n)
     {
         if (n < 1 || n > 29) {

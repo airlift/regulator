@@ -152,11 +152,9 @@ public final class RegexpDump
         output.appendCodePoint(rune);
     }
 
-    /**
-     * Formats hex to match upstream RE2 dump.cc behavior.
-     * RE2/C-style "%#x" output is "0" for zero and "0x..." otherwise.
-     * Java "%#x" differs for zero ("0x0"), so this helper is intentionally custom.
-     */
+    /// Formats hex to match upstream RE2 dump.cc behavior.
+    /// RE2/C-style "%#x" output is "0" for zero and "0x..." otherwise.
+    /// Java "%#x" differs for zero ("0x0"), so this helper is intentionally custom.
     private static String hex(int value)
     {
         if (value == 0) {

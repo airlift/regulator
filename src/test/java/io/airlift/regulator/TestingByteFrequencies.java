@@ -20,10 +20,8 @@ final class TestingByteFrequencies
 {
     private TestingByteFrequencies() {}
 
-    /**
-     * Returns a supplied distribution in which every byte but ASCII letters and space is rare, so
-     * probes move onto punctuation, digits, and bytes at or above 0x80.
-     */
+    /// Returns a supplied distribution in which every byte but ASCII letters and space is rare, so
+    /// probes move onto punctuation, digits, and bytes at or above 0x80.
     public static ByteFrequencies rareNonLetters()
     {
         long[] counts = new long[256];
@@ -33,14 +31,12 @@ final class TestingByteFrequencies
         return ByteFrequencies.fromCounts(counts);
     }
 
-    /**
-     * Returns a distribution learned from two JSON request records. They contain no {@code v},
-     * {@code k}, or {@code =}, one {@code b}, and neither Latin-1 {@code ï} (0xEF) nor the
-     * trailing UTF-8 byte of {@code ï} (0xAF), but {@code a}, {@code s}, and the UTF-8 lead byte
-     * 0xC3 that {@code ï} shares with {@code é} are common, so literals such as
-     * {@code svc1://}, {@code user=}, and {@code aab} move their probes while {@code https://}
-     * and {@code error: } keep the first byte.
-     */
+    /// Returns a distribution learned from two JSON request records. They contain no `v`,
+    /// `k`, or `=`, one `b`, and neither Latin-1 `ï` (0xEF) nor the
+    /// trailing UTF-8 byte of `ï` (0xAF), but `a`, `s`, and the UTF-8 lead byte
+    /// 0xC3 that `ï` shares with `é` are common, so literals such as
+    /// `svc1://`, `user=`, and `aab` move their probes while `https://`
+    /// and `error: ` keep the first byte.
     public static ByteFrequencies learnedJsonRecords()
     {
         String records =

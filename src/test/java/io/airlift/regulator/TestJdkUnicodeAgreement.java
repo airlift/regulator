@@ -32,12 +32,10 @@ import static java.util.regex.Pattern.CASE_INSENSITIVE;
 import static java.util.regex.Pattern.UNICODE_CASE;
 import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * Checks Java and Trino properties, word boundaries, Java character names, name case conversions,
- * and Java case classes against the running JDK. Inputs and case-mapping outputs newer than the
- * JDK's Unicode version are excluded. {@code EXPECTED_DIFFERENCES} lists allowed changes to older
- * characters.
- */
+/// Checks Java and Trino properties, word boundaries, Java character names, name case conversions,
+/// and Java case classes against the running JDK. Inputs and case-mapping outputs newer than the
+/// JDK's Unicode version are excluded. `EXPECTED_DIFFERENCES` lists allowed changes to older
+/// characters.
 public class TestJdkUnicodeAgreement
 {
     // The Age values of the database, oldest first.

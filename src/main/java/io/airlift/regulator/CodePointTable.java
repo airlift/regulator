@@ -16,14 +16,12 @@ package io.airlift.regulator;
 import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
 
-/**
- * An int for every code point from 0 through {@code RUNEMAX}, held in a two-stage table of deltas
- * from the code point. Each block of 256 code points has an offset into the deltas; every block
- * without a mapping shares the all-zero block at offset 0, so a code point without a mapping
- * maps to itself, and a table of a few thousand mappings holds a few dozen blocks rather than an
- * entry per code point. The arrays sit in final fields so that a plain read of a reference to the
- * table publishes their contents.
- */
+/// An int for every code point from 0 through `RUNEMAX`, held in a two-stage table of deltas
+/// from the code point. Each block of 256 code points has an offset into the deltas; every block
+/// without a mapping shares the all-zero block at offset 0, so a code point without a mapping
+/// maps to itself, and a table of a few thousand mappings holds a few dozen blocks rather than an
+/// entry per code point. The arrays sit in final fields so that a plain read of a reference to the
+/// table publishes their contents.
 final class CodePointTable
 {
     private static final int BLOCK_SHIFT = 8;
@@ -33,10 +31,8 @@ final class CodePointTable
     private final int[] blockOffsets;
     private final int[] deltas;
 
-    /**
-     * Maps each of the strictly ascending {@code codePoints} to the value at the same index, and
-     * every other code point to itself.
-     */
+    /// Maps each of the strictly ascending `codePoints` to the value at the same index, and
+    /// every other code point to itself.
     CodePointTable(int[] codePoints, int[] values)
     {
         requireNonNull(codePoints, "codePoints is null");
@@ -74,9 +70,7 @@ final class CodePointTable
         this.deltas = deltas;
     }
 
-    /**
-     * Returns the value of {@code codePoint}, which must be from 0 through {@code RUNEMAX}.
-     */
+    /// Returns the value of `codePoint`, which must be from 0 through `RUNEMAX`.
     int get(int codePoint)
     {
         return codePoint + deltas[blockOffsets[codePoint >>> BLOCK_SHIFT] + (codePoint & BLOCK_MASK)];

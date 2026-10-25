@@ -36,9 +36,7 @@ import java.util.concurrent.TimeUnit;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileRe2;
 
-/**
- * Miscellaneous RE2 benchmarks (edge cases and special patterns).
- */
+/// Miscellaneous RE2 benchmarks (edge cases and special patterns).
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @BenchmarkMode(Mode.AverageTime)

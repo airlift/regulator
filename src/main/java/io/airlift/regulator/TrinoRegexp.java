@@ -31,14 +31,12 @@ import java.util.function.Function;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Trino SQL regular-expression operations over UTF-8 Slice inputs.
- * <p>
- * Function behavior follows Trino's shared regexp contract, including UTF-8 code-point positions,
- * empty-match iteration, trailing split fields, and Java-style replacement references. Patterns use
- * the supported Trino fork of Joni's Java-syntax language documented in
- * {@code docs/integrations/REGEXP_LANGUAGES.md}; unsupported constructs are rejected during compilation.
- */
+/// Trino SQL regular-expression operations over UTF-8 Slice inputs.
+///
+/// Function behavior follows Trino's shared regexp contract, including UTF-8 code-point positions,
+/// empty-match iteration, trailing split fields, and Java-style replacement references. Patterns use
+/// the supported Trino fork of Joni's Java-syntax language documented in
+/// `docs/integrations/REGEXP_LANGUAGES.md`; unsupported constructs are rejected during compilation.
 public sealed class TrinoRegexp
         permits TrinoRegexp.BeginLineTrinoRegexp,
                 TrinoRegexp.CharacterClassTrinoRegexp,
@@ -48,10 +46,8 @@ public sealed class TrinoRegexp
                 TrinoRegexp.LiteralAlternationTrinoRegexp,
                 TrinoRegexp.OrderedLiteralTrinoRegexp
 {
-    /**
-     * Mutable engine resource options. Compilation snapshots every option, so later changes do not
-     * affect an existing {@link TrinoRegexp}. Options instances are not thread-safe.
-     */
+    /// Mutable engine resource options. Compilation snapshots every option, so later changes do not
+    /// affect an existing [TrinoRegexp]. Options instances are not thread-safe.
     public static final class Options
     {
         private long maxMemory = Re2.Options.DEFAULT_MAX_MEMORY;
@@ -84,11 +80,9 @@ public sealed class TrinoRegexp
             return byteFrequencies;
         }
 
-        /**
-         * Sets the byte-frequency distribution that chooses which byte of a literal a candidate
-         * scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
-         * {@link ByteFrequencies#uniform()}, keeps first-byte scanning.
-         */
+        /// Sets the byte-frequency distribution that chooses which byte of a literal a candidate
+        /// scan probes. Compilation keeps only the chosen offsets, not the distribution. The default,
+        /// [ByteFrequencies#uniform()], keeps first-byte scanning.
         public Options setByteFrequencies(ByteFrequencies byteFrequencies)
         {
             this.byteFrequencies = requireNonNull(byteFrequencies, "byteFrequencies is null");
@@ -100,14 +94,12 @@ public sealed class TrinoRegexp
             return generateBytecode;
         }
 
-        /**
-         * Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
-         * so each operation that would run its specialized scan runs dedicated bytecode instead.
-         * Operations that take another route keep it. Patterns that are not eligible, or whose
-         * class cannot be generated, compile as they do without this option. Disabled by default.
-         *
-         * @see TrinoRegexp#usesGeneratedBytecode()
-         */
+        /// Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
+        /// so each operation that would run its specialized scan runs dedicated bytecode instead.
+        /// Operations that take another route keep it. Patterns that are not eligible, or whose
+        /// class cannot be generated, compile as they do without this option. Disabled by default.
+        ///
+        /// @see TrinoRegexp#usesGeneratedBytecode()
         public Options setGenerateBytecode(boolean generateBytecode)
         {
             this.generateBytecode = generateBytecode;
@@ -138,18 +130,14 @@ public sealed class TrinoRegexp
         return compile(pattern, Options.defaults());
     }
 
-    /**
-     * Compiles a copied snapshot of {@code pattern} and the current option values.
-     */
+    /// Compiles a copied snapshot of `pattern` and the current option values.
     public static TrinoRegexp compile(Slice pattern, Options options)
     {
         return compile(pattern, options, TrinoScanPlanMode.DEFAULT);
     }
 
-    /**
-     * Compiles {@code pattern} so that every unanchored scan-plan search continues on the
-     * ordinary engine before its first attempt, exercising that continuation on every input.
-     */
+    /// Compiles `pattern` so that every unanchored scan-plan search continues on the
+    /// ordinary engine before its first attempt, exercising that continuation on every input.
     static TrinoRegexp compileForcingScanPlanHandoffForTesting(Slice pattern)
     {
         return compileForcingScanPlanHandoffForTesting(pattern, Options.defaults());
@@ -160,10 +148,8 @@ public sealed class TrinoRegexp
         return compile(pattern, options, TrinoScanPlanMode.FORCE_HANDOFF);
     }
 
-    /**
-     * Compiles {@code pattern} as {@link #compile(Slice)} does, but builds no scan plan, so the
-     * searches the plan would run use the ordinary engine.
-     */
+    /// Compiles `pattern` as [#compile(Slice)] does, but builds no scan plan, so the
+    /// searches the plan would run use the ordinary engine.
     static TrinoRegexp compileWithoutScanPlanForTesting(Slice pattern)
     {
         return compile(pattern, Options.defaults(), TrinoScanPlanMode.DISABLED);
@@ -216,20 +202,16 @@ public sealed class TrinoRegexp
         return new TrinoRegexp(compiledPattern);
     }
 
-    /**
-     * Creates a mutable matcher retaining every capturing group. Matching uses the Trino language
-     * and existing regex execution machinery; it does not build extraction or replacement outputs.
-     */
+    /// Creates a mutable matcher retaining every capturing group. Matching uses the Trino language
+    /// and existing regex execution machinery; it does not build extraction or replacement outputs.
     public TrinoRegexpMatcher matcher(Slice source)
     {
         return matcher(source, capturingGroupCount());
     }
 
-    /**
-     * Creates a reusable matcher retaining group zero and the requested prefix of capturing groups.
-     * Use zero when only complete-match boundaries are required. This does not change the specialized
-     * execution routes used by the other Trino operations.
-     */
+    /// Creates a reusable matcher retaining group zero and the requested prefix of capturing groups.
+    /// Use zero when only complete-match boundaries are required. This does not change the specialized
+    /// execution routes used by the other Trino operations.
     public TrinoRegexpMatcher matcher(Slice source, int retainedCapturingGroupCount)
     {
         requireNonNull(source, "source is null");
@@ -249,102 +231,82 @@ public sealed class TrinoRegexp
         return pattern;
     }
 
-    /**
-     * Returns whether this compiled pattern has a class generated for it, which only
-     * {@link Options#setGenerateBytecode(boolean)} enables. Each operation of such a pattern that
-     * would run its specialized scan runs the generated class, and the {@code generated}
-     * accessors return its entries.
-     */
+    /// Returns whether this compiled pattern has a class generated for it, which only
+    /// [Options#setGenerateBytecode(boolean)] enables. Each operation of such a pattern that
+    /// would run its specialized scan runs the generated class, and the `generated`
+    /// accessors return its entries.
     public boolean usesGeneratedBytecode()
     {
         return false;
     }
 
-    /**
-     * Returns a handle on the generated code of {@link #contains(Slice)}, of type
-     * {@code (Slice)boolean}, or empty when this pattern runs another route for it. Like every
-     * generated handle, it checks arguments as the operation does, except that it requires
-     * non-null arguments but does not check them.
-     */
+    /// Returns a handle on the generated code of [#contains(Slice)], of type
+    /// `(Slice)boolean`, or empty when this pattern runs another route for it. Like every
+    /// generated handle, it checks arguments as the operation does, except that it requires
+    /// non-null arguments but does not check them.
     public Optional<MethodHandle> generatedContains()
     {
         return Optional.empty();
     }
 
-    /**
-     * Returns a handle on the generated code of {@link #count(Slice)}, of type
-     * {@code (Slice)long}, or empty when this pattern runs another route for it.
-     */
+    /// Returns a handle on the generated code of [#count(Slice)], of type
+    /// `(Slice)long`, or empty when this pattern runs another route for it.
     public Optional<MethodHandle> generatedCount()
     {
         return Optional.empty();
     }
 
-    /**
-     * Returns a handle on the generated code of {@link #position(Slice, long, long)}, of type
-     * {@code (Slice,long,long)long}, or empty when this pattern runs another route for it.
-     */
+    /// Returns a handle on the generated code of [#position(Slice,long,long)], of type
+    /// `(Slice,long,long)long`, or empty when this pattern runs another route for it.
     public Optional<MethodHandle> generatedPosition()
     {
         return Optional.empty();
     }
 
-    /**
-     * Returns a handle on the generated code of {@link #extract(Slice, int)} for {@code group},
-     * of type {@code (Slice)Slice}, or empty when this pattern runs another route for it.
-     *
-     * @throws IllegalArgumentException if the pattern has no such group
-     */
+    /// Returns a handle on the generated code of [#extract(Slice,int)] for `group`,
+    /// of type `(Slice)Slice`, or empty when this pattern runs another route for it.
+    ///
+    /// @throws IllegalArgumentException if the pattern has no such group
     public Optional<MethodHandle> generatedExtract(int group)
     {
         validateHandleGroup(group);
         return Optional.empty();
     }
 
-    /**
-     * Returns a handle on the generated code of {@link #extractAll(Slice, int)} for
-     * {@code group}, of type {@code (Slice)List}, or empty when this pattern runs another route
-     * for it.
-     *
-     * @throws IllegalArgumentException if the pattern has no such group
-     */
+    /// Returns a handle on the generated code of [#extractAll(Slice,int)] for
+    /// `group`, of type `(Slice)List`, or empty when this pattern runs another route
+    /// for it.
+    ///
+    /// @throws IllegalArgumentException if the pattern has no such group
     public Optional<MethodHandle> generatedExtractAll(int group)
     {
         validateHandleGroup(group);
         return Optional.empty();
     }
 
-    /**
-     * Returns a handle on the generated code of {@link #split(Slice)}, of type
-     * {@code (Slice)List}, or empty when this pattern runs another route for it.
-     */
+    /// Returns a handle on the generated code of [#split(Slice)], of type
+    /// `(Slice)List`, or empty when this pattern runs another route for it.
     public Optional<MethodHandle> generatedSplit()
     {
         return Optional.empty();
     }
 
-    /**
-     * Returns a handle on the generated code of {@link #replace(Slice, Slice)}, of type
-     * {@code (Slice,Slice)Slice}, or empty when this pattern runs another route for it.
-     */
+    /// Returns a handle on the generated code of [#replace(Slice,Slice)], of type
+    /// `(Slice,Slice)Slice`, or empty when this pattern runs another route for it.
     public Optional<MethodHandle> generatedReplace()
     {
         return Optional.empty();
     }
 
-    /**
-     * Returns a handle on the generated code of {@link #replace(Slice, Function)}, of type
-     * {@code (Slice,Function)Slice}, or empty when this pattern runs another route for it.
-     */
+    /// Returns a handle on the generated code of [#replace(Slice,Function)], of type
+    /// `(Slice,Function)Slice`, or empty when this pattern runs another route for it.
     public Optional<MethodHandle> generatedReplaceWithCallback()
     {
         return Optional.empty();
     }
 
-    /**
-     * Rejects a group the pattern does not have, as {@link #extract(Slice, int)} does, for
-     * subclasses without a compiled pattern too.
-     */
+    /// Rejects a group the pattern does not have, as [#extract(Slice,int)] does, for
+    /// subclasses without a compiled pattern too.
     final void validateHandleGroup(int group)
     {
         if (group < 0) {
@@ -355,10 +317,8 @@ public sealed class TrinoRegexp
         }
     }
 
-    /**
-     * Returns the generated static method holding this pattern's scan attempt loop, with the
-     * signature of the plan executor it replaces, or {@code null} without a generated class.
-     */
+    /// Returns the generated static method holding this pattern's scan attempt loop, with the
+    /// signature of the plan executor it replaces, or `null` without a generated class.
     MethodHandle attemptHandleForDiagnostics()
     {
         return null;
@@ -404,25 +364,19 @@ public sealed class TrinoRegexp
         return pattern != null && pattern.isSingleByteMatcherComputed();
     }
 
-    /**
-     * Returns the number of capturing groups.
-     */
+    /// Returns the number of capturing groups.
     public int capturingGroupCount()
     {
         return pattern.capturingGroupCount();
     }
 
-    /**
-     * Returns named capturing groups mapped to their one-based group indexes.
-     */
+    /// Returns named capturing groups mapped to their one-based group indexes.
     public Map<String, Integer> namedCapturingGroups()
     {
         return pattern.namedCapturingGroups();
     }
 
-    /**
-     * Returns whether the source contains a match.
-     */
+    /// Returns whether the source contains a match.
     public boolean contains(Slice source)
     {
         requireNonNull(source, "source is null");
@@ -491,9 +445,7 @@ public sealed class TrinoRegexp
         }
     }
 
-    /**
-     * Returns the number of non-overlapping matches, including empty matches.
-     */
+    /// Returns the number of non-overlapping matches, including empty matches.
     public long count(Slice source)
     {
         requireNonNull(source, "source is null");
@@ -520,28 +472,22 @@ public sealed class TrinoRegexp
         return count;
     }
 
-    /**
-     * Returns the one-based code-point position of the first match, or {@code -1}.
-     */
+    /// Returns the one-based code-point position of the first match, or `-1`.
     public long position(Slice source)
     {
         return position(source, 1, 1);
     }
 
-    /**
-     * Returns the one-based code-point position of the first match at or after {@code start}, or
-     * {@code -1}. The start position is one-based.
-     */
+    /// Returns the one-based code-point position of the first match at or after `start`, or
+    /// `-1`. The start position is one-based.
     public long position(Slice source, long start)
     {
         return position(source, start, 1);
     }
 
-    /**
-     * Returns the one-based code-point position of the requested match, or {@code -1}.
-     *
-     * @throws IllegalArgumentException if {@code start} or {@code occurrence} is less than one
-     */
+    /// Returns the one-based code-point position of the requested match, or `-1`.
+    ///
+    /// @throws IllegalArgumentException if `start` or `occurrence` is less than one
     public long position(Slice source, long start, long occurrence)
     {
         requireNonNull(source, "source is null");
@@ -586,14 +532,12 @@ public sealed class TrinoRegexp
         return SliceUtf8.countCodePoints(source, 0, matcher.start()) + 1L;
     }
 
-    /**
-     * Returns the byte offset where {@link #position(Slice, long, long)} starts searching, or
-     * {@code -1} when no match can follow {@code start}, with the same argument checks, for
-     * generated position entries.
-     * A copy of the checks and offset conversion of {@code position(Slice, long, long)}.
-     *
-     * @throws IllegalArgumentException if {@code start} or {@code occurrence} is less than one
-     */
+    /// Returns the byte offset where [#position(Slice,long,long)] starts searching, or
+    /// `-1` when no match can follow `start`, with the same argument checks, for
+    /// generated position entries.
+    /// A copy of the checks and offset conversion of `position(Slice, long, long)`.
+    ///
+    /// @throws IllegalArgumentException if `start` or `occurrence` is less than one
     static int positionSearchStart(Slice source, long start, long occurrence)
     {
         if (start < 1) {
@@ -609,18 +553,14 @@ public sealed class TrinoRegexp
         return SliceUtf8.offsetOfCodePoint(source, toIntExact(codePointStart));
     }
 
-    /**
-     * Returns a zero-copy view of the first complete match, or {@code null}.
-     */
+    /// Returns a zero-copy view of the first complete match, or `null`.
     public Slice extract(Slice source)
     {
         return extract(source, 0);
     }
 
-    /**
-     * Returns a zero-copy view of a group from the first match, or {@code null} when there is no
-     * match or the group did not participate. Group zero is the complete match.
-     */
+    /// Returns a zero-copy view of a group from the first match, or `null` when there is no
+    /// match or the group did not participate. Group zero is the complete match.
     public Slice extract(Slice source, int group)
     {
         validateGroup(group);
@@ -636,10 +576,8 @@ public sealed class TrinoRegexp
         return matcher.group(group);
     }
 
-    /**
-     * Returns the start-anchored scan plan that {@link #extract(Slice, int)} runs without a
-     * matcher for {@code group}, or {@code null} when it builds one.
-     */
+    /// Returns the start-anchored scan plan that [#extract(Slice,int)] runs without a
+    /// matcher for `group`, or `null` when it builds one.
     private TrinoScanPlan startAnchoredExtractPlan(int group)
     {
         // A capture matcher has no single-byte matcher, so it would run this plan directly.
@@ -651,10 +589,8 @@ public sealed class TrinoRegexp
         return startAnchoredExtractPlan(group) != null;
     }
 
-    /**
-     * Returns what {@link #extract(Slice, int)} returns through a matcher, without building one.
-     * Groups above {@code group} are not retained.
-     */
+    /// Returns what [#extract(Slice,int)] returns through a matcher, without building one.
+    /// Groups above `group` are not retained.
     private Slice extractWithStartAnchoredScanPlan(TrinoScanPlan plan, Slice source, int group)
     {
         int[] groups = new int[2 * group + 2];
@@ -665,18 +601,14 @@ public sealed class TrinoRegexp
         return start < 0 ? null : source.slice(start, groups[2 * group + 1] - start);
     }
 
-    /**
-     * Returns zero-copy views of every complete match.
-     */
+    /// Returns zero-copy views of every complete match.
     public List<Slice> extractAll(Slice source)
     {
         return extractAll(source, 0);
     }
 
-    /**
-     * Returns zero-copy views of the requested group from every match. Unmatched groups are
-     * represented by {@code null}. Group zero is the complete match.
-     */
+    /// Returns zero-copy views of the requested group from every match. Unmatched groups are
+    /// represented by `null`. Group zero is the complete match.
     public List<Slice> extractAll(Slice source, int group)
     {
         validateGroup(group);
@@ -698,10 +630,8 @@ public sealed class TrinoRegexp
         return Collections.unmodifiableList(matches);
     }
 
-    /**
-     * Splits around non-overlapping matches and preserves trailing empty fields. Returned values are
-     * zero-copy views of {@code source}.
-     */
+    /// Splits around non-overlapping matches and preserves trailing empty fields. Returned values are
+    /// zero-copy views of `source`.
     public List<Slice> split(Slice source)
     {
         requireNonNull(source, "source is null");
@@ -728,12 +658,10 @@ public sealed class TrinoRegexp
         return Collections.unmodifiableList(parts);
     }
 
-    /**
-     * Replaces every non-overlapping match using Trino replacement syntax. Numbered references use
-     * {@code $1}; named references use {@code ${name}}; backslash escapes the following byte.
-     *
-     * @throws TrinoRegexpReplacementException if the replacement is malformed or names an unknown group
-     */
+    /// Replaces every non-overlapping match using Trino replacement syntax. Numbered references use
+    /// `$1`; named references use `${name}`; backslash escapes the following byte.
+    ///
+    /// @throws TrinoRegexpReplacementException if the replacement is malformed or names an unknown group
     public Slice replace(Slice source, Slice replacement)
     {
         requireNonNull(source, "source is null");
@@ -765,9 +693,7 @@ public sealed class TrinoRegexp
         return new TrinoReplacementPlan(source, replacement, this);
     }
 
-    /**
-     * Returns the most recently parsed well-formed replacement, or {@code null}.
-     */
+    /// Returns the most recently parsed well-formed replacement, or `null`.
     final TrinoReplacementPlan.CachedTemplate cachedReplacementTemplate()
     {
         return replacementTemplate;
@@ -796,11 +722,9 @@ public sealed class TrinoRegexp
         return replacementPlan.build();
     }
 
-    /**
-     * Replaces every non-overlapping match by invoking {@code replacement} with capturing groups
-     * one through {@link #capturingGroupCount()}. Unmatched groups are {@code null}; group zero is
-     * not included. Returns {@code null} immediately if the callback returns {@code null}.
-     */
+    /// Replaces every non-overlapping match by invoking `replacement` with capturing groups
+    /// one through [#capturingGroupCount()]. Unmatched groups are `null`; group zero is
+    /// not included. Returns `null` immediately if the callback returns `null`.
     public Slice replace(Slice source, Function<List<Slice>, Slice> replacement)
     {
         requireNonNull(source, "source is null");
@@ -1750,14 +1674,12 @@ public sealed class TrinoRegexp
         }
     }
 
-    /**
-     * A pattern whose case-sensitive scan plan was compiled to its own hidden class. Each
-     * operation keeps the route it has without the class, decided once when the pattern compiles:
-     * one that would run the plan calls the generated class once, and any other runs the inherited
-     * Java route. Short boolean calls that the interpreter hands to the ordinary engine to avoid
-     * its operation dispatch also stay on the generated class. Callers that never enable
-     * {@link Options#setGenerateBytecode(boolean)} never load this class.
-     */
+    /// A pattern whose case-sensitive scan plan was compiled to its own hidden class. Each
+    /// operation keeps the route it has without the class, decided once when the pattern compiles:
+    /// one that would run the plan calls the generated class once, and any other runs the inherited
+    /// Java route. Short boolean calls that the interpreter hands to the ordinary engine to avoid
+    /// its operation dispatch also stay on the generated class. Callers that never enable
+    /// [Options#setGenerateBytecode(boolean)] never load this class.
     private static final class CompiledScanTrinoRegexp
             extends TrinoRegexp
     {
@@ -1774,11 +1696,9 @@ public sealed class TrinoRegexp
             this.scan = generated.scan();
         }
 
-        /**
-         * Returns {@code pattern} with a generated class, or {@code null} when the pattern is not
-         * eligible or the class cannot be generated. The declared type keeps verification of the
-         * base class from loading this class.
-         */
+        /// Returns `pattern` with a generated class, or `null` when the pattern is not
+        /// eligible or the class cannot be generated. The declared type keeps verification of the
+        /// base class from loading this class.
         static TrinoRegexp create(Re2 pattern)
         {
             TrinoScanKernelGenerator.Routes routes = TrinoScanKernelGenerator.Routes.of(pattern);

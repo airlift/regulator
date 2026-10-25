@@ -13,9 +13,7 @@
  */
 package io.airlift.regulator;
 
-/**
- * Thrown when an RE2 rewrite is malformed or references a capturing group that does not exist.
- */
+/// Thrown when an RE2 rewrite is malformed or references a capturing group that does not exist.
 public final class RegexpRewriteException
         extends IllegalArgumentException
 {

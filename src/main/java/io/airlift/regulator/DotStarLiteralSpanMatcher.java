@@ -33,10 +33,8 @@ final class DotStarLiteralSpanMatcher
         this.latin1 = latin1;
     }
 
-    /**
-     * Returns the matcher for {@code analysis}, or null; {@code search} is the pattern's boolean
-     * contains search for the matcher's literal, or null.
-     */
+    /// Returns the matcher for `analysis`, or null; `search` is the pattern's boolean
+    /// contains search for the matcher's literal, or null.
     static DotStarLiteralSpanMatcher analyze(ExpressionAnalysis analysis, LiteralSearchKernel search)
     {
         ExpressionAnalysis.LiteralSequence sequence = analysis.literalSequence();

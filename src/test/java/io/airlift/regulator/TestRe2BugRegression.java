@@ -26,10 +26,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 // Includes tests ported from upstream RE2: re2/testing/re2_test.cc.
 public class TestRe2BugRegression
 {
-    /**
-     * CL8622304 - Bugs introduced by CL 8622304
-     * Tests that capturing groups work properly with escaped backslash in char class.
-     */
+    /// CL8622304 - Bugs introduced by CL 8622304
+    /// Tests that capturing groups work properly with escaped backslash in char class.
     @Test
     public void testCL8622304()
     {
@@ -49,9 +47,7 @@ public class TestRe2BugRegression
         assertThat(keyValue.groupUtf8(2)).isEqualTo("1,0x2F,030,4,5");
     }
 
-    /**
-     * Bug 1816809 - Issue with anchored matching and complex nested capturing groups.
-     */
+    /// Bug 1816809 - Issue with anchored matching and complex nested capturing groups.
     @Test
     public void testBug1816809AnchoredMatch()
     {
@@ -60,10 +56,8 @@ public class TestRe2BugRegression
         assertThat(result).isNotNull();
     }
 
-    /**
-     * Bug 3061120 - Case folding issue with Kelvin sign and Latin long s.
-     * (?i)\W should not match word characters like 'x', 'k', or 's'.
-     */
+    /// Bug 3061120 - Case folding issue with Kelvin sign and Latin long s.
+    /// (?i)\W should not match word characters like 'x', 'k', or 's'.
     @Test
     public void testBug3061120CaseFold()
     {
@@ -73,10 +67,8 @@ public class TestRe2BugRegression
         assertThat(re.find(utf8("s"))).isFalse();  // broke because of latin long s
     }
 
-    /**
-     * Bug 10131674 - Some octal escapes describe values that do not fit in a byte.
-     * The pattern should fail to compile due to invalid escape sequences.
-     */
+    /// Bug 10131674 - Some octal escapes describe values that do not fit in a byte.
+    /// The pattern should fail to compile due to invalid escape sequences.
     @Test
     public void testBug10131674()
     {
@@ -85,10 +77,8 @@ public class TestRe2BugRegression
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
-    /**
-     * Bug 18391750 - Stray write past end of match_ in nfa.cc, caught by fuzzing + address sanitizer.
-     * This tests specific binary patterns that triggered the bug.
-     */
+    /// Bug 18391750 - Stray write past end of match_ in nfa.cc, caught by fuzzing + address sanitizer.
+    /// This tests specific binary patterns that triggered the bug.
     @Test
     public void testBug18391750()
     {
@@ -110,11 +100,9 @@ public class TestRe2BugRegression
         re.find(Slices.wrappedBuffer(patternBytes));
     }
 
-    /**
-     * Bug 18458852 - Bug in parser accepting invalid (too large) rune,
-     * causing compiler to fail in DCHECK() in UTF-8 character class code.
-     * The pattern should fail to compile.
-     */
+    /// Bug 18458852 - Bug in parser accepting invalid (too large) rune,
+    /// causing compiler to fail in DCHECK() in UTF-8 character class code.
+    /// The pattern should fail to compile.
     @Test
     public void testBug18458852()
     {
@@ -127,10 +115,8 @@ public class TestRe2BugRegression
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
-    /**
-     * Bug 18523943 - Bug in BitState: case kFailInst failed the match entirely.
-     * Tests that a pattern with specific options matches correctly.
-     */
+    /// Bug 18523943 - Bug in BitState: case kFailInst failed the match entirely.
+    /// Tests that a pattern with specific options matches correctly.
     @Test
     public void testBug18523943()
     {
@@ -151,23 +137,19 @@ public class TestRe2BugRegression
         assertThat(s1).isNotNull();
     }
 
-    /**
-     * Bug 21371806 - Bug in parser accepting Unicode groups in Latin-1 mode,
-     * causing compiler to fail in DCHECK() in prog.cc.
-     * The pattern should compile successfully in Latin-1 mode.
-     */
+    /// Bug 21371806 - Bug in parser accepting Unicode groups in Latin-1 mode,
+    /// causing compiler to fail in DCHECK() in prog.cc.
+    /// The pattern should compile successfully in Latin-1 mode.
     @Test
     public void testBug21371806()
     {
         Re2.compile(utf8("g\\p{Zl}]"), Re2.Options.latin1());
     }
 
-    /**
-     * Bug 26356109 - Bug in parser caused by factoring of common prefixes in alternations.
-     * In the past, "a\C*?c|a\C*?b" was factored to "a\C*?[bc]". Thus, the automaton would
-     * consume "ab" and then stop (when unanchored) whereas it should consume all
-     * of "abc" as per first-match semantics.
-     */
+    /// Bug 26356109 - Bug in parser caused by factoring of common prefixes in alternations.
+    /// In the past, `a\C*?c|a\C*?b` was factored to `a\C*?[bc]`. Thus, the automaton would
+    /// consume "ab" and then stop (when unanchored) whereas it should consume all
+    /// of "abc" as per first-match semantics.
     @Test
     public void testBug26356109()
     {
@@ -185,10 +167,8 @@ public class TestRe2BugRegression
         assertThat(submatch[1]).as("ANCHOR_BOTH end").isEqualTo(3);
     }
 
-    /**
-     * Issue 104 - RE2::GlobalReplace always advanced by one byte when the empty string was
-     * matched, which would clobber any rune that is longer than one byte.
-     */
+    /// Issue 104 - RE2::GlobalReplace always advanced by one byte when the empty string was
+    /// matched, which would clobber any rune that is longer than one byte.
     @Test
     public void testIssue104()
     {
@@ -211,10 +191,8 @@ public class TestRe2BugRegression
         assertThat(toString(result3.result())).isEqualTo("\u5c0f\u4eba\u5c0f\u7c7b\u5c0f");
     }
 
-    /**
-     * Issue 310 - (?:|a)* matched more text than (?:|a)+ did.
-     * Both should match empty string first due to first-match semantics.
-     */
+    /// Issue 310 - (?:|a)* matched more text than (?:|a)+ did.
+    /// Both should match empty string first due to first-match semantics.
     @Test
     public void testIssue310()
     {
@@ -234,12 +212,10 @@ public class TestRe2BugRegression
         assertThat(submatch[1]).isEqualTo(0);
     }
 
-    /**
-     * Issue 477 - Regexp::LeadingString didn't output Latin1 into flags.
-     * In the given pattern, 0xA5 should be factored out, but shouldn't lose its
-     * Latin1-ness in the process. Because that was happening, the prefix for accel
-     * was 0xC2 0xA5 instead of 0xA5.
-     */
+    /// Issue 477 - Regexp::LeadingString didn't output Latin1 into flags.
+    /// In the given pattern, 0xA5 should be factored out, but shouldn't lose its
+    /// Latin1-ness in the process. Because that was happening, the prefix for accel
+    /// was 0xC2 0xA5 instead of 0xA5.
     @Test
     public void testIssue477()
     {

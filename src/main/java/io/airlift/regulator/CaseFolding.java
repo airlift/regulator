@@ -24,45 +24,37 @@ import java.util.stream.IntStream;
 import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
 
-/**
- * One case-folding rule and its data. Each compiled pattern carries the rule of its language,
- * and every case-insensitive construct of the pattern is folded with it.
- * <p>
- * A rule is a simple fold, which maps each code point to the code point of its case class, plus
- * an optional set of multi-character folds. Code points with the same simple fold form an orbit,
- * which {@link #cycleFoldRune(int)} visits in ascending order, wrapping from the largest member to
- * the smallest. Instances are shared and immutable. On first use, a rule builds its simple folds,
- * its orbit successors, and its sorted case-folded runes together from the sparse list of code
- * points its simple fold changes, which comes from the pinned {@link UnicodeDatabase}; each table
- * holds only the few dozen blocks of 256 code points that have a case partner. The
- * multi-character folds are built separately, on first use.
- * <p>
- * Each table field is plain rather than volatile, so the compiler's fold loops read it without a
- * fence. A thread that reads the field before another thread's write is visible sees null and
- * takes the synchronized path; one that sees the table sees it fully built, because every table
- * holds its data in final fields.
- */
+/// One case-folding rule and its data. Each compiled pattern carries the rule of its language,
+/// and every case-insensitive construct of the pattern is folded with it.
+///
+/// A rule is a simple fold, which maps each code point to the code point of its case class, plus
+/// an optional set of multi-character folds. Code points with the same simple fold form an orbit,
+/// which [#cycleFoldRune(int)] visits in ascending order, wrapping from the largest member to
+/// the smallest. Instances are shared and immutable. On first use, a rule builds its simple folds,
+/// its orbit successors, and its sorted case-folded runes together from the sparse list of code
+/// points its simple fold changes, which comes from the pinned [UnicodeDatabase]; each table
+/// holds only the few dozen blocks of 256 code points that have a case partner. The
+/// multi-character folds are built separately, on first use.
+///
+/// Each table field is plain rather than volatile, so the compiler's fold loops read it without a
+/// fence. A thread that reads the field before another thread's write is visible sees null and
+/// takes the synchronized path; one that sees the table sees it fully built, because every table
+/// holds its data in final fields.
 final class CaseFolding
 {
-    /**
-     * Trino's full case folding, CaseFolding.txt statuses C and F from the pinned
-     * {@link UnicodeDatabase}, the rule Joni folds with. It shares the orbits and tables of the
-     * RE2 rule, because each status S fold joins code points whose status F folds are equal.
-     */
+    /// Trino's full case folding, CaseFolding.txt statuses C and F from the pinned
+    /// [UnicodeDatabase], the rule Joni folds with. It shares the orbits and tables of the
+    /// RE2 rule, because each status S fold joins code points whose status F folds are equal.
     static final CaseFolding TRINO = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " full case folding", () -> SimpleCaseFolding.TABLES, true);
 
-    /**
-     * Java's case classes, {@code toLowerCase(toUpperCase(codePoint))} as {@code java.util.regex}
-     * folds them, computed from the simple case mappings of the pinned {@link UnicodeDatabase}.
-     * Case-insensitive matching built on these classes, such as of ranges, is Regulator's and is
-     * not identical to {@code Pattern}'s.
-     */
+    /// Java's case classes, `toLowerCase(toUpperCase(codePoint))` as `java.util.regex`
+    /// folds them, computed from the simple case mappings of the pinned [UnicodeDatabase].
+    /// Case-insensitive matching built on these classes, such as of ranges, is Regulator's and is
+    /// not identical to `Pattern`'s.
     static final CaseFolding JAVA = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " case classes", () -> new FoldTables(javaSimpleFolds()), false);
 
-    /**
-     * RE2's simple case folding, CaseFolding.txt statuses C and S from the pinned
-     * {@link UnicodeDatabase}, as upstream RE2 folds with its own Unicode tables.
-     */
+    /// RE2's simple case folding, CaseFolding.txt statuses C and S from the pinned
+    /// [UnicodeDatabase], as upstream RE2 folds with its own Unicode tables.
     static final CaseFolding RE2 = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " simple case folding", () -> SimpleCaseFolding.TABLES, false);
 
     private final String name;
@@ -80,9 +72,7 @@ final class CaseFolding
         this.multiCharacterFolds = multiCharacterFolds;
     }
 
-    /**
-     * Returns the code point that every member of the orbit of {@code codePoint} folds to.
-     */
+    /// Returns the code point that every member of the orbit of `codePoint` folds to.
     int simpleFold(int codePoint)
     {
         if (codePoint < 0 || codePoint > RUNEMAX) {
@@ -91,28 +81,22 @@ final class CaseFolding
         return foldTables().simpleFolds.get(codePoint);
     }
 
-    /**
-     * Returns the table of {@link #simpleFold(int)} for every code point from 0 through
-     * {@code RUNEMAX}, so callers can reuse the table instead of calling {@code simpleFold} for
-     * each code point.
-     */
+    /// Returns the table of [#simpleFold(int)] for every code point from 0 through
+    /// `RUNEMAX`, so callers can reuse the table instead of calling `simpleFold` for
+    /// each code point.
     CodePointTable simpleFoldTable()
     {
         return foldTables().simpleFolds;
     }
 
-    /**
-     * Returns {@link #simpleFold(int)} of each ASCII code point, indexed by code point. Every rule
-     * folds ASCII to ASCII. Callers must not modify the returned array.
-     */
+    /// Returns [#simpleFold(int)] of each ASCII code point, indexed by code point. Every rule
+    /// folds ASCII to ASCII. Callers must not modify the returned array.
     byte[] asciiSimpleFolds()
     {
         return foldTables().asciiSimpleFolds;
     }
 
-    /**
-     * Returns the next larger member of the orbit of {@code rune}, wrapping to the smallest.
-     */
+    /// Returns the next larger member of the orbit of `rune`, wrapping to the smallest.
     int cycleFoldRune(int rune)
     {
         if (rune < 0 || rune > RUNEMAX) {
@@ -121,10 +105,8 @@ final class CaseFolding
         return foldTables().orbitSuccessors.get(rune);
     }
 
-    /**
-     * Adds to {@code builder} the other members of the orbit of each rune from {@code low} through
-     * {@code high}, one single-rune range per member, in ascending rune and orbit order.
-     */
+    /// Adds to `builder` the other members of the orbit of each rune from `low` through
+    /// `high`, one single-rune range per member, in ascending rune and orbit order.
     void addOtherOrbitMembers(CharClassBuilder builder, int low, int high)
     {
         FoldTables foldTables = foldTables();
@@ -167,10 +149,8 @@ final class CaseFolding
         return fullCaseFold().multiCharacterTokens(characterClass);
     }
 
-    /**
-     * Returns whether matching {@code runes} needs a multi-character fold. A folding without
-     * multi-character folds never does.
-     */
+    /// Returns whether matching `runes` needs a multi-character fold. A folding without
+    /// multi-character folds never does.
     boolean requiresFullCaseFold(int[] runes)
     {
         return multiCharacterFolds && fullCaseFold().requiresFullCaseFold(runes);
@@ -259,10 +239,8 @@ final class CaseFolding
         private static final FoldTables TABLES = new FoldTables(UnicodeDatabase.simpleCaseFolding());
     }
 
-    /**
-     * The simple fold and orbit successor of every code point, the sorted runes whose orbit has
-     * another member, and the simple folds of ASCII.
-     */
+    /// The simple fold and orbit successor of every code point, the sorted runes whose orbit has
+    /// another member, and the simple folds of ASCII.
     private static final class FoldTables
     {
         private final CodePointTable simpleFolds;

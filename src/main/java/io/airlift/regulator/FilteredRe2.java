@@ -22,13 +22,11 @@ import java.util.List;
 
 import static java.util.Objects.requireNonNull;
 
-/**
- * An immutable collection of patterns with an external literal-atom prefilter.
- * <p>
- * A caller searches the canonicalized input returned by {@link #canonicalizeText(Slice)} for the
- * byte strings in {@link #atoms()}, then supplies the IDs of the atoms found in the input. The
- * prefilter rejects impossible patterns before the remaining candidates are verified by RE2.
- */
+/// An immutable collection of patterns with an external literal-atom prefilter.
+///
+/// A caller searches the canonicalized input returned by [#canonicalizeText(Slice)] for the
+/// byte strings in [#atoms()], then supplies the IDs of the atoms found in the input. The
+/// prefilter rejects impossible patterns before the remaining candidates are verified by RE2.
 public final class FilteredRe2
 {
     private static final int DEFAULT_MINIMUM_ATOM_LENGTH = 3;
@@ -52,42 +50,32 @@ public final class FilteredRe2
         this.encoding = requireNonNull(encoding, "encoding is null");
     }
 
-    /**
-     * Creates a single-use builder with the default three-byte minimum atom length.
-     */
+    /// Creates a single-use builder with the default three-byte minimum atom length.
     public static Builder builder()
     {
         return builder(DEFAULT_MINIMUM_ATOM_LENGTH);
     }
 
-    /**
-     * Creates a single-use builder with the supplied non-negative minimum atom length.
-     */
+    /// Creates a single-use builder with the supplied non-negative minimum atom length.
     public static Builder builder(int minimumAtomLength)
     {
         return new Builder(minimumAtomLength);
     }
 
-    /**
-     * Returns the number of compiled patterns.
-     */
+    /// Returns the number of compiled patterns.
     public int patternCount()
     {
         return patterns.size();
     }
 
-    /**
-     * Returns the compiled pattern with the supplied pattern ID.
-     */
+    /// Returns the compiled pattern with the supplied pattern ID.
     public Re2 pattern(int patternId)
     {
         return patterns.get(patternId);
     }
 
-    /**
-     * Returns copies of the distinct canonical atoms that the caller must search for.
-     * The atoms are matched literally against {@link #canonicalizeText(Slice)}.
-     */
+    /// Returns copies of the distinct canonical atoms that the caller must search for.
+    /// The atoms are matched literally against [#canonicalizeText(Slice)].
     public List<Slice> atoms()
     {
         return atoms.stream()
@@ -95,21 +83,17 @@ public final class FilteredRe2
                 .toList();
     }
 
-    /**
-     * Returns the encoding shared by every pattern in this collection.
-     */
+    /// Returns the encoding shared by every pattern in this collection.
     public Re2.Options.Encoding encoding()
     {
         return encoding;
     }
 
-    /**
-     * Returns a canonical copy of {@code text} suitable for literal searches using {@link #atoms()}.
-     * <p>
-     * UTF-8 text replaces each valid Unicode code point with its simple case fold under RE2's rule,
-     * Unicode 18.0.0 CaseFolding.txt statuses C and S. Invalid UTF-8 bytes are preserved. Latin-1
-     * text lowercases ASCII letters and preserves every other byte.
-     */
+    /// Returns a canonical copy of `text` suitable for literal searches using [#atoms()].
+    ///
+    /// UTF-8 text replaces each valid Unicode code point with its simple case fold under RE2's rule,
+    /// Unicode 18.0.0 CaseFolding.txt statuses C and S. Invalid UTF-8 bytes are preserved. Latin-1
+    /// text lowercases ASCII letters and preserves every other byte.
     public Slice canonicalizeText(Slice text)
     {
         requireNonNull(text, "text is null");
@@ -150,9 +134,7 @@ public final class FilteredRe2
         return output.slice();
     }
 
-    /**
-     * Canonicalizes one Unicode code point using the rule used to construct UTF-8 atoms.
-     */
+    /// Canonicalizes one Unicode code point using the rule used to construct UTF-8 atoms.
     public static int canonicalizeUnicodeCodePoint(int codePoint)
     {
         if (!Character.isValidCodePoint(codePoint) ||
@@ -162,9 +144,7 @@ public final class FilteredRe2
         return CaseFolding.RE2.simpleFold(codePoint);
     }
 
-    /**
-     * Canonicalizes one unsigned Latin-1 byte using the rule used to construct Latin-1 atoms.
-     */
+    /// Canonicalizes one unsigned Latin-1 byte using the rule used to construct Latin-1 atoms.
     public static int canonicalizeLatin1Byte(int value)
     {
         if (value < 0 || value > 0xFF) {
@@ -176,18 +156,14 @@ public final class FilteredRe2
         return value;
     }
 
-    /**
-     * Returns ascending pattern IDs that may match based only on the supplied atom IDs.
-     */
+    /// Returns ascending pattern IDs that may match based only on the supplied atom IDs.
     public int[] potentialPatternIds(int[] matchedAtomIds)
     {
         requireNonNull(matchedAtomIds, "matchedAtomIds is null");
         return prefilterTree.regexpMatches(matchedAtomIds);
     }
 
-    /**
-     * Returns ascending IDs of every pattern that matches after atom prefiltering.
-     */
+    /// Returns ascending IDs of every pattern that matches after atom prefiltering.
     public int[] matchingPatternIds(Slice text, int[] matchedAtomIds)
     {
         requireNonNull(text, "text is null");
@@ -229,10 +205,8 @@ public final class FilteredRe2
             prefilterTree = new PrefilterTree(minimumAtomLength);
         }
 
-        /**
-         * Compiles and adds a copied pattern, returning its stable pattern ID. If validation or
-         * compilation fails, the builder remains unchanged.
-         */
+        /// Compiles and adds a copied pattern, returning its stable pattern ID. If validation or
+        /// compilation fails, the builder remains unchanged.
         public int add(Slice pattern, Re2.Options options)
         {
             requireNotBuilt();
@@ -255,18 +229,14 @@ public final class FilteredRe2
             return patternId;
         }
 
-        /**
-         * Returns the number of patterns added so far.
-         */
+        /// Returns the number of patterns added so far.
         public int size()
         {
             requireNotBuilt();
             return patterns.size();
         }
 
-        /**
-         * Compiles an immutable collection and invalidates this builder.
-         */
+        /// Compiles an immutable collection and invalidates this builder.
         public FilteredRe2 build()
         {
             requireNotBuilt();

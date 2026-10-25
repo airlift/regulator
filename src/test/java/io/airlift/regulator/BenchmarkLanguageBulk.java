@@ -50,11 +50,9 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-/**
- * Shared bulk operations over pinned Rebar inputs, through each language's public API.
- * A workload may name the byte-frequency distribution the Regulator languages compile with;
- * the JDK and Joni comparators have no such option and ignore it.
- */
+/// Shared bulk operations over pinned Rebar inputs, through each language's public API.
+/// A workload may name the byte-frequency distribution the Regulator languages compile with;
+/// the JDK and Joni comparators have no such option and ignore it.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(5)
@@ -366,10 +364,8 @@ public class BenchmarkLanguageBulk
         return data.execute();
     }
 
-    /**
-     * Diagnostic for the RE2/Java/Rust count-by-iteration path. Unlike count(),
-     * this locates every match boundary even though only the count is consumed.
-     */
+    /// Diagnostic for the RE2/Java/Rust count-by-iteration path. Unlike count(),
+    /// this locates every match boundary even though only the count is consumed.
     @Benchmark
     public long iterateMatches(BenchmarkData data)
     {

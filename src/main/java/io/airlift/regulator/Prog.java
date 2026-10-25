@@ -317,28 +317,22 @@ final class Prog
     private int textDependentAssertions;
     private boolean hasFullCaseFold;
 
-    /**
-     * Whether this program is compiled for reverse (right-to-left) search.
-     * <p>
-     * When {@code true}:
-     * <ul>
-     * <li>{@link io.airlift.regulator.Dfa#search} scans bytes right-to-left (backward)
-     * <li>Anchor flags are swapped from pattern semantics: {@code ^} becomes {@code $}, {@code $} becomes {@code ^}
-     * <li>Used in Phase 2 of two-phase search to find match start after forward DFA found end
-     * <li>Memory budget typically 1/3 of total (vs 2/3 for forward)
-     * </ul>
-     * <p>
-     * <b>Two-Phase Search Pattern:</b>
-     * <ol>
-     * <li>Forward program ({@code reversed=false}) finds match end
-     * <li>Reverse program ({@code reversed=true}) finds match start by searching backward
-     * </ol>
-     * <p>
-     * See {@code REVERSE_DFA.md} for usage examples and complete documentation.
-     *
-     * @see io.airlift.regulator.Compiler#compile for reverse compilation
-     * @see io.airlift.regulator.Dfa#search for search execution
-     */
+    /// Whether this program is compiled for reverse (right-to-left) search.
+    ///
+    /// When `true`:
+    /// - [io.airlift.regulator.Dfa#search] scans bytes right-to-left (backward)
+    /// - Anchor flags are swapped from pattern semantics: `^` becomes `$`, `$` becomes `^`
+    /// - Used in Phase 2 of two-phase search to find match start after forward DFA found end
+    /// - Memory budget typically 1/3 of total (vs 2/3 for forward)
+    ///
+    /// **Two-Phase Search Pattern:**
+    /// 1. Forward program (`reversed=false`) finds match end
+    /// 2. Reverse program (`reversed=true`) finds match start by searching backward
+    ///
+    /// See `REVERSE_DFA.md` for usage examples and complete documentation.
+    ///
+    /// @see io.airlift.regulator.Compiler#compile for reverse compilation
+    /// @see io.airlift.regulator.Dfa#search for search execution
     private boolean reversed;
 
     // Enables a full-match shortcut only when invalid UTF-8 is also accepted.
@@ -403,10 +397,8 @@ final class Prog
         return instructionCount;
     }
 
-    /**
-     * For each instruction reachable from start, computes the number of byte-range
-     * instructions reachable by following only empty transitions.
-     */
+    /// For each instruction reachable from start, computes the number of byte-range
+    /// instructions reachable by following only empty transitions.
     public void fanout(SparseIntArray fanout)
     {
         requireNonNull(fanout, "fanout is null");
@@ -460,13 +452,11 @@ final class Prog
         }
     }
 
-    /**
-     * Removes the most recently added instruction.
-     * <p>
-     * This is an internal compiler helper used during UTF-8 rune range trie factoring,
-     * mirroring upstream RE2 behavior that frees an instruction when it would otherwise
-     * become unreachable.
-     */
+    /// Removes the most recently added instruction.
+    ///
+    /// This is an internal compiler helper used during UTF-8 rune range trie factoring,
+    /// mirroring upstream RE2 behavior that frees an instruction when it would otherwise
+    /// become unreachable.
     public void removeLastInst(int expectedId)
     {
         int last = instructionCount - 1;
@@ -553,44 +543,34 @@ final class Prog
         this.hasFullCaseFold = hasFullCaseFold;
     }
 
-    /**
-     * Returns whether this program is compiled for reverse (right-to-left) search.
-     * <p>
-     *
-     * @return true if program scans backward, false if forward
-     * @see #reversed field for complete documentation
-     */
+    /// Returns whether this program is compiled for reverse (right-to-left) search.
+    ///
+    /// @return true if program scans backward, false if forward
+    /// @see #reversed field for complete documentation
     public boolean reversed()
     {
         return reversed;
     }
 
-    /**
-     * Sets whether this program should execute reverse (right-to-left) search.
-     * <p>
-     * <b>NOTE:</b> Typically set during compilation by {@link io.airlift.regulator.Compiler#compile}.
-     * Manually changing this after compilation may produce incorrect results if
-     * anchor flags weren't swapped appropriately.
-     * <p>
-     *
-     * @param reversed true for backward search, false for forward
-     */
+    /// Sets whether this program should execute reverse (right-to-left) search.
+    ///
+    /// **NOTE:** Typically set during compilation by [io.airlift.regulator.Compiler#compile].
+    /// Manually changing this after compilation may produce incorrect results if
+    /// anchor flags weren't swapped appropriately.
+    ///
+    /// @param reversed true for backward search, false for forward
     public void setReversed(boolean reversed)
     {
         this.reversed = reversed;
     }
 
-    /**
-     * Returns whether this pattern matches every byte sequence, including invalid UTF-8.
-     */
+    /// Returns whether this pattern matches every byte sequence, including invalid UTF-8.
     public boolean matchesAnyByteString()
     {
         return matchesAnyByteString;
     }
 
-    /**
-     * Sets whether this pattern matches every byte sequence.
-     */
+    /// Sets whether this pattern matches every byte sequence.
     public void setMatchesAnyByteString(boolean matchesAnyByteString)
     {
         this.matchesAnyByteString = matchesAnyByteString;
@@ -673,19 +653,15 @@ final class Prog
         return bitStateTextMaxSize;
     }
 
-    /**
-     * Returns instruction counts by opcode, indexed by {@link InstOp#ordinal()}.
-     * Only valid after {@link #flatten()} has been called.
-     */
+    /// Returns instruction counts by opcode, indexed by [InstOp#ordinal()].
+    /// Only valid after [#flatten()] has been called.
     public int[] getInstCount()
     {
         return instCount.clone();
     }
 
-    /**
-     * Returns instruction count for a specific opcode.
-     * Only valid after {@link #flatten()} has been called.
-     */
+    /// Returns instruction count for a specific opcode.
+    /// Only valid after [#flatten()] has been called.
     public int getInstCount(InstOp op)
     {
         return instCount[op.ordinal()];
@@ -696,13 +672,11 @@ final class Prog
         return prefixSize != 0;
     }
 
-    /**
-     * Builds a conservative set of bytes that can begin a non-empty match.
-     * Non-nullable searches may scan past other bytes while the DFA remains in
-     * its start state. Nullable searches may return the current empty match when
-     * the current byte is outside the set. Assertions and dense sets deliberately
-     * use the normal DFA.
-     */
+    /// Builds a conservative set of bytes that can begin a non-empty match.
+    /// Non-nullable searches may scan past other bytes while the DFA remains in
+    /// its start state. Nullable searches may return the current empty match when
+    /// the current byte is outside the set. Assertions and dense sets deliberately
+    /// use the normal DFA.
     byte[] buildStartByteCandidates(int[] stack)
     {
         boolean nullable = canMatchEmpty;
@@ -768,10 +742,8 @@ final class Prog
         return null;
     }
 
-    /**
-     * Finds a selective byte set at one fixed offset from every possible match start.
-     * The bounded walk deliberately rejects assertions and variable-distance candidates.
-     */
+    /// Finds a selective byte set at one fixed offset from every possible match start.
+    /// The bounded walk deliberately rejects assertions and variable-distance candidates.
     FixedDistanceByteCandidates buildFixedDistanceByteCandidates(int[] stack, byte[] startByteCandidates)
     {
         if (reversed || anchorStart || canMatchEmpty || canPrefixAccel() || startByteCandidates == null || start() == 0) {
@@ -901,11 +873,9 @@ final class Prog
         return added;
     }
 
-    /**
-     * True when prefix acceleration is a single-byte, case-sensitive search.
-     * This is the highest-frequency false-positive regime and can use a
-     * dedicated DFA path without affecting other prefix strategies.
-     */
+    /// True when prefix acceleration is a single-byte, case-sensitive search.
+    /// This is the highest-frequency false-positive regime and can use a
+    /// dedicated DFA path without affecting other prefix strategies.
     boolean canUseSingleBytePrefixAccelFastPath()
     {
         return prefixSize == 1 && !prefixFoldCase;
@@ -932,19 +902,15 @@ final class Prog
         return PrefixAccelStrategy.FUSED_SWAR;
     }
 
-    /**
-     * Returns the offset of the prefix byte that the {@link PrefixAccelStrategy#REPEATED_BYTE}
-     * strategy scans for, chosen by {@link ByteFrequencies#probeOffset}.
-     */
+    /// Returns the offset of the prefix byte that the [PrefixAccelStrategy#REPEATED_BYTE]
+    /// strategy scans for, chosen by [ByteFrequencies#probeOffset].
     int prefixAccelProbeOffset()
     {
         return prefixProbeOffset;
     }
 
-    /**
-     * Specialized prefix scan for single-byte, case-sensitive prefix acceleration.
-     * Keeps the scan path branch-free with respect to foldCase/prefix mode.
-     */
+    /// Specialized prefix scan for single-byte, case-sensitive prefix acceleration.
+    /// Keeps the scan path branch-free with respect to foldCase/prefix mode.
     int prefixAccelSingleByteNoFoldCase(byte[] data, int offset, int length)
     {
         if (length <= 0) {
@@ -976,9 +942,7 @@ final class Prog
         configurePrefixAccelBytes(bytes, foldCase, byteFrequencies);
     }
 
-    /**
-     * Retains analysis-owned immutable bytes instead of copying a large literal again.
-     */
+    /// Retains analysis-owned immutable bytes instead of copying a large literal again.
     void configurePrefixAccelShared(Slice prefix, boolean foldCase, ByteFrequencies byteFrequencies)
     {
         if (prefix.byteArrayOffset() != 0 || prefix.length() != prefix.byteArray().length) {
@@ -1024,20 +988,16 @@ final class Prog
         }
     }
 
-    /**
-     * Returns the absolute index in {@code data} of the first possible prefix match,
-     * or {@code -1} if no match is found.
-     * <p>
-     * Uses different strategies depending on configuration:
-     * <ul>
-     * <li>Parallel front-and-back candidate scanning for folded prefixes
-     * <li>Fused first-byte and last-byte masks for non-folded multi-byte prefixes with a
-     * non-ASCII first byte
-     * <li>A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
-     * derived from C++ {@code Prog::PrefixAccel_FrontAndBack()}; see {@link ByteFrequencies}
-     * <li>Simple byte search for single-byte prefix
-     * </ul>
-     */
+    /// Returns the absolute index in `data` of the first possible prefix match,
+    /// or `-1` if no match is found.
+    ///
+    /// Uses different strategies depending on configuration:
+    /// - Parallel front-and-back candidate scanning for folded prefixes
+    /// - Fused first-byte and last-byte masks for non-folded multi-byte prefixes with a
+    ///   non-ASCII first byte
+    /// - A probe-byte scan with a boundary-byte check for other non-folded multi-byte prefixes,
+    ///   derived from C++ `Prog::PrefixAccel_FrontAndBack()`; see [ByteFrequencies]
+    /// - Simple byte search for single-byte prefix
     public int prefixAccel(byte[] data, int offset, int length)
     {
         if (!canPrefixAccel()) {
@@ -1236,9 +1196,7 @@ final class Prog
         return matches;
     }
 
-    /**
-     * Returns absolute index or -1 if not found.
-     */
+    /// Returns absolute index or -1 if not found.
     private int indexOf(byte[] data, int offset, int length, byte b, boolean foldCase)
     {
         if (length <= 0) {
@@ -1256,9 +1214,7 @@ final class Prog
         return indexOfSWAR(data, offset, length, broadcastMask);
     }
 
-    /**
-     * Case-insensitive byte search using the SWAR path.
-     */
+    /// Case-insensitive byte search using the SWAR path.
     private int indexOfFoldCase(byte[] data, int offset, int length, byte b)
     {
         int lowerCaseByte = asciiLower(b & 0xFF);
@@ -1311,11 +1267,9 @@ final class Prog
         return -1;
     }
 
-    /**
-     * SWAR (SIMD Within A Register) byte scanning using Long operations.
-     * Processes 16 bytes (2 longs) per iteration with minimal branching.
-     * Throughput: ~33.7 GB/s on 16MB buffers (5.5x faster than byte-by-byte).
-     */
+    /// SWAR (SIMD Within A Register) byte scanning using Long operations.
+    /// Processes 16 bytes (2 longs) per iteration with minimal branching.
+    /// Throughput: ~33.7 GB/s on 16MB buffers (5.5x faster than byte-by-byte).
     private int indexOfSWAR(byte[] data, int offset, int length, long broadcastMask)
     {
         long loMask = 0x0101010101010101L;
@@ -1363,9 +1317,7 @@ final class Prog
         return -1;
     }
 
-    /**
-     * Check if two bytes match, accounting for optional case folding.
-     */
+    /// Check if two bytes match, accounting for optional case folding.
     private boolean byteMatches(byte a, byte b, boolean foldCase)
     {
         if (!foldCase) {
@@ -1404,35 +1356,27 @@ final class Prog
         return b;
     }
 
-    /**
-     * Check if pattern has a required prefix (for instant rejection).
-     * Required prefix means pattern is "^literal..." and can be rejected if text doesn't match.
-     */
+    /// Check if pattern has a required prefix (for instant rejection).
+    /// Required prefix means pattern is "^literal..." and can be rejected if text doesn't match.
     public boolean hasRequiredPrefix()
     {
         return requiredPrefix != null && requiredPrefix.length > 0;
     }
 
-    /**
-     * Get the required prefix bytes (null if none).
-     */
+    /// Get the required prefix bytes (null if none).
     public byte[] getRequiredPrefix()
     {
         return requiredPrefix;
     }
 
-    /**
-     * Check if required prefix uses case-insensitive matching.
-     */
+    /// Check if required prefix uses case-insensitive matching.
     public boolean isRequiredPrefixFoldCase()
     {
         return requiredPrefixFoldCase;
     }
 
-    /**
-     * Configure the required prefix extracted from the regexp AST.
-     * Called by Compiler after compilation.
-     */
+    /// Configure the required prefix extracted from the regexp AST.
+    /// Called by Compiler after compilation.
     public void configureRequiredPrefix(Slice prefix, boolean foldCase)
     {
         if (prefix == null || prefix.length() == 0) {
@@ -1448,10 +1392,8 @@ final class Prog
         this.requiredPrefixFoldCase = foldCase;
     }
 
-    /**
-     * Check if text starts with the required prefix.
-     * Used for instant rejection in Re2.matchInto() before engine cascade.
-     */
+    /// Check if text starts with the required prefix.
+    /// Used for instant rejection in Re2.matchInto() before engine cascade.
     public boolean textMatchesRequiredPrefix(byte[] data, int offset, int length)
     {
         if (!hasRequiredPrefix()) {
@@ -1483,28 +1425,22 @@ final class Prog
         return true;
     }
 
-    /**
-     * Set the DFA memory budget (called from Re2.build()).
-     * Like upstream Prog::set_dfa_mem().
-     */
+    /// Set the DFA memory budget (called from Re2.build()).
+    /// Like upstream Prog::set_dfa_mem().
     public void setDfaMemory(long dfaMemory)
     {
         this.dfaMemory = dfaMemory;
     }
 
-    /**
-     * Get the DFA memory budget.
-     * Like upstream Prog::dfa_mem().
-     */
+    /// Get the DFA memory budget.
+    /// Like upstream Prog::dfa_mem().
     public long dfaMemory()
     {
         return dfaMemory;
     }
 
-    /**
-     * Get or create cached DFA with memory budget.
-     * Like upstream Prog::GetDFA().
-     */
+    /// Get or create cached DFA with memory budget.
+    /// Like upstream Prog::GetDFA().
     public Dfa.DfaInstance getCachedDfa(Dfa.DfaInstance.Kind kind)
     {
         requireNonNull(kind, "kind is null");
@@ -1982,16 +1918,14 @@ final class Prog
         bytemapRange = outRange[0];
     }
 
-    /**
-     * Computes a lexicographic range {@code [min, max]} such that any string {@code s} that is a
-     * full (anchored) match for this program satisfies {@code min <= s && s <= max}.
-     * <p>
-     * The returned {@code min}/{@code max} are truncated to at most {@code maxLength} bytes. When the
-     * underlying language has no maximum element (e.g., matches all non-empty strings in Latin-1),
-     * this method returns {@code null}.
-     * <p>
-     * Note: Like upstream, this only considers the first copy of an infinitely repeated element.
-     */
+    /// Computes a lexicographic range `[min, max]` such that any string `s` that is a
+    /// full (anchored) match for this program satisfies `min <= s && s <= max`.
+    ///
+    /// The returned `min`/`max` are truncated to at most `maxLength` bytes. When the
+    /// underlying language has no maximum element (e.g., matches all non-empty strings in Latin-1),
+    /// this method returns `null`.
+    ///
+    /// Note: Like upstream, this only considers the first copy of an infinitely repeated element.
     public PossibleMatchRangeResult possibleMatchRange(int maxLength)
     {
         if (maxLength < 0) {

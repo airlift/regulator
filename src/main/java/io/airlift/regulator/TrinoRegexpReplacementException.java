@@ -13,9 +13,7 @@
  */
 package io.airlift.regulator;
 
-/**
- * Thrown when a Trino replacement is malformed or references a capturing group that does not exist.
- */
+/// Thrown when a Trino replacement is malformed or references a capturing group that does not exist.
 public final class TrinoRegexpReplacementException
         extends IllegalArgumentException
 {
@@ -27,9 +25,7 @@ public final class TrinoRegexpReplacementException
         this.byteOffset = byteOffset;
     }
 
-    /**
-     * Returns the byte offset of the invalid replacement construct.
-     */
+    /// Returns the byte offset of the invalid replacement construct.
     public int byteOffset()
     {
         return byteOffset;

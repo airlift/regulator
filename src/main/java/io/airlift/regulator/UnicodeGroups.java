@@ -22,50 +22,40 @@ import java.util.function.Supplier;
 import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Builds Unicode property classes from the pinned {@link UnicodeDatabase} and caches them as
- * immutable range sets. These are the Unicode lookups every language shares; each language
- * resolves its own property names to them. RE2 reads the raw property values of the database,
- * {@link JavaUnicodeProperties} resolves the Java and Trino property names other than Trino's
- * POSIX names, which {@link TrinoRegexpParser} resolves itself, and
- * {@link RustUnicodeProperties} resolves the Rust names to the raw values of the database's
- * binary properties, Age, Script_Extensions, and break properties.
- */
+/// Builds Unicode property classes from the pinned [UnicodeDatabase] and caches them as
+/// immutable range sets. These are the Unicode lookups every language shares; each language
+/// resolves its own property names to them. RE2 reads the raw property values of the database,
+/// [JavaUnicodeProperties] resolves the Java and Trino property names other than Trino's
+/// POSIX names, which [TrinoRegexpParser] resolves itself, and
+/// [RustUnicodeProperties] resolves the Rust names to the raw values of the database's
+/// binary properties, Age, Script_Extensions, and break properties.
 final class UnicodeGroups
 {
     private static final ConcurrentHashMap<String, CharClass> CACHE = new ConcurrentHashMap<>();
 
     private UnicodeGroups() {}
 
-    /**
-     * Returns the class of every code point.
-     */
+    /// Returns the class of every code point.
     static CharClass any()
     {
         return cached("any", () -> codePoints(0, RUNEMAX));
     }
 
-    /**
-     * Returns the General_Category values that UnicodeData.txt assigns, in ascending order.
-     */
+    /// Returns the General_Category values that UnicodeData.txt assigns, in ascending order.
     private static List<String> generalCategoryValues()
     {
         return UnicodeDatabase.generalCategories().names();
     }
 
-    /**
-     * Returns the code points that UnicodeData.txt assigns any of the given General_Category
-     * values, or null if one of them is not a value it assigns.
-     */
+    /// Returns the code points that UnicodeData.txt assigns any of the given General_Category
+    /// values, or null if one of them is not a value it assigns.
     static CharClass generalCategories(List<String> values)
     {
         return propertyValues("gc", UnicodeDatabase.generalCategories(), values);
     }
 
-    /**
-     * Returns the code points of every General_Category value whose name starts with the given
-     * letter, such as L for Lu, Ll, Lt, Lm, and Lo, or null if no value does.
-     */
+    /// Returns the code points of every General_Category value whose name starts with the given
+    /// letter, such as L for Lu, Ll, Lt, Lm, and Lo, or null if no value does.
     static CharClass majorClass(char letter)
     {
         List<String> values = generalCategoryValues().stream()
@@ -74,13 +64,11 @@ final class UnicodeGroups
         return values.isEmpty() ? null : generalCategories(values);
     }
 
-    /**
-     * Returns the code points of the General_Category value or grouping with the given UAX #44
-     * short or long name, such as Lu or Uppercase_Letter, or null if no value or grouping has
-     * that name. Unassigned, Cn, holds every code point that UnicodeData.txt does not assign, and
-     * the groupings, such as L for Lu, Ll, Lt, Lm, and Lo, and LC for Lu, Ll, and Lt, hold their
-     * values' code points; Other, C, includes Cn.
-     */
+    /// Returns the code points of the General_Category value or grouping with the given UAX #44
+    /// short or long name, such as Lu or Uppercase_Letter, or null if no value or grouping has
+    /// that name. Unassigned, Cn, holds every code point that UnicodeData.txt does not assign, and
+    /// the groupings, such as L for Lu, Ll, Lt, Lm, and Lo, and LC for Lu, Ll, and Lt, hold their
+    /// values' code points; Other, C, includes Cn.
     static CharClass generalCategory(String name)
     {
         return switch (name) {
@@ -126,46 +114,36 @@ final class UnicodeGroups
         };
     }
 
-    /**
-     * Returns the code points that UnicodeData.txt assigns any General_Category value.
-     */
+    /// Returns the code points that UnicodeData.txt assigns any General_Category value.
     static CharClass assigned()
     {
         return requireNonNull(generalCategories(generalCategoryValues()), "missing General_Category value");
     }
 
-    /**
-     * Returns the code points that Scripts.txt assigns the script with the given long name, such as
-     * Old_Italic, or null if it assigns no such script.
-     */
+    /// Returns the code points that Scripts.txt assigns the script with the given long name, such as
+    /// Old_Italic, or null if it assigns no such script.
     static CharClass script(String longName)
     {
         return propertyValue("sc", UnicodeDatabase.scripts(), longName);
     }
 
-    /**
-     * Returns the code points that the database gives the binary property with the given name,
-     * such as Hex_Digit or Other_Alphabetic, or null if it holds no such property.
-     */
+    /// Returns the code points that the database gives the binary property with the given name,
+    /// such as Hex_Digit or Other_Alphabetic, or null if it holds no such property.
     static CharClass binaryPropertyValue(String property)
     {
         return propertyValue("binary", UnicodeDatabase.binaryProperties(), property);
     }
 
-    /**
-     * Returns the code points that DerivedAge.txt assigns any of the given Age values, versions
-     * such as 1.1, or null if one of them is not a value it assigns.
-     */
+    /// Returns the code points that DerivedAge.txt assigns any of the given Age values, versions
+    /// such as 1.1, or null if one of them is not a value it assigns.
     static CharClass ages(List<String> values)
     {
         return propertyValues("age", UnicodeDatabase.ages(), values);
     }
 
-    /**
-     * Returns the code points whose Script_Extensions include the script with the given long name,
-     * such as Arabic, or null if neither ScriptExtensions.txt nor Scripts.txt names the script. Use
-     * a code point's explicit Script_Extensions list when present; otherwise use its Script value.
-     */
+    /// Returns the code points whose Script_Extensions include the script with the given long name,
+    /// such as Arabic, or null if neither ScriptExtensions.txt nor Scripts.txt names the script. Use
+    /// a code point's explicit Script_Extensions list when present; otherwise use its Script value.
     static CharClass scriptExtension(String longName)
     {
         String shortName = ScriptShortNames.BY_LONG_NAME.get(longName);
@@ -179,38 +157,30 @@ final class UnicodeGroups
                 script == null ? codePoints() : difference(script, scriptExtensionCodePoints())));
     }
 
-    /**
-     * Returns the code points with the given Grapheme_Cluster_Break value, a long name such as
-     * Regional_Indicator, or null if GraphemeBreakProperty.txt assigns no such value.
-     */
+    /// Returns the code points with the given Grapheme_Cluster_Break value, a long name such as
+    /// Regional_Indicator, or null if GraphemeBreakProperty.txt assigns no such value.
     static CharClass graphemeClusterBreak(String value)
     {
         return propertyValue("gcb", UnicodeDatabase.graphemeClusterBreaks(), value);
     }
 
-    /**
-     * Returns the code points with the given Word_Break value, a long name such as ALetter, or
-     * null if WordBreakProperty.txt assigns no such value.
-     */
+    /// Returns the code points with the given Word_Break value, a long name such as ALetter, or
+    /// null if WordBreakProperty.txt assigns no such value.
     static CharClass wordBreak(String value)
     {
         return propertyValue("wb", UnicodeDatabase.wordBreaks(), value);
     }
 
-    /**
-     * Returns the code points with the given Sentence_Break value, a long name such as ATerm, or
-     * null if SentenceBreakProperty.txt assigns no such value.
-     */
+    /// Returns the code points with the given Sentence_Break value, a long name such as ATerm, or
+    /// null if SentenceBreakProperty.txt assigns no such value.
     static CharClass sentenceBreak(String value)
     {
         return propertyValue("sb", UnicodeDatabase.sentenceBreaks(), value);
     }
 
-    /**
-     * Returns the word characters of UTS #18 (Unicode Regular Expressions, Annex C): Alphabetic,
-     * marks, Decimal_Number, Connector_Punctuation, and Join_Control. This is the class of Java's
-     * {@code \p{IsWord}}.
-     */
+    /// Returns the word characters of UTS #18 (Unicode Regular Expressions, Annex C): Alphabetic,
+    /// marks, Decimal_Number, Connector_Punctuation, and Join_Control. This is the class of Java's
+    /// `\p{IsWord}`.
     static CharClass word()
     {
         return cached("java:Word", () -> union(
@@ -219,22 +189,18 @@ final class UnicodeGroups
                 binary("Join_Control")));
     }
 
-    /**
-     * Returns the Alphabetic code points by the formula of {@code Character.isAlphabetic}: Lu, Ll,
-     * Lt, Lm, Lo, Nl, or Other_Alphabetic. Java patterns must give the JDK's results, so this keeps
-     * the JDK's formula rather than reading the database's Alphabetic. Rust's {@code \w} and word
-     * boundaries, and Trino's word boundaries, build their word characters from this set because
-     * it equals the database's Alphabetic; recheck that when moving to a new Unicode version.
-     */
+    /// Returns the Alphabetic code points by the formula of `Character.isAlphabetic`: Lu, Ll,
+    /// Lt, Lm, Lo, Nl, or Other_Alphabetic. Java patterns must give the JDK's results, so this keeps
+    /// the JDK's formula rather than reading the database's Alphabetic. Rust's `\w` and word
+    /// boundaries, and Trino's word boundaries, build their word characters from this set because
+    /// it equals the database's Alphabetic; recheck that when moving to a new Unicode version.
     static CharClass alphabetic()
     {
         return cached("java:Alphabetic", () -> union(majorClass('L'), categories("Nl"), binary("Other_Alphabetic")));
     }
 
-    /**
-     * Returns the code points that the database gives the binary property with the given name,
-     * which it must hold, such as Hex_Digit.
-     */
+    /// Returns the code points that the database gives the binary property with the given name,
+    /// which it must hold, such as Hex_Digit.
     static CharClass binary(String property)
     {
         int[] ranges = requireNonNull(UnicodeDatabase.binaryProperties().ranges(property), () -> "missing binary property " + property);
@@ -293,10 +259,8 @@ final class UnicodeGroups
         });
     }
 
-    /**
-     * Returns the class cached under {@code identity}, building it with {@code supplier} if none
-     * is, so each class is built once however it is named.
-     */
+    /// Returns the class cached under `identity`, building it with `supplier` if none
+    /// is, so each class is built once however it is named.
     static CharClass cached(String identity, Supplier<CharClass> supplier)
     {
         // Not computeIfAbsent: a class built from other classes looks them up in the cache.
@@ -351,48 +315,38 @@ final class UnicodeGroups
         }
     }
 
-    /**
-     * Builds the table that Java, Trino, and Rust word boundaries read, if no boundary has yet, so
-     * that compiling a pattern with such a boundary, not its first match, reads the database.
-     */
+    /// Builds the table that Java, Trino, and Rust word boundaries read, if no boundary has yet, so
+    /// that compiling a pattern with such a boundary, not its first match, reads the database.
     static void initializeWordFlags()
     {
         requireNonNull(WordFlags.FLAGS, "word flags are null");
     }
 
-    /**
-     * Returns whether {@code codePoint}, from 0 through {@code RUNEMAX}, is a word character of
-     * {@code java.util.regex} with {@code UNICODE_CHARACTER_CLASS}, the class of
-     * {@code \p{IsWord}}, which Java's and Rust's Unicode word boundaries read.
-     */
+    /// Returns whether `codePoint`, from 0 through `RUNEMAX`, is a word character of
+    /// `java.util.regex` with `UNICODE_CHARACTER_CLASS`, the class of
+    /// `\p{IsWord}`, which Java's and Rust's Unicode word boundaries read.
     static boolean isWord(int codePoint)
     {
         return (WordFlags.FLAGS.get(codePoint) & WordFlags.JAVA_WORD) != 0;
     }
 
-    /**
-     * Returns whether {@code codePoint}, from 0 through {@code RUNEMAX}, is a word character of
-     * Trino's word boundaries.
-     */
+    /// Returns whether `codePoint`, from 0 through `RUNEMAX`, is a word character of
+    /// Trino's word boundaries.
     static boolean isTrinoWord(int codePoint)
     {
         return (WordFlags.FLAGS.get(codePoint) & WordFlags.TRINO_WORD) != 0;
     }
 
-    /**
-     * Returns whether {@code codePoint}, from 0 through {@code RUNEMAX}, is a nonspacing mark,
-     * {@code Mn}, which Java's word boundaries attach to a preceding letter or digit.
-     */
+    /// Returns whether `codePoint`, from 0 through `RUNEMAX`, is a nonspacing mark,
+    /// `Mn`, which Java's word boundaries attach to a preceding letter or digit.
     static boolean isNonspacingMark(int codePoint)
     {
         return (WordFlags.FLAGS.get(codePoint) & WordFlags.NONSPACING_MARK) != 0;
     }
 
-    /**
-     * Returns whether {@code codePoint}, from 0 through {@code RUNEMAX}, is a letter or decimal
-     * digit, as {@code Character.isLetterOrDigit} defines it, which can give a nonspacing mark a
-     * base in Java's word boundaries.
-     */
+    /// Returns whether `codePoint`, from 0 through `RUNEMAX`, is a letter or decimal
+    /// digit, as `Character.isLetterOrDigit` defines it, which can give a nonspacing mark a
+    /// base in Java's word boundaries.
     static boolean isLetterOrDigit(int codePoint)
     {
         return (WordFlags.FLAGS.get(codePoint) & WordFlags.LETTER_OR_DIGIT) != 0;

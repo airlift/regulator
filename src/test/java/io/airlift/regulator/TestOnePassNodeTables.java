@@ -18,11 +18,9 @@ import org.junit.jupiter.api.Test;
 import static io.airlift.slice.Slices.utf8Slice;
 import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * One-pass node tables start at the bound for small programs and grow on demand for large ones.
- * These programs need more nodes than the initial capacity, so the growth path must keep every
- * earlier node and action intact.
- */
+/// One-pass node tables start at the bound for small programs and grow on demand for large ones.
+/// These programs need more nodes than the initial capacity, so the growth path must keep every
+/// earlier node and action intact.
 public class TestOnePassNodeTables
 {
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";

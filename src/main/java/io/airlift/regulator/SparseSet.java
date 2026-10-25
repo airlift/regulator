@@ -44,9 +44,7 @@ final class SparseSet
         return dense.length;
     }
 
-    /**
-     * Clears the set in O(1).
-     */
+    /// Clears the set in O(1).
     public void clear()
     {
         size = 0;
@@ -96,9 +94,7 @@ final class SparseSet
         }
     }
 
-    /**
-     * Like {@link #insert(int)}, but only use this if {@link #contains(int)} is known to be false.
-     */
+    /// Like [#insert(int)], but only use this if [#contains(int)] is known to be false.
     public void insertNew(int indexValue)
     {
         checkIndex(indexValue);
@@ -108,16 +104,15 @@ final class SparseSet
         createIndex(indexValue);
     }
 
-    /**
-     * Dense list element at the given index, suitable for iteration like:
-     * <pre>{@code
-     * for (int it = 0; it < set.size(); it++) {
-     *     int value = set.denseAt(it);
-     *     ...
-     *     set.insert(...); // safe during iteration
-     * }
-     * }</pre>
-     */
+    /// Dense list element at the given index, suitable for iteration like:
+    ///
+    /// ```java
+    /// for (int it = 0; it < set.size(); it++) {
+    ///     int value = set.denseAt(it);
+    ///     ...
+    ///     set.insert(...); // safe during iteration
+    /// }
+    /// ```
     public int denseAt(int index)
     {
         if (index < 0 || index >= size) {

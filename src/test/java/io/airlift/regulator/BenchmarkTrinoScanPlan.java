@@ -35,9 +35,7 @@ import static io.airlift.regulator.Re2BenchmarkRunner.buildOptions;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.airlift.slice.Slices.utf8Slice;
 
-/**
- * Public Trino operations over changing inputs and shared compiled plans. No compilation cache is involved.
- */
+/// Public Trino operations over changing inputs and shared compiled plans. No compilation cache is involved.
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @Fork(3)
@@ -626,9 +624,7 @@ public class BenchmarkTrinoScanPlan
         return TrinoRegexp.compile(data.expressions[data.patternIndex], data.options);
     }
 
-    /**
-     * Returns the {@code workload} parameter values in declaration order.
-     */
+    /// Returns the `workload` parameter values in declaration order.
     static List<String> workloads()
             throws NoSuchFieldException
     {

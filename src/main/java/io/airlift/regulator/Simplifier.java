@@ -41,12 +41,10 @@ final class Simplifier
         return simplifyInternal(Coalescer.coalesce(regexp, caseFolding), Mode.FULL, caseFolding);
     }
 
-    /**
-     * Parse-time canonicalization that intentionally preserves counted repetitions ({@code {n,m}}),
-     * matching upstream RE2 parse.cc behavior (parse dumps still contain {@code rep{...}} nodes).
-     * <p>
-     * Compiler pipelines must call {@link #simplify(Regexp, CaseFolding)} (FULL) to eliminate counted repeats.
-     */
+    /// Parse-time canonicalization that intentionally preserves counted repetitions (`{n,m}`),
+    /// matching upstream RE2 parse.cc behavior (parse dumps still contain `rep{...}` nodes).
+    ///
+    /// Compiler pipelines must call [#simplify(Regexp,CaseFolding)] (FULL) to eliminate counted repeats.
     static Regexp simplifyForParse(Regexp regexp, CaseFolding caseFolding)
     {
         requireNonNull(regexp, "regexp is null");
@@ -332,10 +330,8 @@ final class Simplifier
         STAR, PLUS, QUEST
     }
 
-    /**
-     * Simplifies a unary operator over an already simplified child. Returns {@code original}, a node
-     * with this operator and these flags, when rebuilding would produce an equal node.
-     */
+    /// Simplifies a unary operator over an already simplified child. Returns `original`, a node
+    /// with this operator and these flags, when rebuilding would produce an equal node.
     private static Regexp simplifyUnary(int flags, Regexp childRegexp, UnaryOp operator, Regexp original)
     {
         // Simplify repetition over known-empty / known-impossible expressions.
@@ -512,25 +508,23 @@ final class Simplifier
         return true;
     }
 
-    /**
-     * Builds a simplified concatenation from simplified children. Empty matches are dropped, a
-     * child concatenation contributes its children, and adjacent literals with equal flags merge
-     * into one literal string, so {@code (?:ab)(?:cd)} becomes {@code str{abcd}} as in upstream
-     * parse_test.cc.
-     * <p>
-     * The Trino parser builds each run of fully folded literals, which full case folding matches
-     * as one sequence. Two fully folded runs stay apart whenever their joined text contains a
-     * multi-character fold, including one entirely within either run. Joining the copies of
-     * {@code (?i)s{2}} would match {@code ß}.
-     * <p>
-     * Merging literals one at a time would recopy the growing string for each literal. Instead the
-     * open run of literals collects its runes in one buffer and becomes a node once it closes.
-     * <p>
-     * A nested concatenation's children are added between {@link #beginNested()} and
-     * {@link #endNested()}, with the same result as simplifying the nested concatenation and then
-     * adding it: its first child does not merge with an earlier literal, but a lone remaining child
-     * merges as any child does, and a later literal can merge with its last child.
-     */
+    /// Builds a simplified concatenation from simplified children. Empty matches are dropped, a
+    /// child concatenation contributes its children, and adjacent literals with equal flags merge
+    /// into one literal string, so `(?:ab)(?:cd)` becomes `str{abcd}` as in upstream
+    /// parse_test.cc.
+    ///
+    /// The Trino parser builds each run of fully folded literals, which full case folding matches
+    /// as one sequence. Two fully folded runs stay apart whenever their joined text contains a
+    /// multi-character fold, including one entirely within either run. Joining the copies of
+    /// `(?i)s{2}` would match `ß`.
+    ///
+    /// Merging literals one at a time would recopy the growing string for each literal. Instead the
+    /// open run of literals collects its runes in one buffer and becomes a node once it closes.
+    ///
+    /// A nested concatenation's children are added between [#beginNested()] and
+    /// [#endNested()], with the same result as simplifying the nested concatenation and then
+    /// adding it: its first child does not merge with an earlier literal, but a lone remaining child
+    /// merges as any child does, and a later literal can merge with its last child.
     private static final class ConcatBuilder
     {
         // Slots of an enclosing concatenation's frame in the enclosing stack.
@@ -896,12 +890,10 @@ final class Simplifier
         return simplifyAlternatives(caseFolding, flags, simplifiedAlternatives);
     }
 
-    /**
-     * Simplifies a parse-mode alternation: flattens child alternations, collapses scalar
-     * alternatives into a character or byte wildcard among them, and factors the rest. When
-     * pending, the factored alternatives stay pending (see PendingAlternation), so an enclosing
-     * alternation takes them over without copying them.
-     */
+    /// Simplifies a parse-mode alternation: flattens child alternations, collapses scalar
+    /// alternatives into a character or byte wildcard among them, and factors the rest. When
+    /// pending, the factored alternatives stay pending (see PendingAlternation), so an enclosing
+    /// alternation takes them over without copying them.
     private static Object simplifyAlternateForParse(CaseFolding caseFolding, int flags, List<Object> children, boolean pending)
     {
         // Each part is one alternative, or a child alternation's pending alternatives.
@@ -1034,41 +1026,38 @@ final class Simplifier
         return PendingAlternation.splice(flags, factored, mergedIndexes, size, listSummary);
     }
 
-    /**
-     * The factored alternatives of a parse-mode alternation, kept as a linked list rather than
-     * built into a Regexp node, so that an enclosing alternation can take them over.
-     * <p>
-     * An alternation takes its child alternations' alternatives as its own and factors them. In a
-     * chain of nested alternations, flattening child alternations and factoring them again would
-     * copy and refactor every level below at each level. Refactoring a factored list F changes
-     * little. Each round replaces maximal runs of neighbors: round 1 those whose leading literals
-     * share flags and first rune, where a whole literal that full case folding needs intact has
-     * no key, round 2 those with equal candidate leading regexps, and round 3 literals and
-     * classes. In F:
-     * <ul>
-     * <li>No neighbors share a round 1 key. Round 1 left none, its products keep their run's key,
-     * and those of rounds 2 and 3 have none.
-     * <li>No neighbors share a round 2 key unless one is a class F's round 3 merged. Round 2 left
-     * none, its products keep their run's key, round 1 keys are never round 2 keys, and round 3
-     * only adds such classes.
-     * <li>No neighbors are both round 3 members. Round 3 left none, and its classes stand
-     * between non-members.
-     * </ul>
-     * No key depends on a level's flags, and round 3 membership depends on them only through
-     * LATIN1, which a parse never changes. So when an enclosing alternation factors F among other
-     * alternatives, a run of two or more can only take in F's two ends, the classes F's round 3
-     * merged, each with its two neighbors, and alternatives from outside F. The rest of F passes
-     * through every round untouched, since what each round makes of a neighbor keeps the key, or
-     * the lack of membership, that kept the two apart. The enclosing alternation therefore factors
-     * only the alternatives a run can take in, with a gap that no run joins for each untouched
-     * stretch, and splices the result into the list. The classes its own round 3 merged are the
-     * next level's to revisit; the earlier ones have been compared with their neighbors.
-     * <p>
-     * A level thus works on its own alternatives, two ends per child list, and three alternatives
-     * per class the child's round 3 merged, which that merge paid for. The collapse to any
-     * character needs every alternative's flags and kind, so the list keeps counts of them, which
-     * each level updates for the alternatives it replaces.
-     */
+    /// The factored alternatives of a parse-mode alternation, kept as a linked list rather than
+    /// built into a Regexp node, so that an enclosing alternation can take them over.
+    ///
+    /// An alternation takes its child alternations' alternatives as its own and factors them. In a
+    /// chain of nested alternations, flattening child alternations and factoring them again would
+    /// copy and refactor every level below at each level. Refactoring a factored list F changes
+    /// little. Each round replaces maximal runs of neighbors: round 1 those whose leading literals
+    /// share flags and first rune, where a whole literal that full case folding needs intact has
+    /// no key, round 2 those with equal candidate leading regexps, and round 3 literals and
+    /// classes. In F:
+    /// - No neighbors share a round 1 key. Round 1 left none, its products keep their run's key,
+    ///   and those of rounds 2 and 3 have none.
+    /// - No neighbors share a round 2 key unless one is a class F's round 3 merged. Round 2 left
+    ///   none, its products keep their run's key, round 1 keys are never round 2 keys, and round 3
+    ///   only adds such classes.
+    /// - No neighbors are both round 3 members. Round 3 left none, and its classes stand
+    ///   between non-members.
+    ///
+    /// No key depends on a level's flags, and round 3 membership depends on them only through
+    /// LATIN1, which a parse never changes. So when an enclosing alternation factors F among other
+    /// alternatives, a run of two or more can only take in F's two ends, the classes F's round 3
+    /// merged, each with its two neighbors, and alternatives from outside F. The rest of F passes
+    /// through every round untouched, since what each round makes of a neighbor keeps the key, or
+    /// the lack of membership, that kept the two apart. The enclosing alternation therefore factors
+    /// only the alternatives a run can take in, with a gap that no run joins for each untouched
+    /// stretch, and splices the result into the list. The classes its own round 3 merged are the
+    /// next level's to revisit; the earlier ones have been compared with their neighbors.
+    ///
+    /// A level thus works on its own alternatives, two ends per child list, and three alternatives
+    /// per class the child's round 3 merged, which that merge paid for. The collapse to any
+    /// character needs every alternative's flags and kind, so the list keeps counts of them, which
+    /// each level updates for the alternatives it replaces.
     private static final class PendingAlternation
     {
         private final int flags;
@@ -1341,13 +1330,11 @@ final class Simplifier
         }
     }
 
-    /**
-     * A class that round 3 merged, kept as a set of ranges until a Regexp node is needed. A list's
-     * end class can take in another literal at each enclosing level, and building a Regexp node
-     * each time would copy the class at each level. The set keeps its rune count and ASCII letters
-     * current, so comparing it with a class of another size costs nothing, and with one of its size
-     * no more than that class's ranges.
-     */
+    /// A class that round 3 merged, kept as a set of ranges until a Regexp node is needed. A list's
+    /// end class can take in another literal at each enclosing level, and building a Regexp node
+    /// each time would copy the class at each level. The set keeps its rune count and ASCII letters
+    /// current, so comparing it with a class of another size costs nothing, and with one of its size
+    /// no more than that class's ranges.
     private static final class PendingClass
             implements Factorable
     {
@@ -1579,13 +1566,11 @@ final class Simplifier
         }
     }
 
-    /**
-     * A round 1 or round 2 product whose suffix is a pending class or product, standing for the
-     * concatenation of prefix and suffix with these flags. An enclosing factoring that removes the
-     * whole prefix extends the suffix. A remainder has lost part of its prefix's leading string to
-     * an enclosing round 1 factoring. What is left of the string leads it, which is never a round 2
-     * prefix, so it is treated as having none.
-     */
+    /// A round 1 or round 2 product whose suffix is a pending class or product, standing for the
+    /// concatenation of prefix and suffix with these flags. An enclosing factoring that removes the
+    /// whole prefix extends the suffix. A remainder has lost part of its prefix's leading string to
+    /// an enclosing round 1 factoring. What is left of the string leads it, which is never a round 2
+    /// prefix, so it is treated as having none.
     private record PendingProduct(Alternative prefix, boolean remainder, int flags, Factorable suffix)
             implements Factorable {}
 
@@ -1647,10 +1632,8 @@ final class Simplifier
         return pending;
     }
 
-    /**
-     * Simplifies a character class. Returns {@code original} when it is a node with these flags and
-     * this class and rebuilding would produce an equal node; {@code original} may be null.
-     */
+    /// Simplifies a character class. Returns `original` when it is a node with these flags and
+    /// this class and rebuilding would produce an equal node; `original` may be null.
     private static Regexp simplifyCharClass(Mode mode, int flags, CharClass charClass, Regexp original)
     {
         if (charClass.isEmpty()) {
@@ -1766,14 +1749,12 @@ final class Simplifier
         return false;
     }
 
-    /**
-     * Factors common prefixes out of an alternation in three rounds, as upstream parse.cc does:
-     * literal prefixes, then leading regexps, then runs of literals and classes merged into one
-     * class. Each prefix found factors its suffixes again, so a long shared prefix nests one
-     * factoring inside another per prefix piece. The nested factorings wait on an explicit stack,
-     * so their depth is not limited by the thread stack. The classes that the outermost round 3
-     * merged have their indexes in the returned list added to {@code mergedIndexes}.
-     */
+    /// Factors common prefixes out of an alternation in three rounds, as upstream parse.cc does:
+    /// literal prefixes, then leading regexps, then runs of literals and classes merged into one
+    /// class. Each prefix found factors its suffixes again, so a long shared prefix nests one
+    /// factoring inside another per prefix piece. The nested factorings wait on an explicit stack,
+    /// so their depth is not limited by the thread stack. The classes that the outermost round 3
+    /// merged have their indexes in the returned list added to `mergedIndexes`.
     private static List<Factorable> factorAlternationForParse(List<Factorable> alternatives, int flags, CaseFolding caseFolding, List<Integer> mergedIndexes)
     {
         Deque<FactorTask> waiting = new ArrayDeque<>();
@@ -2080,17 +2061,15 @@ final class Simplifier
         };
     }
 
-    /**
-     * An alternative during factoring: a whole node, or what remains of one after factoring
-     * removed a leading string or regexp. Removing a prefix makes a view instead of copying the
-     * remaining runes or children, so removing prefix after prefix from one long alternative costs
-     * time linear in its length. A view becomes a node once, when factoring is done with it.
-     * <p>
-     * A view of a literal string starts at rune {@code start} and keeps at least two runes. A
-     * view of a concatenation starts at child {@code start} and keeps at least two children; a
-     * non-null {@code head} replaces that child when part of its leading string was removed.
-     * Smaller remainders are whole nodes.
-     */
+    /// An alternative during factoring: a whole node, or what remains of one after factoring
+    /// removed a leading string or regexp. Removing a prefix makes a view instead of copying the
+    /// remaining runes or children, so removing prefix after prefix from one long alternative costs
+    /// time linear in its length. A view becomes a node once, when factoring is done with it.
+    ///
+    /// A view of a literal string starts at rune `start` and keeps at least two runes. A
+    /// view of a concatenation starts at child `start` and keeps at least two children; a
+    /// non-null `head` replaces that child when part of its leading string was removed.
+    /// Smaller remainders are whole nodes.
     private static final class Alternative
             implements Factorable
     {
@@ -2335,20 +2314,18 @@ final class Simplifier
         };
     }
 
-    /**
-     * Whether the leading regexps of two alternatives in round 2 are the same. Classes compare by
-     * their runes alone, as Regexp.equals compares them.
-     * <p>
-     * Comparing two classes of one size and range count may read both in full. The same two classes
-     * can meet at every enclosing level: a class that round 3 merged returns to the next level's
-     * window with its neighbors even when the merge added no runes, and a list's last alternative
-     * always returns. So the first alternative remembers its last such comparison by the identity
-     * of both operands and the version of a pending class, which changes with its runes, and a
-     * comparison that meets the same operands again reuses the outcome. Each such comparison
-     * that reads classes again then follows a change in runes, which round 3 pays for. Most
-     * alternatives make one such comparison, so the first comparison only marks the alternative,
-     * and the second allocates the memory for the outcome.
-     */
+    /// Whether the leading regexps of two alternatives in round 2 are the same. Classes compare by
+    /// their runes alone, as Regexp.equals compares them.
+    ///
+    /// Comparing two classes of one size and range count may read both in full. The same two classes
+    /// can meet at every enclosing level: a class that round 3 merged returns to the next level's
+    /// window with its neighbors even when the merge added no runes, and a list's last alternative
+    /// always returns. So the first alternative remembers its last such comparison by the identity
+    /// of both operands and the version of a pending class, which changes with its runes, and a
+    /// comparison that meets the same operands again reuses the outcome. Each such comparison
+    /// that reads classes again then follows a change in runes, which round 3 pays for. Most
+    /// alternatives make one such comparison, so the first comparison only marks the alternative,
+    /// and the second allocates the memory for the outcome.
     private static boolean sameLeadingRegexp(Factorable firstAlternative, Object first, Object second)
     {
         if (!mayReadClassesInFull(first, second)) {

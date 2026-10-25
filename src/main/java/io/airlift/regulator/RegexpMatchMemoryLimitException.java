@@ -13,9 +13,7 @@
  */
 package io.airlift.regulator;
 
-/**
- * Thrown when matching exceeds the configured regular-expression memory budget.
- */
+/// Thrown when matching exceeds the configured regular-expression memory budget.
 public final class RegexpMatchMemoryLimitException
         extends RuntimeException
 {

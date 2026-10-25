@@ -18,10 +18,8 @@ import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 
-/**
- * Vector scans for {@link TrinoScanPlan} and {@link TrinoScanPlanRun}. Callers must check
- * {@link VectorSupport#isAvailable()} first and use their scalar loops otherwise.
- */
+/// Vector scans for [TrinoScanPlan] and [TrinoScanPlanRun]. Callers must check
+/// [VectorSupport#isAvailable()] first and use their scalar loops otherwise.
 final class VectorTrinoScanner
 {
     private static final VectorSpecies<Byte> SPECIES = ByteVector.SPECIES_128;
@@ -33,12 +31,10 @@ final class VectorTrinoScanner
     // run scans broadcast their needles before the block loop because C2 does not
     // hoist per-block broadcasts out of it on aarch64 or x86.
 
-    /**
-     * Returns the first byte at or after {@code cursor} outside {@code members}, or {@code end}
-     * when none remains. {@code needles} holds one to four bytes: the members, or the
-     * non-members when {@code inverted}.
-     * Copied as {@code VectorTrinoScanKernelSupport.findRunStop}; keep the copy in step.
-     */
+    /// Returns the first byte at or after `cursor` outside `members`, or `end`
+    /// when none remains. `needles` holds one to four bytes: the members, or the
+    /// non-members when `inverted`.
+    /// Copied as `VectorTrinoScanKernelSupport.findRunStop`; keep the copy in step.
     static int findRunStop(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
         int count = needles.length;
@@ -71,12 +67,10 @@ final class VectorTrinoScanner
         return end;
     }
 
-    /**
-     * Returns the first byte at or after {@code cursor} that is non-ASCII or equals one of
-     * {@code needles}, or {@code end} when none remains. {@code needles} holds the RE2 run's
-     * ASCII non-members, zero to four bytes. RE2 runs validate the non-ASCII bytes this stops at.
-     * Copied as {@code VectorTrinoScanKernelSupport.findRe2RunStop}; keep the copy in step.
-     */
+    /// Returns the first byte at or after `cursor` that is non-ASCII or equals one of
+    /// `needles`, or `end` when none remains. `needles` holds the RE2 run's
+    /// ASCII non-members, zero to four bytes. RE2 runs validate the non-ASCII bytes this stops at.
+    /// Copied as `VectorTrinoScanKernelSupport.findRe2RunStop`; keep the copy in step.
     static int findRe2RunStop(byte[] input, int cursor, int end, byte[] needles)
     {
         if (needles.length > 1) {
@@ -146,11 +140,9 @@ final class VectorTrinoScanner
         return end;
     }
 
-    /**
-     * Returns the first byte at or after {@code cursor} in {@code members}, or {@code -1} when
-     * none remains. {@code needles} is as for {@link #findRunStop}.
-     * Copied as {@code VectorTrinoScanKernelSupport.findRunCandidate}; keep the copy in step.
-     */
+    /// Returns the first byte at or after `cursor` in `members`, or `-1` when
+    /// none remains. `needles` is as for [#findRunStop].
+    /// Copied as `VectorTrinoScanKernelSupport.findRunCandidate`; keep the copy in step.
     static int findRunCandidate(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
         int count = needles.length;
@@ -183,10 +175,8 @@ final class VectorTrinoScanner
         return -1;
     }
 
-    /**
-     * Returns whether the {@code literal} step occurs in {@code [cursor, end)}.
-     * Copied as {@code VectorTrinoScanKernelSupport.containsLiteral}; keep the copy in step.
-     */
+    /// Returns whether the `literal` step occurs in `[cursor, end)`.
+    /// Copied as `VectorTrinoScanKernelSupport.containsLiteral`; keep the copy in step.
     static boolean containsLiteral(byte[] bytes, int cursor, int end, TrinoScanPlan.Step literal)
     {
         int lastOffset = literal.literal.length - 1;
@@ -232,10 +222,8 @@ final class VectorTrinoScanner
         return -1;
     }
 
-    /**
-     * Returns the first byte at or after {@code cursor} that equals {@code folded}, a lowercase
-     * ASCII letter, after setting bit {@code 0x20}, or {@code -1} when none remains.
-     */
+    /// Returns the first byte at or after `cursor` that equals `folded`, a lowercase
+    /// ASCII letter, after setting bit `0x20`, or `-1` when none remains.
     static int findAsciiFoldedByte(byte[] bytes, int cursor, int end, byte folded)
     {
         ByteVector mask = ByteVector.broadcast(SPECIES, (byte) 0x20);

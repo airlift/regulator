@@ -59,19 +59,17 @@ import static java.lang.reflect.AccessFlag.PUBLIC;
 import static java.lang.reflect.AccessFlag.STATIC;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Compiles one {@link TrinoLikePattern} to a hidden class in this package, with every literal,
- * length bound, and wildcard position as a constant. Every plan has a class. Its public static
- * {@code matchesEntry} checks the length bounds, the anchored prefix and suffix with constant word
- * comparisons, or {@code Arrays.equals} for one of more than 16 bytes, and calls the method of the
- * pattern's middle: a copy of the literal search for contained and ordered literals, a literal
- * search with constant character gaps, or a bit-parallel automaton for other wildcard patterns.
- * The class implements {@link CompiledTrinoLike} by delegating to {@code matchesEntry}, so a caller
- * can also bind the entry directly.
- * <p>
- * Every generated method must stay within HotSpot's huge-method limit, because HotSpot never
- * compiles a larger method. A pattern whose class would exceed it has no class.
- */
+/// Compiles one [TrinoLikePattern] to a hidden class in this package, with every literal,
+/// length bound, and wildcard position as a constant. Every plan has a class. Its public static
+/// `matchesEntry` checks the length bounds, the anchored prefix and suffix with constant word
+/// comparisons, or `Arrays.equals` for one of more than 16 bytes, and calls the method of the
+/// pattern's middle: a copy of the literal search for contained and ordered literals, a literal
+/// search with constant character gaps, or a bit-parallel automaton for other wildcard patterns.
+/// The class implements [CompiledTrinoLike] by delegating to `matchesEntry`, so a caller
+/// can also bind the entry directly.
+///
+/// Every generated method must stay within HotSpot's huge-method limit, because HotSpot never
+/// compiles a larger method. A pattern whose class would exceed it has no class.
 final class TrinoLikeKernelGenerator
 {
     // HotSpot does not JIT-compile a method of more than HugeMethodLimit bytecode bytes, which is
@@ -87,12 +85,10 @@ final class TrinoLikeKernelGenerator
 
     private TrinoLikeKernelGenerator() {}
 
-    /**
-     * What one compiled LIKE pattern matches, in the terms of its interpreted plan: input length
-     * bounds, with {@code maximumSize} negative when unbounded, an anchored prefix and suffix,
-     * either of which may be empty, and the matcher of the remaining middle, or {@code null} when
-     * the prefix and suffix decide the match.
-     */
+    /// What one compiled LIKE pattern matches, in the terms of its interpreted plan: input length
+    /// bounds, with `maximumSize` negative when unbounded, an anchored prefix and suffix,
+    /// either of which may be empty, and the matcher of the remaining middle, or `null` when
+    /// the prefix and suffix decide the match.
     record Kernel(TrinoLikePattern.Plan plan, int minimumSize, int maximumSize, byte[] prefix, byte[] suffix, Region region)
     {
         Kernel
@@ -103,18 +99,14 @@ final class TrinoLikeKernelGenerator
         }
     }
 
-    /**
-     * The matcher of the middle of a pattern, between its prefix and suffix.
-     */
+    /// The matcher of the middle of a pattern, between its prefix and suffix.
     sealed interface Region
             permits LiteralGaps,
                     OrderedLiterals,
                     Wildcard {}
 
-    /**
-     * Literals that occur in order, each searched after the end of the previous one, as
-     * {@link OrderedLiteralMatcher} searches them; one literal is a contains search.
-     */
+    /// Literals that occur in order, each searched after the end of the previous one, as
+    /// [OrderedLiteralMatcher] searches them; one literal is a contains search.
     record OrderedLiterals(List<LiteralSearchKernel> literals)
             implements Region
     {
@@ -127,9 +119,7 @@ final class TrinoLikeKernelGenerator
         }
     }
 
-    /**
-     * Literals separated by fixed numbers of characters, as {@link LiteralGapMatcher} finds them.
-     */
+    /// Literals separated by fixed numbers of characters, as [LiteralGapMatcher] finds them.
     record LiteralGaps(List<LiteralSearchKernel> literals, int[] codePointGaps)
             implements Region
     {
@@ -143,10 +133,8 @@ final class TrinoLikeKernelGenerator
         }
     }
 
-    /**
-     * The automaton of {@link TrinoLikeWildcardMatcher}: what each position matches, a code point
-     * or {@link TrinoLikeWildcardMatcher#MATCH_ANY}, and which states loop on any character.
-     */
+    /// The automaton of [TrinoLikeWildcardMatcher]: what each position matches, a code point
+    /// or [TrinoLikeWildcardMatcher#MATCH_ANY], and which states loop on any character.
     record Wildcard(int[] positions, boolean[] loopback, boolean exact)
             implements Region
     {
@@ -160,10 +148,8 @@ final class TrinoLikeKernelGenerator
         }
     }
 
-    /**
-     * A generated class for one pattern: its {@link CompiledTrinoLike} instance and a handle on its
-     * static entry.
-     */
+    /// A generated class for one pattern: its [CompiledTrinoLike] instance and a handle on its
+    /// static entry.
     record CompiledLike(CompiledTrinoLike like, MethodHandle matches)
     {
         CompiledLike
@@ -173,11 +159,9 @@ final class TrinoLikeKernelGenerator
         }
     }
 
-    /**
-     * Generates and defines the class for {@code kernel}, searching literals as on aarch64 when
-     * {@code aarch64} is true, or returns {@code null} when a method of the class would exceed
-     * {@link #HUGE_METHOD_LIMIT}. Other failures propagate.
-     */
+    /// Generates and defines the class for `kernel`, searching literals as on aarch64 when
+    /// `aarch64` is true, or returns `null` when a method of the class would exceed
+    /// [#HUGE_METHOD_LIMIT]. Other failures propagate.
     static CompiledLike generate(Kernel kernel, boolean aarch64)
     {
         // Building the class of a large pattern costs time and memory that grow with the
@@ -209,28 +193,22 @@ final class TrinoLikeKernelGenerator
         return new CompiledLike(like, matches);
     }
 
-    /**
-     * Returns the class file generated for {@code kernel}, as {@link #generate} generates it for
-     * {@code aarch64}, without defining it or checking its method sizes.
-     */
+    /// Returns the class file generated for `kernel`, as [#generate] generates it for
+    /// `aarch64`, without defining it or checking its method sizes.
     static byte[] classfileForDiagnostics(Kernel kernel, boolean aarch64)
     {
         CompiledUnit unit = compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), kernel, aarch64);
         return unit.classfile(unit.primaryType());
     }
 
-    /**
-     * Returns the size in bytecode bytes of the largest method generated for {@code kernel}, as
-     * {@link #generate} generates it for {@code aarch64}.
-     */
+    /// Returns the size in bytecode bytes of the largest method generated for `kernel`, as
+    /// [#generate] generates it for `aarch64`.
     static int largestMethodBytesForDiagnostics(Kernel kernel, boolean aarch64)
     {
         return largestMethodBytes(compile(HiddenClassDefiner.builder(MethodHandles.lookup()).build(), kernel, aarch64).report());
     }
 
-    /**
-     * Returns true when the size estimate rejects {@code kernel} before its class is built.
-     */
+    /// Returns true when the size estimate rejects `kernel` before its class is built.
     static boolean certainlyExceedsLimitForDiagnostics(Kernel kernel)
     {
         return certainlyExceedsLimit(kernel.region());
@@ -241,13 +219,11 @@ final class TrinoLikeKernelGenerator
         return minimumMiddleBytes(region) > HUGE_METHOD_LIMIT;
     }
 
-    /**
-     * A lower bound on the bytecode bytes of the method of {@code region}: every literal of
-     * ordered literals and every gap of literal gaps emits at least 16 bytes of checks, every
-     * state word of a wildcard automaton at least 16 bytes of state update, and every distinct
-     * code point of a wildcard at least a 4-byte switch entry. An exact run of {@code _} steps
-     * over its characters in constant code.
-     */
+    /// A lower bound on the bytecode bytes of the method of `region`: every literal of
+    /// ordered literals and every gap of literal gaps emits at least 16 bytes of checks, every
+    /// state word of a wildcard automaton at least 16 bytes of state update, and every distinct
+    /// code point of a wildcard at least a 4-byte switch entry. An exact run of `_` steps
+    /// over its characters in constant code.
     private static long minimumMiddleBytes(Region region)
     {
         return switch (region) {
@@ -268,10 +244,8 @@ final class TrinoLikeKernelGenerator
         };
     }
 
-    /**
-     * Returns true when {@code region} is an exact run of {@code _}, which matches a fixed number
-     * of characters.
-     */
+    /// Returns true when `region` is an exact run of `_`, which matches a fixed number
+    /// of characters.
     private static boolean isExactUnderscoreRun(Wildcard region)
     {
         for (int position : region.positions()) {
@@ -304,12 +278,10 @@ final class TrinoLikeKernelGenerator
         return largest;
     }
 
-    /**
-     * Emits the class of one pattern: {@code matchesEntry}, the method of its middle, a search
-     * method for each literal the middle searches for, a method that verifies the candidates of
-     * each search of a literal of two or more bytes, and a class initializer that sets the
-     * constant fields those searches read.
-     */
+    /// Emits the class of one pattern: `matchesEntry`, the method of its middle, a search
+    /// method for each literal the middle searches for, a method that verifies the candidates of
+    /// each search of a literal of two or more bytes, and a class initializer that sets the
+    /// constant fields those searches read.
     private static final class LikeEmitter
     {
         private final Kernel kernel;
@@ -372,10 +344,8 @@ final class TrinoLikeKernelGenerator
             return CompiledTrinoLike.class.getPackageName() + "." + classPrefix + "CompiledTrinoLike";
         }
 
-        /**
-         * The steps of {@code TrinoLikePattern.matches}: the length bounds, the prefix at the
-         * start, the suffix at the end, and the middle between them.
-         */
+        /// The steps of `TrinoLikePattern.matches`: the length bounds, the prefix at the
+        /// start, the suffix at the end, and the middle between them.
         private MethodDefinition defineEntry(MethodDefinition middle)
         {
             Parameter input = arg("input", Slice.class);
@@ -426,10 +396,8 @@ final class TrinoLikeKernelGenerator
             return method;
         }
 
-        /**
-         * A copy of {@code OrderedLiteralMatcher.matches} over the middle {@code [start, end)} of
-         * the backing array.
-         */
+        /// A copy of `OrderedLiteralMatcher.matches` over the middle `[start, end)` of
+        /// the backing array.
         private MethodDefinition defineOrderedLiterals(OrderedLiterals region)
         {
             List<MethodDefinition> searches = defineSearches(region.literals());
@@ -451,11 +419,9 @@ final class TrinoLikeKernelGenerator
             return method;
         }
 
-        /**
-         * A copy of {@code LiteralGapMatcher.matches} over the middle {@code [start, end)} of the
-         * backing array: each candidate of the first literal, then each gap and literal after it,
-         * retrying from the next candidate when one fails.
-         */
+        /// A copy of `LiteralGapMatcher.matches` over the middle `[start, end)` of the
+        /// backing array: each candidate of the first literal, then each gap and literal after it,
+        /// retrying from the next candidate when one fails.
         private MethodDefinition defineLiteralGaps(LiteralGaps region)
         {
             List<LiteralSearchKernel> literals = region.literals();
@@ -517,18 +483,16 @@ final class TrinoLikeKernelGenerator
             return method;
         }
 
-        /**
-         * A bit-parallel shift-and automaton equivalent to {@code TrinoLikeWildcardMatcher.matches}
-         * over the middle {@code [start, end)} of the backing array. Bit {@code s} of the state
-         * words is set when the matcher can be in state {@code s}; state 0 starts, and the state
-         * after the last position accepts. Each character keeps the states that loop on any
-         * character and advances each state whose position matches the character by one bit,
-         * carrying between words. A position matches its code point, and a {@code _} position
-         * matches any character; a malformed character has no code point, so it matches only
-         * {@code _} positions. The match fails once no state remains, succeeds at the first
-         * accepting character unless the middle must end at the accepting state, and otherwise
-         * succeeds when the middle ends in it.
-         */
+        /// A bit-parallel shift-and automaton equivalent to `TrinoLikeWildcardMatcher.matches`
+        /// over the middle `[start, end)` of the backing array. Bit `s` of the state
+        /// words is set when the matcher can be in state `s`; state 0 starts, and the state
+        /// after the last position accepts. Each character keeps the states that loop on any
+        /// character and advances each state whose position matches the character by one bit,
+        /// carrying between words. A position matches its code point, and a `_` position
+        /// matches any character; a malformed character has no code point, so it matches only
+        /// `_` positions. The match fails once no state remains, succeeds at the first
+        /// accepting character unless the middle must end at the accepting state, and otherwise
+        /// succeeds when the middle ends in it.
         private MethodDefinition defineWildcard(Wildcard region)
         {
             int[] positions = region.positions();
@@ -682,14 +646,12 @@ final class TrinoLikeKernelGenerator
             return method;
         }
 
-        /**
-         * Defines a search method for each of {@code literals}, numbered in order: a copy of
-         * {@code LiteralSearchKernel.findSingleByte} for a one-byte literal, and for a literal of
-         * two or more bytes, a copy of {@code LiteralSearchKernel.skipToContainsCandidate} with a
-         * method that copies {@code verifyContainsCandidates} to verify its candidates. A search
-         * takes the backing array and the absolute range to search, and returns the absolute
-         * position of the first occurrence or {@code -1}.
-         */
+        /// Defines a search method for each of `literals`, numbered in order: a copy of
+        /// `LiteralSearchKernel.findSingleByte` for a one-byte literal, and for a literal of
+        /// two or more bytes, a copy of `LiteralSearchKernel.skipToContainsCandidate` with a
+        /// method that copies `verifyContainsCandidates` to verify its candidates. A search
+        /// takes the backing array and the absolute range to search, and returns the absolute
+        /// position of the first occurrence or `-1`.
         private List<MethodDefinition> defineSearches(List<LiteralSearchKernel> literals)
         {
             List<MethodDefinition> searches = new ArrayList<>();
@@ -720,9 +682,7 @@ final class TrinoLikeKernelGenerator
             return searches;
         }
 
-        /**
-         * A copy of {@code LiteralSearchKernel.findSingleByte}, two words at a time.
-         */
+        /// A copy of `LiteralSearchKernel.findSingleByte`, two words at a time.
         private static void emitFindSingleByte(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte target)
         {
             long broadcast = broadcast(target);
@@ -767,14 +727,12 @@ final class TrinoLikeKernelGenerator
             body.jump(tail);
         }
 
-        /**
-         * A copy of {@code LiteralSearchKernel.verifyContainsCandidates}: possible candidates
-         * selected by the first-and-last-byte masks, verified in order, with the same KMP handoff
-         * rule. Verification begins at {@code verifyStart}, where the word scan found the first
-         * candidate, but the words and the KMP handoff count from {@code start}, because the bytes
-         * skipped count as covered. The word loop reads LOW_BITS and the literal's broadcasts as the
-         * scan does.
-         */
+        /// A copy of `LiteralSearchKernel.verifyContainsCandidates`: possible candidates
+        /// selected by the first-and-last-byte masks, verified in order, with the same KMP handoff
+        /// rule. Verification begins at `verifyStart`, where the word scan found the first
+        /// candidate, but the words and the KMP handoff count from `start`, because the bytes
+        /// skipped count as covered. The word loop reads LOW_BITS and the literal's broadcasts as the
+        /// scan does.
         private void emitVerifyCandidates(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter verifyStart, Parameter end, byte[] literal, int[] prefixShifts)
         {
             int length = literal.length;
@@ -830,14 +788,12 @@ final class TrinoLikeKernelGenerator
             body.jump(tailCandidate);
         }
 
-        /**
-         * A copy of {@code LiteralSearchKernel.skipToContainsCandidate}, the word scan of a
-         * search: skips to the first word, or tail position, holding a possible candidate, and
-         * returns {@code verifyCandidates} from there. The scan makes no call until it finds a
-         * possible candidate and has no inner loop, so C2 keeps it innermost and unrolls it. It
-         * reads LOW_BITS from {@link #lowBitsField}, and the literal's broadcasts as
-         * {@link #broadcastOperand} provides them.
-         */
+        /// A copy of `LiteralSearchKernel.skipToContainsCandidate`, the word scan of a
+        /// search: skips to the first word, or tail position, holding a possible candidate, and
+        /// returns `verifyCandidates` from there. The scan makes no call until it finds a
+        /// possible candidate and has no inner loop, so C2 keeps it innermost and unrolls it. It
+        /// reads LOW_BITS from [#lowBitsField], and the literal's broadcasts as
+        /// [#broadcastOperand] provides them.
         private void emitSkipToCandidate(CodeBlock.Builder body, Parameter bytes, Parameter start, Parameter end, byte[] literal, MethodDefinition verifyCandidates)
         {
             int backOffset = literal.length - 1;
@@ -881,22 +837,18 @@ final class TrinoLikeKernelGenerator
             body.jump(tailCandidate);
         }
 
-        /**
-         * Returns the static field holding LOW_BITS, declaring it on first use. On aarch64 C2
-         * cannot encode -LOW_BITS as an immediate, and rebuilt the constant with four instructions
-         * every word; read from the field, it stays in a register.
-         */
+        /// Returns the static field holding LOW_BITS, declaring it on first use. On aarch64 C2
+        /// cannot encode -LOW_BITS as an immediate, and rebuilt the constant with four instructions
+        /// every word; read from the field, it stays in a register.
         private FieldDefinition lowBitsField()
         {
             return constantField("lowBits", LOW_BITS);
         }
 
-        /**
-         * Returns {@code value} in every byte, for a first-and-last-byte search to compare words
-         * with. On aarch64 the search reads it once from a static field into a local named
-         * {@code name}, as it reads LOW_BITS; elsewhere it is a constant. REGULATOR_DECISIONS.md
-         * records the measurements behind this platform trade.
-         */
+        /// Returns `value` in every byte, for a first-and-last-byte search to compare words
+        /// with. On aarch64 the search reads it once from a static field into a local named
+        /// `name`, as it reads LOW_BITS; elsewhere it is a constant. REGULATOR_DECISIONS.md
+        /// records the measurements behind this platform trade.
         private BytecodeExpression broadcastOperand(CodeBlock.Builder body, String name, byte value)
         {
             if (!aarch64) {
@@ -905,18 +857,14 @@ final class TrinoLikeKernelGenerator
             return body.declare(name, getStatic(broadcastField(value)));
         }
 
-        /**
-         * Returns the static field holding {@code value} in every byte, declaring it on first use.
-         */
+        /// Returns the static field holding `value` in every byte, declaring it on first use.
         private FieldDefinition broadcastField(byte value)
         {
             return constantField("broadcast" + HexFormat.of().toHexDigits(value), broadcast(value));
         }
 
-        /**
-         * Returns the static field named {@code name}, declaring it on first use. The field is not
-         * final, so C2 reads it rather than folding it; the class initializer sets it.
-         */
+        /// Returns the static field named `name`, declaring it on first use. The field is not
+        /// final, so C2 reads it rather than folding it; the class initializer sets it.
         private FieldDefinition constantField(String name, long value)
         {
             ConstantField constant = constantFields.computeIfAbsent(name, _ -> new ConstantField(
@@ -927,11 +875,9 @@ final class TrinoLikeKernelGenerator
             return constant.field();
         }
 
-        /**
-         * Defines the method that verifies the candidates of a search, numbered as its search,
-         * which takes the backing array, the start of the search, the position to verify from,
-         * and the end of the search.
-         */
+        /// Defines the method that verifies the candidates of a search, numbered as its search,
+        /// which takes the backing array, the start of the search, the position to verify from,
+        /// and the end of the search.
         private MethodDefinition defineVerifyCandidates(int index, byte[] literal, int[] prefixShifts)
         {
             Parameter bytes = arg("bytes", byte[].class);
@@ -944,11 +890,9 @@ final class TrinoLikeKernelGenerator
             return method;
         }
 
-        /**
-         * Returns {@code candidate} when the whole literal occurs there. Otherwise adds the matched
-         * bytes and the mismatch to {@code comparisonEnd} and, once that passes the candidate,
-         * returns the KMP search from the next position.
-         */
+        /// Returns `candidate` when the whole literal occurs there. Otherwise adds the matched
+        /// bytes and the mismatch to `comparisonEnd` and, once that passes the candidate,
+        /// returns the KMP search from the next position.
         private void emitVerifyCandidate(
                 CodeBlock.Builder body,
                 Parameter bytes,
@@ -1007,10 +951,8 @@ final class TrinoLikeKernelGenerator
         private record ConstantField(FieldDefinition field, long value) {}
     }
 
-    /**
-     * Returns true when {@code literal} does not occur at {@code position}, which leaves room for
-     * it, with the comparisons of {@code LiteralMatchKernel.ShortLiteral} for a short literal.
-     */
+    /// Returns true when `literal` does not occur at `position`, which leaves room for
+    /// it, with the comparisons of `LiteralMatchKernel.ShortLiteral` for a short literal.
     private static BytecodeExpression literalDiffers(BytecodeExpression bytes, Variable position, byte[] literal)
     {
         int length = literal.length;
@@ -1061,10 +1003,8 @@ final class TrinoLikeKernelGenerator
         return TrinoLikeKernelSupport.readLong(literal, offset);
     }
 
-    /**
-     * Steps {@code position} over one character of the width {@code LiteralGapMatcher} reads with
-     * {@code Utf8.characterWidth}, stepping an ASCII byte inline rather than by that call.
-     */
+    /// Steps `position` over one character of the width `LiteralGapMatcher` reads with
+    /// `Utf8.characterWidth`, stepping an ASCII byte inline rather than by that call.
     private static IfStatement stepCharacter(BytecodeExpression bytes, Variable position, BytecodeExpression end)
     {
         return IfStatement.builder()
@@ -1084,26 +1024,22 @@ final class TrinoLikeKernelGenerator
         return (value & 0xFFL) * LOW_BITS;
     }
 
-    /**
-     * The high bit of each zero byte of {@code value}, as {@code LiteralSearchKernel.zeroByteMask}
-     * computes it, including the bits it sets above the lowest zero byte.
-     * <p>
-     * Emitted as {@code (value - LOW_BITS) & ~(value | ~HIGH_BITS)}, which has the same bits. The
-     * scans XOR a constant into {@code value}, and C2 folds {@code ~(input ^ constant)} into a
-     * second XOR, which costs an extra instruction per word and loses the and-not; this form
-     * keeps it.
-     */
+    /// The high bit of each zero byte of `value`, as `LiteralSearchKernel.zeroByteMask`
+    /// computes it, including the bits it sets above the lowest zero byte.
+    ///
+    /// Emitted as `(value - LOW_BITS) & ~(value | ~HIGH_BITS)`, which has the same bits. The
+    /// scans XOR a constant into `value`, and C2 folds `~(input ^ constant)` into a
+    /// second XOR, which costs an extra instruction per word and loses the and-not; this form
+    /// keeps it.
     private static BytecodeExpression zeroByteMask(Variable value)
     {
         return value.subtract(constantLong(LOW_BITS))
                 .bitwiseAnd(value.bitwiseOr(constantLong(~HIGH_BITS)).bitwiseXor(constantLong(-1)));
     }
 
-    /**
-     * {@code zeroByteMask(first) & zeroByteMask(second)}, the bytes that are zero in both,
-     * including the bits each sets above its lowest zero byte, in one expression with a single
-     * and-not, for the same reason as {@link #zeroByteMask}. {@code lowBits} holds LOW_BITS.
-     */
+    /// `zeroByteMask(first) & zeroByteMask(second)`, the bytes that are zero in both,
+    /// including the bits each sets above its lowest zero byte, in one expression with a single
+    /// and-not, for the same reason as [#zeroByteMask]. `lowBits` holds LOW_BITS.
     private static BytecodeExpression bothZeroByteMask(Variable first, Variable second, Variable lowBits)
     {
         return first.subtract(lowBits)
@@ -1112,9 +1048,7 @@ final class TrinoLikeKernelGenerator
                 .bitwiseAnd(constantLong(HIGH_BITS));
     }
 
-    /**
-     * The byte index of the lowest set bit of a little-endian mask.
-     */
+    /// The byte index of the lowest set bit of a little-endian mask.
     private static BytecodeExpression firstByte(Variable mask)
     {
         return invokeStatic(Long.class, "numberOfTrailingZeros", int.class, mask).shiftRightUnsigned(constantInt(3));

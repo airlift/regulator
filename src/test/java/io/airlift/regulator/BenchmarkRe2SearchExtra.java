@@ -39,10 +39,8 @@ import static io.airlift.regulator.Re2BenchmarkRunner.compileProg;
 import static io.airlift.regulator.Re2BenchmarkRunner.compileRe2;
 import static io.airlift.regulator.Re2BenchmarkRunner.randomText;
 
-/**
- * Additional search benchmarks from C++ upstream.
- * Includes case-insensitive, Unicode fanout, anchored matches, and submatch extraction.
- */
+/// Additional search benchmarks from C++ upstream.
+/// Includes case-insensitive, Unicode fanout, anchored matches, and submatch extraction.
 @SuppressWarnings("MethodMayBeStatic")
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @BenchmarkMode(Mode.AverageTime)

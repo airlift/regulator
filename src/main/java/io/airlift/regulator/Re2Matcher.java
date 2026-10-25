@@ -25,12 +25,10 @@ import static io.airlift.regulator.Re2.Anchor.ANCHOR_START;
 import static io.airlift.regulator.Re2.Anchor.UNANCHORED;
 import static java.util.Objects.requireNonNull;
 
-/**
- * A reusable matcher for one compiled pattern.
- * <p>
- * The matcher owns one capture buffer and reuses it across operations. It is mutable and not
- * thread-safe. Group values are zero-copy views of the current input.
- */
+/// A reusable matcher for one compiled pattern.
+///
+/// The matcher owns one capture buffer and reuses it across operations. It is mutable and not
+/// thread-safe. Group values are zero-copy views of the current input.
 public final class Re2Matcher
         implements Re2.MatchWorkspaces
 {
@@ -124,19 +122,15 @@ public final class Re2Matcher
         return Map.copyOf(retainedGroups);
     }
 
-    /**
-     * Resets this matcher to the complete logical input Slice.
-     */
+    /// Resets this matcher to the complete logical input Slice.
     public Re2Matcher reset(Slice input)
     {
         requireNonNull(input, "input is null");
         return reset(input, 0, input.length());
     }
 
-    /**
-     * Resets this matcher to a logical input region without constructing a Slice view. Match and
-     * group offsets remain relative to the logical input Slice.
-     */
+    /// Resets this matcher to a logical input region without constructing a Slice view. Match and
+    /// group offsets remain relative to the logical input Slice.
     @SuppressFBWarnings(value = "EI_EXPOSE_REP2", justification = "The matcher intentionally retains the caller's Slice for zero-copy matching")
     public Re2Matcher reset(Slice input, int start, int end)
     {
@@ -163,9 +157,7 @@ public final class Re2Matcher
         return this;
     }
 
-    /**
-     * Finds the next non-overlapping match in the current region.
-     */
+    /// Finds the next non-overlapping match in the current region.
     public boolean find()
     {
         // Kept small enough for C2 to inline; each route stays out of line.
@@ -178,14 +170,12 @@ public final class Re2Matcher
         return findGeneral();
     }
 
-    /**
-     * The start-anchored plan matches only at the region start, so only the first search of the
-     * region can match. A later search fails as {@link #findGeneral} does. The plan reads the
-     * region as its whole input, but a Rust search still sees the rest of the input, so a Rust
-     * search of a partial region takes {@link #findRust}, which reaches the plan only when the
-     * region ends at the input end. A region whose Java $ reads a CR before it takes
-     * {@link #findGeneral}.
-     */
+    /// The start-anchored plan matches only at the region start, so only the first search of the
+    /// region can match. A later search fails as [#findGeneral] does. The plan reads the
+    /// region as its whole input, but a Rust search still sees the rest of the input, so a Rust
+    /// search of a partial region takes [#findRust], which reaches the plan only when the
+    /// region ends at the input end. A region whose Java $ reads a CR before it takes
+    /// [#findGeneral].
     private boolean findWithStartAnchoredScanPlan()
     {
         if (rustSearch && isPartialRegion()) {
@@ -203,10 +193,8 @@ public final class Re2Matcher
         return false;
     }
 
-    /**
-     * The Rust crate skips an empty match that ends where the previous match ended or, except in
-     * its bytes API, that splits a UTF-8 character.
-     */
+    /// The Rust crate skips an empty match that ends where the previous match ended or, except in
+    /// its bytes API, that splits a UTF-8 character.
     private boolean findRust()
     {
         while (findGeneral()) {
@@ -441,11 +429,9 @@ public final class Re2Matcher
         }
     }
 
-    /**
-     * Resets this matcher to the complete logical input Slice, as {@link #reset(Slice)} does, and
-     * finds the next match starting at the specified byte offset in it, as the JDK's
-     * {@code Matcher.find(int)} does. The offset may be anywhere in the input, its end included.
-     */
+    /// Resets this matcher to the complete logical input Slice, as [#reset(Slice)] does, and
+    /// finds the next match starting at the specified byte offset in it, as the JDK's
+    /// `Matcher.find(int)` does. The offset may be anywhere in the input, its end included.
     public boolean find(int start)
     {
         if (start < 0 || start > input.length()) {
@@ -466,17 +452,13 @@ public final class Re2Matcher
         return find();
     }
 
-    /**
-     * Returns whether the pattern matches the complete current region.
-     */
+    /// Returns whether the pattern matches the complete current region.
     public boolean matches()
     {
         return match(ANCHOR_BOTH);
     }
 
-    /**
-     * Returns whether the pattern matches at the beginning of the current region.
-     */
+    /// Returns whether the pattern matches at the beginning of the current region.
     public boolean lookingAt()
     {
         return match(ANCHOR_START);
@@ -522,19 +504,15 @@ public final class Re2Matcher
         return true;
     }
 
-    /**
-     * Returns the retained capturing-group count, excluding group zero.
-     */
+    /// Returns the retained capturing-group count, excluding group zero.
     public int groupCount()
     {
         return (groups.length / 2) - 1;
     }
 
-    /**
-     * Returns whether a retained group participated in the current match.
-     *
-     * @throws IllegalStateException if no successful match is current
-     */
+    /// Returns whether a retained group participated in the current match.
+    ///
+    /// @throws IllegalStateException if no successful match is current
     public boolean matched(int group)
     {
         checkMatch();
@@ -542,19 +520,15 @@ public final class Re2Matcher
         return groups[group * 2] >= 0;
     }
 
-    /**
-     * Returns the start byte offset of group zero in the logical input.
-     */
+    /// Returns the start byte offset of group zero in the logical input.
     public int start()
     {
         return start(0);
     }
 
-    /**
-     * Returns a group's start byte offset, or {@code -1} when it did not participate.
-     *
-     * @throws IllegalStateException if no successful match is current
-     */
+    /// Returns a group's start byte offset, or `-1` when it did not participate.
+    ///
+    /// @throws IllegalStateException if no successful match is current
     public int start(int group)
     {
         checkMatch();
@@ -563,19 +537,15 @@ public final class Re2Matcher
         return start < 0 ? -1 : regionStart + start;
     }
 
-    /**
-     * Returns the end byte offset of group zero in the logical input.
-     */
+    /// Returns the end byte offset of group zero in the logical input.
     public int end()
     {
         return end(0);
     }
 
-    /**
-     * Returns a group's end byte offset, or {@code -1} when it did not participate.
-     *
-     * @throws IllegalStateException if no successful match is current
-     */
+    /// Returns a group's end byte offset, or `-1` when it did not participate.
+    ///
+    /// @throws IllegalStateException if no successful match is current
     public int end(int group)
     {
         checkMatch();
@@ -584,17 +554,13 @@ public final class Re2Matcher
         return end < 0 ? -1 : regionStart + end;
     }
 
-    /**
-     * Returns a zero-copy view of group zero.
-     */
+    /// Returns a zero-copy view of group zero.
     public Slice group()
     {
         return group(0);
     }
 
-    /**
-     * Returns a zero-copy view of a group, or {@code null} when the group did not participate.
-     */
+    /// Returns a zero-copy view of a group, or `null` when the group did not participate.
     public Slice group(int group)
     {
         int start = start(group);
@@ -604,12 +570,10 @@ public final class Re2Matcher
         return input.slice(start, end(group) - start);
     }
 
-    /**
-     * Returns a zero-copy named-group view, or {@code null} when the group did not participate.
-     *
-     * @throws IllegalArgumentException if the name is unknown
-     * @throws IllegalStateException if no successful match is current
-     */
+    /// Returns a zero-copy named-group view, or `null` when the group did not participate.
+    ///
+    /// @throws IllegalArgumentException if the name is unknown
+    /// @throws IllegalStateException if no successful match is current
     public Slice group(String groupName)
     {
         requireNonNull(groupName, "groupName is null");
@@ -620,12 +584,10 @@ public final class Re2Matcher
         return group(group);
     }
 
-    /**
-     * Returns an immutable snapshot of current boundaries and metadata. The snapshot retains the
-     * input storage, whose mutable contents remain visible through its zero-copy group views.
-     *
-     * @throws IllegalStateException if no successful match is current
-     */
+    /// Returns an immutable snapshot of current boundaries and metadata. The snapshot retains the
+    /// input storage, whose mutable contents remain visible through its zero-copy group views.
+    ///
+    /// @throws IllegalStateException if no successful match is current
     public MatchResult toMatchResult()
     {
         checkMatch();

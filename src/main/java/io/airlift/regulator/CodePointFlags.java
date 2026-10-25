@@ -22,14 +22,12 @@ import java.util.Map;
 import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Up to eight flags for every code point from 0 through {@code RUNEMAX}, held in a two-stage table
- * of flag bytes. Each block of 256 code points has an offset into the flags, and blocks with the
- * same flags are stored once, so the long runs of unassigned, private-use, and ideographic code
- * points share a few blocks. The Latin-1 block is stored first, at offset 0, so {@link #get}
- * reads a Latin-1 code point without the first stage. The arrays sit in final fields so that a
- * plain read of a reference to the table publishes their contents.
- */
+/// Up to eight flags for every code point from 0 through `RUNEMAX`, held in a two-stage table
+/// of flag bytes. Each block of 256 code points has an offset into the flags, and blocks with the
+/// same flags are stored once, so the long runs of unassigned, private-use, and ideographic code
+/// points share a few blocks. The Latin-1 block is stored first, at offset 0, so [#get]
+/// reads a Latin-1 code point without the first stage. The arrays sit in final fields so that a
+/// plain read of a reference to the table publishes their contents.
 final class CodePointFlags
 {
     private static final int BLOCK_SHIFT = 8;
@@ -40,9 +38,7 @@ final class CodePointFlags
     private final int[] blockOffsets;
     private final byte[] flags;
 
-    /**
-     * Gives each code point flag {@code 1 << index} for each class at {@code index} that holds it.
-     */
+    /// Gives each code point flag `1 << index` for each class at `index` that holds it.
     CodePointFlags(List<CharClass> classes)
     {
         requireNonNull(classes, "classes is null");
@@ -94,9 +90,7 @@ final class CodePointFlags
         this.flags = Arrays.copyOf(flags, flagsLength);
     }
 
-    /**
-     * Returns the flags of {@code codePoint}, which must be from 0 through {@code RUNEMAX}.
-     */
+    /// Returns the flags of `codePoint`, which must be from 0 through `RUNEMAX`.
     int get(int codePoint)
     {
         if (codePoint < BLOCK_SIZE) {

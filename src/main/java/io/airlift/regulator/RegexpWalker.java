@@ -22,14 +22,10 @@ import static java.util.Objects.requireNonNull;
 
 abstract class RegexpWalker<T>
 {
-    /**
-     * Called before children are visited. May signal {@code stop=true} to bypass recursion.
-     */
+    /// Called before children are visited. May signal `stop=true` to bypass recursion.
     protected abstract PreVisitResult<T> preVisit(Regexp regexp, T parentValue);
 
-    /**
-     * Called after children are visited (or immediately if {@code stop=true}).
-     */
+    /// Called after children are visited (or immediately if `stop=true`).
     protected abstract T postVisit(Regexp regexp, T parentValue, T preValue, List<T> childValues);
 
     protected T copy(T value)
@@ -37,16 +33,12 @@ abstract class RegexpWalker<T>
         return value;
     }
 
-    /**
-     * Called when max visit count is exceeded in {@link #walkExponential}.
-     */
+    /// Called when max visit count is exceeded in [#walkExponential].
     protected abstract T shortVisit(Regexp regexp, T parentValue);
 
-    /**
-     * Visits every node once per reference to it, with no visit limit. Parse output is a tree, and
-     * simplification adds references only by expanding counted repetitions, which the parsers'
-     * repetition limits keep within a constant factor of the pattern, so the visits stay linear.
-     */
+    /// Visits every node once per reference to it, with no visit limit. Parse output is a tree, and
+    /// simplification adds references only by expanding counted repetitions, which the parsers'
+    /// repetition limits keep within a constant factor of the pattern, so the visits stay linear.
     final T walk(Regexp regexp, T initialValue)
     {
         return walkInternal(regexp, initialValue, true, 0);

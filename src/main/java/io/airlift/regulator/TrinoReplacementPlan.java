@@ -124,9 +124,7 @@ final class TrinoReplacementPlan
         return maximumReferencedGroup == MALFORMED_REPLACEMENT ? 0 : maximumReferencedGroup;
     }
 
-    /**
-     * Returns the highest capturing group the matcher must retain for this replacement.
-     */
+    /// Returns the highest capturing group the matcher must retain for this replacement.
     int maximumCapturingGroup()
     {
         return maximumCapturingGroup;
@@ -172,12 +170,10 @@ final class TrinoReplacementPlan
         addReplacementLength(recordOffset, replacementLength);
     }
 
-    /**
-     * Records the match whose offsets a scan-plan search wrote to {@code groups}, as
-     * {@link #addMatch(Re2Matcher)} records a matcher's current match. Groups that did not
-     * participate hold {@code -1}.
-     * A copy of {@code addMatch(Re2Matcher)}.
-     */
+    /// Records the match whose offsets a scan-plan search wrote to `groups`, as
+    /// [#addMatch(Re2Matcher)] records a matcher's current match. Groups that did not
+    /// participate hold `-1`.
+    /// A copy of `addMatch(Re2Matcher)`.
     void addMatch(int[] groups)
     {
         ParsedReplacement template = this.template;
@@ -226,11 +222,9 @@ final class TrinoReplacementPlan
         writeMatch(template, start, end);
     }
 
-    /**
-     * Returns a replacer for this plan's replacement, which must not reference capturing groups.
-     * The replacer takes over from this plan: a route that finds its own match bounds uses the
-     * replacer alone, so none of this plan's match-record state is live across its search loop.
-     */
+    /// Returns a replacer for this plan's replacement, which must not reference capturing groups.
+    /// The replacer takes over from this plan: a route that finds its own match bounds uses the
+    /// replacer alone, so none of this plan's match-record state is live across its search loop.
     GroupFreeReplacer groupFreeReplacer()
     {
         if (maximumCapturingGroup != 0) {
@@ -245,11 +239,9 @@ final class TrinoReplacementPlan
         return new IllegalStateException("capturing groups are required");
     }
 
-    /**
-     * Writes a match of a template without capturing-group references straight to the output.
-     * Such a template needs only the match bounds, so recording the match and writing it in a
-     * second pass would only add work per match.
-     */
+    /// Writes a match of a template without capturing-group references straight to the output.
+    /// Such a template needs only the match bounds, so recording the match and writing it in a
+    /// second pass would only add work per match.
     private void writeMatch(ParsedReplacement template, int start, int end)
     {
         if (start < previousEnd || end < start || end > source.length()) {
@@ -365,10 +357,8 @@ final class TrinoReplacementPlan
         return recordOffset;
     }
 
-    /**
-     * Allocates the records, grows them, or flushes them when full, and returns the offset for
-     * the next record.
-     */
+    /// Allocates the records, grows them, or flushes them when full, and returns the offset for
+    /// the next record.
     private int reserveRecord(int recordOffset)
     {
         if (matches == null) {
@@ -474,11 +464,9 @@ final class TrinoReplacementPlan
         return outputPosition + length;
     }
 
-    /**
-     * Returns the capacity for a full match-record array, growing geometrically without exceeding
-     * {@code capacityLimit}. Uses long arithmetic so capacities near the int limit clamp rather than
-     * overflow.
-     */
+    /// Returns the capacity for a full match-record array, growing geometrically without exceeding
+    /// `capacityLimit`. Uses long arithmetic so capacities near the int limit clamp rather than
+    /// overflow.
     static int matchRecordCapacity(int currentCapacity, int requiredCapacity, int capacityLimit)
     {
         if (currentCapacity < 0 || requiredCapacity <= currentCapacity || requiredCapacity > capacityLimit) {
@@ -488,12 +476,10 @@ final class TrinoReplacementPlan
         return (int) Math.max(requiredCapacity, Math.min(grownCapacity, capacityLimit));
     }
 
-    /**
-     * Returns the highest capturing group a replacement references, or {@link #MALFORMED_REPLACEMENT}
-     * if {@link #parse} rejects it without resolving a name. This mirrors the parser's grammar,
-     * including greedy multi-digit group numbers, but allocates nothing. A named reference counts
-     * as every capturing group because resolving the name would allocate.
-     */
+    /// Returns the highest capturing group a replacement references, or [#MALFORMED_REPLACEMENT]
+    /// if [#parse] rejects it without resolving a name. This mirrors the parser's grammar,
+    /// including greedy multi-digit group numbers, but allocates nothing. A named reference counts
+    /// as every capturing group because resolving the name would allocate.
     private static int maximumReferencedGroup(Slice replacement, int capturingGroupCount)
     {
         int maximum = 0;
@@ -550,10 +536,8 @@ final class TrinoReplacementPlan
         return maximum;
     }
 
-    /**
-     * Returns how many referenced-group entries parsing the replacement compares to resolve its
-     * group references.
-     */
+    /// Returns how many referenced-group entries parsing the replacement compares to resolve its
+    /// group references.
     static int groupComparisonsForDiagnostics(Slice replacement, int capturingGroupCount)
     {
         int[] groupComparisons = new int[1];
@@ -735,16 +719,14 @@ final class TrinoReplacementPlan
         return -1;
     }
 
-    /**
-     * Writes each match of a replacement without capturing-group references straight to the
-     * output. It produces the same output and allocation as the plan's own direct writes.
-     * <p>
-     * A route's search loop inlines {@link #addMatch} and, when this replacer does not escape,
-     * keeps each of its fields in a register or stack slot for the whole loop. Calls the search
-     * makes out of line preserve no registers, so every value live across the loop is spilled
-     * and reloaded around them. This replacer therefore holds only the output state and what a
-     * first-match parse needs, and its out-of-line helpers are static so that it never escapes.
-     */
+    /// Writes each match of a replacement without capturing-group references straight to the
+    /// output. It produces the same output and allocation as the plan's own direct writes.
+    ///
+    /// A route's search loop inlines [#addMatch] and, when this replacer does not escape,
+    /// keeps each of its fields in a register or stack slot for the whole loop. Calls the search
+    /// makes out of line preserve no registers, so every value live across the loop is spilled
+    /// and reloaded around them. This replacer therefore holds only the output state and what a
+    /// first-match parse needs, and its out-of-line helpers are static so that it never escapes.
     static final class GroupFreeReplacer
     {
         private final Slice source;
@@ -820,11 +802,9 @@ final class TrinoReplacementPlan
         return template;
     }
 
-    /**
-     * Returns an output buffer holding {@code output}'s written bytes with room for
-     * {@code requiredLength}, sized as {@link #growOutput} sizes the plan's direct output.
-     * {@code resultLength} is the result length if no further match changes it.
-     */
+    /// Returns an output buffer holding `output`'s written bytes with room for
+    /// `requiredLength`, sized as [#growOutput] sizes the plan's direct output.
+    /// `resultLength` is the result length if no further match changes it.
     private static byte[] growGroupFreeOutput(byte[] output, long requiredLength, long resultLength)
     {
         int required = toIntExact(requiredLength);
@@ -837,10 +817,8 @@ final class TrinoReplacementPlan
         return Arrays.copyOf(output, (int) Math.max(required, Math.min(grownCapacity, MAXIMUM_ARRAY_LENGTH)));
     }
 
-    /**
-     * Writes the replacement for the match {@code [start, end)} at {@code position} and returns
-     * the position after it. The template must not reference capturing groups.
-     */
+    /// Writes the replacement for the match `[start, end)` at `position` and returns
+    /// the position after it. The template must not reference capturing groups.
     private static int writeGroupFreeTemplate(ParsedReplacement template, Slice source, int start, int end, byte[] output, int position)
     {
         byte[] literalBytes = template.literalBytes();
@@ -868,10 +846,8 @@ final class TrinoReplacementPlan
         return outputPosition + length;
     }
 
-    /**
-     * A well-formed replacement and its parsed template, retained by one TrinoRegexp. It is
-     * immutable, so callers racing to publish different entries only cost a later reparse.
-     */
+    /// A well-formed replacement and its parsed template, retained by one TrinoRegexp. It is
+    /// immutable, so callers racing to publish different entries only cost a later reparse.
     static final class CachedTemplate
     {
         private final byte[] replacement;

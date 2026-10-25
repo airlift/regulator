@@ -24,12 +24,10 @@ final class BooleanRegexpLowering
 {
     private BooleanRegexpLowering() {}
 
-    /**
-     * Lowers a terminal final-LF assertion to an equivalent consuming expression for boolean matching.
-     * The returned expression generally must not be used when match boundaries or captures are
-     * observable. A caller may recover group-zero boundaries when it can prove that the semantic
-     * expression is nonempty and cannot consume LF.
-     */
+    /// Lowers a terminal final-LF assertion to an equivalent consuming expression for boolean matching.
+    /// The returned expression generally must not be used when match boundaries or captures are
+    /// observable. A caller may recover group-zero boundaries when it can prove that the semantic
+    /// expression is nonempty and cannot consume LF.
     static Regexp lowerTerminalFinalLineEnds(Regexp regexp)
     {
         requireNonNull(regexp, "regexp is null");
