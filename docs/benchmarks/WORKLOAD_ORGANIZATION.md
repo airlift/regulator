@@ -6,24 +6,25 @@ ordinary application work separate from stress tests and engine diagnostics.
 The report uses language as its top-level navigation, as defined in
 [`LANGUAGE_COMPARISON_PLAN.md`](LANGUAGE_COMPARISON_PLAN.md). Each regex page
 compares Regulator with the corresponding library: native RE2, JDK `Pattern`,
-or Trino's Joni. LIKE has its own page against Trino `LikeMatcher`. The workload
+or Trino's Joni. LIKE has its own page against Trino SQL LIKE. The workload
 groups below have separate weighting and summary rules within each language.
 
 ## Questions answered separately
 
-The benchmark data has five workload populations. They are never combined
+The benchmark data has six workload populations. They are never combined
 into a row-count-weighted overall score.
 
 | Population | Purpose | Comparators | Headline use |
 |---|---|---|---|
 | Application-shaped scalar operations | Compiled patterns applied to changing, short and medium inputs | Native RE2, JDK Pattern, or Joni for the selected language; Joni for additional Trino operations | Primary application view |
+| Specialized engine and compiler | Representative patterns on the regular engine, the specialized engine, and compiled, as warmed steady-state operations; Trino regex and LIKE today | The page comparator: Joni for Trino regex, Trino SQL LIKE for LIKE | Separate report section; excluded from headlines |
 | Bulk text search | Whole files, books, source trees, dictionaries, and large logs | Native RE2, JDK Pattern, or Joni for the selected language, where supported | Separate throughput view |
 | Compilation | Cold and repeated pattern compilation | Comparator for the pattern language | Integrated lifecycle view; compile-only data in raw downloads |
 | Literal-probe distributions | One literal counted over a pinned corpus with Regulator's default and a corpus-matched byte-frequency distribution | Native RE2, JDK Pattern, or Joni for the selected regex language | Separate report section; excluded from headlines |
 | User-relevant adversarial and stress | Pathological inputs, reported failures, quadratic cases, and resource pressure that users can encounter | Applicable public APIs | Folded report section; excluded from headlines |
 
 Internal route probes, compiler experiments, synthetic scaling sweeps, memory
-censuses, and capacity checks are diagnostic evidence rather than a sixth
+censuses, and capacity checks are diagnostic evidence rather than a seventh
 publication population. Run them only when a qualification result or an
 explicit investigation requires them. Give that work its own frozen inventory,
 budget, and archive; do not make it part of every release campaign.
@@ -77,6 +78,37 @@ The additional Trino operations compare only against Joni. Native RE2 has no
 identical Slice-list, SQL-position, split, or lambda-replacement API. The shared
 everyday suite and RE2 bulk workloads provide native RE2 comparisons without
 inventing a C++ facade for Trino-specific operations.
+
+### Specialized engine and compiler
+
+Specialized-pattern workloads show what happens to representative patterns
+when Regulator's specialized engine and compiler apply. The page names three
+variants. The regular engine is Regulator with scan plans off. The specialized
+engine compiles an eligible pattern to a scan plan and interprets it; code calls
+it the interpreter. Compiled is the opt-in compiler, enabled with
+`setGenerateBytecode`, which turns that plan into bytecode generated for the
+pattern; code and benchmark names call it generated. Each workload measures one
+ordinary operation with each variant beside the page's comparator. The regular
+engine and the specialized engine make the public call; the compiled pattern is
+[const-bound](TRINO_SCAN_PLAN.md#benchmarks) the way an engine like Trino binds
+it, the best case such an engine sees. Each pattern runs in its own JVM, so no
+call site sees another pattern. LIKE has no regular-engine variant.
+
+Case `trino-specialized/<workload>` is the specialized engine for Trino regex,
+and `trino-like-specialized/<workload>` for LIKE. Appending `/generated` gives
+the compiled pattern, and `/regular-engine`, where measured, the regular
+engine.
+
+This population answers what a pattern gains from the specialized engine and
+from the opt-in compiler. It reports warmed steady-state operations only;
+compile and generation costs are not part of it. These rows carry their own
+`specialized-patterns` population and never enter a headline summary. Trino
+regex and LIKE have them today. Another language, against a comparator the
+baseline already reduces, needs no report change: it adds its catalog rows to
+`specialized-patterns.tsv`, with that comparator and case prefix, and the
+campaign code that measures them, which is a benchmark class, the branch of
+`generate-manifest.py` that writes its manifest rows, and its shard's handler in
+`run-shard.sh`.
 
 ## Bulk text search
 
@@ -148,16 +180,18 @@ places the explanation in the row details. Neither status is a numeric loss.
 Within each regex language page, report in this order:
 
 1. application-shaped scalar operations
-2. integrated single-use and multi-use pattern lifecycle
-3. Trino-specific operations where available
-4. text processing workloads
-5. literal-probe distributions
-6. folded adversarial and synthetic stress workloads
+2. specialized engine and compiler where measured
+3. integrated single-use and multi-use pattern lifecycle
+4. Trino-specific operations where available
+5. text processing workloads
+6. literal-probe distributions
+7. folded adversarial and synthetic stress workloads
 
-LIKE has its own integrated lifecycle table. Put ordinary prefix, suffix,
-exact, and contains shapes first and dense-false stress last, keeping DFA
-variants adjacent. Compile-only rows retained by the frozen publication
-inventory remain in the public download rather than a separate table.
+LIKE has its own integrated lifecycle table, preceded by the specialized engine
+and compiler where measured. Put ordinary prefix, suffix, exact, and contains
+shapes first and dense-false stress last, keeping DFA variants adjacent.
+Compile-only rows retained by the frozen publication inventory remain in the
+public download rather than a separate table.
 
 Each literal-probe row pairs the default and tuned measurements of one
 workload. It shows both ratios against the comparator and the
@@ -165,6 +199,12 @@ tuned-versus-default ratio, computed by dividing those two comparator-relative
 ratios so that differences between the hosts that measured them cancel. Its
 interval divides the far ends of the two ratio intervals, so a gain that
 neither interval clearly supports reads as no clear difference.
+
+Each specialized-pattern row pairs the variants of one pattern and operation.
+It shows each variant's time and each later variant's gain over the variant
+first in column order, computed and bounded like a literal-probe gain, then the
+last variant against the comparator. The page's measured variants, not its
+language, decide the variant columns.
 
 Display grouping follows the workload's purpose, not its timing or source
 directory. Reviewed display exceptions do not alter recorded populations or

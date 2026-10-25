@@ -216,6 +216,46 @@ class TestLanguageData(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, error):
                     validate_language_report(data)
 
+    def test_specialized_variants_require_their_specialized_engine_row_and_gains(self):
+        regex = ('/regular-engine', '', '/generated')
+        def with_variants(variants, language='trino', operations=('extract',)):
+            # Like the importer, each variant has gain warnings over every earlier variant; variants come in column order.
+            data = report_fixture()
+            measured = 'matches' if language == 'like' else 'execute'
+            for template in [row for row in data['rows'] if row['language'] == language and row['operation'] == measured]:
+                for operation in operations:
+                    for index, variant in enumerate(variants):
+                        gains = {f'baseline/url/{operation}{earlier}': [] for earlier in variants[:index]}
+                        data['rows'].append({**deepcopy(template), 'id': f'baseline/url/{operation}{variant}', 'caseId': f'specialized/url{variant}',
+                                             'operation': operation, 'model': operation, 'population': 'specialized-patterns', 'source': 'baseline',
+                                             **({'variantGainWarnings': gains} if gains else {})})
+            return data
+        validate_language_report(with_variants(regex))
+        # A second operation on one workload is its own pattern, and LIKE has no regular engine.
+        validate_language_report(with_variants(regex, operations=('extract', 'replace')))
+        validate_language_report(with_variants(('', '/generated'), language='like', operations=('matches',)))
+        with self.assertRaisesRegex(ValueError, 'missing specialized-engine partner'):
+            validate_language_report(with_variants(('/regular-engine', '/generated')))
+        mutations = {
+            'missing gains': lambda row: row.pop('variantGainWarnings'),
+            'empty gains': lambda row: row.update(variantGainWarnings={}),
+            'missing earlier variant': lambda row: row['variantGainWarnings'].pop('baseline/url/extract'),
+            'unknown earlier variant': lambda row: row['variantGainWarnings'].update({'baseline/other': []}),
+            'empty warning': lambda row: row['variantGainWarnings'].update({'baseline/url/extract': ['']}),
+            'warning text instead of a list': lambda row: row['variantGainWarnings'].update({'baseline/url/extract': 'Hosts disagree'}),
+        }
+        for name, mutation in mutations.items():
+            data = with_variants(regex)
+            for row in data['rows']:
+                if row['caseId'] == 'specialized/url/generated':
+                    mutation(row)
+            with self.subTest(mutation=name), self.assertRaisesRegex(ValueError, 'invalid specialized-pattern gain warnings'):
+                validate_language_report(data)
+        data = with_variants(regex)
+        data['rows'] += [{**row, 'id': row['id'] + '/copy'} for row in data['rows'] if row['caseId'] == 'specialized/url/generated']
+        with self.assertRaisesRegex(ValueError, 'duplicate specialized-pattern variant'):
+            validate_language_report(data)
+
     def test_paired_medians_do_not_divide_unpaired_medians(self):
         rows = [host(1, 10, 1), host(2, 20, 100), host(3, 30, 10)]
         result = reduce_hosts(rows, 10)

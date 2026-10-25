@@ -116,7 +116,8 @@ def describe(row, cases):
         elif row['operation'] != 'compile':
             details['inputDescription'] = 'One operation processes the complete corpus. Byte count includes input that an optimized matcher may skip.'
         row['workload'] = details
-    elif row['language'] == 'like':
+    elif row['caseId'].startswith('trino-like/'):
+        # Specialized LIKE rows carry their own workload; only the frozen BenchmarkTrinoLike scenarios need these tables.
         scenario = row['caseId'].split('/')[1]
         row['workload'] = {'pattern': LIKE_PATTERNS[scenario], 'inputDescription': LIKE_INPUTS[scenario]}
 

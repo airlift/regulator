@@ -1,7 +1,7 @@
 from copy import deepcopy
 import unittest
 
-from build_review_preview import compose, pair_cohort, report_workload
+from build_review_preview import LIKE_PATTERNS, compose, pair_cohort, report_workload
 
 
 def observation(engine, mode, candidate_ns, instance='host-1'):
@@ -83,6 +83,16 @@ class TestReviewPreview(unittest.TestCase):
             row = {**self.row, 'language': 'like', 'population': 'diagnostics-and-stress',
                    'family': 'Optional Trino DFA matcher', 'caseId': f'trino-like/{scenario}/optimized'}
             self.assertEqual(report_workload(row), scenario in ['ANY_ASCII', 'ANY_MULTIBYTE'])
+
+    def test_like_scenarios_get_their_patterns_and_specialized_rows_keep_theirs(self):
+        like = {**self.row, 'language': 'like', 'population': 'like', 'operation': 'matches'}
+        legacy = {**like, 'id': 'baseline/trino-like/EXACT_MATCH', 'caseId': 'trino-like/EXACT_MATCH'}
+        workload = {'pattern': '%BRASS', 'columnRows': 16384, 'inputDescription': 'Each operation scans a TPC-H column.'}
+        specialized = [{**like, 'id': f'baseline/trino-like-specialized/Q02_TYPE_BRASS{variant}', 'population': 'specialized-patterns',
+                        'caseId': f'trino-like-specialized/Q02_TYPE_BRASS{variant}', 'workload': deepcopy(workload)} for variant in ('', '/generated')]
+        rows = compose({**self.base, 'rows': [legacy, *specialized]}, [], {}, {})['rows']
+        self.assertEqual(rows[0]['workload']['pattern'], LIKE_PATTERNS['EXACT_MATCH'])
+        self.assertEqual([row['workload'] for row in rows[1:]], [workload, workload])
 
 
 if __name__ == '__main__':

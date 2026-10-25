@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useState } from "react";
+import { Fragment, StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { descriptions, performance as performanceNotes } from "./workload-notes.json";
 
@@ -53,7 +53,9 @@ export type Row = {
   hardware?: { instanceType: string; allocatedVcpus: number };
   measurementWarnings?: string[];
   workContract?: string;
-  workload?: { pattern?: string; description?: string; performanceContext?: string; inputDescription?: string; flags?: string[]; inputs?: Array<{ text: string; bytes: number }> };
+  workload?: { pattern?: string; description?: string; performanceContext?: string; inputDescription?: string; flags?: string[]; inputs?: Array<{ text: string; bytes: number }>; columnRows?: number };
+  // Warnings for this specialized-pattern variant's gain over each earlier variant, keyed by that variant's row id.
+  variantGainWarnings?: Record<string, string[]>;
   patternSummary?: { bytes: number; sourceUrl?: string; fullPatternAvailable: boolean };
 };
 export type ReportData = {
@@ -288,7 +290,7 @@ export function displayedMeasurements(rows: Row[]): Row[] {
   const eligible = rows.filter(row => workloadSection(row) !== "diagnostic-only" && !comparisonIssue(row));
   const displayed = eligible.filter(row => (row.population === "ordinary-scalar" && row.operation.startsWith("reused"))
     || row.population === "trino-operations"
-    || ["bulk-text", "literal-probe", "diagnostics-and-stress", "synthetic-stress"].includes(workloadSection(row)));
+    || ["specialized-patterns", "bulk-text", "literal-probe", "diagnostics-and-stress", "synthetic-stress"].includes(workloadSection(row)));
   for (const pair of lifecycleRows(eligible)) {
     if (pair.single) displayed.push(pair.single);
     displayed.push(pair.reused);
@@ -297,7 +299,9 @@ export function displayedMeasurements(rows: Row[]): Row[] {
 }
 
 export function qualityDistribution(rows: Row[], side: TimingSide) {
-  const values = rows.map(row => timingUncertainty(row.result, side)).filter((value): value is number => value !== null).sort((a, b) => a - b);
+  // Specialized-pattern variants share one comparator measurement, carried by the specialized-engine row.
+  const measured = side === "comparator" ? rows.filter(row => row.population !== "specialized-patterns" || specializedVariantOf(row).key === "specialized") : rows;
+  const values = measured.map(row => timingUncertainty(row.result, side)).filter((value): value is number => value !== null).sort((a, b) => a - b);
   if (!values.length) return null;
   const quantile = (fraction: number) => {
     const index = (values.length - 1) * fraction;
@@ -366,6 +370,7 @@ function Header({ label, column, sort, setSort, title }: {
 }
 
 function operationDescription(row: Row): string {
+  if (row.workload?.columnRows != null) return "Count the rows of one column that match a warmed LIKE pattern.";
   const operation = row.operation === "execute" ? row.model : row.operation;
   return ({
     count: "Count all non-overlapping matches in the input.",
@@ -389,7 +394,8 @@ function operationDescription(row: Row): string {
   } as Record<string, string>)[operation] || operationName(operation);
 }
 
-type EvidenceProps = { row: Row; reused?: Row; comparator: string; hideOperation?: boolean; missingSingle?: boolean };
+// Variants are labelled rows measured beside the summary row, such as each specialized-pattern variant.
+type EvidenceProps = { row: Row; reused?: Row; variants?: Array<{ label: string; row: Row }>; comparator: string; hideOperation?: boolean; missingSingle?: boolean };
 
 function Name(props: EvidenceProps) {
   const [open, setOpen] = useState(false);
@@ -400,15 +406,17 @@ function Name(props: EvidenceProps) {
   </details>;
 }
 
-export function RowEvidence({ row, reused, comparator, missingSingle = false }: EvidenceProps) {
+export function RowEvidence({ row, reused, variants, comparator, missingSingle = false }: EvidenceProps) {
   const reason = (result: Result) => result.reason?.replace(/\bcandidate:/g, "Regulator:").replace(/\bcomparator:/g, `${comparator}:`);
   const commentary = workloadCommentary(reused ?? row);
   const singleUseCommentary = reused ? workloadCommentary(row).performance : undefined;
+  const phases: Array<{ label?: string; variation: string; row: Row }> = variants?.map(variant => ({ ...variant, variation: `${variant.label} measurement variation` }))
+    ?? (reused ? [{ label: "Single use", variation: "Single-use measurement variation", row }, { label: "Multi-use", variation: "Multi-use measurement variation", row: reused }]
+      : [{ variation: "Measurement variation", row }]);
   return <div className="row-evidence-body">
       {missingSingle && <p>Single-use timings were not collected with Trino's DFA enabled. Single-use comparisons are left blank.</p>}
       {comparisonIssue(row) && <p>{comparisonIssue(row)!.reason}</p>}
-      {row.result.reason && <p>{reused && "Single use: "}{reason(row.result)}</p>}
-      {reused?.result.reason && <p>Multi-use: {reason(reused.result)}</p>}
+      {phases.map(phase => phase.row.result.reason && <p key={phase.variation}>{phase.label && `${phase.label}: `}{reason(phase.row.result)}</p>)}
       {(commentary.description || row.workload?.description) && <><h4>What this tests</h4><p>{commentary.description ?? row.workload?.description}</p></>}
       {singleUseCommentary && singleUseCommentary !== commentary.performance && <><h4>Single-use performance context</h4><p>{singleUseCommentary}</p></>}
       {commentary.performance && <><h4>{reused && singleUseCommentary !== commentary.performance ? "Multi-use performance context" : "Performance context"}</h4><p>{commentary.performance}</p></>}
@@ -421,10 +429,9 @@ export function RowEvidence({ row, reused, comparator, missingSingle = false }: 
       {row.inputBytes != null && <p>{new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(row.inputBytes)} input bytes per operation{!Number.isInteger(row.inputBytes) && " on average"}.</p>}
       {row.workload?.inputDescription && <p>{row.workload.inputDescription}</p>}
       {row.workload?.inputs && <><h4>Rotating inputs</h4>{row.workload.inputs.map((input, index) => <pre key={index}>{input.text}</pre>)}</>}
-      <MeasurementAnnotations row={row} comparator={comparator} phase={reused ? "Single use" : undefined} />
-      {reused && <MeasurementAnnotations row={reused} comparator={comparator} phase="Multi-use" />}
-      {!row.result.uncertainty && row.measurementWarnings?.length ? <><h4>{reused ? "Single-use measurement variation" : "Measurement variation"}</h4><p>{row.measurementWarnings.join(". ")}.</p></> : null}
-      {reused && !reused.result.uncertainty && reused.measurementWarnings?.length ? <><h4>Multi-use measurement variation</h4><p>{reused.measurementWarnings.join(". ")}.</p></> : null}
+      {phases.map(phase => <MeasurementAnnotations key={phase.variation} row={phase.row} comparator={comparator} phase={phase.label} />)}
+      {phases.map(phase => !phase.row.result.uncertainty && phase.row.measurementWarnings?.length
+        ? <Fragment key={phase.variation}><h4>{phase.variation}</h4><p>{phase.row.measurementWarnings.join(". ")}.</p></Fragment> : null)}
       {row.mapping && !row.result.reason && !["identical", "direct"].includes(row.mapping.status) && <p>{row.mapping.reason}</p>}
     </div>;
 }
@@ -573,24 +580,33 @@ const distributionLabels: Record<string, string> = {
   "english-text": "English text preset", json: "JSON preset", "sampled-log-lines": "Learned from sample logs",
 };
 
-// Each distribution runs on its own hosts beside its own comparator run. Dividing
-// the two comparator-relative ratios cancels host speed from the tuned gain.
-// Dividing the far ends of their intervals gives a conservative envelope, not a
-// calibrated interval, so the usual no-clear-difference rule applies to the gain.
-export function distributionGain(tuned: Result, standard: Result): Result {
-  const failed = [tuned, standard].find(result => result.state !== "compared");
+// Each literal-probe distribution runs on its own hosts beside its own comparator
+// run; specialized-pattern variants share each host's comparator run. Either way,
+// dividing the two comparator-relative ratios cancels host speed from the
+// variant's gain over its baseline. Dividing the far ends of their intervals gives
+// a conservative envelope, not a calibrated interval, so the usual
+// no-clear-difference rule applies to the gain. Warnings paired host by host, when
+// supplied, replace the two variants' warnings against the comparator.
+export function variantGain(variant: Result, baseline: Result, pairedWarnings?: string[]): Result {
+  const failed = [variant, baseline].find(result => result.state !== "compared");
   if (failed) return { state: failed.state, reason: failed.reason, warnings: [], hosts: [] };
-  const [tunedLow, tunedHigh] = tuned.uncertainty?.ratioInterval ?? [];
-  const [standardLow, standardHigh] = standard.uncertainty?.ratioInterval ?? [];
+  const [variantLow, variantHigh] = variant.uncertainty?.ratioInterval ?? [];
+  const [baselineLow, baselineHigh] = baseline.uncertainty?.ratioInterval ?? [];
   // Only ratio and ratioInterval are read; the other fields only satisfy the Result type.
-  const uncertainty = tuned.uncertainty && standard.uncertainty ? {
-    method: "conservative-ratio-envelope", level: Math.min(tuned.uncertainty.level, standard.uncertainty.level),
-    ratioInterval: [tunedLow! / standardHigh!, tunedHigh! / standardLow!] as [number, number],
-    candidateIntervalNs: tuned.uncertainty.candidateIntervalNs, comparatorIntervalNs: standard.uncertainty.candidateIntervalNs,
-    forkMeanRangeNs: { candidate: tuned.uncertainty.forkMeanRangeNs.candidate, comparator: standard.uncertainty.forkMeanRangeNs.candidate },
+  const uncertainty = variant.uncertainty && baseline.uncertainty ? {
+    method: "conservative-ratio-envelope", level: Math.min(variant.uncertainty.level, baseline.uncertainty.level),
+    ratioInterval: [variantLow! / baselineHigh!, variantHigh! / baselineLow!] as [number, number],
+    candidateIntervalNs: variant.uncertainty.candidateIntervalNs, comparatorIntervalNs: baseline.uncertainty.candidateIntervalNs,
+    forkMeanRangeNs: { candidate: variant.uncertainty.forkMeanRangeNs.candidate, comparator: baseline.uncertainty.forkMeanRangeNs.candidate },
   } : undefined;
-  return { state: "compared", ratio: tuned.ratio! / standard.ratio!, ...(uncertainty ? { uncertainty } : {}),
-    warnings: [...new Set([...standard.warnings, ...tuned.warnings])], hosts: [] };
+  return { state: "compared", ratio: variant.ratio! / baseline.ratio!, ...(uncertainty ? { uncertainty } : {}),
+    warnings: pairedWarnings ?? [...new Set([...baseline.warnings, ...variant.warnings])], hosts: [] };
+}
+
+function Gain({ result, label }: { result?: Result; label: string }) {
+  if (!result) return null;
+  return <span className={`scan-result ${tone(result)}`}
+    title={result.state === "compared" ? `${label}: ${result.ratio!.toFixed(4)}×.${result.uncertainty ? ` Conservative interval ${result.uncertainty.ratioInterval.map(value => value.toFixed(4)).join(" to ")}×.` : ""}` : result.reason}>{comparisonText(result)}</span>;
 }
 
 export function literalProbeRows(rows: Row[]): LiteralProbe[] {
@@ -603,7 +619,7 @@ export function literalProbeRows(rows: Row[]): LiteralProbe[] {
     const tuned = byCase.get(`${standard.caseId}/tuned`);
     if (!tuned) throw new Error(`Missing tuned literal-probe partner for ${standard.id}`);
     return { id: standard.id, name: literalProbeWorkloads[standard.caseId]?.name ?? standard.name,
-      distribution: distributionLabels[tuned.family] ?? tuned.family, standard, tuned, gain: distributionGain(tuned.result, standard.result) };
+      distribution: distributionLabels[tuned.family] ?? tuned.family, standard, tuned, gain: variantGain(tuned.result, standard.result) };
   });
 }
 
@@ -626,8 +642,83 @@ function LiteralProbeTable({ rows, comparator }: { rows: Row[]; comparator: stri
     <td className="measurement">{duration(row.tuned.result.candidateNs)}</td>
     <td className="measurement"><Ratio result={row.standard.result} comparator={comparator}><LifecycleFlags row={row.standard} comparator={comparator} /></Ratio></td>
     <td className="measurement"><Ratio result={row.tuned.result} comparator={comparator}><LifecycleFlags row={row.tuned} comparator={comparator} /></Ratio></td>
-    <td className="measurement"><span className={`scan-result ${tone(row.gain)}`}
-      title={row.gain.state === "compared" ? `Tuned ratio divided by default ratio: ${row.gain.ratio!.toFixed(4)}×.${row.gain.uncertainty ? ` Conservative interval ${row.gain.uncertainty.ratioInterval.map(value => value.toFixed(4)).join(" to ")}×.` : ""}` : row.gain.reason}>{comparisonText(row.gain)}</span></td>
+    <td className="measurement"><Gain result={row.gain} label="Tuned ratio divided by default ratio" /></td>
+  </tr>)}</tbody></table></div>;
+}
+
+type SpecializedVariant = { key: "regular" | "specialized" | "compiled"; suffix: string; label: string; short: string };
+type SpecializedPattern = { id: string; anchor: Row; variants: Partial<Record<SpecializedVariant["key"], Row>>;
+  gains: Partial<Record<SpecializedVariant["key"], Result>>; evidence: Array<{ label: string; row: Row }> };
+
+// Column order; each page shows only the variants it measured.
+const specializedVariants: SpecializedVariant[] = [
+  { key: "regular", suffix: "/regular-engine", label: "Regular engine", short: "Regular" },
+  { key: "specialized", suffix: "", label: "Specialized engine", short: "Specialized" },
+  { key: "compiled", suffix: "/generated", label: "Compiled", short: "Compiled" },
+];
+const [, specializedEngine] = specializedVariants;
+
+function specializedVariantOf(row: Row): SpecializedVariant {
+  return specializedVariants.find(variant => variant.suffix && row.caseId.endsWith(variant.suffix)) ?? specializedEngine;
+}
+
+function measuredVariants(patterns: SpecializedPattern[]): SpecializedVariant[] {
+  return specializedVariants.filter(variant => patterns.some(pattern => pattern.variants[variant.key]));
+}
+
+// Each later variant's gain over the page's first variant is computed once per pattern.
+export function specializedPatternRows(rows: Row[]): SpecializedPattern[] {
+  const patterns = rows.filter(row => row.population === "specialized-patterns");
+  const anchorKey = (row: Row) => `${row.caseId.slice(0, row.caseId.length - specializedVariantOf(row).suffix.length)}/${row.operation}`;
+  const byAnchor = new Map<string, SpecializedPattern>(patterns.filter(row => specializedVariantOf(row) === specializedEngine)
+    .map(anchor => [anchorKey(anchor), { id: anchor.id, anchor, variants: { specialized: anchor }, gains: {}, evidence: [] }]));
+  for (const row of patterns.filter(row => specializedVariantOf(row) !== specializedEngine)) {
+    const pattern = byAnchor.get(anchorKey(row));
+    if (!pattern) throw new Error(`Missing specialized-engine partner for ${row.id}`);
+    pattern.variants[specializedVariantOf(row).key] = row;
+  }
+  const [baseline, ...later] = measuredVariants([...byAnchor.values()]);
+  for (const pattern of byAnchor.values()) {
+    pattern.evidence = specializedVariants.flatMap(variant => pattern.variants[variant.key] ? [{ label: variant.label, row: pattern.variants[variant.key]! }] : []);
+    const baselineRow = pattern.variants[baseline.key];
+    for (const variant of later) {
+      const variantRow = pattern.variants[variant.key];
+      if (!variantRow || !baselineRow) continue;
+      // The importer pairs each host's two variant times; their warnings against the comparator do not apply.
+      const warnings = variantRow.variantGainWarnings?.[baselineRow.id];
+      if (!warnings) throw new Error(`Missing host-paired gain warnings for ${variantRow.id}`);
+      pattern.gains[variant.key] = variantGain(variantRow.result, baselineRow.result, warnings);
+    }
+  }
+  return [...byAnchor.values()];
+}
+
+function SpecializedPatternTable({ rows, like, comparator }: { rows: Row[]; like: boolean; comparator: string }) {
+  const [sort, setSort] = useState<Sort>(null);
+  const patterns = specializedPatternRows(rows);
+  const present = measuredVariants(patterns);
+  const [baseline, ...later] = present;
+  const last = present[present.length - 1];
+  const ordered = sorted(patterns, sort, (pattern, key) => ({
+    name: `${pattern.anchor.name} ${pattern.anchor.operation}`, comparatorNs: pattern.anchor.result.comparatorNs, ratio: pattern.variants[last.key]?.result.ratio,
+    ...Object.fromEntries(present.map(variant => [`${variant.key}Ns`, pattern.variants[variant.key]?.result.candidateNs])),
+    ...Object.fromEntries(later.map(variant => [`${variant.key}Gain`, pattern.gains[variant.key]?.ratio])),
+  } as Record<string, SortValue>)[key]);
+  return <div className="table-scroll"><table className="measurement-table specialized-pattern-table"><thead><tr>
+    <Header label={like ? "Pattern" : "Pattern / operation"} column="name" sort={sort} setSort={setSort} />
+    <Header label={comparator} column="comparatorNs" sort={sort} setSort={setSort} title={`${comparator}, measured once per host and shared by every Regulator variant`} />
+    {present.map(variant => <Header key={variant.key} label={variant.label} column={`${variant.key}Ns`} sort={sort} setSort={setSort} />)}
+    {later.map(variant => <Header key={variant.key} label={`${variant.short} vs ${baseline.short.toLowerCase()}`} column={`${variant.key}Gain`} sort={sort} setSort={setSort} />)}
+    <Header label={`${last.short} vs ${comparator}`} column="ratio" sort={sort} setSort={setSort} />
+  </tr></thead><tbody>{ordered.map(pattern => <tr key={pattern.id}>
+    <td><Name row={pattern.anchor} variants={pattern.evidence} comparator={comparator} hideOperation={like} /></td>
+    <td className="measurement">{duration(pattern.anchor.result.comparatorNs)}<TimingFlags row={pattern.anchor} side="comparator" comparator={comparator} /></td>
+    {present.map(variant => {
+      const row = pattern.variants[variant.key];
+      return <td key={variant.key} className="measurement">{row && <>{duration(row.result.candidateNs)}<TimingFlags row={row} side="candidate" comparator={comparator} /></>}</td>;
+    })}
+    {later.map(variant => <td key={variant.key} className="measurement"><Gain result={pattern.gains[variant.key]} label={`${variant.label} ratio divided by ${baseline.label.toLowerCase()} ratio`} /></td>)}
+    <td className="measurement"><Ratio result={pattern.variants[last.key]?.result} comparator={comparator} /></td>
   </tr>)}</tbody></table></div>;
 }
 
@@ -652,16 +743,19 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
   const comparator = data.languages[language].comparator;
   const preview = data.presentation?.reviewPreview === true;
   const preliminary = data.publication?.status === "preliminary";
-  // Preliminary tables show median estimates, but never assert a consistent
-  // winner when hosts disagree. Full warnings remain in row details and downloads.
+  // Preliminary tables show median estimates, but never assert a consistent winner when hosts
+  // disagree. Full measurement warnings remain in row details; full gain warnings remain in downloads.
+  const shownWarnings = (warnings: string[]) => preview ? [] : preliminary ? warnings.filter(warning => warning.includes("disagree")) : warnings;
   const selectedRows = data.rows.filter(row => row.language === language && row.platform === cpu && row.memoryMode === memory && workloadSection(row) !== "diagnostic-only")
-    .map(row => ({ ...row, measurementWarnings: row.result.warnings, result: { ...displayResult(row.result),
-      ...(preview ? { warnings: [] } : preliminary ? { warnings: row.result.warnings.filter(warning => warning.includes("disagree")) } : {}) } }));
+    .map(row => ({ ...row, measurementWarnings: row.result.warnings, result: { ...displayResult(row.result), warnings: shownWarnings(row.result.warnings) },
+      ...(row.variantGainWarnings ? { variantGainWarnings: Object.fromEntries(Object.entries(row.variantGainWarnings).map(([id, warnings]) => [id, shownWarnings(warnings)])) } : {}) }));
   const pending = selectedRows.filter(row => comparisonIssue(row));
   const rows = selectedRows.filter(row => !comparisonIssue(row));
   const ordinary = rows.filter(row => row.population === "ordinary-scalar" && row.operation.startsWith("reused"));
   const bulk = rows.filter(row => workloadSection(row) === "bulk-text");
   const literalProbes = rows.filter(row => workloadSection(row) === "literal-probe");
+  const specialized = rows.filter(row => workloadSection(row) === "specialized-patterns");
+  const columnRows: number[] = [...new Set(specialized.flatMap(row => row.workload?.columnRows ?? []))].sort((left, right) => left - right);
   const operations = rows.filter(row => row.population === "trino-operations");
   const diagnostic = rows.filter(row => workloadSection(row) === "diagnostics-and-stress")
     .map(row => row.population === "bulk-text" ? { ...row, family: "reported-regression" } : row);
@@ -692,6 +786,7 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
     <MeasurementQuality rows={qualityRows} cpu={cpu} comparator={comparator} platform={data.platforms[cpu]} memory={memory === "safe" ? "pure Java" : "native access"} />
     {pending.length > 0 && <p className="section-note">{pending.length} measurements are separated below because they need remeasurement or use different API work. Their recorded times remain available, but they are not included in speed comparisons.</p>}
     {ordinary.length > 0 && section("Everyday regex operations", "Compiled patterns over rotating inputs. Contains and count are measured separately.", <ResultsTable rows={ordinary} comparator={comparator} />)}
+    {specialized.length > 0 && section("Specialized engine and compiler", <>Patterns that get a scan plan run on the specialized engine, which interprets that plan{specialized.some(row => row.caseId.endsWith("/regular-engine")) && "; the regular engine runs the same patterns without one"}. The opt-in compiler, enabled with setGenerateBytecode, turns the plan into bytecode generated for each pattern. Times are warmed steady-state operations and exclude compilation.{columnRows.length > 0 && ` Each time is one scan of the first ${columnRows.map(count => count.toLocaleString("en-US")).join(" or ")} rows of a TPC-H column.`} Ratios between Regulator variants divide their {comparator}-relative ratios, so differences between hosts cancel.</>, <SpecializedPatternTable rows={specialized} like={language === "like"} comparator={comparator} />)}
     {hasLifecycle && section(language === "like" ? "LIKE pattern lifecycle" : "Regex pattern lifecycle", <>Single use includes compilation and the first operation. Multi-use measures each operation with a warmed compiled pattern.{language !== "like" && " Break-even is an estimate, not a measured execution count."}
       {language === "like" && <><br />Trino's DFA optimization applies only to some patterns. Those patterns have separate enabled and disabled rows.</>}</>, <LifecycleTable rows={lifecycle} like={language === "like"} comparator={comparator} />)}
     {operations.length > 0 && section("Trino regex operations", "Complete public operations using compiled patterns on rotating Slice values, compared with pinned Joni.", <ResultsTable rows={operations} comparator={comparator} />)}

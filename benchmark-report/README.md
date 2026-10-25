@@ -208,12 +208,31 @@ variation. Internal compiler phases, allocation and memory-census results
 remain in the separately preserved complete baseline evidence.
 
 Every API page combines single-use and multi-use timings in its pattern
-lifecycle table. The page order is everyday operations, pattern lifecycle,
-Trino-specific operations where available, text processing, literal-probe
-distributions, then collapsed adversarial and synthetic stress groups.
-Compile-only measurements retained by the frozen publication inventory remain
-in the public JSON download, without a separate construction or
-compiler-stress table.
+lifecycle table. The page order is everyday operations, the specialized engine
+and compiler where measured, pattern lifecycle, Trino-specific operations where
+available, text processing, literal-probe distributions, then collapsed
+adversarial and synthetic stress groups. Compile-only measurements retained by
+the frozen publication inventory remain in the public JSON download, without a
+separate construction or compiler-stress table.
+
+The specialized engine and compiler table has one row per pattern and
+operation. It shows the comparator and each measured Regulator variant's time:
+the regular engine, the specialized engine, and compiled. Each later variant's
+gain over the variant first in column order divides their comparator-relative
+ratios, as the literal-probe table's tuned-versus-default gain does. The
+variants share each host's comparator measurement, so baseline import takes the
+gain's host variation and direction warnings from each host's own pair of
+variant times, not from either variant's comparison with the comparator, and
+adds the raw-sample precision warning when either variant's own measurement
+failed precision. Baseline import rejects variants with a different host cohort
+or comparator measurement, an unknown variant system, a suite or comparator the
+specialized-pattern catalog does not name, and any unit other than ns/op on
+either the variant or the comparator. Report validation rejects a variant
+without its specialized-engine row. The last column compares the last variant
+with the comparator. Times are warmed steady-state operations without
+compilation; each LIKE time scans the leading rows of a TPC-H column, whose row
+count comes from the TPC-H corpus manifest. Any page with `specialized-patterns`
+rows shows the section; these rows never enter the README summary.
 
 LIKE's default row order starts with prefix, suffix, exact and contains checks,
 then ordered literals and fixed-character gaps, then one-character wildcards.

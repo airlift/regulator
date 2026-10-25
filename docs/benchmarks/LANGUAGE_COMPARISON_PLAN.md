@@ -146,10 +146,12 @@ platform, and memory mode encoded in the URL. C9g and native-memory Regulator
 remain the defaults. Each language view contains:
 
 1. ordinary shared execution workloads
-2. representative single-use and reused lifecycle results
-3. Trino-specific operations where available
-4. text processing workloads
-5. folded adversarial and synthetic stress results
+2. the specialized engine and compiler where measured
+3. representative single-use and reused lifecycle results
+4. Trino-specific operations where available
+5. text processing workloads
+6. literal-probe distributions
+7. folded adversarial and synthetic stress results
 
 LIKE uses its integrated lifecycle table, with separate DFA-enabled and disabled
 rows for patterns that can use Trino's DFA optimization. Compile-only results

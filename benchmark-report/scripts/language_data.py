@@ -18,11 +18,18 @@ PLATFORMS = {'c9g': 'C9g · Graviton5', 'c8g': 'C8g · Graviton4', 'c8i': 'C8i �
 RELEASE_PLATFORMS = {'r9g': 'R9g · Graviton5', 'r8g': 'R8g · Graviton4', 'r8i': 'R8i · Intel'}
 MEMORY_MODES = {'native': 'Native memory', 'safe': 'Pure Java'}
 STATES = {'compared', 'not-compatible', 'did-not-finish'}
+# Specialized-pattern case suffixes in report column order: the regular engine,
+# the specialized engine, then compiled.
+SPECIALIZED_VARIANT_SUFFIXES = ('/regular-engine', '', '/generated')
 
 
 def digest(path):
     with Path(path).open('rb') as source:
         return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def warning_list(warnings):
+    return isinstance(warnings, list) and all(isinstance(warning, str) and warning for warning in warnings)
 
 
 def coefficient(values):
@@ -264,6 +271,7 @@ def validate_language_report(data):
     identities = defaultdict(set)
     lifecycle = defaultdict(set)
     probes = defaultdict(dict)
+    specialized = defaultdict(lambda: defaultdict(dict))
     for row in data['rows']:
         language, platform, mode = row['language'], row['platform'], row['memoryMode']
         if language not in LANGUAGES or platform not in platforms or mode not in MEMORY_MODES:
@@ -299,6 +307,12 @@ def validate_language_report(data):
             if language == 'like' or row['source'] != 'language' or row['operation'] != 'execute':
                 raise ValueError('literal-probe rows must be regex-language executions')
             probes[language, platform, mode][row['caseId']] = row['family']
+        if row['population'] == 'specialized-patterns':
+            variant = next((suffix for suffix in SPECIALIZED_VARIANT_SUFFIXES if suffix and row['caseId'].endswith(suffix)), '')
+            variants = specialized[language, platform, mode][row['caseId'].removesuffix(variant), row['operation']]
+            if variant in variants:
+                raise ValueError('duplicate specialized-pattern variant')
+            variants[variant] = row
         size = row['inputBytes']
         if size is not None and (isinstance(size, bool) or not isinstance(size, (int, float)) or not math.isfinite(size) or size < 0):
             raise ValueError('invalid input size')
@@ -309,7 +323,7 @@ def validate_language_report(data):
         for result in results:
             if result['state'] not in STATES:
                 raise ValueError('unpublishable result')
-            if not isinstance(result['warnings'], list) or any(not isinstance(value, str) or not value for value in result['warnings']):
+            if not warning_list(result['warnings']):
                 raise ValueError('invalid timing warning')
             if len(result['hosts']) < (1 if preliminary else 3) or len({host['instanceId'] for host in result['hosts']}) != len(result['hosts']):
                 raise ValueError('preliminary report requires independent hosts' if preliminary
@@ -364,6 +378,20 @@ def validate_language_report(data):
                 raise ValueError('missing literal-probe distribution partner')
             if families[standard] != 'uniform' or families[standard + '/tuned'] == 'uniform':
                 raise ValueError('literal-probe pair must compare uniform with a tuned distribution')
+    # Every specialized-pattern variant is shown beside its specialized-engine row, and
+    # carries host-paired gain warnings over each earlier variant in the page's column order.
+    for patterns in specialized.values():
+        for variants in patterns.values():
+            if '' not in variants:
+                raise ValueError('missing specialized-engine partner')
+            earlier = set()
+            for suffix in [suffix for suffix in SPECIALIZED_VARIANT_SUFFIXES if suffix in variants]:
+                gains = variants[suffix].get('variantGainWarnings', {})
+                if not isinstance(gains, dict) or set(gains) != earlier:
+                    raise ValueError('invalid specialized-pattern gain warnings')
+                if not all(warning_list(warnings) for warnings in gains.values()):
+                    raise ValueError('invalid specialized-pattern gain warnings')
+                earlier.add(variants[suffix]['id'])
     shared = {language: {row['id'] for row in data['rows'] if row['language'] == language and row['source'] == 'language'}
               for language in ('re2', 'java', 'trino')}
     if shared['re2'] != shared['java'] or shared['re2'] != shared['trino']:

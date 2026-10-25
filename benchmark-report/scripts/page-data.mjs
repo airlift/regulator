@@ -1,6 +1,6 @@
 // The publication JSON is evidence. These projections contain only what the UI reads.
 const rowFields = ["id", "caseId", "name", "operation", "model", "population", "family",
-  "language", "platform", "memoryMode", "inputBytes", "source", "comparator", "workContract"];
+  "language", "platform", "memoryMode", "inputBytes", "source", "comparator", "workContract", "variantGainWarnings"];
 const resultFields = ["state", "reason", "candidateNs", "comparatorNs", "ratio", "minimumRatio",
   "maximumRatio", "deltaNs", "deltaNsPerByte", "warnings", "estimator"];
 const pick = (value, fields) => Object.fromEntries(fields.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
@@ -22,7 +22,7 @@ export function compactReport(data, report, sourceLinks = {}) {
       // Presence and cohort gate existing compatibility checks and qualified commentary.
       if (row.measurementSource) compact.measurementSource = pick(row.measurementSource, ["cohort"]);
       if (row.mapping) compact.mapping = pick(row.mapping, ["status", "reason", "patternPreview", "patternBytes"]);
-      if (row.workload) compact.workload = pick(row.workload, ["pattern", "description", "performanceContext", "inputDescription", "flags", "inputs"]);
+      if (row.workload) compact.workload = pick(row.workload, ["pattern", "description", "performanceContext", "inputDescription", "flags", "inputs", "columnRows"]);
       const pattern = row.workload?.pattern ?? row.mapping?.patternPreview;
       const fullPatternAvailable = row.workload?.pattern !== undefined;
       const patternBytes = fullPatternAvailable ? Buffer.byteLength(pattern) : row.mapping?.patternBytes;
