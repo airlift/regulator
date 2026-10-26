@@ -542,7 +542,7 @@ final class RustRegexpParser
         {
             int byteStart = byteOffsets[start];
             int byteEnd = byteOffsets[end];
-            Slice segment = byteEnd > byteStart ? pattern.slice(byteStart, byteEnd - byteStart).copy() : null;
+            Slice segment = byteEnd > byteStart ? pattern.slice(byteStart, byteEnd - byteStart) : null;
             return new RegexpParseException(code, segment, byteStart, detail);
         }
 

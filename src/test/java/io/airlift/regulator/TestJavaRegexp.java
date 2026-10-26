@@ -55,6 +55,23 @@ public class TestJavaRegexp
     }
 
     @Test
+    public void testParse()
+    {
+        Slice pattern = utf8Slice("(?<word>\\w+)(b)?(?<never>[a&&b])");
+        PatternInfo info = JavaRegexp.parse(pattern);
+        assertThat(info.capturingGroupCount()).isEqualTo(3);
+        assertThat(info.namedCapturingGroups()).isEqualTo(Map.of("word", 1, "never", 3));
+
+        JavaRegexp compiled = JavaRegexp.compile(pattern);
+        assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
+        assertThat(info.namedCapturingGroups()).isEqualTo(compiled.namedCapturingGroups());
+
+        PatternInfo comments = JavaRegexp.parse(utf8Slice("#(ignored)\n(a)"), JavaRegexp.Options.defaults().setComments(true));
+        assertThat(comments.capturingGroupCount()).isEqualTo(1);
+        assertThat(comments.namedCapturingGroups()).isEmpty();
+    }
+
+    @Test
     public void testCompiledPatternDoesNotRetainMutablePatternStorage()
     {
         Slice pattern = utf8Slice("(?<name>a)");

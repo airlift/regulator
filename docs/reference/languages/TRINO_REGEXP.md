@@ -31,6 +31,10 @@ Slice value = regexp.extract(input, 2);
 For example, searching for `x` in `😀x` returns `2` from `position()`, while
 the matcher's `start()` returns byte offset `4`.
 
+`TrinoRegexp.parse(pattern)` checks a pattern and reads its capture metadata
+without compiling it; see
+[pattern validation and capture metadata](../REGULATOR_API.md#pattern-validation-and-capture-metadata).
+
 ## Supported constructs
 
 | Category | Constructs |

@@ -82,6 +82,10 @@ it affects speed, not results. See
 [Byte frequencies](../REGULATOR_API.md#byte-frequencies). Compilation copies the
 pattern and snapshots the option values.
 
+`Re2.parse(pattern, options)` applies the same syntax options to check a
+pattern and read its capture metadata without compiling it; see
+[pattern validation and capture metadata](../REGULATOR_API.md#pattern-validation-and-capture-metadata).
+
 ## Unsupported features
 
 RE2 intentionally excludes constructs such as backreferences, lookaround,

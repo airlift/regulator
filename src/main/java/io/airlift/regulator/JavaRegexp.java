@@ -184,6 +184,22 @@ public final class JavaRegexp
         this.pattern = requireNonNull(pattern, "pattern is null");
     }
 
+    /// Validates a pattern and returns its capture metadata without constructing a matching
+    /// engine. Parse errors and capture numbering are the same as for [#compile(Slice)];
+    /// compilation memory limits are not checked.
+    public static PatternInfo parse(Slice pattern)
+    {
+        return parse(pattern, Options.defaults());
+    }
+
+    /// Parses with the current syntax options without retaining the pattern or options.
+    public static PatternInfo parse(Slice pattern, Options options)
+    {
+        requireNonNull(pattern, "pattern is null");
+        requireNonNull(options, "options is null");
+        return JavaRegexpParser.parse(pattern, options.parseFlags()).patternInfo();
+    }
+
     public static JavaRegexp compile(Slice pattern)
     {
         return compile(pattern, Options.defaults());

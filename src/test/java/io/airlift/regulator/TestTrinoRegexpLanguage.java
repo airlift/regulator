@@ -110,6 +110,24 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
+    public void testParse()
+    {
+        Slice pattern = utf8Slice("(?<word>\\w+)(b)?(?<never>[a&&b])");
+        PatternInfo info = TrinoRegexp.parse(pattern);
+        assertThat(info.capturingGroupCount()).isEqualTo(3);
+        assertThat(info.namedCapturingGroups()).isEqualTo(Map.of("word", 1, "never", 3));
+
+        TrinoRegexp compiled = TrinoRegexp.compile(pattern);
+        assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
+        assertThat(info.namedCapturingGroups()).isEqualTo(compiled.namedCapturingGroups());
+
+        // Trino options affect only compilation and matching, so parsing ignores them.
+        PatternInfo tinyMemory = TrinoRegexp.parse(utf8Slice("(a)"), TrinoRegexp.Options.defaults().setMaxMemory(1));
+        assertThat(tinyMemory.capturingGroupCount()).isEqualTo(1);
+        assertThat(tinyMemory.namedCapturingGroups()).isEmpty();
+    }
+
+    @Test
     public void testCompiledPatternDoesNotRetainMutablePatternStorage()
     {
         Slice pattern = utf8Slice("(?<name>a)");

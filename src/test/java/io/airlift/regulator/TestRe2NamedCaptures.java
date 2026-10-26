@@ -97,6 +97,27 @@ public class TestRe2NamedCaptures
         assertThat(match.groupUtf8("x")).isNull();
     }
 
+    @Test
+    public void testParse()
+    {
+        Slice pattern = utf8("(?P<word>\\w+)(b)?(?P<never>[^\\x00-\\x{10FFFF}])");
+        PatternInfo info = Re2.parse(pattern);
+        assertThat(info.capturingGroupCount()).isEqualTo(3);
+        assertThat(info.namedCapturingGroups()).isEqualTo(Map.of("word", 1, "never", 3));
+
+        Re2 compiled = Re2.compile(pattern);
+        assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
+        assertThat(info.namedCapturingGroups()).isEqualTo(compiled.namedCapturingGroups());
+
+        PatternInfo literal = Re2.parse(utf8("(?P<name>a)"), Re2.Options.defaults().setLiteral(true));
+        assertThat(literal.capturingGroupCount()).isZero();
+        assertThat(literal.namedCapturingGroups()).isEmpty();
+
+        PatternInfo neverCapture = Re2.parse(utf8("(?P<name>a)(b)"), Re2.Options.defaults().setNeverCapture(true));
+        assertThat(neverCapture.capturingGroupCount()).isZero();
+        assertThat(neverCapture.namedCapturingGroups()).isEmpty();
+    }
+
     private static Slice utf8(String value)
     {
         return Slices.wrappedBuffer(value.getBytes(StandardCharsets.UTF_8));
