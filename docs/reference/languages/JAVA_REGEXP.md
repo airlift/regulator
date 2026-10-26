@@ -43,6 +43,9 @@ like a JDK region with transparent, non-anchoring bounds. `^` does not match at
 the range start unless it is the input start, and `\bb` does not match `b` in
 the range `[1, 2)` of `ab`.
 
+As in the JDK, `matcher.find(start)` resets the region to the whole input
+before it searches from `start`.
+
 ## Supported constructs
 
 | Category | Constructs |

@@ -259,6 +259,9 @@ start of a nonempty region that splits a CR LF (without `(?d)`); see
 `Re2Matcher` is mutable and not thread-safe. Its capture buffer and execution
 workspaces are reused across `find`, `matches`, `lookingAt`, and `reset` calls.
 `reset(input, start, end)` restricts matching without constructing a Slice view.
+As the JDK's `Matcher.find(int)` does, `find(int)` resets the region to the
+whole input and searches from the given offset, which may be anywhere in the
+input, its end included.
 All exposed offsets remain relative to the complete logical input Slice, not the
 region and never the backing array.
 

@@ -442,20 +442,27 @@ public final class Re2Matcher
     }
 
     /**
-     * Finds the next match starting at the specified byte offset in the logical input Slice.
-     * The offset must be within the current region.
+     * Resets this matcher to the complete logical input Slice, as {@link #reset(Slice)} does, and
+     * finds the next match starting at the specified byte offset in it, as the JDK's
+     * {@code Matcher.find(int)} does. The offset may be anywhere in the input, its end included.
      */
     public boolean find(int start)
     {
-        if (start < regionStart || start > regionEnd) {
+        if (start < 0 || start > input.length()) {
             throw new IndexOutOfBoundsException("start out of bounds: " + start);
         }
-        if (groupZeroForwardCursor != null) {
-            groupZeroForwardCursor.reset();
+        if (isPartialRegion()) {
+            reset(input);
         }
-        nextFindStart = start - regionStart;
-        previousMatchEnd = -1;
-        invalidateMatch();
+        else {
+            // A whole-input matcher already has the reset region, so clear only the search state.
+            if (groupZeroForwardCursor != null) {
+                groupZeroForwardCursor.reset();
+            }
+            previousMatchEnd = -1;
+            invalidateMatch();
+        }
+        nextFindStart = start;
         return find();
     }
 
