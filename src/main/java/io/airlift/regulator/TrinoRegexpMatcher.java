@@ -87,7 +87,8 @@ public sealed class TrinoRegexpMatcher
     }
 
     /// Finds the next non-overlapping match. Empty matches advance by one UTF-8 code point;
-    /// a terminal empty match is returned once. Failure invalidates the current match.
+    /// a terminal empty match is returned once. Failure invalidates the current match, and the next
+    /// search starts again from the end of the last match, as [Re2Matcher#find()] does.
     public boolean find()
     {
         if (matcher != null) {
@@ -99,6 +100,8 @@ public sealed class TrinoRegexpMatcher
         // Both retained span kernels exclude captures and empty matches.
         span = fixedWidth != null ? fixedWidth.findSpan(input, nextStart) : literalAlternation.findSpan(input, nextStart);
         if (span < 0) {
+            // These spans never match empty and the search position is unchanged, so a retry from
+            // the last match end would repeat this failed search.
             exhausted = true;
             return false;
         }
@@ -237,6 +240,8 @@ public sealed class TrinoRegexpMatcher
                 nextStart = groups[1];
                 return true;
             }
+            // Scan plans never match empty and the search position is unchanged, so a retry from
+            // the last match end would repeat this failed search.
             exhausted = true;
             hasMatch = false;
             return false;

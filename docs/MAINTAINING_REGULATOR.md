@@ -124,6 +124,9 @@ Every behavior change must identify its authority:
 - the current JDK release's code for the supported Java frontend, applied to
   the pinned Unicode database, apart from the
   [differences from the JDK](integrations/UNICODE.md#differences-from-the-jdk)
+  and the exceptions
+  [Java Regular-Subset Frontend](../REGULATOR_DECISIONS.md#java-regular-subset-frontend)
+  records
 - Trino's Joni fork and Trino function tests for `TrinoRegexp`
 - Trino LIKE semantics on valid UTF-8, and the malformed-input rule in
   `REGULATOR_DECISIONS.md`, for `TrinoLikePattern`

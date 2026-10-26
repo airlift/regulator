@@ -36,11 +36,16 @@ public class TestTrinoRegexpMatcher
     @Test
     public void testIterationMatchesJoni()
     {
+        // The single-byte matcher records its own retry point, so the table's [ab] entry covers that route.
+        String singleByte = "[ab]";
+        TrinoRegexp singleBytePattern = TrinoRegexp.compile(utf8Slice(singleByte));
+        singleBytePattern.matcher(EMPTY_SLICE);
+        assertThat(singleBytePattern.isSingleByteMatcherComputed()).isTrue();
         for (String expression : List.of(
                 "foo|foobar|bar",
                 "foobar|foo|bar",
                 "abc",
-                "[ab]",
+                singleByte,
                 "[ab]*",
                 "a.*b",
                 "(?s:.*)a(?s:.*)b(?s:.*)",
@@ -69,6 +74,7 @@ public class TestTrinoRegexpMatcher
                     int base = source.byteArrayOffset();
                     Matcher expected = joni.matcher(source.byteArray(), base, base + source.length());
                     int next = 0;
+                    int lastMatchEnd = 0;
                     while (next <= source.length() && expected.search(base + next, base + source.length(), Option.DEFAULT) >= 0) {
                         assertThat(actual.find()).as("%s on %s at %s", expression, text, next).isTrue();
                         Region groups = expected.getEagerRegion();
@@ -83,13 +89,21 @@ public class TestTrinoRegexpMatcher
                         assertThat(actual.end()).isEqualTo(expected.getEnd());
                         assertThat(actual.group()).isEqualTo(actual.group(0));
                         next = expected.getEnd();
+                        lastMatchEnd = next;
                         if (expected.getBegin() == next) {
                             next += next < source.length() ? lengthOfCodePointFromStartByte(source.getByte(next)) : 1;
                         }
                     }
                     assertThat(actual.find()).isFalse();
-                    assertThat(actual.find()).isFalse();
                     assertThatThrownBy(actual::start).isInstanceOf(IllegalStateException.class);
+                    // After a failure, the next find searches again from the end of the last match,
+                    // except that a terminal empty match is returned once.
+                    boolean retried = next <= source.length() && expected.search(base + lastMatchEnd, base + source.length(), Option.DEFAULT) >= 0;
+                    assertThat(actual.find()).as("%s on %s after failure", expression, text).isEqualTo(retried);
+                    if (retried) {
+                        assertThat(actual.start()).isEqualTo(expected.getBegin());
+                        assertThat(actual.end()).isEqualTo(expected.getEnd());
+                    }
                 }
             }
         }

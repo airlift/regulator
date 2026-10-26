@@ -133,7 +133,11 @@ public class TestJavaRegexpDifferential
         // the region, except that the JDK's $ still refuses the LF of a CR LF the region start
         // splits. One matcher per pattern is reset for every region, so state one region leaves
         // behind would show in the next. Ranged calls read as a JDK region with transparent,
-        // non-anchoring bounds, and find(int) resets the region to the whole input.
+        // non-anchoring bounds. find(int) resets the region to the whole input. After a failed
+        // search or match, the next find searches again from the end of the last match. The JDK's
+        // backtracking can move its resume point after a failure, a recorded difference (see
+        // REGULATOR_DECISIONS.md). For these patterns and inputs, the JDK still reaches the same
+        // next match.
         String startAnchoredPlan = "^[xy]([a-z]+)$";
         String unanchoredPlan = "x([^/]+)/$";
         assertThat(JavaRegexp.compile(utf8Slice(startAnchoredPlan)).matcher(utf8Slice("")).startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
@@ -143,6 +147,9 @@ public class TestJavaRegexpDifferential
                 "^",
                 "$",
                 "^$",
+                "^|$a",
+                "a",
+                "[ab]+",
                 "a$",
                 "$\\n",
                 "\\Aa",
@@ -181,13 +188,21 @@ public class TestJavaRegexpDifferential
                             assertSameMatch(description + " find", input, true, expected, actual.find() ? actual.toMatchResult() : null);
                         }
                         assertThat(actual.find()).as(description + " extra find").isFalse();
+                        assertSameMatch(description + " find after failure", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
                         assertSameMatch(description + " lookingAt", input, expected.lookingAt(), expected, actual.lookingAt() ? actual.toMatchResult() : null);
+                        assertSameMatch(description + " find after lookingAt", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
                         assertSameMatch(description + " matches", input, expected.matches(), expected, actual.matches() ? actual.toMatchResult() : null);
+                        assertSameMatch(description + " find after matches", input, expected.find(), expected, actual.find() ? actual.toMatchResult() : null);
                         for (int findStart = 0; findStart <= input.length(); findStart++) {
                             Matcher restarted = jdk.matcher(input).region(start, end);
                             actual.reset(source, byteStart, byteEnd);
                             boolean actualFound = actual.find(utf8Offset(input, findStart));
                             assertSameMatch(description + " find(" + findStart + ")", input, restarted.find(findStart), restarted, actualFound ? actual.toMatchResult() : null);
+                            assertSameMatch(description + " find after find(" + findStart + ")", input, restarted.find(), restarted, actual.find() ? actual.toMatchResult() : null);
+                            // find(int) must forget the last match even when the region already covers the whole input.
+                            actualFound = actual.find(utf8Offset(input, findStart));
+                            assertSameMatch(description + " find(" + findStart + ") again", input, restarted.find(findStart), restarted, actualFound ? actual.toMatchResult() : null);
+                            assertSameMatch(description + " find after find(" + findStart + ") again", input, restarted.find(), restarted, actual.find() ? actual.toMatchResult() : null);
                         }
 
                         Matcher transparent = jdk.matcher(input).region(start, end).useTransparentBounds(true).useAnchoringBounds(false);
@@ -230,6 +245,26 @@ public class TestJavaRegexpDifferential
                     .as(description + " group " + group + " text")
                     .isEqualTo(expected.group(group));
         }
+    }
+
+    @Test
+    public void testFindAfterFailureDiffersFromJdkBacktracking()
+    {
+        // A recorded difference from the JDK, whose backtracking moves its resume point for \d{3} but not \d\d\d.
+        Matcher quantified = Pattern.compile("\\d{3}").matcher("123 45 x");
+        assertThat(quantified.find(4)).isFalse();
+        assertThat(quantified.find()).isFalse();
+        Matcher spelledOut = Pattern.compile("\\d\\d\\d").matcher("123 45 x");
+        assertThat(spelledOut.find(4)).isFalse();
+        assertThat(spelledOut.find()).isTrue();
+        assertThat(spelledOut.start()).isZero();
+        assertThat(spelledOut.end()).isEqualTo(3);
+
+        Re2Matcher matcher = JavaRegexp.compile(utf8Slice("\\d{3}")).matcher(utf8Slice("123 45 x"));
+        assertThat(matcher.find(4)).isFalse();
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isZero();
+        assertThat(matcher.end()).isEqualTo(3);
     }
 
     @Test

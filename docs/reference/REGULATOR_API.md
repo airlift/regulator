@@ -261,7 +261,16 @@ workspaces are reused across `find`, `matches`, `lookingAt`, and `reset` calls.
 `reset(input, start, end)` restricts matching without constructing a Slice view.
 As the JDK's `Matcher.find(int)` does, `find(int)` resets the region to the
 whole input and searches from the given offset, which may be anywhere in the
-input, its end included.
+input, its end included. A failed `find`, `matches`, or `lookingAt` leaves the
+next `find()` to search again from the end of the last match, or from the
+region start when nothing has matched since the last reset. For Java, RE2, and
+Trino patterns, `find()` with `^` on `ab` alternates between a match and a
+failure. For `^` on `ab`, Rust returns the initial empty match once; subsequent
+`find()` calls fail. A `find()` right after an empty match at the region end
+fails without searching, as the JDK's does, so the next `find()` fails too. A
+`while (matcher.find())` loop still stops at the first failure. After a failure
+inside quantified atoms, Java patterns can resume elsewhere than the JDK does;
+see [Java regexp](languages/JAVA_REGEXP.md#matching).
 All exposed offsets remain relative to the complete logical input Slice, not the
 region and never the backing array.
 
