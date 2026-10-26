@@ -64,7 +64,7 @@ campaign-only probes merely because they were collected.
 
 ## Implementation Standards
 
-- **Published API compatibility.** Version 1.0 is released. Preserve its public API compatibility; the pre-release direct-rename exception has expired.
+- **Public API breaks wait for a major version.** The `pom.xml` version names the next release, and an `X.0-SNAPSHOT` version names a major one, where breaking changes are allowed. Otherwise preserve public API compatibility, and suggest a major version bump for a significant break. A fix that brings a language's behavior in line with its authority, listed under Language Authorities in `REGULATOR_DECISIONS.md`, is a bug fix, not a breaking change, even when it changes public API behavior.
 - **Features must be fully implemented.** A fix that only works for one mode (e.g., LATIN1) but not the default mode (UTF-8) is NOT complete. Do not claim something is "fixed" unless it works for all supported configurations.
 - **Verify against the actual benchmark.** If a plan targets a specific benchmark, the fix must improve that exact benchmark, not a variant of it.
 - **Default mode is UTF-8.** Most patterns compile with UTF-8 encoding by default. Any optimization must work for UTF-8 programs, not just LATIN1.

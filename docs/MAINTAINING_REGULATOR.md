@@ -4,17 +4,20 @@ Match the validation effort to the change. A documentation edit needs different
 checks from a parser repair, a Unicode update, or a change to a DFA loop where
 one extra instruction can affect performance.
 
-## Current phase
+## Release and measurement policy
 
-Version 1.0 is published as `io.airlift:regulator:1.0`. The
-[release benchmark report](benchmarks/RESULTS_1.0.md) records measured coverage,
-findings, and remaining limitations. Preserve released API compatibility. Any
-production repair belongs to a subsequent version and a separately identified
-measurement campaign. Record collector revisions separately from the library
-artifact and tagged production source.
+Breaking public API changes wait for a major version, as
+[Implementation Standards](../AGENTS.md#implementation-standards) describes.
 
-Do not start speculative optimization work. A new optimization requires
-either a material final-campaign gap or representative
+The [1.0 release benchmark report](benchmarks/RESULTS_1.0.md) records the
+latest published release campaign: its measured coverage, findings, and
+remaining limitations. Any production repair belongs to a version after the
+measured one and to a separately identified measurement campaign. Record
+collector revisions separately from the library artifact and tagged
+production source.
+
+Do not start speculative optimization work. A new optimization requires either
+a material gap in the latest published release campaign or representative
 production evidence.
 
 ## Protected areas
