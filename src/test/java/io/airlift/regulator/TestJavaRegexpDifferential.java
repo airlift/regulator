@@ -129,13 +129,13 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
-    public void testRegionsAndRangesMatchJdk()
+    public void testRegionsRangesAndFindStartMatchJdk()
     {
         // A matcher region reads as a JDK region with default bounds, so its assertions see only
         // the region, except that the JDK's $ still refuses the LF of a CR LF the region start
         // splits. One matcher per pattern is reset for every region, so state one region leaves
         // behind would show in the next. Ranged calls read as a JDK region with transparent,
-        // non-anchoring bounds.
+        // non-anchoring bounds, and find(int) resets the region to the whole input.
         String startAnchoredPlan = "^[xy]([a-z]+)$";
         String unanchoredPlan = "x([^/]+)/$";
         assertThat(JavaRegexp.compile(utf8Slice(startAnchoredPlan)).matcher(utf8Slice("")).startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
@@ -185,6 +185,12 @@ public class TestJavaRegexpDifferential
                         assertThat(actual.find()).as(description + " extra find").isFalse();
                         assertSameMatch(description + " lookingAt", input, expected.lookingAt(), expected, actual.lookingAt() ? actual.toMatchResult() : null);
                         assertSameMatch(description + " matches", input, expected.matches(), expected, actual.matches() ? actual.toMatchResult() : null);
+                        for (int findStart = 0; findStart <= input.length(); findStart++) {
+                            Matcher restarted = jdk.matcher(input).region(start, end);
+                            actual.reset(source, byteStart, byteEnd);
+                            boolean actualFound = actual.find(utf8Offset(input, findStart));
+                            assertSameMatch(description + " find(" + findStart + ")", input, restarted.find(findStart), restarted, actualFound ? actual.toMatchResult() : null);
+                        }
 
                         Matcher transparent = jdk.matcher(input).region(start, end).useTransparentBounds(true).useAnchoringBounds(false);
                         boolean found = transparent.find();

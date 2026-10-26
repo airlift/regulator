@@ -251,7 +251,8 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   context, as a JDK region with default bounds is, except that, as in the JDK,
   `$` and `\Z` do not match at the start of a nonempty region that splits a
   CR LF (without `(?d)`). A range overload behaves like a JDK region with
-  transparent, non-anchoring bounds.
+  transparent, non-anchoring bounds. As in the JDK, `find(int)` resets the
+  region to the whole input before it searches.
 - Multiline `^` excludes end-of-input even with `UNIX_LINES`. In that mode
   the compiler combines LF-only beginning-of-line with Java's non-EOF
   assertion, using the same context-sensitive fallback. UNIX multiline `$`
