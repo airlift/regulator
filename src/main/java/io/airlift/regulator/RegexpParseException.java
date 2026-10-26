@@ -34,7 +34,8 @@ public final class RegexpParseException
     {
         super(buildMessage(errorCode, detail, byteOffset));
         this.errorCode = requireNonNull(errorCode, "errorCode is null");
-        this.invalidPatternSegment = invalidPatternSegment;
+        // Parsers pass views of the pattern; copy so the exception never shares caller storage.
+        this.invalidPatternSegment = invalidPatternSegment == null ? null : invalidPatternSegment.copy();
         this.byteOffset = byteOffset;
     }
 

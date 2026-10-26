@@ -107,6 +107,9 @@ public sealed class TrinoRegexp
         }
     }
 
+    // TrinoRegexp.Options has no syntax settings, so parsing always starts from the same flags.
+    private static final int PARSE_FLAGS = Regexp.LIKE_PERL;
+
     private final Re2 pattern;
     private final boolean mayHaveSingleByteRepeatMatcher;
     private volatile SingleByteRepeatMatcher singleByteRepeatMatcher;
@@ -123,6 +126,24 @@ public sealed class TrinoRegexp
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
         this.mayHaveSingleByteRepeatMatcher = pattern.canMatchEmpty();
+    }
+
+    /// Validates a pattern and returns its capture metadata without constructing a matching
+    /// engine. Parse errors and capture numbering are the same as for [#compile(Slice)];
+    /// compilation memory limits are not checked.
+    public static PatternInfo parse(Slice pattern)
+    {
+        return parse(pattern, Options.defaults());
+    }
+
+    /// Parses as [#parse(Slice)] does. [Options] has no syntax settings, so parsing always starts
+    /// from the same flags and `options` does not change the result; the overload matches the
+    /// other languages' parse methods.
+    public static PatternInfo parse(Slice pattern, Options options)
+    {
+        requireNonNull(pattern, "pattern is null");
+        requireNonNull(options, "options is null");
+        return TrinoRegexpParser.parse(pattern, PARSE_FLAGS).patternInfo();
     }
 
     public static TrinoRegexp compile(Slice pattern)
@@ -160,7 +181,7 @@ public sealed class TrinoRegexp
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
         Slice patternCopy = pattern.copy();
-        ParseResult parsed = TrinoRegexpParser.parse(patternCopy, Regexp.LIKE_PERL);
+        ParseResult parsed = TrinoRegexpParser.parse(patternCopy, PARSE_FLAGS);
         LiteralAlternationSpanMatcher literalAlternationMatcher = LiteralAlternationSpanMatcher.analyze(
                 parsed.regexp(),
                 parsed.capturingGroupCount());
@@ -168,7 +189,7 @@ public sealed class TrinoRegexp
         if (literalAlternationMatcher != null && literalAlternationMatcher.estimatedRetainedSize() <= forwardMemory) {
             return new LiteralAlternationTrinoRegexp(literalAlternationMatcher);
         }
-        Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, Regexp.LIKE_PERL, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
+        Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
                 (parsed.regexp().parseFlags() & Regexp.TRINO_LINE) != 0) {
             return new BeginLineTrinoRegexp(compiledPattern);

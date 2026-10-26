@@ -273,8 +273,7 @@ public final class RustRegexp
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
-        ParseResult parsed = RustRegexpParser.parse(pattern, options.syntaxFlags(), options.nestLimit());
-        return new PatternInfo(parsed.capturingGroupCount(), ParseResult.namedCapturingGroups(parsed.capturingGroupNames()));
+        return RustRegexpParser.parse(pattern, options.syntaxFlags(), options.nestLimit()).patternInfo();
     }
 
     public static RustRegexp compile(Slice pattern)

@@ -28,20 +28,12 @@ if (matcher.find()) {
 
 ## Pattern validation and capture metadata
 
-Use `RustRegexp.parse(pattern)` to check a pattern without building a matching
-engine. It calls the same parser as `compile` and returns immutable metadata:
-
-```java
-PatternInfo info = RustRegexp.parse(Slices.utf8Slice("(?<word>\\w+)([0-9]+)"));
-int groups = info.capturingGroupCount(); // 2, excluding the whole-match group 0
-Map<String, Integer> names = info.namedCapturingGroups(); // {word=1}
-```
-
-The overload `parse(pattern, options)` uses the current syntax options. Both
-methods throw `RegexpParseException` for invalid syntax and unsupported pattern
-constructs, with the same error codes and UTF-8 byte offsets as `compile`.
-The returned metadata retains neither the input Slice nor a matching engine.
-Parsing does not check the memory needed to compile or execute a pattern.
+Use `RustRegexp.parse(pattern)` to check a pattern and read its capture
+metadata without building a matching engine; see
+[pattern validation and capture metadata](../REGULATOR_API.md#pattern-validation-and-capture-metadata).
+`parse(pattern, options)` applies every [compilation option](#compilation-options)
+except `setMaxMemory`, `setByteFrequencies`, and `setGenerateBytecode`, so byte
+mode and the nest limit can change the result.
 
 ### TeaVM
 
