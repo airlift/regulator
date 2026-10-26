@@ -394,7 +394,7 @@ final class TrinoScanKernelGenerator
                 case END -> attempt != Attempt.PARTIAL;
                 case DELIMITED_CAPTURE, RE2_DELIMITED_CAPTURE -> attempt != Attempt.UNANCHORED;
                 case DOT_ALL_TAIL, LINE_TAIL -> attempt == Attempt.END_ANCHORED;
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> false;
+                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL, RE2_SET_RUN -> false;
             };
             if (!supported) {
                 throw new IllegalArgumentException("%s scan kernel cannot run %s".formatted(attempt, step.kind()));
@@ -560,7 +560,7 @@ final class TrinoScanKernelGenerator
                         .then(groups.setElement(constantInt(step.slot()), cursor.subtract(base)))
                         .build());
                 case FORK -> emitPush(index);
-                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL -> throw new IllegalStateException("unexpected " + step.kind());
+                case ASCII_FOLDED_LITERAL, ASCII_FOLDED_OPTIONAL, RE2_SET_RUN -> throw new IllegalStateException("unexpected " + step.kind());
             }
         }
 

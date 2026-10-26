@@ -4,8 +4,8 @@ The scan plan recognizes a bounded family of Trino patterns and executes
 literals, deterministic character runs, and captures over Slice bytes. It
 targets `contains`, match boundaries, captures, extraction, and replacement
 through the public APIs. RE2, Java, and Rust patterns select the same plans,
-which report the ordinary engine's results on malformed input too, as described
-in [RE2 patterns](#re2-patterns).
+plus runs of sets of some non-ASCII characters, and report the ordinary engine's
+results on malformed input too, as described in [RE2 patterns](#re2-patterns).
 
 ## Coverage
 
@@ -19,14 +19,14 @@ contract, not importing RE2 syntax or changing Trino semantics.
 |---|---|
 | Case-sensitive UTF-8 literals | 1–256 bytes per literal |
 | Greedy optional fixed literals | Up to four, sharing one budget with optional forks and literal-repeat copies |
-| Character runs | ASCII sets and their complements; variable counts require disjoint continuation through captures and optional branches |
+| Character runs | ASCII sets and their complements, and in RE2, Java, and Rust plans sets of some non-ASCII characters; variable counts require disjoint continuation through captures and optional branches |
 | Captures | Capture-free plans plus mandatory, nested, and optional captures; named groups also work; up to 16 subject to the operation limit |
 | Optional bodies | Literals, runs, captures, and nested optionals; at most four forks, sharing the optional budget |
 | Repetitions | Greedy single-character `?`, `*`, `+`, exact and bounded counts up to 1000; unbounded minimum counts; exact and finite capture-free literal-sequence repeats |
 | Start behavior | Logical input start, or captured unanchored search with a variable run and a leading literal, exact one-byte ASCII set, or unbounded run of every byte except the one-byte literal after it |
 | End assertions | Optional; strict end, final-LF `$` (Trino's, or Java's under `UNIX_LINES`), and Java's final-terminator `$` are supported when present |
 | Terminal behavior | Partial-match success, dot-all `.*`, LF-excluding `.*`, and supported character-set runs |
-| Case folding | Restricted ASCII literal and run folds proven safe against the Unicode fold tables, and ASCII letter pairs such as `[Kk]`, which match only their two letters; separate folded executors; general Unicode folding uses the ordinary engine |
+| Case folding | Restricted ASCII literal and run folds proven safe against the Unicode fold tables, and ASCII letter pairs such as `[Kk]`, which match only their two letters; separate folded executors; in RE2, Java, and Rust plans, folds that add non-ASCII members, such as `k` with the Kelvin sign, as sets of some non-ASCII characters; other Unicode folding uses the ordinary engine |
 | Empty overall matches | Ordinary engine |
 | Program size | At most 32 operations plus one terminal operation |
 
@@ -77,9 +77,11 @@ the general representation with explicit capture saves.
 
 `TrinoScanPlanRun` admits ASCII sets and sets containing all non-ASCII
 characters plus any subset of ASCII. These sets have uniform membership for
-non-ASCII UTF-8 bytes. Other Unicode classes retain ordinary engine execution.
-Small byte sets or their complements, up to four bytes, use vector equality
-scans. Larger sets use a scalar membership table.
+non-ASCII UTF-8 bytes. In a Trino plan, other Unicode classes retain ordinary
+engine execution; an RE2, Java, or Rust plan also admits them, reading their
+non-ASCII members by exact encodings, as [RE2 patterns](#re2-patterns)
+describes. Small byte sets or their complements, up to four bytes, use vector
+equality scans. Larger sets use a scalar membership table.
 
 A variable count must be disjoint from every possible first byte of its
 continuation. The richer builder propagates these sets backward through capture
@@ -282,9 +284,11 @@ of the remaining literal bytes before each attempt. An occurrence of the first
 byte alone starts no attempt, the scan resumes after it, and a literal that does
 not fit before the logical end is never a candidate. ASCII-folded leading
 literals use the first-byte scan alone. A literal or ASCII-only set
-cannot match a valid UTF-8 continuation byte. A run set that admits non-ASCII
-characters admits every non-ASCII byte, so from a character boundary its first
-candidate is an ASCII byte or a lead byte. On malformed input the scan makes the
+cannot match a valid UTF-8 continuation byte. A leading run set that admits
+non-ASCII characters admits every non-ASCII byte, so from a character boundary
+its first candidate is an ASCII byte or a lead byte; a set of only some
+non-ASCII characters never leads an unanchored plan, whose candidates are a
+leading literal or a single ASCII byte. On malformed input the scan makes the
 same attempts as trying each position, because a failed position advances only
 over bytes that cannot start the run. Candidate scans first test one byte, or
 sixteen bytes for sets scanned with nibble tables, because dense inputs and
@@ -307,14 +311,18 @@ contains the leading set, and which only capture saves separate from the leading
 character. Runs never give characters back, and each byte that run consumed is a
 member of its set, so an attempt from any of those bytes either fails on its
 first character or consumes one leading character and then reaches the same run
-end in the same state. A run set holds every non-ASCII byte if it holds one, and
-a decoded character never spans an ASCII byte, so this also holds on malformed
-input. Other operations between the runs, a bounded or positive-minimum
-following run, or a following set that omits a leading member keep the
-one-character resume. Optional-leading plans, and plans led by any run other
-than a single character or a delimiter complement, remain on the ordinary
-engine. A lowered final-line plan retains precedence for a run-leading
-expression; a literal-leading scan keeps its candidate-byte route.
+end in the same state. A Trino run set holds every non-ASCII byte if it holds
+one, and a decoded character never spans an ASCII byte, so this also holds on
+malformed input. An RE2, Java, or Rust run reads a non-ASCII character only from
+a lead byte, whose value fixes its width, so a start inside a character that
+either run read is a continuation byte, on which the leading character fails,
+and from any other start both runs read the same characters to the same end.
+Other operations between the runs, a bounded or positive-minimum following run,
+or a following set that omits a leading member keep the one-character resume.
+Optional-leading plans, and plans led by any run other than a single character
+or a delimiter complement, remain on the ordinary engine. A lowered final-line
+plan retains precedence for a run-leading expression; a literal-leading scan
+keeps its candidate-byte route.
 
 ## RE2 patterns
 
@@ -322,11 +330,13 @@ The frontend chooses a plan's language: Trino, RE2, Java, Rust, or none.
 `Re2.compile` analyzes every pattern with the same builder, proofs, budgets,
 and candidate scans as `TrinoRegexp`, so the same shapes select a plan,
 ASCII-folded ones included, and every `Re2` operation reaches the plan through
-the same strategies with the same memory charge. `Re2.compileParsed` builds no
-plan. RE2 also excludes longest-match patterns, whose matches a
-leftmost-first plan cannot report, and, as Trino does, Latin-1 patterns. RE2's
-`$` is the strict end, so the final-LF forms never arise, and RE2's simple case
-folding has no multi-character folds for the ASCII-fold proof to exclude.
+the same strategies with the same memory charge. Unlike Trino, RE2, Java, and
+Rust also admit runs of sets of some non-ASCII characters, described below.
+`Re2.compileParsed` builds no plan. RE2 also excludes longest-match patterns,
+whose matches a leftmost-first plan cannot report, and, as Trino does, Latin-1
+patterns. RE2's `$` is the strict end, so the final-LF forms never arise, and
+RE2's simple case folding has no multi-character folds for the ASCII-fold proof
+to exclude.
 `Re2.Options.setGenerateBytecode(true)` compiles a case-sensitive RE2 plan to
 its own class, as [RE2 executor classes](#re2-executor-classes) describes.
 
@@ -345,12 +355,12 @@ admit every one and be unbounded, so `^x([^/]+)$`, `^\w+$`, and `(?s)^x(.*)$`
 select a plan while `^x([^\n]+)$`, `^x(\S+)$`, and `(?s)^x(.{1,3})$` keep the
 ordinary engine. A literal or fixed-count run before the end needs no such rule,
 and neither does an optional's fork, though a variable run inside the optional
-keeps it. Java's default dot excludes the non-ASCII line terminators, which a
-run cannot represent, so a dot reaches a plan only with `DOTALL` or
-`UNIX_LINES`. As in Trino, multiline anchors, word boundaries, reluctant runs,
-and folds with a non-ASCII member, such as `(?iu)k`, keep the ordinary engine;
-Java's `(?i)` without Unicode case folds each letter as its ASCII pair, so
-`(?i)s` and `(?i)k` reach a plan.
+keeps it. Java's default dot admits no line terminator, so it reaches a plan,
+before `$` too, as a set of some non-ASCII characters, described below, as do
+folds with a non-ASCII member, such as `(?iu)k`. As in Trino, multiline anchors,
+word boundaries, and reluctant runs keep the ordinary engine; Java's `(?i)`
+without Unicode case folds each letter as its ASCII pair, so `(?i)s` and `(?i)k`
+reach a plan.
 `JavaRegexp.Options.setGenerateBytecode(true)` compiles a case-sensitive Java
 plan to an RE2 executor class, as [RE2 executor classes](#re2-executor-classes)
 describes.
@@ -363,9 +373,10 @@ those reach a plan unchanged, as do runs that `(?U)` makes greedy and the
 CRLF-mode dot. Byte mode builds no plan. Only byte constructs carry the Latin-1
 flag the analysis checks, so the analysis alone would still admit an ASCII-only
 byte-mode pattern. Multiline anchors, CRLF ones included, word boundaries,
-including Rust's start, end, and half word boundaries, reluctant runs, Unicode
-Perl classes such as `\w`, and folds with a non-ASCII member, such as `(?i)k`,
-keep the ordinary engine. A Rust range or matcher region keeps the whole input
+including Rust's start, end, and half word boundaries, and reluctant runs keep
+the ordinary engine, while Unicode Perl classes such as `\w` and folds with a
+non-ASCII member, such as `(?i)k`, reach a plan as sets of some non-ASCII
+characters. A Rust range or matcher region keeps the whole input
 as assertion context, so a matcher runs its start-anchored plan directly only
 over the whole input; a partial region reaches the plan, as a range does, only
 when it ends at the input end.
@@ -375,25 +386,48 @@ describes.
 
 An RE2 plan reports exactly what the ordinary engine reports on every input,
 including malformed UTF-8. A class holding every character from U+0080 through
-U+10FFFF, as every non-ASCII run does, compiles to byte ranges that consume a
-lead byte `C2`-`DF` followed by one continuation byte, `E0`-`EF` followed by
-two, or `F0`-`F4` followed by three. They accept overlong three- and four-byte
-forms, encoded surrogates, and values above U+10FFFF, which the strict decoder
-behind Trino plans rejects, and they reject bare continuation bytes, `C0`, `C1`,
-`F5`-`FF`, and truncated sequences.
+U+10FFFF compiles to byte ranges that consume a lead byte `C2`-`DF` followed by
+one continuation byte, `E0`-`EF` followed by two, or `F0`-`F4` followed by
+three. They accept overlong three- and four-byte forms, encoded surrogates, and
+values above U+10FFFF, which the strict decoder behind Trino plans rejects, and
+they reject bare continuation bytes, `C0`, `C1`, `F5`-`FF`, and truncated
+sequences. Every other class compiles its non-ASCII ranges to exact encodings:
+the compiler splits each range into pieces of one encoded length, each with one
+inclusive byte range per position. The pieces accept the encoding of each
+member, an encoded surrogate included when the class holds it, and reject every
+other sequence.
 
 Only operations that can consume a byte at or above `0x80` read input
 differently. Literals, folded literals, ASCII-only runs, capture saves, forks,
 and the end check keep their behavior and are shared. The builder then
 replaces:
 
-- Each run whose set admits non-ASCII characters with an `RE2_RUN`. It scans
-  ASCII members, with the vector scanner when the run has at most four ASCII
-  non-members, the Vector API is available, and at least a vector of input
+- Each run whose set admits every non-ASCII character with an `RE2_RUN`. It
+  scans ASCII members, with the vector scanner when the run has at most four
+  ASCII non-members, the Vector API is available, and at least a vector of input
   remains, and otherwise by byte as Trino's run scan finishes its tail,
   stopping at any non-ASCII byte or an ASCII non-member. It validates each
   non-ASCII sequence by the rule above and counts bounded repetitions and
   minimums by the same rule.
+- Each run whose set admits only some non-ASCII characters, such as Java's
+  default dot, Rust's Unicode `\w`, or `(?i)k`, which holds the Kelvin sign,
+  with an `RE2_SET_RUN`. Its member bytes are its ASCII members and the lead
+  bytes of its non-ASCII members' encodings, never a continuation byte. A table
+  built from the compiler's own split of the set's ranges reads each non-ASCII
+  character, so it accepts exactly the sequences the ordinary engine's byte
+  ranges do. A lead byte whose every encoding is a member, as most leads of
+  Java's default dot are, has no trie nodes. Its entry holds the range of its
+  second byte, which, as in the split, excludes overlong forms, values above
+  U+10FFFF, and surrogates the set does not hold; the reader then checks only
+  that the remaining bytes are continuation bytes. Other lead bytes walk a byte
+  trie, one table read per byte; identical trie nodes are stored once, which
+  keeps Rust's `\w` to about 12 KB, charged to the plan's retained size. The
+  reader takes a character's width from its lead byte rather than from the
+  table, so finding the next character does not wait on the table read. It scans
+  ASCII bytes as an `RE2_RUN` does, with the vector scanner when the set has at
+  most four ASCII non-members, so ASCII input never reads the table, and counts
+  bounded repetitions and minimums with the same reader. A captured run of such
+  a set stays a run, never a delimited capture.
 - Each delimited capture with an `RE2_DELIMITED_CAPTURE`, which scans its run by
   that rule and then requires the delimiter, rather than searching for the
   delimiter byte, which could pass over a rejected sequence.
@@ -405,14 +439,16 @@ The folded executors run the same operations. The leading complement scan, such
 as that of `([^/]+)/`, still finds candidates by byte; its run may now stop at a
 rejected sequence before the delimiter, and the attempt then fails and resumes
 at the run end. Trino plans contain none of these operations; a generated RE2
-class calls copies of the RE2 run reader for them.
+class calls copies of the RE2 run reader for them, and no class is generated
+for a plan with an `RE2_SET_RUN`.
 
 Every skip proof holds under this rule:
 
 - A literal-leading candidate scan skips only positions where the literal does
   not start. A run-leading one skips only ASCII bytes outside the run; a
-  non-ASCII run still admits every byte at or above `0x80`. Either scan visits
-  a superset of the possible starts.
+  non-ASCII run still admits every byte at or above `0x80`, and a set of some
+  non-ASCII characters never leads an unanchored plan. Either scan visits a
+  superset of the possible starts.
 - A failed or empty attempt advances by one strictly decoded character. A
   strictly valid sequence is one RE2 character of the same width, and a
   continuation byte inside it starts no RE2 match, while an invalid sequence
@@ -420,35 +456,53 @@ Every skip proof holds under this rule:
 - Resuming at a leading run's end, and after a leading single character, holds
   because RE2's reading is deterministic from a character start: an attempt
   from any byte the run consumed either starts no match at a continuation byte
-  or reaches the same run end in the same state.
+  or reaches the same run end in the same state. Every RE2 run, whether it
+  reads a set's exact encodings or every non-ASCII character, takes a
+  character's width from its lead byte, so a leading ASCII character and a
+  following set of some non-ASCII characters that contains it
+  read the same characters from any character start.
+- A variable run stops where a backtracking match would because its member
+  bytes are disjoint from the first bytes of its continuation. Every run reads
+  a character only from one of its member bytes, and a set of some non-ASCII
+  characters lists the lead bytes of its members' encodings, so its member
+  bytes are the first bytes of every character it reads. A Java end checks the
+  run's membership of LF, CR, U+0085, U+2028, and U+2029 as characters.
 - The nullable-tail boolean exit, the required-literal check, and both handoffs
   to the ordinary engine keep their conditions. Because the plan and the
   ordinary engine agree on every input, a handoff never changes an RE2 result.
 
 `TestRe2ScanPlan` checks route selection and which upstream golden patterns
 select a plan, whose goldens then run on the plan. It compares the public
-matching operations of plan, forced-handoff, and no-plan compiles, and of
-plan and forced-handoff compiles with generated bytecode, including ranged
-calls, short and null group buffers, and matchers retaining a prefix of
-the groups, with malformed sequences inserted into each witness. Seeded
-generated patterns cover end-anchored, partial, unanchored, run-led, and
-trailing-run shapes and delimited captures, plain and ASCII-folded. Fixed
-patterns run under the default, case-insensitive, never-newline, and POSIX
-one-line options and add a minimum that one multibyte character does not meet,
-forked plans, and long inputs that hand off to the ordinary engine by work
-budget and by failure density. `BenchmarkRe2ScanPlan` runs the
-`BenchmarkTrinoScanPlan` patterns and rows through public RE2 operations, plus
-non-ASCII and malformed rows for the URL, unanchored URL, long-host, and
-unanchored-tail shapes. `FOLDED_HOST` and `FOLDED_KEY` fold an `s` and a `k`,
-whose folds include the long s and the Kelvin sign, so they keep the ordinary
-engine; their rows are mostly ASCII, and one in eight matches through that
-member. `PERL_ANCHORED` and `PERL_UNANCHORED` capture with `\d` and `\w`,
-which RE2 plans as ASCII classes; their rows are mostly ASCII, and a few hold a
-non-ASCII letter or Unicode digits. With `scanPlan=false` it compiles each
-pattern without its plan, so the same rows measure the ordinary engine. That
-compile is resolved reflectively, so the source also runs on a build without
-RE2 plans with `-p scanPlan=true`. With `generateBytecode=true` it compiles each
-pattern with generated bytecode, set reflectively and only then.
+matching operations of plan, forced-handoff, and no-plan compiles, and of plan
+and forced-handoff compiles with generated bytecode, including ranged calls,
+short and null group buffers, and matchers retaining a prefix of the groups,
+with malformed sequences and the characters at the edges of Java's default dot
+inserted into each witness. Seeded generated patterns cover end-anchored,
+partial, unanchored, run-led, and trailing-run shapes and delimited captures,
+plain and ASCII-folded. Fixed patterns run under the default, case-insensitive,
+never-newline, and POSIX one-line options and add a minimum that one multibyte
+character does not meet, forked plans, sets of some non-ASCII characters, folded
+ones included, and long inputs that hand off to the ordinary engine by work
+budget and by failure density. `TestTrinoScanPlanRun` compares how a set of some
+non-ASCII characters reads one character with the ordinary engine on every one-
+and two-byte sequence and on sampled three- and four-byte ones, for Java, Rust,
+and RE2 sets. `BenchmarkRe2ScanPlan` runs the `BenchmarkTrinoScanPlan` patterns
+and rows through public RE2 operations, plus non-ASCII and malformed rows for
+the URL, unanchored URL, long-host, and unanchored-tail shapes. `FOLDED_HOST`
+and `FOLDED_KEY` fold an `s` and a `k`, whose folds include the long s and the
+Kelvin sign. `FOLDED_HOST` plans with its `s` as a set of some non-ASCII
+characters, interpreted as every folded plan is, while `FOLDED_KEY`, an
+unanchored search led by its `k`, keeps the ordinary engine; their rows are
+mostly ASCII, and one in eight matches through that member. In
+`DEEP_REJECTIONS`, the folded `K` that rejects the first pattern in Trino is
+such a set, so in RE2 that pattern alone selects a plan. `PERL_ANCHORED` and
+`PERL_UNANCHORED` capture with `\d` and `\w`, which RE2 plans as ASCII classes;
+their rows are mostly ASCII, and a few hold a non-ASCII letter or Unicode
+digits. With `scanPlan=false` `BenchmarkRe2ScanPlan` compiles each pattern
+without its plan, so the same rows measure the ordinary engine. That compile is
+resolved reflectively, so the source also runs on a build without RE2 plans with
+`-p scanPlan=true`. With `generateBytecode=true` it compiles each pattern with
+generated bytecode, set reflectively and only then.
 
 `TestJavaScanPlan` checks which Java constructs select a plan and compares the
 planned and forced-handoff compiles of each plan shape, with and without
@@ -462,13 +516,13 @@ match, with and without the scan plan and with generated bytecode; with
 `javaDollar=true` each `$` stays Java's `$`. Without dotAll the patterns set
 `UNIX_LINES`, so `$` uses the end before a final LF, unless
 `javaLineTerminators=true` keeps Java's line terminators; then the dot is Java's
-default dot, which keeps the ordinary engine. The Java end is therefore timed by
-the `javaDollar=true` rows with dotAll, and without dotAll by the patterns
-without a dot under `javaLineTerminators=true`. The rows end at most in LF, so
-the CR, CR LF, U+0085, U+2028, and U+2029 checks are not timed.
-`TestBenchmarkJavaScanPlan` confirms that each Java pattern selects a plan, and
-a generated class, exactly when its RE2 pattern does, under either end, unless
-it has Java's default dot. The decisions record holds the results for
+default dot, a set of some non-ASCII characters. The Java end is therefore
+timed by the `javaDollar=true` rows with dotAll, and without dotAll under
+`javaLineTerminators=true`. The rows end at most in LF, so the CR, CR LF,
+U+0085, U+2028, and U+2029 checks are not timed.
+`TestBenchmarkJavaScanPlan` confirms that each Java pattern selects a plan
+exactly when its RE2 pattern does, under either end, and a generated class
+unless it has Java's default dot. The decisions record holds the results for
 [plans](../../REGULATOR_DECISIONS.md#re2-scan-plans) and
 [generated classes](../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels).
 
@@ -481,11 +535,11 @@ ranges, regions, repeated finds, and counts. `BenchmarkRustScanPlan` runs the
 `BenchmarkRe2ScanPlan` workloads and rows through public Rust operations, each
 pattern written in Rust syntax for the same match, with and without the scan
 plan and with generated bytecode; with `unicodePerlClasses=true`, `\d` and `\w`
-stay Rust's Unicode classes, which keep the ordinary engine.
-`TestBenchmarkRustScanPlan` confirms that each Rust pattern selects a plan, and
-a generated class, exactly when its RE2 pattern does, unless it has a Unicode
-`\d` or `\w`, and that the Perl-class rows reach those classes' non-ASCII
-members. The decisions record holds the results for
+stay Rust's Unicode classes, sets of some non-ASCII characters.
+`TestBenchmarkRustScanPlan` confirms that each Rust pattern selects a plan
+exactly when its RE2 pattern does, and a generated class unless it has a
+Unicode `\d` or `\w`, and that the Perl-class rows reach those classes'
+non-ASCII members. The decisions record holds the results for
 [plans](../../REGULATOR_DECISIONS.md#re2-scan-plans) and
 [generated classes](../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels).
 
@@ -716,9 +770,9 @@ case-sensitive plan to a private `Re2` subclass backed by a hidden class from
 the same emitter, and `Re2.usesGeneratedBytecode()` reports whether it has
 one. `JavaRegexp.Options.setGenerateBytecode(true)` and
 `RustRegexp.Options.setGenerateBytecode(true)` compile a Java or Rust pattern to
-the same subclass. ASCII-folded plans and a pattern whose class cannot be
-defined compile as they do without the option. The accepted trade-offs are
-recorded in
+the same subclass. ASCII-folded plans, plans with an `RE2_SET_RUN`, and a
+pattern whose class cannot be defined compile as they do without the option. The
+accepted trade-offs are recorded in
 [`REGULATOR_DECISIONS.md`](../../REGULATOR_DECISIONS.md#generated-re2-scan-kernels).
 
 The class implements `CompiledRe2Scan` with the plan methods it replaces

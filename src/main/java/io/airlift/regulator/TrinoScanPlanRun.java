@@ -16,8 +16,16 @@ package io.airlift.regulator;
 import io.airlift.slice.SizeOf;
 
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 
 /// A greedy character-set run whose continuation needs no repetition backtracking.
+///
+/// Its member bytes are the ASCII characters it holds, plus every byte above 0x7F when it holds
+/// every non-ASCII character. A run of an RE2, Java, or Rust plan may also hold some non-ASCII
+/// characters but not all, which it reads by the exact encodings the compiler gives them (see
+/// [Utf8MemberTable]); its member bytes above 0x7F are then the lead bytes of those
+/// encodings alone.
 final class TrinoScanPlanRun
 {
     static final int MATCHES_EVERY_BYTE = 256;
@@ -46,12 +54,18 @@ final class TrinoScanPlanRun
     private final int lowestMember;
     private final int highestMember;
     private final byte[] candidateNibbleTables;
-    // Set when the run matches every non-ASCII byte; otherwise it matches none.
+    // Set when the run holds every non-ASCII character, so every byte above 0x7F is a member.
     private final boolean matchesNonAscii;
+    // The encodings of the run's non-ASCII members when it holds some but not all, or null.
+    // Only the set-run match methods, which RE2_SET_RUN operations call, may match such a run.
+    private final Utf8MemberTable nonAsciiMembers;
+    // For a run with nonAsciiMembers, the ASCII bytes that are not members of the run when at
+    // most four, for the vector stop scan; otherwise null.
+    private final byte[] asciiStopNeedles;
     private final int minimum;
     private final int maximum;
 
-    private TrinoScanPlanRun(boolean[] members, boolean matchesNonAscii, int minimum, int maximum)
+    private TrinoScanPlanRun(boolean[] members, boolean matchesNonAscii, Utf8MemberTable nonAsciiMembers, int minimum, int maximum)
     {
         this.members = members;
         this.members0 = word(members, 0);
@@ -59,6 +73,8 @@ final class TrinoScanPlanRun
         this.members2 = word(members, 128);
         this.members3 = word(members, 192);
         this.matchesNonAscii = matchesNonAscii;
+        this.nonAsciiMembers = nonAsciiMembers;
+        this.asciiStopNeedles = nonAsciiMembers == null ? null : asciiStopNeedles(members);
         this.minimum = minimum;
         this.maximum = maximum;
         int count = 0;
@@ -110,7 +126,38 @@ final class TrinoScanPlanRun
         this.candidateNibbleTables = candidateScan == CANDIDATE_SCAN_NIBBLE_TABLE ? nibbleTables : null;
     }
 
-    static TrinoScanPlanRun analyze(Regexp expression, CaseFolding caseFolding)
+    private static byte[] asciiStopNeedles(boolean[] members)
+    {
+        int count = 0;
+        for (int value = 0; value < 128; value++) {
+            count += members[value] ? 0 : 1;
+        }
+        if (count > 4) {
+            return null;
+        }
+        byte[] needles = new byte[count];
+        int index = 0;
+        for (int value = 0; value < 128; value++) {
+            if (!members[value]) {
+                needles[index++] = (byte) value;
+            }
+        }
+        return needles;
+    }
+
+    /// Returns the run of `expression` as [CaseFolding, boolean, Map)][#analyze(Regexp,]
+    /// does, with a member table of its own.
+    static TrinoScanPlanRun analyze(Regexp expression, CaseFolding caseFolding, boolean re2Characters)
+    {
+        return analyze(expression, caseFolding, re2Characters, new HashMap<>());
+    }
+
+    /// Returns the run of `expression`, or `null` when it is not a supported run.
+    /// With `re2Characters`, a class that holds some non-ASCII characters but not all can
+    /// be a run; otherwise it cannot, since a Trino run reads every non-ASCII byte alike. The
+    /// member table of such a class comes from `memberTables`, or is built and added there
+    /// when it is absent, so the runs of one plan share one table for each set.
+    static TrinoScanPlanRun analyze(Regexp expression, CaseFolding caseFolding, boolean re2Characters, Map<CharClass, Utf8MemberTable> memberTables)
     {
         if ((expression.parseFlags() & UNSUPPORTED_FLAGS) != 0) {
             return null;
@@ -144,6 +191,7 @@ final class TrinoScanPlanRun
         }
         boolean[] members = new boolean[256];
         boolean matchesNonAscii = false;
+        Utf8MemberTable nonAsciiMembers = null;
         switch (atom.op()) {
             case LITERAL -> {
                 if (atom.rune() >= 128) {
@@ -172,31 +220,48 @@ final class TrinoScanPlanRun
             }
             case CHAR_CLASS -> {
                 CharClass set = atom.charClass();
+                boolean matchesSomeNonAscii = false;
                 for (int index = 0; index < set.rangeCount(); index++) {
                     RuneRange range = set.range(index);
                     if (range.high() >= 128) {
-                        // A byte scan is valid only if all non-ASCII characters have the same
-                        // membership. Arbitrary Unicode classes stay on the ordinary engine.
-                        if (range.low() > 128 || range.high() != Regexp.RUNEMAX) {
-                            return null;
+                        if (range.low() <= 128 && range.high() == Regexp.RUNEMAX) {
+                            matchesNonAscii = true;
                         }
-                        matchesNonAscii = true;
+                        else {
+                            matchesSomeNonAscii = true;
+                        }
                     }
                 }
                 for (int value = 0; value < 128; value++) {
                     members[value] = set.contains(value);
                 }
-                Arrays.fill(members, 128, 256, matchesNonAscii);
+                if (matchesSomeNonAscii) {
+                    // A Trino byte scan is valid only if all non-ASCII characters have the
+                    // same membership, so other Unicode classes stay on its ordinary engine.
+                    if (!re2Characters) {
+                        return null;
+                    }
+                    nonAsciiMembers = memberTables.computeIfAbsent(set, Utf8MemberTable::of);
+                    for (int value = 128; value < 256; value++) {
+                        members[value] = nonAsciiMembers.isLead(value);
+                    }
+                }
+                else {
+                    Arrays.fill(members, 128, 256, matchesNonAscii);
+                }
             }
             default -> {
                 return null;
             }
         }
-        return new TrinoScanPlanRun(members, matchesNonAscii, minimum, maximum);
+        return new TrinoScanPlanRun(members, matchesNonAscii, nonAsciiMembers, minimum, maximum);
     }
 
     int unboundedScanTerminator()
     {
+        // An inverted run with needles excludes at most four byte values, and a run of some
+        // non-ASCII characters excludes all 64 continuation bytes, so it never meets this
+        // condition.
         if (maximum < 0 && minimum <= 1 && inverted && needles != null) {
             if (needles.length == 0) {
                 return MATCHES_EVERY_BYTE;
@@ -243,6 +308,26 @@ final class TrinoScanPlanRun
         return minimum;
     }
 
+    /// Returns whether the run holds some non-ASCII characters but not all.
+    boolean matchesSomeNonAscii()
+    {
+        return nonAsciiMembers != null;
+    }
+
+    /// Returns whether the run holds `codePoint`, a valid Unicode scalar value.
+    boolean matchesCharacter(int codePoint)
+    {
+        if (codePoint < 128) {
+            return members[codePoint];
+        }
+        if (nonAsciiMembers == null) {
+            return matchesNonAscii;
+        }
+        byte[] encoded = new byte[Utf8.encodedLength(codePoint)];
+        int length = Utf8.encode(encoded, 0, codePoint);
+        return nonAsciiMembers.memberWidth(encoded, 0, length) == length;
+    }
+
     // These accessors serve the copies of match, matchMinimum, findCandidate, and the RE2 run
     // helpers in TrinoScanKernelSupport.
 
@@ -269,6 +354,11 @@ final class TrinoScanPlanRun
     boolean matchesNonAscii()
     {
         return matchesNonAscii;
+    }
+
+    Utf8MemberTable nonAsciiMembers()
+    {
+        return nonAsciiMembers;
     }
 
     int candidateScan()
@@ -300,16 +390,22 @@ final class TrinoScanPlanRun
     /// multibyte or malformed sequence.
     boolean acceptsOnlyAscii()
     {
-        return !matchesNonAscii;
+        return !matchesNonAscii && nonAsciiMembers == null;
     }
 
     boolean isSingleByteAscii()
     {
-        return !matchesNonAscii && minimum == 1 && maximum == 1;
+        return acceptsOnlyAscii() && minimum == 1 && maximum == 1;
     }
 
+    /// Returns whether every character of `other` is certainly a member: a sufficient
+    /// check, decided by member bytes, except that it recognizes a run of some non-ASCII
+    /// characters only inside a run of every non-ASCII character.
     boolean containsAll(TrinoScanPlanRun other)
     {
+        if (other.nonAsciiMembers != null && !matchesNonAscii) {
+            return false;
+        }
         return (other.members0 & ~members0) == 0 && (other.members1 & ~members1) == 0 &&
                 (other.members2 & ~members2) == 0 && (other.members3 & ~members3) == 0;
     }
@@ -325,9 +421,11 @@ final class TrinoScanPlanRun
         return minimum != maximum;
     }
 
+    // Excludes nonAsciiMembers, which runs of one plan can share, so the plan counts each table
+    // once.
     long estimatedRetainedSize()
     {
-        return INSTANCE_SIZE + SizeOf.sizeOf(members) + SizeOf.sizeOf(needles) + SizeOf.sizeOf(candidateNibbleTables);
+        return INSTANCE_SIZE + SizeOf.sizeOf(members) + SizeOf.sizeOf(needles) + SizeOf.sizeOf(candidateNibbleTables) + SizeOf.sizeOf(asciiStopNeedles);
     }
 
     // Copied as TrinoScanKernelSupport.runMatch; keep the copy in step.
@@ -454,6 +552,85 @@ final class TrinoScanPlanRun
             }
             int width;
             while (cursor < end && input[cursor] < 0 && (width = Utf8.re2CharacterWidth(input, cursor, end)) != 0) {
+                cursor += width;
+            }
+            if (cursor >= end || input[cursor] < 0 || !members[input[cursor]]) {
+                return cursor;
+            }
+        }
+    }
+
+    /// The version of [#re2Match] for a run of some non-ASCII characters but not all. It
+    /// reads a non-ASCII character as the ordinary engine does, by the exact encodings of the
+    /// run's members (see [Utf8MemberTable]), so any other sequence ends the run like a
+    /// non-member byte.
+    int re2SetMatch(byte[] input, int cursor, int end)
+    {
+        if (maximum < 0 && minimum <= 1) {
+            int stop = re2SetScan(input, cursor, end);
+            return stop - cursor >= minimum ? stop : -1;
+        }
+        int count = 0;
+        int limit = maximum < 0 ? minimum : maximum;
+        int width;
+        while (count < limit && (width = re2SetMemberWidth(input, cursor, end)) != 0) {
+            cursor += width;
+            count++;
+        }
+        if (count < minimum) {
+            return -1;
+        }
+        return maximum < 0 ? re2SetScan(input, cursor, end) : cursor;
+    }
+
+    /// The version of [#re2MatchMinimum] for a run of some non-ASCII characters but not all:
+    /// the position after the run's minimum characters as [#re2SetMatch] reads them, or
+    /// `-1` when they are absent.
+    int re2SetMatchMinimum(byte[] input, int cursor, int end)
+    {
+        for (int count = 0; count < minimum; count++) {
+            int width = re2SetMemberWidth(input, cursor, end);
+            if (width == 0) {
+                return -1;
+            }
+            cursor += width;
+        }
+        return cursor;
+    }
+
+    private int re2SetMemberWidth(byte[] input, int cursor, int end)
+    {
+        if (cursor >= end) {
+            return 0;
+        }
+        int value = input[cursor];
+        if (value < 0) {
+            return nonAsciiMembers.memberWidth(input, cursor, end);
+        }
+        return members[value] ? 1 : 0;
+    }
+
+    private int re2SetScan(byte[] input, int cursor, int end)
+    {
+        while (true) {
+            // As re2Scan does: find the first non-member ASCII byte or non-ASCII byte, then
+            // consume the member characters there. ASCII input never reads the non-ASCII trie.
+            if (asciiStopNeedles != null && end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES && VectorSupport.isAvailable()) {
+                cursor = VectorTrinoScanner.findRe2RunStop(input, cursor, end, asciiStopNeedles);
+            }
+            else if (asciiStopNeedles != null && asciiStopNeedles.length == 0) {
+                // Every ASCII byte is a member.
+                while (cursor < end && input[cursor] >= 0) {
+                    cursor++;
+                }
+            }
+            else {
+                while (cursor < end && input[cursor] >= 0 && members[input[cursor]]) {
+                    cursor++;
+                }
+            }
+            int width;
+            while (cursor < end && input[cursor] < 0 && (width = nonAsciiMembers.memberWidth(input, cursor, end)) != 0) {
                 cursor += width;
             }
             if (cursor >= end || input[cursor] < 0 || !members[input[cursor]]) {

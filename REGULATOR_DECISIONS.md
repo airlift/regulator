@@ -1431,8 +1431,9 @@ specified matching and capture behavior on valid UTF-8. Malformed Trino input
 has a garbage-in, garbage-out contract, while bounded input access and normal
 matcher lifecycle behavior remain required. This does not authorize a public
 malformed-input opt-in. RE2, Java, and Rust patterns select the same plans,
-which report the ordinary engine's results on malformed input too, as described
-in [RE2 Scan Plans](#re2-scan-plans). By default the plan performs no runtime
+plus runs of sets of some non-ASCII characters, and report the ordinary engine's
+results on malformed input too, as described in
+[RE2 Scan Plans](#re2-scan-plans). By default the plan performs no runtime
 code generation; an experimental option may compile the plan into its
 own class, as described in
 [Generated Trino Scan Kernels](#generated-trino-scan-kernels). The ordinary
@@ -1459,7 +1460,8 @@ it, such as `([^/]+)/`, `([^:]+):([0-9]+)`, or `([^,]{2,}),`, is admitted. Its
 scan stops only at the delimiter, which the literal then matches, and this
 shape measured faster than the ordinary engine with no loss.
 
-Character sets must be ASCII-only or have uniform non-ASCII membership.
+Character sets must be ASCII-only or have uniform non-ASCII membership, except
+in RE2, Java, and Rust plans, as [RE2 Scan Plans](#re2-scan-plans) describes.
 Variable repetition requires a continuation disjoint from the repeated set
 across both arms of optional groups, so a run never gives characters back;
 exact counts need no such proof. Finite bounds count characters, not bytes.
@@ -1624,26 +1626,38 @@ development campaign evidence is in the private archive; see the
 
 RE2 patterns select the same scan plans as Trino patterns: the same eligible
 shapes, ASCII-folded ones included, reached by the same operations with the
-same memory charge, and on by default. Trino captures and extraction run about
-eight times faster on a plan than on the ordinary engine, and nothing in those
-shapes is specific to Trino. The frontend chooses a plan's language explicitly,
-so `Re2.compileParsed` builds none. Java and Rust patterns select the same
-plans under these decisions; the last bullets record the rules and measurements
-specific to each language.
+same memory charge, and on by default. They also admit runs of sets of some
+non-ASCII characters, which Trino plans decline. Trino captures and extraction
+run about eight times faster on a plan than on the ordinary engine, and nothing
+in those shapes is specific to Trino. The frontend chooses a plan's language
+explicitly, so `Re2.compileParsed` builds none. Java and Rust patterns select
+the same plans under these decisions; the last bullets record the rules and
+measurements specific to each language.
 
 - An RE2 plan reports exactly what the ordinary engine reports on every input,
   including malformed UTF-8; RE2 has no garbage-in, garbage-out contract. Only
   operations that can consume a byte at or above `0x80` read input differently:
   runs admitting non-ASCII characters, with their bounded counts and minimums,
   delimited captures, and terminal tails. They consume a non-ASCII character as
-  the ordinary engine's byte ranges do, accepting overlong three- and four-byte
-  forms, encoded surrogates, and values above U+10FFFF, and rejecting bare
-  continuation bytes, `C0`, `C1`, `F5`-`FF`, and truncated sequences. Trino plans
-  are unchanged.
+  the ordinary engine's byte ranges do. A set of every non-ASCII character
+  reads leniently, accepting overlong three- and four-byte forms, encoded
+  surrogates, and values above U+10FFFF, and rejecting bare continuation bytes,
+  `C0`, `C1`, `F5`-`FF`, and truncated sequences. A set of only some non-ASCII
+  characters reads strictly, because the compiler splits its ranges into exact
+  encodings: it accepts the encoding of each member, an encoded surrogate
+  included when the set holds it, and rejects every other sequence. Its reader
+  is built from that same split, so the two cannot drift, and it runs only at
+  a non-ASCII byte, so ASCII input keeps the byte and vector scans. Trino plans
+  are unchanged, and a Trino run still declines such a set, since Trino reads
+  every non-ASCII byte alike.
 - The analysis, builder, proofs, budgets, candidate scans, and routing stay
   shared, so a coverage change reaches the Trino, RE2, Java, and Rust
   frontends. Every skip proof holds under the RE2 rule, as the
   [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md#re2-patterns) restates.
+  An unanchored search led by a set of some non-ASCII characters, such as
+  `(?i)key=` led by the k that folds to the Kelvin sign, keeps the ordinary
+  engine, since an unanchored plan's candidates are a leading literal or a
+  single ASCII byte.
 - Longest-match patterns build no plan, because a plan reports leftmost-first
   matches, and Latin-1 patterns build none, as in Trino.
 - An experimental option compiles a case-sensitive RE2 plan into its own
@@ -1710,14 +1724,14 @@ specific to each language.
   compares those exact bytes, which agrees with the ordinary engine's strict
   decoding on malformed input. The JDK gives back run characters to reach that
   position and a run does not, so a variable run that can reach a Java end
-  without consuming more input must admit no line terminator, or every one and
-  be unbounded; `^x([^\n]+)$`, `^x(\S+)$`, and `(?s)^x(.{1,3})$` keep the
-  ordinary engine. Java's default dot excludes some non-ASCII line terminators,
-  so it reaches a plan only with `DOTALL` or `UNIX_LINES`, and multiline
-  anchors, Java word boundaries, reluctant runs, and folds with a non-ASCII
-  member keep the ordinary engine, as they do in Trino. Java's `(?i)` without
-  `UNICODE_CASE` folds each letter as its ASCII pair, so `(?i)s` and `(?i)k`
-  reach a plan.
+  without consuming more input must admit none of LF, CR, U+0085, U+2028, and
+  U+2029, or every one and be unbounded; `^x([^\n]+)$`, `^x(\S+)$`, and
+  `(?s)^x(.{1,3})$` keep the ordinary engine. Java's default dot admits none of
+  them, so it reaches a plan, before `$` too, as do folds with a non-ASCII
+  member, such as `(?iu)k`, each as a set of some non-ASCII characters.
+  Multiline anchors, Java word boundaries, and reluctant runs keep the ordinary
+  engine, as they do in Trino. Java's `(?i)` without `UNICODE_CASE` folds each
+  letter as its ASCII pair, so `(?i)s` and `(?i)k` reach a plan.
 - A Java plan must not be slower than the same pattern without it. On R9g and
   R8i, the 95 rows of `BenchmarkJavaScanPlan` without dotAll, five matching
   methods over the 19 workloads `URL`, `URL_SHORT`, `ANCHORED_HOST`,
@@ -1771,9 +1785,9 @@ specific to each language.
   and builds no plan, as RE2's Latin-1 patterns do. The frontend declines it
   explicitly, because only byte constructs carry the Latin-1 node flag that the
   analysis rejects. Multiline anchors, CRLF ones included, word boundaries,
-  including Rust's start, end, and half word boundaries, reluctant runs, Unicode
-  Perl classes, and folds with a non-ASCII member, such as `(?i)k`, keep the
-  ordinary engine.
+  including Rust's start, end, and half word boundaries, and reluctant runs keep
+  the ordinary engine. Unicode Perl classes and folds with a non-ASCII member,
+  such as `\w` and `(?i)k`, reach a plan as sets of some non-ASCII characters.
 - A Rust range or matcher region keeps the whole input as assertion context, as
   the crate's `Input::range` does, while a matcher's start-anchored plan reads
   its region as the whole input. A Rust matcher therefore runs that plan
@@ -1803,6 +1817,51 @@ specific to each language.
   `OPTIONAL_RETRY`, `RETRY_64`, `LONG_HOST`, `MIXED`, and `URL_MALFORMED`; and
   the `BenchmarkJavaScanPlan` workloads `URL`, `ANCHORED_HOST`, `OPTIONALS`,
   `LONG_HOST`, and `URL_MALFORMED`.
+- A set of some non-ASCII characters reads a character by its lead byte's table
+  entry. The entry of a lead byte whose every encoding is a member, as most
+  leads of Java's default dot are, holds the range of its second byte, and the
+  remaining bytes need only be continuation bytes; other leads walk the trie.
+  The reader takes the width from the lead byte, so finding the next character
+  does not wait on the table read. Walking the trie for every lead made Java's
+  default dot slower than the ordinary engine: on R9g and R8i,
+  `BenchmarkJavaScanPlan` `URL_NON_ASCII` with `javaLineTerminators=true` took
+  1.31 and 1.23 times the ordinary engine's time for `contains` and 1.32 and
+  1.24 for `count`. With full lead entries and the lead-byte width, those rows
+  take 0.85 and 0.98 for `contains` and 0.91 and 1.08 for `count`, where 1.08 is
+  within noise, its forks bimodal. Over the measurement's 43 other rows, on
+  Java, Rust, and RE2 workloads with these sets, the reader takes a geometric
+  mean of 0.907 and 0.946 times the trie walk's time. With the trie walk, the
+  255 rows that plan only with these sets took a geometric mean of 0.161 and
+  0.138 times the ordinary engine's time. Compiling such a plan takes 1.6 to 1.9
+  times the ordinary engine's compilation, against 1.7 to 2.4 with the trie walk
+  in the same measurement; this cost is accepted. Two R8i rows, measured only
+  with the trie walk, took slightly longer than the ordinary engine, and both
+  are accepted: Java `OPTIONALS` `count` with `javaLineTerminators=true` took
+  1.046 times the ordinary engine's time, 68.3 ns against 65.3 ns, and RE2
+  `DEEP_REJECTIONS` `extractAll` 1.08 times, 300 ns against 278 ns, within the
+  error of either measurement.
+- Taking the width from the lead byte rather than the table slows two R8i
+  workloads relative to full lead entries alone; these losses are accepted
+  because both remain faster than the ordinary engine. Java
+  `UNANCHORED_TAIL_4096_NON_ASCII` `boundaries`, `count`, `extract`, and
+  `extractAll` take 1.31 to 1.37 times their time with full lead entries alone,
+  5.1 to 5.3 us against 3.8 to 4.0 us, where the trie walk took 6.0 to 6.1 us
+  and the ordinary engine takes 19 to 39 us. Rust `PERL_UNANCHORED`
+  `boundaries` with Unicode `\d` takes 43.6 ns, against 40.9 ns with full lead
+  entries alone, 41.3 ns with the trie walk, and 84 ns with the ordinary
+  engine.
+- Alternatives rejected for this reader:
+  - A reader for sets of every character except a few code points still took
+    1.08 to 1.10 times the ordinary engine's time on R9g `URL_NON_ASCII`
+    `contains` and `count` and 1.21 to 1.22 on R8i, and made R9g Java
+    `LONG_HOST_NON_ASCII` `extract` and `extractAll` take 1.53 to 1.54 times
+    the trie walk's time.
+  - Merging the interpreter's `RE2_RUN` and `RE2_SET_RUN` arms turned R9g Java
+    `URL_MALFORMED` `contains` from 0.94 to 1.03 times the ordinary engine's
+    time. It targeted R9g Java `URL_NON_ASCII` `extract` without
+    `javaLineTerminators`, an existing plan that seemed 1.13 to 1.19 times
+    slower with the second arm; over 8 forks per build the means are equal,
+    both builds spreading across several C2 register-allocation modes.
 
 ## Generated Trino Scan Kernels
 
@@ -1889,8 +1948,9 @@ plans; the last bullets record the rules and measurements specific to each.
   guarded object layout, do not change. Released versions had a final `Re2`;
   the LIKE generator made the same change to `TrinoLikePattern`.
 - Any pattern with a case-sensitive plan is eligible; an ASCII-folded plan
-  stays interpreted, as in Trino. Unlike Trino, a single-byte matcher or a
-  count that skips the plan does not exclude a pattern, because only the calls
+  stays interpreted, as in Trino, and so for now does a plan with a run of
+  some non-ASCII characters but not all. Unlike Trino, a single-byte matcher or
+  a count that skips the plan does not exclude a pattern, because only the calls
   that reach the plan change.
 - Short boolean calls that the interpreter hands to the DFA stay on the
   generated class, as in Trino. Boolean calls of a start-anchored plan run its

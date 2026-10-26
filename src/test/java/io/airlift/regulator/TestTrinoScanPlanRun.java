@@ -15,12 +15,16 @@ package io.airlift.regulator;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Random;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -34,7 +38,7 @@ public class TestTrinoScanPlanRun
         String tail = "y".repeat(4096);
         for (String expression : List.of("[^/]+", "[^/]{3,}", "[^/]{2,5}", "[a-z]{2,}", "(?s).*", "[^/]*", "[^/]?", "[^/]", "[0-9]+")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), expression);
+            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), expression);
             for (String text : List.of("", "a", "ab", "abc", "é", "é😀x", "例え", "😀😀😀😀", "a/", "/", "ab/c", "A", "1")) {
                 String value = text + tail;
                 byte[] input = ("!" + value + "!").getBytes(UTF_8);
@@ -50,10 +54,146 @@ public class TestTrinoScanPlanRun
         }
         // A bounded view cannot take its minimum from bytes after the view.
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("[^/]{3,}"), Regexp.LIKE_PERL);
-        TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()));
+        TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false));
         byte[] input = "xabc".getBytes(UTF_8);
         assertThat(run.matchMinimum(input, 1, 3)).isEqualTo(-1);
         assertThat(run.matchMinimum(input, 0, 3)).isEqualTo(3);
+    }
+
+    @Test
+    public void testSetRunReadsCharactersAsTheOrdinaryEngine()
+    {
+        // A run of some non-ASCII characters but not all reads one character as the ordinary
+        // engine's byte ranges for the class do: on every sequence of one or two bytes, every
+        // three-byte sequence whose lead is at or above E0 and whose other bytes are continuation
+        // bytes or a sample of others, and random and edge four-byte sequences, malformed UTF-8
+        // included.
+        List<Byte> following = new ArrayList<>();
+        for (int value = 0x80; value <= 0xBF; value++) {
+            following.add((byte) value);
+        }
+        for (int value : new int[] {0x00, 0x41, 0x7F, 0xC0, 0xC2, 0xE2, 0xF0, 0xFF}) {
+            following.add((byte) value);
+        }
+        List<byte[]> sequences = new ArrayList<>();
+        for (int first = 0; first < 256; first++) {
+            sequences.add(new byte[] {(byte) first});
+            for (int second = 0; second < 256; second++) {
+                sequences.add(new byte[] {(byte) first, (byte) second});
+            }
+        }
+        for (int first = 0xE0; first < 256; first++) {
+            for (byte second : following) {
+                for (byte third : following) {
+                    sequences.add(new byte[] {(byte) first, second, third});
+                }
+            }
+        }
+        Random random = new Random(0x10FFFF);
+        for (int iteration = 0; iteration < 20_000; iteration++) {
+            byte[] sequence = {(byte) (0xF0 + random.nextInt(16)), 0, 0, 0};
+            for (int index = 1; index < sequence.length; index++) {
+                sequence[index] = following.get(random.nextInt(following.size()));
+            }
+            sequences.add(sequence);
+        }
+        // The four-byte edges: the first character, the last two, and the first value past them.
+        for (String hex : List.of("f0908080", "f48fbfbe", "f48fbfbf", "f4908080")) {
+            sequences.add(HexFormat.of().parseHex(hex));
+        }
+        for (SetCase set : List.of(
+                // Java's default dot excludes U+0085, U+2028, and U+2029 as well as LF and CR.
+                java("."),
+                java("(?iu)k"),
+                rust("\\w"),
+                rust("\\d"),
+                rust("\\s"),
+                rust("(?i)s"),
+                re2("[é😀]"),
+                re2("[^/\\x{85}]"),
+                // Every non-ASCII character but a few, or but the surrogates: most leads are full,
+                // and the exclusions include the first or last character of a width.
+                re2("[^\\x{85}\\x{7FF}\\x{FFFD}\\x{10FFFF}]"),
+                re2("[\\x{80}-\\x{D7FF}\\x{E000}-\\x{10FFFF}]"),
+                re2("[^\\x{85}\\x{7FF}\\x{800}\\x{FFFD}\\x{10000}]"),
+                // Encoded surrogates are members of a class that holds them, and a class that
+                // holds only some of them keeps lead ED in the trie.
+                re2("[\\x{800}-\\x{FFFF}]"),
+                re2("[\\x{D000}-\\x{D800}]"),
+                re2("[\\x{10000}-\\x{10FFFF}]"),
+                // Ranges across the edges of encoding widths and of the surrogates, and every
+                // character but the last.
+                re2("[\\x{7FF}-\\x{800}]"),
+                re2("[\\x{FFFF}-\\x{10000}]"),
+                re2("[\\x{D7FF}-\\x{E000}]"),
+                re2("[\\x{80}-\\x{10FFFE}]"),
+                re2("[^\\x{10FFFF}]"))) {
+            ParseResult parsed = set.parsed();
+            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), true), set.name());
+            assertThat(run.matchesSomeNonAscii()).as(set.name()).isTrue();
+            for (byte[] sequence : sequences) {
+                String description = set.name() + " on " + HexFormat.of().formatHex(sequence);
+                MatchResult result = set.ordinary().lookingAtResult(wrappedBuffer(sequence));
+                int expectedStop = result == null ? -1 : result.end();
+                int stop = run.re2SetMatch(sequence, 0, sequence.length);
+                assertThat(stop).as(description).isEqualTo(expectedStop);
+                if (stop > 0) {
+                    // Each character the run reads starts with a member byte.
+                    assertThat(run.members()[sequence[0] & 0xFF]).as(description).isTrue();
+                }
+            }
+            // A continuation byte starts no character, and no run of such a set is the
+            // complement of one byte.
+            for (int value = 0x80; value <= 0xBF; value++) {
+                assertThat(run.members()[value]).as("%s byte %s", set.name(), value).isFalse();
+            }
+            ParseResult unbounded = set.parse(set.name() + "+");
+            TrinoScanPlanRun unboundedRun = requireNonNull(TrinoScanPlanRun.analyze(unbounded.regexp(), unbounded.caseFolding(), true), set.name());
+            assertThat(unboundedRun.unboundedScanTerminator()).as(set.name()).isEqualTo(-1);
+            for (int value = 0; value < 256; value++) {
+                assertThat(unboundedRun.isComplementOf((byte) value)).as("%s byte %s", set.name(), value).isFalse();
+            }
+            // Trino reads every non-ASCII byte alike, so such a set is not a Trino run.
+            assertThat(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false)).as(set.name()).isNull();
+        }
+        // Interned blocks and masks keep the member table of Rust's \w near 12 KB.
+        ParseResult word = rust("\\w").parsed();
+        Utf8MemberTable wordTable = requireNonNull(TrinoScanPlanRun.analyze(word.regexp(), word.caseFolding(), true)).nonAsciiMembers();
+        assertThat(wordTable.estimatedRetainedSize()).isLessThan(16 * 1024);
+    }
+
+    private record SetCase(String name, Function<String, ParseResult> parser, Re2 ordinary)
+    {
+        ParseResult parsed()
+        {
+            return parse(name);
+        }
+
+        ParseResult parse(String expression)
+        {
+            return parser.apply(expression);
+        }
+    }
+
+    private static SetCase re2(String set)
+    {
+        Re2.Options options = Re2.Options.defaults();
+        return new SetCase(set, expression -> RegexpParser.parse(utf8Slice(expression), options.parseFlags()), Re2.compileWithoutScanPlanForTesting(utf8Slice(set), options));
+    }
+
+    private static SetCase java(String set)
+    {
+        JavaRegexp.Options options = JavaRegexp.Options.defaults();
+        return new SetCase(set, expression -> JavaRegexpParser.parse(utf8Slice(expression), options.parseFlags()), JavaRegexp.compileWithoutScanPlanForTesting(utf8Slice(set), options).pattern());
+    }
+
+    private static SetCase rust(String set)
+    {
+        RustRegexp.Options options = RustRegexp.Options.defaults();
+        return new SetCase(
+                set,
+                expression -> RustRegexpParser.parse(utf8Slice(expression), options.syntaxFlags(), options.nestLimit()),
+                RustRegexp.compileWithoutScanPlanForTesting(utf8Slice(set), options).pattern());
     }
 
     @Test
@@ -63,7 +203,7 @@ public class TestTrinoScanPlanRun
         // negated classes hold line feeds and every non-ASCII byte without dotAll.
         for (String set : List.of("[^/]", "[^:]", "[^,]", "[^\\n]", "[^/x]", "[^=]", "[^\\x00-\\x7F]", "\\w", "[a]", "[\\x00-\\x7F]", ".", "(?s).")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(set + "+"), Regexp.LIKE_PERL);
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
+            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), set);
             // Only a line feed ends a line in this dialect.
             Pattern reference = Pattern.compile(set, Pattern.UNIX_LINES);
             int excluded = -1;
@@ -90,7 +230,7 @@ public class TestTrinoScanPlanRun
         // copy must agree.
         for (String set : List.of("[a]", "[?&]", "[abz]", "[0-9]", "[0-9a]", "[a-z@]", "\\w", "[\\x00-\\x3F]", "[\\x00-\\x7F]", "[^=]", "[^/:?#]", "[^\\x00-\\x7F]", ".")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("(?s)" + set + "+"), Regexp.LIKE_PERL);
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding()), set);
+            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), set);
             Pattern reference = Pattern.compile("(?s)" + set);
             boolean[] members = new boolean[256];
             int filler = -1;

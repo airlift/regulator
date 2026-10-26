@@ -53,11 +53,11 @@ public class TestBenchmarkJavaScanPlan
                             // The rows are the RE2 benchmark's, and each Java pattern matches what its
                             // RE2 pattern matches, or with javaDollar=true or javaLineTerminators=true
                             // what the ordinary engine matches, since some rows hold a line
-                            // terminator. With scanPlan=true, each Java pattern selects a plan, and a
-                            // generated class when generateBytecode=true, exactly when its RE2 pattern
-                            // does, with Java's $ too, unless it has Java's default dot, which
-                            // excludes some non-ASCII characters; with scanPlan=false, it selects
-                            // neither.
+                            // terminator. With scanPlan=true, each Java pattern selects a plan exactly
+                            // when its RE2 pattern does, with Java's $ and default dot too, and a
+                            // generated class when generateBytecode=true unless it has the default
+                            // dot, which excludes some non-ASCII characters; with scanPlan=false, it
+                            // selects neither.
                             BenchmarkRe2ScanPlan.BenchmarkData re2 = re2Data(workload, dotAll, generateBytecode);
                             assertThat(contains.inputs).as(state).isEqualTo(re2.inputs);
                             for (int index = 0; index < contains.patterns.length; index++) {
@@ -65,7 +65,7 @@ public class TestBenchmarkJavaScanPlan
                                 boolean javaDot = javaLineTerminators && !dotAll && hasDot(re2Expression);
                                 assertThat(contains.patterns[index].pattern().usesTrinoScanPlanForDiagnostics())
                                         .as("%s pattern %s", state, index)
-                                        .isEqualTo(scanPlan && !javaDot && re2.patterns[index].usesTrinoScanPlanForDiagnostics());
+                                        .isEqualTo(scanPlan && re2.patterns[index].usesTrinoScanPlanForDiagnostics());
                                 assertThat(contains.patterns[index].usesGeneratedBytecode())
                                         .as("%s pattern %s", state, index)
                                         .isEqualTo(scanPlan && !javaDot && re2.patterns[index].usesGeneratedBytecode());

@@ -52,9 +52,9 @@ public class TestBenchmarkRustScanPlan
                         // matches. Outside byte mode, results on malformed UTF-8 are unspecified,
                         // so on the malformed rows the RE2 result stands for Regulator's ordinary engine,
                         // which decodes malformed input by RE2's rules. With scanPlan=true, each Rust
-                        // pattern selects a plan, and a generated class when generateBytecode=true,
-                        // exactly when its RE2 pattern does, unless it has a Unicode Perl class,
-                        // which keeps the ordinary engine; with scanPlan=false, it selects neither.
+                        // pattern selects a plan exactly when its RE2 pattern does, and a generated
+                        // class when generateBytecode=true unless it has a Unicode Perl class, which
+                        // holds some non-ASCII characters; with scanPlan=false, it selects neither.
                         BenchmarkRe2ScanPlan.BenchmarkData re2 = re2Data(workload, dotAll, generateBytecode);
                         assertThat(contains.inputs).as(state).isEqualTo(re2.inputs);
                         boolean[] unicodeClasses = new boolean[contains.patterns.length];
@@ -64,7 +64,7 @@ public class TestBenchmarkRustScanPlan
                             unicodeClasses[index] = unicodePerlClasses && perlClass;
                             assertThat(contains.patterns[index].pattern().usesTrinoScanPlanForDiagnostics())
                                     .as("%s pattern %s", state, index)
-                                    .isEqualTo(scanPlan && !unicodeClasses[index] && re2.patterns[index].usesTrinoScanPlanForDiagnostics());
+                                    .isEqualTo(scanPlan && re2.patterns[index].usesTrinoScanPlanForDiagnostics());
                             assertThat(contains.patterns[index].usesGeneratedBytecode())
                                     .as("%s pattern %s", state, index)
                                     .isEqualTo(scanPlan && !unicodeClasses[index] && re2.patterns[index].usesGeneratedBytecode());

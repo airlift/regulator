@@ -30,7 +30,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestBenchmarkRe2ScanPlan
 {
-    // Workloads whose patterns select no plan, so both scanPlan values time the ordinary engine.
+    // Workloads whose patterns select no plan, so both scanPlan values time the ordinary engine,
+    // except that RE2 plans the first pattern in DEEP_REJECTIONS.
     private static final Set<String> WITHOUT_PLAN = Set.of(
             "UNANCHORED_RUN",
             "UNANCHORED_RUN_LEADING",
@@ -39,11 +40,14 @@ public class TestBenchmarkRe2ScanPlan
             "DEEP_REJECTIONS",
             "FALLBACK",
             "LOWERED_FALLBACK",
-            "FOLDED_HOST",
+            // An unanchored search led by the k that folds to the Kelvin sign.
             "FOLDED_KEY");
     // Workloads whose plans are case-insensitive, so they keep the interpreter when generated
     // bytecode is requested.
-    private static final Set<String> FOLDED = Set.of("FOLDED_ANCHORED", "FOLDED_OPTIONAL", "FOLDED_UNANCHORED", "FOLDED_MIXED");
+    private static final Set<String> FOLDED = Set.of("FOLDED_ANCHORED", "FOLDED_OPTIONAL", "FOLDED_UNANCHORED", "FOLDED_MIXED", "FOLDED_HOST");
+    // The first pattern in DEEP_REJECTIONS selects an interpreted RE2 plan because RE2 supports
+    // its Unicode K fold, which Trino rejects.
+    private static final String PARTLY_PLANNED = "DEEP_REJECTIONS";
 
     @Test
     public void testBenchmarkResults()
@@ -67,19 +71,22 @@ public class TestBenchmarkRe2ScanPlan
                     BenchmarkRe2ScanPlan.BenchmarkData replace = data(workload, dotAll, variant);
                     BenchmarkRe2ScanPlan.BenchmarkData compile = data(workload, dotAll, variant);
                     String trinoWorkload = BenchmarkRe2ScanPlan.trinoWorkload(workload);
-                    boolean planned = scanPlan && !WITHOUT_PLAN.contains(trinoWorkload);
-                    boolean generated = generateBytecode && planned && !FOLDED.contains(trinoWorkload);
-                    assertThat(contains.patterns).as(state).allSatisfy(pattern -> {
-                        assertThat(pattern.usesTrinoScanPlanForDiagnostics()).isEqualTo(planned);
-                        assertThat(pattern.usesGeneratedBytecode()).isEqualTo(generated);
-                    });
+                    boolean[] planned = new boolean[contains.patterns.length];
+                    boolean[] generated = new boolean[contains.patterns.length];
+                    for (int index = 0; index < contains.patterns.length; index++) {
+                        planned[index] = scanPlan && (!WITHOUT_PLAN.contains(trinoWorkload) || (trinoWorkload.equals(PARTLY_PLANNED) && index == 0));
+                        generated[index] = generateBytecode && planned[index] && !FOLDED.contains(trinoWorkload) && !trinoWorkload.equals(PARTLY_PLANNED);
+                        assertThat(contains.patterns[index].usesTrinoScanPlanForDiagnostics()).as("%s pattern %s", state, index).isEqualTo(planned[index]);
+                        assertThat(contains.patterns[index].usesGeneratedBytecode()).as("%s pattern %s", state, index).isEqualTo(generated[index]);
+                    }
                     Re2[] patterns = Arrays.stream(contains.expressions).map(Re2::compile).toArray(Re2[]::new);
                     boolean[] planMatched = new boolean[patterns.length];
                     // Continue past the last row so that each method's cursor also wraps around.
                     for (int call = 0; call < contains.inputs.length + patterns.length + 1; call++) {
                         int row = call % contains.inputs.length;
                         Slice input = contains.inputs[row];
-                        Re2 pattern = patterns[row % patterns.length];
+                        int patternIndex = row % patterns.length;
+                        Re2 pattern = patterns[patternIndex];
                         int group = pattern.capturingGroupCount() == 0 ? 0 : 1;
                         String description = state + " row=" + row;
                         if (input.length() > 0) {
@@ -87,7 +94,7 @@ public class TestBenchmarkRe2ScanPlan
                         }
 
                         MatchResult match = pattern.findResult(input);
-                        planMatched[row % patterns.length] |= match != null;
+                        planMatched[patternIndex] |= match != null;
                         assertThat(benchmark.contains(contains)).as(description).isEqualTo(match != null);
                         assertThat(benchmark.count(count)).as(description).isEqualTo(pattern.count(input));
                         long expectedBoundaries = match == null ? -1 : ((long) match.start() << 32) | match.end();
@@ -107,8 +114,8 @@ public class TestBenchmarkRe2ScanPlan
                             Re2 compiled = benchmark.compile(compile);
                             assertThat(compiled.capturingGroupCount()).as(description).isEqualTo(pattern.capturingGroupCount());
                             assertThat(compiled.find(input)).as(description).isEqualTo(match != null);
-                            assertThat(compiled.usesTrinoScanPlanForDiagnostics()).as(description).isEqualTo(planned);
-                            assertThat(compiled.usesGeneratedBytecode()).as(description).isEqualTo(generated);
+                            assertThat(compiled.usesTrinoScanPlanForDiagnostics()).as(description).isEqualTo(planned[patternIndex]);
+                            assertThat(compiled.usesGeneratedBytecode()).as(description).isEqualTo(generated[patternIndex]);
                         }
                     }
                     // A row paired with the wrong plan would time only failure paths.
