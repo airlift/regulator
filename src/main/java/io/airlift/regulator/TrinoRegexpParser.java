@@ -169,11 +169,12 @@ final class TrinoRegexpParser
 
         private RegexpParseException unsupportedFlag(int flag, int flagPosition)
         {
+            // TeaVM's class library has no Character.toString(int), and parsing must compile with TeaVM.
             return new RegexpParseException(
                     RegexpParseErrorCode.UNSUPPORTED_FLAG,
                     Slices.wrappedBuffer(bytes, flagPosition, 1),
                     flagPosition - start,
-                    Character.toString(flag));
+                    new String(Character.toChars(flag)));
         }
 
         Regexp parseRegexp()

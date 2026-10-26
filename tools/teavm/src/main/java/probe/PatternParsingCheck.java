@@ -13,9 +13,12 @@
  */
 package probe;
 
+import io.airlift.regulator.JavaRegexp;
 import io.airlift.regulator.PatternInfo;
+import io.airlift.regulator.Re2;
 import io.airlift.regulator.RegexpParseException;
 import io.airlift.regulator.RustRegexp;
+import io.airlift.regulator.TrinoRegexp;
 import io.airlift.slice.Slice;
 
 import java.util.Map;
@@ -30,32 +33,55 @@ public final class PatternParsingCheck
 
     public static void main(String[] args)
     {
-        byte[] bytes = "xx(?i)(?<letter>\\pL)(b)?yy".getBytes(UTF_8);
-        Slice pattern = wrappedBuffer(bytes, 2, bytes.length - 4);
-        PatternInfo info = RustRegexp.parse(pattern);
-        if (info.capturingGroupCount() != 2 || !info.namedCapturingGroups().equals(Map.of("letter", 1))) {
-            throw new AssertionError("Incorrect capture metadata: " + info.capturingGroupCount() + " groups, names " + info.namedCapturingGroups());
-        }
-
+        Slice pattern = view("(?i)(?<letter>\\pL)(b)?");
+        checkInfo("Rust", RustRegexp.parse(pattern), 2, Map.of("letter", 1));
         if (!pattern.copy().equals(pattern) || !pattern.slice(0, 4).toStringUtf8().equals("(?i)")) {
             throw new AssertionError("Incorrect Slice copy or view");
         }
+        checkInfo("Rust options", RustRegexp.parse(utf8Slice("#(ignored)\n(a)"), RustRegexp.Options.defaults().setComments(true)), 1, Map.of());
+        checkError("Rust", () -> RustRegexp.parse(utf8Slice("é(")), 2, "(");
 
-        PatternInfo comments = RustRegexp.parse(utf8Slice("#(ignored)\n(a)"), RustRegexp.Options.defaults().setComments(true));
-        if (comments.capturingGroupCount() != 1) {
-            throw new AssertionError("Syntax options were ignored");
-        }
+        checkInfo("RE2", Re2.parse(view("(?i)(?P<letter>\\pL)(b)?")), 2, Map.of("letter", 1));
+        checkInfo("RE2 options", Re2.parse(utf8Slice("(a)"), Re2.Options.defaults().setLiteral(true)), 0, Map.of());
+        checkError("RE2", () -> Re2.parse(utf8Slice("é[a")), 4, "[a");
 
-        try {
-            RustRegexp.parse(utf8Slice("é("));
-            throw new AssertionError("Invalid pattern was accepted");
-        }
-        catch (RegexpParseException expected) {
-            if (expected.byteOffset() != 2 || !expected.invalidPatternSegment().toStringUtf8().equals("(")) {
-                throw new AssertionError("Incorrect UTF-8 error span: " + expected);
-            }
-        }
+        checkInfo("Java", JavaRegexp.parse(view("(?iu)(?<letter>\\p{L})(b)?\\N{LATIN SMALL LETTER A}")), 2, Map.of("letter", 1));
+        checkInfo("Java options", JavaRegexp.parse(utf8Slice("#(ignored)\n(a)"), JavaRegexp.Options.defaults().setComments(true)), 1, Map.of());
+        checkError("Java", () -> JavaRegexp.parse(utf8Slice("é(?=a)")), 2, "(?=");
+
+        checkInfo("Trino", TrinoRegexp.parse(view("(?i)(?<letter>\\p{L})(b)?")), 2, Map.of("letter", 1));
+        checkInfo("Trino options", TrinoRegexp.parse(utf8Slice("(a)"), TrinoRegexp.Options.defaults().setMaxMemory(1)), 1, Map.of());
+        checkError("Trino", () -> TrinoRegexp.parse(utf8Slice("é(?=a)")), 2, "(?=");
 
         System.out.println("TeaVM pattern parsing checks passed");
+    }
+
+    // A view with a nonzero offset into a larger array. The padding is unbalanced parentheses, so
+    // a parser that reads the whole array instead of the view fails.
+    private static Slice view(String pattern)
+    {
+        byte[] bytes = (")x" + pattern + "x(").getBytes(UTF_8);
+        return wrappedBuffer(bytes, 2, bytes.length - 4);
+    }
+
+    private static void checkInfo(String check, PatternInfo info, int capturingGroupCount, Map<String, Integer> namedCapturingGroups)
+    {
+        if (info.capturingGroupCount() != capturingGroupCount || !info.namedCapturingGroups().equals(namedCapturingGroups)) {
+            throw new AssertionError(check + ": incorrect capture metadata: " + info.capturingGroupCount() + " groups, names " + info.namedCapturingGroups());
+        }
+    }
+
+    private static void checkError(String check, Runnable parse, int byteOffset, String invalidPatternSegment)
+    {
+        try {
+            parse.run();
+        }
+        catch (RegexpParseException expected) {
+            if (expected.byteOffset() != byteOffset || !expected.invalidPatternSegment().toStringUtf8().equals(invalidPatternSegment)) {
+                throw new AssertionError(check + ": incorrect UTF-8 error span: " + expected);
+            }
+            return;
+        }
+        throw new AssertionError(check + ": invalid pattern was accepted");
     }
 }

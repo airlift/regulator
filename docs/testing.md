@@ -61,10 +61,11 @@ python3 -I tools/unicode-database/generate.py --check
 
 ## TeaVM pattern parsing
 
-After `./mvnw install`, run `tools/teavm/verify.sh` to compile the public
-pattern-validation API to JavaScript and Wasm GC and execute both in Node.
-The check covers Unicode classes and case folding, capture metadata, options,
-Slice views, and UTF-8 error spans. It does not compile or run the matching engines.
+After `./mvnw install`, run `tools/teavm/verify.sh` to compile every regex
+language's public pattern-validation API to JavaScript and Wasm GC and execute
+both in Node. For each language's parser, the check covers Unicode classes and
+case folding, capture metadata, options, Slice views, and UTF-8 error spans. It
+does not compile or run the matching engines.
 
 ## Benchmark setup
 

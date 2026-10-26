@@ -22,6 +22,10 @@ import java.util.Collection;
 public final class TeaVMParsingSupport
         implements SubstitutionPolicy, ResourcesPolicy
 {
+    // These mirror UnicodeDatabase's resources, which are package-private there.
+    private static final String RESOURCE = "io/airlift/regulator/unicode/unicode-18.0.0.bin";
+    private static final String NAMES_RESOURCE = "io/airlift/regulator/unicode/unicode-names-18.0.0.bin";
+
     @Override
     public void contribute(SubstitutionSink sink)
     {
@@ -33,6 +37,11 @@ public final class TeaVMParsingSupport
     @Override
     public String[] supplyResources(Collection<? extends String> classNames)
     {
-        return new String[] {"io/airlift/regulator/unicode/unicode-18.0.0.bin"};
+        // Only Java's \N{name} escapes read character names, so their larger resource is included
+        // only when the program reaches the class that loads it.
+        if (classNames.contains("io.airlift.regulator.UnicodeDatabase$Names")) {
+            return new String[] {RESOURCE, NAMES_RESOURCE};
+        }
+        return new String[] {RESOURCE};
     }
 }

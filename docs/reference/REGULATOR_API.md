@@ -84,6 +84,22 @@ metadata retains no matching engine. Parsing does not check the memory needed to
 compile or execute a pattern. SQL LIKE patterns have no capturing groups, so
 `TrinoLikePattern` has no `parse` method.
 
+### TeaVM
+
+The parsing API supports TeaVM JavaScript and Wasm GC. Applications can opt into
+`io.airlift.regulator.teavm.TeaVMParsingSupport` to substitute Slice's
+byte-array operations and include Regulator's pinned Unicode data. Register
+the providers as described in [tools/teavm](../../tools/teavm/README.md).
+Consumers use the normal Regulator and Slice APIs; there is no second parser
+or Unicode implementation.
+The JVM continues using Airlift Slice.
+
+The substitution covers the operations reachable from parsing, including
+nonzero Slice offsets and UTF-8 diagnostics. Unsupported Slice operations fail
+TeaVM dependency checking rather than falling back to JVM code. Programs that
+use `JavaRegexp.parse` also include the character names for Java's `\N{name}`
+escapes. Full pattern compilation and matching remain JVM-only.
+
 ## Compiled patterns
 
 Compile a pattern once and share the resulting `Re2` across threads:
