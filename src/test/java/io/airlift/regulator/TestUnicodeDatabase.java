@@ -61,12 +61,8 @@ public class TestUnicodeDatabase
         String generationKey = sha256Hex(listing.toString().getBytes(StandardCharsets.US_ASCII));
         assertThat(generationKey).as("generation key of generate.py and manifest.txt: generated.txt is " + REGENERATE).isEqualTo(recorded.get("generation-key"));
 
-        byte[] database;
-        try (InputStream input = UnicodeDatabase.class.getResourceAsStream(UnicodeDatabase.RESOURCE)) {
-            assertThat(input).as(UnicodeDatabase.RESOURCE).isNotNull();
-            database = input.readAllBytes();
-        }
-        assertThat(sha256Hex(database)).as("SHA-256 of %s: the database is %s", UnicodeDatabase.RESOURCE, REGENERATE).isEqualTo(recorded.get("database-sha256"));
+        assertResourceHash(UnicodeDatabase.RESOURCE, recorded.get("database-sha256"));
+        assertResourceHash(UnicodeDatabase.NAMES_RESOURCE, recorded.get("names-sha256"));
         assertThat(HexFormat.of().formatHex(UnicodeDatabase.generationKey())).isEqualTo(generationKey);
     }
 
@@ -130,6 +126,17 @@ public class TestUnicodeDatabase
         assertThat(valueAliases.get("sc")).contains(new Aliases("Zinh", "Inherited", List.of("Qaai")));
         assertThat(valueAliases.get("age")).contains(new Aliases("1.1", "V1_1", List.of()));
         assertThat(valueAliases.get("WB")).contains(new Aliases("LE", "ALetter", List.of()));
+    }
+
+    private static void assertResourceHash(String resource, String expectedHash)
+            throws IOException
+    {
+        byte[] database;
+        try (InputStream input = UnicodeDatabase.class.getResourceAsStream(resource)) {
+            assertThat(input).as(resource).isNotNull();
+            database = input.readAllBytes();
+        }
+        assertThat(sha256Hex(database)).as("SHA-256 of %s: the database is %s", resource, REGENERATE).isEqualTo(expectedHash);
     }
 
     private static AbstractBooleanAssert<?> assertMembership(PropertyValues values, String name, int codePoint)

@@ -3,7 +3,8 @@
 
 # Downloads the Unicode Character Database (UCD) files that manifest.txt lists
 # into target/unicode-database/<version>/ and writes
-# src/main/resources/io/airlift/regulator/unicode/unicode-<version>.bin and
+# src/main/resources/io/airlift/regulator/unicode/unicode-<version>.bin,
+# src/main/resources/io/airlift/regulator/unicode/unicode-names-<version>.bin and
 # tools/unicode-database/generated.txt. Run it with:
 #
 #   python3 -I tools/unicode-database/generate.py
@@ -19,9 +20,9 @@
 # on the manifest, the files it pins, and this script, so rerunning the
 # generator is a no-op.
 #
-# generated.txt records two values, which TestUnicodeDatabase checks on every
-# build without a network: the generation key, and the SHA-256 of the
-# database. The generation key is the SHA-256 of the two lines
+# generated.txt records the generation key and the SHA-256 of each resource,
+# which TestUnicodeDatabase checks on every build without a network.
+# The generation key is the SHA-256 of the two lines
 # "<sha256 hex>  generate.py\n" and "<sha256 hex>  manifest.txt\n", the output
 # of "shasum -a 256 generate.py manifest.txt" in this directory, so it changes
 # whenever the generator or its inputs do.
@@ -41,6 +42,9 @@
 #                      varint payload byte length, and the payload, in
 #                      ascending order of id; a reader skips a section id it
 #                      does not know
+#
+# Both resources have the same header. The names resource holds section 13;
+# the main resource holds all other sections.
 #
 # Section 1, simple case folding orbits: the case folding classes of
 # CaseFolding.txt statuses C and S, in ascending order of the code point every
@@ -949,11 +953,12 @@ def database(version, files, texts, key):
     word_breaks = property_values("auxiliary/WordBreakProperty.txt", texts["auxiliary/WordBreakProperty.txt"])
     sentence_breaks = property_values("auxiliary/SentenceBreakProperty.txt", texts["auxiliary/SentenceBreakProperty.txt"])
     encoded_version = version.encode("ascii")
-    return (MAGIC
-            + varint(FORMAT_VERSION)
-            + varint(len(encoded_version)) + encoded_version
-            + key
-            + input_digest(files)
+    header = (MAGIC
+              + varint(FORMAT_VERSION)
+              + varint(len(encoded_version)) + encoded_version
+              + key
+              + input_digest(files))
+    data = (header
             + orbit_section(simple_orbits)
             + multi_character_section(SECTION_FULL_CASE_FOLDING, full_folds)
             + mapping_section(SECTION_SIMPLE_UPPERCASE_MAPPINGS, uppercase)
@@ -966,7 +971,6 @@ def database(version, files, texts, key):
             + property_value_section(SECTION_AGE, ages)
             + multi_character_section(SECTION_FULL_UPPERCASE_MAPPINGS, full_uppercase)
             + multi_character_section(SECTION_FULL_LOWERCASE_MAPPINGS, full_lowercase)
-            + character_name_section(SECTION_NAME, names)
             + character_name_section(SECTION_CONTROL_NAME, control_names)
             + property_value_section(SECTION_SCRIPT_EXTENSIONS, extensions)
             + property_value_section(SECTION_GRAPHEME_CLUSTER_BREAK, grapheme_cluster_breaks)
@@ -974,13 +978,16 @@ def database(version, files, texts, key):
             + property_value_section(SECTION_SENTENCE_BREAK, sentence_breaks)
             + section(SECTION_PROPERTY_ALIASES, alias_list_payload(property_aliases(texts["PropertyAliases.txt"])))
             + property_value_alias_section(SECTION_PROPERTY_VALUE_ALIASES, value_aliases))
+    names_data = header + character_name_section(SECTION_NAME, names)
+    return data, names_data
 
 
-def generated(key, data):
+def generated(key, data, names):
     return ("# Written by generate.py; do not edit. TestUnicodeDatabase checks these\n"
-            "# values against the committed generator, manifest, and database.\n"
+            "# values against the committed generator, manifest, and resources.\n"
             f"generation-key {key.hex()}\n"
-            f"database-sha256 {sha256(data)}\n").encode("ascii")
+            f"database-sha256 {sha256(data)}\n"
+            f"names-sha256 {sha256(names)}\n").encode("ascii")
 
 
 def main():
@@ -991,10 +998,11 @@ def main():
 
     version, files = read_manifest()
     key = generation_key()
-    data = database(version, files, download(version, files, refresh=args.check), key)
+    data, names = database(version, files, download(version, files, refresh=args.check), key)
     outputs = {
         OUTPUT_DIR / f"unicode-{version}.bin": data,
-        GENERATED: generated(key, data),
+        OUTPUT_DIR / f"unicode-names-{version}.bin": names,
+        GENERATED: generated(key, data, names),
     }
 
     if not args.check:

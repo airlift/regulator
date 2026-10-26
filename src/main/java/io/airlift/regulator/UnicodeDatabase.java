@@ -21,22 +21,20 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.function.IntPredicate;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 
-/// The pinned Unicode Character Database data, read from the resource that
+/// The pinned Unicode Character Database data, read from the resources that
 /// `tools/unicode-database/generate.py` writes. The generator documents the format.
 ///
-/// The resource is read once, on first use, and each section is decoded once, on its own first
-/// use, through a holder class, so a process that never folds case with a rule, or never uses a
-/// property, decodes none of the data that only it needs. The character names are most of the
-/// resource, and only Java's `\N{name}` reads them, so the first read keeps every other
-/// section, and the names are read from the resource again on their own first use.
+/// Each resource is read once, on first use, and each section is decoded once, on its own first
+/// use, through a holder class. Character names have a separate resource, loaded only by Java's
+/// `\N{name}`, so consumers of other Unicode data can omit it.
 final class UnicodeDatabase
 {
     static final String UNICODE_VERSION = "18.0.0";
     static final String RESOURCE = "unicode/unicode-" + UNICODE_VERSION + ".bin";
+    static final String NAMES_RESOURCE = "unicode/unicode-names-" + UNICODE_VERSION + ".bin";
 
     private static final byte[] MAGIC = {'R', 'G', 'U', 'D'};
     private static final int FORMAT_VERSION = 1;
@@ -767,17 +765,16 @@ final class UnicodeDatabase
         return (int) value;
     }
 
-    /// The header of the resource and the payload of each section it keeps.
+    /// The header of the resource and the payload of each known section.
     private static final class Resource
     {
-        private static final Resource RESOURCE = load(sectionId -> sectionId != SECTION_NAME);
+        private static final Resource RESOURCE = load(UnicodeDatabase.RESOURCE);
 
         private final byte[] generationKey;
-        // The payload of each kept section, indexed by section ID; null marks a section that is
-        // missing or not kept.
+        // The payload of each known section, indexed by section ID; null marks a missing section.
         private final byte[][] sections = new byte[SECTION_COUNT][];
 
-        private Resource(byte[] data, IntPredicate keptSections)
+        private Resource(byte[] data)
         {
             Reader reader = new Reader("resource", data);
             if (!Arrays.equals(reader.bytes(MAGIC.length), MAGIC)) {
@@ -804,7 +801,7 @@ final class UnicodeDatabase
                 previousSectionId = sectionId;
                 int length = reader.varint();
                 // A section ID this reader does not know is skipped.
-                if (sectionId < SECTION_COUNT && keptSections.test(sectionId)) {
+                if (sectionId < SECTION_COUNT) {
                     sections[sectionId] = reader.bytes(length);
                 }
                 else {
@@ -822,22 +819,16 @@ final class UnicodeDatabase
             return new Reader("section " + sectionId, section);
         }
 
-        // Reads the resource again for a section that the first read does not keep.
-        private static Reader unkeptSection(int sectionId)
+        private static Resource load(String resource)
         {
-            return load(id -> id == sectionId).section(sectionId);
-        }
-
-        private static Resource load(IntPredicate keptSections)
-        {
-            try (InputStream input = UnicodeDatabase.class.getResourceAsStream(UnicodeDatabase.RESOURCE)) {
+            try (InputStream input = UnicodeDatabase.class.getResourceAsStream(resource)) {
                 if (input == null) {
-                    throw new IllegalStateException("missing Unicode database resource: " + UnicodeDatabase.RESOURCE);
+                    throw new IllegalStateException("missing Unicode database resource: " + resource);
                 }
-                return new Resource(input.readAllBytes(), keptSections);
+                return new Resource(input.readAllBytes());
             }
             catch (IOException e) {
-                throw new UncheckedIOException("failed to read Unicode database resource: " + UnicodeDatabase.RESOURCE, e);
+                throw new UncheckedIOException("failed to read Unicode database resource: " + resource, e);
             }
         }
     }
@@ -1013,7 +1004,7 @@ final class UnicodeDatabase
 
     private static final class Names
     {
-        private static final CharacterNames NAMES = parseCharacterNames(Resource.unkeptSection(SECTION_NAME));
+        private static final CharacterNames NAMES = parseCharacterNames(Resource.load(NAMES_RESOURCE).section(SECTION_NAME));
     }
 
     private static final class ControlNames
