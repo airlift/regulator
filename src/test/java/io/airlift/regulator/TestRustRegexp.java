@@ -265,6 +265,7 @@ public class TestRustRegexp
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(2);
         assertThat(matcher.find()).isFalse();
+        assertThat(matcher.find()).isFalse();
     }
 
     private static void assertBoundedEngines(String pattern, String text, int start, int end)

@@ -21,9 +21,11 @@ judgment:
   supported Java pattern gives that release's results, computed with the JDK's
   own code, such as `Pattern`'s `CharPredicates` and the `Character`
   predicates, applied to the pinned Unicode database. Match positions are byte
-  offsets, as Java Regular-Subset Frontend records, and
-  [Differences from the JDK](docs/integrations/UNICODE.md#differences-from-the-jdk)
-  lists the other exceptions. Where `Pattern`'s javadoc and the JDK's code disagree, the code wins.
+  offsets and a `find()` after a failure resumes at the last match end, both
+  recorded under [Java Regular-Subset Frontend](#java-regular-subset-frontend),
+  and [Differences from the JDK](docs/integrations/UNICODE.md#differences-from-the-jdk)
+  lists the other exceptions. Where `Pattern`'s javadoc and the JDK's code
+  disagree, the code wins.
   A Java property is computed as the JDK computes it even where the database
   stores a Unicode property of the same name with the same members today,
   such as White_Space or Alphabetic.
@@ -252,7 +254,18 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   `$` and `\Z` do not match at the start of a nonempty region that splits a
   CR LF (without `(?d)`). A range overload behaves like a JDK region with
   transparent, non-anchoring bounds. As in the JDK, `find(int)` resets the
-  region to the whole input before it searches.
+  region to the whole input before it searches. After a failed `find`,
+  `matches`, or `lookingAt`, the next `find()` searches again from the end of
+  the last match, or from the region start when nothing has matched since the
+  last reset. The JDK's resume point after a failure can move instead, because
+  its backtracker reuses that position inside `?`, `{n,m}`, lazy quantifiers,
+  and repeated groups. Regulator does not follow that, so `\d{3}` and `\d\d\d`
+  behave the same: on `123 45 x`, after `find(4)` fails, the next `find()`
+  finds `123`, which the JDK finds only for `\d\d\d`. After an empty match
+  at the region end, later `find()` calls keep failing without searching, as
+  in the JDK. The JDK's `start()` and `end()` then still report that empty
+  match while `group()` returns null; Regulator throws, as after any failed
+  `find()`.
 - Multiline `^` excludes end-of-input even with `UNIX_LINES`. In that mode
   the compiler combines LF-only beginning-of-line with Java's non-EOF
   assertion, using the same context-sensitive fallback. UNIX multiline `$`

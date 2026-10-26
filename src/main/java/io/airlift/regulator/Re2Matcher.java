@@ -54,9 +54,14 @@ public final class Re2Matcher
     private int regionStart;
     private int regionEnd;
     private int nextFindStart;
+    // Where find() searches again after a failed find, matches, or lookingAt: the region-relative
+    // end of the last match, or 0 when nothing has matched since the last reset.
+    private int retryStart;
     private boolean hasMatch;
     private boolean groupZeroForwardCursorInitialized;
-    // The region-relative end of the previous match, or -1, for Rust search semantics.
+    // The region-relative end of the last match a Rust search returned. It starts at -1 so Rust can
+    // return a first empty match at 0, and failures keep it so a repeated empty match stays
+    // skipped. In contrast, retryStart starts at 0 and records every match.
     private int previousMatchEnd = -1;
     // Set at reset when the region starts on the LF of a CR LF and the pattern's Java $ reads that
     // CR, so every search of the region runs on the NFA. See Re2.matchRegionAfterCarriageReturnInto.
@@ -152,12 +157,16 @@ public final class Re2Matcher
             groupZeroForwardCursorInitialized = false;
         }
         nextFindStart = 0;
+        retryStart = 0;
         previousMatchEnd = -1;
         invalidateMatch();
         return this;
     }
 
-    /// Finds the next non-overlapping match in the current region.
+    /// Finds the next non-overlapping match in the current region. After a failed `find`,
+    /// `matches`, or `lookingAt` it searches again from the end of the last match, or from the
+    /// region start when nothing has matched since the last reset. Right after an empty match at
+    /// the region end it, and every later find, fails without searching.
     public boolean find()
     {
         // Kept small enough for C2 to inline; each route stays out of line.
@@ -170,11 +179,10 @@ public final class Re2Matcher
         return findGeneral();
     }
 
-    /// The start-anchored plan matches only at the region start, so only the first search of the
-    /// region can match. A later search fails as [#findGeneral] does. The plan reads the
-    /// region as its whole input, but a Rust search still sees the rest of the input, so a Rust
-    /// search of a partial region takes [#findRust], which reaches the plan only when the
-    /// region ends at the input end. A region whose Java $ reads a CR before it takes
+    /// The start-anchored plan can match only when the search starts at the region start. The
+    /// plan reads the region as its whole input, but a Rust search still sees the rest of the
+    /// input, so a Rust search of a partial region takes [#findRust], which reaches the plan only
+    /// when the region ends at the input end. A region whose Java $ reads a CR before it takes
     /// [#findGeneral].
     private boolean findWithStartAnchoredScanPlan()
     {
@@ -188,7 +196,7 @@ public final class Re2Matcher
             setMatchAndAdvance(groups[0], groups[1]);
             return true;
         }
-        nextFindStart = regionLength() + 1;
+        nextFindStart = retryStart;
         invalidateMatch();
         return false;
     }
@@ -226,7 +234,7 @@ public final class Re2Matcher
         if (singleByteMatcher != null) {
             int matchStart = singleByteMatcher.find(input, regionStart + nextFindStart, regionEnd);
             if (matchStart < 0) {
-                nextFindStart = regionLength + 1;
+                nextFindStart = retryStart;
                 invalidateMatch();
                 return false;
             }
@@ -234,6 +242,7 @@ public final class Re2Matcher
             groups[0] = matchStart;
             groups[1] = matchStart + 1;
             nextFindStart = matchStart + 1;
+            retryStart = matchStart + 1;
             hasMatch = true;
             return true;
         }
@@ -259,7 +268,7 @@ public final class Re2Matcher
                 return true;
             }
             if (candidateBoundary == Dfa.SEARCH_NO_MATCH) {
-                nextFindStart = regionLength + 1;
+                nextFindStart = retryStart;
                 invalidateMatch();
                 return false;
             }
@@ -287,7 +296,7 @@ public final class Re2Matcher
                 }
             }
             if (matchBoundary == Dfa.SEARCH_NO_MATCH) {
-                nextFindStart = regionLength + 1;
+                nextFindStart = retryStart;
                 invalidateMatch();
                 return false;
             }
@@ -307,7 +316,7 @@ public final class Re2Matcher
                 return true;
             }
             if (matchBoundary == Dfa.SEARCH_NO_MATCH) {
-                nextFindStart = regionLength + 1;
+                nextFindStart = retryStart;
                 invalidateMatch();
                 return false;
             }
@@ -318,7 +327,7 @@ public final class Re2Matcher
             loweredCandidateStart = pattern.findLoweredCandidateStart(input, regionStart, regionEnd, searchStart);
         }
         if (loweredCandidateStart == Dfa.SEARCH_NO_MATCH) {
-            nextFindStart = regionLength + 1;
+            nextFindStart = retryStart;
             invalidateMatch();
             return false;
         }
@@ -350,7 +359,7 @@ public final class Re2Matcher
                 setMatchAndAdvance(groups[0], groups[1]);
                 return true;
             }
-            nextFindStart = regionLength + 1;
+            nextFindStart = retryStart;
             invalidateMatch();
             return false;
         }
@@ -372,7 +381,7 @@ public final class Re2Matcher
                 UNANCHORED,
                 groups,
                 this)) {
-            nextFindStart = regionLength() + 1;
+            nextFindStart = retryStart;
             invalidateMatch();
             return false;
         }
@@ -386,7 +395,7 @@ public final class Re2Matcher
     private boolean findNextAfterCarriageReturn()
     {
         if (!pattern.matchRegionAfterCarriageReturnInto(input, regionStart, regionEnd, regionStart + nextFindStart, UNANCHORED, groups, this)) {
-            nextFindStart = regionLength() + 1;
+            nextFindStart = retryStart;
             invalidateMatch();
             return false;
         }
@@ -411,6 +420,7 @@ public final class Re2Matcher
     private void setMatchAndAdvance(int matchStart, int matchEnd)
     {
         hasMatch = true;
+        retryStart = matchEnd;
         if (matchStart != matchEnd) {
             nextFindStart = matchEnd;
         }
@@ -445,6 +455,7 @@ public final class Re2Matcher
             if (groupZeroForwardCursor != null) {
                 groupZeroForwardCursor.reset();
             }
+            retryStart = 0;
             previousMatchEnd = -1;
             invalidateMatch();
         }
@@ -474,6 +485,7 @@ public final class Re2Matcher
                 ? pattern.matchRegionAfterCarriageReturnInto(input, regionStart, regionEnd, regionStart, anchor, groups, this)
                 : pattern.matchRegionInto(input, regionStart, regionEnd, regionStart, regionEnd, anchor, groups, this);
         if (!matched) {
+            nextFindStart = retryStart;
             return false;
         }
         setMatchAndAdvance(groups[0], groups[1]);
@@ -485,6 +497,7 @@ public final class Re2Matcher
         // An anchored Rust search cannot skip ahead, so an empty match splitting a character fails,
         // except in the crate's bytes API.
         if (!latin1 && !Utf8.isCharacterBoundary(input, regionStart)) {
+            nextFindStart = retryStart;
             return false;
         }
         if (!pattern.matchRegionInto(
@@ -496,6 +509,7 @@ public final class Re2Matcher
                 anchor,
                 groups,
                 this)) {
+            nextFindStart = retryStart;
             return false;
         }
         toRegionOffsets();

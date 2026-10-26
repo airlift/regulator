@@ -44,7 +44,16 @@ the range start unless it is the input start, and `\bb` does not match `b` in
 the range `[1, 2)` of `ab`.
 
 As in the JDK, `matcher.find(start)` resets the region to the whole input
-before it searches from `start`.
+before it searches from `start`. After a failed `find`, `matches`, or
+`lookingAt`, the next `find()` searches again from the end of the last match,
+or from the region start when nothing has matched since the last reset. The
+JDK's backtracker can move that resume point inside `?`, `{n,m}`, lazy
+quantifiers, and repeated groups; Regulator does not, so on `123 45 x`, after
+`find(4)` fails, the next `find()` finds `123` for both `\d{3}` and `\d\d\d`,
+while the JDK finds it only for `\d\d\d`. After an empty match at the region
+end, `find()` and every later `find()` fail without searching, as in the JDK.
+The JDK's `start()` and `end()` then still report that empty match while
+`group()` returns null; Regulator throws, as after any failed `find()`.
 
 ## Supported constructs
 
