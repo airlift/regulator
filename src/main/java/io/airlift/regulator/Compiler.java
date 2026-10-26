@@ -465,7 +465,111 @@ final class Compiler
         LATIN1,
     }
 
+    /// Receives the pieces that [#splitUtf8Range] splits a rune range into. The compiler
+    /// turns each piece into byte ranges; a scan plan reads characters by the same pieces.
+    interface Utf8RangePieces
+    {
+        /// Adds every rune from U+0080 through U+10FFFF. The compiler's byte ranges for this piece
+        /// accept a lead byte `C2`-`DF`, `E0`-`EF`, or `F0`-`F4`
+        /// followed by one, two, or three continuation bytes, so they also accept overlong three-
+        /// and four-byte forms, encoded surrogates, and values above U+10FFFF (see
+        /// [Utf8#re2CharacterWidth]).
+        void addAllNonAscii();
+
+        /// Adds the ASCII runes `low` through `high`, folded when `foldCase`.
+        void addAscii(int low, int high, boolean foldCase);
+
+        /// Adds the runes encoded from `low` through `high`, two encodings of one
+        /// length. Each position holds one inclusive byte range, from the byte of `low` at
+        /// that position through the byte of `high`, and the sequences whose every byte lies
+        /// in its position's range are exactly the UTF-8 encodings of those runes.
+        void addEncodedRange(byte[] low, byte[] high);
+    }
+
+    /// Splits the runes `low` through `high` as `compile.cc AddRuneRangeUTF8`
+    /// does, into the pieces its byte ranges come from. Only a range that is exactly U+0080 through
+    /// U+10FFFF, alone or after its ASCII part, becomes the lenient
+    /// [Utf8RangePieces#addAllNonAscii] piece; every other non-ASCII rune is added as exact
+    /// encodings.
+    static void splitUtf8Range(int low, int high, boolean foldCase, Utf8RangePieces pieces)
+    {
+        if (low > high) {
+            return;
+        }
+
+        // Pick off 80-10FFFF as a common special case.
+        if (low == 0x80 && high == Regexp.RUNEMAX) {
+            pieces.addAllNonAscii();
+            return;
+        }
+
+        // Split range into same-length sized ranges.
+        for (int i = 1; i < UTF_MAX; i++) {
+            int max = maxRune(i);
+            if (low <= max && max < high) {
+                splitUtf8Range(low, max, foldCase, pieces);
+                splitUtf8Range(max + 1, high, foldCase, pieces);
+                return;
+            }
+        }
+
+        // ASCII range is always a special case.
+        if (high < RUNES_SELF) {
+            pieces.addAscii(low, high, foldCase);
+            return;
+        }
+
+        // Split range into sections that agree on leading bytes.
+        for (int i = 1; i < UTF_MAX; i++) {
+            int mask = (1 << (6 * i)) - 1;  // last i bytes of a UTF-8 sequence
+            if ((low & ~mask) != (high & ~mask)) {
+                if ((low & mask) != 0) {
+                    splitUtf8Range(low, low | mask, foldCase, pieces);
+                    splitUtf8Range((low | mask) + 1, high, foldCase, pieces);
+                    return;
+                }
+                if ((high & mask) != mask) {
+                    splitUtf8Range(low, (high & ~mask) - 1, foldCase, pieces);
+                    splitUtf8Range(high & ~mask, high, foldCase, pieces);
+                    return;
+                }
+            }
+        }
+
+        // Encode the bounds and emit the piece.
+        byte[] encodedLow = encodeUtf8(low);
+        byte[] encodedHigh = encodeUtf8(high);
+        if (encodedLow.length != encodedHigh.length) {
+            throw new RegexpCompileException("invalid UTF-8 rune range split");
+        }
+        pieces.addEncodedRange(encodedLow, encodedHigh);
+    }
+
+    private static int maxRune(int length)
+    {
+        // Maximum rune encoded by a UTF-8 sequence of the specified length.
+        int bits;
+        if (length == 1) {
+            bits = 7;
+        }
+        else {
+            bits = 8 - (length + 1) + 6 * (length - 1);
+        }
+        return (1 << bits) - 1;
+    }
+
+    private static byte[] encodeUtf8(int rune)
+    {
+        if (rune < 0 || rune > Regexp.RUNEMAX) {
+            throw new RegexpCompileException("invalid rune: " + rune);
+        }
+        byte[] bytes = new byte[Utf8.encodedLength(rune)];
+        Utf8.encode(bytes, 0, rune);
+        return bytes;
+    }
+
     private static final class CompilerState
+            implements Utf8RangePieces
     {
         final Prog program = new Prog();
         // Rune-range compilation state shared while building one program.
@@ -1183,59 +1287,27 @@ final class Compiler
             addSuffix(uncachedRuneByteSuffix(low, high, foldCase, 0));
         }
 
-        // Keep suffix caching and trie factoring aligned with compile.cc AddRuneRangeUTF8.
         private void addRuneRangeUtf8(int low, int high, boolean foldCase)
         {
-            if (low > high) {
-                return;
-            }
+            splitUtf8Range(low, high, foldCase, this);
+        }
 
-            // Pick off 80-10FFFF as a common special case.
-            if (low == 0x80 && high == Regexp.RUNEMAX) {
-                add80To10ffff();
-                return;
-            }
+        @Override
+        public void addAllNonAscii()
+        {
+            add80To10ffff();
+        }
 
-            // Split range into same-length sized ranges.
-            for (int i = 1; i < UTF_MAX; i++) {
-                int max = maxRune(i);
-                if (low <= max && max < high) {
-                    addRuneRangeUtf8(low, max, foldCase);
-                    addRuneRangeUtf8(max + 1, high, foldCase);
-                    return;
-                }
-            }
+        @Override
+        public void addAscii(int low, int high, boolean foldCase)
+        {
+            addSuffix(uncachedRuneByteSuffix(low, high, foldCase, 0));
+        }
 
-            // ASCII range is always a special case.
-            if (high < RUNES_SELF) {
-                addSuffix(uncachedRuneByteSuffix(low, high, foldCase, 0));
-                return;
-            }
-
-            // Split range into sections that agree on leading bytes.
-            for (int i = 1; i < UTF_MAX; i++) {
-                int mask = (1 << (6 * i)) - 1;  // last i bytes of a UTF-8 sequence
-                if ((low & ~mask) != (high & ~mask)) {
-                    if ((low & mask) != 0) {
-                        addRuneRangeUtf8(low, low | mask, foldCase);
-                        addRuneRangeUtf8((low | mask) + 1, high, foldCase);
-                        return;
-                    }
-                    if ((high & mask) != mask) {
-                        addRuneRangeUtf8(low, (high & ~mask) - 1, foldCase);
-                        addRuneRangeUtf8(high & ~mask, high, foldCase);
-                        return;
-                    }
-                }
-            }
-
-            // Finally, generate the byte-matching equivalent for the range.
-            byte[] encodedLow = encodeUtf8(low);
-            byte[] encodedHigh = encodeUtf8(high);
-            if (encodedLow.length != encodedHigh.length) {
-                throw new RegexpCompileException("invalid UTF-8 rune range split");
-            }
-
+        // Keep suffix caching and trie factoring aligned with compile.cc AddRuneRangeUTF8.
+        @Override
+        public void addEncodedRange(byte[] encodedLow, byte[] encodedHigh)
+        {
             int id = 0;
             if (reversed) {
                 for (int i = 0; i < encodedLow.length; i++) {
@@ -1586,29 +1658,6 @@ final class Compiler
             suffixInstructionId = addSuffixRecursive(program.inst(byteRangeId).out(), suffixInstructionId);
             program.inst(byteRangeId).setOut(suffixInstructionId);
             return root;
-        }
-
-        private static int maxRune(int length)
-        {
-            // Maximum rune encoded by a UTF-8 sequence of the specified length.
-            int bits;
-            if (length == 1) {
-                bits = 7;
-            }
-            else {
-                bits = 8 - (length + 1) + 6 * (length - 1);
-            }
-            return (1 << bits) - 1;
-        }
-
-        private static byte[] encodeUtf8(int rune)
-        {
-            if (rune < 0 || rune > Regexp.RUNEMAX) {
-                throw new RegexpCompileException("invalid rune: " + rune);
-            }
-            byte[] bytes = new byte[Utf8.encodedLength(rune)];
-            Utf8.encode(bytes, 0, rune);
-            return bytes;
         }
     }
 
