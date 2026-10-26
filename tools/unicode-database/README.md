@@ -2,8 +2,13 @@
 
 `generate.py` writes the Unicode data that Regulator reads at runtime from
 pinned Unicode Character Database (UCD) files. It is a maintenance tool,
-separate from the Maven build and the published JAR. The JAR carries only its
-output, `src/main/resources/io/airlift/regulator/unicode/unicode-18.0.0.bin`.
+separate from the Maven build and the published JAR. The JAR carries its two
+outputs in `src/main/resources/io/airlift/regulator/unicode/`:
+
+- `unicode-18.0.0.bin` holds properties, case mappings, and control names.
+- `unicode-names-18.0.0.bin` holds character names, loaded only for Java's
+  `\N{name}`. Consumers that do not need character-name lookups can omit this
+  resource.
 
 No UCD file is committed. [`manifest.txt`](manifest.txt) lists the unicode.org
 URL and SHA-256 of each file the generator reads, and the version in those URLs
@@ -57,14 +62,14 @@ the manifest, the files it pins, and `generate.py`, so rerunning the generator
 changes nothing.
 
 The generator also writes [`generated.txt`](generated.txt): the generation key,
-which is a SHA-256 of `generate.py` and `manifest.txt`, and the SHA-256 of the
-database. The database embeds the same key. `TestUnicodeDatabase` runs in
+which is a SHA-256 of `generate.py` and `manifest.txt`, and the SHA-256 of each
+resource. Both resources embed the same key. `TestUnicodeDatabase` runs in
 every build without a network. It recomputes the key from the committed
-generator and manifest and hashes the committed database, and fails if either
+generator and manifest and hashes both committed resources, and fails if any
 differs from `generated.txt`. Rerun the generator after changing either file.
 
 `--check` writes nothing in the source tree. It downloads the files again,
-generates in memory, and fails unless the committed database and
+generates in memory, and fails unless both committed resources and
 `generated.txt` are byte-identical to the new ones:
 
 ```bash
@@ -107,8 +112,9 @@ Moving to a new version changes every result that depends on the database.
    generator, as does a binary property file that adds or drops a property;
    review a new property before adding it to the generator's list. Change the
    parser only for a documented change in the UCD file format.
-4. Delete the previous `unicode-<version>.bin`, and set
-   `UnicodeDatabase.UNICODE_VERSION` to the new version.
+4. Delete the previous `unicode-<version>.bin` and
+   `unicode-names-<version>.bin`, and set `UnicodeDatabase.UNICODE_VERSION` to
+   the new version.
 5. Set the version stated in both copies of `LICENSE-unicode.txt`.
 6. Update the version named in the docs, the `FilteredRe2` Javadoc, and this
    README; `git grep -n '18\.0'` lists them.

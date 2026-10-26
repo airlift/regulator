@@ -267,11 +267,10 @@ Unicode data is read on first use, not on every compilation:
   two sets of tables.
 - Trino's multi-code-point folds are initialized once on first use by a
   frontend that enables full folding.
-- The character names are read on the first `\N{name}`, from the resource
-  again, because the first read of the resource keeps every section but the
-  names, which are most of it. They are decoded into arrays of words, code
-  points, and word indexes, with a hash table of the names, about 1 MB in
-  all.
+- The character names are read on the first `\N{name}` from a separate
+  resource, which consumers of other Unicode data can omit. They are decoded
+  into arrays of words, code points, and word indexes, with a hash table of
+  the names, about 1 MB in all.
 - The word-boundary flags are built once, when the first Java, Trino, or Rust
   pattern with a word boundary that reads them compiles, not per pattern. They
   are a two-stage table of one flag byte per code point: each block of 256 code

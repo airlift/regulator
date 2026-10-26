@@ -23,6 +23,9 @@ files to your application's `src/main/resources/META-INF/services` directory:
 Each file contains `io.airlift.regulator.teavm.TeaVMParsingSupport`. Regulator
 does not register these providers automatically.
 
+The separate Unicode character-name resource is needed only for Java's
+`\N{name}` escapes and is not included.
+
 Missing Slice operations fail dependency checking instead of falling back to
 JVM-only code. Matching and full compilation remain JVM APIs;
 this check deliberately reaches only parsing and capture metadata.
