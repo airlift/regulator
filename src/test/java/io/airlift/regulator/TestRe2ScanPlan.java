@@ -35,8 +35,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestRe2ScanPlan
 {
-    // RE2's classes accept these sequences although they are not valid UTF-8: overlong three- and
-    // four-byte forms, an encoded surrogate, and a four-byte form above U+10FFFF.
+    // RE2's classes of every non-ASCII character accept these sequences although they are not
+    // valid UTF-8: overlong three- and four-byte forms, an encoded surrogate, and a four-byte form
+    // above U+10FFFF. A class of only some non-ASCII characters rejects them, except an encoded
+    // surrogate it holds.
     private static final List<byte[]> ACCEPTED_MALFORMED = List.of(bytes(0xE0, 0x80, 0x80), bytes(0xF0, 0x80, 0x80, 0x80), bytes(0xED, 0xA0, 0x80), bytes(0xF4, 0x90, 0x80, 0x80));
     // Every RE2 class rejects these: continuation bytes, overlong two-byte leads, leads above F4,
     // and truncated sequences.
@@ -50,6 +52,9 @@ public class TestRe2ScanPlan
             bytes(0xC2),
             bytes(0xE1, 0x80),
             bytes(0xF1, 0x80, 0x80));
+    // Characters on the edges of the classes of only some non-ASCII characters that plans read:
+    // U+0085 and U+2028, which Java's default dot excludes, and U+2027, which precedes U+2028.
+    private static final List<byte[]> BOUNDARY_CHARACTERS = List.of(bytes(0xC2, 0x85), bytes(0xE2, 0x80, 0xA8), bytes(0xE2, 0x80, 0xA7));
     // Options that keep RE2's leftmost-first UTF-8 reading, under which patterns select plans.
     private static final List<NamedOptions> OPTIONS = List.of(
             new NamedOptions("defaults", Re2.Options.defaults()),
@@ -65,6 +70,9 @@ public class TestRe2ScanPlan
             // the 0x80.
             new PlanCase("^x([^/]+)", HexFormat.of().parseHex("78802f79")),
             new PlanCase("x([^/]+)", "x/xéb"),
+            // A run of some non-ASCII characters, whose minimum rejects the U+0085 it excludes.
+            new PlanCase("^x([^/\\x{85}]+)", "x\u0085/y"),
+            new PlanCase("x([^/\\x{85}]+)", "x\u0085/y"),
             // A partial delimited capture, ASCII-folded when case-insensitive.
             new PlanCase("^abc([^:]+):", "ABCé:d"),
             // Explicit ASCII pairs, which match neither the long s nor the Kelvin sign.
@@ -73,6 +81,9 @@ public class TestRe2ScanPlan
             new PlanCase("^x([^/]{2,})", "xé"),
             new PlanCase("^x([^/]{2,})/", "xé/"),
             new PlanCase("x([^/]{2,})/", "xé/"),
+            // A run of some non-ASCII characters with a minimum of two, which the witness without
+            // its last byte fails.
+            new PlanCase("^x([é😀]{2,})", "xé😀"),
             // An unanchored run that stops at a rejected sequence before its delimiter.
             new PlanCase("[?&]([^=]+)=END", HexFormat.of().parseHex("3f61c080623d654e64")),
             // A run excluding four ASCII bytes, whose vector scan must stop at each of them; in
@@ -80,6 +91,11 @@ public class TestRe2ScanPlan
             new PlanCase("^x([^/:?#]+)/$", "x" + "a".repeat(20) + "?" + "a".repeat(20) + "/"),
             new PlanCase("^x([^/:?#]+)/$", "x" + "a".repeat(20) + "#" + "a".repeat(20) + "/"),
             new PlanCase("^x([^/:?#]+)/$", "x" + "a".repeat(20) + ":" + "a".repeat(20) + "/"),
+            // A run of some non-ASCII characters, whose vector scan must stop at its delimiter.
+            new PlanCase("^x([^/\\x{85}]+)/", "x" + "a".repeat(20) + "/b"),
+            // A run of every ASCII byte and some non-ASCII characters, whose scan must stop at the
+            // U+0085 it excludes.
+            new PlanCase("^x([^\\x{85}]+)$", "xa\u0085"),
             // A run of three ASCII members, whose vector scan must not stop at the third, 'c'.
             new PlanCase("^x([abc]+)/$", "x" + "c".repeat(40) + "/"),
             // Forked start-anchored plans, whose boolean find and count run on the ordinary engine
@@ -89,8 +105,21 @@ public class TestRe2ScanPlan
             new PlanCase("^(a)?(b)?abcd([^/]+)/", "aabcd" + "é".repeat(21) + "/"),
             // Inputs that hand off to the ordinary engine in the middle of a search.
             new PlanCase("x([^z]+)zq", "xa".repeat(1100) + "zrxbzqxczq"),
+            new PlanCase("x([^z\\x{85}]+)zq", "xa".repeat(1100) + "zrxbzqxczq"),
             new PlanCase("([^/]+)/([^!]+)!x", "a/".repeat(1100) + "!y!x/b/c!x"),
-            new PlanCase("[0-9]([0-9]*)zz", "1 2 3 4 5 6 7 8 9zz" + " ".repeat(256)));
+            new PlanCase("[0-9]([0-9]*)zz", "1 2 3 4 5 6 7 8 9zz" + " ".repeat(256)),
+            // Runs of some non-ASCII characters but not all, which read them by their exact
+            // encodings: a delimited capture whose set excludes U+0085, and a Unicode class.
+            new PlanCase("^x([^/\\x{85}]+)/", "xé\u2028b/"),
+            new PlanCase("^([é😀]+):$", "é😀é:"),
+            // Case-insensitive, an s folds to the long s, a k to the Kelvin sign, and [a-z] to
+            // both.
+            new PlanCase("^https?://([^/]+)/", "HTTPſ://hoſt/"),
+            new PlanCase("^k([^/]+)/", "\u212Aab/"),
+            new PlanCase("^x([a-z]+)/", "xaſ\u212Ab/"),
+            // A failed attempt resumes at the end of a run of some non-ASCII characters that
+            // contains the leading set.
+            new PlanCase("([0-9][0-9é]*)=x", "1é=y 2é=x"));
 
     private record NamedOptions(String name, Re2.Options options) {}
 
@@ -174,8 +203,9 @@ public class TestRe2ScanPlan
         assertThat(Re2.compile(utf8Slice(eligible), Re2.Options.defaults().setLongestMatch(true)).usesTrinoScanPlanForDiagnostics()).isFalse();
         assertThat(Re2.compile(utf8Slice(eligible), Re2.Options.latin1()).usesTrinoScanPlanForDiagnostics()).isFalse();
         assertThat(Re2.compileWithoutScanPlanForTesting(utf8Slice(eligible), Re2.Options.defaults()).usesTrinoScanPlanForDiagnostics()).isFalse();
-        // Shapes Trino excludes: lazy runs, Unicode classes, lazy tails, and nullable patterns.
-        for (String expression : List.of("^([^/]+?)/$", "^([é😀]+):$", "^([^/]+)/.*?$", "^([a-z]*)$")) {
+        // Lazy runs, lazy tails, and nullable patterns, and unanchored searches led by a run of
+        // some non-ASCII characters, whose candidates are not single bytes.
+        for (String expression : List.of("^([^/]+?)/$", "^([^/]+)/.*?$", "^([a-z]*)$", "[éè]([a-z]+)=", "([^/\\x{85}]+)/")) {
             assertThat(Re2.compile(utf8Slice(expression)).usesTrinoScanPlanForDiagnostics()).as(expression).isFalse();
             assertThat(Re2.compile(utf8Slice(expression), Re2.Options.defaults().setGenerateBytecode(true)).usesGeneratedBytecode()).as(expression).isFalse();
         }
@@ -190,30 +220,40 @@ public class TestRe2ScanPlan
                 Random random = new Random(planCase.expression().hashCode());
                 String description = planCase.expression() + " " + options.name();
                 // Never-newline takes the newline out of a leading run, which then stops at more
-                // than its delimiter, never-capture leaves an unanchored pattern without the
-                // capture its plan needs, and case folding adds the long s and the Kelvin sign to
-                // an explicit pair, so the ordinary engine keeps those patterns.
+                // than its delimiter, and never-capture leaves an unanchored pattern without the
+                // capture its plan needs, so the ordinary engine keeps those patterns.
                 int flags = options.options().parseFlags();
                 boolean leadingRun = planCase.expression().startsWith("([^");
                 boolean unanchored = !planCase.expression().startsWith("^");
-                boolean foldedPair = (flags & Regexp.FOLD_CASE) != 0 && planCase.expression().contains("[Ss]");
-                boolean planned = !((flags & Regexp.NEVER_NEWLINE) != 0 && leadingRun) && !((flags & Regexp.NEVER_CAPTURE) != 0 && unanchored) && !foldedPair;
+                boolean planned = !((flags & Regexp.NEVER_NEWLINE) != 0 && leadingRun) && !((flags & Regexp.NEVER_CAPTURE) != 0 && unanchored);
                 List<Slice> sources = sources(random, planCase.witness());
                 assertThat(assertPlanMatchesOrdinaryEngine(description, planCase.expression(), options.options(), sources)).as(description).isEqualTo(planned);
             }
         }
         // The long cases hand off in the middle of a search: at the next candidate after the work
         // budget ends the first failed attempt, and after the eighth of eight dense failures of
-        // boolean find by failure density.
-        for (String expression : List.of("x([^z]+)zq", "([^/]+)/([^!]+)!x")) {
+        // boolean find by failure density. The bytes a run of some non-ASCII characters scans
+        // count toward the budget in both executors.
+        for (String expression : List.of("x([^z]+)zq", "x([^z\\x{85}]+)zq", "([^/]+)/([^!]+)!x")) {
             Slice witness = witness(expression);
             assertThat(plan(expression).search(witness, 0, witness.length(), 0, false, false, null)).as(expression).isEqualTo(1);
         }
+        TrinoScanPlan folded = plan("(?i)x([^z\\x{85}]+)zq");
+        assertThat(folded.usesAsciiFoldedExecutor()).isTrue();
+        Slice foldedWitness = utf8Slice("xA".repeat(1100) + "ZrxbZQxczq");
+        assertThat(folded.searchAsciiFolded(foldedWitness, 0, foldedWitness.length(), 0, false, false, null)).isEqualTo(1);
         Slice dense = witness("[0-9]([0-9]*)zz");
         assertThat(plan("[0-9]([0-9]*)zz").searchBeforeHandoff(dense, 0, dense.length(), 0, false)).isEqualTo(dense.toStringUtf8().indexOf('8') + 1);
         // The four excluded ASCII bytes keep this a run rather than a delimited capture, so the
         // case reaches the run's vector scan.
         assertThat(plan("^x([^/:?#]+)/$").operationsForDiagnostics()).isEqualTo("LITERAL,RE2_RUN,LITERAL,END");
+        // The U+0085 keeps this a run of some non-ASCII characters, so the case reaches its scan.
+        assertThat(plan("^x([^/\\x{85}]+)/").operationsForDiagnostics()).isEqualTo("LITERAL,RE2_SET_RUN,LITERAL");
+        // A failed attempt resumes past the run of some non-ASCII characters it read, in both
+        // executors, so each run of digits is one candidate rather than one per digit.
+        for (String expression : List.of("([0-9][0-9é]*)=x", "(?i)([0-9][0-9é]*)=x")) {
+            assertThat(plan(expression).candidateAttemptsForDiagnostics(utf8Slice("123é=y 456é=x"))).as(expression).isEqualTo(2);
+        }
     }
 
     @Test
@@ -222,6 +262,7 @@ public class TestRe2ScanPlan
         int[] plansPerShape = new int[8];
         int plansWithRuns = 0;
         int plansWithDelimitedCaptures = 0;
+        int plansWithSetRuns = 0;
         for (long seed : new long[] {211, 223, 227}) {
             Random random = new Random(seed);
             for (int iteration = 0; iteration < 200; iteration++) {
@@ -263,12 +304,14 @@ public class TestRe2ScanPlan
                     String operations = plan(expressions[shape]).operationsForDiagnostics();
                     plansWithRuns += operations.contains("RE2_RUN") ? 1 : 0;
                     plansWithDelimitedCaptures += operations.contains("RE2_DELIMITED_CAPTURE") ? 1 : 0;
+                    plansWithSetRuns += operations.contains("RE2_SET_RUN") ? 1 : 0;
                 }
             }
         }
         assertThat(Arrays.stream(plansPerShape).min().orElseThrow()).as("fewest plans of one shape").isGreaterThan(100);
         assertThat(plansWithRuns).as("plans with an RE2 run").isGreaterThan(1500);
         assertThat(plansWithDelimitedCaptures).as("plans with an RE2 delimited capture").isGreaterThan(150);
+        assertThat(plansWithSetRuns).as("plans with an RE2 set run").isGreaterThan(400);
     }
 
     @Test
@@ -290,18 +333,18 @@ public class TestRe2ScanPlan
     }
 
     /// Returns the witness alone, doubled after a lead, and without its last byte, and with each
-    /// malformed sequence inserted at a random position, substituted for the byte before it,
-    /// wrapped around the witness, and appended. Each is a view between continuation bytes, which
-    /// would complete a truncated sequence at its end, so a trailing run that read past the view
-    /// would change a result.
+    /// malformed sequence and boundary character inserted at a random position, substituted for
+    /// the byte before it, wrapped around the witness, and appended. Each is a view between
+    /// continuation bytes, which would complete a truncated sequence at its end, so a trailing run
+    /// that read past the view would change a result.
     static List<Slice> sources(Random random, byte[] witness)
     {
         List<byte[]> sources = new ArrayList<>();
         sources.add(witness);
         sources.add(concat("lead x".getBytes(UTF_8), witness, witness));
         sources.add(Arrays.copyOf(witness, witness.length - 1));
-        for (List<byte[]> malformed : List.of(ACCEPTED_MALFORMED, REJECTED_MALFORMED)) {
-            for (byte[] sequence : malformed) {
+        for (List<byte[]> sequences : List.of(ACCEPTED_MALFORMED, REJECTED_MALFORMED, BOUNDARY_CHARACTERS)) {
+            for (byte[] sequence : sequences) {
                 int position = 1 + random.nextInt(witness.length);
                 byte[] prefix = Arrays.copyOf(witness, position);
                 byte[] suffix = Arrays.copyOfRange(witness, position, witness.length);
@@ -338,8 +381,8 @@ public class TestRe2ScanPlan
         Re2.Options generating = options.copy().setGenerateBytecode(true);
         Re2 generated = Re2.compile(pattern, generating);
         Re2 generatedHandoff = Re2.compileForcingScanPlanHandoffForTesting(pattern, generating);
-        // Every case-sensitive plan generates.
-        boolean generates = actual.caseSensitiveTrinoScanPlan() != null;
+        // Every case-sensitive plan generates, except one with a run of some non-ASCII characters.
+        boolean generates = actual.caseSensitiveTrinoScanPlan() != null && !hasSetRun(actual);
         assertThat(generated.usesGeneratedBytecode()).as(description).isEqualTo(generates);
         assertThat(generatedHandoff.usesGeneratedBytecode()).as(description).isEqualTo(generates);
         for (Slice source : sources) {
@@ -353,6 +396,14 @@ public class TestRe2ScanPlan
             }
         }
         return true;
+    }
+
+    /// Returns whether the pattern's plan has a run of some non-ASCII characters but not all, for
+    /// which no bytecode is generated.
+    static boolean hasSetRun(Re2 pattern)
+    {
+        TrinoScanPlan plan = pattern.caseSensitiveTrinoScanPlan();
+        return plan != null && plan.operationsForDiagnostics().contains("RE2_SET_RUN");
     }
 
     /// Returns the results of the public matching operations on `source`: boolean and

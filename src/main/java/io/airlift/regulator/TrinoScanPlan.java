@@ -22,13 +22,20 @@ import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /// A scan over literals, deterministic runs, and bounded optional captures, for the Trino, RE2,
 /// Java, and Rust frontends; no other frontend builds one. A Trino plan preserves valid UTF-8
 /// behavior, and malformed input has Trino's garbage-in, garbage-out contract. An RE2, Java, or Rust
-/// plan reads each non-ASCII character as RE2's classes do (see [Utf8#re2CharacterWidth]), as
-/// the ordinary engine compiled for those languages does, so it agrees with that engine on every
+/// plan reads each non-ASCII character as the ordinary engine compiled for those languages does:
+/// a run of every non-ASCII character reads it as RE2's classes do (see
+/// [Utf8#re2CharacterWidth]), and a run of some non-ASCII characters by the exact encodings
+/// of its members (see [Utf8MemberTable]). The plan therefore agrees with that engine on every
 /// input, malformed UTF-8 included. The languages share the analysis and the executors; in an RE2,
 /// Java, or Rust plan, each run admitting non-ASCII characters, and each delimited capture, becomes
 /// an `RE2_` operation, and a Trino plan never contains one.
@@ -87,6 +94,9 @@ final class TrinoScanPlan
         FORK,
         // In an RE2, Java, or Rust plan, a RUN whose set holds every non-ASCII character.
         RE2_RUN,
+        // In an RE2, Java, or Rust plan, a RUN whose set holds some non-ASCII characters but not
+        // all. It reads them by the exact encodings the compiler gives the set.
+        RE2_SET_RUN,
         // A DELIMITED_CAPTURE of an RE2, Java, or Rust plan: a captured RE2_RUN of every
         // character except an ASCII delimiter, and the delimiter.
         RE2_DELIMITED_CAPTURE,
@@ -209,7 +219,7 @@ final class TrinoScanPlan
 
     static boolean isRun(Step step)
     {
-        return step.kind == Kind.RUN || step.kind == Kind.RE2_RUN;
+        return step.kind == Kind.RUN || step.kind == Kind.RE2_RUN || step.kind == Kind.RE2_SET_RUN;
     }
 
     private static int findLeadingOperation(Step[] steps)
@@ -235,7 +245,7 @@ final class TrinoScanPlan
             nullable[index] = switch (step.kind) {
                 case LITERAL, ASCII_FOLDED_LITERAL, DELIMITED_CAPTURE, RE2_DELIMITED_CAPTURE -> false;
                 case SAVE, OPTIONAL, ASCII_FOLDED_OPTIONAL -> nullable[index + 1];
-                case RUN, RE2_RUN -> step.run.minimum() == 0 && nullable[index + 1];
+                case RUN, RE2_RUN, RE2_SET_RUN -> step.run.minimum() == 0 && nullable[index + 1];
                 case FORK -> nullable[index + 1] || nullable[step.branch.target()];
                 case DOT_ALL_TAIL, LINE_TAIL, END -> throw new IllegalStateException("partial scan contains " + step.kind);
             };
@@ -276,17 +286,23 @@ final class TrinoScanPlan
     ///
     /// Runs never give back bytes. A failed attempt at `p` matched the leading character
     /// and then the second run up to its end `e`, and failed with every retry exhausted;
-    /// each retry lies at or after `e`. Every byte in `(p, e)` is a member of the
-    /// second run: the leading character's other bytes are non-ASCII, and a set holding one
-    /// non-ASCII byte holds all of them. An attempt at a start in `(p, e)` therefore fails
-    /// on the leading character, or matches a character that ends by `e`. In a Trino plan,
+    /// each retry lies at or after `e`. In a Trino plan every byte in `(p, e)` is a
+    /// member of the second run: the leading character's other bytes are non-ASCII, and a Trino
+    /// set holding one non-ASCII byte holds all of them. An attempt at a start in `(p, e)`
+    /// therefore fails on the leading character, or matches a character that ends by `e`;
     /// `e` holds an ASCII byte or is the end, and no decoded character spans an ASCII byte.
-    /// An RE2 run may also stop at a sequence RE2 rejects. A start inside a character the run
-    /// read is a continuation byte, which RE2 rejects as a leading character; from any other
-    /// start RE2 reads the same characters, which end at `e`, and `e` still starts
-    /// the rejected sequence. The second run then stops at `e` again, so that attempt
-    /// reaches `e` with the same operations and retries, differs only in saved positions,
-    /// and fails as well.
+    ///
+    /// A run of an RE2, Java, or Rust plan reads a non-ASCII character only from a lead byte,
+    /// whose value fixes its width, and may also stop at a sequence it rejects. A start in
+    /// `(p, e)` inside a character that either run read is a continuation byte, on which the
+    /// leading run fails. At any other start the second run read a character, and the leading run
+    /// fails or reads that same character, since both take its width from its lead byte. The
+    /// second run then reads the same characters as before, which end at `e`, where the
+    /// byte or sequence that stopped it remains.
+    ///
+    /// In either kind of plan, an attempt that passes the leading run therefore sees the second
+    /// run stop at `e` again, so it reaches `e` with the same operations and retries,
+    /// differs only in saved positions, and fails as well.
     private static int findFailureResumeOperation(Step[] steps, int leadingOperation)
     {
         Step leading = steps[leadingOperation];
@@ -387,7 +403,7 @@ final class TrinoScanPlan
                     }
                 }
                 case END, SAVE, FORK -> {}
-                case DELIMITED_CAPTURE, DOT_ALL_TAIL, LINE_TAIL, RE2_RUN, RE2_DELIMITED_CAPTURE -> {
+                case DELIMITED_CAPTURE, DOT_ALL_TAIL, LINE_TAIL, RE2_RUN, RE2_SET_RUN, RE2_DELIMITED_CAPTURE -> {
                     return false;
                 }
             }
@@ -411,8 +427,9 @@ final class TrinoScanPlan
     }
 
     /// Analyzes `expression` for `language`, which is [Language#TRINO],
-    /// [Language#RE2], [Language#JAVA], or [Language#RUST]. The languages admit
-    /// the same shapes, except that a Java end admits fewer runs before it. Only Java's default
+    /// [Language#RE2], [Language#JAVA], or [Language#RUST]. The languages share
+    /// one builder and admit the same shapes, except that a Java end admits fewer runs before it
+    /// and only RE2, Java, and Rust admit sets of some non-ASCII characters. Only Java's default
     /// `$` and `\Z` build a Java end. An RE2, Java, or Rust plan reads input by RE2's
     /// rules.
     static TrinoScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
@@ -580,6 +597,8 @@ final class TrinoScanPlan
     long estimatedRetainedSize()
     {
         long size = INSTANCE_SIZE + SizeOf.sizeOf(steps) + SizeOf.sizeOf(booleanTails);
+        // Runs of one set share its member table, which is counted once.
+        Set<Utf8MemberTable> countedTables = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Step step : steps) {
             size += Step.INSTANCE_SIZE + SizeOf.sizeOf(step.literal);
             if (step.asciiFolded != null) {
@@ -587,6 +606,10 @@ final class TrinoScanPlan
             }
             if (step.run != null) {
                 size += step.run.estimatedRetainedSize();
+                Utf8MemberTable memberTable = step.run.nonAsciiMembers();
+                if (memberTable != null && countedTables.add(memberTable)) {
+                    size += memberTable.estimatedRetainedSize();
+                }
             }
             if (step.branch != null) {
                 size += Branch.INSTANCE_SIZE;
@@ -804,6 +827,18 @@ final class TrinoScanPlan
                     }
                     cursor = stop;
                 }
+                case RE2_SET_RUN -> {
+                    int stop = step.run.re2SetMatch(bytes, cursor, end);
+                    if (stop < 0) {
+                        failed = true;
+                        break;
+                    }
+                    if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                        groups[step.slot] = cursor - base;
+                        groups[step.slot + 1] = stop - base;
+                    }
+                    cursor = stop;
+                }
                 case SAVE -> {
                     if (groups != null && step.slot < groups.length) {
                         groups[step.slot] = cursor - base;
@@ -970,6 +1005,18 @@ final class TrinoScanPlan
                     }
                     cursor = stop;
                 }
+                case RE2_SET_RUN -> {
+                    int stop = step.run.re2SetMatch(bytes, cursor, end);
+                    if (stop < 0) {
+                        failed = true;
+                        break;
+                    }
+                    if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                        groups[step.slot] = cursor - base;
+                        groups[step.slot + 1] = stop - base;
+                    }
+                    cursor = stop;
+                }
                 case SAVE -> {
                     if (groups != null && step.slot < groups.length) {
                         groups[step.slot] = cursor - base;
@@ -1114,6 +1161,26 @@ final class TrinoScanPlan
                             break;
                         }
                         int stop = step.run.re2Match(bytes, cursor, end);
+                        if (stop < 0) {
+                            failed = true;
+                            break;
+                        }
+                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                            groups[step.slot] = cursor - base;
+                            groups[step.slot + 1] = stop - base;
+                        }
+                        cursor = stop;
+                    }
+                    case RE2_SET_RUN -> {
+                        if (groups == null && !fullMatch && booleanTails[operation - 1]) {
+                            // The continuation cannot fail, so the run's minimum decides this path.
+                            if (step.run.re2SetMatchMinimum(bytes, cursor, end) >= 0) {
+                                return true;
+                            }
+                            failed = true;
+                            break;
+                        }
+                        int stop = step.run.re2SetMatch(bytes, cursor, end);
                         if (stop < 0) {
                             failed = true;
                             break;
@@ -1286,6 +1353,26 @@ final class TrinoScanPlan
                             break;
                         }
                         int stop = step.run.re2Match(bytes, cursor, end);
+                        if (stop < 0) {
+                            failed = true;
+                            break;
+                        }
+                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                            groups[step.slot] = cursor - base;
+                            groups[step.slot + 1] = stop - base;
+                        }
+                        cursor = stop;
+                    }
+                    case RE2_SET_RUN -> {
+                        if (groups == null && !fullMatch && booleanTails[operation - 1]) {
+                            // The continuation cannot fail, so the run's minimum decides this path.
+                            if (step.run.re2SetMatchMinimum(bytes, cursor, end) >= 0) {
+                                return true;
+                            }
+                            failed = true;
+                            break;
+                        }
+                        int stop = step.run.re2SetMatch(bytes, cursor, end);
                         if (stop < 0) {
                             failed = true;
                             break;
@@ -1804,6 +1891,32 @@ final class TrinoScanPlan
                         }
                         cursor = stop;
                     }
+                    case RE2_SET_RUN -> {
+                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                            // The continuation cannot fail, so the run's minimum decides this path.
+                            // Boolean callers observe only a nonnegative result, not its end.
+                            int stop = step.run.re2SetMatchMinimum(bytes, cursor, end);
+                            if (stop >= 0) {
+                                return stop;
+                            }
+                            failed = true;
+                            break;
+                        }
+                        int stop = step.run.re2SetMatch(bytes, cursor, end);
+                        if (stop < 0) {
+                            failed = true;
+                            break;
+                        }
+                        scanned = Math.max(scanned, stop);
+                        if (stepIndex == failureResumeOperation) {
+                            resumeRunEnd = stop;
+                        }
+                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                            groups[step.slot] = cursor - base;
+                            groups[step.slot + 1] = stop - base;
+                        }
+                        cursor = stop;
+                    }
                     case SAVE -> {
                         if (groups != null && step.slot < groups.length) {
                             groups[step.slot] = cursor - base;
@@ -1969,6 +2082,32 @@ final class TrinoScanPlan
                         }
                         cursor = stop;
                     }
+                    case RE2_SET_RUN -> {
+                        if (groups == null && !fullMatch && booleanTails[stepIndex]) {
+                            // The continuation cannot fail, so the run's minimum decides this path.
+                            // Boolean callers observe only a nonnegative result, not its end.
+                            int stop = step.run.re2SetMatchMinimum(bytes, cursor, end);
+                            if (stop >= 0) {
+                                return stop;
+                            }
+                            failed = true;
+                            break;
+                        }
+                        int stop = step.run.re2SetMatch(bytes, cursor, end);
+                        if (stop < 0) {
+                            failed = true;
+                            break;
+                        }
+                        scanned = Math.max(scanned, stop);
+                        if (stepIndex == failureResumeOperation) {
+                            resumeRunEnd = stop;
+                        }
+                        if (groups != null && step.slot > 0 && step.slot + 1 < groups.length) {
+                            groups[step.slot] = cursor - base;
+                            groups[step.slot + 1] = stop - base;
+                        }
+                        cursor = stop;
+                    }
                     case SAVE -> {
                         if (groups != null && step.slot < groups.length) {
                             groups[step.slot] = cursor - base;
@@ -2102,16 +2241,23 @@ final class TrinoScanPlan
         private static final int FIRST_BYTE_WORDS = 4;
         private static final int MAX_GROUPS = 16;
         private static final int MAX_ANALYSIS_OPERATIONS = MAX_OPERATIONS + MAX_GROUPS;
+        // Java's line terminators without UNIX_LINES, as the Java dot and
+        // EmptyOp.isJavaLineTerminator list them.
+        private static final int[] JAVA_LINE_TERMINATORS = {'\n', '\r', 0x0085, 0x2028, 0x2029};
 
         private final CaseFolding caseFolding;
+        private final boolean re2Characters;
+        // Runs of one set share its member table.
+        private final Map<CharClass, Utf8MemberTable> memberTables = new HashMap<>();
         private final List<Step> steps = new ArrayList<>();
         private int captures;
         private int optionals;
         private boolean hasVariableLiteralRepeat;
 
-        private Builder(CaseFolding caseFolding)
+        private Builder(CaseFolding caseFolding, boolean re2Characters)
         {
             this.caseFolding = caseFolding;
+            this.re2Characters = re2Characters;
         }
 
         private static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean re2Characters, int workBudgetBytes, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
@@ -2124,6 +2270,11 @@ final class TrinoScanPlan
                 return null;
             }
             boolean anchoredStart = sequence.getFirst().op() == RegexpOp.BEGIN_TEXT;
+            // An unanchored plan needs a capture, so reject one without any before its runs are
+            // analyzed, which can build member tables.
+            if (!anchoredStart && captureCount == 0) {
+                return null;
+            }
             boolean anchoredEnd = sequence.getLast().op() == RegexpOp.END_TEXT;
             boolean javaFinalEnd = anchoredEnd && (sequence.getLast().parseFlags() & Regexp.JAVA_FINAL_END) != 0;
             // Only the Java frontend builds a Java end, and its plans compact as RE2 plans do,
@@ -2136,7 +2287,7 @@ final class TrinoScanPlan
             if (bodyStart >= bodyEnd) {
                 return null;
             }
-            Builder builder = new Builder(caseFolding);
+            Builder builder = new Builder(caseFolding, re2Characters);
             for (int index = bodyStart; index < bodyEnd; index++) {
                 if (!builder.emit(sequence.get(index), 0)) {
                     return null;
@@ -2154,7 +2305,7 @@ final class TrinoScanPlan
                 return null;
             }
             if (anchoredStart) {
-                builder.compact(captureCount, anchoredEnd, re2Characters);
+                builder.compact(captureCount, anchoredEnd);
             }
             // MAX_OPERATIONS counts executable operations. END may occupy the
             // following slot, which the retry stack explicitly supports.
@@ -2164,7 +2315,7 @@ final class TrinoScanPlan
             if (!anchoredEnd) {
                 builder.steps.removeLast();
             }
-            if (!anchoredStart && (captureCount == 0 || !builder.hasVariableRun() || !builder.canSearchUnanchored())) {
+            if (!anchoredStart && (!builder.hasVariableRun() || !builder.canSearchUnanchored())) {
                 return null;
             }
             if (re2Characters) {
@@ -2379,7 +2530,7 @@ final class TrinoScanPlan
 
         private boolean emitRun(Regexp expression)
         {
-            TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression, caseFolding);
+            TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression, caseFolding, re2Characters, memberTables);
             if (run == null) {
                 return false;
             }
@@ -2444,7 +2595,7 @@ final class TrinoScanPlan
             // A top-level optional character atom is lowered to one bounded run
             // without a retry checkpoint.
             if (depth == 0) {
-                TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression, caseFolding);
+                TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression, caseFolding, re2Characters, memberTables);
                 if (run != null) {
                     steps.add(Step.run(0, run));
                     return true;
@@ -2470,7 +2621,8 @@ final class TrinoScanPlan
         {
             // The graph only moves forward. Propagate possible first bytes through capture
             // boundaries and both arms of every optional, then check each variable run against
-            // its complete continuation. Unicode membership is uniform for all admitted runs.
+            // its complete continuation. A run reads a non-ASCII character only from one of its
+            // member bytes, so the first byte of every character it reads is a member byte.
             long[] first = new long[steps.size() * FIRST_BYTE_WORDS];
             boolean[] nullable = new boolean[steps.size()];
             for (int index = steps.size() - 1; index >= 0; index--) {
@@ -2519,24 +2671,25 @@ final class TrinoScanPlan
 
         /// Returns whether a variable run that can reach a Java end without consuming more input
         /// stops where the JDK's backtracking match would. The end also matches before one final
-        /// line terminator, up to three bytes before the end, and the JDK gives back run
-        /// characters to reach one: `^x([^\n]+)$` on `"xab\r\n"` gives back the CR,
-        /// since the end refuses the position between CR and LF. A run never gives back, so this
-        /// planner accepts only a run that admits every terminator byte or none. A run that admits
-        /// none (only ASCII bytes other than CR and LF) never consumes a terminator byte, so no
-        /// shorter stop starts the final one. An unbounded run that admits all (CR, LF, and every
-        /// non-ASCII character) reads a final terminator it reaches as members through to the end,
-        /// where the end matches, so the longest stop wins. The run's other continuations start
-        /// with bytes outside it, as for every run, so a shorter stop has no other path. A bounded
-        /// run that admits terminators may stop at its maximum inside the final terminator, so it
-        /// is rejected. Both readings hold on malformed input: a terminator is valid UTF-8, its
-        /// first byte continues no sequence, and every run reads it whole.
+        /// line terminator, up to three bytes before the end, and the JDK gives back run characters
+        /// to reach one: `^x([^\n]+)$` on `"xab\r\n"` gives back the CR, since the end
+        /// refuses the position between CR and LF. A run never gives back, so this planner accepts
+        /// only a run that admits all or none of the terminators LF, CR, U+0085, U+2028, and U+2029
+        /// as characters. A run that admits none never reads a terminator as a character, so no
+        /// shorter stop starts the final one. An unbounded run that admits all reads a final
+        /// terminator it reaches as members through to the end, where the end matches, so the
+        /// longest stop wins. The run's other continuations start with bytes outside it, as for
+        /// every run, so a shorter stop has no other path. A bounded run that admits terminators may
+        /// stop at its maximum inside the final terminator, so it is rejected. Both readings hold on
+        /// malformed input: a terminator is valid UTF-8, its first byte continues no sequence, and
+        /// every run reads it whole or not at all.
         private static boolean stopsWhereJavaFinalEndAllows(TrinoScanPlanRun run)
         {
-            boolean[] members = run.members();
-            boolean admitsNone = !members['\n'] && !members['\r'] && !run.matchesNonAscii();
-            boolean admitsAll = members['\n'] && members['\r'] && run.matchesNonAscii();
-            return admitsNone || (admitsAll && run.isUnbounded());
+            int admitted = 0;
+            for (int terminator : JAVA_LINE_TERMINATORS) {
+                admitted += run.matchesCharacter(terminator) ? 1 : 0;
+            }
+            return admitted == 0 || (admitted == JAVA_LINE_TERMINATORS.length && run.isUnbounded());
         }
 
         private static void add(long[] sets, int set, int value)
@@ -2556,7 +2709,7 @@ final class TrinoScanPlan
         /// that ends at its delimiter into an RE2 delimited capture, which validates the characters
         /// it skips, and keeps a final run as a run before END, since a tail would skip bytes
         /// unchecked; each swap is one for one, so the operation limit admits the same shapes.
-        private void compact(int captureCount, boolean anchoredEnd, boolean re2Characters)
+        private void compact(int captureCount, boolean anchoredEnd)
         {
             // Compaction applies only to plans with at most three simple captured
             // runs and no forks; richer plans keep the builder representation.
@@ -2610,11 +2763,20 @@ final class TrinoScanPlan
             steps.addAll(compacted);
         }
 
-        /// Replaces each run that matches every non-ASCII character with an RE2 run. Runs of ASCII
-        /// bytes alone already match as RE2 does, as do literals, which compare exact bytes.
+        /// Replaces each run that matches every non-ASCII character with an RE2 run, and each run
+        /// that matches some with an RE2 set run. Runs of ASCII bytes alone already match as RE2
+        /// does, as do literals, which compare exact bytes.
         private void useRe2Runs()
         {
-            steps.replaceAll(step -> step.kind == Kind.RUN && step.run.matchesNonAscii() ? Step.re2Run(step.slot, step.run) : step);
+            steps.replaceAll(step -> {
+                if (step.kind != Kind.RUN) {
+                    return step;
+                }
+                if (step.run.matchesNonAscii()) {
+                    return Step.re2Run(step.slot, step.run);
+                }
+                return step.run.matchesSomeNonAscii() ? Step.re2SetRun(step.slot, step.run) : step;
+            });
         }
 
         private static void merge(long[] sets, int target, int source)
@@ -2698,6 +2860,11 @@ final class TrinoScanPlan
         private static Step re2Run(int slot, TrinoScanPlanRun run)
         {
             return new Step(Kind.RE2_RUN, null, 0, slot, 0, run, null);
+        }
+
+        private static Step re2SetRun(int slot, TrinoScanPlanRun run)
+        {
+            return new Step(Kind.RE2_SET_RUN, null, 0, slot, 0, run, null);
         }
 
         private static Step save(int slot)
