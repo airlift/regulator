@@ -689,7 +689,7 @@ final class UnicodeDatabase
             }
             System.arraycopy(rest, 0, words, length + shared, rest.length);
             wordEnds[word] = length + shared + rest.length;
-            if (word > frequentWordCount && Arrays.compare(words, start, length, words, length, wordEnds[word]) >= 0) {
+            if (word > frequentWordCount && !isAscending(words, start, length, wordEnds[word])) {
                 throw reader.corrupt("words are not ascending");
             }
             length = wordEnds[word];
@@ -731,6 +731,21 @@ final class UnicodeDatabase
         }
         reader.requireEnd();
         return new CharacterNames(Arrays.copyOf(words, length), wordEnds, frequentWordCount, codePoints, tokenEnds, Arrays.copyOf(tokens, tokenCount));
+    }
+
+    // Returns whether the word from previousWordStart to wordStart sorts before the word from
+    // wordStart to wordEnd. TeaVM's class library has no ranged Arrays.compare, and parsing must
+    // compile with TeaVM.
+    private static boolean isAscending(byte[] words, int previousWordStart, int wordStart, int wordEnd)
+    {
+        int mismatch = Arrays.mismatch(words, previousWordStart, wordStart, words, wordStart, wordEnd);
+        if (mismatch < 0) {
+            return false;
+        }
+        if (mismatch == wordStart - previousWordStart) {
+            return true;
+        }
+        return mismatch < wordEnd - wordStart && words[previousWordStart + mismatch] < words[wordStart + mismatch];
     }
 
     private static String asciiName(Reader reader)

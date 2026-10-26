@@ -6,16 +6,20 @@ After installing the current Regulator artifact with `./mvnw install`, run:
 tools/teavm/verify.sh
 ```
 
-This compiles the public `RustRegexp.parse` API to JavaScript and Wasm GC
-with TeaVM and runs both outputs in Node. It exercises Unicode properties and case
-folding, capture metadata, syntax options, nonzero Slice offsets, copying,
-and UTF-8 error spans. The check registers Regulator's optional TeaVM support
-explicitly.
+This compiles the public `parse` API of `Re2`, `TrinoRegexp`, `JavaRegexp`,
+and `RustRegexp` to JavaScript and Wasm GC with TeaVM and runs both outputs in
+Node. For each language it exercises Unicode properties and case folding,
+capture metadata, options, nonzero Slice offsets, and UTF-8 error spans, plus
+Slice copying and Java's `\N{name}` escapes. The check registers Regulator's
+optional TeaVM support explicitly. The
+[API reference](../../docs/reference/REGULATOR_API.md#teavm) describes what the
+support covers.
 
 `io.airlift.regulator.teavm.TeaVMParsingSupport` supplies a byte-array-backed
-Slice substitution for the parser's reachable operations and includes its
-pinned Unicode resource through TeaVM's extension SPI. To enable it, add these
-files to your application's `src/main/resources/META-INF/services` directory:
+Slice substitution for the parser's reachable operations and includes the
+pinned Unicode data parsing needs through TeaVM's extension SPI. To enable it,
+add these files to your application's `src/main/resources/META-INF/services`
+directory:
 
 - `org.teavm.extension.spi.substitution.SubstitutionPolicy`
 - `org.teavm.extension.spi.resources.ResourcesPolicy`
@@ -24,7 +28,8 @@ Each file contains `io.airlift.regulator.teavm.TeaVMParsingSupport`. Regulator
 does not register these providers automatically.
 
 The separate Unicode character-name resource is needed only for Java's
-`\N{name}` escapes and is not included.
+`\N{name}` escapes. It is included only when the program reaches Java's
+character-name lookup, as any use of `JavaRegexp.parse` does.
 
 Missing Slice operations fail dependency checking instead of falling back to
 JVM-only code. Matching and full compilation remain JVM APIs;

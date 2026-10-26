@@ -35,21 +35,6 @@ metadata without building a matching engine; see
 except `setMaxMemory`, `setByteFrequencies`, and `setGenerateBytecode`, so byte
 mode and the nest limit can change the result.
 
-### TeaVM
-
-The parsing API supports TeaVM JavaScript and Wasm GC. Applications can opt into
-`io.airlift.regulator.teavm.TeaVMParsingSupport` to substitute Slice's
-byte-array operations and include Regulator's pinned Unicode data. Register
-the providers as described in [tools/teavm](../../../tools/teavm/README.md).
-Consumers use the normal Regulator and Slice APIs; there is no second parser
-or Unicode implementation.
-The JVM continues using Airlift Slice.
-
-The substitution covers the operations reachable from parsing, including
-nonzero Slice offsets and UTF-8 diagnostics. Unsupported Slice operations fail
-TeaVM dependency checking rather than falling back to JVM code. Full pattern
-compilation and matching remain JVM-only.
-
 ## Matching
 
 The compiled-pattern operations have the same signatures as `JavaRegexp`:
