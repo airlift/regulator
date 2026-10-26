@@ -246,7 +246,8 @@ Range overloads such as `pattern.find(input, start, end)` search `[start, end)`
 but retain the complete Slice as context for anchors and boundary assertions.
 Their offsets remain relative to the complete logical Slice. Named range
 overloads are available for boolean, caller-buffer, and immutable-result
-matching. In contrast,
+matching. For Java patterns a range behaves like a JDK matcher region with
+transparent, non-anchoring bounds. In contrast,
 `matcher.reset(input, start, end)` makes the region itself the assertion
 context, matching a logical Slice view without allocating one on DFA-only paths.
 For Rust patterns a region keeps the complete Slice as context; see

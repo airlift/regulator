@@ -37,6 +37,12 @@ the region. As in the JDK, `$` and `\Z` still read the CR before the region,
 so outside Unix-lines mode (`(?d)`) they do not match at the start of a
 nonempty region that starts on the LF of a CR LF.
 
+A range overload such as `regexp.find(input, start, end)` searches
+`[start, end)` but keeps the whole Slice as assertion context, so it behaves
+like a JDK region with transparent, non-anchoring bounds. `^` does not match at
+the range start unless it is the input start, and `\bb` does not match `b` in
+the range `[1, 2)` of `ab`.
+
 ## Supported constructs
 
 | Category | Constructs |
