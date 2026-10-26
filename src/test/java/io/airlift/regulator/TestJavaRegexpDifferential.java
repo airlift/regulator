@@ -129,12 +129,13 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
-    public void testRegionsMatchJdk()
+    public void testRegionsAndRangesMatchJdk()
     {
         // A matcher region reads as a JDK region with default bounds, so its assertions see only
         // the region, except that the JDK's $ still refuses the LF of a CR LF the region start
         // splits. One matcher per pattern is reset for every region, so state one region leaves
-        // behind would show in the next.
+        // behind would show in the next. Ranged calls read as a JDK region with transparent,
+        // non-anchoring bounds.
         String startAnchoredPlan = "^[xy]([a-z]+)$";
         String unanchoredPlan = "x([^/]+)/$";
         assertThat(JavaRegexp.compile(utf8Slice(startAnchoredPlan)).matcher(utf8Slice("")).startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
@@ -165,7 +166,8 @@ public class TestJavaRegexpDifferential
                 startAnchoredPlan,
                 unanchoredPlan)) {
             Pattern jdk = Pattern.compile(pattern);
-            Re2Matcher actual = JavaRegexp.compile(utf8Slice(pattern)).matcher(utf8Slice(""));
+            JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
+            Re2Matcher actual = regexp.matcher(utf8Slice(""));
             for (String input : inputs) {
                 Slice source = utf8Slice("padding" + input).slice(7, utf8Slice(input).length());
                 String escaped = input.replace("\r", "\\r").replace("\n", "\\n");
@@ -173,14 +175,27 @@ public class TestJavaRegexpDifferential
                 for (int start = 0; start <= input.length(); start++) {
                     for (int end = start; end <= input.length(); end++) {
                         String description = "%s on [%s] [%s, %s)".formatted(pattern, escaped, start, end);
+                        int byteStart = utf8Offset(input, start);
+                        int byteEnd = utf8Offset(input, end);
                         Matcher expected = jdk.matcher(input).region(start, end);
-                        actual.reset(source, utf8Offset(input, start), utf8Offset(input, end));
+                        actual.reset(source, byteStart, byteEnd);
                         while (expected.find()) {
                             assertSameMatch(description + " find", input, true, expected, actual.find() ? actual.toMatchResult() : null);
                         }
                         assertThat(actual.find()).as(description + " extra find").isFalse();
                         assertSameMatch(description + " lookingAt", input, expected.lookingAt(), expected, actual.lookingAt() ? actual.toMatchResult() : null);
                         assertSameMatch(description + " matches", input, expected.matches(), expected, actual.matches() ? actual.toMatchResult() : null);
+
+                        Matcher transparent = jdk.matcher(input).region(start, end).useTransparentBounds(true).useAnchoringBounds(false);
+                        boolean found = transparent.find();
+                        assertThat(regexp.find(source, byteStart, byteEnd)).as(description + " ranged find").isEqualTo(found);
+                        assertSameMatch(description + " ranged find", input, found, transparent, regexp.findResult(source, byteStart, byteEnd));
+                        boolean lookingAt = transparent.lookingAt();
+                        assertThat(regexp.lookingAt(source, byteStart, byteEnd)).as(description + " ranged lookingAt").isEqualTo(lookingAt);
+                        assertSameMatch(description + " ranged lookingAt", input, lookingAt, transparent, regexp.lookingAtResult(source, byteStart, byteEnd));
+                        boolean matches = transparent.matches();
+                        assertThat(regexp.matches(source, byteStart, byteEnd)).as(description + " ranged matches").isEqualTo(matches);
+                        assertSameMatch(description + " ranged matches", input, matches, transparent, regexp.matchesResult(source, byteStart, byteEnd));
                     }
                 }
             }

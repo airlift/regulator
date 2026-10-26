@@ -250,7 +250,8 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
 - Java patterns use the shared `Re2Matcher`. A matcher region is the assertion
   context, as a JDK region with default bounds is, except that, as in the JDK,
   `$` and `\Z` do not match at the start of a nonempty region that splits a
-  CR LF (without `(?d)`).
+  CR LF (without `(?d)`). A range overload behaves like a JDK region with
+  transparent, non-anchoring bounds.
 - Multiline `^` excludes end-of-input even with `UNIX_LINES`. In that mode
   the compiler combines LF-only beginning-of-line with Java's non-EOF
   assertion, using the same context-sensitive fallback. UNIX multiline `$`
