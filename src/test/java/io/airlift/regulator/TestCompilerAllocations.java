@@ -96,14 +96,14 @@ public class TestCompilerAllocations
                 utf8Slice("^((a)?(b)?(c)?(d)?)abcd([^/]+)/$"),
                 Regexp.LIKE_PERL);
         for (int iteration = 0; iteration < 10_000; iteration++) {
-            assertThat(ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding())).isNotNull();
+            assertThat(ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), ByteFrequencies.uniform())).isNotNull();
         }
 
         long threadId = Thread.currentThread().threadId();
         long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         int iterations = 10_000;
         for (int iteration = 0; iteration < iterations; iteration++) {
-            ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding());
+            ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), ByteFrequencies.uniform());
         }
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
@@ -119,7 +119,7 @@ public class TestCompilerAllocations
                 TrinoRegexpParser.parse(utf8Slice("([a-z]+)$"), Regexp.LIKE_PERL));
         for (int iteration = 0; iteration < 10_000; iteration++) {
             for (ParseResult expression : expressions) {
-                assertThat(ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding()))
+                assertThat(ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), ScanPlan.Language.TRINO, false, expression.caseFolding(), ByteFrequencies.uniform()))
                         .as(RegexpToString.toString(expression.regexp()))
                         .isNull();
             }
@@ -130,7 +130,7 @@ public class TestCompilerAllocations
         int iterations = 10_000;
         for (int iteration = 0; iteration < iterations; iteration++) {
             for (ParseResult expression : expressions) {
-                ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding());
+                ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), ScanPlan.Language.TRINO, false, expression.caseFolding(), ByteFrequencies.uniform());
             }
         }
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;

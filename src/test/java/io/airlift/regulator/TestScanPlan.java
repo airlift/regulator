@@ -2639,7 +2639,7 @@ public class TestScanPlan
     private static ScanPlan analyze(String expression, ByteFrequencies frequencies)
     {
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-        return ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding(), frequencies);
+        return ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), frequencies);
     }
 
     private static Regex joniPattern(String expression)
