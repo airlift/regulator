@@ -31,7 +31,7 @@ final class Utf8
     /// - low 32 bits: code point (unsigned)
     ///
     /// For invalid sequences, returns `RUNE_ERROR` with width 1.
-    /// Copied as `TrinoScanKernelSupport.decode`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.decode`; keep the copy in step.
     static long decode(byte[] bytes, int index, int end)
     {
         if (index >= end) {
@@ -146,7 +146,7 @@ final class Utf8
     /// overlong three- and four-byte forms, encoded surrogates, and values above U+10FFFF. It
     /// rejects bare continuation bytes, C0, C1, F5-FF, and sequences that a non-continuation byte
     /// or `end` cuts short.
-    /// Copied as `TrinoScanKernelSupport.re2CharacterWidth`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.re2CharacterWidth`; keep the copy in step.
     static int re2CharacterWidth(byte[] bytes, int index, int end)
     {
         int b0 = bytes[index] & 0xFF;
@@ -275,7 +275,7 @@ final class Utf8
         }
     }
 
-    // Copied as TrinoScanKernelSupport.pack; keep the copy in step.
+    // Copied as ScanKernelSupport.pack; keep the copy in step.
     private static long pack(int codePoint, int width)
     {
         return (((long) width) << 32) | (codePoint & 0xFFFFFFFFL);

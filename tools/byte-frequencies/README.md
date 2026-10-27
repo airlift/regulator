@@ -109,5 +109,5 @@ Score the new table on held-out corpora of the preset's format and on other
 formats, and update the evidence in `REGULATOR_DECISIONS.md` ("Literal Probe
 Byte Selection"). Never build a measured preset from a corpus used to score it
 or to benchmark literal scans. Then run `TestByteFrequencies`,
-`TestPrefixProbeAcceleration`, and `TestTrinoScanPlan`, and check that
+`TestPrefixProbeAcceleration`, and `TestScanPlan`, and check that
 `--check` passes.

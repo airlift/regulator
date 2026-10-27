@@ -345,7 +345,7 @@ The APIs are familiar, but their representations and capabilities differ:
 `Re2`, `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` are separate compilers
 for different pattern languages. They use the same matching engine after
 compilation. Their patterns of a few common extraction shapes also select a
-[scan plan](../benchmarks/TRINO_SCAN_PLAN.md), which runs those shapes over the
+[scan plan](../benchmarks/SCAN_PLAN.md), which runs those shapes over the
 input bytes. A plan agrees with the ordinary engine on valid UTF-8, and RE2,
 Java, and Rust plans also agree on malformed input.
 

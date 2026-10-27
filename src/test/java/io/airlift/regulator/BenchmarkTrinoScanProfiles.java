@@ -207,7 +207,7 @@ public class BenchmarkTrinoScanProfiles
         {
             Slice copy = expression.copy();
             Re2 compiled = Re2.compileParsed(copy, TrinoRegexpParser.parse(copy, Regexp.LIKE_PERL), Regexp.LIKE_PERL, Re2.Options.DEFAULT_MAX_MEMORY);
-            if (compiled.usesTrinoScanPlanForDiagnostics()) {
+            if (compiled.usesScanPlanForDiagnostics()) {
                 throw new IllegalStateException("Pattern has a scan plan: " + expression.toStringUtf8());
             }
             return compiled;

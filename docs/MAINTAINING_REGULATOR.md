@@ -42,8 +42,8 @@ make naming-only edits inside a protected loop without inspecting generated
 code and running the relevant benchmarks.
 
 When changing a helper marked "Copied as", change the copy it names. When that
-copy is in `TrinoScanKernelSupport` or `VectorTrinoScanKernelSupport`, also run
-`TestTrinoScanKernel`, `TestRe2ScanPlan`, `TestJavaScanPlan`, and
+copy is in `ScanKernelSupport` or `VectorScanKernelSupport`, also run
+`TestScanKernel`, `TestRe2ScanPlan`, `TestJavaScanPlan`, and
 `TestRustScanPlan`; when it is in `TrinoLikeKernelSupport`, run
 `TestTrinoLikeKernel` and `TestTrinoLikeCorpus`.
 Code whose comment names `TrinoLikeKernelGenerator` has its copy in the emitter

@@ -56,7 +56,7 @@ public final class BenchmarkTrinoScanKernelCost
 
     private static void report(int count)
     {
-        List<TrinoScanKernelGenerator.Routes> routes = routes(count);
+        List<ScanKernelGenerator.TrinoRoutes> routes = routes(count);
         List<Slice> inputs = new ArrayList<>(count);
         for (int index = 0; index < count; index++) {
             inputs.add(input(index));
@@ -68,8 +68,8 @@ public final class BenchmarkTrinoScanKernelCost
         long codeBytes = 0;
         long classfileBytes = 0;
         long start = System.nanoTime();
-        for (TrinoScanKernelGenerator.Routes route : routes) {
-            TrinoScanKernelGenerator.ReportedScan generated = TrinoScanKernelGenerator.generateCompiledScanForDiagnostics(route);
+        for (ScanKernelGenerator.TrinoRoutes route : routes) {
+            ScanKernelGenerator.ReportedTrinoKernel generated = ScanKernelGenerator.generateCompiledTrinoScanForDiagnostics(route);
             scans.add(generated.compiled().scan());
             for (CompilationReport.ClassInfo classInfo : generated.report().classes()) {
                 classfileBytes += classInfo.classfileBytes();
@@ -110,12 +110,12 @@ public final class BenchmarkTrinoScanKernelCost
     /// Returns the routes of `count` distinct end-anchored patterns, compiled without
     /// generated code, that cycle through the four `OPTIONAL_MIXED` shapes of
     /// [BenchmarkTrinoScanPlan].
-    static List<TrinoScanKernelGenerator.Routes> routes(int count)
+    static List<ScanKernelGenerator.TrinoRoutes> routes(int count)
     {
-        List<TrinoScanKernelGenerator.Routes> routes = new ArrayList<>(count);
+        List<ScanKernelGenerator.TrinoRoutes> routes = new ArrayList<>(count);
         for (int index = 0; index < count; index++) {
-            TrinoScanKernelGenerator.Routes route = TrinoScanKernelGenerator.Routes.of(TrinoRegexp.compile(expression(index)).pattern());
-            if (route == null || TrinoScanKernelGenerator.Attempt.of(route.plan()) != TrinoScanKernelGenerator.Attempt.END_ANCHORED) {
+            ScanKernelGenerator.TrinoRoutes route = ScanKernelGenerator.TrinoRoutes.of(TrinoRegexp.compile(expression(index)).pattern());
+            if (route == null || ScanKernelGenerator.Attempt.of(route.plan()) != ScanKernelGenerator.Attempt.END_ANCHORED) {
                 throw new IllegalStateException("Pattern " + index + " has no end-anchored scan plan to generate");
             }
             routes.add(route);

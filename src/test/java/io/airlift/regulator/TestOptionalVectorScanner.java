@@ -24,7 +24,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class TestOptionalVectorTrinoScanner
+public class TestOptionalVectorScanner
 {
     @Test
     public void testWithAndWithoutVectorModule()
@@ -34,9 +34,9 @@ public class TestOptionalVectorTrinoScanner
         assertThat(disabled.exitCode()).as(disabled.output()).isZero();
         assertThat(disabled.output()).contains("OK scalar");
         assertThat(disabled.classLoadLog())
-                .contains("io.airlift.regulator.TrinoScanPlan source:")
-                .contains("io.airlift.regulator.TrinoScanPlanRun source:")
-                .doesNotContain("io.airlift.regulator.VectorTrinoScanner source:")
+                .contains("io.airlift.regulator.ScanPlan source:")
+                .contains("io.airlift.regulator.ScanPlanRun source:")
+                .doesNotContain("io.airlift.regulator.VectorScanner source:")
                 .doesNotContain("io.airlift.regulator.VectorByteSetScanner source:")
                 .doesNotContain("jdk.incubator.vector.");
 
@@ -44,7 +44,7 @@ public class TestOptionalVectorTrinoScanner
         assertThat(enabled.exitCode()).as(enabled.output()).isZero();
         assertThat(enabled.output()).contains("OK vector");
         assertThat(enabled.classLoadLog())
-                .contains("io.airlift.regulator.VectorTrinoScanner source:")
+                .contains("io.airlift.regulator.VectorScanner source:")
                 .contains("io.airlift.regulator.VectorByteSetScanner source:")
                 .contains("jdk.incubator.vector.ByteVector");
     }
@@ -63,7 +63,7 @@ public class TestOptionalVectorTrinoScanner
             }
             command.add("-cp");
             command.add(System.getProperty("java.class.path"));
-            command.add(VectorTrinoScannerProbe.class.getName());
+            command.add(VectorScannerProbe.class.getName());
             command.add(Boolean.toString(enableVectorModule));
 
             ProcessBuilder processBuilder = new ProcessBuilder(command)

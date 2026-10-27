@@ -54,7 +54,7 @@ branch profiles.
 
 ## Scan-plan execution
 
-The [scan-plan guide](TRINO_SCAN_PLAN.md) describes the scan plan that runs this
+The [scan-plan guide](SCAN_PLAN.md) describes the scan plan that runs this
 pattern in the RE2 and Trino frontends and its benchmarks, including Trino's
 normal-dot semantics.
 

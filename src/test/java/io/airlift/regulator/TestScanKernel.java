@@ -13,8 +13,8 @@
  */
 package io.airlift.regulator;
 
-import io.airlift.regulator.TestTrinoScanPlan.PatternWitness;
-import io.airlift.regulator.TestTrinoScanPlan.QuadraticSearch;
+import io.airlift.regulator.TestScanPlan.PatternWitness;
+import io.airlift.regulator.TestScanPlan.QuadraticSearch;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
@@ -41,18 +41,18 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.function.Function;
 
-import static io.airlift.regulator.TestTrinoScanPlan.MALFORMED_SEQUENCES;
-import static io.airlift.regulator.TestTrinoScanPlan.QUADRATIC_SEARCHES;
-import static io.airlift.regulator.TestTrinoScanPlan.URL;
-import static io.airlift.regulator.TestTrinoScanPlan.generatedSequence;
-import static io.airlift.regulator.TestTrinoScanPlan.randomSources;
+import static io.airlift.regulator.TestScanPlan.MALFORMED_SEQUENCES;
+import static io.airlift.regulator.TestScanPlan.QUADRATIC_SEARCHES;
+import static io.airlift.regulator.TestScanPlan.URL;
+import static io.airlift.regulator.TestScanPlan.generatedSequence;
+import static io.airlift.regulator.TestScanPlan.randomSources;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class TestTrinoScanKernel
+public class TestScanKernel
 {
     private static final String OPTIONAL_RETRIES = "^((a)?(b)?(c)?(d)?)abcd([^/]+)/$";
     private static final MethodType BOOLEAN_ATTEMPT = MethodType.methodType(boolean.class, Slice.class, int.class, int.class, boolean.class, int[].class);
@@ -61,7 +61,7 @@ public class TestTrinoScanKernel
     // The replacement callbacks: one that builds each replacement, one that ends replacement
     // early, and one that fails.
     private static final List<Function<List<Slice>, Slice>> CALLBACKS = List.of(
-            TestTrinoScanPlan::callbackReplacement,
+            TestScanPlan::callbackReplacement,
             _ -> null,
             groups -> {
                 throw new IllegalStateException("callback failed with " + groups.size() + " groups");
@@ -71,58 +71,58 @@ public class TestTrinoScanKernel
     // shared helper from the generated callers' profiles and the interpreter can then no longer
     // inline it. Methods outside this package belong to Slice or the JDK.
     private static final Set<String> GENERATED_CODE_CALLS = Set.of(
-            "Re2.continueTrinoScanSearch",
+            "Re2.continueScanSearch",
             "TrinoRegexp.newReplacementPlan",
             "TrinoRegexp.positionSearchStart",
             "TrinoReplacementPlan.addMatch",
             "TrinoReplacementPlan.build",
             "TrinoReplacementPlan.maximumCapturingGroup",
-            "TrinoScanKernelSupport.containsRequiredLiteral",
-            "TrinoScanKernelSupport.decode",
-            "TrinoScanKernelSupport.endsBeforeJavaFinalTerminator",
-            "TrinoScanKernelSupport.findByte",
-            "TrinoScanKernelSupport.findLiteral",
-            "TrinoScanKernelSupport.literalMatches",
-            "TrinoScanKernelSupport.re2RunMatch",
-            "TrinoScanKernelSupport.re2RunMatchBefore",
-            "TrinoScanKernelSupport.re2RunMatchMinimum",
-            "TrinoScanKernelSupport.re2SetRunMatch",
-            "TrinoScanKernelSupport.re2SetRunMatchMinimum",
-            "TrinoScanKernelSupport.readInt",
-            "TrinoScanKernelSupport.readLong",
-            "TrinoScanKernelSupport.readShort",
-            "TrinoScanKernelSupport.runFindCandidate",
-            "TrinoScanKernelSupport.runMatch",
-            "TrinoScanKernelSupport.runMatchMinimum",
-            "TrinoScanPlan$Step.first",
-            "TrinoScanPlan$Step.last",
-            "TrinoScanPlan$Step.lastOffset",
-            "TrinoScanPlan$Step.width",
-            "TrinoScanPlanRun.asciiStopNeedles",
-            "TrinoScanPlanRun.candidateNibbleTables",
-            "TrinoScanPlanRun.candidateScan",
-            "TrinoScanPlanRun.highestMember",
-            "TrinoScanPlanRun.isInverted",
-            "TrinoScanPlanRun.lowestMember",
-            "TrinoScanPlanRun.matchesNonAscii",
-            "TrinoScanPlanRun.maximum",
-            "TrinoScanPlanRun.members",
-            "TrinoScanPlanRun.minimum",
-            "TrinoScanPlanRun.needles",
-            "TrinoScanPlanRun.nonAsciiMembers",
+            "ScanKernelSupport.containsRequiredLiteral",
+            "ScanKernelSupport.decode",
+            "ScanKernelSupport.endsBeforeJavaFinalTerminator",
+            "ScanKernelSupport.findByte",
+            "ScanKernelSupport.findLiteral",
+            "ScanKernelSupport.literalMatches",
+            "ScanKernelSupport.re2RunMatch",
+            "ScanKernelSupport.re2RunMatchBefore",
+            "ScanKernelSupport.re2RunMatchMinimum",
+            "ScanKernelSupport.re2SetRunMatch",
+            "ScanKernelSupport.re2SetRunMatchMinimum",
+            "ScanKernelSupport.readInt",
+            "ScanKernelSupport.readLong",
+            "ScanKernelSupport.readShort",
+            "ScanKernelSupport.runFindCandidate",
+            "ScanKernelSupport.runMatch",
+            "ScanKernelSupport.runMatchMinimum",
+            "ScanPlan$Step.first",
+            "ScanPlan$Step.last",
+            "ScanPlan$Step.lastOffset",
+            "ScanPlan$Step.width",
+            "ScanPlanRun.asciiStopNeedles",
+            "ScanPlanRun.candidateNibbleTables",
+            "ScanPlanRun.candidateScan",
+            "ScanPlanRun.highestMember",
+            "ScanPlanRun.isInverted",
+            "ScanPlanRun.lowestMember",
+            "ScanPlanRun.matchesNonAscii",
+            "ScanPlanRun.maximum",
+            "ScanPlanRun.members",
+            "ScanPlanRun.minimum",
+            "ScanPlanRun.needles",
+            "ScanPlanRun.nonAsciiMembers",
             "Utf8.decodedWidth",
             "Utf8MemberTable.lastBytes",
             "Utf8MemberTable.leads",
             "Utf8MemberTable.nodes",
             "VectorSupport.isAvailable",
-            "VectorTrinoScanKernelSupport.containsLiteral",
-            "VectorTrinoScanKernelSupport.findByte",
-            "VectorTrinoScanKernelSupport.findByteSet",
-            "VectorTrinoScanKernelSupport.findNibbleTable",
-            "VectorTrinoScanKernelSupport.findRange",
-            "VectorTrinoScanKernelSupport.findRe2RunStop",
-            "VectorTrinoScanKernelSupport.findRunCandidate",
-            "VectorTrinoScanKernelSupport.findRunStop");
+            "VectorScanKernelSupport.containsLiteral",
+            "VectorScanKernelSupport.findByte",
+            "VectorScanKernelSupport.findByteSet",
+            "VectorScanKernelSupport.findNibbleTable",
+            "VectorScanKernelSupport.findRange",
+            "VectorScanKernelSupport.findRe2RunStop",
+            "VectorScanKernelSupport.findRunCandidate",
+            "VectorScanKernelSupport.findRunStop");
 
     /// A pattern compiled with generated bytecode, the attempt it generates, and whether contains
     /// reaches the generated class rather than the route it takes without it.
@@ -259,14 +259,14 @@ public class TestTrinoScanKernel
                 "[?&]([^=]+)=");
         Set<String> kinds = new LinkedHashSet<>();
         Set<String> invoked = new LinkedHashSet<>();
-        invoked.addAll(invokedMethods(classfile(TrinoScanKernelSupport.class)));
-        invoked.addAll(invokedMethods(classfile(VectorTrinoScanKernelSupport.class)));
+        invoked.addAll(invokedMethods(classfile(ScanKernelSupport.class)));
+        invoked.addAll(invokedMethods(classfile(VectorScanKernelSupport.class)));
         int index = 0;
         for (String expression : expressions) {
             TrinoRegexp generated = generated(expression);
             assertThat(generated.usesGeneratedBytecode()).as(expression).isTrue();
-            invoked.addAll(invokedMethods(TrinoScanKernelGenerator.classfileForDiagnostics(TrinoScanKernelGenerator.Routes.of(generated.pattern()))));
-            kinds.addAll(List.of(generated.pattern().caseSensitiveTrinoScanPlan().operationsForDiagnostics().split(",")));
+            invoked.addAll(invokedMethods(ScanKernelGenerator.trinoClassfileForDiagnostics(ScanKernelGenerator.TrinoRoutes.of(generated.pattern()))));
+            kinds.addAll(List.of(generated.pattern().caseSensitiveScanPlan().operationsForDiagnostics().split(",")));
             List<String> symbols = new ArrayList<>(SYMBOLS);
             symbols.addAll(witnessParts(expression));
             List<Slice> sources = new ArrayList<>(randomSources(200 + index++, symbols, MALFORMED_SEQUENCES));
@@ -282,29 +282,29 @@ public class TestTrinoScanKernel
         for (String expression : List.of("^https?://([^/]+)/.*$", "^https?://([^/]+)/", "^x([^/]+)", "x([^/]+)", "([^:]+):", "^x([^/\\x{85}]+)")) {
             Re2 re2 = Re2.compile(utf8Slice(expression), Re2.Options.defaults().setGenerateBytecode(true));
             assertThat(re2.usesGeneratedBytecode()).as(expression).isTrue();
-            boolean ordinaryHandoff = re2.usesTrinoScanPlanForFindForDiagnostics() && re2.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
-            invoked.addAll(invokedMethods(TrinoScanKernelGenerator.re2ClassfileForDiagnostics(re2.caseSensitiveTrinoScanPlan(), ordinaryHandoff)));
-            re2Kinds.addAll(List.of(re2.caseSensitiveTrinoScanPlan().operationsForDiagnostics().split(",")));
+            boolean ordinaryHandoff = re2.usesScanPlanForFindForDiagnostics() && re2.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
+            invoked.addAll(invokedMethods(ScanKernelGenerator.re2ClassfileForDiagnostics(re2.caseSensitiveScanPlan(), ordinaryHandoff)));
+            re2Kinds.addAll(List.of(re2.caseSensitiveScanPlan().operationsForDiagnostics().split(",")));
         }
         assertThat(re2Kinds).contains("RE2_RUN", "RE2_SET_RUN", "RE2_DELIMITED_CAPTURE");
         // A Java end, whose class checks the final line terminator. TestJavaScanPlan compares its
         // results with the JDK.
         Re2 javaEnd = JavaRegexp.compile(utf8Slice("^x([a-z]+)$"), JavaRegexp.Options.defaults().setGenerateBytecode(true)).pattern();
         assertThat(javaEnd.usesGeneratedBytecode()).isTrue();
-        boolean javaEndHandoff = javaEnd.usesTrinoScanPlanForFindForDiagnostics() && javaEnd.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
-        invoked.addAll(invokedMethods(TrinoScanKernelGenerator.re2ClassfileForDiagnostics(javaEnd.caseSensitiveTrinoScanPlan(), javaEndHandoff)));
-        assertThat(leadingRun("[a-z]([0-9]*)!").candidateScan()).isEqualTo(TrinoScanPlanRun.CANDIDATE_SCAN_RANGE);
-        TrinoScanPlanRun threeBytes = leadingRun("[abc]([0-9]*)!");
-        assertThat(threeBytes.candidateScan()).isEqualTo(TrinoScanPlanRun.CANDIDATE_SCAN_SMALL_SET);
+        boolean javaEndHandoff = javaEnd.usesScanPlanForFindForDiagnostics() && javaEnd.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
+        invoked.addAll(invokedMethods(ScanKernelGenerator.re2ClassfileForDiagnostics(javaEnd.caseSensitiveScanPlan(), javaEndHandoff)));
+        assertThat(leadingRun("[a-z]([0-9]*)!").candidateScan()).isEqualTo(ScanPlanRun.CANDIDATE_SCAN_RANGE);
+        ScanPlanRun threeBytes = leadingRun("[abc]([0-9]*)!");
+        assertThat(threeBytes.candidateScan()).isEqualTo(ScanPlanRun.CANDIDATE_SCAN_SMALL_SET);
         assertThat(threeBytes.needles()).hasSize(3);
-        assertThat(leadingRun("\\w([0-9]*)!").candidateScan()).isEqualTo(TrinoScanPlanRun.CANDIDATE_SCAN_NIBBLE_TABLE);
+        assertThat(leadingRun("\\w([0-9]*)!").candidateScan()).isEqualTo(ScanPlanRun.CANDIDATE_SCAN_NIBBLE_TABLE);
         assertThat(invoked.stream().filter(method -> !method.startsWith("java.") && !method.startsWith("jdk.") && !method.startsWith("io.airlift.slice.")))
                 .containsExactlyInAnyOrderElementsOf(GENERATED_CODE_CALLS);
     }
 
-    private static TrinoScanPlanRun leadingRun(String expression)
+    private static ScanPlanRun leadingRun(String expression)
     {
-        TrinoScanPlan plan = TrinoRegexp.compile(utf8Slice(expression)).pattern().caseSensitiveTrinoScanPlan();
+        ScanPlan plan = TrinoRegexp.compile(utf8Slice(expression)).pattern().caseSensitiveScanPlan();
         return plan.step(plan.leadingOperation()).run();
     }
 
@@ -324,9 +324,9 @@ public class TestTrinoScanKernel
             String expression = probeCase.expression();
             TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(probeCase.frequencies()));
             TrinoRegexp compiled = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(probeCase.frequencies()).setGenerateBytecode(true));
-            assertThat(interpreted.pattern().caseSensitiveTrinoScanPlan().leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(probeCase.probe());
+            assertThat(interpreted.pattern().caseSensitiveScanPlan().leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(probeCase.probe());
             assertThat(compiled.usesGeneratedBytecode()).as(expression).isTrue();
-            byte[] classfile = TrinoScanKernelGenerator.classfileForDiagnostics(TrinoScanKernelGenerator.Routes.of(compiled.pattern()));
+            byte[] classfile = ScanKernelGenerator.trinoClassfileForDiagnostics(ScanKernelGenerator.TrinoRoutes.of(compiled.pattern()));
             assertThat(probeOffsets(classfile)).as(expression).isNotEmpty().containsOnly(probeCase.probe());
             List<String> symbols = new ArrayList<>(SYMBOLS);
             symbols.addAll(witnessParts(expression));
@@ -335,7 +335,7 @@ public class TestTrinoScanKernel
     }
 
     /// Compares generated and interpreted patterns over the seeded patterns of
-    /// [TestTrinoScanPlan]: end-anchored, partial, compacted, and unanchored shapes, on their
+    /// [TestScanPlan]: end-anchored, partial, compacted, and unanchored shapes, on their
     /// witnesses, mutations, random text, and malformed UTF-8.
     @Test
     public void testGeneratedPatternsAgainstInterpreter()
@@ -356,7 +356,7 @@ public class TestTrinoScanKernel
                 for (String expression : expressions) {
                     TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression));
                     TrinoRegexp compiled = generated(expression);
-                    boolean eligible = interpreted.getClass() == TrinoRegexp.class && TrinoScanKernelGenerator.Routes.of(interpreted.pattern()) != null;
+                    boolean eligible = interpreted.getClass() == TrinoRegexp.class && ScanKernelGenerator.TrinoRoutes.of(interpreted.pattern()) != null;
                     assertThat(compiled.usesGeneratedBytecode()).as(expression).isEqualTo(eligible);
                     if (!eligible) {
                         continue;
@@ -403,7 +403,7 @@ public class TestTrinoScanKernel
             String expression = search.expression();
             TrinoRegexp compiled = generated(expression);
             TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression));
-            if (interpreted.pattern().usesAsciiFoldedTrinoScanExecutorForDiagnostics()) {
+            if (interpreted.pattern().usesAsciiFoldedScanExecutorForDiagnostics()) {
                 assertThat(compiled.usesGeneratedBytecode()).as(expression).isFalse();
                 continue;
             }
@@ -433,7 +433,7 @@ public class TestTrinoScanKernel
     /// name, without the package for an owner in this package, a dot, and the method name.
     static Set<String> invokedMethods(byte[] classfile)
     {
-        String packagePrefix = TestTrinoScanKernel.class.getPackageName() + ".";
+        String packagePrefix = TestScanKernel.class.getPackageName() + ".";
         ClassModel model = ClassFile.of().parse(classfile);
         Set<String> methods = new LinkedHashSet<>();
         for (MethodModel method : model.methods()) {
@@ -590,7 +590,7 @@ public class TestTrinoScanKernel
             }
             handles.verify(sourceDescription, expected, source, count, replacements);
             if (attempts) {
-                verifySameAttempts(sourceDescription, actual.attemptHandleForDiagnostics(), expected.pattern().caseSensitiveTrinoScanPlan(), source, groupCount);
+                verifySameAttempts(sourceDescription, actual.attemptHandleForDiagnostics(), expected.pattern().caseSensitiveScanPlan(), source, groupCount);
             }
         }
     }
@@ -741,7 +741,7 @@ public class TestTrinoScanKernel
     /// Compares raw attempt results, which the public operations partly normalize: the boolean
     /// or encoded attempt result, and every capture slot, including slots the attempt leaves
     /// untouched and slots past a short group array.
-    private static void verifySameAttempts(String description, MethodHandle actual, TrinoScanPlan expected, Slice source, int groupCount)
+    private static void verifySameAttempts(String description, MethodHandle actual, ScanPlan expected, Slice source, int groupCount)
             throws Throwable
     {
         int length = source.length();

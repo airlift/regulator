@@ -18,13 +18,13 @@ import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 
-/// Vector scans for [TrinoScanPlan] and [TrinoScanPlanRun]. Callers must check
+/// Vector scans for [ScanPlan] and [ScanPlanRun]. Callers must check
 /// [VectorSupport#isAvailable()] first and use their scalar loops otherwise.
-final class VectorTrinoScanner
+final class VectorScanner
 {
     private static final VectorSpecies<Byte> SPECIES = ByteVector.SPECIES_128;
 
-    private VectorTrinoScanner() {}
+    private VectorScanner() {}
 
     // PERFORMANCE-SENSITIVE HOT LOOPS: changes here require target-host assembly
     // and benchmark evidence. Keep Vector API linkage isolated in this class. The
@@ -34,7 +34,7 @@ final class VectorTrinoScanner
     /// Returns the first byte at or after `cursor` outside `members`, or `end`
     /// when none remains. `needles` holds one to four bytes: the members, or the
     /// non-members when `inverted`.
-    /// Copied as `VectorTrinoScanKernelSupport.findRunStop`; keep the copy in step.
+    /// Copied as `VectorScanKernelSupport.findRunStop`; keep the copy in step.
     static int findRunStop(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
         int count = needles.length;
@@ -70,7 +70,7 @@ final class VectorTrinoScanner
     /// Returns the first byte at or after `cursor` that is non-ASCII or equals one of
     /// `needles`, or `end` when none remains. `needles` holds the RE2 run's
     /// ASCII non-members, zero to four bytes. RE2 runs validate the non-ASCII bytes this stops at.
-    /// Copied as `VectorTrinoScanKernelSupport.findRe2RunStop`; keep the copy in step.
+    /// Copied as `VectorScanKernelSupport.findRe2RunStop`; keep the copy in step.
     static int findRe2RunStop(byte[] input, int cursor, int end, byte[] needles)
     {
         if (needles.length > 1) {
@@ -99,7 +99,7 @@ final class VectorTrinoScanner
 
     // findRe2RunStop for two to four needles. The guards on the first two needles always hold
     // here; they stay because this is the shape that was measured. Copied as
-    // VectorTrinoScanKernelSupport.findRe2SetStop; keep the copy in step.
+    // VectorScanKernelSupport.findRe2SetStop; keep the copy in step.
     private static int findRe2SetStop(byte[] input, int cursor, int end, byte[] needles)
     {
         int count = needles.length;
@@ -142,7 +142,7 @@ final class VectorTrinoScanner
 
     /// Returns the first byte at or after `cursor` in `members`, or `-1` when
     /// none remains. `needles` is as for [#findRunStop].
-    /// Copied as `VectorTrinoScanKernelSupport.findRunCandidate`; keep the copy in step.
+    /// Copied as `VectorScanKernelSupport.findRunCandidate`; keep the copy in step.
     static int findRunCandidate(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
         int count = needles.length;
@@ -176,8 +176,8 @@ final class VectorTrinoScanner
     }
 
     /// Returns whether the `literal` step occurs in `[cursor, end)`.
-    /// Copied as `VectorTrinoScanKernelSupport.containsLiteral`; keep the copy in step.
-    static boolean containsLiteral(byte[] bytes, int cursor, int end, TrinoScanPlan.Step literal)
+    /// Copied as `VectorScanKernelSupport.containsLiteral`; keep the copy in step.
+    static boolean containsLiteral(byte[] bytes, int cursor, int end, ScanPlan.Step literal)
     {
         int lastOffset = literal.literal.length - 1;
         int lastStart = end - literal.literal.length;
@@ -204,7 +204,7 @@ final class VectorTrinoScanner
         return false;
     }
 
-    // Copied as VectorTrinoScanKernelSupport.findByte; keep the copy in step.
+    // Copied as VectorScanKernelSupport.findByte; keep the copy in step.
     static int findByte(byte[] bytes, int cursor, int end, byte target)
     {
         ByteVector wanted = ByteVector.broadcast(SPECIES, target);

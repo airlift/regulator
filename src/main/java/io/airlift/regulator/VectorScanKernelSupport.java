@@ -18,11 +18,11 @@ import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 
-/// Vector scans for [TrinoScanKernelSupport]: copies of the [VectorTrinoScanner]
+/// Vector scans for [ScanKernelSupport]: copies of the [VectorScanner]
 /// and [VectorByteSetScanner] scans that the interpreter's helpers call, kept apart for
-/// the reason given in [TrinoScanKernelSupport]. Callers must check
+/// the reason given in [ScanKernelSupport]. Callers must check
 /// [VectorSupport#isAvailable()] first and use their scalar loops otherwise.
-final class VectorTrinoScanKernelSupport
+final class VectorScanKernelSupport
 {
     // The plan's own scans use 128-bit vectors, and the byte-set scans shared with the DFA use
     // the preferred species, as in the originals.
@@ -30,14 +30,14 @@ final class VectorTrinoScanKernelSupport
     private static final VectorSpecies<Byte> BYTE_SET_SPECIES = ByteVector.SPECIES_PREFERRED;
     private static final int HIGH_NIBBLE_TABLE_OFFSET = 64;
 
-    private VectorTrinoScanKernelSupport() {}
+    private VectorScanKernelSupport() {}
 
     // PERFORMANCE-SENSITIVE HOT LOOPS: changes here require target-host assembly
     // and benchmark evidence. Keep Vector API linkage isolated in this class. The
     // run scans broadcast their needles before the block loop because C2 does not
     // hoist per-block broadcasts out of it on aarch64 or x86.
 
-    /// A copy of `VectorTrinoScanner.findRunStop`.
+    /// A copy of `VectorScanner.findRunStop`.
     static int findRunStop(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
         int count = needles.length;
@@ -70,7 +70,7 @@ final class VectorTrinoScanKernelSupport
         return end;
     }
 
-    /// A copy of `VectorTrinoScanner.findRe2RunStop`.
+    /// A copy of `VectorScanner.findRe2RunStop`.
     static int findRe2RunStop(byte[] input, int cursor, int end, byte[] needles)
     {
         if (needles.length > 1) {
@@ -97,7 +97,7 @@ final class VectorTrinoScanKernelSupport
         return end;
     }
 
-    // A copy of VectorTrinoScanner.findRe2SetStop. The guards on the first two needles always
+    // A copy of VectorScanner.findRe2SetStop. The guards on the first two needles always
     // hold here; they stay because this is the shape that was measured.
     private static int findRe2SetStop(byte[] input, int cursor, int end, byte[] needles)
     {
@@ -139,7 +139,7 @@ final class VectorTrinoScanKernelSupport
         return end;
     }
 
-    /// A copy of `VectorTrinoScanner.findRunCandidate`.
+    /// A copy of `VectorScanner.findRunCandidate`.
     static int findRunCandidate(byte[] input, int cursor, int end, byte[] needles, boolean inverted, boolean[] members)
     {
         int count = needles.length;
@@ -172,8 +172,8 @@ final class VectorTrinoScanKernelSupport
         return -1;
     }
 
-    /// A copy of `VectorTrinoScanner.containsLiteral`.
-    static boolean containsLiteral(byte[] bytes, int cursor, int end, TrinoScanPlan.Step literal)
+    /// A copy of `VectorScanner.containsLiteral`.
+    static boolean containsLiteral(byte[] bytes, int cursor, int end, ScanPlan.Step literal)
     {
         int lastOffset = literal.literal.length - 1;
         int lastStart = end - literal.literal.length;
@@ -186,21 +186,21 @@ final class VectorTrinoScanKernelSupport
                     .and(ByteVector.fromArray(SPECIES, bytes, cursor + lastOffset).compare(VectorOperators.EQ, last));
             long bits = matches.toLong();
             while (bits != 0) {
-                if (TrinoScanKernelSupport.literalMatches(literal, bytes, cursor + Long.numberOfTrailingZeros(bits), end)) {
+                if (ScanKernelSupport.literalMatches(literal, bytes, cursor + Long.numberOfTrailingZeros(bits), end)) {
                     return true;
                 }
                 bits &= bits - 1;
             }
         }
         for (; cursor <= lastStart; cursor++) {
-            if (TrinoScanKernelSupport.literalMatches(literal, bytes, cursor, end)) {
+            if (ScanKernelSupport.literalMatches(literal, bytes, cursor, end)) {
                 return true;
             }
         }
         return false;
     }
 
-    /// A copy of `VectorTrinoScanner.findByte`.
+    /// A copy of `VectorScanner.findByte`.
     static int findByte(byte[] bytes, int cursor, int end, byte target)
     {
         ByteVector wanted = ByteVector.broadcast(SPECIES, target);

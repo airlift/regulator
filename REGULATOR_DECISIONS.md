@@ -718,7 +718,7 @@ When a pattern also has a scan plan, full-Slice `find` keeps the literal
 contains, prefix, equality, and final-line equality kernels, which answer
 without reading past the literal; other boolean strategies yield to the plan.
 Scan-plan boolean calls also stop once a match is certain, as described in
-the [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md#integration).
+the [scan-plan guide](docs/benchmarks/SCAN_PLAN.md#integration).
 
 These plans apply only when normalized expression analysis proves equivalent
 existence semantics. APIs that accept a range, return boundaries or captures,
@@ -1438,7 +1438,7 @@ code generation; an experimental option may compile the plan into its
 own class, as described in
 [Generated Trino Scan Kernels](#generated-trino-scan-kernels). The ordinary
 semantic program remains the fallback. The
-[scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md) describes candidate
+[scan-plan guide](docs/benchmarks/SCAN_PLAN.md) describes candidate
 selection, resume rules, the executors, and optional-capture execution.
 
 Plans may require the logical input start or perform unanchored search. An
@@ -1661,7 +1661,7 @@ measurements specific to each language.
   shared, so a coverage change reaches the Trino, RE2, Java, and Rust
   frontends, except a change for sets of some non-ASCII characters, which Trino
   plans decline. Every skip proof holds under the RE2 rule, as the
-  [scan-plan guide](docs/benchmarks/TRINO_SCAN_PLAN.md#re2-patterns) restates.
+  [scan-plan guide](docs/benchmarks/SCAN_PLAN.md#re2-patterns) restates.
   An unanchored search may also be led by one character of a set of some
   non-ASCII characters, such as `(?i)key=([^;]+);` led by the `k` that folds to
   the Kelvin sign, or by an unbounded run of such a set that holds every ASCII

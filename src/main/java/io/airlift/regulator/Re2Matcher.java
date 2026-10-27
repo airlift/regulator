@@ -42,8 +42,8 @@ public final class Re2Matcher
     private final boolean hasLoweredCandidateSearch;
     private final boolean hasDirectLoweredGroupZeroSearch;
     // The pattern's start-anchored scan plan that find() can run directly. See
-    // Re2.startAnchoredTrinoScanPlan.
-    private final TrinoScanPlan startAnchoredScanPlan;
+    // Re2.startAnchoredScanPlan.
+    private final ScanPlan startAnchoredScanPlan;
     private final boolean rustSearch;
     private final boolean readsCarriageReturnBeforeRegion;
     private OnePass.Workspace onePassWorkspace;
@@ -102,7 +102,7 @@ public final class Re2Matcher
         this.hasLoweredCandidateSearch = pattern.hasLoweredCandidateSearch();
         this.hasDirectLoweredGroupZeroSearch =
                 groups.length == 2 && pattern.hasDirectLoweredGroupZeroSearch();
-        this.startAnchoredScanPlan = this.singleByteMatcher == null ? pattern.startAnchoredTrinoScanPlan() : null;
+        this.startAnchoredScanPlan = this.singleByteMatcher == null ? pattern.startAnchoredScanPlan() : null;
         this.rustSearch = (pattern.flags() & Regexp.RUST_SEARCH) != 0;
         this.readsCarriageReturnBeforeRegion = pattern.readsCarriageReturnBeforeRegion();
         reset(input);
@@ -192,7 +192,7 @@ public final class Re2Matcher
         if (regionStartsAfterCarriageReturn) {
             return findGeneral();
         }
-        if (nextFindStart == 0 && pattern.findWithStartAnchoredTrinoScanPlan(startAnchoredScanPlan, input, regionStart, regionEnd, groups)) {
+        if (nextFindStart == 0 && pattern.findWithStartAnchoredScanPlan(startAnchoredScanPlan, input, regionStart, regionEnd, groups)) {
             setMatchAndAdvance(groups[0], groups[1]);
             return true;
         }

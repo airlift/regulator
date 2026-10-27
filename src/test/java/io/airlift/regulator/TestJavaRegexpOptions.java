@@ -92,10 +92,10 @@ public class TestJavaRegexpOptions
 
         options.setByteFrequencies(ByteFrequencies.uniform());
 
-        assertThat(regexp.pattern().caseSensitiveTrinoScanPlan().leadingLiteralProbeOffsetForDiagnostics()).isEqualTo(5);
+        assertThat(regexp.pattern().caseSensitiveScanPlan().leadingLiteralProbeOffsetForDiagnostics()).isEqualTo(5);
         assertThat(regexp.pattern().forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
         Re2 uniform = JavaRegexp.compile(utf8Slice("été=([a-z]+)"), options).pattern();
-        assertThat(uniform.caseSensitiveTrinoScanPlan().leadingLiteralProbeOffsetForDiagnostics()).isZero();
+        assertThat(uniform.caseSensitiveScanPlan().leadingLiteralProbeOffsetForDiagnostics()).isZero();
         assertThat(uniform.forwardProgramForDiagnostics().prefixAccelProbeOffset()).isZero();
 
         // The compiled probe offset, chosen by the distribution at compilation, is retained.

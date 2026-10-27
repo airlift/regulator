@@ -29,7 +29,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
 import static org.assertj.core.api.Assertions.assertThat;
 
-public class TestTrinoScanPlanRun
+public class TestScanPlanRun
 {
     @Test
     public void testRunMinimumReadsOnlyTheMinimum()
@@ -38,7 +38,7 @@ public class TestTrinoScanPlanRun
         String tail = "y".repeat(4096);
         for (String expression : List.of("[^/]+", "[^/]{3,}", "[^/]{2,5}", "[a-z]{2,}", "(?s).*", "[^/]*", "[^/]?", "[^/]", "[0-9]+")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), expression);
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), expression);
             for (String text : List.of("", "a", "ab", "abc", "é", "é😀x", "例え", "😀😀😀😀", "a/", "/", "ab/c", "A", "1")) {
                 String value = text + tail;
                 byte[] input = ("!" + value + "!").getBytes(UTF_8);
@@ -54,7 +54,7 @@ public class TestTrinoScanPlanRun
         }
         // A bounded view cannot take its minimum from bytes after the view.
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("[^/]{3,}"), Regexp.LIKE_PERL);
-        TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false));
+        ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false));
         byte[] input = "xabc".getBytes(UTF_8);
         assertThat(run.matchMinimum(input, 1, 3)).isEqualTo(-1);
         assertThat(run.matchMinimum(input, 0, 3)).isEqualTo(3);
@@ -129,7 +129,7 @@ public class TestTrinoScanPlanRun
                 re2("[\\x{80}-\\x{10FFFE}]"),
                 re2("[^\\x{10FFFF}]"))) {
             ParseResult parsed = set.parsed();
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), true), set.name());
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), true), set.name());
             assertThat(run.matchesSomeNonAscii()).as(set.name()).isTrue();
             for (byte[] sequence : sequences) {
                 String description = set.name() + " on " + HexFormat.of().formatHex(sequence);
@@ -138,7 +138,7 @@ public class TestTrinoScanPlanRun
                 int stop = run.re2SetMatch(sequence, 0, sequence.length);
                 assertThat(stop).as(description).isEqualTo(expectedStop);
                 // Generated kernels read the set by a copy of the run's reader.
-                assertThat(TrinoScanKernelSupport.re2SetRunMatch(run, sequence, 0, sequence.length)).as("kernel " + description).isEqualTo(expectedStop);
+                assertThat(ScanKernelSupport.re2SetRunMatch(run, sequence, 0, sequence.length)).as("kernel " + description).isEqualTo(expectedStop);
                 if (stop > 0) {
                     // Each character the run reads starts with a member byte.
                     assertThat(run.members()[sequence[0] & 0xFF]).as(description).isTrue();
@@ -150,17 +150,17 @@ public class TestTrinoScanPlanRun
                 assertThat(run.members()[value]).as("%s byte %s", set.name(), value).isFalse();
             }
             ParseResult unbounded = set.parse(set.name() + "+");
-            TrinoScanPlanRun unboundedRun = requireNonNull(TrinoScanPlanRun.analyze(unbounded.regexp(), unbounded.caseFolding(), true), set.name());
+            ScanPlanRun unboundedRun = requireNonNull(ScanPlanRun.analyze(unbounded.regexp(), unbounded.caseFolding(), true), set.name());
             assertThat(unboundedRun.unboundedScanTerminator()).as(set.name()).isEqualTo(-1);
             for (int value = 0; value < 256; value++) {
                 assertThat(unboundedRun.isComplementOf((byte) value)).as("%s byte %s", set.name(), value).isFalse();
             }
             // Trino reads every non-ASCII byte alike, so such a set is not a Trino run.
-            assertThat(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false)).as(set.name()).isNull();
+            assertThat(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false)).as(set.name()).isNull();
         }
         // Interned blocks and masks keep the member table of Rust's \w near 12 KB.
         ParseResult word = rust("\\w").parsed();
-        Utf8MemberTable wordTable = requireNonNull(TrinoScanPlanRun.analyze(word.regexp(), word.caseFolding(), true)).nonAsciiMembers();
+        Utf8MemberTable wordTable = requireNonNull(ScanPlanRun.analyze(word.regexp(), word.caseFolding(), true)).nonAsciiMembers();
         assertThat(wordTable.estimatedRetainedSize()).isLessThan(16 * 1024);
     }
 
@@ -205,7 +205,7 @@ public class TestTrinoScanPlanRun
         // negated classes hold line feeds and every non-ASCII byte without dotAll.
         for (String set : List.of("[^/]", "[^:]", "[^,]", "[^\\n]", "[^/x]", "[^=]", "[^\\x00-\\x7F]", "\\w", "[a]", "[\\x00-\\x7F]", ".", "(?s).")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(set + "+"), Regexp.LIKE_PERL);
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), set);
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), set);
             // Only a line feed ends a line in this dialect.
             Pattern reference = Pattern.compile(set, Pattern.UNIX_LINES);
             int excluded = -1;
@@ -232,7 +232,7 @@ public class TestTrinoScanPlanRun
         // copy must agree.
         for (String set : List.of("[a]", "[?&]", "[abz]", "[0-9]", "[0-9a]", "[a-z@]", "\\w", "[\\x00-\\x3F]", "[\\x00-\\x7F]", "[^=]", "[^/:?#]", "[^\\x00-\\x7F]", ".")) {
             ParseResult parsed = TrinoRegexpParser.parse(utf8Slice("(?s)" + set + "+"), Regexp.LIKE_PERL);
-            TrinoScanPlanRun run = requireNonNull(TrinoScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), set);
+            ScanPlanRun run = requireNonNull(ScanPlanRun.analyze(parsed.regexp(), parsed.caseFolding(), false), set);
             Pattern reference = Pattern.compile("(?s)" + set);
             boolean[] members = new boolean[256];
             int filler = -1;
@@ -260,7 +260,7 @@ public class TestTrinoScanPlanRun
                             assertThat(run.findCandidate(bytes, cursor, end))
                                     .as("%s byte %s cursor %s length %s position %s", set, value, cursor, length, position)
                                     .isEqualTo(expected);
-                            assertThat(TrinoScanKernelSupport.runFindCandidate(run, bytes, cursor, end))
+                            assertThat(ScanKernelSupport.runFindCandidate(run, bytes, cursor, end))
                                     .as("generated %s byte %s cursor %s length %s position %s", set, value, cursor, length, position)
                                     .isEqualTo(expected);
                         }

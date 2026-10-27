@@ -285,9 +285,9 @@ public class TestRe2Allocations
         // Every unanchored search on this plan continues on the ordinary engine.
         Re2 handoff = TrinoRegexp.compileForcingScanPlanHandoffForTesting(Slices.utf8Slice("https?://([^/]+)/")).pattern();
         for (Re2 pattern : List.of(anchored, folded, unanchored, handoff)) {
-            assertThat(pattern.usesTrinoScanPlanForDiagnostics()).as(pattern.pattern().toStringUtf8()).isTrue();
+            assertThat(pattern.usesScanPlanForDiagnostics()).as(pattern.pattern().toStringUtf8()).isTrue();
         }
-        assertThat(folded.usesAsciiFoldedTrinoScanExecutorForDiagnostics()).isTrue();
+        assertThat(folded.usesAsciiFoldedScanExecutorForDiagnostics()).isTrue();
 
         Slice url = Slices.utf8Slice("https://www.example.com/index.html");
         Slice header = Slices.utf8Slice("Content-Type: text/html; charset=utf-8");
@@ -313,7 +313,7 @@ public class TestRe2Allocations
 
         TrinoRegexp pattern = TrinoRegexp.compile(Slices.utf8Slice("https?://([^/]+)/"));
         Slice source = Slices.utf8Slice("see http://one.example/ and https://two.example/ for details");
-        assertThat(pattern.pattern().usesTrinoScanPlanForDiagnostics()).isTrue();
+        assertThat(pattern.pattern().usesScanPlanForDiagnostics()).isTrue();
 
         for (int iteration = 0; iteration < 20_000; iteration++) {
             assertThat(pattern.count(source)).isEqualTo(2);

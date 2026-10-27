@@ -25,12 +25,12 @@ public class TestBenchmarkTrinoScanKernelCost
     @Test
     public void testDistinctPatternsGenerateMatchingClasses()
     {
-        List<TrinoScanKernelGenerator.Routes> routes = BenchmarkTrinoScanKernelCost.routes(8);
+        List<ScanKernelGenerator.TrinoRoutes> routes = BenchmarkTrinoScanKernelCost.routes(8);
         int[] groups = new int[2];
         for (int index = 0; index < routes.size(); index++) {
             Slice input = BenchmarkTrinoScanKernelCost.input(index);
             Slice other = BenchmarkTrinoScanKernelCost.input(index + 1);
-            CompiledTrinoScan scan = TrinoScanKernelGenerator.generateCompiledScan(routes.get(index)).scan();
+            CompiledTrinoScan scan = ScanKernelGenerator.generateCompiledTrinoScan(routes.get(index)).scan();
             assertThat(TrinoRegexp.compile(BenchmarkTrinoScanKernelCost.expression(index)).contains(input)).as("pattern %s", index).isTrue();
             assertThat(scan.find(input, 0, groups)).as("pattern %s", index).isTrue();
             assertThat(groups).as("pattern %s", index).containsExactly(0, input.length());

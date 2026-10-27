@@ -91,7 +91,7 @@ it the interpreter. Compiled is the opt-in compiler, enabled with
 pattern; code and benchmark names call it generated. Each workload measures one
 ordinary operation with each variant beside the page's comparator. The regular
 engine and the specialized engine make the public call; the compiled pattern is
-[const-bound](TRINO_SCAN_PLAN.md#benchmarks) the way an engine like Trino binds
+[const-bound](SCAN_PLAN.md#benchmarks) the way an engine like Trino binds
 it, the best case such an engine sees. Each pattern runs in its own JVM, so no
 call site sees another pattern. LIKE has no regular-engine variant.
 

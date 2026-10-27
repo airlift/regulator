@@ -20,11 +20,11 @@ import java.util.Arrays;
 import static io.airlift.slice.Slices.utf8Slice;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
-public final class VectorTrinoScannerProbe
+public final class VectorScannerProbe
 {
     private static final String FILLER = "y".repeat(64);
 
-    private VectorTrinoScannerProbe() {}
+    private VectorScannerProbe() {}
 
     public static void main(String[] arguments)
     {
@@ -115,10 +115,10 @@ public final class VectorTrinoScannerProbe
     private static void verify(String expression, String operations, String requiredLiteral, boolean asciiFolded, String text, String group, int count)
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
-        check(regexp.pattern().usesTrinoScanPlanForDiagnostics(), expression + ": no scan plan");
-        check(regexp.pattern().usesAsciiFoldedTrinoScanExecutorForDiagnostics() == asciiFolded, expression + ": unexpected executor");
+        check(regexp.pattern().usesScanPlanForDiagnostics(), expression + ": no scan plan");
+        check(regexp.pattern().usesAsciiFoldedScanExecutorForDiagnostics() == asciiFolded, expression + ": unexpected executor");
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
-        TrinoScanPlan plan = TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding());
+        ScanPlan plan = ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding());
         check(plan != null, expression + ": no plan");
         check(plan.operationsForDiagnostics().equals(operations), expression + ": unexpected operations " + plan.operationsForDiagnostics());
         byte[] required = plan.requiredLiteralForDiagnostics();

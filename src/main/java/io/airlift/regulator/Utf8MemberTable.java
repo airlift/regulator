@@ -84,7 +84,7 @@ final class Utf8MemberTable
 
     /// Returns the width of the member whose encoding starts at `cursor`, or 0 when none
     /// does. The byte at `cursor`, which must be before `end`, is at or above 0x80.
-    /// Copied as `TrinoScanKernelSupport.memberWidth`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.memberWidth`; keep the copy in step.
     int memberWidth(byte[] input, int cursor, int end)
     {
         int first = input[cursor];
@@ -128,7 +128,7 @@ final class Utf8MemberTable
         return leads[value & 0x7F] != 0;
     }
 
-    // These accessors serve the copy of memberWidth in TrinoScanKernelSupport.
+    // These accessors serve the copy of memberWidth in ScanKernelSupport.
 
     int[] leads()
     {

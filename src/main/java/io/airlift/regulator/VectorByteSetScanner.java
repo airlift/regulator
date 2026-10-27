@@ -33,7 +33,7 @@ final class VectorByteSetScanner
 
     // PERFORMANCE-SENSITIVE HOT LOOP: changes here require target-host assembly
     // and benchmark evidence. Candidate count is always one, two, or three.
-    // Copied as VectorTrinoScanKernelSupport.findByteSet; keep the copy in step.
+    // Copied as VectorScanKernelSupport.findByteSet; keep the copy in step.
     static int find(byte[] data, int offset, int length, byte first, byte second, byte third, int candidateCount)
     {
         return switch (candidateCount) {
@@ -60,7 +60,7 @@ final class VectorByteSetScanner
 
     // PERFORMANCE-SENSITIVE HOT LOOP: unsigned comparisons preserve byte-set
     // ordering across the signed-byte boundary without an extra vector transform.
-    // Copied as VectorTrinoScanKernelSupport.findRange; keep the copy in step.
+    // Copied as VectorScanKernelSupport.findRange; keep the copy in step.
     static int findRange(byte[] data, int offset, int length, int lowerBound, int upperBound)
     {
         ByteVector lowerBoundVector = ByteVector.broadcast(SPECIES, (byte) lowerBound);
@@ -137,7 +137,7 @@ final class VectorByteSetScanner
 
     // PERFORMANCE-SENSITIVE HOT LOOP: the replicated tables are part of the code shape.
     // Changes require target-host assembly and integrated benchmark evidence.
-    // Copied as VectorTrinoScanKernelSupport.findNibbleTable; keep the copy in step.
+    // Copied as VectorScanKernelSupport.findNibbleTable; keep the copy in step.
     static int findNibbleTable(byte[] data, int offset, int length, byte[] tables)
     {
         ByteVector lowNibbleTable = ByteVector.fromArray(SPECIES, tables, 0);
@@ -166,7 +166,7 @@ final class VectorByteSetScanner
         return -1;
     }
 
-    // Copied as VectorTrinoScanKernelSupport.findOne; keep the copy in step.
+    // Copied as VectorScanKernelSupport.findOne; keep the copy in step.
     private static int findOne(byte[] data, int offset, int length, byte candidate)
     {
         ByteVector candidateVector = ByteVector.broadcast(SPECIES, candidate);
@@ -189,7 +189,7 @@ final class VectorByteSetScanner
         return -1;
     }
 
-    // Copied as VectorTrinoScanKernelSupport.findTwo; keep the copy in step.
+    // Copied as VectorScanKernelSupport.findTwo; keep the copy in step.
     private static int findTwo(byte[] data, int offset, int length, byte first, byte second)
     {
         ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
@@ -215,7 +215,7 @@ final class VectorByteSetScanner
         return -1;
     }
 
-    // Copied as VectorTrinoScanKernelSupport.findThree; keep the copy in step.
+    // Copied as VectorScanKernelSupport.findThree; keep the copy in step.
     private static int findThree(byte[] data, int offset, int length, byte first, byte second, byte third)
     {
         ByteVector firstVector = ByteVector.broadcast(SPECIES, first);
