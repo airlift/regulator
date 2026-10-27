@@ -583,7 +583,7 @@ that a refill records its own concurrency and deadline.
 
 For baseline-only follow-ups, repeat `--shard NAME` on `run-campaign.py` to
 collect complete affected shards. Use the same selection with
-`validate-campaign-results.py` and `aggregate_results.py`. The full checked-in
+`aggregate_results.py`. The full checked-in
 row manifest remains unchanged and its digest stays in every receipt; selection
 only narrows required shard coverage. Missing replicas, unexpected shards, or
 mixed source identities still reject the campaign. A language fleet uses its

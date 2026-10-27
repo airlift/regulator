@@ -3,7 +3,9 @@
 A unit is the rows one host measures between two chained calibrations. Atoms
 are the row sets a comparison or a scaling fit needs measured together; atoms
 are packed greedily, largest first, adding a unit until every unit holding
-several atoms fits the unit budget. run-unit.sh measures one unit.
+several atoms fits the unit budget. run-unit.sh measures one unit. The
+generator checks every unit against the measurement requirements before it
+writes the tables.
 
 The tables are not checked in: freeze-candidate.sh generates them into the
 candidate archive and beside these modules, where hosts and the controller read
@@ -29,7 +31,6 @@ UNIT_FIELDS = (
     "owned_rows",
     "representatives",
     "estimated_seconds",
-    "oversized",
 )
 UNIT_ROW_FIELDS = ("unit_id", "row_id", "role", "replica_id")
 # The generated tables, written together by generate-units.py.
@@ -178,7 +179,8 @@ def merge(atoms):
 def pack(atoms, by_id, protocols, bindings):
     """Largest atom first into the lightest unit, adding a unit until only lone atoms exceed the budget.
 
-    Packing is greedy, so it can use more units than an optimal packing would.
+    Packing is greedy, so it can use more units than an optimal packing would. `check` refuses any unit
+    over the 15-minute budget, a lone atom included.
     """
     costs = {id(atom): estimate(atom, by_id, protocols, bindings) for atom in atoms}
     ordered = sorted(atoms, key=lambda atom: (-costs[id(atom)], atom.owned[0]))
@@ -236,7 +238,81 @@ def generate(manifest_rows, representatives, protocols):
                 "representatives": unit_representatives,
                 "estimated_seconds": seconds,
             })
+    check(units, manifest_rows, protocols)
     return units
+
+
+def check_ownership(units, manifest_rows):
+    """Each manifest row is owned by exactly one unit of its shard; returns each row's unit."""
+    owners = defaultdict(list)
+    for unit in units:
+        for row_id in unit["owned"]:
+            owners[row_id].append(unit)
+    by_id = {row["row_id"]: row for row in manifest_rows}
+    unknown = sorted(set(owners) - set(by_id))
+    if unknown:
+        raise ValueError(f"units own rows outside the manifest: {unknown[:3]}")
+    for row in manifest_rows:
+        holders = owners.get(row["row_id"], [])
+        if len(holders) != 1:
+            raise ValueError(f"row {row['row_id']} is owned by {len(holders)} units")
+        if holders[0]["shard_id"] != row["shard_id"]:
+            raise ValueError(f"unit {holders[0]['unit_id']} holds row {row['row_id']} from another shard")
+    return {row_id: holders[0]["unit_id"] for row_id, holders in owners.items()}
+
+
+def check_together(owner, row_ids, requirement):
+    unit_ids = {owner[row_id] for row_id in row_ids}
+    if len(unit_ids) != 1:
+        raise ValueError(f"{requirement} spans {len(unit_ids)} units: {sorted(row_ids)[0]}")
+
+
+def check_requirements(manifest_rows, owner):
+    """Comparators, scaling groups, and each logical row's systems are measured in one unit."""
+    for _, points in row_protocol.identify_scaling_groups(manifest_rows).values():
+        check_together(owner, [row["row_id"] for row, _ in points], "scaling group")
+    for _, candidate, comparator_system, comparators in row_protocol.comparison_specs(manifest_rows):
+        if any(owner[row["row_id"]] != owner[candidate["row_id"]] for row in comparators):
+            raise ValueError(f"{candidate['row_id']} is not measured beside its {comparator_system} comparator")
+    logical = defaultdict(list)
+    for row in manifest_rows:
+        logical[row_protocol.logical_row_id(row)].append(row["row_id"])
+    for row_ids in logical.values():
+        check_together(owner, row_ids, "logical row")
+
+
+def check_selectors(manifest_rows, protocols, owner):
+    """Each unit's share of a method is one Cartesian -p block, and a method is split along at most one axis."""
+    for (_, system, benchmark, _), rows in selector_groups(manifest_rows, protocols).items():
+        full = defaultdict(set)
+        portions = defaultdict(lambda: defaultdict(set))
+        counts = defaultdict(int)
+        for row in rows:
+            unit_id = owner[row["row_id"]]
+            counts[unit_id] += 1
+            for key, value in row_protocol.parse_parameters(row["parameters"]).items():
+                full[key].add(value)
+                portions[unit_id][key].add(value)
+        split = set()
+        for unit_id, values in portions.items():
+            if counts[unit_id] != math.prod(len(value_set) for value_set in values.values()):
+                raise ValueError(f"{system} {benchmark} is not a Cartesian block in unit {unit_id}")
+            # JMH cannot select a value holding a comma, so such a method runs whole.
+            if counts[unit_id] != len(rows) and not all(expressible(value_set) for value_set in values.values()):
+                raise ValueError(f"{system} {benchmark} has a value JMH cannot select and is split")
+            split.update(key for key, value_set in values.items() if value_set != full[key])
+        if len(split) > 1:
+            raise ValueError(f"{system} {benchmark} is split along {sorted(split)}")
+
+
+def check(units, manifest_rows, protocols):
+    """The measurement requirements every unit meets, within the 15-minute budget."""
+    owner = check_ownership(units, manifest_rows)
+    check_requirements(manifest_rows, owner)
+    check_selectors(manifest_rows, protocols, owner)
+    for unit in units:
+        if unit["estimated_seconds"] > UNIT_SECONDS:
+            raise ValueError(f"unit {unit['unit_id']} exceeds {UNIT_SECONDS} seconds")
 
 
 def generate_from(directory):
@@ -263,7 +339,6 @@ def render(units):
         "owned_rows": len(unit["owned"]),
         "representatives": len(unit["representatives"]),
         "estimated_seconds": f"{unit['estimated_seconds']:.1f}",
-        "oversized": str(unit["estimated_seconds"] > UNIT_SECONDS).lower(),
     } for unit in units]
     mapping = []
     for unit in units:

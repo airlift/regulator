@@ -120,7 +120,7 @@ confirmation revalidates the previous phase's ledger and attempts first,
 refusing a previous phase whose rejection ledger is missing or lists an
 attempt, even when another attempt of that unit was accepted.
 
-The campaign validator requires every platform and frozen unit of the selected
+Campaign validation requires every platform and frozen unit of the selected
 shards, with replicas 1, 2, and 3. It also requires:
 
 - the three replicas of a unit on distinct EC2 instances; different units may
@@ -138,18 +138,13 @@ shards, with replicas 1, 2, and 3. It also requires:
 - with `--release-version`, each accepted attempt, retained beside the ledger,
   attesting on every route that it measured that release's pinned JAR
 
-The controller's phase gate applies the same checks, except that it requires
+The controller's phase gate applies these checks, except that it requires
 only replica 1 for a smoke phase and leaves the rejection ledger to the next
-phase's prerequisite and the reducer. A unit confirmation is replica `4`, at
-most one per platform and unit, on an instance none of that unit's replicas
-used; only the confirmation phase gate checks this, against the primary
-ledger. The command below validates primary coverage.
-
-```bash
-tools/re2-benchmark/baseline/validate-campaign-results.py \
-    --campaign-id units-20261101 \
-    --accepted-units accepted-units.tsv
-```
+phase's prerequisite and the reducer. The report importer revalidates the
+published campaign's ledgers. A unit confirmation is replica `4`, at most one
+per platform and unit, on an instance none of that unit's replicas used. Every
+campaign validation checks this against the primary ledger: the controller's
+confirmation phase gate, the reducer, and the report importer.
 
 Run the isolated self-tests with:
 
