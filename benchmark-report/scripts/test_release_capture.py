@@ -1,7 +1,6 @@
+import argparse
 import copy
 import csv
-import gzip
-import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -9,6 +8,10 @@ import unittest
 from unittest.mock import patch
 
 import release_capture
+# release_capture puts the baseline tooling on the path; its unit campaign fixture runs attempts as hosts do.
+import aggregate_results
+import collection
+from test_unit_session import UnitCampaign
 
 
 class TestReleaseCapture(unittest.TestCase):
@@ -21,7 +24,7 @@ class TestReleaseCapture(unittest.TestCase):
                  'partition': part['id'], 'replica': replica}
                 for replica in (1, 2, 3)]
         self.manifest = {'suite': 'language-bulk', 'cases': [{'id': 'example', 'model': 'count'}]}
-        platforms = release_capture.fleet.RELEASE_1_0_PLATFORMS
+        platforms = release_capture.fleet.PLATFORMS
         self.data = {'plan': {'schema_version': 3, 'replicas': 3, 'platforms': list(platforms),
                               'platform_allocations': release_capture.fleet.platform_allocations('language-bulk', platforms),
                               'jobs': jobs, 'partitions': [part]},
@@ -56,25 +59,6 @@ class TestReleaseCapture(unittest.TestCase):
             receipt['plan_sha256'] = plan_sha256
             receipt['exports'] = {host['job']['id']: 'f' * 64}
 
-    def test_release_commentary_matches_source_and_operation(self):
-        row = {'caseId': 'trino-like/SUFFIX_LARGE', 'language': 'like', 'operation': 'matches',
-               'result': {'state': 'compared'}, 'workload': {'pattern': '%needle'}}
-        historical = copy.deepcopy(row)
-        single = {**copy.deepcopy(row), 'operation': 'singleUse'}
-        unsupported = {**copy.deepcopy(row), 'result': {'state': 'not-compatible'}}
-        unrelated = {**copy.deepcopy(row), 'language': 'java'}
-        prefix = {**copy.deepcopy(row), 'caseId': 'wild/url/example', 'language': 'java', 'operation': 'execute'}
-        release_capture.annotate_release_rows([row, single, unsupported, unrelated, prefix], self.release)
-        self.assertIn('two overlapping four-byte words', row['workload']['performanceContext'])
-        self.assertNotIn('1-3 ns', row['workload']['performanceContext'])
-        self.assertNotEqual(row['workload']['performanceContext'], single['workload']['performanceContext'])
-        self.assertEqual(row['workload']['pattern'], '%needle')
-        for unchanged in (historical, unsupported, unrelated):
-            self.assertNotIn('performanceContext', unchanged['workload'])
-        self.assertIn('URL components', prefix['workload']['performanceContext'])
-        with self.assertRaisesRegex(ValueError, 'released source'):
-            release_capture.annotate_release_rows([row], {**self.release, 'source_commit': '0' * 40})
-
     def test_released_artifact_and_collector_remain_separate(self):
         data = self.normalize()
         self.assertEqual(len(data['hosts']), 3)
@@ -85,7 +69,7 @@ class TestReleaseCapture(unittest.TestCase):
         self.manifest['suite'] = 'language-lifecycle'
         allocation = release_capture.fleet.platform_allocation('language-lifecycle', 'r9g')
         self.data['plan']['platform_allocations'] = release_capture.fleet.platform_allocations(
-            'language-lifecycle', release_capture.fleet.RELEASE_1_0_PLATFORMS)
+            'language-lifecycle', release_capture.fleet.PLATFORMS)
         for host in self.data['hosts']:
             job = host['job']
             job.update(id=job['id'].replace('r8i/', 'r9g/'), platform='r9g', **allocation)
@@ -96,35 +80,6 @@ class TestReleaseCapture(unittest.TestCase):
         self.data['hosts'][0]['provenance']['instance_identity']['instanceType'] = 'r9g.large'
         with self.assertRaisesRegex(ValueError, 'accepted instance'):
             self.normalize()
-
-    def test_imports_legacy_plan_with_the_qualified_allocation(self):
-        # Legacy plans are the 1.0 release campaign's, which also measured R8g.
-        for platform in ('r9g', 'r8g'):
-            self.setUp()
-            self.manifest['suite'] = 'language-lifecycle'
-            allocation = release_capture.fleet.platform_allocation('language-lifecycle', platform)
-            for host in self.data['hosts']:
-                job = host['job']
-                job.update(id=job['id'].replace('r8i/', platform + '/'), platform=platform, **allocation)
-                host['provenance']['instance_identity']['instanceType'] = allocation['instance_type']
-            self.data['plan']['schema_version'] = 2
-            del self.data['plan']['platform_allocations']
-            for job in self.data['plan']['jobs']:
-                del job['instance_type']
-                del job['vcpus']
-            self.refresh_receipts()
-            with self.subTest(platform=platform):
-                self.assertEqual(len(self.normalize()['hosts']), 3)
-
-    def test_baseline_validates_against_the_platforms_its_collector_pinned(self):
-        # The manifests/platforms.tsv entry of docs/benchmarks/results-1.0/baseline-evidence.json.
-        collector = {'platform_manifest_sha256': '5439d337086d2d0bae3a61d6533001d5362e898ffdba1d99011e4fc036d5b0c7'}
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'platforms.tsv'
-            path.write_bytes(release_capture.collector_platform_manifest(collector))
-            self.assertEqual(set(release_capture.acceptance.load_platforms(path)), {'r8i', 'r8g', 'r9g'})
-        with self.assertRaisesRegex(ValueError, 'baseline collector'):
-            release_capture.collector_platform_manifest({'platform_manifest_sha256': '0' * 64})
 
     def test_shared_language_ledger_routes_each_frozen_plan(self):
         other_plan = {**self.data['plan'], 'suite': 'language-lifecycle'}
@@ -182,37 +137,83 @@ class TestReleaseCapture(unittest.TestCase):
                 release_capture.load_collector({'candidate_provenance': str(paths[0]) + '.missing'},
                                                plan, self.release)
 
-    def test_baseline_confirmation_cannot_reuse_primary_host(self):
-        receipts = [{'instance_id': 'i-primary', 'host_epoch': '1', 'platform': 'r8i',
-                     'shard_id': 'engine', 'replica_id': '1'},
-                    {'instance_id': 'i-confirmation', 'host_epoch': '4', 'platform': 'r8i',
-                     'shard_id': 'engine', 'replica_id': '4'}]
-        release_capture.validate_independent_baseline_hosts(receipts)
-        for field in ('instance_id', 'host_epoch', 'replica_id'):
-            changed = copy.deepcopy(receipts)
-            changed[1][field] = changed[0][field]
-            with self.subTest(field=field), self.assertRaisesRegex(ValueError, 'distinct hosts'):
-                release_capture.validate_independent_baseline_hosts(changed)
+    def test_baseline_accepts_only_a_complete_unit_campaign_of_its_collector(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shards = [row['shard_id'] for row in release_capture.read_rows(release_capture.BASELINE / 'shards.tsv')]
+            # Replicas 1 to 3 of every unit on both platforms, each worker running every unit of its replica,
+            # and one unit confirmed on a fourth host.
+            campaign = UnitCampaign(root / 'results', *shards)
+            confirmed = campaign.add('r8i', campaign.units[0], 4, host=4)
+            receipts = campaign.receipts
+            relabelled = [{**receipt, 'candidate_commit': 'f' * 40} for receipt in receipts + [confirmed]]
 
-    def test_1_0_baseline_manifests_are_the_pinned_rows_and_their_shards(self):
-        pinned = 'row_id\tshard_id\tsystem\nold/regulator\told\tregulator\n'
-        with tempfile.TemporaryDirectory() as directory, patch.object(release_capture, 'ROOT', Path(directory)):
-            baseline = Path(directory) / 'tools/re2-benchmark/baseline'
-            baseline.mkdir(parents=True)
-            (baseline / 'remeasurement-rows.tsv.gzip').write_bytes(gzip.compress(pinned.encode(), mtime=0))
-            (baseline / 'remeasurement-protocol.json').write_text(json.dumps(
-                {'original_row_manifest_sha256': hashlib.sha256(pinned.encode()).hexdigest()}))
-            # After 1.0 the live manifests gain rows and shards and rename the 1.0 shard.
-            (baseline / 'rows.tsv').write_text('row_id\tshard_id\tsystem\nold/regulator\trenamed\tregulator\nnew/regulator\tnew\tregulator\n')
-            (baseline / 'shards.tsv').write_text('shard_id\tdescription\nrenamed\tRenamed\nnew\tNew\n')
-            with release_capture.baseline_manifests(self.release) as (manifest, shards):
-                self.assertEqual(manifest.read_text(), pinned)
-                self.assertEqual(release_capture.acceptance.load_shards(shards), {'old'})
-            with release_capture.baseline_manifests({**self.release, 'version': '2.0'}) as (manifest, shards):
-                self.assertEqual((manifest, shards), (baseline / 'rows.tsv', baseline / 'shards.tsv'))
-            (baseline / 'remeasurement-rows.tsv.gzip').write_bytes(gzip.compress(b'changed', mtime=0))
-            with self.assertRaisesRegex(ValueError, 'original row manifest changed'), release_capture.baseline_manifests(self.release):
-                pass
+            def phase(name, ledger, rejected=()):
+                # The controller keeps each phase's semantic-rejection ledger beside its accepted units.
+                (root / name).mkdir()
+                with (root / name / release_capture.unit_session.SEMANTIC_REJECTIONS).open('w') as output:
+                    fields = release_capture.unit_session.SEMANTIC_REJECTION_FIELDS
+                    writer = csv.DictWriter(output, fieldnames=fields, delimiter='\t', extrasaction='ignore')
+                    writer.writeheader()
+                    writer.writerows(rejected)
+                return campaign.write_ledger(root / name / 'accepted-units.tsv', ledger)
+
+            primary, confirmation = phase('primary', receipts), phase('confirmation', [confirmed])
+            phase('partial', receipts[1:])
+            phase('rejected', receipts, rejected=receipts[:1])
+            phase('relabelled', relabelled[:-1])
+            phase('relabelled-confirmation', relabelled[-1:])
+            # A confirmation ledger in an older receipt schema, with a column the current one lacks.
+            (root / 'stale').mkdir()
+            with (root / 'stale/accepted-units.tsv').open('w') as output:
+                fields = [*release_capture.unit_session.UNIT_RECEIPT_FIELDS, 'copied_row_count']
+                writer = csv.DictWriter(output, fieldnames=fields, delimiter='\t')
+                writer.writeheader()
+                writer.writerow({**confirmed, 'copied_row_count': '0'})
+
+            def reduce(name, release_version=''):
+                aggregate_results.aggregate(argparse.Namespace(
+                    manifest=release_capture.BASELINE / 'rows.tsv', platforms=release_capture.BASELINE / 'platforms.tsv',
+                    shards=release_capture.BASELINE / 'shards.tsv', primary_receipts=[primary],
+                    confirmation_receipts=[confirmation], artifacts_root=[campaign.root], session_dir=[], events=[],
+                    artifact_index=[], campaign_artifact=None, output_dir=root / name,
+                    expected_manifest_rows=aggregate_results.parser().get_default('expected_manifest_rows'),
+                    release_version=release_version))
+                return str(root / name)
+            # The fixture's attempts carry no release JAR; released_artifact's own tests cover the reducer's proof.
+            with patch.object(release_capture.released_artifact, 'validate_baseline'):
+                reduction = reduce('reduction', '1.0')
+            unproven = reduce('unproven')
+            baseline = {'primary': str(root / 'primary'), 'confirmation': str(root / 'confirmation'),
+                        'reduction': reduction, 'campaign_id': 'campaign'}
+            release = {'version': '1.0', 'engine_tree': confirmed['engine_tree']}
+            collector = {'candidate_commit': confirmed['candidate_commit'],
+                         'archive_sha256': confirmed['candidate_archive_sha256'],
+                         'platform_manifest_sha256': release_capture.digest(release_capture.BASELINE / 'platforms.tsv')}
+            release_capture.validate_baseline(baseline, release, collector)
+            lifecycle = collection.prepare(root / 'lifecycle')
+            rows = release_capture.baseline_rows(reduction, lifecycle)
+            # Every population imports on both platforms, though each worker ran several units of a shard.
+            populations = ('trino-operations', 'like', 'specialized-patterns', 'diagnostics-and-stress')
+            self.assertEqual({(platform, population) for platform in ('r8i', 'r9g') for population in populations},
+                             {(row['platform'], row['population']) for row in rows})
+            cases = (
+                ({}, {'engine_tree': '0' * 40}, {}, 'changed release source or collector'),
+                ({}, {}, {'candidate_commit': '0' * 40}, 'changed release source or collector'),
+                ({}, {}, {'archive_sha256': '0' * 64}, 'changed release source or collector'),
+                ({'primary': str(root / 'partial')}, {}, {}, 'unit coverage failed'),
+                ({'primary': str(root / 'absent')}, {}, {}, 'cannot read'),
+                ({'confirmation': str(root / 'absent')}, {}, {}, 'cannot read'),
+                ({'confirmation': str(root / 'stale')}, {}, {}, 'columns must be'),
+                ({'primary': str(root / 'rejected')}, {}, {}, 'semantic failure'),
+                ({'reduction': unproven}, {}, {}, 'did not prove'),
+                # Receipts relabelled to another candidate, against the reduction of this one.
+                ({'primary': str(root / 'relabelled'), 'confirmation': str(root / 'relabelled-confirmation')}, {},
+                 {'candidate_commit': 'f' * 40}, 'changed the accepted unit attempts'),
+            )
+            for paths, source, pin, message in cases:
+                with self.subTest(paths=paths, source=source, pin=pin), self.assertRaisesRegex(ValueError, message):
+                    release_capture.validate_baseline({**baseline, **paths}, {**release, **source}, {**collector, **pin})
 
     def test_rejects_missing_hosts_or_acceptance_receipts(self):
         self.data['hosts'].pop()

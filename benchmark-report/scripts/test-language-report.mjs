@@ -503,11 +503,6 @@ assert.match(contextHtml, /20 input bytes per operation/);
 assert.match(contextHtml, /Rotating inputs/);
 assert.match(contextHtml, /example &lt;input&gt;/);
 assert.doesNotMatch(contextHtml.match(/class="row-evidence-body">(.*?)<\/div>/s)[1], /independent hosts/);
-const previewData = { ...data, presentation: { reviewPreview: true }, rows: [{ ...contextRow, result: { ...result, warnings: ['sample precision exceeds 5%'] } }] };
-const previewHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: previewData }));
-assert.match(previewHtml, /5.00× slower/);
-assert.doesNotMatch(previewHtml, /timing variable|Engine abcdef/);
-assert.equal(downloadData(previewData).rows[0].result.warnings[0], 'sample precision exceeds 5%');
 
 const literalCount = { ...reused, caseId: 'everyday/trinoLiteral', language: 'java', operation: 'reusedCount',
   measurementSource: { cohort: 'routing-20260911-probes-r2' } };

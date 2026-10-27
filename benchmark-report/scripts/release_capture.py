@@ -1,48 +1,26 @@
 """Import complete release campaigns while retaining artifact and collector identities."""
 
-from contextlib import contextmanager
 import csv
-import gzip
 import hashlib
 import json
 from pathlib import Path
 import sys
-import tarfile
-import tempfile
 
 from baseline_data import baseline_rows, read_rows
-from language_data import MEMORY_MODES, RELEASE_1_0_LANGUAGES, RELEASE_1_0_PLATFORMS, digest, language_rows
+from language_data import CURRENT_PLATFORMS, LANGUAGES, MEMORY_MODES, digest, language_rows
 from report_data import validate_report
 
 ROOT = Path(__file__).resolve().parents[2]
-RELEASE_BASELINE_EVIDENCE = ROOT / 'docs/benchmarks/results-1.0/baseline-tables.tar.gz'
-sys.path.insert(0, str(ROOT / 'tools/re2-benchmark/baseline'))
+BASELINE = ROOT / 'tools/re2-benchmark/baseline'
+sys.path.insert(0, str(BASELINE))
 sys.path.insert(0, str(ROOT / 'tools/re2-benchmark/language'))
-import acceptance
 import fleet
 import released_artifact
-import retained_selection
-import topology
+import unit_session
 
 
 def load(path):
     return json.loads(Path(path).read_text())
-
-
-def annotate_release_rows(rows, release):
-    notes = load(ROOT / 'benchmark-report/src/release-1.0-workload-notes.json')
-    if notes['sourceCommit'] != release['source_commit']:
-        raise ValueError('performance commentary does not match the released source')
-    for row in rows:
-        if row['result']['state'] == 'not-compatible':
-            continue
-        for note in notes['performance']:
-            matches_case = (row['caseId'] in note.get('cases', []) or
-                            any(row['caseId'].startswith(prefix) for prefix in note.get('prefixes', [])))
-            if (matches_case and row['operation'] in note['operations'] and
-                    row['language'] in note.get('languages', [row['language']])):
-                row.setdefault('workload', {})['performanceContext'] = note['text']
-                break
 
 
 def load_collector(item, plan, release):
@@ -60,9 +38,8 @@ def normalize_language(data, manifest, expected_release, collector, receipts):
     plan = data['plan']
     if plan['replicas'] != 3 or 'selection' in plan:
         raise ValueError('release language capture requires the complete three-host matrix')
-    schema = plan.get('schema_version', 2)
     allocations = fleet.platform_allocations(manifest['suite'], plan['platforms'])
-    if schema not in (2, 3) or (schema == 3 and plan.get('platform_allocations') != allocations):
+    if plan.get('schema_version') != 3 or plan.get('platform_allocations') != allocations:
         raise ValueError('release language capture changed its frozen worker allocations')
     expected_candidate = {'source_commit': collector['candidate_commit'], 'source_tree': collector['root_tree']}
     if any(data['candidate'][key] != value for key, value in expected_candidate.items()):
@@ -100,10 +77,7 @@ def normalize_language(data, manifest, expected_release, collector, receipts):
         instance = provenance['instance_identity']
         allocation = allocations.get(job['platform'])
         planned = {key: job.get(key) for key in ('instance_type', 'vcpus')}
-        unfrozen = {'instance_type': None, 'vcpus': None}
-        if (job['platform'] not in RELEASE_1_0_PLATFORMS or allocation is None or
-                (schema == 3 and planned != allocation) or
-                (schema == 2 and planned not in (unfrozen, allocation)) or
+        if (job['platform'] not in CURRENT_PLATFORMS or allocation is None or planned != allocation or
                 instance['instanceType'] != allocation['instance_type'] or
                 accepted[job['id']] != (host['export_sha256'], instance['instanceId'])):
             raise ValueError('language host differs from its accepted instance or export')
@@ -146,76 +120,48 @@ def validate_language_receipt_coverage(ledgers):
             raise ValueError('language ledger contains receipts outside the imported captures')
 
 
-@contextmanager
-def baseline_manifests(release):
-    """Yield the row and shard manifests a release's baseline receipts were accepted against."""
-    baseline = ROOT / 'tools/re2-benchmark/baseline'
-    if release['version'] != '1.0':
-        yield baseline / 'rows.tsv', baseline / 'shards.tsv'
-        return
-    # rows.tsv and shards.tsv grow after 1.0, so validate 1.0 receipts against the pinned 1.0 row manifest and its shard IDs.
-    rows = retained_selection.original_rows(baseline, load(baseline / 'remeasurement-protocol.json'))
-    with tempfile.TemporaryDirectory() as directory:
-        manifest, shard_manifest = Path(directory) / 'rows.tsv', Path(directory) / 'shards.tsv'
-        # Receipts record the manifest's checksum, so write its exact bytes rather than the parsed rows.
-        manifest.write_bytes(gzip.decompress((baseline / retained_selection.ORIGINAL_ROW_MANIFEST).read_bytes()))
-        shard_manifest.write_text(''.join(shard + '\n' for shard in ['shard_id', *sorted({row['shard_id'] for row in rows})]))
-        yield manifest, shard_manifest
+def validate_baseline(baseline, release, collector):
+    """Require a complete unit campaign of the collector, reduced from exactly its accepted unit attempts."""
+    from build_capture_data import validate_reduction
+    platforms = BASELINE / 'platforms.tsv'
+    if digest(platforms) != collector['platform_manifest_sha256']:
+        raise ValueError('platform manifest differs from the baseline collector')
+    primary = Path(baseline['primary']) / 'accepted-units.tsv'
+    confirmation = Path(baseline['confirmation']) / 'accepted-units.tsv' if baseline.get('confirmation') else None
+    fields = unit_session.UNIT_RECEIPT_FIELDS
+    # The confirmation ledger needs the receipt schema the primary ledger's acceptance requires.
+    confirmations = unit_session.read_tsv(confirmation, fields, fields) if confirmation else []
+    unit_session.validate_unit_campaign(BASELINE / 'rows.tsv', platforms, BASELINE / 'shards.tsv', primary,
+                                        baseline['campaign_id'], confirmations=confirmations)
+    # The reducer refuses a phase whose correctness stage rejected any attempt; checking again here also
+    # refuses a rejection recorded after the reduction was made.
+    for ledger in (primary, confirmation):
+        if ledger:
+            unit_session.check_semantic_rejections(ledger.parent)
+    receipts = read_rows(primary) + confirmations
+    for receipt in receipts:
+        if (receipt['engine_tree'] != release['engine_tree'] or receipt['candidate_commit'] != collector['candidate_commit'] or
+                receipt['candidate_archive_sha256'] != collector['archive_sha256']):
+            raise ValueError('baseline receipt changed release source or collector')
+    reduction = Path(baseline['reduction'])
+    validate_reduction(reduction)
+    # The reducer owns the proof that each attempt measured the release JAR; its summary names the release it proved.
+    if load(reduction / 'summary.json').get('release_version') != release['version']:
+        raise ValueError('baseline reduction did not prove its attempts measured the release JAR')
+    validate_reduced_attempts(reduction, receipts)
 
 
-def collector_platform_manifest(collector):
-    """Return the platform manifest the baseline collector pinned, as the release evidence archives it."""
-    with tarfile.open(RELEASE_BASELINE_EVIDENCE) as archive:
-        content = archive.extractfile('manifests/platforms.tsv').read()
-    if hashlib.sha256(content).hexdigest() != collector['platform_manifest_sha256']:
-        raise ValueError('archived platform manifest differs from the baseline collector')
-    return content
-
-
-def validate_baseline(capture, release, collector, campaign_id, primary):
-    with baseline_manifests(release) as (manifest, shards), tempfile.TemporaryDirectory() as directory:
-        receipts_path = capture / 'accepted-sessions.tsv'
-        platforms_path = Path(directory) / 'platforms.tsv'
-        platforms_path.write_bytes(collector_platform_manifest(collector))
-        if primary:
-            acceptance.validate_campaign(manifest, platforms_path, shards, receipts_path, campaign_id, (1, 2, 3))
-        receipts = read_rows(receipts_path)
-        platforms = acceptance.load_platforms(platforms_path)
-        for receipt in receipts:
-            if (receipt['engine_tree'] != release['engine_tree'] or receipt['candidate_commit'] != collector['candidate_commit'] or
-                    receipt['candidate_archive_sha256'] != collector['archive_sha256']):
-                raise ValueError('baseline receipt changed release source or collector')
-            if not primary and receipt['replica_id'] != '4':
-                raise ValueError('baseline confirmation requires the fourth independent host')
-            platform = platforms.get(receipt['platform'])
-            if (receipt['campaign_id'] != campaign_id or platform is None or
-                    receipt['architecture'] != platform['architecture'] or
-                    receipt['instance_type'] != topology.instance_type(platform, receipt['shard_id'])):
-                raise ValueError('baseline receipt changed campaign or worker topology')
-            base = capture / 'jobs' / receipt['platform'] / receipt['shard_id'] / ('replica-' + receipt['replica_id']) / ('epoch-' + receipt['host_epoch'])
-            paths = list(base.glob('*/' + receipt['architecture'] + '/re2-results'))
-            if len(paths) != 1:
-                raise ValueError('baseline accepted epoch has ambiguous artifacts')
-            session = paths[0]
-            validator = acceptance.validate_host_results if primary else acceptance.validate_confirmation_host_results
-            if validator(manifest, session / 'session.tsv', session / 'observed-rows.tsv') != receipt:
-                raise ValueError('baseline raw evidence differs from the accepted receipt')
-            released_artifact.validate_baseline(session, release)
-            cleanup = dict(line.split('=', 1) for line in (session.parents[1] / 'cleanup-manifest.txt').read_text().splitlines())
-            if any(cleanup.get(key) != 'verified' for key in ('cleanup_status', 'instances_terminated', 'iam_removed', 'bucket_removed')):
-                raise ValueError('baseline resource cleanup is incomplete')
-        return receipts
-
-
-def validate_independent_baseline_hosts(receipts):
-    for fields in (('instance_id',), ('host_epoch',), ('platform', 'shard_id', 'replica_id')):
-        values = [tuple(receipt[field] for field in fields) for receipt in receipts]
-        if len(values) != len(set(values)):
-            raise ValueError('baseline primary and confirmation require distinct hosts, epochs, and assignments')
+def validate_reduced_attempts(reduction, receipts):
+    """Require the reduction's host rows to come from exactly the accepted unit attempts, as their receipts name them."""
+    fields = ('campaign_id', 'platform', 'unit_id', 'replica_id', 'unit_attempt_id', 'shard_id', 'instance_id',
+              'host_epoch', 'candidate_commit', 'engine_tree', 'evidence_manifest_sha256')
+    expected = {tuple(row[key] for key in fields) for row in receipts}
+    actual = {tuple(row[key] for key in fields) for row in read_rows(reduction / 'host-rows.tsv')}
+    if actual != expected:
+        raise ValueError('baseline reduction changed the accepted unit attempts')
 
 
 def build(plan_path):
-    from build_capture_data import validate_reduction
     plan = load(plan_path)
     release = released_artifact.manifest(ROOT, plan['release_version'])
     collectors = {}
@@ -246,32 +192,22 @@ def build(plan_path):
     baseline = plan['baseline']
     collector = load_collector(baseline, plan, release)
     collectors['baseline'] = collector
-    primary = validate_baseline(Path(baseline['primary']), release, collector, baseline['campaign_id'], True)
-    confirmations = validate_baseline(Path(baseline['confirmation']), release, collector, baseline['campaign_id'], False) if baseline.get('confirmation') else []
-    validate_independent_baseline_hosts(primary + confirmations)
+    validate_baseline(baseline, release, collector)
     reduction = Path(baseline['reduction'])
-    validate_reduction(reduction)
-    identity_fields = ('platform', 'shard_id', 'replica_id', 'host_epoch')
-    expected = {tuple(row[key] for key in identity_fields) for row in primary + confirmations}
-    actual = {tuple(row[key] for key in identity_fields) for row in read_rows(reduction / 'host-rows.tsv')}
-    if actual != expected:
-        raise ValueError('baseline reduction changed the accepted host cohort')
-    rows = language_rows(combined, manifests, platforms=RELEASE_1_0_PLATFORMS)
+    rows = language_rows(combined, manifests, platforms=CURRENT_PLATFORMS)
     lifecycle = next(manifest for manifest in manifests if manifest['suite'] == 'language-lifecycle')
     # The current baseline already includes all LIKE lifecycle shards.
     rows.extend(baseline_rows(reduction, lifecycle))
-    annotate_release_rows(rows, release)
     report = {'schemaVersion': 2,
               'sources': {'currentLabel': 'Regulator ' + release['version'] + ' final results',
                           'currentCandidate': release['source_commit'], 'engineTree': release['engine_tree'],
                           'jdk': 'Temurin 25.0.4+7'},
-              'languages': RELEASE_1_0_LANGUAGES, 'platforms': RELEASE_1_0_PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
+              'languages': LANGUAGES, 'platforms': CURRENT_PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
               'methodology': ['Public measurements load the checksummed published release JAR. Collector source is recorded separately.',
                               'Comparisons use three independent hosts, with same-host ratios and all original samples retained. Baseline confirmations use a fourth host where required.',
                               'Ordinary R-family workers have 2 vCPUs and 16 GiB RAM. Measured JVMs retain an 8 GiB heap; JMH launchers use at most 256 MiB.',
                               'JVM language timings use five forks and ten one-second warmup and measurement iterations. Native RE2 uses five repetitions.',
-                              'Observed host ranges are not confidence intervals. Incompatibility, reproduced timeouts, and timing variability remain explicit.',
-                              'The separate baseline evidence identifies the 8-vCPU multicore cohort and retains internal diagnostics.'],
+                              'Observed host ranges are not confidence intervals. Incompatibility, reproduced timeouts, and timing variability remain explicit.'],
               'provenance': {'releasedArtifact': release, 'collectors': collectors,
                              'languageExportSha256': exports, 'logicalLanguageJobs': len(combined['hosts']),
                              'baselineReductionChecksumsSha256': digest(reduction / 'output-checksums.tsv'),

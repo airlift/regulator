@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "tsc --noEmit && node scripts/test-language-report.mjs && npm run build && node scripts/test-site-data.mjs && python3 -m unittest discover -s scripts -p 'test_*.py' && python3 scripts/report_data.py check"
+    "check": "tsc --noEmit && node scripts/test-language-report.mjs && npm run build && node scripts/test-site-data.mjs && python3 ../tools/re2-benchmark/baseline/generate-units.py > /dev/null && python3 -m unittest discover -s scripts -p 'test_*.py' && python3 scripts/report_data.py check"
   },
   "dependencies": {
     "react": "19.2.6",

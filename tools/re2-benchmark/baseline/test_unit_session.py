@@ -35,6 +35,17 @@ REPRESENTATIVE_UNIT = ("trino-operations", "4")
 
 
 class TestUnitSession(unittest.TestCase):
+    def testCurrentDispatchExactlyCoversEveryShardAndKeepsNativeFirst(self):
+        manifest = SHARD_RESULTS.load_manifest(BASELINE / "rows.tsv")
+        shards = sorted({row["shard_id"] for row in manifest})
+        for shard in shards:
+            dispatch = UNIT_SESSION.load_dispatch(BASELINE / "shard-dispatch.tsv", shard)
+            routes = UNIT_SESSION.applicable_routes(dispatch)
+            self.assertEqual("native-access", routes[0][0])
+            route_systems = set().union(*(systems for _, _, systems in routes))
+            manifest_systems = {row["system"] for row in manifest if row["shard_id"] == shard}
+            self.assertEqual(manifest_systems, route_systems, shard)
+
     def testUnitAttemptIsAccepted(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             fixture = UnitFixture(Path(temporary_directory), *UNIT)
@@ -76,6 +87,15 @@ class TestUnitSession(unittest.TestCase):
         def tamper_route_artifact(fixture):
             (fixture.route_directory() / "semantic-gate.tsv").write_text("changed\n")
 
+        def tamper_raw_log(fixture):
+            (fixture.route_directory() / "logs" / "benchmark.log").write_text("tampered\n")
+
+        def add_unlisted_route_artifact(fixture):
+            (fixture.route_directory() / "normalized-output.tsv").write_text("normalized\n")
+
+        def forge_protocol(**changes):
+            return lambda fixture: fixture.forge_protocol(**changes)
+
         def empty_route_plan(fixture):
             SHARD_RESULTS.write_tsv(fixture.root / "route-plan.tsv", UNIT_SESSION.ROUTE_PLAN_FIELDS, [])
 
@@ -90,21 +110,34 @@ class TestUnitSession(unittest.TestCase):
             (UNIT, add_unknown_role, None, "differs from the frozen rows"),
             (UNIT, shorten_selector_window, None, "differs from the selectors of the frozen protocol"),
             (UNIT, None, tamper_route_artifact, "checksum mismatch"),
+            (UNIT, None, tamper_raw_log, "raw artifact checksum mismatch"),
+            (UNIT, None, add_unlisted_route_artifact, "evidence is incomplete"),
             (UNIT, None, empty_route_plan, "route-plan.tsv is not the unit's plan for replica"),
             (UNIT, None, misname_attempt, "unit-session.tsv unit_attempt_id must be <host_session>/<lease_seq>"),
             (UNIT, lambda fixture: fixture.replace_semantic_report(), None,
              "are not the files of its semantic receipt"),
             (REPRESENTATIVE_UNIT, lambda fixture: fixture.drop_representative(), None, "ran representatives"),
+            (REPRESENTATIVE_UNIT, forge_protocol(specialized_score="110"), None,
+             "relative difference does not match the protocol scores"),
+            (REPRESENTATIVE_UNIT, forge_protocol(specialized_score="106", relative_difference="0.06"), None,
+             "exceeds the protocol threshold"),
+            (REPRESENTATIVE_UNIT, forge_protocol(reference_sample_count="49"), None,
+             "fewer than 50 protocol samples"),
+            (REPRESENTATIVE_UNIT, forge_protocol(reference_sample_count="51", specialized_sample_count="51"), None,
+             "exactly 50 protocol samples"),
+            (REPRESENTATIVE_UNIT, forge_protocol(reference_cv="0.36"), None, "relative standard error"),
+            (REPRESENTATIVE_UNIT, forge_protocol(reference_cv="nan"), None, "invalid protocol statistics"),
         )
         for unit, before_combine, after_combine, message in cases:
             with self.subTest(message=message), tempfile.TemporaryDirectory() as temporary_directory:
                 fixture = UnitFixture(Path(temporary_directory), *unit)
                 if before_combine:
                     before_combine(fixture)
-                fixture.combine()
-                if after_combine:
-                    after_combine(fixture)
+                # Combining binds the attempt's evidence, so it rejects forged evidence before validation does.
                 with self.assertRaisesRegex(ValueError, re.escape(message)):
+                    fixture.combine()
+                    if after_combine:
+                        after_combine(fixture)
                     UNIT_SESSION.validate_unit_results(fixture.root)
 
     def testWorkerUnitsShareTheCalibrationBetweenThem(self):
@@ -149,7 +182,7 @@ class TestUnitSession(unittest.TestCase):
             return UNIT_SESSION.validate_unit_campaign(
                 BASELINE / "rows.tsv", BASELINE / "platforms.tsv", BASELINE / "shards.tsv",
                 campaign.write_ledger(campaign.root / "accepted-units.tsv", receipts), "campaign", replicas,
-                [campaign.shard_id])
+                list(campaign.shard_ids))
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             smoke = UnitCampaign(Path(temporary_directory) / "smoke", "like-dfa-single-use", replicas=(1,))
@@ -308,6 +341,13 @@ class UnitFixture:
     def replace_semantic_report(self):
         (self.route_directory() / "semantic-reports" / "TEST-Fixture.xml").write_text("<testsuite>other</testsuite>\n")
 
+    def forge_protocol(self, **changes):
+        """Rewrite the first representative's qualification statistics before the attempt binds them."""
+        path = next(self.root.glob("routes/*/protocol-qualification.tsv"))
+        rows = self.read(path.relative_to(self.root))
+        rows[0].update(changes)
+        SHARD_RESULTS.write_tsv(path, PROTOCOL_QUALIFICATION_FIELDS, rows)
+
     def drop_representative(self):
         directory = next(path.parent for path in self.root.glob("routes/*/protocol-qualification.tsv"))
         rows = self.read(directory.relative_to(self.root) / "protocol-qualification.tsv")
@@ -344,22 +384,22 @@ class UnitFixture:
 
 
 class UnitCampaign:
-    """A unit campaign's retained attempts: one host per platform and replica runs each unit of a shard."""
+    """A unit campaign's retained attempts: one host per platform and replica runs each unit of its shards."""
 
     PLATFORMS = {"r8i": ("intel", "r8i.large"), "r9g": ("arm", "r9g.large")}
 
-    def __init__(self, root, shard_id, replicas=(1, 2, 3), score=lambda row, platform, replica: 1,
+    def __init__(self, root, *shard_ids, replicas=(1, 2, 3), score=lambda row, platform, replica: 1,
                  host_calibrations=False, chained=False):
         self.root = root
-        self.shard_id = shard_id
+        self.shard_ids = shard_ids
         self.score = score
         self.host_calibrations = host_calibrations
         # With chained host calibrations, each lease after a host's first takes its before from the lease before it.
         self.chained = chained
         self.completions = {}
         self.units = sorted(
-            (unit for unit in UNIT_SESSION.work_units.load(BASELINE).values() if unit["shard_id"] == shard_id),
-            key=lambda unit: int(unit["unit_index"]))
+            (unit for unit in UNIT_SESSION.work_units.load(BASELINE).values() if unit["shard_id"] in shard_ids),
+            key=lambda unit: (shard_ids.index(unit["shard_id"]), int(unit["unit_index"])))
         self.leases = {}
         self.receipts = []
         for platform in self.PLATFORMS:
@@ -382,7 +422,7 @@ class UnitCampaign:
         architecture, instance_type = self.PLATFORMS[platform]
         previous = self.completions.get(host_session) if self.chained else None
         fixture = UnitFixture(
-            directory, self.shard_id, unit["unit_index"], str(replica), {
+            directory, unit["shard_id"], unit["unit_index"], str(replica), {
                 "campaign_id": "campaign", "platform": platform, "instance_id": f"i-{platform}-{host}",
                 "host_epoch": f"{platform}-epoch-{host}", "architecture": architecture,
                 "instance_type": instance_type, "availability_zone": "us-west-2a",

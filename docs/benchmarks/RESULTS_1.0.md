@@ -336,7 +336,7 @@ to those short-input waves.
 ## Reproduction, verification and archives
 
 The [methodology](METHODOLOGY.md), [qualification plan](QUALIFICATION_PLAN.md),
-[replacement collector guide](../../tools/re2-benchmark/baseline/REMEASUREMENT.md)
+[replacement collector guide](https://github.com/airlift/regulator/blob/a087e3a8bc7f826a63f70d6186ba32936bf2800c/tools/re2-benchmark/baseline/REMEASUREMENT.md)
 and [language collector guide](../../tools/re2-benchmark/language/README.md)
 define the protocols. The archived inventories, source snapshots, qualification
 decisions and controller inputs record each collection exactly.

@@ -12,7 +12,6 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import host_session
 import row_protocol
 import unit_session
 import work_units
@@ -126,8 +125,8 @@ def plan_unit(unit, manifest, protocols, representatives):
     """Every protocol and replica's route plans of one unit, checked; returns them by run."""
     shard = unit["shard_id"]
     held = sorted(unit["owned"])
-    dispatch = host_session.load_dispatch(DIRECTORY / "shard-dispatch.tsv", shard)
-    routes = [route for route, _, _ in host_session.applicable_routes(dispatch)]
+    dispatch = unit_session.load_dispatch(DIRECTORY / "shard-dispatch.tsv", shard)
+    routes = [route for route, _, _ in unit_session.applicable_routes(dispatch)]
     shard_rows = [row for row in manifest if row["shard_id"] == shard]
     plans = {}
     for replica in REPLICAS:
@@ -167,7 +166,7 @@ def sample(units, plans):
     """One unit per handler pairing, and a whole-method unit if any unit has one."""
     chosen = {}
     for unit in sorted(units.values(), key=lambda unit: (unit["shard_id"], int(unit["unit_index"]))):
-        dispatch = host_session.load_dispatch(DIRECTORY / "shard-dispatch.tsv", unit["shard_id"])
+        dispatch = unit_session.load_dispatch(DIRECTORY / "shard-dispatch.tsv", unit["shard_id"])
         chosen.setdefault((dispatch["native_access_handler"], dispatch["object_row_handler"]), unit["unit_id"])
         if any(selector["parameters"] == unit_session.ROUTE_ARGUMENTS
                for _, _, selectors, _, _ in plans[unit["unit_id"]][("qualification", "1")]

@@ -124,24 +124,12 @@ Fixture results are not benchmark evidence.
 
 Report data uses schema version 2. Earlier development formats are not supported.
 
-For private report-design work, `scripts/build_review_preview.py` combines an
-existing report with saved outlier measurements. Run it with `--help` for the
-input paths, then pass its output directory to `scripts/build.mjs` using
-`--data-directory` and a separate `--output-name`. It does not update the
-versioned data or release manifest.
-
-The preview uses matching same-host comparisons, keeps untouched results, and
-excludes internal diagnostics while retaining adversarial workloads. Its tables
-show point estimates without precision annotations; the raw download preserves
-warnings, predecessor results, and mixed-source provenance. This preview is not
-a new full run or release qualification.
-
 ## Historical preliminary 1.0 results
 
 The preliminary snapshot combined existing campaign results with targeted
 follow-ups. Its page header and README label used a `publication` object
 with `status: "preliminary"`, `sourcePolicy: "mixed-development-revisions"`, and
-a short `note`. It does not use the private `reviewPreview` presentation.
+a short `note`.
 
 Keep the base capture identity in `sources` and each replaced row's actual
 source and predecessor results. Do not relabel mixed measurements as a run
@@ -160,37 +148,28 @@ preliminary capture's original identity and label.
 
 ## Capture requirements
 
-`scripts/build_capture_data.py` builds the language report from the complete
-verified language export, baseline reduction and LIKE lifecycle supplement.
-The legacy input path reproduces preliminary captures. For a released campaign,
-provide both the frozen publication workload source and a separate private
-complete-capture destination:
+`scripts/build_capture_data.py` builds the language report from a released
+campaign: the complete verified language exports and the baseline reduction.
+Provide both the frozen publication workload source and a separate private
+complete-capture destination. The baseline is accepted against the row
+protocols and work units, which are generated rather than checked in, so
+generate them first:
 
 ```bash
+python3 tools/re2-benchmark/baseline/generate-units.py
 python3 benchmark-report/scripts/build_capture_data.py \
   --released-campaign campaign-paths.json \
   --publication-workloads benchmark-report/data/frozen-publication.json.gz \
-  --measurement-followup /private/archive/replacement-report.json.gz \
-  --analysis-inputs /private/archive/publication-analysis-inputs.jsonl.gz \
-  --publication-analysis-output /private/archive/publication-analysis-inputs-public.jsonl.gz \
   --complete-output /private/archive/complete-campaign.json \
   --output /tmp/publication.json
 python3 benchmark-report/scripts/report_data.py import /tmp/publication.json
 ```
 
 The public and complete outputs must differ. The complete output is evidence to
-archive and index; it is never an input to `report_data.py import`. The release
-build first reconstructs the complete original campaign, then applies the saved
-complete-campaign measurement follow-up. It verifies unchanged row identity and
-workload structure, exact released-artifact identity, complete normalized-input
-coverage, and the recorded analysis-input SHA-256 before copying the approved
-mean estimates, uncertainty, predecessor results, hardware, and provenance.
-The analysis output is a deterministic projection onto the published numeric
-rows. The report records both its hash and the source complete-campaign input
-hash, so the public replay rejects missing, extra, or substituted comparisons.
+archive and index; it is never an input to `report_data.py import`.
 The paths file identifies `release_version`, `candidate_provenance`, both
 `language` plan/export pairs, and `baseline` primary, optional confirmation,
-reduction, and campaign ID. LIKE lifecycle comes from accepted baseline shards.
+reduction, and campaign ID. LIKE lifecycle comes from accepted baseline units.
 Each language entry and the baseline entry may specify its own
 `candidate_provenance`, overriding the common collector pin. This permits a
 baseline-only protocol repair to retain unaffected language collection. Every
@@ -199,7 +178,14 @@ released production tree and JAR, and its complete independent-host matrix.
 The report records collector identities by suite.
 The importer checks published-JAR receipts separately from collector identity,
 R-family topology, manifest and receipt checksums, independent-host coverage,
-and lifecycle pairing. Historical C-family datasets retain their labels.
+and lifecycle pairing. The baseline must be a complete unit campaign: its
+`accepted-units.tsv` ledgers pass unit-campaign acceptance and their
+`semantic-rejections.tsv` ledgers list no attempt, the reduction's
+`output-checksums.tsv` matches every reduced file, its `summary.json` names the
+release whose JAR the reducer proved every attempt measured, and its host rows
+come from exactly the accepted unit attempts, with the campaign, host,
+candidate, and evidence identity of their receipts. Historical C-family
+datasets retain their labels.
 It rejects missing rows and verification failures. Timeouts and incompatibilities remain
 distinct nonnumeric results.
 
@@ -270,33 +256,6 @@ appear on older results. Lifecycle rows label runtime explanations as multi-use
 context. Unsupported cases get descriptions but no performance claims. The raw
 download includes the selected notes. Review them whenever the measured
 implementation or workload mappings change.
-
-The released 1.0 import uses `src/release-1.0-workload-notes.json`, pinned to
-the release source commit, and embeds its explanations in each applicable row.
-These describe the released engine paths without carrying forward timing claims
-from older machines. Historical captures keep their original commentary. Review
-the final ratios, absolute differences and uncertainty alongside these source
-explanations; an implementation difference alone does not prove a timing cause.
-
-`scripts/qualify_capture_data.py` applies the separately collected Trino/Joni
-precision follow-up. It requires three distinct paired hosts per CPU, suite
-and memory mode, rechecks raw artifacts against accepted receipts, and
-preserves the earlier result in each replaced row. Repeat `--pilot` or
-`--confirmation` when recovery was recorded in a separate directory. A split
-memory-mode recovery must include Joni on each host. Its collector-only source
-change requires both source archives and the recorded recovery protocol; the
-import checks that all engine and benchmark files are byte-identical.
-Failed host collection is not an engine timeout and supplies no numerical
-result. The original shorter-interval cohort is never blended into the new
-median.
-
-`scripts/public_api_report.py` applies a qualified public-operation follow-up.
-It requires a complete primary raw-validation index and the original and
-selected workload manifests. It checks source and workload identities, keeps
-three independent paired hosts per case and CPU, and retains predecessor
-results with their earlier API-path labels. It replaces only the selected
-rows; untouched rows keep their original measurements and source provenance.
-Pilot measurements and failed infrastructure attempts never enter its medians.
 
 ## GitHub Pages
 

@@ -264,8 +264,6 @@ def validate_language_report(data):
                 or not isinstance(publication.get('note'), str) or not publication['note'].strip()
                 or 'preliminary' not in data['sources']['currentLabel'].lower()):
             raise ValueError('invalid preliminary publication metadata')
-        if data.get('presentation', {}).get('reviewPreview'):
-            raise ValueError('preliminary publication cannot use private-preview presentation')
     platforms = data['platforms']
     if set(data['memoryModes']) != set(MEMORY_MODES):
         raise ValueError('missing memory mode')

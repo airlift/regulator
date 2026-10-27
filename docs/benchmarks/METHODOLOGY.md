@@ -351,7 +351,7 @@ checks. Do not replace it with a blanket five-fork or one-second setting.
 The [language collector](../../tools/re2-benchmark/language/README.md#target-host-measurement-and-saved-data)
 uses its own frozen protocol and receipts, including for source brackets.
 The 1.0 measurement-quality follow-up uses separately frozen
-[replacement protocols](../../tools/re2-benchmark/baseline/REMEASUREMENT.md)
+[replacement protocols](https://github.com/airlift/regulator/blob/a087e3a8bc7f826a63f70d6186ba32936bf2800c/tools/re2-benchmark/baseline/REMEASUREMENT.md)
 and the language profiles described in that collector guide. They preserve
 workload identities and release identity while replacing selected measurements
 with isolated forks and separate allocation profiling. These are qualified

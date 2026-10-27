@@ -125,8 +125,7 @@ shards, with replicas 1, 2, and 3. It also requires:
 
 - the three replicas of a unit on distinct EC2 instances; different units may
   share a host, its host epoch, and its host session
-- exactly the `r8i` and `r9g` platform identities, or the 1.0 release's
-  `r8i`, `r8g`, and `r9g` from its archived `platforms.tsv`
+- exactly the `r8i` and `r9g` platform identities
 - globally distinct unit attempt IDs, and each instance, host epoch, and host
   session naming one host
 - the architecture and instance type pinned for the unit's shard

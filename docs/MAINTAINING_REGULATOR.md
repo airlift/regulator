@@ -314,10 +314,10 @@ Run the complete frozen publication campaign only after:
 For a release, run the R9g and R8i publication campaign after release, using
 the published artifact for public-API measurements and recording its checksum
 and release tag. The 1.0 campaign, which also measured R8g, is recorded in
-[`RESULTS_1.0.md`](benchmarks/RESULTS_1.0.md). Its public report is built by
-`benchmark-report/scripts/build_capture_data.py --released-campaign`, which
-supports only the 1.0 campaign. Measure both native-memory and pure-Java
-routes. Run internal diagnostics only when a qualification
+[`RESULTS_1.0.md`](benchmarks/RESULTS_1.0.md). The public report is built by
+`benchmark-report/scripts/build_capture_data.py --released-campaign` from the
+language exports and the baseline unit campaign. Measure both native-memory and
+pure-Java routes. Run internal diagnostics only when a qualification
 failure or explicit measurement-quality question requires them; use the same
 tagged source and give them a separate inventory, budget, and private archive.
 A later change invalidates at least the affected publication shards; a broad or

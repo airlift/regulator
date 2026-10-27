@@ -144,8 +144,7 @@ class TestLanguageData(unittest.TestCase):
                 (lambda d: d['rows'][0].pop('measurementSource'), 'source provenance'),
                 (lambda d: d['sources'].update(currentLabel='Final results'), 'publication metadata'),
                 (lambda d: d['publication'].update(status='final'), 'publication metadata'),
-                (lambda d: d['publication'].update(note=''), 'publication metadata'),
-                (lambda d: d.update(presentation={'reviewPreview': True}), 'private-preview')):
+                (lambda d: d['publication'].update(note=''), 'publication metadata')):
             with self.subTest(message=message):
                 changed = deepcopy(data)
                 mutate(changed)

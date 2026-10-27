@@ -102,13 +102,13 @@ def variant_gain_warnings(variant, baseline, hosts):
 
 
 def output_contract(pairs, metadata):
-    """Require captured contracts for both routes of every paired host."""
+    """Require captured contracts for both routes of every paired unit attempt."""
     contracts = []
     for pair in pairs:
         routes = defaultdict(dict)
         for row in metadata:
-            if (all(row[field] == pair[field] for field in
-                    ('platform', 'shard_id', 'replica_id', 'host_epoch'))
+            # A worker runs several units of a shard and replica, so only the attempt names one unit's routes.
+            if (all(row[field] == pair[field] for field in ('platform', 'unit_attempt_id'))
                     and row['source'].endswith('/run-metadata.txt')):
                 if row['key'] in routes[row['source']]:
                     raise ValueError('duplicate captured route metadata')

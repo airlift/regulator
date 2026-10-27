@@ -9,10 +9,7 @@ from pathlib import Path
 import topology
 
 
-SCHEMA_VERSION = "2"
 EXPECTED_PLATFORMS = frozenset({"r8i", "r9g"})
-# The 1.0 release campaign also measured R8g; its archived platform manifest still validates.
-RELEASE_1_0_PLATFORMS = EXPECTED_PLATFORMS | {"r8g"}
 SESSION_FIELDS = (
     "schema_version",
     "campaign_id",
@@ -26,17 +23,6 @@ SESSION_FIELDS = (
     "availability_zone",
     "systems",
 )
-RECEIPT_FIELDS = SESSION_FIELDS + (
-    "row_count",
-    "manifest_sha256",
-    "expected_rows_sha256",
-    "observed_rows_sha256",
-    "evidence_manifest_sha256",
-    "candidate_commit",
-    "candidate_archive_sha256",
-    "engine_tree",
-    "heap_size",
-)
 EVIDENCE_FIELDS = ("route", "artifact", "verification", "sha256")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 GIT_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
@@ -44,27 +30,17 @@ CAPACITY_PREFIX_FIELDS = (
     "memory_total_bytes",
     "memory_available_before_bytes",
 )
-ROUTE_REQUIRED_ARTIFACTS = {
+# A unit's routes calibrate across the unit, so the unit root holds its one calibration.
+UNIT_ROUTE_REQUIRED_ARTIFACTS = {
     "route-session.tsv",
     "semantic-gate.tsv",
     "semantic-evidence.tsv",
-    "calibration.tsv",
+    "jmh-selectors.tsv",
     "observed-rows.tsv",
     "observed-rows.tsv.sha256",
     "raw-artifacts.sha256",
     "run-metadata.txt",
     "status.txt",
-}
-# A unit's routes calibrate across the unit, so the unit root holds its one calibration.
-UNIT_ROUTE_REQUIRED_ARTIFACTS = (ROUTE_REQUIRED_ARTIFACTS - {"calibration.tsv"}) | {"jmh-selectors.tsv"}
-FORMAL_HOST_ARTIFACTS = {
-    "environment-manifest.txt",
-    "environment.txt",
-    "route-plan.tsv",
-    "expected-rows.tsv",
-    "observed-rows.tsv",
-    "session.tsv",
-    "host-capacity.txt",
 }
 FORMAL_UNIT_ARTIFACTS = {
     "environment-manifest.txt",
@@ -77,6 +53,7 @@ FORMAL_UNIT_ARTIFACTS = {
     "unit-session.tsv",
     "unit-capacity.txt",
 }
+CAPACITY_ARTIFACT = "unit-capacity.txt"
 PROTOCOL_QUALIFICATION_FIELDS = (
     "manifest_row_id",
     "system",
@@ -253,14 +230,8 @@ def verify_protocol_qualification(path, route, systems, expected_count):
             raise ValidationError(f"{context} protocol outcome is not accepted")
 
 
-def verify_evidence_manifest(
-        path,
-        root,
-        route_required=ROUTE_REQUIRED_ARTIFACTS,
-        formal_required=FORMAL_HOST_ARTIFACTS,
-        capacity_artifact="host-capacity.txt",
-        host_root=None):
-    """Verify every bound artifact; a unit passes its own route, formal, and capacity artifacts.
+def verify_evidence_manifest(path, root, host_root=None):
+    """Verify every artifact a unit attempt's evidence manifest binds.
 
     A unit measured on a worker host references that host's calibrations by
     digest; host_root is the host evidence directory those references resolve in.
@@ -289,7 +260,7 @@ def verify_evidence_manifest(
         if row["verification"] in {"sha256", "host-sha256"}:
             digest = sha256_file(artifact)
         elif row["verification"] == "capacity-prefix-sha256":
-            if row["artifact"] != capacity_artifact:
+            if row["artifact"] != CAPACITY_ARTIFACT:
                 raise ValidationError(f"{context} uses capacity-prefix verification for another artifact")
             digest = capacity_prefix_sha256(artifact)
         else:
@@ -303,8 +274,8 @@ def verify_evidence_manifest(
 
     # Host references bind shared host files, never the unit's own artifacts.
     listed = {row["artifact"] for row in rows if row["verification"] != "host-sha256"}
-    if (root / capacity_artifact).is_file() and capacity_artifact not in listed:
-        raise ValidationError(f"{capacity_artifact} exists but is not bound by {path.name}")
+    if (root / CAPACITY_ARTIFACT).is_file() and CAPACITY_ARTIFACT not in listed:
+        raise ValidationError(f"{CAPACITY_ARTIFACT} exists but is not bound by {path.name}")
     for line_number, row in enumerate(rows, 2):
         route = row["route"]
         artifact = row["artifact"]
@@ -325,7 +296,7 @@ def verify_evidence_manifest(
             for artifact in listed
             if artifact.startswith(prefix)
         }
-        missing = route_required - route_artifacts
+        missing = UNIT_ROUTE_REQUIRED_ARTIFACTS - route_artifacts
         if missing:
             raise ValidationError(f"{path} route {route!r} is missing evidence: {sorted(missing)}")
         route_directory = root / "routes" / route
@@ -369,7 +340,7 @@ def verify_evidence_manifest(
     if environment_path.is_file():
         environment = read_properties(environment_path)
         if environment.get("verification_status") == "verified":
-            missing = formal_required - listed
+            missing = FORMAL_UNIT_ARTIFACTS - listed
             if missing:
                 raise ValidationError(f"{path} is missing formal evidence: {sorted(missing)}")
             for key in (
@@ -436,11 +407,6 @@ def evidence_candidate_identity(rows, root):
                 raise ValidationError("environment has invalid candidate archive SHA-256")
             candidate_archive_sha256 = recorded_archive
     return identities[0][0], candidate_archive_sha256, identities[0][1], identities[0][2]
-
-
-def row_id_digest(row_ids):
-    value = "".join(f"{row_id}\n" for row_id in sorted(row_ids))
-    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def read_tsv(path, required_fields, exact_fields=None):
@@ -527,87 +493,6 @@ def parse_confirmation_replica(value, context):
     return 4
 
 
-def expected_rows(manifest_rows, shard_id, systems):
-    shard_rows = [row for row in manifest_rows if row["shard_id"] == shard_id]
-    if not shard_rows:
-        raise ValidationError(f"unknown or empty shard {shard_id!r}")
-    shard_systems = {row["system"] for row in shard_rows}
-    unknown_systems = sorted(systems - shard_systems)
-    if unknown_systems:
-        raise ValidationError(f"shard {shard_id!r} does not contain systems: {unknown_systems}")
-    return {row["row_id"]: row for row in shard_rows if row["system"] in systems}
-
-
-# The report tooling revalidates the host-session evidence a release captured with these.
-def validate_host_results(manifest_path, session_path, observed_path):
-    return _validate_host_results(manifest_path, session_path, observed_path, parse_primary_replica)
-
-
-def validate_confirmation_host_results(manifest_path, session_path, observed_path):
-    return _validate_host_results(manifest_path, session_path, observed_path, parse_confirmation_replica)
-
-
-def _validate_host_results(manifest_path, session_path, observed_path, replica_parser):
-    manifest_rows = load_rows_manifest(manifest_path)
-    session = read_one_tsv(session_path, SESSION_FIELDS)
-    if session["schema_version"] != SCHEMA_VERSION:
-        raise ValidationError(
-            f"{session_path} schema_version must be {SCHEMA_VERSION}, found {session['schema_version']!r}")
-    replica_parser(session["replica_id"], str(session_path))
-
-    systems = parse_systems(session["systems"], str(session_path))
-    expected = expected_rows(manifest_rows, session["shard_id"], systems)
-    observed_rows = read_tsv(observed_path, ("row_id", "shard_id", "system"))
-    observed_ids = [row["row_id"] for row in observed_rows]
-    duplicates = duplicate_values(observed_ids)
-    missing = sorted(set(expected) - set(observed_ids))
-    unexpected = sorted(set(observed_ids) - set(expected))
-
-    problems = []
-    if missing:
-        problems.append(f"missing rows={format_values(missing)}")
-    if duplicates:
-        problems.append(f"duplicate rows={format_values(duplicates)}")
-    if unexpected:
-        problems.append(f"unexpected rows={format_values(unexpected)}")
-
-    for line_number, row in enumerate(observed_rows, start=2):
-        expected_row = expected.get(row["row_id"])
-        if expected_row is None:
-            continue
-        if row["shard_id"] != expected_row["shard_id"]:
-            problems.append(
-                f"{observed_path}:{line_number} shard_id is {row['shard_id']!r}, "
-                f"expected {expected_row['shard_id']!r}")
-        if row["system"] != expected_row["system"]:
-            problems.append(
-                f"{observed_path}:{line_number} system is {row['system']!r}, "
-                f"expected {expected_row['system']!r}")
-
-    if problems:
-        raise ValidationError("observed-row acceptance failed: " + "; ".join(problems))
-
-    evidence_path = session_path.parent / "route-evidence.tsv"
-    evidence_rows = verify_evidence_manifest(evidence_path, session_path.parent)
-    candidate_commit, candidate_archive_sha256, engine_tree, heap_size = evidence_candidate_identity(
-        evidence_rows, session_path.parent)
-
-    receipt = {field: session[field] for field in SESSION_FIELDS}
-    receipt["systems"] = canonical_systems(systems)
-    receipt.update({
-        "row_count": str(len(expected)),
-        "manifest_sha256": sha256_file(manifest_path),
-        "expected_rows_sha256": row_id_digest(expected),
-        "observed_rows_sha256": sha256_file(observed_path),
-        "evidence_manifest_sha256": sha256_file(evidence_path),
-        "candidate_commit": candidate_commit,
-        "candidate_archive_sha256": candidate_archive_sha256,
-        "engine_tree": engine_tree,
-        "heap_size": heap_size,
-    })
-    return receipt
-
-
 def load_platforms(path):
     fields = ("platform", "architecture", "instance_type", "vcpus",
               "concurrency_instance_type", "concurrency_vcpus")
@@ -616,10 +501,9 @@ def load_platforms(path):
     if duplicates:
         raise ValidationError(f"{path} has duplicate platforms: {duplicates}")
     platforms = {row["platform"]: row for row in rows}
-    if set(platforms) not in (set(EXPECTED_PLATFORMS), set(RELEASE_1_0_PLATFORMS)):
+    if set(platforms) != EXPECTED_PLATFORMS:
         raise ValidationError(
-            f"platform identities must be {sorted(EXPECTED_PLATFORMS)} or the 1.0 release's "
-            f"{sorted(RELEASE_1_0_PLATFORMS)}, found {sorted(platforms)}")
+            f"platform identities must be {sorted(EXPECTED_PLATFORMS)}, found {sorted(platforms)}")
     for platform, row in platforms.items():
         try:
             topology.validate(row)
@@ -652,132 +536,3 @@ def campaign_shards(manifest_rows, shards, selected_shards=None):
     if not selected or not selected <= shards or len(selected) != len(selected_shards):
         raise ValidationError('invalid or duplicate selected shards')
     return selected
-
-
-def validate_campaign(
-        manifest_path,
-        platforms_path,
-        shards_path,
-        receipts_path,
-        campaign_id,
-        expected_replica_ids=(1, 2, 3),
-        selected_shards=None):
-    manifest_rows = load_rows_manifest(manifest_path)
-    platforms = load_platforms(platforms_path)
-    shards = campaign_shards(manifest_rows, load_shards(shards_path), selected_shards)
-    receipts = read_tsv(receipts_path, RECEIPT_FIELDS, RECEIPT_FIELDS)
-    manifest_digest = sha256_file(manifest_path)
-
-    expected_keys = {
-        (platform, shard_id, replica_id)
-        for platform in platforms
-        for shard_id in shards
-        for replica_id in expected_replica_ids
-    }
-    observed_keys = []
-    instance_ids = []
-    host_epochs = []
-    candidate_identities = []
-
-    systems_by_shard = {
-        shard_id: {row["system"] for row in manifest_rows if row["shard_id"] == shard_id}
-        for shard_id in shards
-    }
-    expected_by_shard = {
-        shard_id: expected_rows(manifest_rows, shard_id, systems_by_shard[shard_id])
-        for shard_id in shards
-    }
-
-    for line_number, receipt in enumerate(receipts, start=2):
-        context = f"{receipts_path}:{line_number}"
-        if receipt["schema_version"] != SCHEMA_VERSION:
-            raise ValidationError(
-                f"{context} schema_version must be {SCHEMA_VERSION}, found {receipt['schema_version']!r}")
-        if receipt["campaign_id"] != campaign_id:
-            raise ValidationError(
-                f"{context} campaign_id is {receipt['campaign_id']!r}, expected {campaign_id!r}")
-        platform = receipt["platform"]
-        if platform not in platforms:
-            raise ValidationError(f"{context} has unexpected platform {platform!r}")
-        shard_id = receipt["shard_id"]
-        if shard_id not in shards:
-            raise ValidationError(f"{context} has unexpected shard {shard_id!r}")
-        replica_id = parse_primary_replica(receipt["replica_id"], context)
-        observed_keys.append((platform, shard_id, replica_id))
-        instance_ids.append(receipt["instance_id"])
-        host_epochs.append(receipt["host_epoch"])
-        candidate_identities.append((
-            receipt["candidate_commit"],
-            receipt["candidate_archive_sha256"],
-            receipt["engine_tree"],
-            normalize_heap_size(receipt["heap_size"]),
-        ))
-
-        platform_row = platforms[platform]
-        if receipt["architecture"] != platform_row["architecture"]:
-            raise ValidationError(
-                f"{context} architecture is {receipt['architecture']!r}, "
-                f"expected {platform_row['architecture']!r}")
-        expected_instance = platform_row["instance_type"]
-        if receipt["instance_type"] != expected_instance:
-            raise ValidationError(
-                f"{context} instance_type is {receipt['instance_type']!r}, "
-                f"expected {expected_instance!r}")
-
-        systems = parse_systems(receipt["systems"], context)
-        if receipt["systems"] != canonical_systems(systems):
-            raise ValidationError(
-                f"{context} systems must be sorted canonically as {canonical_systems(systems)!r}")
-        if systems != systems_by_shard[shard_id]:
-            raise ValidationError(
-                f"{context} systems do not cover shard {shard_id!r}: "
-                f"missing={sorted(systems_by_shard[shard_id] - systems)}, "
-                f"unexpected={sorted(systems - systems_by_shard[shard_id])}")
-        expected = expected_by_shard[shard_id]
-        if receipt["row_count"] != str(len(expected)):
-            raise ValidationError(
-                f"{context} row_count is {receipt['row_count']!r}, expected {len(expected)}")
-        if receipt["manifest_sha256"] != manifest_digest:
-            raise ValidationError(f"{context} manifest_sha256 does not match {manifest_path}")
-        if receipt["expected_rows_sha256"] != row_id_digest(expected):
-            raise ValidationError(f"{context} expected_rows_sha256 does not match shard {shard_id!r}")
-        observed_digest = receipt["observed_rows_sha256"]
-        if len(observed_digest) != 64 or any(character not in "0123456789abcdef" for character in observed_digest):
-            raise ValidationError(f"{context} observed_rows_sha256 is not a lowercase SHA-256 digest")
-        if not SHA256.fullmatch(receipt["evidence_manifest_sha256"]):
-            raise ValidationError(f"{context} evidence_manifest_sha256 is not a lowercase SHA-256 digest")
-        if GIT_OBJECT_ID.fullmatch(receipt["candidate_commit"]) is None:
-            raise ValidationError(f"{context} candidate_commit is not a Git object ID")
-        if receipt["candidate_archive_sha256"] != "not-recorded" and not SHA256.fullmatch(
-                receipt["candidate_archive_sha256"]):
-            raise ValidationError(f"{context} candidate_archive_sha256 is invalid")
-        if GIT_OBJECT_ID.fullmatch(receipt["engine_tree"]) is None:
-            raise ValidationError(f"{context} engine_tree is not a Git object ID")
-
-    duplicate_keys = duplicate_values(observed_keys)
-    missing_keys = sorted(expected_keys - set(observed_keys))
-    unexpected_keys = sorted(set(observed_keys) - expected_keys)
-    if duplicate_keys or missing_keys or unexpected_keys:
-        raise ValidationError(
-            "campaign session coverage failed: "
-            f"missing={format_values(missing_keys)}; "
-            f"duplicate={format_values(duplicate_keys)}; "
-            f"unexpected={format_values(unexpected_keys)}")
-
-    duplicate_instances = duplicate_values(instance_ids)
-    if duplicate_instances:
-        raise ValidationError(f"campaign reuses instance IDs: {format_values(duplicate_instances)}")
-    duplicate_epochs = duplicate_values(host_epochs)
-    if duplicate_epochs:
-        raise ValidationError(f"campaign reuses host epochs: {format_values(duplicate_epochs)}")
-    if len(set(candidate_identities)) != 1:
-        raise ValidationError(
-            f"campaign contains multiple candidate identities: {format_values(sorted(set(candidate_identities)))}")
-
-    return {
-        "campaign_id": campaign_id,
-        "platform_count": len(platforms),
-        "shard_count": len(shards),
-        "accepted_sessions": len(receipts),
-        "accepted_rows": sum(int(receipt["row_count"]) for receipt in receipts),
-    }
