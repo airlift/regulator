@@ -18,8 +18,8 @@ schema_version campaign_id platform unit_id replica_id unit_attempt_id instance_
 leased the unit and the lease's sequence number there, so each retry of a unit
 is a distinct attempt. The validator rejects the attempt unless:
 
-- the unit is a checked-in unit, its `unit-rows.tsv` is exactly the checked-in
-  rows of the unit, roles included, and its ID recomputes from its owned rows,
+- the unit is one of the candidate's frozen units, its `unit-rows.tsv` is
+  exactly the frozen rows of the unit, roles included, and its ID recomputes from its owned rows,
   copies, and representatives under the frozen row protocols
 - `expected-rows.tsv` and `observed-rows.tsv` hold exactly the owned and
   copied rows, each observed row marked `owner` or `copy`; copies are
@@ -122,8 +122,8 @@ confirmation revalidates the previous phase's ledger and attempts first,
 refusing a previous phase whose rejection ledger is missing or lists an
 attempt, even when another attempt of that unit was accepted.
 
-The campaign validator requires every platform and checked-in unit of the selected shards, with replicas 1, 2, and 3. It also
-requires:
+The campaign validator requires every platform and frozen unit of the selected
+shards, with replicas 1, 2, and 3. It also requires:
 
 - the three replicas of a unit on distinct EC2 instances; different units may
   share a host, its host epoch, and its host session
@@ -133,7 +133,7 @@ requires:
   session naming one host
 - the architecture and instance type pinned for the unit's shard
 - each receipt's owned and copied row counts and row-protocol digest
-  recomputed from the checked-in `units.tsv` and `row-protocol.tsv`, so every
+  recomputed from the frozen `units.tsv` and `row-protocol.tsv`, so every
   receipt names the same frozen units and protocols
 - the frozen manifest digest and one candidate commit, engine tree, and
   source-archive identity across all attempts

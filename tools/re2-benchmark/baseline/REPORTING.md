@@ -45,8 +45,8 @@ includes `../lease-<n>-completion.json`, the completion marker of the lease its
 before calibration came from, which the controller retained beside it; the
 reducer requires that lease to have completed with that after calibration.
 
-The ledgers must pass campaign unit acceptance: every platform and checked-in
-unit of the selected shards, replicas 1, 2, and 3 of a unit on distinct EC2
+The ledgers must pass campaign unit acceptance: every platform and frozen unit
+of the selected shards, replicas 1, 2, and 3 of a unit on distinct EC2
 instances, and at most one replica-4 confirmation per platform and unit on an
 instance none of its replicas used. Accepted artifact discovery must match the
 ledgers exactly. Each attempt is reverified as unit acceptance does, and its

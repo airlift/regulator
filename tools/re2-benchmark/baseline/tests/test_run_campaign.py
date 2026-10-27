@@ -319,6 +319,23 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual(popen.call_args.kwargs["env"]["CAMPAIGN_SPOT_ONLY"], "1")
             self.assertIn("Spot-only policy waiting", (result_root / "job-attempts.tsv").read_text())
 
+    def freeze_archive(self, repository, archive):
+        """Archive HEAD with generated tables beside the baseline tooling, as freeze-candidate.sh does."""
+        baseline = repository / "tools/re2-benchmark/baseline"
+        baseline.mkdir(parents=True, exist_ok=True)
+        for table in ("row-protocol.tsv", "units.tsv", "unit-rows.tsv"):
+            (baseline / table).write_text(f"{table}\n")
+        with archive.open("wb") as output_file:
+            git_archive = subprocess.Popen(
+                ["git", "archive", "--format=tar", "--prefix=tools/re2-benchmark/baseline/",
+                 *(f"--add-file={baseline / table}" for table in ("row-protocol.tsv", "units.tsv", "unit-rows.tsv")),
+                 "--prefix=", "HEAD"], cwd=repository, stdout=subprocess.PIPE)
+            gzip = subprocess.run(["gzip", "-n"], stdin=git_archive.stdout, stdout=output_file, check=True)
+            git_archive.stdout.close()
+            self.assertEqual(git_archive.wait(), 0)
+            self.assertEqual(gzip.returncode, 0)
+        return archive
+
     def frozen_candidate(self, root):
         repository = root / "repository"
         repository.mkdir()
@@ -338,19 +355,14 @@ class TestRunCampaign(unittest.TestCase):
         )
         for name in manifest_names:
             (baseline / name).write_text(f"{name}\n")
+        (repository / ".gitignore").write_text(
+            "".join(f"/tools/re2-benchmark/baseline/{table}\n" for table in RUN_CAMPAIGN.work_units.TABLES))
         subprocess.run(["git", "add", "."], cwd=repository, check=True)
         subprocess.run(["git", "commit", "-qm", "Candidate"], cwd=repository, check=True)
 
         candidate_ref = "refs/benchmarks/test-candidate"
         subprocess.run(["git", "update-ref", candidate_ref, "HEAD"], cwd=repository, check=True)
-        archive = root / "candidate.tar.gz"
-        with archive.open("wb") as output_file:
-            git_archive = subprocess.Popen(
-                ["git", "archive", "--format=tar", "HEAD"], cwd=repository, stdout=subprocess.PIPE)
-            gzip = subprocess.run(["gzip", "-n"], stdin=git_archive.stdout, stdout=output_file, check=True)
-            git_archive.stdout.close()
-            self.assertEqual(git_archive.wait(), 0)
-            self.assertEqual(gzip.returncode, 0)
+        archive = self.freeze_archive(repository, root / "candidate.tar.gz")
 
         commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
@@ -473,7 +485,7 @@ class TestRunCampaign(unittest.TestCase):
 
             self.assertEqual(values["maximum_resident_kibibytes"], "1048576")
 
-    def test_deterministic_archive_checksum_matches_git_archive(self):
+    def test_deterministic_archive_checksum_matches_the_frozen_archive_and_its_tables(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
@@ -482,16 +494,20 @@ class TestRunCampaign(unittest.TestCase):
             (root / "file.txt").write_text("content\n")
             subprocess.run(["git", "add", "file.txt"], cwd=root, check=True)
             subprocess.run(["git", "commit", "-qm", "Test"], cwd=root, check=True)
-            archive = root / "candidate.tar.gz"
-            with archive.open("wb") as output_file:
-                git_archive = subprocess.Popen(
-                    ["git", "archive", "--format=tar", "HEAD"], cwd=root, stdout=subprocess.PIPE)
-                gzip = subprocess.run(["gzip", "-n"], stdin=git_archive.stdout, stdout=output_file, check=True)
-                git_archive.stdout.close()
-                self.assertEqual(git_archive.wait(), 0)
-                self.assertEqual(gzip.returncode, 0)
+            with self.assertRaisesRegex(SystemExit, "generated tables .* are missing"):
+                RUN_CAMPAIGN.deterministic_archive_sha256(root, "HEAD")
+            archive = self.freeze_archive(root, root / "candidate.tar.gz")
+            with tarfile.open(archive) as members:
+                self.assertEqual(["file.txt", "tools/re2-benchmark/baseline/row-protocol.tsv",
+                                  "tools/re2-benchmark/baseline/unit-rows.tsv", "tools/re2-benchmark/baseline/units.tsv"],
+                                 sorted(member.name for member in members if member.isfile()))
 
             self.assertEqual(
+                RUN_CAMPAIGN.deterministic_archive_sha256(root, "HEAD"),
+                hashlib.sha256(archive.read_bytes()).hexdigest())
+            # Tables regenerated differently since the freeze no longer reproduce the candidate archive.
+            (root / "tools/re2-benchmark/baseline/units.tsv").write_text("changed\n")
+            self.assertNotEqual(
                 RUN_CAMPAIGN.deterministic_archive_sha256(root, "HEAD"),
                 hashlib.sha256(archive.read_bytes()).hexdigest())
 

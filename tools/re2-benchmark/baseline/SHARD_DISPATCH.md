@@ -50,11 +50,10 @@ iteration counts while avoiding a new forked JVM for every row:
   `memory-census`), its process or fork count, warmup and measurement
   iteration counts and windows, and its relative standard-error ceiling.
   `run-shard.sh` reads these fields instead of deriving them, so a row keeps
-  its protocol however its route is divided. `generate-row-protocol.py`
-  derives the file from the rules hosts applied when each host measured whole
-  routes, and `validate-row-protocol.py` regenerates and compares it, in the
-  offline gate and in each real run before any JVM starts. A route whose
-  candidate and Joni rows number at most 30 keeps one-second iterations.
+  its protocol however its route is divided. `generate-units.py` derives the
+  file from the rules hosts applied when each host measured whole routes. A
+  route whose candidate and Joni rows number at most 30 keeps one-second
+  iterations.
   Larger routes use 50 ms iterations across five independent JVM processes;
   every row in that five-process set has 50 measurement samples and is
   rejected when its relative standard error exceeds 5%. Smoke keeps its single
@@ -225,9 +224,12 @@ fit it feeds complete inside it. `generate-units.py` writes `units.tsv` (one
 line per unit with its counts and estimated seconds) and `unit-rows.tsv`
 (each unit's owned rows, copied rows, and representatives; one row ID
 contains a comma, so row lists are not packed into a column).
-`validate-units.py` regenerates both files byte for byte and checks them
-independently. `run-unit.sh` measures one unit, and a unit worker host leases
-units one at a time (see [Unit workers](../aws/README.md#unit-workers)).
+`validate-units.py` checks them independently. The three tables are not checked
+in: `freeze-candidate.sh` generates them into the candidate archive and beside
+the baseline tooling, where the controller reads them, and the offline gate
+generates them before its tests. `run-unit.sh` measures one unit, and a unit
+worker host leases units one at a time (see
+[Unit workers](../aws/README.md#unit-workers)).
 
 - Atoms are the rows that must share a unit: every system of one logical row,
   which keeps both routes, native RE2 brackets, Joni, Trino, and route

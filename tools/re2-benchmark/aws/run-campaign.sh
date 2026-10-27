@@ -980,17 +980,6 @@ archive_content_sha256()
     gzip -dc "$1" | shasum -a 256 | awk '{print $1}'
 }
 
-commit_archive_sha256()
-{
-    local worktree=$1
-    local commit=$2
-
-    git -C "${worktree}" archive --format=tar "${commit}" \
-        | gzip -n \
-        | shasum -a 256 \
-        | awk '{print $1}'
-}
-
 verify_engine_build_archive()
 {
     local checksum=$1
@@ -1426,10 +1415,6 @@ fi
 cp "${BASELINE_CANDIDATE_ARCHIVE}" "${SESSION_DIR}/regulator.tar.gz"
 if [[ $(sha256 "${SESSION_DIR}/regulator.tar.gz") != "${BASELINE_CANDIDATE_ARCHIVE_SHA256}" ]]; then
     echo "Frozen candidate archive SHA-256 mismatch" >&2
-    exit 1
-fi
-if [[ $(commit_archive_sha256 "${REGULATOR_DIR}" "${REGULATOR_COMMIT}") != "${BASELINE_CANDIDATE_ARCHIVE_SHA256}" ]]; then
-    echo "Frozen candidate archive does not reproduce the selected Regulator commit" >&2
     exit 1
 fi
 if [[ $(git -C "${REGULATOR_DIR}" rev-parse "${REGULATOR_COMMIT}:src/main") != "${BASELINE_EXPECTED_ENGINE_TREE}" ]]; then

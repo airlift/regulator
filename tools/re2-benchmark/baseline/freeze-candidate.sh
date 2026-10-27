@@ -40,8 +40,17 @@ fi
 python3 "${SCRIPT_DIR}/validate-manifest.py"
 python3 "${SCRIPT_DIR}/validate-protocol-representatives.py"
 
+# The row protocols and work units are generated, not checked in. They are written beside the
+# baseline tooling, where the controller reads them, and added to the archive hosts run from.
+python3 "${SCRIPT_DIR}/generate-units.py" > /dev/null
+python3 "${SCRIPT_DIR}/validate-units.py"
+tables=()
+for table in row-protocol.tsv units.tsv unit-rows.tsv; do
+    tables+=("--add-file=${SCRIPT_DIR}/${table}")
+done
+
 mkdir -p "$(dirname "${ARCHIVE}")" "$(dirname "${PROVENANCE}")"
-git -C "${ROOT}" archive --format=tar "${commit}" |
+git -C "${ROOT}" archive --format=tar --prefix=tools/re2-benchmark/baseline/ "${tables[@]}" --prefix= "${commit}" |
     gzip -n > "${ARCHIVE}"
 archive_sha256=$(sha256sum "${ARCHIVE}" | awk '{print $1}')
 archive_tree=$(gzip -dc "${ARCHIVE}" |

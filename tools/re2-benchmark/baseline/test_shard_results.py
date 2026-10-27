@@ -8,7 +8,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -402,29 +401,6 @@ class TestShardResults(unittest.TestCase):
                             int(metadata["joni_jmh_forks"]) if joni_rows else 0)
                         # Each launch measures one workload, so a forked launch starts its launcher and its forks.
                         self.assertEqual(planned, len(compiler_hints) + sum(1 + int(launch[0]) for launch in launches))
-
-    def testRunsValidateTheFrozenRowProtocolBeforeAnyJvmAndPlansDoNot(self):
-        source = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
-        validation = 'python3 "${SCRIPT_DIR}/validate-row-protocol.py"\n'
-        plan_only = source.index('if [[ "${PLAN_ONLY}" == true ]]; then\n')
-        plan_exit = source.index("    exit 0\nfi\n", plan_only) + len("    exit 0\nfi\n")
-        # Once per run, after the plan-only exit, as the first command of execution.
-        self.assertEqual(1, source.count(validation))
-        self.assertEqual(plan_exit, source.rindex("fi\n", 0, source.index(validation)) + len("fi\n"))
-        self.assertNotRegex(source[plan_exit:source.index(validation)], r"(?m)^[^#\n]")
-        # The validator refuses an altered table.
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            directory = Path(temporary_directory)
-            for name in ("validate-row-protocol.py", "row_protocol.py", "row-protocol.tsv", "rows.tsv",
-                         "shard-dispatch.tsv", "full-protocol-benchmarks.tsv"):
-                shutil.copy(SOURCE.with_name(name), directory / name)
-            protocol = directory / "row-protocol.tsv"
-            protocol.write_text(protocol.read_text(encoding="utf-8").replace("\t0.05\n", "\t0.5\n", 1),
-                                encoding="utf-8")
-            result = subprocess.run([sys.executable, str(directory / "validate-row-protocol.py")],
-                                    capture_output=True, text=True)
-        self.assertEqual(1, result.returncode)
-        self.assertIn("does not match the frozen protocol rules", result.stderr)
 
     def testUnitHandlerCallRunsEachSelectorAtItsProtocol(self):
         source = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")

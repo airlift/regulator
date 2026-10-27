@@ -37,14 +37,12 @@ class TestWorkUnits(unittest.TestCase):
         cls.representatives = row_protocol.read_tsv(BASELINE / "protocol-representatives.tsv")
         cls.protocols = row_protocol.load(BASELINE / "row-protocol.tsv")
 
-    def test_generator_writes_the_checked_in_units_and_summarizes_each_shard(self):
+    def test_generator_writes_the_tables_and_summarizes_each_shard(self):
         with tempfile.TemporaryDirectory() as temporary:
             result = subprocess.run(
                 [sys.executable, BASELINE / "generate-units.py", "--output-directory", temporary],
                 check=True, capture_output=True, text=True)
-            for name in ("units.tsv", "unit-rows.tsv"):
-                with self.subTest(name=name):
-                    self.assertEqual((BASELINE / name).read_text(), (Path(temporary) / name).read_text())
+            self.assertEqual(sorted(work_units.TABLES), sorted(path.name for path in Path(temporary).iterdir()))
         # Each shard's unit minutes, by their smallest, median and largest unit.
         self.assertIn("like-dfa-single-use\tr8i.large\tr9g.large\t1\t12.5\t12.5\t12.5\t12.5\n", result.stdout)
         self.assertIn("lifecycle\tr8i.large\tr9g.large\t4\t12.3\t13.1\t13.1\t51.5\n", result.stdout)

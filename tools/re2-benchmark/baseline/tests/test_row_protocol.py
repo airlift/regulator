@@ -1,6 +1,4 @@
-import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -11,13 +9,6 @@ import row_protocol  # noqa: E402
 
 
 class TestRowProtocol(unittest.TestCase):
-    def test_generator_writes_the_checked_in_protocols(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "row-protocol.tsv"
-            subprocess.run([sys.executable, BASELINE / "generate-row-protocol.py", "--output", output],
-                           check=True, capture_output=True)
-            self.assertEqual((BASELINE / "row-protocol.tsv").read_text(), output.read_text())
-
     def test_rows_keep_the_protocol_their_whole_route_selected(self):
         protocols = row_protocol.load(BASELINE / "row-protocol.tsv")
         cases = {

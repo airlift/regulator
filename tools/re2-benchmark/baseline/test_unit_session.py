@@ -100,8 +100,8 @@ class TestUnitSession(unittest.TestCase):
         cases = (
             (COPY_UNIT, None, swap_copy_role, "role is 'owner', expected 'copy'"),
             (COPY_UNIT, None, drift_calibration, "drifted 0.0600"),
-            (COPY_UNIT, None, drop_unit_copy, "differs from the checked-in rows"),
-            (COPY_UNIT, add_unknown_role, None, "differs from the checked-in rows"),
+            (COPY_UNIT, None, drop_unit_copy, "differs from the frozen rows"),
+            (COPY_UNIT, add_unknown_role, None, "differs from the frozen rows"),
             (COPY_UNIT, override_joni_window, None, "overrides the frozen Joni JMH window: 7ms"),
             (COPY_UNIT, shorten_selector_window, None, "differs from the selectors of the frozen protocol"),
             (COPY_UNIT, None, tamper_route_artifact, "checksum mismatch"),

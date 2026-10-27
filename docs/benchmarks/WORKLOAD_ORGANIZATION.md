@@ -109,9 +109,8 @@ baseline already reduces, needs no report change: it adds its catalog rows to
 `specialized-patterns.tsv`, with that comparator and case prefix, and the
 campaign code that measures them, which is a benchmark class, the branch of
 `generate-manifest.py` that writes its manifest rows, and its shard's handler in
-`run-shard.sh`. It then regenerates `row-protocol.tsv` with
-`generate-row-protocol.py` and `units.tsv` and `unit-rows.tsv` with
-`generate-units.py`.
+`run-shard.sh`. Its rows' protocols and work units are generated when the
+candidate is frozen.
 
 ## Bulk text search
 

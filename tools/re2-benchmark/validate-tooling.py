@@ -21,6 +21,10 @@ def main():
     for name in NATIVE_TEST_ENVIRONMENT:
         environment.pop(name, None)
     started = time.monotonic()
+    # The row protocols and work units are generated, not checked in; the tests and validators read them.
+    print("Generating the row protocols and work units", flush=True)
+    subprocess.run([sys.executable, str(ROOT / "baseline" / "generate-units.py")], cwd=ROOT.parents[1],
+                   env=environment, check=True, stdout=subprocess.DEVNULL, timeout=300)
     directories = sorted({path.parent for path in ROOT.rglob("test_*.py")})
     if not directories:
         raise ValueError("no benchmark tooling tests found")
@@ -31,8 +35,8 @@ def main():
                         "-p", "test_*.py"], cwd=ROOT.parents[1], env=environment,
                        check=True, timeout=300)
     for validator in ("validate-manifest.py", "validate-mode-inventory.py",
-                      "validate-protocol-representatives.py", "validate-row-protocol.py",
-                      "validate-units.py", "validate-unit-plans.py"):
+                      "validate-protocol-representatives.py", "validate-units.py",
+                      "validate-unit-plans.py"):
         print(f"Validating {validator}", flush=True)
         subprocess.run([sys.executable, str(ROOT / "baseline" / validator)],
                        cwd=ROOT.parents[1], env=environment, check=True, timeout=300)

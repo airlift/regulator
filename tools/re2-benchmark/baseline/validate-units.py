@@ -180,10 +180,7 @@ def check(units, manifest_rows, representatives, protocols):
 
 
 def validate(directory):
-    unit_table, unit_rows = work_units.render(work_units.generate_from(directory))
-    for name, expected in (("units.tsv", unit_table), ("unit-rows.tsv", unit_rows)):
-        if (directory / name).read_text(encoding="utf-8") != expected:
-            raise ValueError(f"{name} does not match the unit rules; run generate-units.py")
+    """Check the generated units against the measurement requirements they must meet."""
     units = work_units.load(directory)
     oversized = check(
         units,

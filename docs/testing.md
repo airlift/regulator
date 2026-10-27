@@ -76,10 +76,12 @@ the same offline gate used by CI:
 python3 tools/re2-benchmark/validate-tooling.py
 ```
 
-It discovers the tooling's Python unit suites in separate processes and checks
-the frozen manifests, modes, protocol representatives, row protocols, work
-units, and unit plans. Cloud operations and build commands in
-these unit tests use fixtures or mocks.
+It first generates the row protocols and work units, which are not checked in,
+with `tools/re2-benchmark/baseline/generate-units.py`; run that script before
+running one of the suites alone. It then discovers the tooling's Python unit
+suites in separate processes and checks the frozen manifests, modes, protocol
+representatives, work units, and unit plans. Cloud operations and build
+commands in these unit tests use fixtures or mocks.
 The gate clears `LANGUAGE_NATIVE_RUNNER`, `LANGUAGE_NATIVE_BULK_RUNNER`,
 `LANGUAGE_NATIVE_RUST_RUNNER`, and `LANGUAGE_NATIVE_RUST_BULK_RUNNER`, so native
 integration tests remain explicitly skipped even in a prepared shell.

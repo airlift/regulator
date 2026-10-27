@@ -217,15 +217,25 @@ The checked-in inputs are:
 - `baseline/platform-regions.tsv`: each platform's AMI ID in each launch region
 - `baseline/comparators.tsv`: pinned comparator identities
 - `baseline/protocol-representatives.tsv`: bounded/full protocol equivalence
-- `baseline/row-protocol.tsv`: each row's frozen qualification protocol
-- `baseline/units.tsv` and `baseline/unit-rows.tsv`: the work units each shard's rows are divided into, measured one at a time by `baseline/run-unit.sh`
 
-Run the validators before allocating hosts:
+`baseline/generate-units.py` derives the rest from them and writes it beside
+the baseline tooling:
+
+- `baseline/row-protocol.tsv`: each row's frozen qualification protocol
+- `baseline/units.tsv` and `baseline/unit-rows.tsv`: the work units each shard's
+  rows are divided into, measured one at a time by `baseline/run-unit.sh`
+
+These tables are not checked in. [Freezing a candidate](#freeze-a-candidate)
+generates them and adds them to the candidate archive, and the controller
+reads them from the baseline directory, where the frozen archive must
+reproduce them.
+
+Generate the tables and run the validators before allocating hosts:
 
 ```bash
+python3 tools/re2-benchmark/baseline/generate-units.py
 python3 tools/re2-benchmark/baseline/validate-manifest.py
 python3 tools/re2-benchmark/baseline/validate-protocol-representatives.py
-python3 tools/re2-benchmark/baseline/validate-row-protocol.py
 python3 tools/re2-benchmark/baseline/validate-units.py
 python3 tools/re2-benchmark/baseline/validate-unit-plans.py
 python3 tools/re2-benchmark/baseline/validate-mode-inventory.py
@@ -234,8 +244,9 @@ python3 tools/re2-benchmark/baseline/validate-mode-inventory.py
 ## Freeze a candidate
 
 `freeze-candidate.sh` runs the full build, verifies the production engine tree,
-creates an immutable local benchmark ref, and writes a reproducible archive and
-provenance record:
+generates the row protocols and work units, creates an immutable local
+benchmark ref, and writes a reproducible archive, holding the candidate and
+its generated tables, and a provenance record:
 
 ```bash
 tools/re2-benchmark/baseline/freeze-candidate.sh \

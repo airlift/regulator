@@ -512,18 +512,18 @@ def reject(message) -> NoReturn:
 
 
 def check_unit_identity(root, session, units, protocols):
-    """The unit recomputes from its rows, protocols, and representatives, and is a checked-in unit."""
+    """The unit recomputes from its rows, protocols, and representatives, and is a frozen unit."""
     unit_rows_file = read_tsv(root / "unit-rows.tsv", work_units.UNIT_ROW_FIELDS, work_units.UNIT_ROW_FIELDS)
     if {row["unit_id"] for row in unit_rows_file} != {session["unit_id"]}:
         reject(f"{root / 'unit-rows.tsv'} does not hold only unit {session['unit_id']}")
     unit = units.get(session["unit_id"])
     if unit is None:
-        reject(f"unit {session['unit_id']} is not a checked-in work unit")
-    # The attempt's mapping is the checked-in one, row for row, so no row of another role slips past.
-    checked_in = [row for row in row_protocol.read_tsv(DIRECTORY / "unit-rows.tsv")
-                  if row["unit_id"] == session["unit_id"]]
-    if unit_rows_file != checked_in:
-        reject(f"{root / 'unit-rows.tsv'} differs from the checked-in rows of unit {session['unit_id']}")
+        reject(f"unit {session['unit_id']} is not a frozen work unit")
+    # The attempt's mapping is the frozen one, row for row, so no row of another role slips past.
+    frozen = [row for row in row_protocol.read_tsv(DIRECTORY / "unit-rows.tsv")
+              if row["unit_id"] == session["unit_id"]]
+    if unit_rows_file != frozen:
+        reject(f"{root / 'unit-rows.tsv'} differs from the frozen rows of unit {session['unit_id']}")
     owned = sorted(unit["owned"])
     copies = sorted(unit["copies"])
     representatives = sorted(unit["representatives"])
@@ -965,7 +965,7 @@ def check_unit_campaign(receipts, platforms, units, protocols, manifest_digest, 
 def validate_unit_campaign(manifest_path, platforms_path, shards_path, receipts_path, campaign_id,
                            expected_replica_ids=(1, 2, 3), selected_shards=None,
                            protocol_path=DIRECTORY / "row-protocol.tsv", confirmations=()):
-    """Validate an accepted-units.tsv ledger against the checked-in units of the campaign's shards.
+    """Validate an accepted-units.tsv ledger against the frozen units of the campaign's shards.
 
     confirmations are the accepted replica 4 receipts of the campaign's confirmation phase.
     """
