@@ -175,11 +175,14 @@ public class TestRustScanPlan
             assertThat(matches(unanchored.matcher(unanchoredSource))).as(name).isEqualTo("[2:7 3:6 ][7:10 8:9 ]");
 
             // A forced handoff continues every unanchored search on the ordinary engine before the
-            // plan's first attempt, so with that engine unable to succeed it finds nothing.
+            // plan's first attempt, which would match here, so with that engine unable to succeed
+            // it finds nothing.
             RustRegexp handoff = RustRegexp.compileForcingScanPlanHandoffForTesting(utf8Slice("x([^/]+)/"), options);
+            assertThat(handoff.usesGeneratedBytecode()).as(name).isEqualTo(generate);
             disableOrdinaryEngine(handoff.pattern());
-            assertThat(handoff.find(unanchoredSource)).as(name).isFalse();
-            assertThat(handoff.count(unanchoredSource)).as(name).isZero();
+            Slice handoffSource = utf8Slice("xéb/xc/");
+            assertThat(handoff.find(handoffSource)).as(name).isFalse();
+            assertThat(handoff.count(handoffSource)).as(name).isZero();
         }
     }
 

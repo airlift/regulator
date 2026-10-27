@@ -197,15 +197,17 @@ public class TestJavaScanPlan
         }
 
         // A forced handoff continues every unanchored search on the ordinary engine before the
-        // plan's first attempt, so with that engine unable to succeed it finds nothing.
+        // plan's first attempt, which would match here, so with that engine unable to succeed it
+        // finds nothing.
         Slice handoffPattern = utf8Slice("x([^/]+)/");
-        Slice handoffSource = utf8Slice("x/xéb/xc/");
-        for (NamedRegexp handoff : List.of(
-                new NamedRegexp("interpreted", JavaRegexp.compileForcingScanPlanHandoffForTesting(handoffPattern, JavaRegexp.Options.defaults())),
-                new NamedRegexp("generated", JavaRegexp.compileForcingScanPlanHandoffForTesting(handoffPattern, GENERATING)))) {
-            disableOrdinaryEngine(handoff.regexp().pattern());
-            assertThat(handoff.regexp().find(handoffSource)).as(handoff.name()).isFalse();
-            assertThat(handoff.regexp().count(handoffSource)).as(handoff.name()).isZero();
+        Slice handoffSource = utf8Slice("xéb/xc/");
+        for (JavaRegexp.Options options : List.of(JavaRegexp.Options.defaults(), GENERATING)) {
+            String name = options.generateBytecode() ? "generated" : "interpreted";
+            JavaRegexp handoff = JavaRegexp.compileForcingScanPlanHandoffForTesting(handoffPattern, options);
+            assertThat(handoff.usesGeneratedBytecode()).as(name).isEqualTo(options.generateBytecode());
+            disableOrdinaryEngine(handoff.pattern());
+            assertThat(handoff.find(handoffSource)).as(name).isFalse();
+            assertThat(handoff.count(handoffSource)).as(name).isZero();
         }
     }
 
