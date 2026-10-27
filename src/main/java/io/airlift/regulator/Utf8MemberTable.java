@@ -70,7 +70,7 @@ final class Utf8MemberTable
     /// characters but not every one.
     static Utf8MemberTable of(CharClass set)
     {
-        Builder builder = new Builder();
+        Builder builder = new Builder(set);
         for (int index = 0; index < set.rangeCount(); index++) {
             RuneRange range = set.range(index);
             if (range.high() >= 0x80) {
@@ -79,7 +79,7 @@ final class Utf8MemberTable
                 Compiler.splitUtf8Range(range.low(), range.high(), false, builder);
             }
         }
-        return builder.build(set);
+        return builder.build();
     }
 
     /// Returns the width of the member whose encoding starts at `cursor`, or 0 when none
@@ -150,24 +150,34 @@ final class Utf8MemberTable
         return INSTANCE_SIZE + SizeOf.sizeOf(leads) + SizeOf.sizeOf(nodes) + SizeOf.sizeOf(lastBytes);
     }
 
-    /// Builds the tables from the compiler's pieces. Nodes are stored once from the start, so
-    /// adding a piece replaces only the nodes on its paths, and adjacent leads or entries that
-    /// share a node share its replacement. The pieces encode distinct characters, so past the
-    /// first byte where a piece's low and high encodings differ, every node it reaches is still
-    /// empty, and the work and allocation follow the number of pieces rather than the encodings
-    /// they span.
+    /// Builds the tables from the compiler's pieces in a mutable trie, adding each piece's
+    /// encodings to the nodes on its paths. UTF-8's shape bounds the trie, however many pieces
+    /// the compiler splits the set into: 30 two-byte leads with a mask each, 16 three-byte leads
+    /// with at most 992 second bytes among them, and 5 four-byte leads with at most 256 second
+    /// bytes among them and 64 third bytes each, so at most 17,406 masks and 277 blocks. A full
+    /// lead reads no node, so its encodings are not added. Identical blocks and masks are stored
+    /// once when the trie is frozen.
     private static final class Builder
             implements Compiler.Utf8RangePieces
     {
+        private final CharClass set;
         // Indexed like leads: the width of the lead byte's encodings, or 0 when none starts with
-        // it, and the node of its first continuation byte.
+        // it; its full entry, or 0 when it is not full; and the node of its first continuation
+        // byte, which a full lead does not have.
         private final int[] leadWidths = new int[128];
+        private final int[] fullLeads = new int[128];
         private final int[] leadNodes = new int[128];
-        private final Nodes nodes = new Nodes();
-        // The table index of each frozen block, keyed by its builder node and kept per number of
-        // continuation bytes it reads less two, since a block reading two and one reading three
-        // are stored once when equal.
-        private final List<Map<Integer, Integer>> frozenBlocks = List.of(new HashMap<>(), new HashMap<>());
+        // The trie's blocks and masks; each block entry holds the node of the next byte. Block and
+        // mask zero are never used, so a zero entry is a missing child.
+        private int[][] blocks = new int[16][];
+        private int blockCount = 1;
+        private long[] masks = new long[64];
+        private int maskCount = 1;
+
+        private Builder(CharClass set)
+        {
+            this.set = set;
+        }
 
         @Override
         public void addAllNonAscii()
@@ -184,52 +194,61 @@ final class Utf8MemberTable
         @Override
         public void addEncodedRange(byte[] low, byte[] high)
         {
-            int node = -1;
-            int replacement = 0;
             for (int lead = low[0] & 0xFF; lead <= (high[0] & 0xFF); lead++) {
                 int index = lead & 0x7F;
                 if (leadWidths[index] == 0) {
                     leadWidths[index] = low.length;
+                    fullLeads[index] = fullLead(set, lead);
+                    if (fullLeads[index] == 0) {
+                        leadNodes[index] = newNode(low.length - 1);
+                    }
                 }
                 else if (leadWidths[index] != low.length) {
                     throw new IllegalStateException(String.format(Locale.ROOT, "UTF-8 lead byte 0x%02X with widths %d and %d", lead, leadWidths[index], low.length));
                 }
-                if (leadNodes[index] != node) {
-                    node = leadNodes[index];
-                    replacement = add(node, low, high, 1);
+                if (fullLeads[index] == 0) {
+                    add(leadNodes[index], low, high, 1);
                 }
-                leadNodes[index] = replacement;
             }
         }
 
-        /// Returns the replacement for `node`, which reads the continuation byte at
-        /// `offset`: a node that also holds the continuation bytes from `offset` of
-        /// every encoding between `low` and `high`. `node` itself is unchanged.
-        private int add(int node, byte[] low, byte[] high, int offset)
+        /// Adds the continuation bytes from `offset` of every encoding between `low` and
+        /// `high` to `node`, which reads the byte at `offset`.
+        private void add(int node, byte[] low, byte[] high, int offset)
         {
             int first = low[offset] & 0x3F;
             int last = high[offset] & 0x3F;
             if (offset == low.length - 1) {
-                long mask = nodes.mask(node);
-                for (int value = first; value <= last; value++) {
-                    mask |= 1L << value;
-                }
-                return nodes.internMask(mask);
+                masks[node] |= (-1L << first) & (-1L >>> (63 - last));
+                return;
             }
-            int[] block = nodes.block(node).clone();
-            int child = -1;
-            int replacement = 0;
+            int[] block = blocks[node];
             for (int entry = first; entry <= last; entry++) {
-                if (block[entry] != child) {
-                    child = block[entry];
-                    replacement = add(child, low, high, offset + 1);
+                if (block[entry] == 0) {
+                    block[entry] = newNode(low.length - 1 - offset);
                 }
-                block[entry] = replacement;
+                add(block[entry], low, high, offset + 1);
             }
-            return nodes.internBlock(block);
         }
 
-        private Utf8MemberTable build(CharClass set)
+        /// Returns a new empty node that reads the remaining `continuationBytes` of an
+        /// encoding: a mask for the last one, otherwise a block.
+        private int newNode(int continuationBytes)
+        {
+            if (continuationBytes == 1) {
+                if (maskCount == masks.length) {
+                    masks = Arrays.copyOf(masks, masks.length * 2);
+                }
+                return maskCount++;
+            }
+            if (blockCount == blocks.length) {
+                blocks = Arrays.copyOf(blocks, blocks.length * 2);
+            }
+            blocks[blockCount] = new int[NODE_ENTRIES];
+            return blockCount++;
+        }
+
+        private Utf8MemberTable build()
         {
             // The table numbers a node once its children are frozen, walking from the leads in
             // ascending order.
@@ -237,7 +256,7 @@ final class Utf8MemberTable
             int[] leads = new int[128];
             for (int index = 0; index < leads.length; index++) {
                 if (leadWidths[index] != 0) {
-                    int full = fullLead(set, index | 0x80);
+                    int full = fullLeads[index];
                     leads[index] = full != 0 ? full : (leadWidths[index] << WIDTH_SHIFT) | freeze(table, leadNodes[index], leadWidths[index] - 1);
                 }
             }
@@ -313,27 +332,20 @@ final class Utf8MemberTable
 
         /// Returns the index in `table` of `node`, which reads the remaining
         /// `continuationBytes` of an encoding: a mask index for the last one, otherwise a
-        /// block index.
+        /// block index. Trie nodes are not shared, so each is frozen once.
         private int freeze(Nodes table, int node, int continuationBytes)
         {
             if (continuationBytes == 1) {
-                return table.internMask(nodes.mask(node));
+                return table.internMask(masks[node]);
             }
-            Map<Integer, Integer> frozen = frozenBlocks.get(continuationBytes - 2);
-            Integer index = frozen.get(node);
-            if (index != null) {
-                return index;
-            }
-            int[] children = nodes.block(node);
+            int[] children = blocks[node];
             int[] block = new int[NODE_ENTRIES];
             for (int entry = 0; entry < NODE_ENTRIES; entry++) {
                 if (children[entry] != 0) {
                     block[entry] = freeze(table, children[entry], continuationBytes - 1);
                 }
             }
-            int blockIndex = table.internBlock(block);
-            frozen.put(node, blockIndex);
-            return blockIndex;
+            return table.internBlock(block);
         }
     }
 
@@ -349,16 +361,6 @@ final class Utf8MemberTable
         {
             internBlock(new int[NODE_ENTRIES]);
             internMask(0);
-        }
-
-        private int[] block(int index)
-        {
-            return blocks.get(index);
-        }
-
-        private long mask(int index)
-        {
-            return masks.get(index);
         }
 
         private int internBlock(int[] block)
