@@ -3,7 +3,6 @@
 from collections import defaultdict
 import csv
 from pathlib import Path
-from statistics import median
 
 from language_data import SPECIALIZED_VARIANT_SUFFIXES, reduce_hosts
 
@@ -19,7 +18,6 @@ LIKE_INPUT_BYTES = {
 BASELINE_WARNINGS = {
     'precision-rejected': 'At least one original host exceeded the sample precision gate',
     'host-direction-disagreement': 'Hosts disagree about which engine is faster',
-    'native-bracket-drift-above-5-percent': 'Native comparator changed by more than 5% between bracketing measurements',
     'ratio-host-cv-above-5-percent': 'Host ratio variation exceeds 5%',
 }
 # A variant's system is regulator, its variant, then its memory route: regulator-generated-object-row.
@@ -27,7 +25,7 @@ SPECIALIZED_SYSTEM_VARIANTS = {'': '', '-regular-engine': '/regular-engine', '-g
 # Regex variants run on each memory route; LIKE has no routes, so its rows appear in both views.
 SPECIALIZED_ROUTES = {'-native-access': ('native',), '-object-row': ('safe',), '': ('native', 'safe')}
 # The report language of each baseline comparator a specialized-pattern catalog row can name.
-COMPARATOR_LANGUAGES = {'native-re2': 're2', 'joni': 'trino', 'trino-sql': 'like'}
+COMPARATOR_LANGUAGES = {'joni': 'trino', 'trino-sql': 'like'}
 BENCHMARK_TOOLS = Path(__file__).resolve().parents[2] / 'tools/re2-benchmark'
 SPECIALIZED_CATALOG = BENCHMARK_TOOLS / 'baseline/specialized-patterns.tsv'
 
@@ -183,17 +181,10 @@ def baseline_rows(directory, lifecycle_manifest):
             if comparator == 'trino-optimized':
                 family = 'Optional Trino DFA matcher'
             modes = ('native', 'safe')
-        elif suite.startswith('trino-') and comparator == 'joni':
-            language = 'trino'
-            population = 'trino-operations' if suite == 'trino-everyday-operations' else 'diagnostics-and-stress'
-            family = {'trino-public-operations': 'Fixed-input public operations', 'trino-final-line': 'Final-line semantics'}.get(suite, 'Trino operations')
-            modes = ('native',) if candidate_system == 'regulator-native-access' else ('safe',)
-        elif comparator == 'native-re2' and suite == 'traditional':
-            language, population, family = 're2', 'diagnostics-and-stress', 'Engine-route and scaling controls'
+        elif suite == 'trino-everyday-operations' and comparator == 'joni':
+            language, population, family = 'trino', 'trino-operations', 'Trino operations'
             modes = ('native',) if candidate_system == 'regulator-native-access' else ('safe',)
         else:
-            # Official Rebar, allocation and internal route results are retained
-            # in the full baseline download, not relabeled as a public frontend.
             continue
         candidate = timings[row['platform'], row['candidate_row_id']]
         parameters = dict(item.split('=', 1) for item in candidate['parameters'].split(';') if '=' in item)
@@ -235,17 +226,8 @@ def baseline_rows(directory, lifecycle_manifest):
             size = LIKE_INPUT_BYTES[parameters['scenario']]
             if comparator == 'trino-optimized':
                 case_id += '/optimized'
-        elif 'sourceLength' in parameters:
-            size = int(parameters['sourceLength'])
-        elif 'size' in parameters and parameters['size'].isdigit():
-            size = int(parameters['size'])
         if 'compile' in operation.lower():
             size = None
-            if language == 're2':
-                # These are internal parse/simplify/program phases, collected
-                # only in native mode. Shared-language compile rows measure
-                # the public compiler in both modes and own the stress table.
-                continue
         evidence = []
         for pair in pairs:
             host = hosts[pair['platform'], pair['host_epoch'], pair['candidate_row_id']]

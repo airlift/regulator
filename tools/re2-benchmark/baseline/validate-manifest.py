@@ -2,16 +2,14 @@
 
 import csv
 import hashlib
-import importlib.util
 import re
-import sys
 from collections import Counter
 from pathlib import Path
 import topology
 
 
-EXPECTED_ROW_COUNT = 5522
-EXPECTED_SHARD_COUNT = 47
+EXPECTED_ROW_COUNT = 449
+EXPECTED_SHARD_COUNT = 8
 EXPECTED_PLATFORMS = {
     "r8i": ("intel", "r8i.large", "2"),
     "r9g": ("arm", "r9g.large", "2"),
@@ -30,32 +28,6 @@ EXPECTED_COMPARATORS = {
 def read_tsv(path):
     with path.open(newline="") as input_file:
         return list(csv.DictReader(input_file, delimiter="\t"))
-
-
-def validate_jmh_route_coverage(rows, suite_rows, dispatch_rows):
-    declared_systems = {
-        (row["shard_id"], row["suite"]): set(row["systems"].split(","))
-        for row in suite_rows
-    }
-    missing = []
-    for dispatch in dispatch_rows:
-        shard_id = dispatch["shard_id"]
-        for handler_field, systems_field in (
-                ("native_access_handler", "native_access_systems"),
-                ("object_row_handler", "object_row_systems")):
-            if dispatch[handler_field] != "jmh":
-                continue
-            for system in dispatch[systems_field].split(","):
-                suites = {
-                    row["suite"]
-                    for row in rows
-                    if row["shard_id"] == shard_id and row["system"] == system
-                }
-                for suite in suites:
-                    if system not in declared_systems.get((shard_id, suite), set()):
-                        missing.append(f"{shard_id}/{suite}/{system}")
-    if missing:
-        raise SystemExit(f"generic JMH route has undeclared suites: {sorted(missing)}")
 
 
 def main():
@@ -92,76 +64,10 @@ def main():
             raise SystemExit(f"row {line_number} ID does not begin with its shard")
         if "re2j" in "\t".join(row.values()).lower():
             raise SystemExit(f"row {line_number} contains the excluded historical RE2J comparator")
-        if row["suite"].startswith("rebar-") and row["allocation_contract"] != "not-measured":
-            raise SystemExit(f"row {line_number} claims unavailable Rebar allocation evidence")
-        if (row["suite"] == "traditional" and row["system"].startswith("native-re2-") and
-                row["allocation_contract"] != "not-measured"):
-            raise SystemExit(f"row {line_number} claims unavailable native RE2 allocation evidence")
-        if (row["system"].startswith("regulator") and not row["suite"].startswith("rebar-") and
-                row["allocation_contract"] == "not-measured"):
+        if row["system"].startswith("regulator") and row["allocation_contract"] == "not-measured":
             raise SystemExit(f"row {line_number} omits available Regulator allocation evidence")
         if row["allocation_contract"] == "operation-dependent":
             raise SystemExit(f"row {line_number} has an unresolved allocation contract")
-
-    suite_rows = read_tsv(directory / "jmh-suites.tsv")
-    declared_suites = {row["suite"] for row in suite_rows}
-    observed_suites = {row["suite"] for row in rows}
-    empty_suites = sorted(declared_suites - observed_suites)
-    if empty_suites:
-        raise SystemExit(f"declared JMH suites have no manifest rows: {empty_suites}")
-    validate_jmh_route_coverage(rows, suite_rows, read_tsv(directory / "shard-dispatch.tsv"))
-
-    specification = importlib.util.spec_from_file_location(
-        "rebar_joni_applicability", directory / "rebar_joni_applicability.py")
-    applicability_module = importlib.util.module_from_spec(specification)
-    sys.modules["rebar_joni_applicability"] = applicability_module
-    specification.loader.exec_module(applicability_module)
-    applicability = applicability_module.load_applicability(directory.parents[2])
-    expected_joni = {
-        identity for identity, row in applicability.items()
-        if row["status"] == "compatible"
-    }
-    actual_joni = {
-        (row["benchmark"], row["parameters"].split(";", 1)[0].split("=", 1)[1])
-        for row in rows
-        if row["suite"].startswith("rebar-") and row["system"] == "joni"
-    }
-    if actual_joni != expected_joni:
-        raise SystemExit(
-            "Rebar Joni rows differ from applicability; "
-            f"missing={sorted(expected_joni - actual_joni)[:20]}, "
-            f"unexpected={sorted(actual_joni - expected_joni)[:20]}")
-
-    public_compile_rows = [
-        row for row in rows
-        if row["benchmark"] == "io.airlift.regulator.BenchmarkJavaRegexpPublicApi.compile"
-    ]
-    if (len(public_compile_rows) != 1 or
-            {row["suite"] for row in public_compile_rows} != {"public-compile"} or
-            {row["system"] for row in public_compile_rows} != {"regulator-native-access"}):
-        raise SystemExit("public compile rows must use the route-independent compiler suite")
-
-    corpus_rows = read_tsv(directory.parent / "manifests/literal-corpus.tsv")
-    expected_literal_rows = set()
-    for corpus in corpus_rows:
-        for method, count_field in (("count", "count"), ("countCaseInsensitive", "case_insensitive_count")):
-            for system in ("regulator-native-access", "regulator-object-row"):
-                expected_literal_rows.add((
-                    f"io.airlift.regulator.BenchmarkLiteralCorpus.{method}",
-                    f"language={corpus['language']}",
-                    system,
-                    f"count={corpus[count_field]}",
-                    f"rebar={corpus['rebar_revision']};corpus={corpus['sha256']}"))
-    actual_literal_rows = {
-        (row["benchmark"], row["parameters"], row["system"], row["expected_result"], row["workload_checksum"])
-        for row in rows
-        if row["benchmark"].startswith("io.airlift.regulator.BenchmarkLiteralCorpus.")
-    }
-    if actual_literal_rows != expected_literal_rows:
-        raise SystemExit(
-            "literal corpus manifest mismatch: "
-            f"missing={sorted(expected_literal_rows - actual_literal_rows)}, "
-            f"unexpected={sorted(actual_literal_rows - expected_literal_rows)}")
 
     platform_rows = read_tsv(directory / "platforms.tsv")
     platforms = {row["platform"]: row for row in platform_rows}

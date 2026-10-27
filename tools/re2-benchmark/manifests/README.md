@@ -1,6 +1,7 @@
 # Benchmark workload manifests
 
-These files freeze the workload identity used by the Rebar benchmark runners:
+These files freeze the workload identity of the Rebar workloads that the
+language bulk comparison runs:
 
 - `rebar-workloads.csv` records the 41-workload curated native RE2
   intersection, including pattern and input hashes, expected results, and
@@ -22,19 +23,20 @@ Run the consistency check with:
 ```bash
 tools/re2-benchmark/manifests/validate-rebar-workloads.sh
 python3 tools/re2-benchmark/manifests/validate-workload-taxonomy.py
+tools/re2-benchmark/manifests/validate-extended-rebar.sh <pinned-rebar-checkout>
 ```
 
-`tools/re2-benchmark/rebar/generate-manifest.sh` compares an expanded
-41-workload manifest with the checked-in CSV. `rebar/prepare.sh --selected`
-generates the focused KLV corpus from the pinned Rebar checkout and verifies
-each uncompressed length and checksum.
+The last check regenerates the extended manifest and exclusions from a
+checkout of the pinned Rebar revision and compares them with the checked-in
+files.
 
 Update these files only when the pinned Rebar revision or the intentional
 benchmark intersection changes. Regenerate from that exact revision, review
 every added or removed workload and result-demand change, update both checksum
-files, and rerun the Rebar Python tests. A manifest update changes the
-qualification corpus and therefore requires a new frozen candidate and new
-qualification results.
+files, and rerun the manifest tests with
+`python3 -m unittest discover -s tools/re2-benchmark/manifests`. A manifest
+update changes the qualification corpus and therefore requires a new frozen
+candidate and new qualification results.
 
 `literal-probe-corpus.tsv` pins the corpora for the literal-probe distribution
 workloads by URL, revision, size, checksum, and license, and

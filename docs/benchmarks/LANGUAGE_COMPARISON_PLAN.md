@@ -198,26 +198,10 @@ timeout details remain in the interactive report.
 
 ## Collection implementation
 
-The collection tools are implemented in
-[`tools/re2-benchmark/language`](../../tools/re2-benchmark/language/README.md).
-It covers the existing 13 everyday workloads, all four Regulator regex frontends
-and their natural comparators, compilation, and single-use/reused contains and
-count. It keeps immutable inputs, raw samples, allocation, phase-specific
-verification receipts, normalization sizes, and runner provenance in a
-layout-independent export. Verification is available separately from timing.
-
-The complete 238-case Rebar registry has checksummed inputs, explicit
-translations and exclusions, and bulk public-operation adapters. Verification
-compares aggregate results and ordered match/capture bytes against the original
-native source. Phase-specific timeout receipts require two attempts. A result
-disagreement blocks collection; it is not classified as incompatibility.
-
-The tools support same-host batches, archive-based worker builds, AWS dispatch,
-validated restarts, and aggregation from raw evidence. Language suites run
-separately from the baseline shards, Trino operations, and LIKE coverage; all
-are required. Final qualification requires the complete released-artifact
-campaign. Historical preliminary reports keep each measurement's actual source
-identity. Page-layout changes must preserve raw samples and workload IDs.
+The [language collector](../../tools/re2-benchmark/language/README.md)
+documents the workloads, the Rebar registry and its translations,
+verification, timeout receipts, AWS dispatch, restarts, and aggregation.
+Language suites run separately from the baseline shards; both are required.
 
 ## Completion criteria
 

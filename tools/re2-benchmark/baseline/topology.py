@@ -1,13 +1,4 @@
-"""Frozen ordinary and multicore worker requirements."""
-
-
-CONCURRENCY_SHARDS = frozenset({"lifecycle-shared-cold"})
-
-
-def instance_type(platform, shard):
-    if shard in CONCURRENCY_SHARDS:
-        return platform.get("concurrency_instance_type", platform["instance_type"])
-    return platform["instance_type"]
+"""Frozen ordinary and 8-vCPU worker requirements; the language lifecycle suite runs on the larger one."""
 
 
 def validate(platform):

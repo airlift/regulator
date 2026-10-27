@@ -1,11 +1,9 @@
 """Static measurement seconds of manifest rows under their frozen protocols.
 
-These are the per-row, per-selector, representative, and calibration rules of
-run-shard.sh's route estimate, without its cold build, pinned Trino
-preparation, and host bootstrap allowances: engines are prebuilt, and those
-allowances do not scale with the rows a host measures. The estimate also
-leaves out the Rebar verification allowance, which does grow with the
-selected Rebar rows.
+These are the per-row, per-selector, representative, and calibration costs of
+a unit's JMH runs. Engines are prebuilt, so building, pinned Trino preparation,
+and host bootstrap are not charged; they do not scale with the rows a host
+measures.
 """
 from shard_results import jmh_runtime_seconds
 
@@ -20,7 +18,6 @@ CALIBRATION_MEASUREMENT_ITERATIONS = 10
 CALIBRATION_ITERATION_SECONDS = 1
 # A full five-fork reference and five bounded host-JVM processes for one representative.
 PROTOCOL_REPRESENTATIVE_SECONDS = 132
-RETAINED_MEMORY_CENSUS_SECONDS = 900
 
 
 def measured_seconds(protocol, processes):
@@ -38,13 +35,6 @@ def row_seconds(protocol):
     if execution == "jmh-forks":
         forks = int(protocol["processes"])
         return measured_seconds(protocol, forks) + forks * JMH_STARTUP_SECONDS
-    if execution == "native-bracket":
-        return (int(protocol["processes"]) * int(protocol["measurement_iterations"]) *
-                row_protocol.seconds(protocol["measurement_time"]))
-    if execution == "rebar":
-        return row_protocol.seconds(protocol["warmup_time"]) + row_protocol.seconds(protocol["measurement_time"])
-    if execution == "memory-census":
-        return RETAINED_MEMORY_CENSUS_SECONDS
     raise ValueError(f"no cost rule for execution {execution!r}")
 
 
@@ -56,9 +46,7 @@ def selector_startup_seconds(protocol):
     """
     if protocol["execution"] == "jmh-processes":
         return (int(protocol["processes"]) + 1) * JMH_STARTUP_SECONDS
-    if protocol["execution"] == "jmh-forks":
-        return JMH_STARTUP_SECONDS
-    return 0
+    return JMH_STARTUP_SECONDS
 
 
 def calibration_seconds(invocations):
@@ -94,10 +82,9 @@ def selectors(rows, protocols):
     result = {}
     for row in rows:
         protocol = protocols[row["row_id"]]
-        if protocol["execution"] in ("jmh-processes", "jmh-forks"):
-            key = (row["system"], row["benchmark"], row_protocol.protocol_key(protocol),
-                   row["row_id"] if runs_each_workload(row) else None)
-            result.setdefault(key, protocol)
+        key = (row["system"], row["benchmark"], row_protocol.protocol_key(protocol),
+               row["row_id"] if runs_each_workload(row) else None)
+        result.setdefault(key, protocol)
     return result
 
 

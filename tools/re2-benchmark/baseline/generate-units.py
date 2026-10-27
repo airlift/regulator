@@ -18,7 +18,7 @@ def main():
     tables = dict(zip(work_units.TABLES, (row_protocol.render(protocols), unit_table, unit_rows)))
     for name, content in tables.items():
         (arguments.output_directory / name).write_text(content, encoding="utf-8")
-    print(work_units.summary(units, row_protocol.read_tsv(directory / "platforms.tsv")))
+    print(work_units.summary(units))
     print(f"wrote {len(protocols)} frozen row protocols and {len(units)} work units")
 
 

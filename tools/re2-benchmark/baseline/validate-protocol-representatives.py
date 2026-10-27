@@ -5,7 +5,7 @@ import csv
 from collections import Counter
 from pathlib import Path
 
-from row_protocol import FINAL_LINE_CLASS, TRINO_LIKE_CLASS
+from row_protocol import TRINO_LIKE_CLASS, TRINO_LIKE_SHARDS
 from row_protocol import jmh_benchmark as actual_jmh_benchmark
 
 
@@ -54,17 +54,8 @@ def read_tsv(path, expected_fields=None):
     return rows
 
 
-def is_jmh_row(row):
-    return (
-        row["suite"] != "retained-memory" and
-        not row["suite"].startswith("rebar-") and
-        not row["system"].startswith("native-re2-"))
-
-
 def benchmark_family(row):
-    if row["shard_id"] == "trino-final-line":
-        return FINAL_LINE_CLASS
-    if row["shard_id"] in {"trino-like", "like-compile", "like-single-use", "like-dfa-single-use"}:
+    if row["shard_id"] in TRINO_LIKE_SHARDS:
         return TRINO_LIKE_CLASS
     benchmark_class, separator, _ = row["benchmark"].rpartition(".")
     if not separator:
@@ -73,7 +64,7 @@ def benchmark_family(row):
 
 
 def required_classpath(row):
-    if row["shard_id"] in {"trino-final-line", "trino-like", "like-compile", "like-single-use", "like-dfa-single-use"}:
+    if row["shard_id"] in TRINO_LIKE_SHARDS:
         return "special"
     if row["system"] == "joni":
         return "pinned-trino"
@@ -102,7 +93,7 @@ def bounded_routes(manifest_rows, dispatch_rows):
             systems = set(systems_text.split(","))
             route_rows = [
                 row for row in manifest_rows
-                if row["shard_id"] == shard_id and row["system"] in systems and is_jmh_row(row)
+                if row["shard_id"] == shard_id and row["system"] in systems
             ]
             if len(route_rows) > BOUNDED_PROTOCOL_ROW_THRESHOLD:
                 bounded[(shard_id, route)] = (systems, route_rows)
@@ -139,7 +130,7 @@ def validate(representatives_path, manifest_path, dispatch_path):
 
         shard_route = (representative["shard_id"], route)
         if shard_route not in required_routes:
-            raise ValueError(f"representative line {line_number} does not identify a bounded JMH route")
+            raise ValueError(f"representative line {line_number} does not identify a bounded route")
         route_systems, _ = required_routes[shard_route]
         if representative["system"] not in route_systems:
             raise ValueError(
@@ -157,8 +148,6 @@ def validate(representatives_path, manifest_path, dispatch_path):
                 raise ValueError(
                     f"representative line {line_number} {field} does not match manifest row "
                     f"{manifest_row['row_id']}")
-        if not is_jmh_row(manifest_row):
-            raise ValueError(f"representative line {line_number} identifies an excluded non-JMH row")
 
         expected_benchmark = actual_jmh_benchmark(manifest_row)
         if representative["jmh_benchmark"] != expected_benchmark:

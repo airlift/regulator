@@ -83,11 +83,9 @@ anchor, requested outputs, setup, reuse, and output construction. Different
 algorithms for the same operation are fair. Asking only one engine to recover
 captures, construct values, or find a boundary is not a fair engine comparison.
 
-The traditional pair registry in `tools/re2-benchmark/traditional/summarize.py`
-selects exact Java and native benchmark names. Corrected call contracts use new
-names so old raw results cannot satisfy a new comparison. The corresponding
-baseline row manifest must be regenerated with those names. Archived manifests
-and captured results stay unchanged.
+Corrected call contracts use new Java and native benchmark names so old raw
+results cannot satisfy a new comparison. Archived manifests and captured
+results stay unchanged.
 
 | Benchmark | Requested work on both sides |
 |---|---|
@@ -190,49 +188,38 @@ uses one short process and is not retained timing evidence.
 
 ## Native RE2 baseline
 
-Build the pinned native comparator with:
-
-```bash
-tools/re2-benchmark/build.sh
-target/re2-benchmark-build/regexp_benchmark \
-  --benchmark_filter='threads:1$' \
-  --benchmark_repetitions=5 \
-  --benchmark_min_time=0.5s
-```
-
-The build fetches pinned RE2, Abseil, Google Benchmark, and GoogleTest sources.
-Benchmark-only workload definitions make Java and C++ consume identical pattern
-and input bytes; native RE2 engine code is unchanged.
+`tools/re2-benchmark/build.sh` builds the
+[language collector's](../../tools/re2-benchmark/language/README.md) native
+runners named by `RE2_BENCHMARK_TARGETS`. The build fetches pinned RE2, Abseil,
+and Google Benchmark sources. The language manifest makes Java and C++ consume
+identical pattern and input bytes; native RE2 engine code is unchanged.
 
 | Dependency | Commit |
 |---|---|
 | RE2 | `972a15cedd008d846f1a39b2e88ce48d7f166cbd` |
 | Abseil | `d38452e1ee03523a208362186fd42248ff2609f6` |
 | Google Benchmark | `192ef10025eb2c4cdd392bc502f0c852196baa48` |
-| GoogleTest | `52eb8108c5bdec04579160ae17225d66034bd723` |
 
 Native and Java pairs must agree on operation, input, engine route, caching,
-captures, encoding, memory budget, and expected result. Run native immediately
-before and after Java on the same host. A Java/native elapsed-time ratio below
-`1.00` means Java is faster; above `1.00` means Java is slower.
+captures, encoding, memory budget, and expected result. A Java/native
+elapsed-time ratio below `1.00` means Java is faster; above `1.00` means Java
+is slower.
 
 ## Trino comparators
 
 `BenchmarkEverydayTrinoRegexp` measures Regulator's scalar operations over a
 fixed sequence of changing Slice values. Its Trino counterpart measures Airlift
 Joni with the same patterns, Slice offsets, input order, operation arguments,
-and expected outputs. `BenchmarkTrinoRegexp` and the final-line matrices use
-unchanging inputs. They are diagnostics, not the source of the application
-headline.
+and expected outputs.
 
 [`WORKLOAD_ORGANIZATION.md`](WORKLOAD_ORGANIZATION.md) defines the population,
 family balancing, comparator applicability, and reporting rules. Rebar bulk
 text, compilation, and diagnostics are reported independently rather than
 combined by row count.
 
-Rebar measures native RE2 and Regulator in one bracketed invocation and runs
-applicable pinned Joni rows through a separate exact invocation on the same
-host. A checksummed exhaustive ledger records incompatible syntax or semantics.
+The language bulk comparison runs the Rebar workloads for native RE2,
+Regulator, and pinned Joni. A checksummed exhaustive ledger records
+incompatible syntax or semantics.
 A compatible workload that exceeds the fixed verification timeout remains a
 runtime `did-not-finish` outcome rather than being reclassified as incompatible.
 
@@ -281,11 +268,13 @@ and which benchmarks serve as its edge controls.
 
 ## AWS execution
 
-`tools/re2-benchmark/baseline/run-campaign.py` schedules the frozen shard
-manifest. Its `aws/run-campaign.sh` worker provisions one isolated Intel or
-Graviton host, uploads the clean source archive, records environment metadata,
-pins benchmark processes to physical cores, downloads artifacts, and terminates
-all cloud resources.
+`tools/re2-benchmark/baseline/run-campaign.py` partitions the frozen manifest
+into work units of about 15 minutes and leases them to R8i and R9g worker hosts
+that `aws/run-campaign.sh` provisions. Each worker installs the prebuilt
+engines and the frozen candidate archive, records environment metadata, pins
+benchmark processes to physical cores, and measures one unit at a time between
+chained calibrations. The controller collects the artifacts and terminates all
+cloud resources.
 
 Final runs require:
 
@@ -294,19 +283,18 @@ Final runs require:
 - pinned JDK and comparator revisions
 - workload and source checksums
 - no overlapping process on a sibling hardware thread
-- candidate and control measurements on the same host
+- a candidate and its comparators in the same unit, on the same host
 
 Exploratory measurements and comparisons of alternative implementations must
 also run on R8i and R9g. Do not use local timings to accept or reject a
 candidate, or to decide whether it deserves a target-host run.
 
-Independent shards may use separate host pairs in parallel. Results from
-different hosts are independent sessions, not interchangeable brackets.
-A campaign may allow several AWS regions. Each Spot launch goes to the allowed
-region with the best Spot placement score, when scores are available, that has
-quota headroom; an On-Demand launch takes the first allowed region with
-headroom. Every region runs the same pinned image, identified by the name of
-its Oregon pin.
+The three replicas of a unit run on distinct instances; different units may
+share a host. A campaign may allow several AWS regions. Each Spot launch goes
+to the allowed region with the best Spot placement score, when scores are
+available, that has quota headroom; an On-Demand launch takes the first allowed
+region with headroom. Every region runs the same pinned image, identified by
+the name of its Oregon pin.
 
 See the [AWS guide](../../tools/re2-benchmark/aws/README.md) for commands,
 environment variables, machine-hour planning, and Spot/On-Demand costs.
@@ -357,9 +345,8 @@ objects.
 
 The original [baseline dispatch protocol](../../tools/re2-benchmark/baseline/SHARD_DISPATCH.md#jmh-protocol)
 is authoritative for baseline shards. It defines the bounded Regulator process
-sets, Joni fork policy, full-protocol exceptions, allocation collection, and
-per-host equivalence checks. Do not replace it with a blanket five-fork or
-one-second setting.
+sets, Joni fork policy, allocation collection, and per-host equivalence
+checks. Do not replace it with a blanket five-fork or one-second setting.
 
 The [language collector](../../tools/re2-benchmark/language/README.md#target-host-measurement-and-saved-data)
 uses its own frozen protocol and receipts, including for source brackets.
@@ -401,9 +388,8 @@ provide the exact estimator, limitations and independent replay command.
 In a campaign of work units, the unit attempt takes the host's place: processes
 nest within a unit attempt, and a row's independent samples are the attempts of
 the one unit that owns it, its three replicas on distinct instances. Different
-units may share a host. A unit that copies a native bracket measures it again
-only to pair with the rows it owns; the copy is never a sample of the bracket
-row. The [reduction rules](../../tools/re2-benchmark/baseline/REPORTING.md#inputs)
+units may share a host. The
+[reduction rules](../../tools/re2-benchmark/baseline/REPORTING.md#inputs)
 define ownership and pairing.
 
 Three or four hosts cannot establish a distribution-free precision guarantee

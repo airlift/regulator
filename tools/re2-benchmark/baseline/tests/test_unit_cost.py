@@ -24,9 +24,6 @@ class TestUnitCost(unittest.TestCase):
             # Every JMH fork starts its own JVM.
             (protocol("jmh-forks", 1, 10, "50ms", 10, "50ms"), 3),
             (protocol("jmh-forks", 5, 10, "1s", 10, "1s"), 110),
-            (protocol("native-bracket", 1, "-", "-", 5, "1s"), 5),
-            (protocol("rebar", warmup_time="5s", measurement_time="5s"), 10),
-            (protocol("memory-census"), 900),
         )
         for row_protocol_fields, seconds in cases:
             with self.subTest(protocol=row_protocol_fields):
@@ -62,7 +59,7 @@ class TestUnitCost(unittest.TestCase):
         rows = [row for row in row_protocol.read_tsv(BASELINE / "rows.tsv") if row["shard_id"] == "trino-like"]
         protocols = row_protocol.load(BASELINE / "row-protocol.tsv")
         self.assertEqual(36, len(rows))
-        # The route estimate charged none of these windows; each of the three systems is one selector.
+        # Each of the three systems is one selector.
         self.assertAlmostEqual(36 * 100 + 3 * 12, unit_cost.estimate(rows, protocols))
 
 

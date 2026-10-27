@@ -72,14 +72,11 @@ unit_order=forward
 if ((REPLICA_ID % 2 == 0)); then
     unit_order=reverse
 fi
-for order_name in JONI_COMPARATOR_ORDER REBAR_COMPARATOR_ORDER; do
-    if [[ -n ${!order_name:-} && ${!order_name} != "${unit_order}" ]]; then
-        echo "${order_name}=${!order_name} conflicts with replica ${REPLICA_ID}'s ${unit_order} unit order" >&2
-        exit 1
-    fi
-done
+if [[ -n ${JONI_COMPARATOR_ORDER:-} && ${JONI_COMPARATOR_ORDER} != "${unit_order}" ]]; then
+    echo "JONI_COMPARATOR_ORDER=${JONI_COMPARATOR_ORDER} conflicts with replica ${REPLICA_ID}'s ${unit_order} unit order" >&2
+    exit 1
+fi
 export JONI_COMPARATOR_ORDER=${unit_order}
-export REBAR_COMPARATOR_ORDER=${unit_order}
 
 mkdir -p "${RESULT_DIR}"
 RESULT_DIR=$(cd "${RESULT_DIR}" && pwd)
@@ -154,7 +151,7 @@ if [[ "${PLAN_ONLY}" != true && "${UNIT_STAGE}" == unit ]]; then
 fi
 
 for output in routes calibration-output route-plan.tsv expected-rows.tsv unit-rows.tsv calibration.tsv \
-        observed-rows.tsv observed-rows.tsv.sha256 rebar-outcomes.tsv unit-session.tsv \
+        observed-rows.tsv observed-rows.tsv.sha256 unit-session.tsv \
         unit-evidence.tsv unit-receipt.tsv status.txt; do
     if [[ -e "${RESULT_DIR}/${output}" ]]; then
         echo "Unit output already exists: ${RESULT_DIR}/${output}" >&2
@@ -243,7 +240,6 @@ while IFS=$'\t' read -r -u 3 route _ systems calibration; do
     BASELINE_UNIT_CALIBRATION="${calibration}" \
     BASELINE_UNIT_CALIBRATION_DIRECTORY="${calibration_directory}" \
     BASELINE_PLAN_ONLY="${PLAN_ONLY}" \
-    BASELINE_DEFER_ACCEPTANCE=true \
     BASELINE_PROTOCOL_QUALIFICATION="${PROTOCOL_QUALIFICATION}" \
     BASELINE_SHARED_WORK_DIR="${SHARED_WORK_DIR}" \
         "${RUN_SHARD}" "${SHARD_ID}" "${PROTOCOL}" "${route}" "${route_directory}"
@@ -301,16 +297,9 @@ python3 "${RESULT_TOOL}" calibration \
     --before "${calibration_before}" \
     --after "${calibration_after}" \
     --output "${RESULT_DIR}/calibration.tsv"
-drift_arguments=(
-    --calibration "${RESULT_DIR}/calibration.tsv"
+python3 "${RESULT_TOOL}" validate-drift \
+    --calibration "${RESULT_DIR}/calibration.tsv" \
     --maximum 0.05
-)
-for native_bracket in "${RESULT_DIR}"/routes/*/native-bracket.tsv; do
-    if [[ -s "${native_bracket}" ]]; then
-        drift_arguments+=(--native-bracket "${native_bracket}")
-    fi
-done
-python3 "${RESULT_TOOL}" validate-drift "${drift_arguments[@]}"
 
 python3 "${UNIT_TOOL}" combine \
     --unit-directory "${RESULT_DIR}" \

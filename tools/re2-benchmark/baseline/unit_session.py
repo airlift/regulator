@@ -18,7 +18,6 @@ from typing import NoReturn
 
 import host_session
 import row_protocol
-import topology
 import unit_cost
 import work_units
 from acceptance import (
@@ -53,13 +52,11 @@ from acceptance import (
 from shard_results import (
     MANIFEST_FIELDS,
     OBSERVED_FIELDS,
-    REBAR_OUTCOME_FIELDS,
     calibration_rows,
     combined_rows,
     exact_filter,
     load_manifest,
     load_observed,
-    load_rebar_outcomes,
     write_observed_rows,
     write_tsv,
 )
@@ -82,7 +79,6 @@ SELECTOR_FIELDS = (
     "rows",
 )
 SELECTION_FIELDS = SELECTOR_FIELDS + ("filter",)
-UNIT_OBSERVED_FIELDS = OBSERVED_FIELDS + ("role",)
 # A selector whose values JMH cannot express runs a whole method with its handler's arguments.
 ROUTE_ARGUMENTS = "route"
 SMOKE_SETTINGS = ("processes", "warmup_iterations", "measurement_iterations", "time")
@@ -104,7 +100,6 @@ UNIT_SESSION_FIELDS = (
 UNIT_RECEIPT_FIELDS = UNIT_SESSION_FIELDS + (
     "shard_id",
     "owned_row_count",
-    "copied_row_count",
     "row_protocol_sha256",
     "manifest_sha256",
     "observed_rows_sha256",
@@ -129,7 +124,6 @@ UNIT_HOST_ARTIFACTS = (
     "expected-rows.tsv",
     "observed-rows.tsv",
     "observed-rows.tsv.sha256",
-    "rebar-outcomes.tsv",
     "calibration.tsv",
     "unit-session.tsv",
     "unit-chain.txt",
@@ -153,7 +147,7 @@ def load_unit(directory, unit_id):
 
 
 def unit_rows(directory, unit):
-    held = set(unit["owned"]) | set(unit["copies"])
+    held = set(unit["owned"])
     rows = [row for row in load_manifest(directory / "rows.tsv") if row["row_id"] in held]
     if len(rows) != len(held):
         raise ValueError(f"Unit {unit['unit_id']} holds rows outside the manifest")
@@ -161,31 +155,20 @@ def unit_rows(directory, unit):
 
 
 def route_shares(rows, routes):
-    """Each route's share of a unit's rows, as (route, handler, systems, rows) in dispatch order.
-
-    A native bracket wraps the Java rows of its own route. A unit that holds only
-    the other route's rows copies the bracket, so it measures the bracket there.
-    """
-    native = work_units.NATIVE_COMPARATOR_SYSTEMS
+    """Each route's share of a unit's rows, as (route, handler, systems, rows) in dispatch order."""
     shares = []
     for route, handler, systems in routes:
         share = [row for row in rows if row["system"] in systems]
-        if any(row["system"] not in native for row in share):
-            shares.append([route, handler, set(systems), share])
-    brackets = [row for row in rows if row["system"] in native]
-    if brackets and not any(row["system"] in native for _, _, _, share in shares for row in share):
-        if len(shares) != 1:
-            raise ValueError("A copied native bracket needs exactly one route to wrap")
-        shares[0][2] |= native
-        shares[0][3] = [row for row in rows if row["system"] in shares[0][2]]
+        if share:
+            shares.append((route, handler, set(systems), share))
     assigned = sorted(row["row_id"] for _, _, _, share in shares for row in share)
     if assigned != sorted(row["row_id"] for row in rows):
         raise ValueError("Unit rows are not each assigned to exactly one route")
     result = []
     for route, handler, systems, share in shares:
         present = {row["system"] for row in share}
-        # A route handler measures every Java system of its route, and a whole bracket or none.
-        if present - native != systems - native or present & native not in (set(), native):
+        # A route handler measures every system of its route.
+        if present != systems:
             raise ValueError(
                 f"Unit route {route} holds systems {sorted(present)}, not those of its handler: {sorted(systems)}")
         result.append((route, handler, frozenset(present), share))
@@ -193,7 +176,7 @@ def route_shares(rows, routes):
 
 
 def ordered_shares(shares, replica_id):
-    """Odd replicas run native access first; even replicas reverse it, as host sessions do."""
+    """Odd replicas run native access first; even replicas reverse it."""
     return list(reversed(shares)) if int(replica_id) % 2 == 0 else list(shares)
 
 
@@ -285,7 +268,7 @@ def execution_settings(system, protocol, protocol_name, smoke):
 
 
 def selectors(rows, shard_rows, protocols, protocol_name, smoke):
-    """A unit route's JMH rows as exact selectors, in row order.
+    """A unit route's rows as exact JMH selectors, in row order.
 
     A selector is one system and frozen protocol over the methods that share one
     Cartesian -p block, so it measures exactly its rows and nothing else. A row
@@ -298,13 +281,11 @@ def selectors(rows, shard_rows, protocols, protocol_name, smoke):
 
     groups = {}
     for row in rows:
-        if protocols[row["row_id"]]["execution"] in work_units.JMH_EXECUTIONS:
-            groups.setdefault(key(row), []).append(row)
+        groups.setdefault(key(row), []).append(row)
     whole = {}
     for row in shard_rows:
-        if protocols[row["row_id"]]["execution"] in work_units.JMH_EXECUTIONS:
-            row_key = key(row)
-            whole[row_key] = whole.get(row_key, 0) + 1
+        row_key = key(row)
+        whole[row_key] = whole.get(row_key, 0) + 1
     merged = {}
     for (system, benchmark, protocol_key, alone), group in groups.items():
         block = parameter_block(group)
@@ -390,8 +371,6 @@ def select(arguments):
         raise ValueError(f"JMH filter {arguments.filter!r} selects no planned selector")
     output_base = arguments.output_base
     for selector in chosen:
-        if arguments.warmup_time and selector["kind"] == "processes":
-            selector["warmup_time"] = arguments.warmup_time
         selector["filter"] = exact_filter(selector["benchmarks"].split(","))
         if selector["parameters"] != ROUTE_ARGUMENTS:
             Path(f"{output_base}-selector-{selector['selector']}-parameters.txt").write_text(
@@ -403,16 +382,11 @@ def read_route_plan(root):
     return row_protocol.read_tsv(root / "route-plan.tsv")
 
 
-def unit_roles(mapping):
-    return {row["row_id"]: row["role"] for row in mapping if row["role"] in {"owner", "copy"}}
-
-
 def combine(arguments):
-    """Combine a unit's routes into its observed rows, each marked owner or pairing-only copy."""
+    """Combine a unit's routes into its observed rows."""
     root = arguments.unit_directory
     route_plan = read_route_plan(root)
     observed = []
-    rebar_outcomes = {}
     sessions = []
     for route in route_plan:
         route_directory = root / "routes" / route["route"]
@@ -422,25 +396,14 @@ def combine(arguments):
             raise ValueError(f"Route {route['route']} session systems differ from the unit route plan")
         sessions.append(session)
         observed.extend(load_observed(route_directory / "observed-rows.tsv"))
-        outcomes_path = route_directory / "raw" / "rebar-outcomes.tsv"
-        if outcomes_path.is_file():
-            route_outcomes = load_rebar_outcomes(outcomes_path)
-            if rebar_outcomes.keys() & route_outcomes.keys():
-                raise ValueError("Duplicate Rebar outcomes across unit routes")
-            rebar_outcomes.update(route_outcomes)
     identity_fields = [field for field in SESSION_FIELDS if field != "systems"]
     for session in sessions[1:]:
         changed = [field for field in identity_fields if session[field] != sessions[0][field]]
         if changed:
             raise ValueError(f"Unit route sessions changed host identity fields: {changed}")
-    rows = combined_rows(load_manifest(root / "expected-rows.tsv"), observed, rebar_outcomes)
+    rows = combined_rows(load_manifest(root / "expected-rows.tsv"), observed)
     mapping = row_protocol.read_tsv(root / "unit-rows.tsv")
-    roles = unit_roles(mapping)
-    if rebar_outcomes:
-        write_tsv(root / "rebar-outcomes.tsv", REBAR_OUTCOME_FIELDS,
-                  [rebar_outcomes[row_id] for row_id in sorted(rebar_outcomes)])
-    write_observed_rows(root / "observed-rows.tsv", UNIT_OBSERVED_FIELDS,
-                        [{**row, "role": roles[row["row_id"]]} for row in rows])
+    write_observed_rows(root / "observed-rows.tsv", OBSERVED_FIELDS, rows)
     unit_id = mapping[0]["unit_id"]
     write_tsv(root / "unit-session.tsv", UNIT_SESSION_FIELDS, [{
         "schema_version": UNIT_SCHEMA_VERSION,
@@ -461,11 +424,8 @@ def write_unit_evidence(root, route_plan, host_evidence=None):
     """
     evidence = []
     for route in route_plan:
-        systems = parse_systems(route["systems"], "route plan")
         for artifact, path in host_session.route_evidence(
-                root / "routes" / route["route"],
-                work_units.NATIVE_COMPARATOR_SYSTEMS <= systems,
-                UNIT_ROUTE_REQUIRED_ARTIFACTS):
+                root / "routes" / route["route"], UNIT_ROUTE_REQUIRED_ARTIFACTS):
             evidence.append({
                 "route": route["route"],
                 "artifact": f"routes/{route['route']}/{artifact}",
@@ -525,24 +485,23 @@ def check_unit_identity(root, session, units, protocols):
     if unit_rows_file != frozen:
         reject(f"{root / 'unit-rows.tsv'} differs from the frozen rows of unit {session['unit_id']}")
     owned = sorted(unit["owned"])
-    copies = sorted(unit["copies"])
     representatives = sorted(unit["representatives"])
     identity = work_units.unit_id(
-        unit["shard_id"], owned, copies, [f"{replica}:{row_id}" for replica, row_id in representatives], protocols)
+        unit["shard_id"], owned, [f"{replica}:{row_id}" for replica, row_id in representatives], protocols)
     if identity != session["unit_id"]:
         reject(f"unit {session['unit_id']} recomputes as {identity} under the frozen row protocols")
     return unit
 
 
 def check_unit_rows(root, unit, manifest):
-    """Expected and observed rows are exactly the unit's owned and copied rows, each with its role."""
-    held = {row_id: "owner" for row_id in unit["owned"]} | {row_id: "copy" for row_id in unit["copies"]}
+    """Expected and observed rows are exactly the unit's rows."""
+    held = set(unit["owned"])
     by_id = {row["row_id"]: row for row in manifest}
     expected = [row["row_id"] for row in load_manifest(root / "expected-rows.tsv")]
     if sorted(expected) != sorted(held):
         reject(f"{root / 'expected-rows.tsv'} does not list exactly the unit's rows")
     observed_path = root / "observed-rows.tsv"
-    observed = read_tsv(observed_path, ("row_id", "shard_id", "system", "role"), UNIT_OBSERVED_FIELDS)
+    observed = read_tsv(observed_path, ("row_id", "shard_id", "system"), OBSERVED_FIELDS)
     identifiers = [row["row_id"] for row in observed]
     problems = []
     duplicates = duplicate_values(identifiers)
@@ -560,8 +519,6 @@ def check_unit_rows(root, unit, manifest):
         manifest_row = by_id[row["row_id"]]
         if (row["shard_id"], row["system"]) != (manifest_row["shard_id"], manifest_row["system"]):
             problems.append(f"{observed_path}:{line_number} does not match the manifest shard and system")
-        if row["role"] != held[row["row_id"]]:
-            problems.append(f"{observed_path}:{line_number} role is {row['role']!r}, expected {held[row['row_id']]!r}")
     if problems:
         reject("unit observed-row acceptance failed: " + "; ".join(problems))
     verify_observed_rows_checksum(root / "observed-rows.tsv.sha256")
@@ -599,8 +556,6 @@ def check_unit_routes(root, unit, session, protocols, manifest):
 def check_route_selectors(directory, metadata, share, shard_rows, protocols):
     """The route ran its JMH selectors at the frozen protocol of their rows, with no window override."""
     path = directory / "run-metadata.txt"
-    if metadata.get("baseline_joni_jmh_time") != "default":
-        reject(f"{path} overrides the frozen Joni JMH window: {metadata.get('baseline_joni_jmh_time')}")
     if metadata.get("protocol") not in {"smoke", "qualification"}:
         reject(f"{path} records unit protocol {metadata.get('protocol')!r}, expected smoke or qualification")
     try:
@@ -828,8 +783,7 @@ def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_p
         **session,
         "shard_id": unit["shard_id"],
         "owned_row_count": str(len(unit["owned"])),
-        "copied_row_count": str(len(unit["copies"])),
-        "row_protocol_sha256": work_units.protocol_digest([*unit["owned"], *unit["copies"]], protocols),
+        "row_protocol_sha256": work_units.protocol_digest(unit["owned"], protocols),
         "manifest_sha256": tables["manifest_sha256"],
         "observed_rows_sha256": sha256_file(root / "observed-rows.tsv"),
         "evidence_manifest_sha256": sha256_file(root / "unit-evidence.tsv"),
@@ -901,7 +855,7 @@ def check_unit_campaign(receipts, platforms, units, protocols, manifest_digest, 
         if receipt["shard_id"] != unit["shard_id"]:
             reject(f"{context} names shard {receipt['shard_id']!r}, not its unit's {unit['shard_id']!r}")
         if receipt["architecture"] != platform["architecture"] or \
-                receipt["instance_type"] != topology.instance_type(platform, unit["shard_id"]):
+                receipt["instance_type"] != platform["instance_type"]:
             reject(f"{context} does not match the frozen platform {receipt['platform']}")
         if confirmation:
             parse_confirmation_replica(receipt["replica_id"], context)
@@ -909,10 +863,9 @@ def check_unit_campaign(receipts, platforms, units, protocols, manifest_digest, 
         else:
             parse_primary_replica(receipt["replica_id"], context)
             observed.append((receipt["platform"], receipt["unit_id"], receipt["replica_id"]))
-        if (receipt["owned_row_count"], receipt["copied_row_count"]) != (
-                str(len(unit["owned"])), str(len(unit["copies"]))):
+        if receipt["owned_row_count"] != str(len(unit["owned"])):
             reject(f"{context} row counts differ from unit {receipt['unit_id']}")
-        if receipt["row_protocol_sha256"] != work_units.protocol_digest([*unit["owned"], *unit["copies"]], protocols):
+        if receipt["row_protocol_sha256"] != work_units.protocol_digest(unit["owned"], protocols):
             reject(f"{context} row_protocol_sha256 differs from the frozen row protocols")
         if receipt["manifest_sha256"] != manifest_digest:
             reject(f"{context} manifest_sha256 does not match the frozen manifest")
@@ -1010,7 +963,6 @@ def parser():
     select_parser = subparsers.add_parser("select")
     select_parser.add_argument("--selectors", type=Path, required=True)
     select_parser.add_argument("--filter", required=True)
-    select_parser.add_argument("--warmup-time")
     select_parser.add_argument("--parameter", action="append", default=[], metavar="NAME=VALUES")
     select_parser.add_argument("--output-base", required=True)
     select_parser.set_defaults(function=select)

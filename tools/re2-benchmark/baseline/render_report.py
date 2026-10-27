@@ -132,11 +132,10 @@ def render(arguments):
     for platform in summary["platforms"]:
         lines.extend([f"### {platform.upper()}", ""])
         platform_classes = [row for row in classes if row["platform"] == platform]
-        platform_classes.sort(key=lambda row: (
-            row["rebar_corpus"], row["suite"], row["candidate_system"], row["comparator_system"]))
+        platform_classes.sort(key=lambda row: (row["suite"], row["candidate_system"], row["comparator_system"]))
         lines += table(
-            ("Corpus", "Suite", "Java", "Comparator", "Rows", "Median", "P10", "P90", "F/P/S", "Unresolved"),
-            ((row["rebar_corpus"], row["suite"], row["candidate_system"], row["comparator_system"],
+            ("Suite", "Java", "Comparator", "Rows", "Median", "P10", "P90", "F/P/S", "Unresolved"),
+            ((row["suite"], row["candidate_system"], row["comparator_system"],
               row["comparison_count"], ratio(row["median_ratio"]), ratio(row["p10_ratio"]), ratio(row["p90_ratio"]),
               f"{row['faster_count']}/{row['parity_count']}/{row['slower_count']}", row["unresolved_count"])
              for row in platform_classes))
@@ -147,29 +146,11 @@ def render(arguments):
     lines.append("")
     outliers.sort(key=lambda row: (row["platform"], -abs(float(row["median_ratio"]) - 1), row["comparison_id"]))
     lines += table(
-        ("Platform", "Corpus", "Suite", "Java", "Comparator", "Median", "Range", "Row"),
-        ((row["platform"], row["rebar_corpus"], row["suite"], row["candidate_system"],
+        ("Platform", "Suite", "Java", "Comparator", "Median", "Range", "Row"),
+        ((row["platform"], row["suite"], row["candidate_system"],
           row["comparator_system"], ratio(row["median_ratio"]),
           f"{ratio(row['minimum_ratio'])} to {ratio(row['maximum_ratio'])}",
           f"`{short_row_id(row['candidate_row_id'])}`") for row in outliers))
-
-    for corpus, title in (("curated", "Curated Rebar"), ("extended", "Extended Rebar (Informational)")):
-        lines.extend([f"## {title}", ""])
-        corpus_classes = [row for row in classes if row["rebar_corpus"] == corpus]
-        corpus_outliers = [row for row in outliers if row["rebar_corpus"] == corpus]
-        lines.append(
-            f"{len(corpus_classes)} general platform/class summaries; "
-            f"{len(corpus_outliers)} serious platform/row outliers. Extended results are informational "
-            "and are not combined with the curated corpus." if corpus == "extended" else
-            f"{len(corpus_classes)} general platform/class summaries; "
-            f"{len(corpus_outliers)} serious platform/row outliers.")
-        lines.append("")
-        lines += table(
-            ("Platform", "Suite", "Java", "Comparator", "Rows", "Median", "P10", "P90"),
-            ((row["platform"], row["suite"], row["candidate_system"], row["comparator_system"],
-              row["comparison_count"], ratio(row["median_ratio"]), ratio(row["p10_ratio"]), ratio(row["p90_ratio"]))
-             for row in sorted(corpus_classes, key=lambda row: (
-                 row["platform"], row["suite"], row["candidate_system"], row["comparator_system"]))))
 
     lines.extend(["## Stability And Allocation", ""])
     condition_counts = Counter(gap["condition"] for gap in gaps if gap["severity"] == "unresolved")
@@ -177,7 +158,7 @@ def render(arguments):
         ("Unresolved condition", "Count"),
         ((condition, str(count)) for condition, count in sorted(condition_counts.items())))
     lines.append(
-        "The row table contains host CV, allocation, maximum calibration drift, maximum native-bracket drift, "
+        "The row table contains host CV, allocation, maximum calibration drift, "
         "contract-identity consistency, and scaling classification. Contract identity describes the benchmark "
         "setup and expected-result contract; it is not a checksum of a measured output. The host table preserves "
         "every underlying score and allocation result.")

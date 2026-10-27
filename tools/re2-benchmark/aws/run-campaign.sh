@@ -38,55 +38,15 @@ fi
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-5400}
 CAMPAIGN_PROVENANCE=${CAMPAIGN_PROVENANCE:-qualification}
 RESULT_ROOT=${RESULT_ROOT:-"${REGULATOR_DIR}/benchmark-results/re2-qualification"}
-CAMPAIGN_MODE=${CAMPAIGN_MODE:-baseline-shard}
+CAMPAIGN_MODE=${CAMPAIGN_MODE:-}
 CAMPAIGN_ARCHITECTURES=${CAMPAIGN_ARCHITECTURES:-intel}
 CAMPAIGN_ID=${CAMPAIGN_ID:-baseline}
 CAMPAIGN_PLATFORM=${CAMPAIGN_PLATFORM:-r8i}
-CAMPAIGN_SHARD_ID=${CAMPAIGN_SHARD_ID:-traditional-search}
+CAMPAIGN_SHARD_ID=${CAMPAIGN_SHARD_ID:-}
 CAMPAIGN_REPLICA_ID=${CAMPAIGN_REPLICA_ID:-1}
 CAMPAIGN_HOST_EPOCH=${CAMPAIGN_HOST_EPOCH:-1}
 CAMPAIGN_ATTEMPT=${CAMPAIGN_ATTEMPT:-1}
 BASELINE_PROTOCOL=${BASELINE_PROTOCOL:-qualification}
-BENCHMARK_DIAGNOSTIC_PLAN=${BENCHMARK_DIAGNOSTIC_PLAN:-}
-BENCHMARK_REMEASUREMENT_PARTITION=${BENCHMARK_REMEASUREMENT_PARTITION:-}
-if [[ -n "${BENCHMARK_REMEASUREMENT_PARTITION}" ]]; then
-    if [[ ! "${BENCHMARK_REMEASUREMENT_PARTITION}" =~ ^[0-9]+$ ||
-            -n "${BENCHMARK_DIAGNOSTIC_PLAN}" || "${BASELINE_PROTOCOL}" != smoke ||
-            "${CAMPAIGN_MODE}" != baseline-shard || "${REGULATOR_RELEASE_VERSION}" != 1.0 ]]; then
-        echo "Replacement requires a frozen partition, release 1.0, and a complete smoke" >&2
-        exit 1
-    fi
-    IFS=$'\t' read -r replacement_instance_type replacement_vcpus < <(
-        python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/remeasure.py" \
-            --shard "${CAMPAIGN_SHARD_ID}" --partition "${BENCHMARK_REMEASUREMENT_PARTITION}" \
-            --print-allocation "${CAMPAIGN_PLATFORM}")
-    case "${CAMPAIGN_PLATFORM}" in
-        r8i) INTEL_INSTANCE_TYPE=${replacement_instance_type} ;;
-        r9g) ARM_INSTANCE_TYPE=${replacement_instance_type} ;;
-    esac
-    BENCHMARK_EXPECTED_VCPUS=${replacement_vcpus}
-fi
-BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE=${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE:-}
-BENCHMARK_DIAGNOSTIC_INPUT_SHA256=${BENCHMARK_DIAGNOSTIC_INPUT_SHA256:-}
-if [[ -n "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}" ]] &&
-        { [[ -z "${BENCHMARK_DIAGNOSTIC_PLAN}" || ! -f "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}" ]] ||
-          [[ ! "${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}" =~ ^[0-9a-f]{64}$ ]]; }; then
-    echo "Diagnostic input requires a plan, archive and SHA-256" >&2
-    exit 1
-fi
-if [[ -n "${BENCHMARK_DIAGNOSTIC_PLAN}" ]]; then
-    if [[ ! "${BENCHMARK_DIAGNOSTIC_PLAN}" =~ ^[a-z0-9-]+$ ||
-            ! -f "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/${BENCHMARK_DIAGNOSTIC_PLAN}.json" ||
-            "${BASELINE_PROTOCOL}" != smoke || "${CAMPAIGN_MODE}" != baseline-shard ||
-            ( "${CAMPAIGN_SHARD_ID}" != trino-final-line && "${CAMPAIGN_SHARD_ID}" != traditional-extra-easy2 ) ||
-            -z "${REGULATOR_RELEASE_VERSION}" ]]; then
-        echo "Diagnostics require a checked-in plan, release identity, and a supported complete smoke" >&2
-        exit 1
-    fi
-    python3 "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/run.py" \
-        --plan "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/${BENCHMARK_DIAGNOSTIC_PLAN}.json" \
-        --check-only --shard "${CAMPAIGN_SHARD_ID}"
-fi
 BASELINE_PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
 BASELINE_CANDIDATE_ARCHIVE=${BASELINE_CANDIDATE_ARCHIVE:-}
 BASELINE_CANDIDATE_ARCHIVE_SHA256=${BASELINE_CANDIDATE_ARCHIVE_SHA256:-}
@@ -97,7 +57,6 @@ LANGUAGE_CANDIDATE_PROVENANCE=${LANGUAGE_CANDIDATE_PROVENANCE:-}
 LANGUAGE_CANDIDATE_PROVENANCE_SHA256=${LANGUAGE_CANDIDATE_PROVENANCE_SHA256:-}
 ENGINE_BUILD_DIRECTORY=${ENGINE_BUILD_DIRECTORY:-}
 ENGINE_BUILD_MANIFEST_SHA256=${ENGINE_BUILD_MANIFEST_SHA256:-}
-BASELINE_JONI_JMH_TIME=${BASELINE_JONI_JMH_TIME:-}
 TRINO_REVISION=${TRINO_REVISION:-}
 NATIVE_COMPILER_PACKAGE=${NATIVE_COMPILER_PACKAGE:-}
 CMAKE_PACKAGE=${CMAKE_PACKAGE:-}
@@ -116,27 +75,13 @@ BENCHMARK_INTEL_AMI_ID=${BENCHMARK_INTEL_AMI_ID:-}
 BENCHMARK_ARM_AMI_ID=${BENCHMARK_ARM_AMI_ID:-}
 BENCHMARK_INTEL_AMI_NAME=${BENCHMARK_INTEL_AMI_NAME:-}
 BENCHMARK_ARM_AMI_NAME=${BENCHMARK_ARM_AMI_NAME:-}
-REBAR_OFFICIAL_DIR=${REBAR_OFFICIAL_DIR:-"${HOME}/.cache/regulator/rebar-463d00f31887e84c38467805b9e3122c314b9521"}
-REBAR_COMPARATOR_ORDER=${REBAR_COMPARATOR_ORDER:-forward}
 JONI_COMPARATOR_ORDER=${JONI_COMPARATOR_ORDER:-forward}
-
-# The dispatch file names each shard's route handler, which decides the shard's Trino use.
-campaign_shard_handler()
-{
-    awk -F '\t' -v shard="${CAMPAIGN_SHARD_ID}" 'NR > 1 && $1 == shard {print $2}' \
-        "${REGULATOR_DIR}/tools/re2-benchmark/baseline/shard-dispatch.tsv"
-}
 
 campaign_uses_trino()
 {
     # The engine build prepares the pinned Trino harness for the platform's unit workers,
     # and a unit worker measures units of every shard.
-    [[ "${CAMPAIGN_MODE}" == engine-build || "${CAMPAIGN_MODE}" == unit-worker ]] && return 0
-    [[ "${CAMPAIGN_MODE}" == baseline-shard ]] || return 1
-    case "$(campaign_shard_handler)" in
-        trino-operations | trino-final-line | trino-like | lifecycle | rebar) return 0 ;;
-        *) return 1 ;;
-    esac
+    [[ "${CAMPAIGN_MODE}" == engine-build || "${CAMPAIGN_MODE}" == unit-worker ]]
 }
 
 jdk_archive_url()
@@ -176,9 +121,9 @@ benchmark_ami_name()
 }
 
 case "${CAMPAIGN_MODE}" in
-    baseline-shard | language-batch | engine-build | unit-worker) ;;
+    language-batch | engine-build | unit-worker) ;;
     *)
-        echo "RE2 benchmark campaign mode must be baseline-shard, language-batch, engine-build, or unit-worker" >&2
+        echo "RE2 benchmark campaign mode must be language-batch, engine-build, or unit-worker" >&2
         exit 1
         ;;
 esac
@@ -233,12 +178,7 @@ if campaign_uses_trino "${CAMPAIGN_MODE}"; then
 else
     CAMPAIGN_USES_TRINO=false
 fi
-case "$(campaign_shard_handler)" in
-    trino-operations | trino-final-line) JONI_EVIDENCE_SCOPE=trino-operation-comparison ;;
-    lifecycle) JONI_EVIDENCE_SCOPE=retained-memory-comparison ;;
-    rebar) JONI_EVIDENCE_SCOPE=rebar-bulk-text-comparison ;;
-    *) JONI_EVIDENCE_SCOPE=not-used ;;
-esac
+JONI_EVIDENCE_SCOPE=not-used
 if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
     # Each leased unit's shard decides how it compares Joni.
     JONI_EVIDENCE_SCOPE=unit-shard-comparison
@@ -253,18 +193,6 @@ if [[ ! ${CAMPAIGN_ID} =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$ ]]; then
 fi
 if [[ ! ${CAMPAIGN_SHARD_ID} =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$ ]]; then
     echo "CAMPAIGN_SHARD_ID must be a 1-63 character identifier: ${CAMPAIGN_SHARD_ID}" >&2
-    exit 1
-fi
-if [[ "${CAMPAIGN_MODE}" == baseline-shard ]] &&
-        ! awk -F '\t' -v shard="${CAMPAIGN_SHARD_ID}" 'NR > 1 && $1 == shard {found = 1} END {exit !found}' \
-        "${REGULATOR_DIR}/tools/re2-benchmark/baseline/shards.tsv"; then
-    echo "CAMPAIGN_SHARD_ID is not in the baseline shard manifest: ${CAMPAIGN_SHARD_ID}" >&2
-    exit 1
-fi
-# A baseline shard host only prepares a shard's semantic routes for diagnostics or remeasurement.
-if [[ "${CAMPAIGN_MODE}" == baseline-shard && -z "${BENCHMARK_DIAGNOSTIC_PLAN}${BENCHMARK_REMEASUREMENT_PARTITION}" ]]; then
-    echo "A baseline shard job requires BENCHMARK_DIAGNOSTIC_PLAN or BENCHMARK_REMEASUREMENT_PARTITION;" \
-        "baseline campaigns lease work units to unit workers" >&2
     exit 1
 fi
 if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
@@ -307,10 +235,6 @@ esac
 case "${BASELINE_PROTOCOL}" in
     smoke | qualification) ;;
     *) echo "BASELINE_PROTOCOL must be smoke or qualification: ${BASELINE_PROTOCOL}" >&2; exit 1 ;;
-esac
-case "${REBAR_COMPARATOR_ORDER}" in
-    forward | reverse) ;;
-    *) echo "REBAR_COMPARATOR_ORDER must be forward or reverse: ${REBAR_COMPARATOR_ORDER}" >&2; exit 1 ;;
 esac
 case "${JONI_COMPARATOR_ORDER}" in
     forward | reverse) ;;
@@ -359,11 +283,6 @@ RESOLVED_ARM_JAVA_ARCHIVE_SHA256=$(jdk_archive_sha256 arm)
 RESOLVED_INTEL_AMI_ID=$(benchmark_ami_id intel)
 RESOLVED_ARM_AMI_ID=$(benchmark_ami_id arm)
 
-"${REGULATOR_DIR}/tools/re2-benchmark/manifests/validate-rebar-workloads.sh"
-REBAR_WORKLOAD_DEFINITIONS_SHA256=$(awk '{print $1}' \
-    "${REGULATOR_DIR}/tools/re2-benchmark/manifests/rebar-workloads.sha256")
-REBAR_SELECTED_DEFINITIONS_SHA256=$(awk '{print $1}' \
-    "${REGULATOR_DIR}/tools/re2-benchmark/manifests/rebar-selected-workloads.sha256")
 python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/validate-manifest.py"
 BASELINE_ROW_MANIFEST_SHA256=$(shasum -a 256 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/rows.tsv" | awk '{print $1}')
 BASELINE_PLATFORM_MANIFEST_SHA256=$(shasum -a 256 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/platforms.tsv" | awk '{print $1}')
@@ -392,7 +311,6 @@ BUCKET_OWNED=0
 OBJECT_PREFIX=
 INPUT_PREFIX=input
 RESULT_PREFIX=results
-REBAR_OFFICIAL_SHA256=
 INSTANCE_ROLE_NAME=
 INSTANCE_PROFILE_NAME=
 
@@ -926,20 +844,6 @@ package_commit()
         | gzip -n > "${output}"
 }
 
-package_rebar_commit()
-{
-    local worktree=$1
-    local commit=$2
-    local output=$3
-
-    git -C "${worktree}" archive \
-        --format=tar \
-        --prefix=rebar-corpus/ \
-        --add-virtual-file="rebar-corpus/.regulator-rebar-commit:${commit}" \
-        "${commit}" \
-        | gzip -n > "${output}"
-}
-
 candidate_commit()
 {
     local reference
@@ -1186,12 +1090,6 @@ if [[ '${CAMPAIGN_USES_TRINO}' == true ]]; then
     printf '%s  %s\n' '${TRINO_SHA256}' /tmp/trino.tar.gz | sha256sum --check -
     tar -xzf /tmp/trino.tar.gz -C /opt/re2-work/trino
 fi
-if [[ '${REBAR_OFFICIAL_SHA256}' != '' ]]; then
-    mkdir -p /opt/re2-work/rebar
-    download_input 's3://${BUCKET}/${INPUT_PREFIX}/rebar-official.tar.gz' /tmp/rebar-official.tar.gz
-    printf '%s  %s\n' '${REBAR_OFFICIAL_SHA256}' /tmp/rebar-official.tar.gz | sha256sum --check -
-    tar --no-same-owner -xzf /tmp/rebar-official.tar.gz -C /opt/re2-work/rebar --strip-components=1
-fi
 export ENGINE_BUILD_INPUT_DIR=
 export ENGINE_BUILD_MANIFEST_SHA256='${ENGINE_BUILD_MANIFEST_SHA256}'
 if [[ '${ENGINE_BUILD_MANIFEST_SHA256}' != '' ]]; then
@@ -1199,8 +1097,6 @@ if [[ '${ENGINE_BUILD_MANIFEST_SHA256}' != '' ]]; then
     mkdir -p "\${ENGINE_BUILD_INPUT_DIR}"
     download_input 's3://${BUCKET}/${INPUT_PREFIX}/engine-build.json' "\${ENGINE_BUILD_INPUT_DIR}/engine-build.json"
     printf '%s  %s\n' '${ENGINE_BUILD_MANIFEST_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/engine-build.json" | sha256sum --check -
-    download_input 's3://${BUCKET}/${ENGINE_BUILD_NATIVE_KEY}' "\${ENGINE_BUILD_INPUT_DIR}/native.tar.gz"
-    printf '%s  %s\n' '${ENGINE_BUILD_NATIVE_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/native.tar.gz" | sha256sum --check -
     download_input 's3://${BUCKET}/${ENGINE_BUILD_TRINO_KEY}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz"
     printf '%s  %s\n' '${ENGINE_BUILD_TRINO_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz" | sha256sum --check -
 fi
@@ -1216,19 +1112,10 @@ export RE2_CAMPAIGN_PLATFORM='${CAMPAIGN_PLATFORM}'
 export RE2_CAMPAIGN_SHARD_ID='${CAMPAIGN_SHARD_ID}'
 export RE2_CAMPAIGN_REPLICA_ID='${CAMPAIGN_REPLICA_ID}'
 export RE2_CAMPAIGN_HOST_EPOCH='${CAMPAIGN_HOST_EPOCH}'
-export BENCHMARK_DIAGNOSTIC_PLAN='${BENCHMARK_DIAGNOSTIC_PLAN}'
-export BENCHMARK_REMEASUREMENT_PARTITION='${BENCHMARK_REMEASUREMENT_PARTITION}'
 export BENCHMARK_PARTIAL_RESULT_URI='s3://${BUCKET}/${RESULT_PREFIX}/partial-${label}.tar.gz'
-if [[ '${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}' != '' ]]; then
-    download_input 's3://${BUCKET}/${INPUT_PREFIX}/diagnostic-inputs.tar.gz' /tmp/diagnostic-inputs.tar.gz
-    printf '%s  %s\n' '${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}' /tmp/diagnostic-inputs.tar.gz | sha256sum --check -
-    export BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE=/tmp/diagnostic-inputs.tar.gz
-    export BENCHMARK_DIAGNOSTIC_INPUT_SHA256='${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}'
-fi
 export BASELINE_PROTOCOL='${BASELINE_PROTOCOL}'
 export BASELINE_PROTOCOL_QUALIFICATION='${BASELINE_PROTOCOL_QUALIFICATION}'
 export BASELINE_EXPECTED_ENGINE_TREE='${BASELINE_EXPECTED_ENGINE_TREE}'
-export BASELINE_JONI_JMH_TIME='${BASELINE_JONI_JMH_TIME}'
 export NATIVE_COMPILER_PACKAGE='${NATIVE_COMPILER_PACKAGE}'
 export CMAKE_PACKAGE='${CMAKE_PACKAGE}'
 export GLIBC_PACKAGE='${GLIBC_PACKAGE}'
@@ -1245,11 +1132,7 @@ export INSTANCE_MARKET_TYPE='${INSTANCE_MARKET_TYPE}'
 export REGULATOR_RELEASE_VERSION='${REGULATOR_RELEASE_VERSION}'
 export BENCHMARK_JAVA_ARCHIVE_URL='${java_archive_url}'
 export BENCHMARK_JAVA_ARCHIVE_SHA256='${java_archive_sha256}'
-export REBAR_ROOT='/opt/re2-work/rebar'
-export REBAR_COMPARATOR_ORDER='${REBAR_COMPARATOR_ORDER}'
 export JONI_COMPARATOR_ORDER='${JONI_COMPARATOR_ORDER}'
-export REBAR_WORKLOAD_DEFINITIONS_SHA256='${REBAR_WORKLOAD_DEFINITIONS_SHA256}'
-export REBAR_SELECTED_DEFINITIONS_SHA256='${REBAR_SELECTED_DEFINITIONS_SHA256}'
 export BENCHMARK_HEAP_SIZE='${BENCHMARK_HEAP_SIZE:-8g}'
 export BENCHMARK_CPU_LIST='${BENCHMARK_CPU_LIST:-0}'
 export BENCHMARK_EXPECTED_VCPUS='${BENCHMARK_EXPECTED_VCPUS:-}'
@@ -1443,32 +1326,13 @@ if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"
 fi
 
-if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* || "${CAMPAIGN_MODE}" == engine-build || "${CAMPAIGN_MODE}" == unit-worker ]]; then
-    if [[ ! -d "${REBAR_OFFICIAL_DIR}/.git" ]]; then
-        echo "Pinned Rebar checkout does not exist: ${REBAR_OFFICIAL_DIR}" >&2
-        exit 1
-    fi
-    if [[ "$(git -C "${REBAR_OFFICIAL_DIR}" rev-parse HEAD)" != 463d00f31887e84c38467805b9e3122c314b9521 ]]; then
-        echo "Unexpected Rebar revision in ${REBAR_OFFICIAL_DIR}" >&2
-        exit 1
-    fi
-    "${REGULATOR_DIR}/tools/re2-benchmark/manifests/validate-extended-rebar.sh" "${REBAR_OFFICIAL_DIR}"
-    rebar_commit=$(git -C "${REBAR_OFFICIAL_DIR}" rev-parse HEAD)
-    package_rebar_commit \
-        "${REBAR_OFFICIAL_DIR}" \
-        "${rebar_commit}" \
-        "${SESSION_DIR}/rebar-official.tar.gz"
-    REBAR_OFFICIAL_SHA256=$(sha256 "${SESSION_DIR}/rebar-official.tar.gz")
-fi
-
-ENGINE_BUILD_NATIVE_SHA256=
 ENGINE_BUILD_TRINO_SHA256=
 if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
-    read -r ENGINE_BUILD_NATIVE_SHA256 ENGINE_BUILD_TRINO_SHA256 < <(
-        PYTHONDONTWRITEBYTECODE=1 python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" checksums \
+    ENGINE_BUILD_TRINO_SHA256=$(
+        PYTHONDONTWRITEBYTECODE=1 python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" checksum \
             --build "${ENGINE_BUILD_DIRECTORY}" --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256}")
-    if [[ ! "${ENGINE_BUILD_NATIVE_SHA256}" =~ ^[0-9a-f]{64}$ || ! "${ENGINE_BUILD_TRINO_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-        echo "Engine build archives do not match their manifest" >&2
+    if [[ ! "${ENGINE_BUILD_TRINO_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "Engine build archive does not match its manifest" >&2
         exit 1
     fi
 fi
@@ -1520,13 +1384,6 @@ else
 fi
 
 aws_cli s3 cp "${SESSION_DIR}/regulator.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/regulator.tar.gz" --only-show-errors
-if [[ -n "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}" ]]; then
-    if [[ $(sha256 "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}") != "${BENCHMARK_DIAGNOSTIC_INPUT_SHA256}" ]]; then
-        echo "Diagnostic input archive checksum mismatch" >&2
-        exit 1
-    fi
-    aws_cli s3 cp "${BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE}" "s3://${BUCKET}/${INPUT_PREFIX}/diagnostic-inputs.tar.gz" --only-show-errors
-fi
 if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
     aws_cli s3 cp "${SESSION_DIR}/language-batch.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/language-batch.tar.gz" --only-show-errors
     aws_cli s3 cp "${SESSION_DIR}/candidate-provenance.tsv" "s3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv" --only-show-errors
@@ -1534,22 +1391,15 @@ fi
 if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     aws_cli s3 cp "${SESSION_DIR}/trino.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/trino.tar.gz" --only-show-errors
 fi
-if [[ -f "${SESSION_DIR}/rebar-official.tar.gz" ]]; then
-    aws_cli s3 cp "${SESSION_DIR}/rebar-official.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/rebar-official.tar.gz" --only-show-errors
-fi
-ENGINE_BUILD_NATIVE_KEY=
 ENGINE_BUILD_TRINO_KEY=
 ENGINE_BUILD_SHARED_RESOURCES=
 if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
     aws_cli s3 cp "${ENGINE_BUILD_DIRECTORY}/engine-build.json" "s3://${BUCKET}/${INPUT_PREFIX}/engine-build.json" --only-show-errors
-    # Every session in the bucket's region shares one copy of each content-addressed
-    # archive; they are campaign inputs, not session resources, so cleanup keeps them.
-    engine_build_prefix="${TRANSFER_PREFIX}/engine-builds"
-    ENGINE_BUILD_NATIVE_KEY="${engine_build_prefix}/${ENGINE_BUILD_NATIVE_SHA256}.tar.gz"
-    verify_engine_build_archive "${ENGINE_BUILD_NATIVE_SHA256}" "${ENGINE_BUILD_NATIVE_KEY}"
-    ENGINE_BUILD_TRINO_KEY="${engine_build_prefix}/${ENGINE_BUILD_TRINO_SHA256}.tar.gz"
+    # Every session in the bucket's region shares one copy of the content-addressed
+    # archive; it is a campaign input, not a session resource, so cleanup keeps it.
+    ENGINE_BUILD_TRINO_KEY="${TRANSFER_PREFIX}/engine-builds/${ENGINE_BUILD_TRINO_SHA256}.tar.gz"
     verify_engine_build_archive "${ENGINE_BUILD_TRINO_SHA256}" "${ENGINE_BUILD_TRINO_KEY}"
-    ENGINE_BUILD_SHARED_RESOURCES="\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_NATIVE_KEY}\",\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_TRINO_KEY}\""
+    ENGINE_BUILD_SHARED_RESOURCES="\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_TRINO_KEY}\""
 fi
 
 create_instance_profile
@@ -1613,21 +1463,15 @@ regulator_content_sha256=${REGULATOR_CONTENT_SHA256}
 baseline_candidate_archive_sha256=${BASELINE_CANDIDATE_ARCHIVE_SHA256:-not-used}
 baseline_protocol=${BASELINE_PROTOCOL}
 baseline_expected_engine_tree=${BASELINE_EXPECTED_ENGINE_TREE}
-baseline_joni_jmh_time=${BASELINE_JONI_JMH_TIME:-default}
 baseline_protocol_qualification=${BASELINE_PROTOCOL_QUALIFICATION}
 trino_commit=${TRINO_COMMIT}
 trino_snapshot_sha256=${TRINO_SHA256}
-rebar_official_sha256=${REBAR_OFFICIAL_SHA256:-none}
 engine_build_manifest_sha256=${ENGINE_BUILD_MANIFEST_SHA256:-none}
-engine_build_native_sha256=${ENGINE_BUILD_NATIVE_SHA256:-none}
 engine_build_trino_sha256=${ENGINE_BUILD_TRINO_SHA256:-none}
-rebar_workload_definitions_sha256=${REBAR_WORKLOAD_DEFINITIONS_SHA256}
-rebar_selected_definitions_sha256=${REBAR_SELECTED_DEFINITIONS_SHA256}
 joni_evidence_scope=${JONI_EVIDENCE_SCOPE}
 campaign_mode=${CAMPAIGN_MODE}
 campaign_architectures=${CAMPAIGN_ARCHITECTURES}
 instance_market_type=${INSTANCE_MARKET_TYPE}
-rebar_comparator_order=${REBAR_COMPARATOR_ORDER}
 joni_comparator_order=${JONI_COMPARATOR_ORDER}
 benchmark_intel_java_archive_url=${RESOLVED_INTEL_JAVA_ARCHIVE_URL:-default-temurin-25}
 benchmark_intel_java_archive_sha256=${RESOLVED_INTEL_JAVA_ARCHIVE_SHA256:-none}
@@ -1691,7 +1535,7 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                 fi
                 expected_cargo_package=not-installed
                 expected_rust_package=not-installed
-                if [[ "${CAMPAIGN_SHARD_ID}" == rebar-* || "${CAMPAIGN_MODE}" != baseline-shard ]]; then
+                if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
                     expected_cargo_package=${CARGO_PACKAGE}
                     expected_rust_package=${RUST_PACKAGE}
                 fi
@@ -1717,14 +1561,12 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                         ! grep -Fqx "instance_type=${expected_instance_type}" "${environment_manifest}" ||
                         ! grep -Fqx "jdk_archive_sha256=${expected_java_sha256}" "${environment_manifest}" ||
                         ! grep -Fqx "trino_used=${CAMPAIGN_USES_TRINO}" "${environment_manifest}" ||
-                        ! grep -Fqx "rebar_workload_definitions_sha256=${REBAR_WORKLOAD_DEFINITIONS_SHA256}" "${environment_manifest}" ||
-                        ! grep -Fqx "rebar_selected_definitions_sha256=${REBAR_SELECTED_DEFINITIONS_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "joni_evidence_scope=${JONI_EVIDENCE_SCOPE}" "${environment_manifest}"; then
                     echo "${label} qualification environment manifest is missing or inconsistent" >&2
                     campaign_failed=1
                     continue
                 fi
-                if [[ "${CAMPAIGN_MODE}" == baseline-shard || "${CAMPAIGN_MODE}" == unit-worker ]] &&
+                if [[ "${CAMPAIGN_MODE}" == unit-worker ]] &&
                         (! grep -Fqx "row_manifest_sha256=${BASELINE_ROW_MANIFEST_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "platform_manifest_sha256=${BASELINE_PLATFORM_MANIFEST_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "comparator_manifest_sha256=${BASELINE_COMPARATOR_MANIFEST_SHA256}" "${environment_manifest}" ||

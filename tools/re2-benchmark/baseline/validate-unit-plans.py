@@ -2,8 +2,7 @@
 """Check that every work unit plans exactly its rows, under their frozen protocols, in route order.
 
 Every unit is planned in process for both protocols and replicas 1 to 4. A
-deterministic sample, one unit per handler plus the copy and whole-method
-cases, is also planned through run-unit.sh to pin the shell wiring.
+deterministic sample, one unit per handler and any whole-method unit, is also planned through run-unit.sh to pin the shell wiring.
 """
 import itertools
 import json
@@ -40,11 +39,11 @@ def row_key(system, benchmark, parameters):
 
 
 def check_selectors(label, share, shard_rows, protocols, protocol_name, selectors):
-    """Each selector expands to rows of the share, and together they measure every JMH row once."""
+    """Each selector expands to rows of the share, and together they measure every row once."""
     jmh = {
         row_key(row["system"], row_protocol.jmh_benchmark(row),
                 row_protocol.parse_parameters(row["parameters"])): row
-        for row in share if protocols[row["row_id"]]["execution"] in work_units.JMH_EXECUTIONS}
+        for row in share}
     measured = []
     for selector in selectors:
         benchmarks = selector["benchmarks"].split(",")
@@ -80,7 +79,7 @@ def check_selectors(label, share, shard_rows, protocols, protocol_name, selector
             check_protocol(label, selector, protocols[jmh[key]["row_id"]], protocol_name)
         measured.extend(expanded)
     if sorted(measured) != sorted(jmh):
-        raise SystemExit(f"{label} selectors do not measure each JMH row of the unit exactly once")
+        raise SystemExit(f"{label} selectors do not measure each row of the unit exactly once")
 
 
 def check_protocol(label, selector, protocol, protocol_name):
@@ -106,7 +105,7 @@ def check_protocol(label, selector, protocol, protocol_name):
 
 
 def check_precision(label, share, protocols, protocol_name):
-    """The precision ceiling a route passes is the frozen ceiling of every JMH row of its share; returns it.
+    """The precision ceiling a route passes is the frozen ceiling of every row of its share; returns it.
 
     run-shard.sh takes the ceiling from the route's JMH process rows under qualification, so a forked row
     gets the ceiling only through them. Smoke routes pass none."""
@@ -115,7 +114,7 @@ def check_precision(label, share, protocols, protocol_name):
     ceilings = {
         execution: {protocols[row["row_id"]]["maximum_relative_standard_error"]
                     for row in share if protocols[row["row_id"]]["execution"] == execution}
-        for execution in work_units.JMH_EXECUTIONS}
+        for execution in row_protocol.EXECUTIONS}
     ceiling = min(ceilings["jmh-processes"], default="-")
     frozen = set().union(*ceilings.values())
     if frozen - {ceiling}:
@@ -126,7 +125,7 @@ def check_precision(label, share, protocols, protocol_name):
 def plan_unit(unit, manifest, protocols, representatives):
     """Every protocol and replica's route plans of one unit, checked; returns them by run."""
     shard = unit["shard_id"]
-    held = sorted(unit["owned"] + unit["copies"])
+    held = sorted(unit["owned"])
     dispatch = host_session.load_dispatch(DIRECTORY / "shard-dispatch.tsv", shard)
     routes = [route for route, _, _ in host_session.applicable_routes(dispatch)]
     shard_rows = [row for row in manifest if row["shard_id"] == shard]
@@ -165,21 +164,15 @@ def plan_unit(unit, manifest, protocols, representatives):
 
 
 def sample(units, plans):
-    """One unit per handler pairing, the traditional-capture phases, a copy unit, and a whole-method unit."""
+    """One unit per handler pairing, and a whole-method unit if any unit has one."""
     chosen = {}
     for unit in sorted(units.values(), key=lambda unit: (unit["shard_id"], int(unit["unit_index"]))):
         dispatch = host_session.load_dispatch(DIRECTORY / "shard-dispatch.tsv", unit["shard_id"])
-        handlers = (dispatch["native_access_handler"], dispatch["object_row_handler"],
-                    unit["shard_id"] == "traditional-capture")
-        chosen.setdefault(handlers, unit["unit_id"])
-        if unit["copies"]:
-            chosen.setdefault("copy", unit["unit_id"])
+        chosen.setdefault((dispatch["native_access_handler"], dispatch["object_row_handler"]), unit["unit_id"])
         if any(selector["parameters"] == unit_session.ROUTE_ARGUMENTS
                for _, _, selectors, _, _ in plans[unit["unit_id"]][("qualification", "1")]
                for selector in selectors):
             chosen.setdefault("whole-method", unit["unit_id"])
-    if "copy" not in chosen or "whole-method" not in chosen:
-        raise SystemExit("No unit exercises copied rows or whole-method selectors")
     return sorted(set(chosen.values()))
 
 

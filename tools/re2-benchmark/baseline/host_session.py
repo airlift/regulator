@@ -64,10 +64,8 @@ def require_complete_route(route_directory):
         raise ValueError(f"Route did not complete successfully: {route_directory}")
 
 
-def route_evidence(route_directory, needs_native_bracket, required_artifacts):
+def route_evidence(route_directory, required_artifacts):
     required = set(required_artifacts)
-    if needs_native_bracket:
-        required.add("native-bracket.tsv")
     metadata = read_properties(route_directory / "run-metadata.txt")
     qualification_required = metadata.get("protocol_qualification_required")
     if qualification_required not in {"true", "false"}:

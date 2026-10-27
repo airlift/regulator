@@ -1,8 +1,8 @@
 # Language comparison collection
 
 This suite measures ordinary regex operations and pattern lifecycles across
-the four regex languages. Run it alongside the baseline, Rebar,
-Trino-operation, and LIKE shards, not instead of them.
+the four regex languages. Run it alongside the baseline Trino-operation,
+specialized-pattern, and LIKE shards, not instead of them.
 
 The current corpus is the 13 workloads in `everyday-trino-workloads.tsv`, with
 eight rotating inputs each. Each workload runs through:
@@ -542,7 +542,7 @@ for each language.
 
 The shared controller accepts repeated `--language-plan` arguments. Run the
 existing baseline campaign separately; language plans add coverage and do not
-replace its LIKE, Trino-operation, retained-memory, or direct-engine shards.
+replace its LIKE and Trino-operation shards.
 Keep both source manifests and fleet plans outside Maven's `target` directory
 for a final campaign.
 

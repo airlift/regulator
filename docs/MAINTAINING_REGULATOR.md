@@ -288,7 +288,7 @@ launching machines. Choose shards based on the changed path, not this example:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py smoke focused-change \
-  --shard traditional-search --shard expression-plans-a \
+  --shard trino-operations --shard trino-like \
   --result-root /durable/path/focused-change/smoke --max-concurrent 4
 ```
 

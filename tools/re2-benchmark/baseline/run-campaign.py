@@ -82,8 +82,7 @@ SEMANTIC_FAILURE_STATUS = 44
 SEMANTIC_FAILURE_DETAIL = f"semantic failure: status {SEMANTIC_FAILURE_STATUS}"
 # A unit campaign phase's digest of the tooling that started it, beside its campaign state.
 TOOLING_DIGEST = "tooling-digest.txt"
-WORK_ITEM_FIELDS = (
-    "platform", "instance_class", "shard_id", "unit_id", "replica", "estimated_seconds", "excluded_instances")
+WORK_ITEM_FIELDS = ("platform", "shard_id", "unit_id", "replica", "estimated_seconds", "excluded_instances")
 # Lease outcomes that spend one of the item's attempts.
 COUNTED_UNIT_OUTCOMES = frozenset(("failed", "interrupted", "lost"))
 # Lease outcomes after which the lease's host can no longer change what it became.
@@ -98,9 +97,8 @@ PLACEMENT_SCORE_CACHE_SECONDS = 5 * 60
 REFILL_ENVIRONMENT_SCOPES = {
     **dict.fromkeys((
         "row_manifest_sha256", "platform_manifest_sha256", "comparator_manifest_sha256",
-        "protocol_representatives_sha256", "rebar_workload_definitions_sha256",
-        "rebar_selected_definitions_sha256", "baseline_protocol", "baseline_selected_route",
-        "baseline_joni_jmh_time", "benchmark_heap_size", "regulator_release_version", "java_home"), ()),
+        "protocol_representatives_sha256", "baseline_protocol", "baseline_selected_route",
+        "benchmark_heap_size", "regulator_release_version", "java_home"), ()),
     **dict.fromkeys((
         "ami", "jdk_archive_url", "jdk_archive_sha256", "java_runtime_version",
         "native_compiler_package", "cmake_package", "glibc_package", "time_package"), ("platform",)),
@@ -108,10 +106,9 @@ REFILL_ENVIRONMENT_SCOPES = {
     **dict.fromkeys(("benchmark_mode", "trino_used", "joni_evidence_scope", "cargo_package", "rust_package"),
                     ("shard",)),
 }
-PINNED_REBAR_COMMIT = "463d00f31887e84c38467805b9e3122c314b9521"
 # A shard needs the pinned Trino checkout when shard-dispatch.tsv gives it one of these handlers.
-TRINO_HANDLERS = frozenset({"trino-operations", "trino-final-line", "trino-like", "lifecycle", "rebar"})
-# The build phase's one job per platform; it prepares the Trino harness among its engines.
+TRINO_HANDLERS = frozenset({"trino-operations", "trino-like"})
+# The build phase's one job per platform; it prepares the pinned Trino harness.
 ENGINE_BUILD_SHARD = "engine-build"
 TRINO_SHARDS = frozenset(
     row["shard_id"] for row in csv.DictReader(
@@ -175,9 +172,8 @@ class Platform:
 
 @dataclass(frozen=True)
 class WorkItem:
-    """One replica of a work unit on one platform, measured by any unit worker of its pool."""
+    """One replica of a work unit on one platform, measured by any unit worker of its platform's pool."""
     platform: str
-    instance_class: str
     shard: str
     unit_id: str
     replica: int
@@ -191,7 +187,7 @@ class WorkItem:
 
     @property
     def pool(self):
-        return self.platform, self.instance_class
+        return self.platform
 
 
 @dataclass(frozen=True)
@@ -448,22 +444,19 @@ def build_work_items(phase, platforms, units, shards, confirmation_units=()):
                     for platform in platforms
                     for unit_id in ordered
                     for replica in replicas]
-    return [WorkItem(platform, units[unit_id]["instance_class"], units[unit_id]["shard_id"], unit_id, replica,
+    return [WorkItem(platform, units[unit_id]["shard_id"], unit_id, replica,
                      float(units[unit_id]["estimated_seconds"]), instances)
             for platform, unit_id, replica, instances in selected]
 
 
-def unit_worker_job(platform, instance_class, ordinal, host_epoch, market, spot_capacity_failures=()):
-    """A unit worker host of a pool; its replica is the worker's ordinal within the phase."""
-    if instance_class == "concurrency":
-        platform = allocated_platform(platform, platform.concurrency_instance_type, platform.concurrency_vcpus)
+def unit_worker_job(platform, ordinal, host_epoch, market, spot_capacity_failures=()):
+    """A unit worker host of a platform's pool; its replica is the worker's ordinal within the phase."""
     return Job(platform, UNIT_WORKER_SHARD, ordinal, host_epoch, 1, market, "unit-worker",
                spot_capacity_failures=tuple(spot_capacity_failures))
 
 
 def unit_worker_pool(job):
-    concurrency = job.platform.concurrency_instance_type and job.platform.instance_type == job.platform.concurrency_instance_type
-    return job.platform.name, "concurrency" if concurrency else "ordinary"
+    return job.platform.name
 
 
 def allocated_platform(platform, instance_type, vcpus):
@@ -527,9 +520,6 @@ def validate_configuration(arguments, jobs, launched_jobs=None, items=None):
                          "the policy allows On-Demand in an allowed region holding each worker type's image")
     if getattr(arguments, "execute", False) and arguments.max_concurrent > DEFAULT_MAX_CONCURRENT and budget is None:
         raise SystemExit("more than 64 workers requires a shared fleet budget")
-    if items is not None and os.environ.get("BASELINE_JONI_JMH_TIME"):
-        # The override would shorten a unit's frozen JMH windows while its receipts claim them.
-        raise SystemExit("unit workers measure the frozen protocol; unset BASELINE_JONI_JMH_TIME")
     if items is not None and budget and budget.policy["max_attempt_seconds"] < UNIT_WORKER_TIMEOUT_SECONDS + 15 * 60:
         raise SystemExit("unit workers require a shared fleet max_attempt_seconds of at least "
                          f"{UNIT_WORKER_TIMEOUT_SECONDS + 15 * 60}, a worker's lifetime, last unit and cleanup")
@@ -582,8 +572,7 @@ def campaign_worker_platforms(arguments, jobs, items):
     if items is None:
         return [job.platform for job in jobs]
     platforms = getattr(arguments, "unit_platforms", {})
-    return [unit_worker_job(platforms[name], instance_class, 0, 0, "spot").platform
-            for name, instance_class in sorted({item.pool for item in items}) if name in platforms]
+    return [platforms[name] for name in sorted({item.pool for item in items}) if name in platforms]
 
 
 def unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus):
@@ -596,8 +585,7 @@ def unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus):
         work[item.platform] = work.get(item.platform, 0) + item.estimated_seconds
         platform = platforms.get(item.platform)
         if platform is not None:
-            vcpus = platform.concurrency_vcpus if item.instance_class == "concurrency" else platform.vcpus
-            vcpu_seconds += vcpus * item.estimated_seconds
+            vcpu_seconds += platform.vcpus * item.estimated_seconds
     lifetime = UNIT_WORKER_LIFETIME_SECONDS
     waves = max([math.ceil(sum(work.values()) / (host_limit * lifetime))] +
                 [math.ceil(seconds / (min(per_platform, host_limit) * lifetime)) for seconds in work.values()] +
@@ -860,15 +848,7 @@ def validate_dependencies(root, arguments, jobs):
         for directory, _ in language_campaign(arguments).plans.values():
             language_fleet.validate(directory)
         return
-    subprocess.run([str(root / "tools/re2-benchmark/manifests/validate-rebar-workloads.sh")], check=True)
     subprocess.run([str(root / "tools/re2-benchmark/baseline/validate-manifest.py")], check=True)
-    rebar_root = Path(os.environ.get(
-        "REBAR_OFFICIAL_DIR",
-        Path.home() / ".cache/regulator" / f"rebar-{PINNED_REBAR_COMMIT}"))
-    subprocess.run([
-        str(root / "tools/re2-benchmark/manifests/validate-extended-rebar.sh"),
-        str(rebar_root),
-    ], check=True)
     if not any(job.shard in TRINO_SHARDS for job in jobs):
         return
     trino_directory = os.environ.get("TRINO_DIR")
@@ -1006,33 +986,32 @@ def upload_engine_builds(arguments, jobs):
     for platform, region in sorted(uploads):
         build = directories[platform]
         manifest = engine_build.load_manifest(build, arguments.engine_build_policy[platform])
-        for name in ("native", "trino"):
-            archive = manifest["archives"][name]
-            path = build / archive["file"]
-            key = f"{os.environ['TRANSFER_PREFIX']}/engine-builds/{archive['sha256']}.tar.gz"
-            checksum = base64.b64encode(bytes.fromhex(archive["sha256"])).decode()
-            prefix = aws_output(arguments, region) + ["s3api"]
-            for attempt in range(1, ENGINE_BUILD_UPLOAD_ATTEMPTS + 1):
-                try:
-                    existing = check_output(prefix + [
-                        "head-object", "--bucket", buckets[region], "--key", key, "--checksum-mode", "ENABLED",
-                        "--query", "ChecksumSHA256", "--output", "text"], stderr=subprocess.DEVNULL, timeout=60)
-                except subprocess.SubprocessError:
-                    existing = None
-                if existing == checksum:
-                    break
-                print(f"uploading {platform} {name} engine archive to {region} (attempt {attempt})", flush=True)
-                try:
-                    # A single PUT keeps S3's checksum the whole-object SHA-256, which S3 verifies on upload.
-                    check_output(prefix + [
-                        "put-object", "--bucket", buckets[region], "--key", key, "--body", str(path),
-                        "--checksum-algorithm", "SHA256", "--checksum-sha256", checksum],
-                        timeout=60 + path.stat().st_size / ENGINE_BUILD_UPLOAD_MINIMUM_RATE)
-                    break
-                except subprocess.SubprocessError as error:
-                    if attempt == ENGINE_BUILD_UPLOAD_ATTEMPTS:
-                        raise SystemExit(f"could not upload the {platform} {name} engine archive to "
-                                         f"s3://{buckets[region]}/{key}: {error}") from error
+        archive = manifest["archives"]["trino"]
+        path = build / archive["file"]
+        key = f"{os.environ['TRANSFER_PREFIX']}/engine-builds/{archive['sha256']}.tar.gz"
+        checksum = base64.b64encode(bytes.fromhex(archive["sha256"])).decode()
+        prefix = aws_output(arguments, region) + ["s3api"]
+        for attempt in range(1, ENGINE_BUILD_UPLOAD_ATTEMPTS + 1):
+            try:
+                existing = check_output(prefix + [
+                    "head-object", "--bucket", buckets[region], "--key", key, "--checksum-mode", "ENABLED",
+                    "--query", "ChecksumSHA256", "--output", "text"], stderr=subprocess.DEVNULL, timeout=60)
+            except subprocess.SubprocessError:
+                existing = None
+            if existing == checksum:
+                break
+            print(f"uploading {platform} engine archive to {region} (attempt {attempt})", flush=True)
+            try:
+                # A single PUT keeps S3's checksum the whole-object SHA-256, which S3 verifies on upload.
+                check_output(prefix + [
+                    "put-object", "--bucket", buckets[region], "--key", key, "--body", str(path),
+                    "--checksum-algorithm", "SHA256", "--checksum-sha256", checksum],
+                    timeout=60 + path.stat().st_size / ENGINE_BUILD_UPLOAD_MINIMUM_RATE)
+                break
+            except subprocess.SubprocessError as error:
+                if attempt == ENGINE_BUILD_UPLOAD_ATTEMPTS:
+                    raise SystemExit(f"could not upload the {platform} engine archive to "
+                                     f"s3://{buckets[region]}/{key}: {error}") from error
 
 
 def spot_placement_scores(arguments, instance_type, regions):
@@ -1362,7 +1341,7 @@ def write_jobs(path, jobs, *, extend=False):
 
 def write_work_items(path, items):
     write_manifest(path, WORK_ITEM_FIELDS, [
-        (item.platform, item.instance_class, item.shard, item.unit_id, item.replica, f"{item.estimated_seconds:g}",
+        (item.platform, item.shard, item.unit_id, item.replica, f"{item.estimated_seconds:g}",
          ",".join(sorted(item.excluded_instances)) or "-") for item in items])
 
 
@@ -1405,8 +1384,6 @@ def job_environment(job, arguments, root, result_root):
     architecture = job.platform.architecture
     benchmark_protocol = phase_protocol(arguments)
     unit_worker = job.workload == "unit-worker"
-    # A concurrency-class unit worker measures multicore units.
-    multicore = unit_worker and unit_worker_pool(job)[1] == "concurrency"
     region = job.region or campaign_regions(arguments)[0]
     amis = getattr(arguments, "regional_amis", None)
     ami_id = job.platform.ami_id if amis is None else amis.get((job.platform.name, region))
@@ -1436,12 +1413,11 @@ def job_environment(job, arguments, root, result_root):
         "INSTANCE_MARKET_TYPE": job.market,
         "CAMPAIGN_SPOT_ONLY": "1" if getattr(arguments, "spot_only", False) else "0",
         "REGULATOR_RELEASE_VERSION": getattr(arguments, "release_version", ""),
-        "BENCHMARK_CPU_LIST": "0-7" if multicore else "0",
+        "BENCHMARK_CPU_LIST": "0",
         "BENCHMARK_EXPECTED_VCPUS": str(job.platform.vcpus),
         "TIMEOUT_SECONDS": str(UNIT_WORKER_TIMEOUT_SECONDS if unit_worker else JOB_TIMEOUT_SECONDS),
         "RESULT_ROOT": str(job_result_root(result_root, job)),
         "TRINO_REVISION": "c7503d170344c4e266f03fdb39e53c82aa7e3594",
-        "REBAR_COMPARATOR_ORDER": "forward" if job.replica % 2 else "reverse",
         "JONI_COMPARATOR_ORDER": "forward" if job.replica % 2 else "reverse",
         "NATIVE_COMPILER_PACKAGE": job.platform.native_compiler_package,
         "CMAKE_PACKAGE": job.platform.cmake_package,
@@ -1489,9 +1465,6 @@ def job_environment(job, arguments, root, result_root):
             "BENCHMARK_ARM_JAVA_ARCHIVE_URL": job.platform.jdk_url,
             "BENCHMARK_ARM_JAVA_ARCHIVE_SHA256": job.platform.jdk_sha256,
         })
-    environment.setdefault(
-        "REBAR_OFFICIAL_DIR",
-        str(Path.home() / ".cache/regulator" / f"rebar-{PINNED_REBAR_COMMIT}"))
     return environment
 
 
@@ -2002,7 +1975,7 @@ def validate_refill_references(result_root, arguments, granted_jobs):
 
 def validate_refill_environment(result_root, arguments, job, receipt_path):
     # A refill may run a newer controller checkout, which chooses the AMI, JDK, packages,
-    # and Trino and Rebar inputs, so a refilled host must match the accepted originals.
+    # and Trino inputs, so a refilled host must match the accepted originals.
     # Ordinary restarts check too, so they never accept a receipt the refill rejected.
     granted = refill_granted_identities(result_root) or set()
     if job.logical_identity not in granted:
@@ -2923,8 +2896,7 @@ def read_unit_workers(path, platforms):
         platform = by_name.get(row["platform"])
         if platform is None or row["shard_id"] != UNIT_WORKER_SHARD:
             raise UnsafeCampaignError(f"unit worker manifest names an unexpected worker: {row}")
-        instance_class = "concurrency" if row["instance_type"] == platform.concurrency_instance_type else "ordinary"
-        job = unit_worker_job(platform, instance_class, int(row["replica"]), int(row["host_epoch"]), row["market"])
+        job = unit_worker_job(platform, int(row["replica"]), int(row["host_epoch"]), row["market"])
         if job.platform.instance_type != row["instance_type"]:
             raise UnsafeCampaignError(f"unit worker manifest names an unexpected instance type: {row}")
         jobs.append(job)
@@ -3675,7 +3647,7 @@ class UnitDispatcher:
     def candidate(self, pool, market):
         candidate = self.candidates.get(pool)
         if candidate is None:
-            candidate = unit_worker_job(self.platforms[pool[0]], pool[1], self.next_ordinal, self.next_epoch, market)
+            candidate = unit_worker_job(self.platforms[pool], self.next_ordinal, self.next_epoch, market)
             self.next_ordinal += 1
             self.next_epoch += 1
             # The manifest names each worker before the budget can reserve its host epoch.
@@ -3705,7 +3677,7 @@ class UnitDispatcher:
                 market = self.pool_demand(pool, now)
                 # A worker is planned only once its platform has room for it.
                 if market is None or not platform_has_capacity(
-                        unit_worker_job(self.platforms[pool[0]], pool[1], 0, 0, market), running, self.arguments):
+                        unit_worker_job(self.platforms[pool], 0, 0, market), running, self.arguments):
                     break
                 candidate = self.candidate(pool, market)
                 if candidate.market == "on-demand" and self.on_demand_ready.get(pool, 0) > now:
@@ -3916,9 +3888,8 @@ def main():
         validate_dependencies(root, arguments, items)
         resolve_engine_builds(root, arguments, platforms)
         validate_prerequisites(root, arguments, platforms)
-        pools = sorted({item.pool for item in items})
-        workers = [unit_worker_job(arguments.unit_platforms[name], instance_class, 0, 0, "spot")
-                   for name, instance_class in pools]
+        workers = [unit_worker_job(arguments.unit_platforms[name], 0, 0, "spot")
+                   for name in sorted({item.pool for item in items})]
         validate_aws(arguments, platforms, workers)
         upload_engine_builds(arguments, workers)
         execute_units(arguments, root, result_root, items, platforms)

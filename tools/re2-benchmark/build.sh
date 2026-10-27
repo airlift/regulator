@@ -6,7 +6,7 @@ ROOT_DIR=$(cd "${SCRIPT_DIR}/../.." && pwd)
 DEPENDENCY_DIR=${RE2_GOLDEN_DEPENDENCY_DIR:-"${ROOT_DIR}/target/re2-golden-dependencies"}
 BUILD_DIR=${RE2_BENCHMARK_BUILD_DIR:-"${ROOT_DIR}/target/re2-benchmark-build"}
 NATIVE_TUNING=${RE2_NATIVE_TUNING:-generic}
-BENCHMARK_TARGETS=${RE2_BENCHMARK_TARGETS:-regexp_benchmark}
+BENCHMARK_TARGETS=${RE2_BENCHMARK_TARGETS:?set RE2_BENCHMARK_TARGETS to the language runner targets}
 
 case "${NATIVE_TUNING}" in
     generic)
@@ -26,14 +26,6 @@ esac
 RE2_DIR=${RE2_DIR:-"${DEPENDENCY_DIR}/re2"}
 ABSL_DIR=${ABSL_DIR:-"${DEPENDENCY_DIR}/abseil-cpp"}
 BENCHMARK_DIR=${BENCHMARK_DIR:-"${DEPENDENCY_DIR}/benchmark"}
-GOOGLETEST_DIR=${GOOGLETEST_DIR:-"${DEPENDENCY_DIR}/googletest"}
-
-# The pinned checkout is shared with the Rebar native build, which refuses a
-# dirty one, so the benchmark patches last only as long as this build.
-trap 'git -C "${RE2_DIR}" checkout -q -- re2/testing/regexp_benchmark.cc' EXIT
-git -C "${RE2_DIR}" checkout -q -- re2/testing/regexp_benchmark.cc
-git -C "${RE2_DIR}" apply "${SCRIPT_DIR}/random-text.patch"
-git -C "${RE2_DIR}" apply "${SCRIPT_DIR}/program-range.patch"
 
 cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
@@ -41,8 +33,7 @@ cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_CXX_FLAGS_RELEASE="${RELEASE_FLAGS}" \
     -DRE2_DIR="${RE2_DIR}" \
     -DABSL_DIR="${ABSL_DIR}" \
-    -DBENCHMARK_DIR="${BENCHMARK_DIR}" \
-    -DGOOGLETEST_DIR="${GOOGLETEST_DIR}"
+    -DBENCHMARK_DIR="${BENCHMARK_DIR}"
 read -r -a benchmark_targets <<<"${BENCHMARK_TARGETS}"
 cmake --build "${BUILD_DIR}" --target "${benchmark_targets[@]}" --parallel
 

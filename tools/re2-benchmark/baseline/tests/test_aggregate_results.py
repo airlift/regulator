@@ -1,6 +1,5 @@
 import argparse
 import csv
-import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -102,24 +101,16 @@ def manifest_row(logical, suite, system, benchmark, parameters, comparator,
 
 def synthetic_manifest():
     rows = []
-    for system in ("native-re2-before", "native-re2-after", "regulator-native-access", "regulator-object-row"):
-        rows.append(manifest_row("native/search", "traditional", system, "search", "textSize=100",
-                                 "NativeSearch", "allocation-free", "paired-native-result"))
     for system in ("joni", "regulator-native-access", "regulator-object-row"):
-        rows.append(manifest_row("joni/count", "trino-public-operations", system, "count", "sourceLength=100",
+        rows.append(manifest_row("joni/count", "trino-everyday-operations", system, "count", "sourceLength=100",
                                  "joni", "operation-dependent", "joni-differential"))
     for system in ("regulator", "trino-optimized", "trino-sql"):
         rows.append(manifest_row("like/contains", "trino-like", system, "matches", "scenario=contains",
                                  "trino-like", "allocation-free", "trino-differential"))
     for size in (10, 100, 1000):
         for system in ("regulator-native-access", "regulator-object-row"):
-            rows.append(manifest_row(f"scale/{size}", "accepted-routes", system, "scan",
-                                     f"textSize={size};workload=ascii", "general-route-control", "allocation-free"))
-    for corpus, suite in (("curated", "rebar-curated"), ("extended", "rebar-extended")):
-        for system in ("native-re2-before", "native-re2-after", "regulator-native-access", "regulator-object-row"):
-            rows.append(manifest_row(f"{corpus}/work/count", suite, system, f"{corpus}/work",
-                                     f"model=count;workload={corpus}/work", "pinned-native-re2",
-                                     "recorded", "native-differential"))
+            rows.append(manifest_row(f"scale/{size}", "trino-everyday-operations", system, "scan",
+                                     f"textSize={size};workload=ascii", "route-control", "allocation-free"))
     return sorted(rows, key=lambda row: row["row_id"])
 
 
@@ -146,16 +137,10 @@ class SampleFixture:
         if "/scale/" in row["row_id"]:
             size = int(aggregate_results.parse_parameters(row["parameters"])["textSize"])
             base = size if system == "regulator-native-access" else size * 1.25
-        elif "/native/search/" in row["row_id"]:
-            base = {"native-re2-before": 100, "native-re2-after": 102,
-                    "regulator-native-access": 80, "regulator-object-row": 120}[system]
         elif "/joni/count/" in row["row_id"]:
             base = {"joni": 100, "regulator-native-access": 90, "regulator-object-row": 110}[system]
-        elif "/like/contains/" in row["row_id"]:
-            base = {"regulator": 50, "trino-optimized": 100, "trino-sql": 25}[system]
         else:
-            base = {"native-re2-before": 100, "native-re2-after": 102,
-                    "regulator-native-access": 95, "regulator-object-row": 125}[system]
+            base = {"regulator": 50, "trino-optimized": 100, "trino-sql": 25}[system]
         return base * multiplier
 
     def add(self, platform, replica):
@@ -167,13 +152,10 @@ class SampleFixture:
             "instance_id": f"i-{platform}-{replica}", "host_epoch": f"{platform}-epoch-{replica}",
             "candidate_commit": "a" * 40, "engine_tree": "b" * 40, "evidence_manifest_sha256": "c" * 64,
         }
-        # The shard's comparators repeat, so its native brackets are keyed by benchmark and parameters.
-        brackets = {f"{row['benchmark']}[{row['parameters']}]": 0.02
-                    for row in self.rows if row["system"] == "native-re2-before"}
         self.sessions[(platform, replica)] = aggregate_results.Session(
-            receipt, Path(platform, f"replica-{replica}"), replica == 4, 0.01, 0.02, brackets, "d" * 64, (), {}, ())
+            receipt, Path(platform, f"replica-{replica}"), replica == 4, 0.01, "d" * 64, (), {})
         self.observed[(platform, replica)] = {row["row_id"]: {
-            "row_id": row["row_id"], "role": "owner", "score": f"{self.score(row, replica):.12g}",
+            "row_id": row["row_id"], "score": f"{self.score(row, replica):.12g}",
             "score_unit": "ns/op", "allocation_bytes": "0" if row["allocation_contract"] == "allocation-free" else "16",
             "result_checksum": hashlib.sha256((row["row_id"] + "\0contract").encode()).hexdigest(),
             "outcome": "accepted",
@@ -181,11 +163,6 @@ class SampleFixture:
 
     def set(self, platform, replica, row_id, field, value):
         self.observed[(platform, replica)][row_id][field] = str(value)
-
-    def bracket(self, platform, replica, benchmark, drift):
-        session = self.sessions[(platform, replica)]
-        self.sessions[(platform, replica)] = dataclasses.replace(
-            session, native_drift_by_benchmark={**session.native_drift_by_benchmark, benchmark: drift})
 
     def reduce(self):
         sessions = list(self.sessions.values())
@@ -220,24 +197,9 @@ class TestReductionRules(unittest.TestCase):
             aggregate_results.parse_parameters("sourceLength=10;workload=ascii"),
             {"sourceLength": "10", "workload": "ascii"})
 
-    def test_semantic_mismatch_observed_row_may_omit_performance_values(self):
-        observed = self.root / "semantic-mismatch-observed.tsv"
-        write_tsv(observed, aggregate_results.OBSERVED_FIELDS, ({
-            "row_id": "only/extended/work/count/regulator-native-access",
-            "shard_id": "only",
-            "system": "regulator-native-access",
-            "score": "",
-            "score_unit": "",
-            "allocation_bytes": "not-measured",
-            "result_checksum": "f" * 64,
-            "outcome": "semantic-mismatch",
-        },))
-
-        self.assertEqual("semantic-mismatch", aggregate_results.read_observed_rows(observed)[0]["outcome"])
-
     def test_comparator_relationship_is_not_invented_from_two_routes(self):
         rows = [
-            manifest_row("absolute/scan", "accepted-routes", system, "scan", "textSize=10", "absolute")
+            manifest_row("absolute/scan", "trino-everyday-operations", system, "scan", "textSize=10", "absolute")
             for system in ("regulator-native-access", "regulator-object-row")
         ]
         self.assertEqual(aggregate_results.comparison_specs(rows), [])
@@ -245,117 +207,14 @@ class TestReductionRules(unittest.TestCase):
     def test_retained_bytes_are_compared_as_a_cost(self):
         self.assertEqual(0.5, aggregate_results.cost_ratio(512, "bytes", 1024, "bytes"))
 
-    def test_extended_rebar_mismatch_is_not_compared(self):
-        manifest = [
-            row for row in self.fixture.rows
-            if "/extended/work/count/" in row["row_id"]
-            and row["system"] in {"native-re2-before", "native-re2-after", "regulator-native-access"}
-        ]
-        host_rows = []
-        for row in manifest:
-            host_rows.append({
-                "platform": "r8i",
-                "host_epoch": "epoch",
-                "unit_id": "unit",
-                "unit_attempt_id": "session/1",
-                "replica_id": "1",
-                "confirmation": "false",
-                "row_id": row["row_id"],
-                "system": row["system"],
-                "shard_id": row["shard_id"],
-                "suite": row["suite"],
-                "rebar_corpus": "extended",
-                "score": "100",
-                "score_unit": "ns/op",
-                "native_bracket_drift": "0",
-                "semantic_outcome": (
-                    "semantic-mismatch" if row["system"] == "regulator-native-access" else "verified"),
-            })
-
-        _, comparisons = aggregate_results.build_comparisons(host_rows, manifest)
-        self.assertEqual([], comparisons)
-
-        next(row for row in host_rows if row["system"] == "regulator-native-access")[
-            "semantic_outcome"] = "verified"
-        _, comparisons = aggregate_results.build_comparisons(host_rows, manifest)
-        self.assertEqual(1, len(comparisons))
-
-    def test_extended_rebar_mismatch_is_not_numerically_aggregated(self):
-        host_rows = [
-            {
-                "platform": "r8i",
-                "row_id": "extended/regulator-native-access",
-                "shard_id": "rebar-a",
-                "confirmation": "false",
-                "semantic_outcome": "semantic-mismatch",
-            }
-            for _ in range(3)
-        ]
-
-        _, rows, gaps = aggregate_results.build_row_aggregates(host_rows, {}, set(), {})
-
-        self.assertEqual([], rows)
-        self.assertEqual([], gaps)
-
-        host_rows[0]["semantic_outcome"] = "verified"
-        with self.assertRaisesRegex(aggregate_results.ReductionError, "changes semantic outcome"):
-            aggregate_results.build_row_aggregates(host_rows, {}, set(), {})
-
-    def test_joni_did_not_finish_is_not_numerically_aggregated(self):
-        host_rows = [
-            {
-                "platform": "r8i",
-                "row_id": "curated/joni",
-                "shard_id": "rebar-a",
-                "confirmation": "false",
-                "semantic_outcome": outcome,
-            }
-            for outcome in ("did-not-finish", "verified", "verified")
-        ]
-
-        _, rows, gaps = aggregate_results.build_row_aggregates(host_rows, {}, set(), {})
-
-        self.assertEqual([], rows)
-        self.assertEqual([], gaps)
-
-    def test_scaling_group_with_semantic_mismatch_is_not_aggregated(self):
-        manifest = [
-            manifest_row(
-                f"extended/scale/{size}",
-                "rebar-extended",
-                "regulator-native-access",
-                "extended/scale",
-                f"sourceLength={size}",
-                "pinned-native-re2")
-            for size in (10, 100, 1000)
-        ]
-        host_rows = [
-            {
-                "platform": "r8i",
-                "unit_attempt_id": "session/1",
-                "row_id": row["row_id"],
-                "semantic_outcome": (
-                    "semantic-mismatch" if "100/" in row["row_id"] else "verified"),
-            }
-            for row in manifest
-        ]
-
-        _, rows, membership, mismatches, classes = aggregate_results.build_scaling(host_rows, manifest)
-
-        self.assertEqual([], rows)
-        self.assertEqual({}, membership)
-        self.assertEqual(set(), mismatches)
-        self.assertEqual({}, classes)
-
     def test_stable_samples_request_no_confirmation(self):
         reduction = self.fixture.reduce()
-        native = find(reduction.comparisons, "r8i", "comparison_id",
-                      "only/native/search/regulator-native-access::native-re2")
-        self.assertEqual(("faster", "false"), (native["direction"], native["unresolved"]))
+        joni = find(reduction.comparisons, "r8i", "comparison_id", "only/joni/count/regulator-native-access::joni")
+        self.assertEqual(("faster", "false"), (joni["direction"], joni["unresolved"]))
         self.assertEqual([], reduction.confirmation_jobs)
 
     def test_contract_identity_disagreement_is_unresolved(self):
-        row_id = "only/native/search/regulator-native-access"
+        row_id = "only/joni/count/regulator-native-access"
         self.fixture.set("r8i", 3, row_id, "result_checksum", "f" * 64)
         reduction = self.fixture.reduce()
         row = find(reduction.rows, "r8i", "row_id", row_id)
@@ -364,7 +223,7 @@ class TestReductionRules(unittest.TestCase):
         self.assertEqual(reduction.confirmation_jobs, [SampleFixture.CONFIRMATION_JOB])
 
     def test_host_cv_and_allocation_are_unresolved(self):
-        row_id = "only/native/search/regulator-native-access"
+        row_id = "only/like/contains/regulator"
         self.fixture.set("r8i", 3, row_id, "score", "200")
         self.fixture.set("r8i", 2, row_id, "allocation_bytes", "8")
         reduction = self.fixture.reduce()
@@ -386,7 +245,7 @@ class TestReductionRules(unittest.TestCase):
         self.assertEqual(reduction.confirmation_jobs, [SampleFixture.CONFIRMATION_JOB])
 
     def test_allocation_violation_alone_does_not_request_confirmation(self):
-        self.fixture.set("r8i", 2, "only/native/search/regulator-native-access", "allocation_bytes", "8")
+        self.fixture.set("r8i", 2, "only/like/contains/regulator", "allocation_bytes", "8")
         self.assertEqual(self.fixture.reduce().confirmation_jobs, [])
 
     def test_material_host_direction_disagreement_is_unresolved(self):
@@ -499,39 +358,8 @@ class TestReductionRules(unittest.TestCase):
 
     def test_existing_confirmation_consumes_platform_unit_allowance(self):
         self.fixture.add("r8i", 4)
-        self.fixture.set("r8i", 3, "only/native/search/regulator-native-access", "score", "200")
+        self.fixture.set("r8i", 3, "only/like/contains/regulator", "score", "200")
         self.assertEqual(self.fixture.reduce().confirmation_jobs, [])
-
-    def test_native_bracket_drift_above_gate_marks_only_affected_rows_unresolved(self):
-        self.fixture.bracket("r8i", 1, "curated/work[model=count;workload=curated/work]", 0.06)
-        reduction = self.fixture.reduce()
-
-        affected_rows = [
-            row for row in reduction.rows
-            if row["platform"] == "r8i" and row["benchmark"] == "curated/work"
-        ]
-        self.assertTrue(affected_rows)
-        self.assertTrue(all(row["unresolved"] == "true" for row in affected_rows))
-        self.assertTrue(all(
-            "native-bracket-drift-above-5-percent" in row["unresolved_reasons"]
-            for row in affected_rows))
-
-        unaffected_rows = [
-            row for row in reduction.rows
-            if row["platform"] == "r8i" and row["benchmark"] == "extended/work"
-        ]
-        self.assertTrue(unaffected_rows)
-        self.assertTrue(all(
-            "native-bracket-drift-above-5-percent" not in row["unresolved_reasons"]
-            for row in unaffected_rows))
-
-        affected_comparisons = [
-            row for row in reduction.comparisons
-            if row["platform"] == "r8i" and "curated/work/count" in row["candidate_row_id"]
-        ]
-        self.assertTrue(affected_comparisons)
-        self.assertTrue(all(row["unresolved"] == "true" for row in affected_comparisons))
-        self.assertEqual(reduction.confirmation_jobs, [SampleFixture.CONFIRMATION_JOB])
 
     def test_throughput_ratio_is_inverted_to_cost(self):
         candidate = "only/joni/count/regulator-native-access"
@@ -544,66 +372,6 @@ class TestReductionRules(unittest.TestCase):
                     self.fixture.set(platform, replica, row_id, "score", score)
         row = find(self.fixture.reduce().comparisons, "r8i", "candidate_row_id", candidate)
         self.assertAlmostEqual(float(row["median_ratio"]), 0.5)
-
-    def test_checked_in_rebar_exclusions_are_all_ingested(self):
-        path = BASELINE.parent / "manifests" / "rebar-exclusions.tsv"
-        events = aggregate_results.load_rebar_exclusions([path], "test-campaign")
-        self.assertEqual(len(events), 61)
-        self.assertTrue(all(json.loads(event["details"])["scope"] == "Rebar" for event in events))
-
-    def test_legacy_joni_exclusion_is_rejected(self):
-        path = self.root / "joni-exclusions.tsv"
-        write_tsv(path, ("benchmark", "model", "reason"), ({
-            "benchmark": "curated/01-literal/sherlock-en",
-            "model": "count",
-            "reason": "manual exclusion",
-        },))
-
-        with self.assertRaisesRegex(aggregate_results.ReductionError, "unsupported exclusion columns"):
-            aggregate_results.load_rebar_exclusions([path], "test-campaign")
-
-    def test_checked_in_joni_applicability_records_only_unavailable_rows(self):
-        path = BASELINE.parent / "manifests" / "rebar-joni-applicability.tsv"
-        manifest = aggregate_results.load_manifest(BASELINE / "rows.tsv", MANIFEST_ROW_COUNT)
-        events = aggregate_results.load_rebar_joni_applicability(
-            path, manifest, "test-campaign")
-
-        self.assertEqual(13, len(events))
-        details = [json.loads(event["details"]) for event in events]
-        self.assertEqual({"Joni"}, {detail["scope"] for detail in details})
-        self.assertEqual(
-            {"not-compatible"},
-            {detail["status"] for detail in details})
-
-    def test_joni_applicability_must_match_frozen_rows(self):
-        path = BASELINE.parent / "manifests" / "rebar-joni-applicability.tsv"
-        manifest = aggregate_results.load_manifest(BASELINE / "rows.tsv", MANIFEST_ROW_COUNT)
-        manifest = [
-            row for row in manifest
-            if not (row["suite"].startswith("rebar-") and row["system"] == "joni")
-        ]
-
-        with self.assertRaisesRegex(
-                aggregate_results.ReductionError,
-                "frozen Rebar/Joni rows differ from applicability"):
-            aggregate_results.load_rebar_joni_applicability(path, manifest, "test-campaign")
-
-    def test_joni_applicability_must_match_frozen_digest(self):
-        path = BASELINE.parent / "manifests" / "rebar-joni-applicability.tsv"
-        manifest = aggregate_results.load_manifest(BASELINE / "rows.tsv", MANIFEST_ROW_COUNT)
-        changed = next(
-            row.copy() for row in manifest
-            if row["suite"].startswith("rebar-") and row["system"] == "joni")
-        changed["workload_checksum"] = re.sub(
-            r"joni-applicability=[0-9a-f]{64}",
-            "joni-applicability=" + ("0" * 64),
-            changed["workload_checksum"])
-        manifest = [changed if row["row_id"] == changed["row_id"] else row for row in manifest]
-
-        with self.assertRaisesRegex(
-                aggregate_results.ReductionError,
-                "digest differs from frozen manifest binding"):
-            aggregate_results.load_rebar_joni_applicability(path, manifest, "test-campaign")
 
     def write_events(self, fields, rows):
         path = self.root / "campaign-events.tsv"
@@ -652,15 +420,6 @@ class TestReductionRules(unittest.TestCase):
         self.assertEqual(rejected_gap["severity"], "recorded")
         self.assertEqual(rejected_gap["status"], "recorded")
 
-    def test_campaign_event_cannot_inject_joni_exclusion(self):
-        path = self.write_events(aggregate_results.EVENT_FIELDS, (self.archived_event(
-            event_type="exclusion", details='{"benchmark":"curated/work","model":"count","scope":"Joni"}'),))
-
-        with self.assertRaisesRegex(
-                aggregate_results.ReductionError,
-                "authoritative applicability ledger"):
-            aggregate_results.load_events([path])
-
     def test_preformatted_event_details_are_preserved(self):
         path = self.write_events(aggregate_results.EVENT_FIELDS, (self.archived_event(
             details="controller classification: spot interruption"),))
@@ -677,10 +436,8 @@ class TestReductionRules(unittest.TestCase):
 
 
 class TestUnitCampaignReduction(unittest.TestCase):
-    # Units 1 and 3 own native brackets and native-access rows; units 2 and 4 own object rows and copy brackets.
-    SHARD = "traditional-extra-big-fixed"
-    SCORES = {"native-re2-before": 100, "native-re2-after": 102, "regulator-native-access": 80,
-              "regulator-object-row": 300}
+    SHARD = "trino-operations"
+    SCORES = {"joni": 100, "regulator-native-access": 80, "regulator-object-row": 300}
 
     def reduction(self, root):
         """A chained unit campaign of the shard whose first unit is unstable on r8i, and a reducer over it."""
@@ -688,11 +445,10 @@ class TestUnitCampaignReduction(unittest.TestCase):
                         if (unit["shard_id"], unit["unit_index"]) == (self.SHARD, "1"))
         unstable_rows = {row_id for row_id in unstable["owned"] if row_id.endswith("/regulator-native-access")}
 
-        def score(row, role, platform, replica):
+        def score(row, platform, replica):
             if platform == "r8i" and row["row_id"] in unstable_rows:
                 return {1: 60, 2: 80, 3: 100, 4: 80}[replica]
-            # A copy measures its bracket again, here at another cost, beside the unit's own rows.
-            return self.SCORES[row["system"]] * (2 if role == "copy" else 1)
+            return self.SCORES[row["system"]]
 
         campaign = UnitCampaign(root / "campaign-results", self.SHARD, score=score, host_calibrations=True,
                                 chained=True)
@@ -716,40 +472,28 @@ class TestUnitCampaignReduction(unittest.TestCase):
                 "shards": BASELINE / "shards.tsv", "selected_shards": [self.SHARD],
                 "primary_receipts": [campaign.write_ledger(root / "accepted-units.tsv", campaign.receipts)],
                 "confirmation_receipts": [campaign.write_ledger(root / "confirmation-units.tsv", confirmations)],
-                "artifacts_root": [campaign.root], "session_dir": [], "events": [], "rebar_exclusions": [],
-                "rebar_joni_applicability": None, "artifact_index": [], "output_dir": root / "output",
+                "artifacts_root": [campaign.root], "session_dir": [], "events": [], "artifact_index": [], "output_dir": root / "output",
                 "campaign_artifact": artifact, "expected_manifest_rows": MANIFEST_ROW_COUNT, **overrides}))
 
         return campaign, unstable, unstable_rows, aggregate
 
-    def test_unit_attempts_reduce_owned_samples_paired_within_their_attempt(self):
+    def test_unit_attempts_reduce_samples_paired_within_their_attempt(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            _, unstable, unstable_rows, aggregate = self.reduction(root)
+            _, unstable, _, aggregate = self.reduction(root)
             summary = aggregate([])
             output = root / "output"
-            host_rows = read_tsv(output / "host-rows.tsv")
-            self.assertEqual((24, 2 * 3 * 2 * 14), (
-                summary["primary_sessions"], sum(row["role"] == "copy" for row in host_rows)))
+            self.assertEqual(24, summary["primary_sessions"])
             aggregates = {(row["platform"], row["row_id"]): row for row in read_tsv(output / "row-aggregates.tsv")}
-            bracket = next(row_id for row_id in unstable["owned"] if row_id.endswith("/native-re2-before"))
+            joni = next(row_id for row_id in unstable["owned"] if row_id.endswith("/joni"))
             self.assertEqual(("3", "100"), (
-                aggregates[("r9g", bracket)]["host_count"], aggregates[("r9g", bracket)]["primary_median_score"]))
-            # A candidate pairs with the bracket measured in its own attempt: owned beside native access,
-            # copied beside object rows, though both attempts ran on one host.
+                aggregates[("r9g", joni)]["host_count"], aggregates[("r9g", joni)]["primary_median_score"]))
             ratios = [row for row in read_tsv(output / "host-comparator-ratios.tsv") if row["platform"] == "r9g"]
             self.assertEqual(
-                {"regulator-native-access": {aggregate_results.format_number(80 / 101)},
-                 "regulator-object-row": {aggregate_results.format_number(300 / 202)}},
+                {"regulator-native-access": {aggregate_results.format_number(80 / 100)},
+                 "regulator-object-row": {aggregate_results.format_number(300 / 100)}},
                 {system: {row["ratio"] for row in ratios if row["candidate_system"] == system}
                  for system in ("regulator-native-access", "regulator-object-row")})
-            owners = {(row["unit_attempt_id"], row["row_id"]) for row in host_rows if row["role"] == "owner"}
-            self.assertTrue(all((row["unit_attempt_id"], row["candidate_row_id"]) in owners for row in ratios))
-            # Scaling groups, too, take only owned samples.
-            scaling = read_tsv(output / "scaling.tsv")
-            self.assertTrue(scaling)
-            self.assertTrue(all(
-                (row["unit_attempt_id"], row_id) in owners for row in scaling for row_id in row["row_ids"].split(",")))
             self.assertEqual(
                 [{"platform": "r8i", "shard_id": self.SHARD, "unit_id": unstable["unit_id"]}],
                 read_tsv(output / "confirmation-jobs.tsv"))
@@ -767,11 +511,6 @@ class TestUnitCampaignReduction(unittest.TestCase):
                 "host_epoch": "interrupted-epoch", "reason": "Spot interruption",
                 "artifact_uri": "s3://bucket/rejected/interrupted.tar.zst", "artifact_sha256": "e" * 64,
             },))
-            exclusions = root / "rebar-exclusions.tsv"
-            write_tsv(exclusions, ("name", "model", "definition", "reason"), ({
-                "name": "unicode/unsupported", "model": "grep",
-                "definition": "unicode/unsupported.toml", "reason": "no-native-re2-semantics",
-            },))
             index = root / "artifact-index.tsv"
             write_tsv(index, UNIT_SESSION.UNIT_SESSION_FIELDS + ("artifact_uri", "artifact_sha256", "retrieved_at"), [{
                 **{field: receipt[field] for field in UNIT_SESSION.UNIT_SESSION_FIELDS},
@@ -779,7 +518,7 @@ class TestUnitCampaignReduction(unittest.TestCase):
                 "artifact_sha256": hashlib.sha256(receipt["unit_attempt_id"].encode()).hexdigest(),
                 "retrieved_at": "2026-08-02T00:00:00Z",
             } for receipt in campaign.receipts])
-            aggregate([], events=[events], rebar_exclusions=[exclusions], artifact_index=[index])
+            aggregate([], events=[events], artifact_index=[index])
             output = root / "output"
             inventory = read_tsv(output / "artifact-inventory.tsv")
             self.assertTrue(all(row["artifact_uri"].startswith("s3://") for row in inventory))
@@ -792,11 +531,7 @@ class TestUnitCampaignReduction(unittest.TestCase):
             self.assertEqual(24, len(capacity))
             self.assertTrue(all(row["exit_status"] == "0" for row in capacity))
             events = read_tsv(output / "events.tsv")
-            self.assertEqual({row["event_type"] for row in events}, {"interruption", "exclusion"})
-            rebar_event = next(row for row in events if '"scope":"Rebar"' in row["details"])
-            self.assertEqual(json.loads(rebar_event["details"])["model"], "grep")
-            rebar_gap = next(row for row in read_tsv(output / "gap-ledger.tsv") if row["scope"] == "Rebar")
-            self.assertEqual(rebar_gap["row_id"], "unicode/unsupported")
+            self.assertEqual(["interruption"], [row["event_type"] for row in events])
 
             report = root / "report.md"
             arguments = argparse.Namespace(input_dir=output, output=report, title="Synthetic Baseline")

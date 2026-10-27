@@ -61,14 +61,11 @@ class TestSpecializedPatternRows(unittest.TestCase):
     MANIFEST = [row for row in read_rows(BENCHMARK_TOOLS / 'baseline/rows.tsv') if specialized_suite(row['suite'])]
     CATALOG = baseline_data.SPECIALIZED_CATALOG.read_text().splitlines()
     GENERATED = 'trino-specialized-patterns-a/clickbenchHost/replace/regulator-generated-native-access'
-    # A Regulator variant of a hypothetical RE2 section, compared with native RE2 by the shared baseline.
-    RE2_CATALOG = '\t'.join(('re2-specialized-patterns', 'literalPrefix', 'contains', 'abc[0-9]+', 'Literal prefix', 'Finds a literal prefix.',
-                             'native-re2', 're2-specialized/'))
-    RE2 = [{'row_id': f're2-specialized-patterns/literalPrefix/contains/{system}', 'shard_id': 're2-specialized-patterns',
-            'suite': 're2-specialized-patterns', 'system': system, 'benchmark': f'io.airlift.regulator.BenchmarkSpecializedRe2.contains{suffix}',
-            'parameters': 'workload=literalPrefix', 'comparator': 'native-re2'}
-           for system, suffix in (('regulator-native-access', ''), ('regulator-object-row', ''), ('regulator-generated-native-access', 'Generated'),
-                                  ('regulator-generated-object-row', 'Generated'), ('native-re2-before', ''), ('native-re2-after', ''))]
+    # A workload of a hypothetical third shard that the catalog does not list.
+    UNCATALOGUED = [{'row_id': f'trino-specialized-patterns-c/literalPrefix/contains/{system}', 'shard_id': 'trino-specialized-patterns-c',
+                     'suite': 'trino-specialized-patterns', 'system': system, 'benchmark': 'io.airlift.regulator.BenchmarkSpecializedTrinoRegexp.contains',
+                     'parameters': 'workload=literalPrefix', 'comparator': 'joni'}
+                    for system in ('regulator-native-access', 'regulator-object-row', 'joni')]
 
     def rows(self, manifest=MANIFEST, score=lambda row, replica: 10, hosts=lambda rows: rows, comparisons=lambda rows: rows):
         # The baseline reducer pairs every Regulator variant in a unit attempt with that attempt's one comparator run.
@@ -78,11 +75,11 @@ class TestSpecializedPatternRows(unittest.TestCase):
             tables['row-aggregates'].append({'platform': 'c9g', 'row_id': row['row_id'], 'benchmark': row['benchmark'], 'parameters': row['parameters']})
             for replica in (1, 2, 3):
                 tables['host-rows'].append({
-                    'platform': 'c9g', 'shard_id': row['shard_id'], 'suite': row['suite'], 'rebar_corpus': '', 'replica_id': str(replica),
+                    'platform': 'c9g', 'shard_id': row['shard_id'], 'suite': row['suite'], 'replica_id': str(replica),
                     'host_epoch': f'epoch-{replica}', 'unit_id': 'unit', 'unit_attempt_id': f'session-{replica}/1',
                     'confirmation': 'false', 'row_id': row['row_id'], 'instance_id': f'i-{replica}',
                     'score': str(score(row, replica) if row['system'].startswith('regulator') else 100), 'score_unit': 'ns/op',
-                    'native_bracket_drift': '', 'outcome': 'accepted'})
+                    'outcome': 'accepted'})
         tables['host-rows'] = hosts(tables['host-rows'])
         _, ratios = aggregate_results.build_comparisons(tables['host-rows'], manifest)
         tables['comparison-aggregates'] = [{'platform': 'c9g', 'comparison_id': comparison, 'unresolved': 'false', 'unresolved_reasons': ''}
@@ -186,15 +183,6 @@ class TestSpecializedPatternRows(unittest.TestCase):
         with self.catalog([*self.CATALOG, self.CATALOG[1]]), self.assertRaisesRegex(ValueError, 'duplicate specialized pattern'):
             specialized_patterns()
 
-    def test_a_new_language_reaches_the_report_through_its_catalog_rows(self):
-        with self.catalog([*self.CATALOG, self.RE2_CATALOG]):
-            rows = [row for row in self.rows(self.MANIFEST + self.RE2) if row['language'] == 're2']
-        cases = ('re2-specialized/literalPrefix', 're2-specialized/literalPrefix/generated')
-        self.assertEqual({(row['caseId'], row['memoryMode']) for row in rows}, {(case, mode) for case in cases for mode in ('native', 'safe')})
-        self.assertEqual({row['population'] for row in rows}, {'specialized-patterns'})
-        generated = next(row for row in rows if row['caseId'] == 're2-specialized/literalPrefix/generated')
-        self.assertEqual(set(generated['variantGainWarnings']), {'baseline/re2-specialized-patterns/literalPrefix/contains'})
-
     def test_rejects_rows_that_differ_from_the_catalog_or_their_pairing(self):
         experimental = [{**row, 'row_id': row['row_id'].replace('/regulator-generated-', '/regulator-experimental-'),
                          'system': row['system'].replace('regulator-generated-', 'regulator-experimental-')}
@@ -212,7 +200,7 @@ class TestSpecializedPatternRows(unittest.TestCase):
         cases = {
             # The reducer pairs every Regulator system with Joni, so an unknown regex variant reaches import.
             'unknown variant': ({'manifest': self.MANIFEST + experimental}, 'unknown specialized-pattern system: regulator-experimental-native-access'),
-            'uncatalogued suite': ({'manifest': self.MANIFEST + self.RE2}, 'not in the catalog: re2-specialized-patterns/literalPrefix/contains'),
+            'uncatalogued workload': ({'manifest': self.MANIFEST + self.UNCATALOGUED}, 'not in the catalog: trino-specialized-patterns-c/literalPrefix/contains'),
             'mislabelled workload': ({'manifest': mislabelled}, 'measures workload keyValue'),
             'candidate unit': ({'hosts': like('regulator', score_unit='us/op')}, 'is in us/op, not ns/op'),
             # The reducer scales a 0.1 us comparator into the ratio, but import would publish 0.1 ns.

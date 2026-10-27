@@ -5,9 +5,9 @@
 route a [work unit](#work-units) needs, keeping route artifacts under
 `routes/<route>`. Odd replicas run `native-access` first, while even replicas
 run `object-row` first, so route startup and thermal effects do not
-systematically favor one implementation. Expensive pinned Trino/Joni and
-Rebar/native preparation is shared through `BASELINE_SHARED_WORK_DIR`;
-measurements and semantic receipts are never shared between routes.
+systematically favor one implementation. Expensive pinned Trino/Joni
+preparation is shared through `BASELINE_SHARED_WORK_DIR`; measurements and
+semantic receipts are never shared between routes.
 
 `freeze-candidate.sh` creates an immutable benchmark ref and records that
 candidate's commit, complete tree, production tree, deterministic source
@@ -39,16 +39,16 @@ iteration counts while avoiding a new forked JVM for every row:
   sharing the Regulator host JVM. The three primary replicas therefore provide
   three isolated Joni JVMs on three hosts for every row, each with ten warmup
   and ten measurement iterations. Five forks on every one of the three hosts
-  would provide 15 redundant JVMs per row and make the 184-row Trino operations
+  would provide 15 redundant JVMs per row and make the 104-row Trino operations
   comparator spend most of its time starting JVMs rather than measuring rows.
   A Joni row therefore has ten samples on each host, not the 50 samples used by
   the bounded Regulator process set. Rows over the 5% relative standard-error
   ceiling remain explicitly precision-rejected and are candidates for a
   targeted longer-protocol rerun.
 - Each row's qualification protocol is frozen in `row-protocol.tsv`: how it
-  executes (`jmh-processes`, `jmh-forks`, `native-bracket`, `rebar`, or
-  `memory-census`), its process or fork count, warmup and measurement
-  iteration counts and windows, and its relative standard-error ceiling.
+  executes (`jmh-processes` or `jmh-forks`), its process or fork count, warmup
+  and measurement iteration counts and windows, and its relative standard-error
+  ceiling.
   `run-shard.sh` reads these fields instead of deriving them, so a row keeps
   its protocol however its route is divided. `generate-units.py` derives the
   file from the rules hosts applied when each host measured whole routes. A
@@ -66,9 +66,6 @@ iteration counts while avoiding a new forked JVM for every row:
 - The first process records GC allocation metrics. The other four processes do
   not run the GC profiler because its in-process instrumentation perturbs the
   primary timing score. All five processes contribute primary timing samples.
-- Compiler rows use 300 ms warmup iterations because their C2 transition is
-  later than the matching loops. The additional warmup is charged to the
-  route duration budget.
 - Every representative whose row is frozen with 50 ms windows is compared with
   a full five-fork, ten-by-one-second protocol on every replica. The
   specialized side uses five independent JVMs with the same JMH compiler
@@ -82,44 +79,19 @@ iteration counts while avoiding a new forked JVM for every row:
   most 5% relative standard error under each protocol, and differ by at most
   5%; otherwise the unit attempt is rejected before its result can be
   accepted.
-- An exact row that fails this equivalence gate is listed in
-  `full-protocol-benchmarks.tsv` instead of weakening the gate. Qualification
-  excludes that method from the main process set, reruns its other parameters
-  with the bounded protocol, and runs the failing parameter with the full
-  protocol. The normalizer requires five process groups for every resulting
-  row while permitting those disjoint JSON row sets. A selector may list
-  multiple comma-separated values for a parameter when the full-protocol rows
-  form a Cartesian group; the configured full and bounded selections must be
-  disjoint and together cover the method's complete manifest row set. This
-  selection follows the benchmark row onto its configured classpath; a Trino
-  benchmark on the special pinned classpath must generate the same bounded and
-  full side files that the default candidate classpath generates.
-- The released-1.0 smoke rejected `searchEasy2DfaBoolean(textSize=32768)`
-  with an 18.6% protocol median difference on R8g. A subsequent 4096-byte
-  representative differed by 46.1% on R8i's pure-Java route, with full-run
-  process medians near 1.28 and 1.90 microseconds. These distributions do not
-  establish that shorter iterations caused the different medians. The entire
-  `BenchmarkRe2SearchExtra` family now uses full timing in eight
-  `traditional-extra-*` shards. Each route has at most 30 JMH rows, and both
-  applicable memory routes fit the unchanged 90-minute static host deadline.
-  The split preserves every Java/native pair and input size. Original rejected
-  measurements remain evidence; they are not accepted final samples.
 - Numerical protocol rejection has exit status 42. It leaves the unit
   unresolved and the campaign incomplete, without terminating unrelated work
   or automatically retrying the rejected timings. Malformed evidence and
   resource failures retain the shared fleet stop behavior.
 - A failed check of a route's correctness stage has exit status 44: a
   semantic test, the DFA probe, a differential verifier or its count of
-  verified cases, the curated Rebar verification, or the pinned Trino
-  comparator's verification, including one that could not start. The
+  verified cases, or the pinned Trino comparator's verification, including
+  one that could not start. The
   campaign leaves the unit unresolved without retrying it, and its phase is
   not accepted.
 - Fast allocating rows require special scrutiny because a 50 ms window can
   contain zero collections in most iterations and concentrate collection cost
-  in one iteration that a median discards. The `countRegulator`
-  `captureLateMatch` rows use the full protocol for this reason: they allocate
-  208 bytes per operation, while their final C2 instruction stream is identical
-  under forked and host-JVM execution.
+  in one iteration that a median discards.
 - Smoke runs one top-level process with one 20 ms warmup and three 20 ms
   measurement iterations per row. It also primes the calibration workload once
   before the recorded before sample. Qualification uses only its recorded full
@@ -162,38 +134,22 @@ estimate from:
 - every representative full-protocol and bounded-protocol comparison, including
   all six top-level JVM process startups
 - all warmup and measurement windows
-- every selected traditional native-bracket row multiplied by the native
-  repetition count and minimum measurement window
-- a 900-second cold native RE2 build and process-startup allowance
-- every selected Rebar system row multiplied by the protocol's maximum warmup
-  and measurement windows
-- a 900-second cold Rebar build and process-startup allowance
-- every selected Rebar/Joni row multiplied by the fixed 30-second semantic
-  verification timeout
 - a 900-second pinned Trino preparation, build, and route-harness allowance for
   every host that performs that work
-- a 900-second allowance for each retained-memory census process
 - a 600-second host bootstrap allowance
 
 These are conservative acceptance-gate allowances rather than predicted wall
-times. Rebar measurement is bounded directly by its selected row count and
-configured maximum windows; cold build and census work use explicit allowances
-because their duration depends on the host and shared-work cache state. A
-route is rejected before measurement if its estimate exceeds 90 minutes, and
-`run-metadata.txt` records each route estimate. Native RE2 and Rebar keep their checked-in specialized protocols
-rather than being forced through JMH.
+times. The Trino preparation uses an explicit allowance because its duration
+depends on the host and shared-work cache state. A route is rejected before
+measurement if its estimate exceeds 90 minutes, and `run-metadata.txt` records
+each route estimate.
 
 `unit_cost.py` estimates the measurement seconds of any set of rows from their
 frozen protocols, with the same per-row, per-selector startup,
-representative, and calibration rules. It leaves out the cold-build, pinned
-Trino preparation, and host bootstrap allowances, which do not grow with the
-rows a host measures, and the Rebar verification allowance, which grows with
-the selected Rebar rows. The route estimate differs from it in three recorded
-ways: it charges none of `trino-like`'s
-3,600 seconds of iterations, it charges the compiler warmup to the 26 native
-`traditional-capture` rows that share the compiler benchmark names (325
-seconds), and it also charges each full-protocol row the bounded windows that
-row never runs (5 seconds each).
+representative, and calibration rules. It leaves out the pinned Trino
+preparation and host bootstrap allowances, which do not grow with the rows a
+host measures. The route estimate differs from it in one recorded way: it
+charges none of `trino-like`'s 3,600 seconds of iterations.
 
 Measured-shard normalization requires exactly one process sample group in each
 top-level JMH JSON file. Calibration retains JMH's ordinary forked shape: one
@@ -202,19 +158,13 @@ in the calibration statistics.
 
 ### Engine Builds
 
-A host installs the native RE2 benchmark, the Rebar engines and native
-runners, and the pinned Trino harness from its platform's
-[engine build](../aws/README.md#engine-builds) instead of building them. The
-cold-build allowances above stay unchanged: a host whose native target differs
-from the builder's builds the native engines itself, and the bound must hold
-for that host too. Each route's `run-metadata.txt` records `native_re2_build`,
-`rebar_build`, `rebar_native_build`, and `trino_harness_build` as
-`prebuilt:<archive-sha256>`, `local`, or `not-used`; `engine-build.txt` in the
-route records the host's native target and CPU identity against the builder's.
-Routes from sessions before engine builds carry neither and remain valid.
-Engine builds change where an engine binary came from, not what a route
-measures or how it is accepted and reduced. The language comparison does not
-use them.
+A host installs the pinned Trino harness from its platform's
+[engine build](../aws/README.md#engine-builds) instead of building it. Each
+route's `run-metadata.txt` records `trino_harness_build` as
+`prebuilt:<archive-sha256>`, `local`, or `not-used`, and `engine-build.txt` in
+the route records the installed build. Engine builds change where the harness
+came from, not what a route measures or how it is accepted and reduced. The
+language comparison does not use them.
 
 ## Work Units
 
@@ -222,8 +172,8 @@ A work unit is a set of one shard's rows that a host can measure between two
 chained calibrations in about 15 minutes, with every comparison and scaling
 fit it feeds complete inside it. `generate-units.py` writes `units.tsv` (one
 line per unit with its counts and estimated seconds) and `unit-rows.tsv`
-(each unit's owned rows, copied rows, and representatives; one row ID
-contains a comma, so row lists are not packed into a column).
+(each unit's owned rows and representatives; one row ID contains a comma,
+so row lists are not packed into a column).
 `validate-units.py` checks them independently. The three tables are not checked
 in: `freeze-candidate.sh` generates them into the candidate archive and beside
 the baseline tooling, where the controller reads them, and the offline gate
@@ -232,20 +182,14 @@ worker host leases units one at a time (see
 [Unit workers](../aws/README.md#unit-workers)).
 
 - Atoms are the rows that must share a unit: every system of one logical row,
-  which keeps both routes, native RE2 brackets, Joni, Trino, and route
-  controls beside their candidates; every point of a scaling group; the whole
-  `retained-memory` shard; and each Rebar workload with all of its engines.
+  which keeps both routes, Joni, and Trino beside their candidates, and every
+  point of a scaling group.
 - A unit's share of a JMH method must stay one exact selector, the method and
   one Cartesian `-p` block for each system and frozen protocol. A method is
   split along at most one parameter, its most varied one outside its scaling
   sizes, so rows sharing that parameter's value are one atom. JMH splits a
   `-p` value list at every comma, so a parameter with a value containing one
   never splits a method, and a method with no other parameter stays whole.
-- An atom over budget that holds native RE2 rows is split without its logical
-  row links: each route's scaling groups become their own atom, still joined
-  to any Joni, Trino, or route-control comparator, and each copies the native
-  bracket rows it is compared against. The copy in the unit measuring the
-  bracket's own route owns the row's sample; other copies only pair.
 - Each shard is packed into `ceil(cost / 788 s)` units, the 900-second unit
   less one chained calibration, by placing atoms largest first, ties by
   smallest row ID, into the unit with the lowest estimate. When a unit holding
@@ -255,22 +199,16 @@ worker host leases units one at a time (see
   most demanding of replicas 1 to 3, its representatives. The model counts a
   startup per method even where methods sharing one `-p` block run as one
   selector, a deliberately conservative allowance. Units are indexed by
-  their smallest owned row ID, and `lifecycle-shared-cold` units are measured
-  on the concurrency instance type.
+  their smallest owned row ID.
 - Each representative that runs, one whose row is frozen with 50 ms windows,
   belongs to the unit owning its row; replica 4 uses replica 1's. The
-  `trino-like` and full-protocol entries never run and are not attached.
-- A unit ID is the SHA-256 of the shard, the sorted owned and copied rows, the
+  `trino-like` entries never run and are not attached.
+- A unit ID is the SHA-256 of the shard, the sorted owned rows, the
   digest of their frozen protocols, the attached representatives, and the
   order rule, under which a unit sequences its rows as its route handler
   sequences a route, comparator order included. Changing any of them changes
   the ID.
-- A unit over 900 seconds is a single atom measured alone, and
-  `validate-units.py` allows only the unit IDs it lists: the 47-minute
-  `retained-memory` shard, each 19-minute text size of
-  `lifecycle-shared-cold` with both routes over five worker counts, and each
-  17-minute route of a `traditional-extra-*` eight-size scaling group with its
-  native bracket.
+- No unit exceeds 900 seconds.
 
 ### Running a Unit
 
@@ -285,18 +223,13 @@ one a shard route runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
   qualification runs each row at its own process count and windows, and smoke
   keeps the route's smoke windows. A method holding a value JMH cannot select
   runs whole with the handler's own arguments.
-- A unit holding only object-row Java rows of a native-bracketed atom
-  measures its copied native rows around them on the object-row route. Copied
-  rows are measured and marked pairing-only in the unit's observed rows.
-- Odd replicas run native access, then object row, with forward Joni and
-  Rebar comparator order; even replicas reverse both, as the unit ID's order
+- Odd replicas run native access, then object row, with forward Joni
+  comparator order; even replicas reverse both, as the unit ID's order
   rule binds. A comparator order set in the environment that disagrees is an
   error.
 - The first route calibrates before its rows and the last route after them,
   always in the native-access JVM so the two sides compare across routes. The
-  unit's before/after calibration drift must be within 5%. Native bracket
-  drift is kept per row; above 5% it leaves only the affected comparisons
-  unresolved during reduction.
+  unit's before/after calibration drift must be within 5%.
   With `BASELINE_UNIT_HOST_EVIDENCE`, a worker host's evidence directory, the
   calibrations are stored there once as `calibrations/<sha256>.json` instead
   of in the routes' raw artifacts. Chaining, by naming the previous unit's
@@ -322,32 +255,23 @@ one a shard route runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
   to 4 in process, and checks that the selectors expand to exactly the unit's
   rows under their frozen protocols, in replica route order, with the unit's
   representatives. It also plans a deterministic sample through `run-unit.sh`,
-  one unit per route handler pairing plus `traditional-capture`, a unit with
-  copied rows, and a whole-method unit, for qualification replicas 1 and 2 and
-  smoke replica 4.
+  one unit per route handler pairing and any whole-method unit, for
+  qualification replicas 1 and 2 and smoke replica 4.
 
 ## Comparator Ordering
 
 `JONI_COMPARATOR_ORDER=forward|reverse` controls the accepted measurement
-order for `trino-operations`, `trino-specialized-patterns-a` and `-b`,
-`trino-final-line`, `retained-memory`, and the Rebar shards. Forward runs
-Regulator before Joni; reverse runs Joni before Regulator. The JMH systems use
-separate exact invocations and JSON files. Retained memory uses separate
-accepted census processes, and Rebar uses separate exact engine and workload
-filters, in the same selected order.
+order for `trino-operations` and `trino-specialized-patterns-a` and `-b`.
+Forward runs Regulator before Joni; reverse runs Joni before Regulator. The
+JMH systems use separate exact invocations and JSON files.
 
-Traditional native RE2 and Rebar retain explicit before/after native brackets.
 The candidate and comparators always run on the same host and under the same
 smoke or qualification protocol.
 
 ## Route Handlers
 
-- `jmh` runs the checked-in candidate JMH suites selected by `jmh-suites.tsv`.
-- `traditional` runs candidate JMH rows bracketed by pinned native RE2 where
-  the route owns native rows.
 - `trino-operations` runs exact Regulator and pinned Joni filters separately.
-  Its 312 application-shaped rows rotate through changing Slice values; the
-  older fixed-haystack public-operation rows remain diagnostic controls. The
+  Its 312 application-shaped rows rotate through changing Slice values. The
   same handler runs `trino-specialized-patterns-a` and `-b`, whose routes each
   measure three Regulator variants: the scan-plan interpreter, the regular
   engine, and generated bytecode. The two shards divide the workloads so each
@@ -359,42 +283,12 @@ smoke or qualification protocol.
   normalization. Even replicas reverse the Regulator variants and their
   workloads; Joni's workloads keep their forward order, and
   `JONI_COMPARATOR_ORDER` still places Joni before or after all the variants.
-- `trino-search-edges` runs the 168 Regulator-only search-edge rows through the
-  generic JMH handler on both memory routes.
-- `trino-final-line` compiles the checked-in harness against the exact pinned
-  Trino archive and normalizes its physical method names to stable manifest
-  operation IDs.
 - `trino-like` runs the Regulator, Trino optimized, and Trino SQL methods as
   separate exact filters. For `trino-like-specialized` it runs
   `BenchmarkTrinoLikeTpch`'s interpreted, generated, and Trino SQL methods over
   the shard's TPC-H workloads, after its verifier checks every workload. Each
   workload of each method runs in its own JVMs and reports nanoseconds, and
   even replicas reverse the whole sequence, Trino SQL included.
-- The `lifecycle` handler runs the candidate cache, reset, fallback, and
-  concurrency JMH suite. Shared cold-cache waves use the separate
-  `lifecycle-shared-cold` shard so both memory routes fit on each host within
-  the 90-minute limit. The original `lifecycle` shard contains the other rows.
-- `memory-census` runs independently normalized retained-memory evidence for
-  Regulator and pinned Joni.
-- `rebar` prepares the pinned corpus and engines, verifies the exact
-  deterministic manifest partition, preserves the native-before/Regulator/
-  native-after invocation, and runs applicable Joni rows in a separate ordered
-  invocation. Untimed Regulator and Joni verification keeps each engine's heap
-  size but disables heap pre-touch: Rebar's deadline includes JVM startup, and
-  faulting unused heap pages can exhaust it before verification starts. Timed
-  invocations explicitly enable pre-touch and retain their original heap,
-  warmup, measurement and timeout settings. Both settings are recorded in the
-  route metadata. The checksummed applicability ledger covers 238 logical
-  workloads; 225 have Joni rows, while the 13 syntax or semantic
-  incompatibilities remain explicit reporting events. A compatible Joni row
-  that exceeds the 30-second verification or 120-second measurement limit is
-  recorded as `did-not-finish` in `raw/rebar-outcomes.tsv`, with its phase.
-  Measurement can time out after verification succeeds; neither outcome is
-  reclassified as incompatible. Other curated verification failures are fatal.
-  Recognized extended-corpus result
-  mismatches are also recorded in `raw/rebar-outcomes.tsv` and excluded from
-  performance comparison. Process failures, incomplete output, and other
-  unclassified failures remain fatal.
 
 ## Evidence And Acceptance
 
@@ -406,8 +300,7 @@ Every successful route contains:
 - `semantic-gate.tsv`, written only after semantic checks pass
 - exact, sorted `observed-rows.tsv`
 - `calibration.tsv`, except in a unit's routes, whose calibrations the unit
-  records once (see [Running a Unit](#running-a-unit)), and, when applicable,
-  `native-bracket.tsv`
+  records once (see [Running a Unit](#running-a-unit))
 - `raw-artifacts.sha256`, which records raw file hashes separately from result
   identity
 - `route-session.tsv`, which the unit combines with its other routes
@@ -429,20 +322,10 @@ identity of an otherwise unchanged row. The campaign and reducer enforce pinned
 source/runtime/comparator identities; `raw-artifacts.sha256` preserves raw
 provenance, including the complete semantic receipt and outcome evidence.
 
-Calibration drift above 5% rejects the route. Native before/after drift is
-preserved per benchmark; drift above 5% marks only the affected rows and
-comparisons unresolved during reduction. Missing `gc.alloc.rate.norm` rejects
-a JMH row whose allocation contract is `recorded` or `allocation-free`; a
-nonzero allocation-free observation is retained for the gap ledger rather than
-treated as host corruption.
+Calibration drift above 5% rejects the route. Missing `gc.alloc.rate.norm`
+rejects a JMH row whose allocation contract is `recorded` or `allocation-free`;
+a nonzero allocation-free observation is retained for the gap ledger rather
+than treated as host corruption.
 
 `BASELINE_PLAN_ONLY=true` validates manifest selection, route applicability,
-protocol choice, and the static runtime bound without building or executing
-benchmarks.
-
-## Allocation Evidence
-
-The checked-in Rebar and native RE2 result formats do not report allocation.
-Their manifest rows therefore use `allocation_contract=not-measured` rather
-than fabricating evidence from timing output. Regulator JMH rows retain their
-`recorded` or `allocation-free` contracts and require `gc.alloc.rate.norm`.
+and protocol choice without building or executing benchmarks.
