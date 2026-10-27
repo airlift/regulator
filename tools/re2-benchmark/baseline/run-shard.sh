@@ -738,10 +738,6 @@ if [[ "${PLAN_ONLY}" == true ]]; then
     exit 0
 fi
 
-# A run refuses a row protocol table that differs from its frozen rules before
-# any JVM starts. A plan skips this, since the offline gate checks the table.
-python3 "${SCRIPT_DIR}/validate-row-protocol.py"
-
 command -v taskset >/dev/null || {
     echo "taskset is required for baseline execution" >&2
     exit 1

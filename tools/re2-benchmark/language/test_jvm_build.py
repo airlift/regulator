@@ -84,7 +84,11 @@ class TestJvmBuild(unittest.TestCase):
 
     def extracted_fixture(self):
         identity = jvm_build.source_identity(self.root)
-        payload = self.git("archive", "--format=tar", "HEAD")
+        # freeze-candidate.sh adds the generated benchmark tables to the Git archive.
+        table = self.directory / "units.tsv"
+        table.write_text("generated\n")
+        payload = self.git("archive", "--format=tar", "--prefix=tools/re2-benchmark/baseline/",
+                           f"--add-file={table}", "--prefix=", "HEAD")
         archive = self.directory / "candidate.tar.gz"
         archive.write_bytes(gzip.compress(payload, mtime=0))
         provenance = self.directory / "candidate.tsv"

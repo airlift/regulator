@@ -18,3 +18,8 @@ re2_upstream/
 hsdis-*.dylib
 async-profiler-*/
 *.jfr
+
+# Benchmark tables generated when a candidate is frozen
+/tools/re2-benchmark/baseline/row-protocol.tsv
+/tools/re2-benchmark/baseline/units.tsv
+/tools/re2-benchmark/baseline/unit-rows.tsv

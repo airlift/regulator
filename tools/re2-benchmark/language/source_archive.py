@@ -9,6 +9,11 @@ import re
 import tarfile
 
 
+# freeze-candidate.sh adds these generated tables to the Git archive; the archive checksum binds them.
+GENERATED_TABLES = frozenset(f"tools/re2-benchmark/baseline/{name}"
+                             for name in ("row-protocol.tsv", "units.tsv", "unit-rows.tsv"))
+
+
 def git_object(kind, payload):
     return hashlib.sha1(kind.encode() + b" " + str(len(payload)).encode() + b"\0" + payload).digest()
 
@@ -75,7 +80,8 @@ def read(root, archive, provenance):
         # checked compression and every member; extraction still uses the data filter.
         source.fileobj.seek(0)
         uncompressed = source.fileobj.read()
-    if git_tree(files) != receipt["root_tree"]:
+    committed = {name: entry for name, entry in files.items() if name not in GENERATED_TABLES}
+    if git_tree(committed) != receipt["root_tree"]:
         raise ValueError("archive content does not match the candidate Git tree")
     for name, (mode, payload) in files.items():
         path = root / name

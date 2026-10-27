@@ -631,8 +631,14 @@ def campaign_heap_size(arguments):
 
 
 def deterministic_archive_sha256(root, candidate):
+    # freeze-candidate.sh adds the tables it generated beside the baseline tooling to the archive.
+    tables = [root / "tools/re2-benchmark/baseline" / table for table in work_units.TABLES]
+    missing = [table.name for table in tables if not table.is_file()]
+    if missing:
+        raise SystemExit(f"the candidate's generated tables {missing} are missing; freeze-candidate.sh writes them")
     archive = subprocess.Popen(
-        ["git", "archive", "--format=tar", candidate],
+        ["git", "archive", "--format=tar", "--prefix=tools/re2-benchmark/baseline/",
+         *(f"--add-file={table}" for table in tables), "--prefix=", candidate],
         cwd=root,
         stdout=subprocess.PIPE)
     compressor = subprocess.Popen(

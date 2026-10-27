@@ -4,6 +4,10 @@ A unit is the rows one host measures between two chained calibrations. Atoms
 are the row sets a comparison or a scaling fit needs measured together; atoms
 are packed greedily, largest first, adding a unit until every unit holding
 several atoms fits the unit budget. run-unit.sh measures one unit.
+
+The tables are not checked in: freeze-candidate.sh generates them into the
+candidate archive and beside these modules, where hosts and the controller read
+them, and the offline gate generates them before its tests.
 """
 import csv
 import hashlib
@@ -31,6 +35,8 @@ UNIT_FIELDS = (
     "oversized",
 )
 UNIT_ROW_FIELDS = ("unit_id", "row_id", "role", "replica_id")
+# The generated tables, written together by generate-units.py.
+TABLES = ("row-protocol.tsv", "units.tsv", "unit-rows.tsv")
 ROLES = ("owner", "copy", "representative")
 # A unit is a 15-minute work item. Chained units share their boundary calibrations, so each unit is
 # charged one calibration invocation.
@@ -327,7 +333,7 @@ def generate_from(directory):
         row_protocol.read_tsv(directory / "rows.tsv"),
         row_protocol.read_tsv(directory / "shard-dispatch.tsv"),
         row_protocol.read_tsv(directory / "protocol-representatives.tsv"),
-        row_protocol.load(directory / "row-protocol.tsv"))
+        {protocol["row_id"]: protocol for protocol in row_protocol.generate_from(directory)})
 
 
 def render_table(fields, rows):
@@ -364,7 +370,7 @@ def render(units):
 
 
 def load(directory):
-    """Units with their owned rows, copies, and representatives, read from the checked-in files."""
+    """Units with their owned rows, copies, and representatives, read from the generated tables."""
     units = {}
     for row in row_protocol.read_tsv(directory / "units.tsv"):
         if row["unit_id"] in units:
