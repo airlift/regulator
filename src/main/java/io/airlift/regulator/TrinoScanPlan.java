@@ -102,11 +102,9 @@ final class TrinoScanPlan
         RE2_DELIMITED_CAPTURE,
     }
 
-    /// The frontend whose semantics a plan follows. `NONE` is a frontend's choice to build
-    /// no plan, which the frontend checks before it analyzes; [#analyze] rejects it.
+    /// The frontend whose semantics a plan follows.
     enum Language
     {
-        NONE,
         TRINO,
         RE2,
         JAVA,
@@ -426,12 +424,10 @@ final class TrinoScanPlan
         return analyze(expression, captureCount, Language.TRINO, forceHandoff, caseFolding, byteFrequencies);
     }
 
-    /// Analyzes `expression` for `language`, which is [Language#TRINO],
-    /// [Language#RE2], [Language#JAVA], or [Language#RUST]. The languages share
-    /// one builder and admit the same shapes, except that a Java end admits fewer runs before it
-    /// and only RE2, Java, and Rust admit sets of some non-ASCII characters. Only Java's default
-    /// `$` and `\Z` build a Java end. An RE2, Java, or Rust plan reads input by RE2's
-    /// rules.
+    /// Analyzes `expression` for `language`. The languages share one builder and admit the same
+    /// shapes, except that a Java end admits fewer runs before it and only RE2, Java, and Rust
+    /// admit sets of some non-ASCII characters. Only Java's default `$` and `\Z` build a Java
+    /// end. An RE2, Java, or Rust plan reads input by RE2's rules.
     static TrinoScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         // The RE2, Java, and Rust frontends compile in the RE2 dialect to the same byte ranges,
@@ -439,7 +435,6 @@ final class TrinoScanPlan
         boolean re2Characters = switch (language) {
             case TRINO -> false;
             case RE2, JAVA, RUST -> true;
-            case NONE -> throw new IllegalArgumentException("scan plan language is NONE, which builds no plan");
         };
         StartKind startKind = startKind(expression, 0);
         if (startKind != StartKind.ANCHORED && startKind != StartKind.LITERAL &&

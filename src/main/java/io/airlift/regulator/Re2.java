@@ -72,7 +72,7 @@ public sealed class Re2
         OTHER,
     }
 
-    /// Selects the scan plan a Trino, Java, or Rust compile builds. Only tests request
+    /// Selects the scan plan an RE2, Trino, Java, or Rust compile builds. Only tests request
     /// [#FORCE_HANDOFF].
     enum ScanPlanMode
     {
@@ -583,7 +583,7 @@ public sealed class Re2
     static Re2 compile(Slice pattern, int flags)
     {
         requireNonNull(pattern, "pattern is null");
-        return compile(pattern.copy(), flags, Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), false, TrinoScanPlan.Language.RE2, false);
+        return compile(pattern.copy(), flags, Options.DEFAULT_MAX_MEMORY, ByteFrequencies.uniform(), false, ScanPlanMode.DEFAULT);
     }
 
     /// Compiles a copied snapshot of `pattern` and the current option values.
@@ -591,7 +591,7 @@ public sealed class Re2
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
-        return compile(pattern.copy(), options, TrinoScanPlan.Language.RE2, false);
+        return compile(pattern.copy(), options, ScanPlanMode.DEFAULT);
     }
 
     /// Compiles `pattern` as [#compile(Slice,Options)] does, but without a scan plan,
@@ -600,7 +600,7 @@ public sealed class Re2
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
-        return compile(pattern.copy(), options, TrinoScanPlan.Language.NONE, false);
+        return compile(pattern.copy(), options, ScanPlanMode.DISABLED);
     }
 
     /// Compiles `pattern` as [#compile(Slice,Options)] does, but a scan plan
@@ -609,12 +609,12 @@ public sealed class Re2
     {
         requireNonNull(pattern, "pattern is null");
         requireNonNull(options, "options is null");
-        return compile(pattern.copy(), options, TrinoScanPlan.Language.RE2, true);
+        return compile(pattern.copy(), options, ScanPlanMode.FORCE_HANDOFF);
     }
 
-    private static Re2 compile(Slice pattern, Options options, TrinoScanPlan.Language scanPlanLanguage, boolean forceScanPlanHandoff)
+    private static Re2 compile(Slice pattern, Options options, ScanPlanMode scanPlanMode)
     {
-        Re2 compiled = compile(pattern, options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.longestMatch(), scanPlanLanguage, forceScanPlanHandoff);
+        Re2 compiled = compile(pattern, options.parseFlags(), options.maxMemory(), options.byteFrequencies(), options.longestMatch(), scanPlanMode);
         return options.generateBytecode() ? withGeneratedBytecode(compiled) : compiled;
     }
 
@@ -797,18 +797,11 @@ public sealed class Re2
         return out.slice();
     }
 
-    private static Re2 compile(
-            Slice pattern,
-            int flags,
-            long maxMemory,
-            ByteFrequencies byteFrequencies,
-            boolean longestMatch,
-            TrinoScanPlan.Language scanPlanLanguage,
-            boolean forceScanPlanHandoff)
+    private static Re2 compile(Slice pattern, int flags, long maxMemory, ByteFrequencies byteFrequencies, boolean longestMatch, ScanPlanMode scanPlanMode)
     {
         requireNonNull(pattern, "pattern is null");
         ParseResult parsed = RegexpParser.parse(pattern, flags);
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, scanPlanLanguage, forceScanPlanHandoff);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, longestMatch, Compiler.Dialect.RE2, TrinoScanPlan.Language.RE2, scanPlanMode);
     }
 
     /// The caller passes a private snapshot that it never mutates.
@@ -832,7 +825,7 @@ public sealed class Re2
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.NONE, false);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.RE2, ScanPlanMode.DISABLED);
     }
 
     /// Compiles a pattern parsed by the Java frontend. The caller passes a private snapshot that it
@@ -846,16 +839,7 @@ public sealed class Re2
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(
-                pattern,
-                parsed,
-                flags,
-                maxMemory,
-                byteFrequencies,
-                false,
-                Compiler.Dialect.RE2,
-                scanPlanMode == ScanPlanMode.DISABLED ? TrinoScanPlan.Language.NONE : TrinoScanPlan.Language.JAVA,
-                scanPlanMode == ScanPlanMode.FORCE_HANDOFF);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.JAVA, scanPlanMode);
     }
 
     /// Compiles a pattern parsed by the Rust frontend. The caller passes a private snapshot that it
@@ -869,16 +853,7 @@ public sealed class Re2
         if (maxMemory <= 0) {
             throw new IllegalArgumentException("maxMemory must be greater than zero: " + maxMemory);
         }
-        return build(
-                pattern,
-                parsed,
-                flags,
-                maxMemory,
-                byteFrequencies,
-                false,
-                Compiler.Dialect.RE2,
-                scanPlanMode == ScanPlanMode.DISABLED ? TrinoScanPlan.Language.NONE : TrinoScanPlan.Language.RUST,
-                scanPlanMode == ScanPlanMode.FORCE_HANDOFF);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.RE2, TrinoScanPlan.Language.RUST, scanPlanMode);
     }
 
     /// The caller passes a private snapshot that it never mutates. `scanPlanMode` selects
@@ -926,16 +901,7 @@ public sealed class Re2
                         null);
             }
         }
-        return build(
-                pattern,
-                parsed,
-                flags,
-                maxMemory,
-                byteFrequencies,
-                false,
-                Compiler.Dialect.TRINO,
-                scanPlanMode == ScanPlanMode.DISABLED ? TrinoScanPlan.Language.NONE : TrinoScanPlan.Language.TRINO,
-                scanPlanMode == ScanPlanMode.FORCE_HANDOFF);
+        return build(pattern, parsed, flags, maxMemory, byteFrequencies, false, Compiler.Dialect.TRINO, TrinoScanPlan.Language.TRINO, scanPlanMode);
     }
 
     static boolean shouldAnalyzeFixedWidthByteSpanForTrino(ParseResult parsed)
@@ -958,7 +924,7 @@ public sealed class Re2
             boolean longestMatch,
             Compiler.Dialect compilerDialect,
             TrinoScanPlan.Language scanPlanLanguage,
-            boolean forceScanPlanHandoff)
+            ScanPlanMode scanPlanMode)
     {
         long reverseMemory = Math.max(1, maxMemory / 3);
         long forwardMemory = Math.max(1, maxMemory - reverseMemory);
@@ -1052,10 +1018,10 @@ public sealed class Re2
                 exactLiteral == null ? -1 : exactLiteral.length(),
                 requiredPrefix,
                 semanticProgram);
-        // The frontend chooses the plan's language. A plan reports leftmost-first matches, so a
-        // longest-match pattern has none.
-        TrinoScanPlan trinoScanPlan = scanPlanLanguage != TrinoScanPlan.Language.NONE && !longestMatch && !expressionAnalysis.canMatchEmpty()
-                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount, scanPlanLanguage, forceScanPlanHandoff, caseFolding, byteFrequencies)
+        // The frontend chooses the plan's language and mode. A plan reports leftmost-first
+        // matches, so a longest-match pattern has none.
+        TrinoScanPlan trinoScanPlan = scanPlanMode != ScanPlanMode.DISABLED && !longestMatch && !expressionAnalysis.canMatchEmpty()
+                ? TrinoScanPlan.analyze(entireRegexp, capturingGroupCount, scanPlanLanguage, scanPlanMode == ScanPlanMode.FORCE_HANDOFF, caseFolding, byteFrequencies)
                 : null;
         // Anchored and literal-led plans take precedence over a lowered boolean program. A run-led
         // unanchored plan yields to one, which keeps the lowered final-line route.
