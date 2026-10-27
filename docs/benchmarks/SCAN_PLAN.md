@@ -1,11 +1,11 @@
-# Trino specialized scan plan
+# Specialized scan plan
 
-The scan plan recognizes a bounded family of Trino patterns and executes
-literals, deterministic character runs, and captures over Slice bytes. It
-targets `contains`, match boundaries, captures, extraction, and replacement
-through the public APIs. RE2, Java, and Rust patterns select the same plans,
-plus runs of sets of some non-ASCII characters, and report the ordinary engine's
-results on malformed input too, as described in [RE2 patterns](#re2-patterns).
+The scan plan recognizes a bounded family of Trino, RE2, Java, and Rust
+patterns and executes literals, deterministic character runs, and captures over
+Slice bytes. It targets `contains`, match boundaries, captures, extraction, and
+replacement through the public APIs. RE2, Java, and Rust plans also admit runs
+of sets of some non-ASCII characters and report the ordinary engine's results
+on malformed input too, as described in [RE2 patterns](#re2-patterns).
 
 ## Coverage
 
@@ -47,13 +47,13 @@ Anchored partial-match coverage includes these ClickHouse performance cases:
 Unanchored coverage includes the URL family, a delimiter-complement run family
 such as `([^/]+)/`, and ClickHouse's `[?&]([^=]+)=` query-key shape.
 Fixed literal-sequence repeats are also admitted within the bounded limits
-below. Any extension must preserve the Trino language contract. Unsupported
+below. Any extension must preserve each language's contract. Unsupported
 optimization shapes use the ordinary Regulator engine; this is not fallback to
 another regex language or to Joni.
 
 ## Integration
 
-`TrinoScanPlan.analyze` reads the parsed expression before required-prefix
+`ScanPlan.analyze` reads the parsed expression before required-prefix
 stripping. It requires proof that a successful match consumes input. An
 unanchored plan must begin, after capture saves, with a literal, an exact
 one-byte ASCII set, or an unbounded run of every byte except the one-byte
@@ -77,7 +77,7 @@ into delimiter-capture and terminal-tail operations. Unanchored plans and plans
 with general forks, nested capture boundaries, or more than three captures keep
 the general representation with explicit capture saves.
 
-`TrinoScanPlanRun` admits ASCII sets and sets containing all non-ASCII
+`ScanPlanRun` admits ASCII sets and sets containing all non-ASCII
 characters plus any subset of ASCII. These sets have uniform membership for
 non-ASCII UTF-8 bytes. In a Trino plan, other Unicode classes retain ordinary
 engine execution; an RE2, Java, or Rust plan also admits them, reading their
@@ -114,7 +114,7 @@ complete plan and literal storage against the forward DFA budget. If the budget
 does not fit, compilation retains the ordinary route. The semantic program is
 kept for range-limited calls outside the scan plan's supported context.
 
-Plan execution uses its own strategy byte, `trinoScanStrategy`, separate from
+Plan execution uses its own strategy byte, `scanPlanStrategy`, separate from
 the boolean `find` strategy; both fit in the 96-byte `Re2` layout.
 Shared capture matching checks the plan strategy byte before loading the plan,
 avoiding an extra dependent plan lookup for unrelated patterns. It invokes the
@@ -512,7 +512,7 @@ plain and ASCII-folded. Fixed patterns run under the default, case-insensitive,
 never-newline, and POSIX one-line options and add a minimum that one multibyte
 character does not meet, forked plans, sets of some non-ASCII characters, folded
 ones included, and long inputs that hand off to the ordinary engine by work
-budget and by failure density. `TestTrinoScanPlanRun` compares how a set of some
+budget and by failure density. `TestScanPlanRun` compares how a set of some
 non-ASCII characters reads one character with the ordinary engine on every one-
 and two-byte sequence and on sampled three- and four-byte ones, for Java, Rust,
 and RE2 sets. `BenchmarkRe2ScanPlan` runs the `BenchmarkTrinoScanPlan` patterns
@@ -573,7 +573,7 @@ The decisions record holds the results for
 
 ## Correctness and measurement
 
-`TestTrinoScanPlan` verifies selection, Joni match/capture agreement, optional
+`TestScanPlan` verifies selection, Joni match/capture agreement, optional
 retry, final LF, strict end, replacement versus extraction, multibyte input,
 NUL, bounded reads on malformed input, regions, memory fallback, and concurrent
 use of one compiled plan. Seeded unanchored cases also cover repeated `find`,
@@ -721,7 +721,7 @@ participation and retry behavior receive coverage alongside rejection.
 
 `TrinoRegexp.Options.setGenerateBytecode(true)` is an experimental opt-in. It
 compiles an eligible pattern to a private `TrinoRegexp` subclass backed by a
-hidden class that `TrinoScanKernelGenerator` emits for the pattern's
+hidden class that `ScanKernelGenerator` emits for the pattern's
 case-sensitive plan. `TrinoRegexp.usesGeneratedBytecode()` reports whether a
 pattern has one. The accepted trade-offs are recorded in
 [`REGULATOR_DECISIONS.md`](../../REGULATOR_DECISIONS.md#generated-trino-scan-kernels).
@@ -759,8 +759,8 @@ resumes through a switch on the saved operation, clearing the same capture
 slots.
 
 Those scanners, and every candidate scan below, are copies of the
-interpreter's helpers in `TrinoScanKernelSupport` and
-`VectorTrinoScanKernelSupport`, not calls to the originals, for the reason
+interpreter's helpers in `ScanKernelSupport` and
+`VectorScanKernelSupport`, not calls to the originals, for the reason
 recorded in
 [`REGULATOR_DECISIONS.md`](../../REGULATOR_DECISIONS.md#generated-trino-scan-kernels).
 The search handoff to the ordinary engine and result assembly stay shared;
@@ -808,12 +808,13 @@ rather than operation entries. A start-anchored plan's `match` is the attempt
 method itself. An unanchored plan gets `search`, the interpreter's region
 search with its context, start, anchoring, and full-match arguments, and,
 when full-Slice `find` would hand off to the ordinary boolean search,
-`searchBeforeHandoff`. The attempt and candidate loop are the Trino ones;
-`RE2_RUN`, `RE2_SET_RUN`, and `RE2_DELIMITED_CAPTURE`, which RE2, Java, and Rust
-plans use, call `TrinoScanKernelSupport` copies of the RE2 run reader and, for
+`searchBeforeHandoff`. The class emits the same attempt and candidate loops as
+the [generated class](#generated-class) above; `RE2_RUN`, `RE2_SET_RUN`, and
+`RE2_DELIMITED_CAPTURE`, which RE2, Java, and Rust plans use, call
+`ScanKernelSupport` copies of the RE2 run reader and, for
 an `RE2_SET_RUN`, of the member reader, and an RE2 run's stop scan calls a copy
-in `VectorTrinoScanKernelSupport`. A Java end calls the
-`TrinoScanKernelSupport` copy of the final-terminator check. The class never
+in `VectorScanKernelSupport`. A Java end calls the
+`ScanKernelSupport` copy of the final-terminator check. The class never
 calls back into the pattern.
 
 The subclass overrides the four `Re2` calls that reach a plan: full-Slice

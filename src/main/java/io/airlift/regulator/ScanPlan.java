@@ -39,9 +39,9 @@ import java.util.Set;
 /// input, malformed UTF-8 included. The languages share the analysis and the executors; in an RE2,
 /// Java, or Rust plan, each run admitting non-ASCII characters, and each delimited capture, becomes
 /// an `RE2_` operation, and a Trino plan never contains one.
-final class TrinoScanPlan
+final class ScanPlan
 {
-    private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoScanPlan.class);
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(ScanPlan.class);
     private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.LATIN1;
     private static final int UNSUPPORTED_FLAGS = UNSUPPORTED_ATOM_FLAGS | Regexp.NON_GREEDY;
     private static final int MAX_RECURSIVE_DEPTH = 32;
@@ -138,7 +138,7 @@ final class TrinoScanPlan
     // Boolean entry points run that plan with the same executors, so no method that reports
     // positions changes: choosing an operation array inside the shared executors slowed capture
     // calls.
-    private final TrinoScanPlan booleanPlan;
+    private final ScanPlan booleanPlan;
     // A plan's end is the end of input, or with finalLineEnd also before a final LF. With
     // javaFinalEnd, END also accepts the position before one final Java line terminator (see
     // endsBeforeJavaFinalTerminator). Only Java's default $ and \Z select this mode.
@@ -191,7 +191,7 @@ final class TrinoScanPlan
     // before its first attempt. Only tests select the negative value.
     private final int workBudgetBytes;
 
-    private TrinoScanPlan(List<Step> steps, boolean finalLineEnd, boolean javaFinalEnd, boolean partialMatch, boolean anchoredStart, boolean re2Characters, int workBudgetBytes, ByteFrequencies byteFrequencies)
+    private ScanPlan(List<Step> steps, boolean finalLineEnd, boolean javaFinalEnd, boolean partialMatch, boolean anchoredStart, boolean re2Characters, int workBudgetBytes, ByteFrequencies byteFrequencies)
     {
         this.steps = steps.toArray(Step[]::new);
         this.booleanTails = partialMatch ? findBooleanTails(this.steps) : new boolean[this.steps.length];
@@ -211,7 +211,7 @@ final class TrinoScanPlan
         this.allowsOrdinaryShortBooleanMatch = anchoredFork && !hasBooleanTail(booleanTails) && (re2Characters || consumesOnlyAscii(this.steps));
         this.workBudgetBytes = workBudgetBytes;
         this.booleanPlan = anchoredFork && hasSave(this.steps)
-                ? new TrinoScanPlan(withoutSaves(this.steps), finalLineEnd, javaFinalEnd, partialMatch, anchoredStart, re2Characters, workBudgetBytes, byteFrequencies)
+                ? new ScanPlan(withoutSaves(this.steps), finalLineEnd, javaFinalEnd, partialMatch, anchoredStart, re2Characters, workBudgetBytes, byteFrequencies)
                 : this;
     }
 
@@ -412,14 +412,14 @@ final class TrinoScanPlan
     /// Analyzes `expression`. A plan built with `forceHandoff` hands every unanchored
     /// search to the ordinary engine before its first attempt, so tests can run the continuation
     /// on every input.
-    static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding)
+    static ScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding)
     {
         return analyze(expression, captureCount, forceHandoff, caseFolding, ByteFrequencies.uniform());
     }
 
     /// Analyzes `expression`, with `byteFrequencies` choosing the probe byte of a
     /// case-sensitive leading literal.
-    static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
+    static ScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         return analyze(expression, captureCount, Language.TRINO, forceHandoff, caseFolding, byteFrequencies);
     }
@@ -428,7 +428,7 @@ final class TrinoScanPlan
     /// shapes, except that a Java end admits fewer runs before it and only RE2, Java, and Rust
     /// admit sets of some non-ASCII characters. Only Java's default `$` and `\Z` build a Java
     /// end. An RE2, Java, or Rust plan reads input by RE2's rules.
-    static TrinoScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
+    static ScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         // The RE2, Java, and Rust frontends compile in the RE2 dialect to the same byte ranges,
         // so their plans read characters as RE2's classes do.
@@ -509,7 +509,7 @@ final class TrinoScanPlan
 
     /// Returns the plan whose executors answer a call of this plan that reports no positions:
     /// for a start-anchored plan with a fork, the same operations without capture saves.
-    TrinoScanPlan booleanPlan()
+    ScanPlan booleanPlan()
     {
         return booleanPlan;
     }
@@ -1638,12 +1638,12 @@ final class TrinoScanPlan
 
     /// Returns whether the required literal occurs in `[cursor, end)`. Every match of an
     /// unanchored search lies in that range and contains the literal.
-    /// Copied as `TrinoScanKernelSupport.containsRequiredLiteral`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.containsRequiredLiteral`; keep the copy in step.
     private boolean containsRequiredLiteral(byte[] bytes, int cursor, int end)
     {
         Step literal = steps[requiredLiteralOperation];
         if (VectorSupport.isAvailable()) {
-            return VectorTrinoScanner.containsLiteral(bytes, cursor, end, literal);
+            return VectorScanner.containsLiteral(bytes, cursor, end, literal);
         }
         int lastStart = end - literal.literal.length;
         for (; cursor <= lastStart; cursor++) {
@@ -1707,7 +1707,7 @@ final class TrinoScanPlan
     /// Returns the first position at or after `candidate` where the whole `literal`
     /// occurs, or `-1` when none remains. A literal that does not fit before `end` is
     /// never a candidate, so no byte at or past `end` is read.
-    /// Copied as `TrinoScanKernelSupport.findLiteral`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.findLiteral`; keep the copy in step.
     private static int findLiteral(byte[] bytes, int candidate, int end, byte[] literal)
     {
         // A start after this limit leaves too few bytes for the literal.
@@ -1732,7 +1732,7 @@ final class TrinoScanPlan
     ///
     /// The scan searches a range shifted by the probe offset, so every candidate starts at or
     /// after `candidate`.
-    /// Copied as `TrinoScanKernelSupport.findLiteralAtProbe`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.findLiteralAtProbe`; keep the copy in step.
     private static int findLiteralAtProbe(byte[] bytes, int candidate, int end, byte[] literal, int probeOffset)
     {
         byte probe = literal[probeOffset];
@@ -2187,7 +2187,7 @@ final class TrinoScanPlan
     /// region that needs the Java CR-before-region correction bypasses scan plans. The ordinary
     /// engine decodes the terminator strictly, so comparing its exact encoded bytes gives the same
     /// answer on every input, malformed UTF-8 included.
-    /// Copied as `TrinoScanKernelSupport.endsBeforeJavaFinalTerminator`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.endsBeforeJavaFinalTerminator`; keep the copy in step.
     private static boolean endsBeforeJavaFinalTerminator(byte[] bytes, int base, int end, int cursor)
     {
         return switch (end - cursor) {
@@ -2198,11 +2198,11 @@ final class TrinoScanPlan
         };
     }
 
-    // Copied as TrinoScanKernelSupport.findByte; keep the copy in step.
+    // Copied as ScanKernelSupport.findByte; keep the copy in step.
     private static int findByte(byte[] bytes, int cursor, int end, byte target)
     {
         if (VectorSupport.isAvailable()) {
-            return VectorTrinoScanner.findByte(bytes, cursor, end, target);
+            return VectorScanner.findByte(bytes, cursor, end, target);
         }
         for (; cursor < end; cursor++) {
             if (bytes[cursor] == target) {
@@ -2215,7 +2215,7 @@ final class TrinoScanPlan
     private static int findAsciiFoldedByte(byte[] bytes, int cursor, int end, byte folded)
     {
         if (VectorSupport.isAvailable()) {
-            return VectorTrinoScanner.findAsciiFoldedByte(bytes, cursor, end, folded);
+            return VectorScanner.findAsciiFoldedByte(bytes, cursor, end, folded);
         }
         for (; cursor < end; cursor++) {
             if ((bytes[cursor] | 0x20) == folded) {
@@ -2262,7 +2262,7 @@ final class TrinoScanPlan
             this.re2Characters = re2Characters;
         }
 
-        private static TrinoScanPlan analyze(Regexp expression, int captureCount, boolean re2Characters, int workBudgetBytes, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
+        private static ScanPlan analyze(Regexp expression, int captureCount, boolean re2Characters, int workBudgetBytes, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
         {
             if (captureCount > MAX_GROUPS) {
                 return null;
@@ -2323,7 +2323,7 @@ final class TrinoScanPlan
             if (re2Characters) {
                 builder.useRe2Runs();
             }
-            return new TrinoScanPlan(
+            return new ScanPlan(
                     builder.steps,
                     anchoredEnd && (sequence.getLast().parseFlags() & Regexp.FINAL_LINE_END) != 0,
                     javaFinalEnd,
@@ -2394,7 +2394,7 @@ final class TrinoScanPlan
             return false;
         }
 
-        private boolean stopsOnlyAtFollowingByte(TrinoScanPlanRun run, int start)
+        private boolean stopsOnlyAtFollowingByte(ScanPlanRun run, int start)
         {
             for (int index = start; index < steps.size(); index++) {
                 Step step = steps.get(index);
@@ -2547,7 +2547,7 @@ final class TrinoScanPlan
 
         private boolean emitRun(Regexp expression)
         {
-            TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression, caseFolding, re2Characters, memberTables);
+            ScanPlanRun run = ScanPlanRun.analyze(expression, caseFolding, re2Characters, memberTables);
             if (run == null) {
                 return false;
             }
@@ -2612,7 +2612,7 @@ final class TrinoScanPlan
             // A top-level optional character atom is lowered to one bounded run
             // without a retry checkpoint.
             if (depth == 0) {
-                TrinoScanPlanRun run = TrinoScanPlanRun.analyze(expression, caseFolding, re2Characters, memberTables);
+                ScanPlanRun run = ScanPlanRun.analyze(expression, caseFolding, re2Characters, memberTables);
                 if (run != null) {
                     steps.add(Step.run(0, run));
                     return true;
@@ -2700,7 +2700,7 @@ final class TrinoScanPlan
         /// stop at its maximum inside the final terminator, so it is rejected. Both readings hold on
         /// malformed input: a terminator is valid UTF-8, its first byte continues no sequence, and
         /// every run reads it whole or not at all.
-        private static boolean stopsWhereJavaFinalEndAllows(TrinoScanPlanRun run)
+        private static boolean stopsWhereJavaFinalEndAllows(ScanPlanRun run)
         {
             int admitted = 0;
             for (int terminator : JAVA_LINE_TERMINATORS) {
@@ -2747,7 +2747,7 @@ final class TrinoScanPlan
                     }
                     Step afterCapture = index + 3 < steps.size() ? steps.get(index + 3) : null;
                     int terminator = following.run.unboundedScanTerminator();
-                    if (terminator >= 0 && terminator < TrinoScanPlanRun.MATCHES_EVERY_BYTE && afterCapture != null && afterCapture.kind == Kind.LITERAL &&
+                    if (terminator >= 0 && terminator < ScanPlanRun.MATCHES_EVERY_BYTE && afterCapture != null && afterCapture.kind == Kind.LITERAL &&
                             (afterCapture.literal[0] & 0xFF) == terminator) {
                         compacted.add(re2Characters ? Step.re2DelimitedCapture(terminator, step.slot, following.run) : Step.delimitedCapture(terminator, step.slot, following.run.minimum()));
                         if (afterCapture.literal.length > 1) {
@@ -2764,7 +2764,7 @@ final class TrinoScanPlan
                 if (anchoredEnd && !re2Characters && step.kind == Kind.RUN && following != null) {
                     int terminator = step.run.unboundedScanTerminator();
                     if (step.run.minimum() == 0 && following.kind == Kind.END) {
-                        if (terminator == TrinoScanPlanRun.MATCHES_EVERY_BYTE) {
+                        if (terminator == ScanPlanRun.MATCHES_EVERY_BYTE) {
                             compacted.add(Step.dotAllTail());
                             continue;
                         }
@@ -2821,7 +2821,7 @@ final class TrinoScanPlan
         private final long first;
         private final long last;
         private final AsciiFoldedLiteral asciiFolded;
-        private final TrinoScanPlanRun run;
+        private final ScanPlanRun run;
         private final Branch branch;
 
         private static Step literal(byte[] bytes)
@@ -2849,7 +2849,7 @@ final class TrinoScanPlan
             return new Step(Kind.DELIMITED_CAPTURE, null, delimiter, slot, minimum, null, null);
         }
 
-        private static Step re2DelimitedCapture(int delimiter, int slot, TrinoScanPlanRun run)
+        private static Step re2DelimitedCapture(int delimiter, int slot, ScanPlanRun run)
         {
             return new Step(Kind.RE2_DELIMITED_CAPTURE, null, delimiter, slot, 0, run, null);
         }
@@ -2869,17 +2869,17 @@ final class TrinoScanPlan
             return new Step(Kind.END, null, 0, 0, 0, null, null);
         }
 
-        private static Step run(int slot, TrinoScanPlanRun run)
+        private static Step run(int slot, ScanPlanRun run)
         {
             return new Step(Kind.RUN, null, 0, slot, 0, run, null);
         }
 
-        private static Step re2Run(int slot, TrinoScanPlanRun run)
+        private static Step re2Run(int slot, ScanPlanRun run)
         {
             return new Step(Kind.RE2_RUN, null, 0, slot, 0, run, null);
         }
 
-        private static Step re2SetRun(int slot, TrinoScanPlanRun run)
+        private static Step re2SetRun(int slot, ScanPlanRun run)
         {
             return new Step(Kind.RE2_SET_RUN, null, 0, slot, 0, run, null);
         }
@@ -2894,7 +2894,7 @@ final class TrinoScanPlan
             return new Step(Kind.FORK, null, 0, 0, 0, null, new Branch(target, captureMask));
         }
 
-        private Step(Kind kind, byte[] literal, int delimiter, int slot, int minimum, TrinoScanPlanRun run, Branch branch)
+        private Step(Kind kind, byte[] literal, int delimiter, int slot, int minimum, ScanPlanRun run, Branch branch)
         {
             this.kind = kind;
             this.literal = literal;
@@ -2952,7 +2952,7 @@ final class TrinoScanPlan
             return last;
         }
 
-        TrinoScanPlanRun run()
+        ScanPlanRun run()
         {
             return run;
         }
@@ -2962,7 +2962,7 @@ final class TrinoScanPlan
             return branch;
         }
 
-        // Copied as TrinoScanKernelSupport.literalMatches; keep the copy in step.
+        // Copied as ScanKernelSupport.literalMatches; keep the copy in step.
         boolean matches(byte[] input, int cursor, int end)
         {
             if (literal.length > end - cursor) {

@@ -89,21 +89,21 @@ public class TestCompilerAllocations
     }
 
     @Test
-    public void testTrinoScanContinuationAnalysisUsesCompactStorage()
+    public void testScanPlanContinuationAnalysisUsesCompactStorage()
     {
         ThreadMXBean threadBean = allocatedMemoryBean();
         ParseResult parsed = TrinoRegexpParser.parse(
                 utf8Slice("^((a)?(b)?(c)?(d)?)abcd([^/]+)/$"),
                 Regexp.LIKE_PERL);
         for (int iteration = 0; iteration < 10_000; iteration++) {
-            assertThat(TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding())).isNotNull();
+            assertThat(ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding())).isNotNull();
         }
 
         long threadId = Thread.currentThread().threadId();
         long allocatedBefore = threadBean.getThreadAllocatedBytes(threadId);
         int iterations = 10_000;
         for (int iteration = 0; iteration < iterations; iteration++) {
-            TrinoScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding());
+            ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), false, parsed.caseFolding());
         }
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;
 
@@ -111,7 +111,7 @@ public class TestCompilerAllocations
     }
 
     @Test
-    public void testTrinoScanRejectsUnsupportedUnanchoredStartBeforeAllocation()
+    public void testScanPlanRejectsUnsupportedUnanchoredStartBeforeAllocation()
     {
         ThreadMXBean threadBean = allocatedMemoryBean();
         List<ParseResult> expressions = List.of(
@@ -119,7 +119,7 @@ public class TestCompilerAllocations
                 TrinoRegexpParser.parse(utf8Slice("([a-z]+)$"), Regexp.LIKE_PERL));
         for (int iteration = 0; iteration < 10_000; iteration++) {
             for (ParseResult expression : expressions) {
-                assertThat(TrinoScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding()))
+                assertThat(ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding()))
                         .as(RegexpToString.toString(expression.regexp()))
                         .isNull();
             }
@@ -130,7 +130,7 @@ public class TestCompilerAllocations
         int iterations = 10_000;
         for (int iteration = 0; iteration < iterations; iteration++) {
             for (ParseResult expression : expressions) {
-                TrinoScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding());
+                ScanPlan.analyze(expression.regexp(), expression.capturingGroupCount(), false, expression.caseFolding());
             }
         }
         long allocatedBytes = threadBean.getThreadAllocatedBytes(threadId) - allocatedBefore;

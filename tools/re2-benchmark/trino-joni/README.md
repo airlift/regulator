@@ -91,7 +91,7 @@ tools/re2-benchmark/trino-joni/run-everyday.sh \
 
 `BenchmarkSpecializedTrinoJoni` is the Joni twin of
 `BenchmarkSpecializedTrinoRegexp`, the specialized-pattern workloads described
-in [`TRINO_SCAN_PLAN.md`](../../../docs/benchmarks/TRINO_SCAN_PLAN.md). Each
+in [`SCAN_PLAN.md`](../../../docs/benchmarks/SCAN_PLAN.md). Each
 workload has one operation: a template replacement, a group extract, or a group
 extract-all, which uses the Slice adapter's group form of pinned Trino's
 `regexp_extract_all` loop. Before timing, `SpecializedTrinoJoniVerifier`

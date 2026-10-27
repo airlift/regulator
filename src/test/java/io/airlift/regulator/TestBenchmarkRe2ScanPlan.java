@@ -75,7 +75,7 @@ public class TestBenchmarkRe2ScanPlan
                     for (int index = 0; index < contains.patterns.length; index++) {
                         planned[index] = scanPlan && (!WITHOUT_PLAN.contains(trinoWorkload) || (trinoWorkload.equals(PARTLY_PLANNED) && index == 0));
                         generated[index] = generateBytecode && planned[index] && !FOLDED.contains(trinoWorkload) && !trinoWorkload.equals(PARTLY_PLANNED);
-                        assertThat(contains.patterns[index].usesTrinoScanPlanForDiagnostics()).as("%s pattern %s", state, index).isEqualTo(planned[index]);
+                        assertThat(contains.patterns[index].usesScanPlanForDiagnostics()).as("%s pattern %s", state, index).isEqualTo(planned[index]);
                         assertThat(contains.patterns[index].usesGeneratedBytecode()).as("%s pattern %s", state, index).isEqualTo(generated[index]);
                     }
                     Re2[] patterns = Arrays.stream(contains.expressions).map(Re2::compile).toArray(Re2[]::new);
@@ -113,7 +113,7 @@ public class TestBenchmarkRe2ScanPlan
                             Re2 compiled = benchmark.compile(compile);
                             assertThat(compiled.capturingGroupCount()).as(description).isEqualTo(pattern.capturingGroupCount());
                             assertThat(compiled.find(input)).as(description).isEqualTo(match != null);
-                            assertThat(compiled.usesTrinoScanPlanForDiagnostics()).as(description).isEqualTo(planned[patternIndex]);
+                            assertThat(compiled.usesScanPlanForDiagnostics()).as(description).isEqualTo(planned[patternIndex]);
                             assertThat(compiled.usesGeneratedBytecode()).as(description).isEqualTo(generated[patternIndex]);
                         }
                     }

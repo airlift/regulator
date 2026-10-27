@@ -351,7 +351,7 @@ public class TestTrinoRegexpFunctions
         LiteralSearchKernel search = regexp.pattern().literalSearchForDiagnostics();
         assertThat(search).isNotNull();
         assertThat(baseline.literalSearchForDiagnostics()).isNull();
-        assertThat(regexp.pattern().usesTrinoScanPlanForDiagnostics()).isFalse();
+        assertThat(regexp.pattern().usesScanPlanForDiagnostics()).isFalse();
         assertThat(regexp.pattern().forwardProgramForDiagnostics().size()).isEqualTo(baseline.forwardProgramForDiagnostics().size());
         assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.pattern().forwardProgramForDiagnostics().dfaMemory())
                 .isEqualTo(search.estimatedRetainedSize());

@@ -586,7 +586,7 @@ public sealed class TrinoRegexp
     {
         validateGroup(group);
         requireNonNull(source, "source is null");
-        TrinoScanPlan plan = startAnchoredExtractPlan(group);
+        ScanPlan plan = startAnchoredExtractPlan(group);
         if (plan != null) {
             return extractWithStartAnchoredScanPlan(plan, source, group);
         }
@@ -599,10 +599,10 @@ public sealed class TrinoRegexp
 
     /// Returns the start-anchored scan plan that [#extract(Slice,int)] runs without a
     /// matcher for `group`, or `null` when it builds one.
-    private TrinoScanPlan startAnchoredExtractPlan(int group)
+    private ScanPlan startAnchoredExtractPlan(int group)
     {
         // A capture matcher has no single-byte matcher, so it would run this plan directly.
-        return group == 0 ? null : pattern.startAnchoredTrinoScanPlan();
+        return group == 0 ? null : pattern.startAnchoredScanPlan();
     }
 
     boolean extractsWithStartAnchoredScanPlanForDiagnostics(int group)
@@ -612,10 +612,10 @@ public sealed class TrinoRegexp
 
     /// Returns what [#extract(Slice,int)] returns through a matcher, without building one.
     /// Groups above `group` are not retained.
-    private Slice extractWithStartAnchoredScanPlan(TrinoScanPlan plan, Slice source, int group)
+    private Slice extractWithStartAnchoredScanPlan(ScanPlan plan, Slice source, int group)
     {
         int[] groups = new int[2 * group + 2];
-        if (!pattern.findWithStartAnchoredTrinoScanPlan(plan, source, 0, source.length(), groups)) {
+        if (!pattern.findWithStartAnchoredScanPlan(plan, source, 0, source.length(), groups)) {
             return null;
         }
         int start = groups[2 * group];
@@ -1706,10 +1706,10 @@ public sealed class TrinoRegexp
     {
         // Whether contains reaches the plan rather than a retained literal kernel.
         private final boolean contains;
-        private final TrinoScanKernelGenerator.CompiledScan generated;
+        private final ScanKernelGenerator.CompiledTrinoKernel generated;
         private final CompiledTrinoScan scan;
 
-        private CompiledScanTrinoRegexp(Re2 pattern, boolean contains, TrinoScanKernelGenerator.CompiledScan generated)
+        private CompiledScanTrinoRegexp(Re2 pattern, boolean contains, ScanKernelGenerator.CompiledTrinoKernel generated)
         {
             super(pattern);
             this.contains = contains;
@@ -1722,13 +1722,13 @@ public sealed class TrinoRegexp
         /// base class from loading this class.
         static TrinoRegexp create(Re2 pattern)
         {
-            TrinoScanKernelGenerator.Routes routes = TrinoScanKernelGenerator.Routes.of(pattern);
+            ScanKernelGenerator.TrinoRoutes routes = ScanKernelGenerator.TrinoRoutes.of(pattern);
             if (routes == null) {
                 return null;
             }
-            TrinoScanKernelGenerator.CompiledScan generated;
+            ScanKernelGenerator.CompiledTrinoKernel generated;
             try {
-                generated = TrinoScanKernelGenerator.generateCompiledScan(routes);
+                generated = ScanKernelGenerator.generateCompiledTrinoScan(routes);
             }
             catch (RuntimeException | LinkageError ignored) {
                 // Linking the generator fails here only if a consumer excluded the classfile
@@ -1808,7 +1808,7 @@ public sealed class TrinoRegexp
         @Override
         MethodHandle attemptHandleForDiagnostics()
         {
-            return TrinoScanKernelGenerator.attemptHandleForDiagnostics(scan, pattern().caseSensitiveTrinoScanPlan());
+            return ScanKernelGenerator.attemptHandleForDiagnostics(scan, pattern().caseSensitiveScanPlan());
         }
 
         @Override

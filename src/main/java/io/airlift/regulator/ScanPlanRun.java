@@ -26,7 +26,7 @@ import java.util.Map;
 /// characters but not all, which it reads by the exact encodings the compiler gives them (see
 /// [Utf8MemberTable]); its member bytes above 0x7F are then the lead bytes of those
 /// encodings alone.
-final class TrinoScanPlanRun
+final class ScanPlanRun
 {
     static final int MATCHES_EVERY_BYTE = 256;
 
@@ -38,7 +38,7 @@ final class TrinoScanPlanRun
     static final int SCALAR_CANDIDATE_PREFIX_BYTES = 16;
     static final int RE2_RUN_STOP_MINIMUM_BYTES = 16;
 
-    private static final int INSTANCE_SIZE = SizeOf.instanceSize(TrinoScanPlanRun.class);
+    private static final int INSTANCE_SIZE = SizeOf.instanceSize(ScanPlanRun.class);
     private static final int UNSUPPORTED_ATOM_FLAGS = Regexp.LATIN1;
     private static final int UNSUPPORTED_FLAGS = UNSUPPORTED_ATOM_FLAGS | Regexp.NON_GREEDY;
 
@@ -65,7 +65,7 @@ final class TrinoScanPlanRun
     private final int minimum;
     private final int maximum;
 
-    private TrinoScanPlanRun(boolean[] members, boolean matchesNonAscii, Utf8MemberTable nonAsciiMembers, int minimum, int maximum)
+    private ScanPlanRun(boolean[] members, boolean matchesNonAscii, Utf8MemberTable nonAsciiMembers, int minimum, int maximum)
     {
         this.members = members;
         this.members0 = word(members, 0);
@@ -145,9 +145,9 @@ final class TrinoScanPlanRun
         return needles;
     }
 
-    /// Returns the run of `expression` as [CaseFolding, boolean, Map)][#analyze(Regexp,]
+    /// Returns the run of `expression` as [#analyze(Regexp,CaseFolding,boolean,Map)]
     /// does, with a member table of its own.
-    static TrinoScanPlanRun analyze(Regexp expression, CaseFolding caseFolding, boolean re2Characters)
+    static ScanPlanRun analyze(Regexp expression, CaseFolding caseFolding, boolean re2Characters)
     {
         return analyze(expression, caseFolding, re2Characters, new HashMap<>());
     }
@@ -157,7 +157,7 @@ final class TrinoScanPlanRun
     /// be a run; otherwise it cannot, since a Trino run reads every non-ASCII byte alike. The
     /// member table of such a class comes from `memberTables`, or is built and added there
     /// when it is absent, so the runs of one plan share one table for each set.
-    static TrinoScanPlanRun analyze(Regexp expression, CaseFolding caseFolding, boolean re2Characters, Map<CharClass, Utf8MemberTable> memberTables)
+    static ScanPlanRun analyze(Regexp expression, CaseFolding caseFolding, boolean re2Characters, Map<CharClass, Utf8MemberTable> memberTables)
     {
         if ((expression.parseFlags() & UNSUPPORTED_FLAGS) != 0) {
             return null;
@@ -254,7 +254,7 @@ final class TrinoScanPlanRun
                 return null;
             }
         }
-        return new TrinoScanPlanRun(members, matchesNonAscii, nonAsciiMembers, minimum, maximum);
+        return new ScanPlanRun(members, matchesNonAscii, nonAsciiMembers, minimum, maximum);
     }
 
     int unboundedScanTerminator()
@@ -329,7 +329,7 @@ final class TrinoScanPlanRun
     }
 
     // These accessors serve the copies of match, matchMinimum, findCandidate, and the RE2 run
-    // helpers in TrinoScanKernelSupport.
+    // helpers in ScanKernelSupport.
 
     int maximum()
     {
@@ -410,7 +410,7 @@ final class TrinoScanPlanRun
     /// Returns whether every character of `other` is certainly a member: a sufficient
     /// check, decided by member bytes, except that it recognizes a run of some non-ASCII
     /// characters only inside a run of every non-ASCII character.
-    boolean containsAll(TrinoScanPlanRun other)
+    boolean containsAll(ScanPlanRun other)
     {
         if (other.nonAsciiMembers != null && !matchesNonAscii) {
             return false;
@@ -444,7 +444,7 @@ final class TrinoScanPlanRun
         return INSTANCE_SIZE + SizeOf.sizeOf(members) + SizeOf.sizeOf(needles) + SizeOf.sizeOf(candidateNibbleTables) + SizeOf.sizeOf(asciiStopNeedles);
     }
 
-    // Copied as TrinoScanKernelSupport.runMatch; keep the copy in step.
+    // Copied as ScanKernelSupport.runMatch; keep the copy in step.
     int match(byte[] input, int cursor, int end)
     {
         if (!matchesNonAscii) {
@@ -472,7 +472,7 @@ final class TrinoScanPlanRun
 
     /// Returns the position after the run's minimum characters, or `-1` when they are absent.
     /// It fails exactly when [#match] fails but reads no further than the minimum.
-    /// Copied as `TrinoScanKernelSupport.runMatchMinimum`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.runMatchMinimum`; keep the copy in step.
     int matchMinimum(byte[] input, int cursor, int end)
     {
         for (int count = 0; count < minimum; count++) {
@@ -487,7 +487,7 @@ final class TrinoScanPlanRun
     /// The RE2 version of [#match], for a run that matches every non-ASCII character. It
     /// reads characters as RE2 does (see [Utf8#re2CharacterWidth]), so a rejected sequence
     /// ends the run like a non-member byte.
-    /// Copied as `TrinoScanKernelSupport.re2RunMatch`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.re2RunMatch`; keep the copy in step.
     int re2Match(byte[] input, int cursor, int end)
     {
         if (maximum < 0 && minimum <= 1) {
@@ -509,7 +509,7 @@ final class TrinoScanPlanRun
 
     /// The RE2 version of [#matchMinimum]: the position after the run's minimum
     /// characters as [#re2Match] reads them, or `-1` when they are absent.
-    /// Copied as `TrinoScanKernelSupport.re2RunMatchMinimum`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.re2RunMatchMinimum`; keep the copy in step.
     int re2MatchMinimum(byte[] input, int cursor, int end)
     {
         for (int count = 0; count < minimum; count++) {
@@ -525,14 +525,14 @@ final class TrinoScanPlanRun
     /// For a run of every character except the ASCII `delimiter`: returns the position
     /// where [#re2Match] stops when `delimiter` is there, or `-1` when the run
     /// fails or stops at a rejected sequence or the end.
-    /// Copied as `TrinoScanKernelSupport.re2RunMatchBefore`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.re2RunMatchBefore`; keep the copy in step.
     int re2MatchBefore(byte[] input, int cursor, int end, byte delimiter)
     {
         int stop = re2Match(input, cursor, end);
         return stop >= 0 && stop < end && input[stop] == delimiter ? stop : -1;
     }
 
-    // Copied as TrinoScanKernelSupport.re2RunMemberWidth; keep the copy in step.
+    // Copied as ScanKernelSupport.re2RunMemberWidth; keep the copy in step.
     private int re2MemberWidth(byte[] input, int cursor, int end)
     {
         if (cursor >= end) {
@@ -545,7 +545,7 @@ final class TrinoScanPlanRun
         return members[value] ? 1 : 0;
     }
 
-    // Copied as TrinoScanKernelSupport.re2RunScan; keep the copy in step.
+    // Copied as ScanKernelSupport.re2RunScan; keep the copy in step.
     private int re2Scan(byte[] input, int cursor, int end)
     {
         while (true) {
@@ -553,7 +553,7 @@ final class TrinoScanPlanRun
             // non-ASCII characters there. Less than a vector of input is scanned by byte, as
             // Trino's run scan does for its tail.
             if (needles != null && end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES && VectorSupport.isAvailable()) {
-                cursor = VectorTrinoScanner.findRe2RunStop(input, cursor, end, needles);
+                cursor = VectorScanner.findRe2RunStop(input, cursor, end, needles);
             }
             else if (needles != null && needles.length == 0) {
                 // Every ASCII byte is a member.
@@ -580,7 +580,7 @@ final class TrinoScanPlanRun
     /// reads a non-ASCII character as the ordinary engine does, by the exact encodings of the
     /// run's members (see [Utf8MemberTable]), so any other sequence ends the run like a
     /// non-member byte.
-    /// Copied as `TrinoScanKernelSupport.re2SetRunMatch`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.re2SetRunMatch`; keep the copy in step.
     int re2SetMatch(byte[] input, int cursor, int end)
     {
         if (maximum < 0 && minimum <= 1) {
@@ -603,7 +603,7 @@ final class TrinoScanPlanRun
     /// The version of [#re2MatchMinimum] for a run of some non-ASCII characters but not all:
     /// the position after the run's minimum characters as [#re2SetMatch] reads them, or
     /// `-1` when they are absent.
-    /// Copied as `TrinoScanKernelSupport.re2SetRunMatchMinimum`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.re2SetRunMatchMinimum`; keep the copy in step.
     int re2SetMatchMinimum(byte[] input, int cursor, int end)
     {
         for (int count = 0; count < minimum; count++) {
@@ -616,7 +616,7 @@ final class TrinoScanPlanRun
         return cursor;
     }
 
-    // Copied as TrinoScanKernelSupport.re2SetRunMemberWidth; keep the copy in step.
+    // Copied as ScanKernelSupport.re2SetRunMemberWidth; keep the copy in step.
     private int re2SetMemberWidth(byte[] input, int cursor, int end)
     {
         if (cursor >= end) {
@@ -629,14 +629,14 @@ final class TrinoScanPlanRun
         return members[value] ? 1 : 0;
     }
 
-    // Copied as TrinoScanKernelSupport.re2SetRunScan; keep the copy in step.
+    // Copied as ScanKernelSupport.re2SetRunScan; keep the copy in step.
     private int re2SetScan(byte[] input, int cursor, int end)
     {
         while (true) {
             // As re2Scan does: find the first non-member ASCII byte or non-ASCII byte, then
             // consume the member characters there. ASCII input never reads the non-ASCII trie.
             if (asciiStopNeedles != null && end - cursor >= RE2_RUN_STOP_MINIMUM_BYTES && VectorSupport.isAvailable()) {
-                cursor = VectorTrinoScanner.findRe2RunStop(input, cursor, end, asciiStopNeedles);
+                cursor = VectorScanner.findRe2RunStop(input, cursor, end, asciiStopNeedles);
             }
             else if (asciiStopNeedles != null && asciiStopNeedles.length == 0) {
                 // Every ASCII byte is a member.
@@ -659,7 +659,7 @@ final class TrinoScanPlanRun
         }
     }
 
-    // Copied as TrinoScanKernelSupport.runScan; keep the copy in step.
+    // Copied as ScanKernelSupport.runScan; keep the copy in step.
     private int scan(byte[] input, int cursor, int end)
     {
         if (needles != null) {
@@ -669,7 +669,7 @@ final class TrinoScanPlanRun
             // Small sets and their complements share the same equality scans. Keep larger
             // sets on a scalar table until measurements justify another vector operation.
             if (VectorSupport.isAvailable()) {
-                return VectorTrinoScanner.findRunStop(input, cursor, end, needles, inverted, members);
+                return VectorScanner.findRunStop(input, cursor, end, needles, inverted, members);
             }
         }
         for (; cursor < end; cursor++) {
@@ -683,7 +683,7 @@ final class TrinoScanPlanRun
     /// Returns the first member byte at or after `cursor`, or `-1` when none remains.
     /// Member sets of one to 64 bytes use the same vector scanners as the DFA's start-byte
     /// search; larger sets and their complements keep the plan's own scans.
-    /// Copied as `TrinoScanKernelSupport.runFindCandidate`; keep the copy in step.
+    /// Copied as `ScanKernelSupport.runFindCandidate`; keep the copy in step.
     int findCandidate(byte[] input, int cursor, int end)
     {
         // Dense inputs usually have a candidate at the cursor, and large sets such as word
@@ -720,7 +720,7 @@ final class TrinoScanPlanRun
         }
     }
 
-    // Copied as TrinoScanKernelSupport.runFindCandidateInTable; keep the copy in step.
+    // Copied as ScanKernelSupport.runFindCandidateInTable; keep the copy in step.
     private int findCandidateInTable(byte[] input, int cursor, int end)
     {
         if (needles != null) {
@@ -728,7 +728,7 @@ final class TrinoScanPlanRun
                 return inverted ? cursor : -1;
             }
             if (VectorSupport.isAvailable()) {
-                return VectorTrinoScanner.findRunCandidate(input, cursor, end, needles, inverted, members);
+                return VectorScanner.findRunCandidate(input, cursor, end, needles, inverted, members);
             }
         }
         for (; cursor < end; cursor++) {

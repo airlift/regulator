@@ -62,9 +62,9 @@ public class TestBenchmarkJavaScanPlan
                             assertThat(contains.inputs).as(state).isEqualTo(re2.inputs);
                             for (int index = 0; index < contains.patterns.length; index++) {
                                 String re2Expression = re2.expressions[index].toStringUtf8();
-                                assertThat(contains.patterns[index].pattern().usesTrinoScanPlanForDiagnostics())
+                                assertThat(contains.patterns[index].pattern().usesScanPlanForDiagnostics())
                                         .as("%s pattern %s", state, index)
-                                        .isEqualTo(scanPlan && re2.patterns[index].usesTrinoScanPlanForDiagnostics());
+                                        .isEqualTo(scanPlan && re2.patterns[index].usesScanPlanForDiagnostics());
                                 assertThat(contains.patterns[index].usesGeneratedBytecode())
                                         .as("%s pattern %s", state, index)
                                         .isEqualTo(scanPlan && re2.patterns[index].usesGeneratedBytecode());
@@ -111,8 +111,8 @@ public class TestBenchmarkJavaScanPlan
                                     JavaRegexp compiled = benchmark.compile(compile);
                                     assertThat(compiled.capturingGroupCount()).as(description).isEqualTo(pattern.capturingGroupCount());
                                     assertThat(compiled.find(input)).as(description).isEqualTo(match != null);
-                                    assertThat(compiled.pattern().usesTrinoScanPlanForDiagnostics()).as(description)
-                                            .isEqualTo(contains.patterns[patternIndex].pattern().usesTrinoScanPlanForDiagnostics());
+                                    assertThat(compiled.pattern().usesScanPlanForDiagnostics()).as(description)
+                                            .isEqualTo(contains.patterns[patternIndex].pattern().usesScanPlanForDiagnostics());
                                     assertThat(compiled.usesGeneratedBytecode()).as(description).isEqualTo(contains.patterns[patternIndex].usesGeneratedBytecode());
                                 }
                             }

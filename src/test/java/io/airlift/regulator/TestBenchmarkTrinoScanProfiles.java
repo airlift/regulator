@@ -75,7 +75,7 @@ public class TestBenchmarkTrinoScanProfiles
         BenchmarkTrinoScanProfiles.BenchmarkData containsWithoutScanPlan = data("INTERLEAVED", false);
         BenchmarkTrinoScanProfiles.BenchmarkData capturesWithoutScanPlan = data("INTERLEAVED", false);
         BenchmarkTrinoScanProfiles.BenchmarkData extractWithoutScanPlan = data("INTERLEAVED", false);
-        assertThat(containsWithoutScanPlan.patternsWithoutScanPlan).allSatisfy(pattern -> assertThat(pattern.usesTrinoScanPlanForDiagnostics()).isFalse());
+        assertThat(containsWithoutScanPlan.patternsWithoutScanPlan).allSatisfy(pattern -> assertThat(pattern.usesScanPlanForDiagnostics()).isFalse());
         for (int row = 0; row < source.inputs.length; row++) {
             TrinoRegexp pattern = patterns[row % patterns.length];
             Slice input = source.inputs[row];

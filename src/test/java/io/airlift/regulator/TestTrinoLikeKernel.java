@@ -40,8 +40,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static io.airlift.regulator.LiteralSearchKernel.CANDIDATE_COMPARISON_BUDGET;
-import static io.airlift.regulator.TestTrinoScanKernel.classfile;
-import static io.airlift.regulator.TestTrinoScanKernel.invokedMethods;
+import static io.airlift.regulator.TestScanKernel.classfile;
+import static io.airlift.regulator.TestScanKernel.invokedMethods;
 import static io.airlift.regulator.TrinoLikeKernelGenerator.HUGE_METHOD_LIMIT;
 import static io.airlift.regulator.TrinoLikePattern.AARCH64;
 import static io.airlift.regulator.TrinoLikePattern.Plan.CONTAINS;
