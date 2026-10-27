@@ -409,25 +409,13 @@ final class ScanPlan
         return true;
     }
 
-    /// Analyzes `expression`. A plan built with `forceHandoff` hands every unanchored
-    /// search to the ordinary engine before its first attempt, so tests can run the continuation
-    /// on every input.
-    static ScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding)
-    {
-        return analyze(expression, captureCount, forceHandoff, caseFolding, ByteFrequencies.uniform());
-    }
-
-    /// Analyzes `expression`, with `byteFrequencies` choosing the probe byte of a
-    /// case-sensitive leading literal.
-    static ScanPlan analyze(Regexp expression, int captureCount, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
-    {
-        return analyze(expression, captureCount, Language.TRINO, forceHandoff, caseFolding, byteFrequencies);
-    }
-
-    /// Analyzes `expression` for `language`. The languages share one builder and admit the same
+    /// Analyzes `expression` for `language`, with `byteFrequencies` choosing the probe byte of a
+    /// case-sensitive leading literal. The languages share one builder and admit the same
     /// shapes, except that a Java end admits fewer runs before it and only RE2, Java, and Rust
     /// admit sets of some non-ASCII characters. Only Java's default `$` and `\Z` build a Java
-    /// end. An RE2, Java, or Rust plan reads input by RE2's rules.
+    /// end. An RE2, Java, or Rust plan reads input by RE2's rules. A plan built with
+    /// `forceHandoff` hands every unanchored search to the ordinary engine before its first
+    /// attempt, so tests can run the continuation on every input.
     static ScanPlan analyze(Regexp expression, int captureCount, Language language, boolean forceHandoff, CaseFolding caseFolding, ByteFrequencies byteFrequencies)
     {
         // The RE2, Java, and Rust frontends compile in the RE2 dialect to the same byte ranges,
