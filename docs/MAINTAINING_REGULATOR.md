@@ -293,8 +293,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py smoke focused-change \
 ```
 
 Execution additionally requires `--execute` and the frozen candidate arguments
-from the AWS guide, and either the engines of an accepted build phase
-(`--engine-builds`) or `--local-engine-builds`. Primary collection requires the
+from the AWS guide, and the engines of an accepted build phase
+(`--engine-builds`). Primary collection requires the
 accepted smoke root and the same selection. Resume an interrupted campaign
 with its original inputs; do not change source, heap, selection, or
 concurrency inside a resumed run.

@@ -173,13 +173,11 @@ be attributed rather than treated as run-to-run noise.
 
 Pin single-threaded runs to one logical CPU and verify that no second benchmark
 uses its sibling thread. Disable unrelated agents and scheduled work. Use a
-fixed CPU power policy where the platform permits it. Reboot or replace the
-instance between independent host sessions.
+fixed CPU power policy where the platform permits it.
 
-Run three independent host sessions on each of R8i and R9g. A session is a
-fresh instance or reboot followed by the complete randomized benchmark order.
-A campaign of work units samples unit attempts on distinct instances instead;
-see the [unit-campaign definition](METHODOLOGY.md#statistics) of an independent
+Measure three independent replicas of every work unit on each of R8i and R9g,
+each replica on a distinct instance; see the
+[unit-campaign definition](METHODOLOGY.md#statistics) of an independent
 sample.
 
 ## Workload manifest
@@ -364,7 +362,7 @@ being tuned. Only durable implementation constraints belong in source comments,
 
 Keep one immutable working directory per candidate commit containing:
 
-- environment manifests for every host session
+- environment manifests for every measuring host
 - comparator revisions and build logs
 - workload manifest and checksum
 - raw JMH and Google Benchmark JSON

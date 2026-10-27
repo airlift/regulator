@@ -24,6 +24,12 @@ case "${BENCHMARK_MODE}" in
         exit 1
         ;;
 esac
+# A baseline shard host prepares a shard's semantic routes for diagnostics or remeasurement.
+if [[ "${BENCHMARK_MODE}" == baseline-shard &&
+        -z "${BENCHMARK_REMEASUREMENT_PARTITION:-}${BENCHMARK_DIAGNOSTIC_PLAN:-}" ]]; then
+    echo "A baseline shard host requires BENCHMARK_DIAGNOSTIC_PLAN or BENCHMARK_REMEASUREMENT_PARTITION" >&2
+    exit 1
+fi
 # run-unit-worker.sh exits with its INTERRUPTED_STATUS after a Spot interruption notice.
 UNIT_WORKER_INTERRUPTED_STATUS=43
 CAMPAIGN_PROVENANCE=${CAMPAIGN_PROVENANCE:-}
@@ -36,7 +42,6 @@ case "${BASELINE_PROTOCOL}" in
     smoke | qualification) ;;
     *) echo "BASELINE_PROTOCOL must be smoke or qualification" >&2; exit 1 ;;
 esac
-BASELINE_SELECTED_ROUTE=${BASELINE_SELECTED_ROUTE:-}
 BASELINE_JONI_JMH_TIME=${BASELINE_JONI_JMH_TIME:-}
 NATIVE_COMPILER_PACKAGE=${NATIVE_COMPILER_PACKAGE:?NATIVE_COMPILER_PACKAGE is required}
 CMAKE_PACKAGE=${CMAKE_PACKAGE:?CMAKE_PACKAGE is required}
@@ -222,7 +227,7 @@ record_environment()
         printf 'regulator_release_version=%s\n' "${REGULATOR_RELEASE_VERSION:-}"
         printf 'logical_cpu_count=%s\n' "${LOGICAL_CPU_COUNT}"
         printf 'baseline_protocol=%s\n' "${BASELINE_PROTOCOL}"
-        printf 'baseline_selected_route=%s\n' "${BASELINE_SELECTED_ROUTE:-all}"
+        printf 'baseline_selected_route=all\n'
         printf 'baseline_joni_jmh_time=%s\n' "${BASELINE_JONI_JMH_TIME:-default}"
         printf 'row_manifest_sha256=%s\n' "${row_manifest_sha256}"
         printf 'platform_manifest_sha256=%s\n' "${platform_manifest_sha256}"
@@ -313,18 +318,14 @@ record_environment()
 install_engine_build()
 {
     # Install the platform's prebuilt engines once the compiler can resolve this
-    # host's native target. Without a build, shards build every engine locally;
-    # native engines made for another target or CPU are left for shards to build,
-    # while the Java Trino harness installs on any host.
-    local arguments=(
-        --shared "${BASELINE_SHARED_WORK_DIR}"
-        --environment "${RESULT_DIR}/environment-manifest.txt"
+    # host's native target. Native engines made for another target or CPU are
+    # left for the routes to build, while the Java Trino harness installs on any host.
+    python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" install \
+        --build "${ENGINE_BUILD_INPUT_DIR:?A unit worker requires prebuilt engines}" \
+        --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256:?}" \
+        --shared "${BASELINE_SHARED_WORK_DIR}" \
+        --environment "${RESULT_DIR}/environment-manifest.txt" \
         --output "${RESULT_DIR}/engine-build.txt"
-    )
-    if [[ -n "${ENGINE_BUILD_INPUT_DIR:-}" ]]; then
-        arguments+=(--build "${ENGINE_BUILD_INPUT_DIR}" --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256:?}")
-    fi
-    python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" install "${arguments[@]}"
 }
 
 install_packages
@@ -334,7 +335,7 @@ record_environment
 export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
     export BASELINE_HEAP_SIZE=${BENCHMARK_HEAP_SIZE:-8g}
     export BASELINE_SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${REGULATOR_DIR}/target/baseline-shared}
-    if [[ "${BENCHMARK_MODE}" == baseline-shard || "${BENCHMARK_MODE}" == unit-worker ]]; then
+    if [[ "${BENCHMARK_MODE}" == unit-worker ]]; then
         install_engine_build
     fi
     capacity_file="${RESULT_DIR}/host-capacity.txt"
@@ -363,11 +364,7 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
             "${RESULT_DIR}" /var/tmp/re2-units)
     else
         session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/run-host-session.sh"
-            "${RE2_CAMPAIGN_SHARD_ID}" "${BASELINE_PROTOCOL}" "${RESULT_DIR}")
-    fi
-    if [[ -n "${BENCHMARK_REMEASUREMENT_PARTITION:-}${BENCHMARK_DIAGNOSTIC_PLAN:-}" ]]; then
-        export BASELINE_VERIFICATION_ONLY=true
-        export BASELINE_PROTOCOL_QUALIFICATION=false
+            "${RE2_CAMPAIGN_SHARD_ID}" "${RESULT_DIR}")
     fi
     set +e
     /usr/bin/time --append --output="${capacity_file}" \
@@ -427,5 +424,5 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         echo "Host capacity gate rejected the baseline session; see ${capacity_file}" >&2
         exit 1
     fi
-# Preserve the dedicated protocol-rejection status only after resource checks.
+# Report the session's own status only after resource checks.
 exit "${host_session_status}"

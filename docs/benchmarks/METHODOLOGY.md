@@ -403,7 +403,7 @@ nest within a unit attempt, and a row's independent samples are the attempts of
 the one unit that owns it, its three replicas on distinct instances. Different
 units may share a host. A unit that copies a native bracket measures it again
 only to pair with the rows it owns; the copy is never a sample of the bracket
-row. The [reduction rules](../../tools/re2-benchmark/baseline/REPORTING.md#unit-campaigns)
+row. The [reduction rules](../../tools/re2-benchmark/baseline/REPORTING.md#inputs)
 define ownership and pairing.
 
 Three or four hosts cannot establish a distribution-free precision guarantee

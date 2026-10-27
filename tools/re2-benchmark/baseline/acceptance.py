@@ -540,6 +540,7 @@ def expected_rows(manifest_rows, shard_id, systems):
     return {row["row_id"]: row for row in shard_rows if row["system"] in systems}
 
 
+# The report tooling revalidates the host-session evidence a release captured with these.
 def validate_host_results(manifest_path, session_path, observed_path):
     return _validate_host_results(manifest_path, session_path, observed_path, parse_primary_replica)
 
@@ -607,14 +608,6 @@ def _validate_host_results(manifest_path, session_path, observed_path, replica_p
         "heap_size": heap_size,
     })
     return receipt
-
-
-def write_receipt(path, receipt):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=RECEIPT_FIELDS, delimiter="\t", lineterminator="\n")
-        writer.writeheader()
-        writer.writerow(receipt)
 
 
 def load_platforms(path):

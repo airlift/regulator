@@ -15,7 +15,7 @@ from pathlib import Path
 
 BASELINE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASELINE))
-from acceptance import PROTOCOL_QUALIFICATION_FIELDS  # noqa: E402
+from acceptance import PROTOCOL_QUALIFICATION_FIELDS, SESSION_FIELDS  # noqa: E402
 import unit_dispatch  # noqa: E402
 
 
@@ -26,7 +26,6 @@ def load_module(name, path):
     return module
 
 
-HOST_SESSION = load_module("host_session", BASELINE / "host_session.py")
 SHARD_RESULTS = load_module("host_session_shard_results", BASELINE / "shard_results.py")
 UNIT_SESSION = load_module("unit_session", BASELINE / "unit_session.py")
 # A one-route object-row unit that copies the native bracket it is compared against.
@@ -267,7 +266,7 @@ class UnitFixture:
     def create_route(self, route, systems, share, calibration, representatives):
         directory = self.root / "routes" / route
         (directory / "semantic-reports").mkdir(parents=True)
-        SHARD_RESULTS.write_tsv(directory / "route-session.tsv", HOST_SESSION.SESSION_FIELDS, [{
+        SHARD_RESULTS.write_tsv(directory / "route-session.tsv", SESSION_FIELDS, [{
             "schema_version": "2", **self.host, "shard_id": self.unit["shard_id"], "replica_id": self.replica,
             "systems": ",".join(sorted(systems)),
         }])

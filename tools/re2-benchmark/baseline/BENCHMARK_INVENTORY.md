@@ -5,9 +5,10 @@ modes.
 
 ## Accepted modes
 
-- `baseline-shard` runs one shard selected by `baseline/run-campaign.py`.
-  Its exact rows and systems come from `rows.tsv`, and route ownership comes
-  from `shard-dispatch.tsv`.
+- `baseline-shard` runs one shard for a
+  [diagnostic](../diagnostics/README.md) or
+  [remeasurement](REMEASUREMENT.md) plan. Its exact rows and systems come
+  from `rows.tsv`, and route ownership comes from `shard-dispatch.tsv`.
 - `language-batch` runs a public-language comparison batch selected by
   `language/fleet.py`, with collection and acceptance managed by
   `language/campaign.py`. See the [language guide](../language/README.md).

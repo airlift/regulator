@@ -1,19 +1,13 @@
 # Baseline shard dispatch
 
-`run-host-session.sh` runs one shard of the frozen candidate on one host:
-
-```bash
-tools/re2-benchmark/baseline/run-host-session.sh \
-    traditional-search qualification /results/traditional-search
-```
-
-It reads the exact route and system ownership from `shard-dispatch.tsv` and
-keeps route artifacts under `routes/<route>`. Odd replicas run `native-access`
-first, while even replicas run `object-row` first, so route startup and thermal
-effects do not systematically favor one implementation. Expensive pinned
-Trino/Joni and Rebar/native preparation is shared through
-`BASELINE_SHARED_WORK_DIR`; measurements and semantic receipts are never shared
-between routes.
+`shard-dispatch.tsv` assigns each shard's rows to routes and systems.
+`run-shard.sh` measures one route, and `run-unit.sh` runs it once for each
+route a [work unit](#work-units) needs, keeping route artifacts under
+`routes/<route>`. Odd replicas run `native-access` first, while even replicas
+run `object-row` first, so route startup and thermal effects do not
+systematically favor one implementation. Expensive pinned Trino/Joni and
+Rebar/native preparation is shared through `BASELINE_SHARED_WORK_DIR`;
+measurements and semantic receipts are never shared between routes.
 
 `freeze-candidate.sh` creates an immutable benchmark ref and records that
 candidate's commit, complete tree, production tree, deterministic source
@@ -22,12 +16,10 @@ identities directly before execution. The pre-cleanup snapshot remains a
 separate regression baseline and is not a prerequisite for freezing a later
 candidate.
 
-Each route is executed by `run-shard.sh`. A deferred route produces
-`route-session.tsv` but no acceptance receipt. The host wrapper verifies that
-all route sessions describe the same host identity, combines the exact route
-rows, rejects duplicate or missing rows, and writes the only canonical
-`session.tsv` and `acceptance-receipt.tsv` at the host-session root. The union
-of dispatched systems must equal every system in `rows.tsv` for the shard.
+A route produces `route-session.tsv` but no acceptance receipt. `run-unit.sh`
+verifies that all route sessions describe the same host identity, combines the
+exact route rows, rejects duplicate or missing rows, and writes the unit's
+`unit-session.tsv` and, once accepted, its `unit-receipt.tsv`.
 
 ## JMH Protocol
 
@@ -76,8 +68,8 @@ iteration counts while avoiding a new forked JVM for every row:
   not run the GC profiler because its in-process instrumentation perturbs the
   primary timing score. All five processes contribute primary timing samples.
 - Compiler rows use 300 ms warmup iterations because their C2 transition is
-  later than the matching loops. The additional warmup is charged to the host
-  duration budget.
+  later than the matching loops. The additional warmup is charged to the
+  route duration budget.
 - Every representative whose row is frozen with 50 ms windows is compared with
   a full five-fork, ten-by-one-second protocol on every replica. The
   specialized side uses five independent JVMs with the same JMH compiler
@@ -89,7 +81,8 @@ iteration counts while avoiding a new forked JVM for every row:
   representative must provide exactly five groups of ten measurements under
   each protocol, have at
   most 5% relative standard error under each protocol, and differ by at most
-  5%; otherwise the host is rejected before its result can be accepted.
+  5%; otherwise the unit attempt is rejected before its result can be
+  accepted.
 - An exact row that fails this equivalence gate is listed in
   `full-protocol-benchmarks.tsv` instead of weakening the gate. Qualification
   excludes that method from the main process set, reruns its other parameters
@@ -112,16 +105,16 @@ iteration counts while avoiding a new forked JVM for every row:
   applicable memory routes fit the unchanged 90-minute static host deadline.
   The split preserves every Java/native pair and input size. Original rejected
   measurements remain evidence; they are not accepted final samples.
-- Numerical protocol rejection has exit status 42. It leaves the host
-  unaccepted and the campaign incomplete, without terminating unrelated jobs
+- Numerical protocol rejection has exit status 42. It leaves the unit
+  unresolved and the campaign incomplete, without terminating unrelated work
   or automatically retrying the rejected timings. Malformed evidence and
   resource failures retain the shared fleet stop behavior.
 - A failed check of a route's correctness stage has exit status 44: a
   semantic test, the DFA probe, a differential verifier or its count of
   verified cases, the curated Rebar verification, or the pinned Trino
-  comparator's verification, including one that could not start. A host
-  session treats it as any other benchmark failure; a unit campaign leaves the
-  unit unresolved without retrying it, and its phase is not accepted.
+  comparator's verification, including one that could not start. The
+  campaign leaves the unit unresolved without retrying it, and its phase is
+  not accepted.
 - Fast allocating rows require special scrutiny because a 50 ms window can
   contain zero collections in most iterations and concentrate collection cost
   in one iteration that a median discards. The `countRegulator`
@@ -186,12 +179,9 @@ estimate from:
 These are conservative acceptance-gate allowances rather than predicted wall
 times. Rebar measurement is bounded directly by its selected row count and
 configured maximum windows; cold build and census work use explicit allowances
-because their duration depends on the host and shared-work cache state. Shared
-cold-build allowances are charged once across the serial routes. The host is
-rejected before measurement if the complete route sum and bootstrap allowance
-exceed 90 minutes. `run-metadata.txt` records each route estimate, while
-`host-plan.tsv` and `host-plan.properties` record route order and the complete
-host bound. Native RE2 and Rebar keep their checked-in specialized protocols
+because their duration depends on the host and shared-work cache state. A
+route is rejected before measurement if its estimate exceeds 90 minutes, and
+`run-metadata.txt` records each route estimate. Native RE2 and Rebar keep their checked-in specialized protocols
 rather than being forced through JMH.
 
 `unit_cost.py` estimates the measurement seconds of any set of rows from their
@@ -199,9 +189,8 @@ frozen protocols, with the same per-row, per-selector startup,
 representative, and calibration rules. It leaves out the cold-build, pinned
 Trino preparation, and host bootstrap allowances, which do not grow with the
 rows a host measures, and the Rebar verification allowance, which grows with
-the selected Rebar rows. `validate-shard-plans.py` checks the
-model against every planned route on every replica. The route estimate
-differs from it in three recorded ways: it charges none of `trino-like`'s
+the selected Rebar rows. The route estimate differs from it in three recorded
+ways: it charges none of `trino-like`'s
 3,600 seconds of iterations, it charges the compiler warmup to the 26 native
 `traditional-capture` rows that share the compiler benchmark names (325
 seconds), and it also charges each full-protocol row the bounded windows that
@@ -214,7 +203,7 @@ in the calibration statistics.
 
 ### Engine Builds
 
-A host may install the native RE2 benchmark, the Rebar engines and native
+A host installs the native RE2 benchmark, the Rebar engines and native
 runners, and the pinned Trino harness from its platform's
 [engine build](../aws/README.md#engine-builds) instead of building them. The
 cold-build allowances above stay unchanged: a host whose native target differs
@@ -286,7 +275,7 @@ units one at a time (see [Unit workers](../aws/README.md#unit-workers)).
 `run-unit.sh <unit-id> <smoke|qualification> <replica-id> <result-directory>`
 plans the unit with `unit_session.py` and runs `run-shard.sh` once for each
 route its rows need, so every route handler, verifier, and normalizer is the
-one a host session runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
+one a shard route runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
 
 - Each route reads the unit's expected rows. Its JMH runners execute the
   unit's selectors instead of the handler's whole filter: one exact method
@@ -419,14 +408,14 @@ Every successful route contains:
   `native-bracket.tsv`
 - `raw-artifacts.sha256`, which records raw file hashes separately from result
   identity
-- `route-session.tsv` for deferred host execution
+- `route-session.tsv`, which the unit combines with its other routes
 - candidate, protocol, and static-runtime provenance in `run-metadata.txt`
 
-The host-session root also contains `host-capacity.txt`, produced by the pinned
+The unit directory also contains `unit-capacity.txt`, produced by the pinned
 GNU `time` package. It records total and before/after available memory, swap
 state, OOM-kill counters, elapsed wall time, peak resident memory, command
 status, and the required post-run memory headroom. The campaign controller
-rejects a successful job if this capacity evidence is missing, malformed, or
+rejects a successful unit attempt if this capacity evidence is missing, malformed, or
 fails any capacity gate.
 
 The observed schema is `row_id`, `shard_id`, `system`, `score`, `score_unit`,

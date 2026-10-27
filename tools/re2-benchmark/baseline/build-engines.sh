@@ -7,8 +7,8 @@ if [[ $# -ne 1 ]]; then
 fi
 
 # Build the native RE2 benchmark, the Rebar engines, and the pinned Trino
-# harness once for this platform, exactly as a baseline shard builds them, and
-# package them for every baseline host of the platform.
+# harness once for this platform, exactly as a route builds them, and
+# package them for every unit worker of the platform.
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 RESULT_DIR=$1

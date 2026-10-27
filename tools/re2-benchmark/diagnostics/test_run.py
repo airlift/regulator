@@ -144,8 +144,7 @@ class TestDiagnostics(unittest.TestCase):
         base = {**os.environ, "BENCHMARK_DIAGNOSTIC_PLAN": "pilot-core",
                 "CAMPAIGN_MODE": "baseline-shard", "CAMPAIGN_SHARD_ID": "trino-final-line",
                 "REGULATOR_RELEASE_VERSION": "1.0", "BASELINE_PROTOCOL": "smoke"}
-        for override in ({"BASELINE_PROTOCOL": "qualification"}, {"BASELINE_SELECTED_ROUTE": "object-row"},
-                         {"BENCHMARK_DIAGNOSTIC_PLAN": "../../bad"}):
+        for override in ({"BASELINE_PROTOCOL": "qualification"}, {"BENCHMARK_DIAGNOSTIC_PLAN": "../../bad"}):
             result = subprocess.run(["bash", str(wrapper)], env={**base, **override},
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             self.assertNotEqual(result.returncode, 0)

@@ -12,26 +12,20 @@ import json
 import math
 import re
 import statistics
+import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from acceptance import (
-    EVIDENCE_FIELDS,
-    EXPECTED_PLATFORMS,
-    RECEIPT_FIELDS,
-    RELEASE_1_0_PLATFORMS,
-    SCHEMA_VERSION,
-    SESSION_FIELDS,
-    ValidationError,
-    evidence_candidate_identity,
-    normalize_heap_size,
-    verify_evidence_manifest,
-)
+from acceptance import EVIDENCE_FIELDS, EXPECTED_PLATFORMS, RELEASE_1_0_PLATFORMS, ValidationError
 import rebar_joni_applicability
 import unit_dispatch
 import unit_session
 from row_protocol import comparison_specs, identify_scaling_groups, logical_row_id, parse_parameters
+
+BASELINE = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASELINE.parent / "language"))
+import released_artifact  # noqa: E402
 
 MANIFEST_FIELDS = (
     "row_id", "shard_id", "suite", "system", "benchmark", "parameters",
@@ -58,8 +52,10 @@ DRIFT_LIMIT = 0.05
 MATERIAL_LIMIT = 0.05
 SERIOUS_RATIO_LOW = 0.5
 SERIOUS_RATIO_HIGH = 2.0
-# A unit campaign names each sample's unit attempt beside its host.
+# Each sample names its unit attempt beside its host.
 UNIT_ATTEMPT_FIELDS = ("unit_id", "unit_attempt_id")
+RECEIPT_NAME = "unit-receipt.tsv"
+CAPACITY_NAME = "unit-capacity.txt"
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -69,10 +65,7 @@ class ReductionError(ValueError):
 
 @dataclass(frozen=True)
 class Session:
-    """One accepted measurement session: a host session, or a unit attempt in a unit campaign.
-
-    Host sessions are independent samples; unit attempts are independent only across the replicas of one row.
-    """
+    """One accepted unit attempt; attempts are independent samples only across the replicas of one row."""
     receipt: dict[str, str]
     directory: Path
     confirmation: bool
@@ -88,29 +81,6 @@ class Session:
     def key(self):
         return session_key(self.receipt)
 
-    @property
-    def unit_attempt(self):
-        return "unit_attempt_id" in self.receipt
-
-    @property
-    def receipt_name(self):
-        return receipt_name(self.unit_attempt)
-
-    @property
-    def capacity_name(self):
-        return capacity_name(self.unit_attempt)
-
-
-def receipt_name(units):
-    """The receipt file of a unit attempt, or of a host session."""
-    return "unit-receipt.tsv" if units else "acceptance-receipt.tsv"
-
-
-def capacity_name(units):
-    """The finalized capacity file of a unit attempt, or of a host session."""
-    return "unit-capacity.txt" if units else "host-capacity.txt"
-
-
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -120,15 +90,12 @@ def stable_digest(values) -> str:
 
 
 def session_key(row):
-    if "unit_attempt_id" in row:
-        return tuple(row[field] for field in ("campaign_id", "platform", "unit_id", "replica_id", "unit_attempt_id"))
-    return tuple(row[field] for field in (
-        "campaign_id", "platform", "shard_id", "replica_id", "instance_id", "host_epoch"))
+    return tuple(row[field] for field in ("campaign_id", "platform", "unit_id", "replica_id", "unit_attempt_id"))
 
 
 def attempt_key(row):
-    """The session a sample belongs to: its unit attempt, or the host session that measured it."""
-    return row.get("unit_attempt_id") or row["host_epoch"]
+    """The unit attempt a sample belongs to."""
+    return row["unit_attempt_id"]
 
 
 def owns_sample(row):
@@ -137,11 +104,11 @@ def owns_sample(row):
 
 
 def unit_identity(row):
-    return {field: row[field] for field in UNIT_ATTEMPT_FIELDS if field in row}
+    return {field: row[field] for field in UNIT_ATTEMPT_FIELDS}
 
 
 def unit_columns(fields, *extra):
-    """A unit campaign's table names the unit and attempt after the host epoch."""
+    """A table names the unit and attempt after the host epoch."""
     index = fields.index("host_epoch") + 1
     return (*fields[:index], *UNIT_ATTEMPT_FIELDS, *extra, *fields[index:])
 
@@ -266,23 +233,8 @@ def load_shards(path):
     return shards
 
 
-def ledger_holds_units(paths):
-    """Whether the receipt ledgers hold unit attempts rather than host sessions; they may not mix."""
-    kinds = set()
-    for path in paths:
-        try:
-            with path.open(newline="", encoding="utf-8") as input_file:
-                fields = tuple(next(csv.reader(input_file, delimiter="\t"), ()))
-        except OSError as error:
-            raise ReductionError(f"cannot read {path}: {error}") from error
-        kinds.add(fields == unit_session.UNIT_RECEIPT_FIELDS)
-    if len(kinds) > 1:
-        raise ReductionError("receipt ledgers mix host sessions and unit attempts")
-    return kinds == {True}
-
-
-def load_receipt_ledger(paths, confirmation, units=False):
-    fields = unit_session.UNIT_RECEIPT_FIELDS if units else RECEIPT_FIELDS
+def load_receipt_ledger(paths, confirmation):
+    fields = unit_session.UNIT_RECEIPT_FIELDS
     rows = []
     for path in paths:
         rows.extend(read_tsv(path, fields, fields))
@@ -297,75 +249,8 @@ def load_receipt_ledger(paths, confirmation, units=False):
     return rows
 
 
-def verify_receipt_coverage(primary, confirmation, platforms, shards, manifest_rows, manifest_digest):
-    manifest_shards = {row["shard_id"] for row in manifest_rows}
-    if manifest_shards != shards:
-        raise ReductionError(
-            f"manifest/shard mismatch: missing={sorted(shards - manifest_shards)}, "
-            f"unexpected={sorted(manifest_shards - shards)}")
-    expected = {(platform, shard, str(replica)) for platform in platforms for shard in shards for replica in (1, 2, 3)}
-    actual = {(row["platform"], row["shard_id"], row["replica_id"]) for row in primary}
-    if actual != expected or len(primary) != len(expected):
-        raise ReductionError(
-            f"primary coverage mismatch: missing={sorted(expected - actual)[:20]}, "
-            f"unexpected={sorted(actual - expected)[:20]}")
-    confirmation_keys = [(row["platform"], row["shard_id"]) for row in confirmation]
-    if len(confirmation_keys) != len(set(confirmation_keys)):
-        raise ReductionError("more than one confirmation host exists for a platform and shard")
-    all_rows = primary + confirmation
-    campaign_ids = {row["campaign_id"] for row in all_rows}
-    if len(campaign_ids) != 1:
-        raise ReductionError(f"accepted receipts contain multiple campaign IDs: {sorted(campaign_ids)}")
-    instances = [row["instance_id"] for row in all_rows]
-    epochs = [row["host_epoch"] for row in all_rows]
-    if len(instances) != len(set(instances)):
-        raise ReductionError("accepted receipts reuse an instance ID")
-    if len(epochs) != len(set(epochs)):
-        raise ReductionError("accepted receipts reuse a host epoch")
-    candidate_identities = {
-        (row["candidate_commit"], row["candidate_archive_sha256"], row["engine_tree"], normalize_heap_size(row["heap_size"]))
-        for row in all_rows
-    }
-    if len(candidate_identities) != 1:
-        raise ReductionError(f"accepted receipts contain multiple candidate identities: {sorted(candidate_identities)}")
-    systems_by_shard = defaultdict(set)
-    rows_by_shard = defaultdict(list)
-    for row in manifest_rows:
-        systems_by_shard[row["shard_id"]].add(row["system"])
-        rows_by_shard[row["shard_id"]].append(row)
-    for row in all_rows:
-        context = f"{row['_source']}:{row['_line']}"
-        if row["schema_version"] != SCHEMA_VERSION:
-            raise ReductionError(f"{context} has unsupported receipt schema {row['schema_version']!r}")
-        for field in ("observed_rows_sha256", "evidence_manifest_sha256"):
-            if not SHA256.fullmatch(row[field]):
-                raise ReductionError(f"{context} has an invalid {field}")
-        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", row["candidate_commit"]) is None:
-            raise ReductionError(f"{context} has an invalid candidate commit")
-        if row["candidate_archive_sha256"] != "not-recorded" and not SHA256.fullmatch(
-                row["candidate_archive_sha256"]):
-            raise ReductionError(f"{context} has an invalid candidate archive checksum")
-        if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", row["engine_tree"]) is None:
-            raise ReductionError(f"{context} has an invalid engine tree")
-        platform = platforms.get(row["platform"])
-        if platform is None or row["shard_id"] not in shards:
-            raise ReductionError(f"{context} has an unknown platform or shard")
-        if row["architecture"] != platform["architecture"] or row["instance_type"] != topology.instance_type(platform, row["shard_id"]):
-            raise ReductionError(f"{context} does not match the frozen platform")
-        systems = row["systems"].split(",")
-        if systems != sorted(set(systems)) or set(systems) != systems_by_shard[row["shard_id"]]:
-            raise ReductionError(f"{context} does not cover the shard's exact systems")
-        expected_rows = rows_by_shard[row["shard_id"]]
-        if row["row_count"] != str(len(expected_rows)):
-            raise ReductionError(f"{context} has the wrong row count")
-        if row["manifest_sha256"] != manifest_digest:
-            raise ReductionError(f"{context} has the wrong manifest checksum")
-        if row["expected_rows_sha256"] != stable_digest(item["row_id"] for item in expected_rows):
-            raise ReductionError(f"{context} has the wrong expected-row checksum")
-
-
 def verify_unit_receipt_coverage(primary, confirmation, platforms, shards, manifest_rows, manifest_digest):
-    """A unit campaign covers its shards by the campaign acceptance rule; returns the units in scope."""
+    """A campaign covers its shards by the campaign acceptance rule; returns the units in scope."""
     campaign_ids = {row["campaign_id"] for row in primary + confirmation}
     if not campaign_ids:
         raise ReductionError("accepted unit ledgers contain no receipts")
@@ -391,20 +276,18 @@ def retained_unit_attempt(directory):
     if len(parents) <= 5 or parents[4].name != "units":
         return False
     fields = unit_session.UNIT_RECEIPT_FIELDS
-    receipt = read_one(directory / receipt_name(units=True), fields, fields)
+    receipt = read_one(directory / RECEIPT_NAME, fields, fields)
     return unit_dispatch.unit_attempt_directory(parents[5], receipt) == directory.resolve()
 
 
-def discover_session_directories(artifact_roots, session_directories, units=False):
+def discover_session_directories(artifact_roots, session_directories):
     directories = {path.resolve() for path in session_directories}
     for root in artifact_roots:
         if not root.is_dir():
             raise ReductionError(f"artifact root does not exist: {root}")
-        found = (path.parent for path in root.rglob(receipt_name(units)))
-        if units:
-            # A unit phase's unit-results/ holds the controller's staged copies of the same attempts.
-            found = (directory for directory in found if retained_unit_attempt(directory))
-        directories.update(directory.resolve() for directory in found)
+        # A phase's unit-results/ holds the controller's staged copies of the same attempts.
+        directories.update(
+            path.parent.resolve() for path in root.rglob(RECEIPT_NAME) if retained_unit_attempt(path.parent))
     return sorted(directories, key=str)
 
 
@@ -509,7 +392,7 @@ def read_final_capacity(path):
     if maximum_resident * 1024 > memory_total:
         raise ReductionError(f"{path} peak RSS exceeds total physical memory")
     if properties["exit_status"] != "0":
-        raise ReductionError(f"{path} reports nonzero host-session exit status")
+        raise ReductionError(f"{path} reports a nonzero exit status")
     return properties
 
 
@@ -522,72 +405,16 @@ def evidence_paths(directory, evidence_rows, name):
     ]
 
 
-def verify_session(directory, ledger_receipt, confirmation, manifest_by_id, manifest_digest):
-    status_path = directory / "status.txt"
-    if not status_path.is_file() or status_path.read_text(encoding="utf-8") != "status=complete\n":
-        raise ReductionError(f"host session does not have a complete final status: {directory}")
-    artifact_receipt = read_one(directory / receipt_name(units=False), RECEIPT_FIELDS, RECEIPT_FIELDS)
-    clean_artifact = {field: artifact_receipt[field] for field in RECEIPT_FIELDS}
-    clean_ledger = {field: ledger_receipt[field] for field in RECEIPT_FIELDS}
-    if clean_artifact != clean_ledger:
-        raise ReductionError(f"artifact receipt does not match its ledger row: {directory}")
-    session = read_one(directory / "session.tsv", SESSION_FIELDS, SESSION_FIELDS)
-    if any(session[field] != artifact_receipt[field] for field in SESSION_FIELDS):
-        raise ReductionError(f"session identity does not match its receipt: {directory}")
-    observed_path = directory / "observed-rows.tsv"
-    if sha256_file(observed_path) != artifact_receipt["observed_rows_sha256"]:
-        raise ReductionError(f"observed-row checksum does not match receipt: {directory}")
-    evidence_path = directory / "route-evidence.tsv"
-    if sha256_file(evidence_path) != artifact_receipt["evidence_manifest_sha256"]:
-        raise ReductionError(f"host evidence manifest checksum does not match receipt: {directory}")
-    try:
-        evidence_rows = verify_evidence_manifest(evidence_path, directory)
-        candidate_commit, candidate_archive_sha256, engine_tree, heap_size = evidence_candidate_identity(
-            evidence_rows, directory)
-    except ValidationError as error:
-        raise ReductionError(f"invalid host evidence in {directory}: {error}") from error
-    candidate_identity = {
-        "candidate_commit": candidate_commit,
-        "candidate_archive_sha256": candidate_archive_sha256,
-        "engine_tree": engine_tree,
-        "heap_size": heap_size,
-    }
-    mismatches = [
-        field for field, value in candidate_identity.items()
-        if artifact_receipt[field] != value
-    ]
-    if mismatches:
-        raise ReductionError(f"host evidence candidate identity differs from receipt: {mismatches}")
+def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_path, manifest_by_id, release=None):
+    """Reverify a unit attempt as unit acceptance does; its owned and copied rows are its measurements.
 
-    route_sessions = evidence_paths(directory, evidence_rows, "route-session.tsv")
-    route_systems = set()
-    identity_fields = tuple(field for field in SESSION_FIELDS if field != "systems")
-    for route_session_path in route_sessions:
-        route_session = read_one(route_session_path, SESSION_FIELDS, SESSION_FIELDS)
-        changed = [field for field in identity_fields if route_session[field] != session[field]]
-        if changed:
-            raise ReductionError(f"route session identity differs from host session: {route_session_path}: {changed}")
-        route_systems.update(route_session["systems"].split(","))
-    if route_systems != set(session["systems"].split(",")):
-        raise ReductionError(f"route systems do not exactly cover host session systems: {directory}")
-    observed = read_observed_rows(observed_path)
-    expected = {identifier: row for identifier, row in manifest_by_id.items()
-                if row["shard_id"] == artifact_receipt["shard_id"]}
-    identifiers = [row["row_id"] for row in observed]
-    if len(identifiers) != len(set(identifiers)) or set(identifiers) != set(expected):
-        raise ReductionError(f"artifact does not contain the exact shard rows: {directory}")
-    return verify_measurements(
-        directory, artifact_receipt, confirmation, evidence_rows, observed_path, observed, expected,
-        evidence_paths(directory, evidence_rows, "calibration.tsv"), directory / capacity_name(units=False))
-
-
-def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_path, manifest_by_id):
-    """Reverify a unit attempt as unit acceptance does; its owned and copied rows are its measurements."""
+    A release campaign's attempt must also prove each route measured the release's JAR.
+    """
     fields = unit_session.UNIT_RECEIPT_FIELDS
     status_path = directory / "status.txt"
     if not status_path.is_file() or status_path.read_text(encoding="utf-8") != "status=complete\n":
         raise ReductionError(f"unit attempt does not have a complete final status: {directory}")
-    artifact_receipt = read_one(directory / receipt_name(units=True), fields, fields)
+    artifact_receipt = read_one(directory / RECEIPT_NAME, fields, fields)
     clean_artifact = {field: artifact_receipt[field] for field in fields}
     if clean_artifact != {field: ledger_receipt[field] for field in fields}:
         raise ReductionError(f"artifact receipt does not match its ledger row: {directory}")
@@ -595,7 +422,9 @@ def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_
         # A worker host's calibrations live once in its host session's directory, the attempt's parent.
         regenerated = unit_session.validate_unit_results(directory, manifest_path, host_evidence=directory.parent)
         unit_session.check_chain_predecessor(directory, directory.parent)
-    except (OSError, ValueError) as error:
+        if release:
+            released_artifact.validate_baseline(directory, release)
+    except (OSError, ValueError, KeyError) as error:
         raise ReductionError(f"invalid unit evidence in {directory}: {error}") from error
     if regenerated != clean_artifact:
         raise ReductionError(f"unit receipt cannot be reproduced from its evidence: {directory}")
@@ -608,7 +437,7 @@ def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_
         raise ReductionError(f"artifact does not contain the exact unit rows: {directory}")
     return verify_measurements(
         directory, artifact_receipt, confirmation, evidence_rows, observed_path, observed, expected,
-        [directory / "calibration.tsv"], directory / capacity_name(units=True))
+        [directory / "calibration.tsv"], directory / CAPACITY_NAME)
 
 
 def verify_measurements(directory, artifact_receipt, confirmation, evidence_rows, observed_path, observed, expected,
@@ -691,21 +520,20 @@ def verify_measurements(directory, artifact_receipt, confirmation, evidence_rows
 
 
 def load_sessions(primary_receipts, confirmation_receipts, artifact_roots, session_directories,
-                  manifest_rows, manifest_digest, campaign_units=None, manifest_path=None):
-    """Load and reverify every accepted host session, or every unit attempt when the campaign's units are given."""
+                  manifest_rows, campaign_units, manifest_path, release=None):
+    """Load and reverify every accepted unit attempt of the campaign's units."""
     manifest_by_id = {row["row_id"]: row for row in manifest_rows}
-    units = campaign_units is not None
-    receipt_fields = unit_session.UNIT_RECEIPT_FIELDS if units else RECEIPT_FIELDS
+    receipt_fields = unit_session.UNIT_RECEIPT_FIELDS
     ledgers = {session_key(row): (row, False) for row in primary_receipts}
     for row in confirmation_receipts:
         key = session_key(row)
         if key in ledgers:
             raise ReductionError("primary and confirmation ledgers overlap")
         ledgers[key] = (row, True)
-    discovered = discover_session_directories(artifact_roots, session_directories, units)
+    discovered = discover_session_directories(artifact_roots, session_directories)
     artifacts = {}
     for directory in discovered:
-        receipt = read_one(directory / receipt_name(units), receipt_fields, receipt_fields)
+        receipt = read_one(directory / RECEIPT_NAME, receipt_fields, receipt_fields)
         key = session_key(receipt)
         if key in artifacts:
             raise ReductionError(f"duplicate accepted artifact for session {key}")
@@ -720,22 +548,18 @@ def load_sessions(primary_receipts, confirmation_receipts, artifact_roots, sessi
     observed_by_session = {}
     for key in sorted(ledgers):
         receipt, confirmation = ledgers[key]
-        if units:
-            session, observed = verify_unit_attempt(
-                artifacts[key], receipt, confirmation, campaign_units[receipt["unit_id"]], manifest_path,
-                manifest_by_id)
-        else:
-            session, observed = verify_session(
-                artifacts[key], receipt, confirmation, manifest_by_id, manifest_digest)
+        session, observed = verify_unit_attempt(
+            artifacts[key], receipt, confirmation, campaign_units[receipt["unit_id"]], manifest_path, manifest_by_id,
+            release)
         sessions.append(session)
         observed_by_session[key] = observed
     return sessions, observed_by_session
 
 
-def load_artifact_indexes(paths, session_fields=SESSION_FIELDS):
+def load_artifact_indexes(paths):
     indexes = {}
     for path in paths:
-        rows = read_tsv(path, session_fields)
+        rows = read_tsv(path, unit_session.UNIT_SESSION_FIELDS)
         for row in rows:
             key = session_key(row)
             if key in indexes:
@@ -991,7 +815,7 @@ def native_bracket_drift(manifest, drift_by_benchmark):
     return next(iter(values)) if values else None
 
 
-def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_indexes, campaign_artifact, units=False):
+def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_indexes, campaign_artifact):
     rows = []
     host_fields = (
         "campaign_id", "platform", "architecture", "instance_type", "availability_zone", "shard_id",
@@ -1004,8 +828,7 @@ def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_inde
         "artifact_sha256", "retrieved_at", "campaign_s3_uri", "campaign_version_id",
         "campaign_archive_sha256", "session_directory",
     )
-    if units:
-        host_fields = unit_columns(host_fields, "role")
+    host_fields = unit_columns(host_fields, "role")
     for session in sessions:
         receipt = session.receipt
         index = artifact_indexes.get(session.key, {})
@@ -1038,9 +861,9 @@ def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_inde
                 "campaign_version_id": campaign_artifact.get("version_id", ""),
                 "campaign_archive_sha256": campaign_artifact.get("archive_sha256", ""),
                 "session_directory": str(session.directory),
+                **unit_identity(receipt),
+                "role": observed["role"],
             }
-            if session.unit_attempt:
-                row.update(unit_identity(receipt), role=observed["role"])
             rows.append(row)
     rows.sort(key=lambda row: (
         row["platform"], row["row_id"], int(row["replica_id"]), row["host_epoch"], attempt_key(row)))
@@ -1074,8 +897,8 @@ def cost_ratio(candidate_score, candidate_unit, comparator_score, comparator_uni
     return candidate / comparator if candidate_kind == "cost" else comparator / candidate
 
 
-def build_comparisons(host_rows, manifest_rows, units=False):
-    """Pair each candidate sample with the comparators measured in its own host session or unit attempt."""
+def build_comparisons(host_rows, manifest_rows):
+    """Pair each candidate sample with the comparators measured in its own unit attempt."""
     by_host_row = {(row["platform"], attempt_key(row), row["row_id"]): row for row in host_rows}
     hosts_by_row_id = defaultdict(list)
     for row in host_rows:
@@ -1088,8 +911,7 @@ def build_comparisons(host_rows, manifest_rows, units=False):
         "comparator_score", "score_unit", "ratio", "direction", "material",
         "native_bracket_drift", "serious_outlier", "outcome",
     )
-    if units:
-        fields = unit_columns(fields)
+    fields = unit_columns(fields)
     rows = []
     for logical_id, candidate, comparator_system, comparators in comparison_specs(manifest_rows):
         for host in hosts_by_row_id[candidate["row_id"]]:
@@ -1100,7 +922,7 @@ def build_comparisons(host_rows, manifest_rows, units=False):
             if any(row is None for row in comparator_hosts):
                 raise ReductionError(
                     f"comparator is missing for {candidate['row_id']} "
-                    f"on the same {'unit attempt' if units else 'host'} {attempt_key(host)}")
+                    f"on the same unit attempt {attempt_key(host)}")
             if host.get("semantic_outcome", "verified") != "verified" or any(
                     row.get("semantic_outcome", "verified") != "verified" for row in comparator_hosts):
                 continue
@@ -1170,8 +992,8 @@ def scaling_class(slope):
     return "superlinear"
 
 
-def build_scaling(host_rows, manifest_rows, units=False):
-    """One signature per scaling group and host session or unit attempt; units hold whole groups."""
+def build_scaling(host_rows, manifest_rows):
+    """One signature per scaling group and unit attempt; units hold whole groups."""
     owned = [row for row in host_rows if owns_sample(row)]
     by_host_row = {(row["platform"], attempt_key(row), row["row_id"]): row for row in owned}
     host_identity = {(row["platform"], attempt_key(row)): row for row in owned}
@@ -1180,8 +1002,7 @@ def build_scaling(host_rows, manifest_rows, units=False):
         "size_parameter", "other_parameters", "replica_id", "host_epoch", "confirmation",
         "point_count", "minimum_size", "maximum_size", "slope", "classification", "row_ids",
     )
-    if units:
-        fields = unit_columns(fields)
+    fields = unit_columns(fields)
     rows = []
     membership = defaultdict(list)
     for group_id, (identity, points) in identify_scaling_groups(manifest_rows).items():
@@ -1193,7 +1014,7 @@ def build_scaling(host_rows, manifest_rows, units=False):
                 continue
             if any(row is None for row in host_points):
                 raise ReductionError(
-                    f"{'unit attempt' if units else 'host'} {attempt} has incomplete scaling group {group_id}")
+                    f"unit attempt {attempt} has incomplete scaling group {group_id}")
             if any(row["semantic_outcome"] != "verified" or
                    row.get("outcome", "accepted") != "accepted"
                    for row in host_points):
@@ -1444,10 +1265,10 @@ def build_classes(comparison_aggregates):
     return fields, rows
 
 
-def build_confirmation_jobs(row_aggregates, host_rows, comparisons, scaling, sessions, units=False):
-    """Select each unstable platform/shard, or platform/unit in a unit campaign, not yet confirmed."""
+def build_confirmation_jobs(row_aggregates, host_rows, comparisons, scaling, sessions):
+    """Select each unstable platform/unit not yet confirmed."""
     def scope(row):
-        return (row["platform"], row["shard_id"], *((row["unit_id"],) if units else ()))
+        return row["platform"], row["shard_id"], row["unit_id"]
 
     owned = [row for row in host_rows if owns_sample(row)]
     scope_by_row = {(row["platform"], row["row_id"]): scope(row) for row in owned}
@@ -1495,7 +1316,7 @@ def build_confirmation_jobs(row_aggregates, host_rows, comparisons, scaling, ses
     already_confirmed = {scope(session.receipt) for session in sessions if session.confirmation}
     eligible -= already_confirmed
     platform_order = {platform: index for index, platform in enumerate(("r8i", "r8g", "r9g"))}
-    fields = ("platform", "shard_id", *(("unit_id",) if units else ()))
+    fields = ("platform", "shard_id", "unit_id")
     rows = [
         dict(zip(fields, value))
         for value in sorted(eligible, key=lambda value: (platform_order.get(value[0], 99), *value[1:]))
@@ -1558,13 +1379,12 @@ def event_gaps(events):
     return rows
 
 
-def build_rebar_outcomes(sessions, units=False):
+def build_rebar_outcomes(sessions):
     fields = (
         "campaign_id", "platform", "shard_id", "replica_id", "instance_id", "host_epoch",
         *REBAR_OUTCOME_FIELDS,
     )
-    if units:
-        fields = unit_columns(fields)
+    fields = unit_columns(fields)
     rows = []
     gaps = []
     for session in sessions:
@@ -1593,7 +1413,7 @@ def build_rebar_outcomes(sessions, units=False):
     return fields, rows, gaps
 
 
-def build_inventory(sessions, artifact_indexes, campaign_artifact, units=False):
+def build_inventory(sessions, artifact_indexes, campaign_artifact):
     fields = (
         "campaign_id", "platform", "shard_id", "replica_id", "host_epoch", "confirmation",
         "logical_name", "local_path", "size_bytes", "sha256", "artifact_set_sha256",
@@ -1602,8 +1422,7 @@ def build_inventory(sessions, artifact_indexes, campaign_artifact, units=False):
         "candidate_archive_sha256", "engine_tree", "evidence_manifest_sha256",
         "campaign_source_directory", "campaign_file_count", "campaign_source_manifest_sha256",
     )
-    if units:
-        fields = unit_columns(fields)
+    fields = unit_columns(fields)
     rows = []
     for session in sessions:
         index = artifact_indexes.get(session.key, {})
@@ -1636,10 +1455,8 @@ def build_inventory(sessions, artifact_indexes, campaign_artifact, units=False):
     return fields, rows
 
 
-def build_metadata(sessions, artifact_indexes, campaign_artifact, units=False):
-    fields = ("platform", "shard_id", "replica_id", "host_epoch", "source", "key", "value")
-    if units:
-        fields = unit_columns(fields)
+def build_metadata(sessions, artifact_indexes, campaign_artifact):
+    fields = unit_columns(("platform", "shard_id", "replica_id", "host_epoch", "source", "key", "value"))
     rows = []
     for session in sessions:
         prefix = {
@@ -1654,7 +1471,7 @@ def build_metadata(sessions, artifact_indexes, campaign_artifact, units=False):
             for key, value in read_properties(session.directory / artifact):
                 rows.append({**prefix, "source": artifact, "key": key, "value": value})
         for key in ("candidate_commit", "candidate_archive_sha256", "engine_tree", "evidence_manifest_sha256"):
-            rows.append({**prefix, "source": session.receipt_name, "key": key,
+            rows.append({**prefix, "source": RECEIPT_NAME, "key": key,
                          "value": session.receipt[key]})
         for key, value in sorted(artifact_indexes.get(session.key, {}).items()):
             if not key.startswith("_"):
@@ -1665,17 +1482,13 @@ def build_metadata(sessions, artifact_indexes, campaign_artifact, units=False):
     return fields, rows
 
 
-def build_capacity(sessions, units=False):
-    fields = (
+def build_capacity(sessions):
+    # A unit attempt's capacity is that of its own unit-capacity.txt.
+    fields = (*unit_columns((
         "campaign_id", "platform", "shard_id", "replica_id", "host_epoch", "confirmation",
         "wall_seconds", "maximum_resident_kibibytes", "memory_total_bytes",
         "memory_available_before_bytes", "memory_available_after_bytes", "exit_status",
-        "host_capacity_sha256",
-    )
-    # A unit attempt's capacity is that of its own unit-capacity.txt.
-    digest_field = "unit_capacity_sha256" if units else "host_capacity_sha256"
-    if units:
-        fields = (*unit_columns(fields[:-1]), digest_field)
+    )), "unit_capacity_sha256")
     rows = []
     for session in sessions:
         rows.append({
@@ -1686,7 +1499,7 @@ def build_capacity(sessions, units=False):
             **{field: session.capacity[field] for field in (
                 "wall_seconds", "maximum_resident_kibibytes", "memory_total_bytes",
                 "memory_available_before_bytes", "memory_available_after_bytes", "exit_status")},
-            digest_field: sha256_file(session.directory / session.capacity_name),
+            "unit_capacity_sha256": sha256_file(session.directory / CAPACITY_NAME),
         })
     rows.sort(key=lambda row: (
         row["platform"], row["shard_id"], int(row["replica_id"]), row["host_epoch"], attempt_key(row)))
@@ -1716,29 +1529,24 @@ def aggregate(arguments):
             raise ReductionError('invalid or duplicate selected shards')
         shards = selected
         manifest_rows = [row for row in manifest_rows if row['shard_id'] in shards]
-    units = ledger_holds_units(arguments.primary_receipts + arguments.confirmation_receipts)
-    primary = load_receipt_ledger(arguments.primary_receipts, False, units)
-    confirmation = load_receipt_ledger(arguments.confirmation_receipts, True, units)
-    if units:
-        # A unit campaign phase whose correctness stage rejected any attempt is not reduced.
-        for path in arguments.primary_receipts + arguments.confirmation_receipts:
-            try:
-                unit_session.check_semantic_rejections(path.parent)
-            except ValidationError as error:
-                raise ReductionError(str(error)) from error
-        campaign_units = verify_unit_receipt_coverage(
-            primary, confirmation, platforms, shards, manifest_rows, manifest_digest)
-        session_fields = unit_session.UNIT_SESSION_FIELDS
-        event_fields = unit_columns(EVENT_FIELDS)
-    else:
-        verify_receipt_coverage(primary, confirmation, platforms, shards, manifest_rows, manifest_digest)
-        campaign_units = None
-        session_fields = SESSION_FIELDS
-        event_fields = EVENT_FIELDS
+    primary = load_receipt_ledger(arguments.primary_receipts, False)
+    confirmation = load_receipt_ledger(arguments.confirmation_receipts, True)
+    # A phase whose correctness stage rejected any attempt is not reduced.
+    for path in arguments.primary_receipts + arguments.confirmation_receipts:
+        try:
+            unit_session.check_semantic_rejections(path.parent)
+        except ValidationError as error:
+            raise ReductionError(str(error)) from error
+    campaign_units = verify_unit_receipt_coverage(
+        primary, confirmation, platforms, shards, manifest_rows, manifest_digest)
+    session_fields = unit_session.UNIT_SESSION_FIELDS
+    event_fields = unit_columns(EVENT_FIELDS)
+    version = getattr(arguments, "release_version", "")
     sessions, observed = load_sessions(
         primary, confirmation, arguments.artifacts_root, arguments.session_dir,
-        manifest_rows, manifest_digest, campaign_units, arguments.manifest)
-    indexes = load_artifact_indexes(arguments.artifact_index, session_fields)
+        manifest_rows, campaign_units, arguments.manifest,
+        released_artifact.manifest(BASELINE.parents[2], version) if version else None)
+    indexes = load_artifact_indexes(arguments.artifact_index)
     unknown_indexes = sorted(set(indexes) - {session.key for session in sessions})
     if unknown_indexes:
         raise ReductionError(f"artifact index contains unknown accepted sessions: {unknown_indexes[:10]}")
@@ -1762,20 +1570,20 @@ def aggregate(arguments):
     events.sort(key=lambda row: tuple(row.get(field, "") for field in event_fields))
     manifest_by_id = {row["row_id"]: row for row in manifest_rows}
     host_fields, host_rows = build_host_rows(
-        sessions, observed, manifest_by_id, indexes, campaign_artifact, units)
-    comparison_fields, comparisons = build_comparisons(host_rows, manifest_rows, units)
+        sessions, observed, manifest_by_id, indexes, campaign_artifact)
+    comparison_fields, comparisons = build_comparisons(host_rows, manifest_rows)
     scaling_fields, scaling, membership, scaling_mismatches, scaling_classes = build_scaling(
-        host_rows, manifest_rows, units)
+        host_rows, manifest_rows)
     aggregate_fields, row_aggregates, row_gaps = build_row_aggregates(
         host_rows, membership, scaling_mismatches, scaling_classes)
     comparison_aggregate_fields, comparison_aggregates, comparison_gaps = build_comparison_aggregates(comparisons)
     class_fields, classes = build_classes(comparison_aggregates)
     confirmation_fields, confirmation_jobs = build_confirmation_jobs(
-        row_aggregates, host_rows, comparisons, scaling, sessions, units)
-    inventory_fields, inventory = build_inventory(sessions, indexes, campaign_artifact, units)
-    metadata_fields, metadata = build_metadata(sessions, indexes, campaign_artifact, units)
-    capacity_fields, capacity = build_capacity(sessions, units)
-    rebar_outcome_fields, rebar_outcomes, rebar_outcome_gaps = build_rebar_outcomes(sessions, units)
+        row_aggregates, host_rows, comparisons, scaling, sessions)
+    inventory_fields, inventory = build_inventory(sessions, indexes, campaign_artifact)
+    metadata_fields, metadata = build_metadata(sessions, indexes, campaign_artifact)
+    capacity_fields, capacity = build_capacity(sessions)
+    rebar_outcome_fields, rebar_outcomes, rebar_outcome_gaps = build_rebar_outcomes(sessions)
     gaps = row_gaps + comparison_gaps + rebar_outcome_gaps + event_gaps(events)
     gaps.sort(key=lambda row: (row["severity"], row["platform"], row["shard_id"], row["row_id"], row["gap_id"]))
     gap_fields = (
@@ -1848,6 +1656,8 @@ def parser():
     argument_parser.add_argument("--campaign-artifact", type=Path)
     argument_parser.add_argument("--output-dir", type=Path, required=True)
     argument_parser.add_argument("--expected-manifest-rows", type=int, default=5522)
+    argument_parser.add_argument("--release-version", default="",
+                                 help="require every attempt to prove it measured this release's JAR")
     return argument_parser
 
 

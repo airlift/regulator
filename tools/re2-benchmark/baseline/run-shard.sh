@@ -146,6 +146,11 @@ if [[ "${DEFER_ACCEPTANCE}" != true && "${DEFER_ACCEPTANCE}" != false ]]; then
     echo "BASELINE_DEFER_ACCEPTANCE must be true or false" >&2
     exit 1
 fi
+if [[ "${DEFER_ACCEPTANCE}" != true && "${PLAN_ONLY}" != true ]]; then
+    # Its work unit or the shard's semantic preparation accepts what a route measures.
+    echo "A measured route defers acceptance; set BASELINE_DEFER_ACCEPTANCE=true" >&2
+    exit 1
+fi
 if [[ "${PROTOCOL_QUALIFICATION}" != true && "${PROTOCOL_QUALIFICATION}" != false ]]; then
     echo "BASELINE_PROTOCOL_QUALIFICATION must be true or false" >&2
     exit 1
@@ -2705,50 +2710,11 @@ for value_name in campaign_id platform replica_id host_epoch architecture instan
     fi
 done
 canonical_systems=$(tr ',' '\n' <<<"${systems}" | sort | paste -sd, -)
-session_file="${RESULT_DIR}/session.tsv"
-if [[ "${DEFER_ACCEPTANCE}" == true ]]; then
-    session_file="${RESULT_DIR}/route-session.tsv"
-fi
+session_file="${RESULT_DIR}/route-session.tsv"
 {
     printf 'schema_version\tcampaign_id\tplatform\tshard_id\treplica_id\tinstance_id\thost_epoch\tarchitecture\tinstance_type\tavailability_zone\tsystems\n'
     printf '2\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "${campaign_id}" "${platform}" "${SHARD_ID}" "${replica_id}" "${instance_id}" \
         "${host_epoch}" "${architecture}" "${instance_type}" "${availability_zone}" "${canonical_systems}"
 } > "${session_file}"
-
-if [[ "${DEFER_ACCEPTANCE}" == true ]]; then
-    echo "Completed deferred route ${SHARD_ID} ${PROTOCOL} ${ROUTE}"
-    exit 0
-fi
-
-if [[ "${replica_id}" == 4 ]]; then
-    acceptance_validator="${SCRIPT_DIR}/validate-confirmation-host-results.py"
-else
-    acceptance_validator="${SCRIPT_DIR}/validate-host-results.py"
-fi
-for required_evidence in \
-        "${RESULT_DIR}/semantic-gate.tsv" \
-        "${RESULT_DIR}/semantic-evidence.tsv" \
-        "${RESULT_DIR}/calibration.tsv" \
-        "${RESULT_DIR}/raw-artifacts.sha256" \
-        "${RESULT_DIR}/session.tsv" \
-        "${RESULT_DIR}/observed-rows.tsv"; do
-    if [[ ! -s "${required_evidence}" ]]; then
-        echo "Required acceptance evidence is missing or empty: ${required_evidence}" >&2
-        exit 1
-    fi
-done
-if [[ "${systems}" == *native-re2-before* && ! -s "${RESULT_DIR}/native-bracket.tsv" ]]; then
-    echo "Native RE2 rows require native-bracket.tsv before acceptance" >&2
-    exit 1
-fi
-if [[ "${protocol_qualification_required}" == true && ! -s "${RESULT_DIR}/protocol-qualification.tsv" ]]; then
-    echo "Bounded JMH execution requires protocol-qualification.tsv before acceptance" >&2
-    exit 1
-fi
-python3 "${acceptance_validator}" \
-    --manifest "${MANIFEST}" \
-    --session "${RESULT_DIR}/session.tsv" \
-    --observed-rows "${RESULT_DIR}/observed-rows.tsv" \
-    --receipt "${RESULT_DIR}/acceptance-receipt.tsv"
-echo "Completed ${SHARD_ID} ${PROTOCOL} ${ROUTE}"
+echo "Completed deferred route ${SHARD_ID} ${PROTOCOL} ${ROUTE}"

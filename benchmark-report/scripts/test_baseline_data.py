@@ -71,7 +71,7 @@ class TestSpecializedPatternRows(unittest.TestCase):
                                   ('regulator-generated-object-row', 'Generated'), ('native-re2-before', ''), ('native-re2-after', ''))]
 
     def rows(self, manifest=MANIFEST, score=lambda row, replica: 10, hosts=lambda rows: rows, comparisons=lambda rows: rows):
-        # The baseline reducer pairs every Regulator variant on a host with that host's one comparator run.
+        # The baseline reducer pairs every Regulator variant in a unit attempt with that attempt's one comparator run.
         # Regulator variants take score(row, replica) ns and comparators always take 100 ns.
         tables = {'row-aggregates': [], 'host-rows': []}
         for row in manifest:
@@ -79,7 +79,8 @@ class TestSpecializedPatternRows(unittest.TestCase):
             for replica in (1, 2, 3):
                 tables['host-rows'].append({
                     'platform': 'c9g', 'shard_id': row['shard_id'], 'suite': row['suite'], 'rebar_corpus': '', 'replica_id': str(replica),
-                    'host_epoch': f'epoch-{replica}', 'confirmation': 'false', 'row_id': row['row_id'], 'instance_id': f'i-{replica}',
+                    'host_epoch': f'epoch-{replica}', 'unit_id': 'unit', 'unit_attempt_id': f'session-{replica}/1',
+                    'confirmation': 'false', 'row_id': row['row_id'], 'instance_id': f'i-{replica}',
                     'score': str(score(row, replica) if row['system'].startswith('regulator') else 100), 'score_unit': 'ns/op',
                     'native_bracket_drift': '', 'outcome': 'accepted'})
         tables['host-rows'] = hosts(tables['host-rows'])

@@ -227,6 +227,7 @@ REBAR_JONI_BENCHMARK_FILTER=$(python3 "${RESULT_TOOL}" jmh-filter --manifest "${
             for replica, observed in enumerate(executions):
                 hosts.append({
                     **by_id[row_id], **observed[row_id], "platform": "r8i", "rebar_corpus": "curated",
+                    "unit_id": "unit", "unit_attempt_id": f"session-{replica}/1",
                     "confirmation": "true" if replica == 3 else "false", "semantic_outcome": "verified",
                     "calibration_drift": "0", "native_bracket_drift": "0",
                     "contract_identity": observed[row_id]["result_checksum"],

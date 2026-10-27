@@ -77,8 +77,8 @@ python3 tools/re2-benchmark/validate-tooling.py
 ```
 
 It discovers the tooling's Python unit suites in separate processes and checks
-the frozen manifests, modes, protocol representatives, row protocols, shard
-plans, work units, and unit plans. Cloud operations and build commands in
+the frozen manifests, modes, protocol representatives, row protocols, work
+units, and unit plans. Cloud operations and build commands in
 these unit tests use fixtures or mocks.
 The gate clears `LANGUAGE_NATIVE_RUNNER`, `LANGUAGE_NATIVE_BULK_RUNNER`,
 `LANGUAGE_NATIVE_RUST_RUNNER`, and `LANGUAGE_NATIVE_RUST_BULK_RUNNER`, so native
