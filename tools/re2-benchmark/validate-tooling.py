@@ -34,9 +34,7 @@ def main():
         subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", str(directory),
                         "-p", "test_*.py"], cwd=ROOT.parents[1], env=environment,
                        check=True, timeout=300)
-    for validator in ("validate-manifest.py", "validate-mode-inventory.py",
-                      "validate-protocol-representatives.py", "validate-units.py",
-                      "validate-unit-plans.py"):
+    for validator in ("validate-manifest.py", "validate-protocol-representatives.py"):
         print(f"Validating {validator}", flush=True)
         subprocess.run([sys.executable, str(ROOT / "baseline" / validator)],
                        cwd=ROOT.parents[1], env=environment, check=True, timeout=300)

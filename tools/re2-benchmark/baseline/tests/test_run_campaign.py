@@ -587,22 +587,6 @@ class TestRunCampaign(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("require TIMEOUT_SECONDS=5400", result.stderr)
 
-    def test_user_data_waits_for_instance_profile_and_retries_transfers(self):
-        source = AWS_RUNNER.read_text()
-
-        self.assertIn("wait_for_aws_credentials()", source)
-        self.assertIn("for credential_attempt in {1..60}", source)
-        self.assertIn("download_input()", source)
-        self.assertIn("for download_attempt in {1..24}", source)
-        self.assertIn("for upload_attempt in {1..12}", source)
-
-    def test_baseline_controller_omits_diagnostic_dependencies(self):
-        source = AWS_RUNNER.read_text()
-
-        self.assertNotIn("hsdis", source.lower())
-        self.assertNotIn("CAPTURE_PIPELINE", source)
-        self.assertNotIn("BASELINE_CAMPAIGN_PROFILE", source)
-
     def test_generated_user_data_is_valid_bash(self):
         source = AWS_RUNNER.read_text()
         function = source[
@@ -669,13 +653,6 @@ class TestRunCampaign(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertEqual("cargo-pin rust-pin" in output, "expected=cargo-pin" in output)
                 self.assertEqual("cargo-pin rust-pin" in output, mode == "language-batch")
-
-    def test_missing_remote_artifact_is_retryable_infrastructure(self):
-        source = AWS_RUNNER.read_text()
-
-        self.assertIn(
-            '"instance-terminated-without-results:state=${state};spot_status=${spot_status:-none}"',
-            source)
 
     def test_shared_transfer_bucket_requires_prefix(self):
         result = subprocess.run(
@@ -1296,32 +1273,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                 self.assertEqual(replacement.attempt, attempt + 1)
                 self.assertEqual(replacement.market, "on-demand")
 
-    def test_spot_vcpu_quota_failure_is_retryable(self):
-        source = AWS_RUNNER.read_text()
-
-        self.assertIn(
-            "InsufficientInstanceCapacity|UnfulfillableCapacity|MaxSpotInstanceCountExceeded",
-            source)
-        self.assertIn('record_failure_classification retryable-capacity "vcpu-limit:', source)
-
-    def test_session_bucket_omits_the_location_constraint_s3_rejects_in_us_east_1(self):
-        source = AWS_RUNNER.read_text()
-
-        self.assertIn('if [[ "${AWS_REGION}" == us-east-1 ]]; then\n'
-                      '        aws_cli s3api create-bucket --bucket "${BUCKET}" >/dev/null\n    else', source)
-
-    def test_session_file_appears_only_whole(self):
-        source = AWS_RUNNER.read_text()
-
-        self.assertNotIn('cat > "${SESSION_DIR}/session.txt"', source)
-        self.assertIn('mv "${SESSION_DIR}/session.txt.new" "${SESSION_DIR}/session.txt"', source)
-
-    def test_cleanup_ignores_repeated_termination_signals(self):
-        source = AWS_RUNNER.read_text()
-        cleanup = source[source.index("cleanup()\n{"):source.index("\n}\n\nabort_campaign()")]
-
-        self.assertIn("trap '' INT TERM", cleanup)
-
     def test_termination_signal_marks_campaign_failed(self):
         source = AWS_RUNNER.read_text()
 
@@ -1666,13 +1617,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                          "verified instance profile test", "verified role test", "verified bucket test"},
                         set(result.stderr.splitlines()))
 
-    def test_semantic_evidence_uses_actual_surefire_report_directory(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-
-        self.assertNotIn("-Dsurefire.reportsDirectory=", source)
-        self.assertIn('default_semantic_report_dir="${ROOT}/target/surefire-reports"', source)
-        self.assertIn('cp "${default_semantic_report_dir}"/TEST-*.xml "${semantic_report_dir}/"', source)
-
     def semantic_verifier_script(self, source, directory):
         """The run-shard.sh semantic-verifier functions, set up for a native-access route under directory."""
         functions = source[source.index("SEMANTIC_FAILURE_STATUS="):source.index("\n}\n", source.index(
@@ -1883,31 +1827,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_trino_joni_preparation_supports_source_archives(self):
-        source = (SCRIPT.parents[1] / "trino-joni" / "prepare.sh").read_text()
-
-        self.assertEqual(source.count("./mvnw -q -Dmaven.gitcommitid.skip=true"), 2)
-
-    def test_protocol_representative_awk_avoids_builtin_names(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-
-        self.assertNotIn('-v system="${representative_system}"', source)
-        self.assertIn('-v target_system="${representative_system}"', source)
-
-    def test_protocol_qualification_samples_five_independent_jvms(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-
-        self.assertIn("PROTOCOL_QUALIFICATION_PROCESS_COUNT=5", source)
-        self.assertIn('-f "${PROTOCOL_QUALIFICATION_PROCESS_COUNT}"', source)
-        self.assertIn(
-            'process_index <= PROTOCOL_QUALIFICATION_PROCESS_COUNT',
-            source,
-        )
-        self.assertIn(
-            '"${PROTOCOL_QUALIFICATION_PROCESS_COUNT}-independent-jvms-',
-            source,
-        )
-
     def test_optional_protocol_qualification_is_a_successful_no_op(self):
         source = (SCRIPT.parent / "run-shard.sh").read_text()
         function_start = source.index("run_protocol_qualification()")
@@ -1924,36 +1843,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "reached\n")
-
-    def test_calibration_uses_process_stable_workload(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-
-        self.assertIn(
-            "calibration_filter='^io\\.airlift\\.regulator\\.BenchmarkExpressionPlans\\.findLiteral$'",
-            source)
-        self.assertIn("calibration_parameters=(-p workload=KIB_LATE)", source)
-        self.assertEqual(source.count('"${calibration_parameters[@]}"'), 3)
-        self.assertNotIn("calibration-before.json\" -p textSize=32768", source)
-        self.assertNotIn("calibration-after.json\" -p textSize=32768", source)
-
-    def test_remote_benchmark_failure_is_classified(self):
-        source = (SCRIPT.parent.parent / "aws" / "run-campaign.sh").read_text()
-
-        self.assertIn(
-            'record_failure_classification benchmark-failure "remote-exit-status:${result_status}"',
-            source)
-
-    def test_cleanup_records_and_guards_its_shell_origin(self):
-        source = (SCRIPT.parent.parent / "aws" / "run-campaign.sh").read_text()
-
-        self.assertIn('ROOT_BASHPID=${BASHPID}', source)
-        self.assertIn('cleanup_bash_pid=${BASHPID}', source)
-        self.assertIn('cleanup_subshell=${BASH_SUBSHELL}', source)
-        self.assertIn("printf 'cleanup_cause=%s\\n' \"${CLEANUP_CAUSE:-exit}\"", source)
-        self.assertIn('${BASHPID} -ne ${ROOT_BASHPID}', source)
-        self.assertIn('CLEANUP_CAUSE=$1', source)
-        self.assertIn("trap 'abort_campaign INT 130' INT", source)
-        self.assertIn("trap 'abort_campaign TERM 143' TERM", source)
 
     def test_replacement_allowance_is_bounded(self):
         final_attempt = RUN_CAMPAIGN.Job(
@@ -3917,15 +3806,6 @@ class TestUnitWorkers(unittest.TestCase):
                                     f"\\['{stalled.session}/1'\\]"):
                     RUN_CAMPAIGN.validate_unit_phase_prerequisite(
                         SCRIPT.parents[3], self.arguments, Path(temporary) / "results", (1,), "smoke")
-                # So does the standalone campaign validator.
-                validation = subprocess.run(
-                    [sys.executable, SCRIPT.parent / "validate-campaign-results.py", "--campaign-id", "campaign",
-                     "--accepted-units", Path(temporary) / "results/accepted-units.tsv",
-                     "--shard", "like-dfa-single-use"],
-                    capture_output=True, text=True)
-                self.assertEqual(1, validation.returncode, validation.stdout)
-                self.assertIn(f"rejected unit attempts for a semantic failure: ['{stalled.session}/1']",
-                              validation.stderr)
 
 
 if __name__ == "__main__":

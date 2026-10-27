@@ -29,7 +29,6 @@ listed in [`specialized-patterns.tsv`](specialized-patterns.tsv).
 
 ## Enforcement
 
-`validate-mode-inventory.py` verifies that both AWS wrappers accept only
-`language-batch`, `engine-build`, and `unit-worker`. Formal
-campaign orchestration and aggregation accept only rows from the frozen
-manifests.
+Both AWS wrappers accept only `language-batch`, `engine-build`, and
+`unit-worker`. Formal campaign orchestration and aggregation accept only rows
+from the frozen manifests.

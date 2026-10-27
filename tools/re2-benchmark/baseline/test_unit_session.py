@@ -5,18 +5,24 @@ import csv
 import hashlib
 import io
 import importlib.util
+import itertools
 import json
+import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
 BASELINE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASELINE))
 from acceptance import PROTOCOL_QUALIFICATION_FIELDS, SESSION_FIELDS  # noqa: E402
+import row_protocol  # noqa: E402
 import unit_dispatch  # noqa: E402
+import work_units  # noqa: E402
 
 
 def load_module(name, path):
@@ -45,6 +51,22 @@ class TestUnitSession(unittest.TestCase):
             route_systems = set().union(*(systems for _, _, systems in routes))
             manifest_systems = {row["system"] for row in manifest if row["shard_id"] == shard}
             self.assertEqual(manifest_systems, route_systems, shard)
+
+    def testEveryUnitPlansExactlyItsRowsUnderItsFrozenProtocolsInRouteOrder(self):
+        # Every unit is planned in process for both protocols and replicas 1 to 4. One unit per handler
+        # pairing, and any whole-method unit, is also planned through run-unit.sh to pin the shell wiring.
+        units = work_units.load(BASELINE)
+        manifest = SHARD_RESULTS.load_manifest(BASELINE / "rows.tsv")
+        protocols = row_protocol.load(BASELINE / "row-protocol.tsv")
+        representatives = row_protocol.read_tsv(BASELINE / "protocol-representatives.tsv")
+        plans = {unit_id: plan_unit(unit, manifest, protocols, representatives) for unit_id, unit in units.items()}
+        runs = [(unit_id, protocol_name, replica)
+                for unit_id in sample(units, plans) for protocol_name, replica in SHELL_RUNS]
+        with tempfile.TemporaryDirectory() as temporary_directory, ThreadPoolExecutor(os.cpu_count()) as executor:
+            root = Path(temporary_directory)
+            directories = list(executor.map(lambda run: run_shell(root, *run), runs))
+            for (unit_id, protocol_name, replica), result_directory in zip(runs, directories):
+                check_shell(result_directory, unit_id, plans[unit_id][(protocol_name, replica)])
 
     def testUnitAttemptIsAccepted(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -202,6 +224,210 @@ class TestUnitSession(unittest.TestCase):
                 validate(campaign, [
                     repeated if (receipt["platform"], receipt["replica_id"]) == ("r8i", "2") else receipt
                     for receipt in campaign.receipts[:-1]])
+
+
+PROTOCOLS = ("smoke", "qualification")
+REPLICAS = ("1", "2", "3", "4")
+# run-shard.sh smoke windows: processes, warmup and measurement iterations, iteration time.
+SMOKE_WINDOWS = dict(zip(UNIT_SESSION.SMOKE_SETTINGS, ("1", "1", "3", "20ms")))
+SHELL_RUNS = (("qualification", "1"), ("qualification", "2"), ("smoke", "4"))
+
+
+def expected_calibrations(route_count):
+    """A unit calibrates before its first route and after its last; a lone route does both."""
+    if route_count == 1:
+        return ["both"]
+    return ["before", *["none"] * (route_count - 2), "after"]
+
+
+def row_key(system, benchmark, parameters):
+    return system, benchmark, tuple(sorted(parameters.items()))
+
+
+def check_selectors(label, share, shard_rows, protocols, protocol_name, selectors):
+    """Each selector expands to rows of the share, and together they measure every row once."""
+    jmh = {
+        row_key(row["system"], row_protocol.jmh_benchmark(row),
+                row_protocol.parse_parameters(row["parameters"])): row
+        for row in share}
+    measured = []
+    for selector in selectors:
+        benchmarks = selector["benchmarks"].split(",")
+        if selector["parameters"] == UNIT_SESSION.ROUTE_ARGUMENTS:
+            if len(benchmarks) != 1:
+                raise AssertionError(f"{label} selector {selector['selector']} runs several whole methods")
+            expanded = [key for key, row in jmh.items()
+                        if key[:2] == (selector["system"], benchmarks[0]) and
+                        protocols[row["row_id"]]["execution"] == selector["execution"]]
+            whole = [row for row in shard_rows
+                     if (row["system"], row_protocol.jmh_benchmark(row)) == (selector["system"], benchmarks[0])]
+            method = f"{selector['system']} {benchmarks[0]}"
+            if len(expanded) != len(whole):
+                raise AssertionError(f"{label} selector {selector['selector']} runs {method} whole with "
+                                     f"{len(expanded)} of its {len(whole)} rows")
+            values = {name: sorted({row_protocol.parse_parameters(row["parameters"])[name] for row in whole})
+                      for name in row_protocol.parse_parameters(whole[0]["parameters"])}
+            if all(work_units.expressible(parameter_values) for parameter_values in values.values()):
+                raise AssertionError(f"{label} selector {selector['selector']} runs {method} whole, though JMH could "
+                                     f"select each of its values: {values}")
+        else:
+            block = json.loads(selector["parameters"])
+            names = sorted(block)
+            expanded = [
+                row_key(selector["system"], benchmark, dict(zip(names, values)))
+                for benchmark in benchmarks
+                for values in itertools.product(*(block[name] for name in names))]
+        if len(expanded) != int(selector["rows"]):
+            raise AssertionError(f"{label} selector {selector['selector']} counts {selector['rows']} rows")
+        for key in expanded:
+            if key not in jmh:
+                raise AssertionError(f"{label} selector {selector['selector']} selects {key}, a row outside the unit")
+            check_protocol(label, selector, protocols[jmh[key]["row_id"]], protocol_name)
+        measured.extend(expanded)
+    if sorted(measured) != sorted(jmh):
+        raise AssertionError(f"{label} selectors do not measure each row of the unit exactly once")
+
+
+def check_protocol(label, selector, protocol, protocol_name):
+    if selector["execution"] != protocol["execution"]:
+        raise AssertionError(f"{label} selector {selector['selector']} mixes executions")
+    fields = ("processes", "warmup_iterations", "warmup_time", "measurement_iterations", "measurement_time")
+    if protocol_name == "qualification":
+        expected = {field: protocol[field] for field in fields}
+        expected["kind"] = "forks" if protocol["execution"] == "jmh-forks" else "processes"
+    else:
+        kind = "forks" if selector["system"] == "joni" else "processes"
+        expected = {
+            "kind": kind,
+            "processes": protocol["processes"] if kind == "forks" else SMOKE_WINDOWS["processes"],
+            "warmup_iterations": SMOKE_WINDOWS["warmup_iterations"],
+            "warmup_time": SMOKE_WINDOWS["time"],
+            "measurement_iterations": SMOKE_WINDOWS["measurement_iterations"],
+            "measurement_time": SMOKE_WINDOWS["time"],
+        }
+    actual = {field: selector[field] for field in expected}
+    if actual != expected:
+        raise AssertionError(f"{label} selector {selector['selector']} runs {actual}, not {expected}")
+
+
+def check_precision(label, share, protocols, protocol_name):
+    """The precision ceiling a route passes is the frozen ceiling of every row of its share; returns it.
+
+    run-shard.sh takes the ceiling from the route's JMH process rows under qualification, so a forked row
+    gets the ceiling only through them. Smoke routes pass none."""
+    if protocol_name != "qualification":
+        return "-"
+    ceilings = {
+        execution: {protocols[row["row_id"]]["maximum_relative_standard_error"]
+                    for row in share if protocols[row["row_id"]]["execution"] == execution}
+        for execution in row_protocol.EXECUTIONS}
+    ceiling = min(ceilings["jmh-processes"], default="-")
+    frozen = set().union(*ceilings.values())
+    if frozen - {ceiling}:
+        raise AssertionError(f"{label} passes the precision ceiling {ceiling} to rows frozen at {sorted(frozen)}")
+    return ceiling
+
+
+def plan_unit(unit, manifest, protocols, representatives):
+    """Every protocol and replica's route plans of one unit, checked; returns them by run."""
+    shard = unit["shard_id"]
+    held = sorted(unit["owned"])
+    dispatch = UNIT_SESSION.load_dispatch(BASELINE / "shard-dispatch.tsv", shard)
+    routes = [route for route, _, _ in UNIT_SESSION.applicable_routes(dispatch)]
+    shard_rows = [row for row in manifest if row["shard_id"] == shard]
+    plans = {}
+    for replica in REPLICAS:
+        planned = UNIT_SESSION.plan_routes(BASELINE, unit, replica)
+        label = f"unit {unit['unit_id']} replica {replica}"
+        order = [route for route, *_ in planned]
+        dispatch_order = [route for route in routes if route in order]
+        if order != (dispatch_order[::-1] if int(replica) % 2 == 0 else dispatch_order):
+            raise AssertionError(f"{label} runs routes {order} out of replica order")
+        if sorted(row["row_id"] for *_, share, _ in planned for row in share) != held:
+            raise AssertionError(f"{label} routes do not hold exactly the unit's rows")
+        calibrations = [calibration for *_, calibration in planned]
+        if calibrations != expected_calibrations(len(planned)):
+            raise AssertionError(f"{label} calibrates {calibrations}")
+        target = "1" if replica == "4" else replica
+        expected_representatives = sorted(
+            row_id for representative_replica, row_id in unit["representatives"] if representative_replica == target)
+        if UNIT_SESSION.unit_representatives(unit, replica) != expected_representatives:
+            raise AssertionError(f"{label} runs the wrong representatives")
+        for protocol_name in PROTOCOLS:
+            routes_plan = []
+            for route, handler, systems, share, calibration in planned:
+                selectors = UNIT_SESSION.selectors(share, shard_rows, protocols, protocol_name, SMOKE_WINDOWS)
+                check_selectors(f"{label} {protocol_name} {route}", share, shard_rows, protocols,
+                                protocol_name, selectors)
+                route_representatives = sum(
+                    1 for representative in representatives
+                    if (representative["shard_id"], representative["replica_id"], representative["route"]) ==
+                    (shard, target, route) and representative["manifest_row_id"] in expected_representatives)
+                ceiling = check_precision(f"{label} {protocol_name} {route}", share, protocols, protocol_name)
+                routes_plan.append((route, share, selectors, route_representatives, ceiling))
+            plans[(protocol_name, replica)] = routes_plan
+    return plans
+
+
+def sample(units, plans):
+    """One unit per handler pairing, and a whole-method unit if any unit has one."""
+    chosen = {}
+    for unit in sorted(units.values(), key=lambda unit: (unit["shard_id"], int(unit["unit_index"]))):
+        dispatch = UNIT_SESSION.load_dispatch(BASELINE / "shard-dispatch.tsv", unit["shard_id"])
+        chosen.setdefault((dispatch["native_access_handler"], dispatch["object_row_handler"]), unit["unit_id"])
+        if any(selector["parameters"] == UNIT_SESSION.ROUTE_ARGUMENTS
+               for _, _, selectors, _, _ in plans[unit["unit_id"]][("qualification", "1")]
+               for selector in selectors):
+            chosen.setdefault("whole-method", unit["unit_id"])
+    return sorted(set(chosen.values()))
+
+
+def run_shell(root, unit_id, protocol_name, replica):
+    result_directory = root / unit_id[:12] / f"{protocol_name}-{replica}"
+    subprocess.run(
+        [str(BASELINE / "run-unit.sh"), unit_id, protocol_name, replica, str(result_directory)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BASELINE_PLAN_ONLY": "true",
+            "BASELINE_PROTOCOL_QUALIFICATION": "true",
+        })
+    return result_directory
+
+
+def check_shell(result_directory, unit_id, plan):
+    if (result_directory / "status.txt").read_text(encoding="utf-8") != "status=planned\n":
+        raise AssertionError(f"run-unit.sh did not plan {result_directory}")
+    route_plan = row_protocol.read_tsv(result_directory / "route-plan.tsv")
+    if [route["route"] for route in route_plan] != [route for route, *_ in plan]:
+        raise AssertionError(f"run-unit.sh plans routes out of order in {result_directory}")
+    calibrations = expected_calibrations(len(plan))
+    if [route["calibration"] for route in route_plan] != calibrations:
+        raise AssertionError(f"run-unit.sh plans calibrations {[route['calibration'] for route in route_plan]} "
+                             f"in {result_directory}, expected {calibrations}")
+    for (route, share, selectors, representative_count, ceiling), calibration in zip(plan, calibrations):
+        route_directory = result_directory / "routes" / route
+        label = f"run-unit.sh {unit_id} {route_directory}"
+        expected = sorted(row["row_id"] for row in SHARD_RESULTS.load_manifest(route_directory / "expected-rows.tsv"))
+        if expected != sorted(row["row_id"] for row in share):
+            raise AssertionError(f"{label} expects rows other than its share")
+        if row_protocol.read_tsv(route_directory / "jmh-selectors.tsv") != selectors:
+            raise AssertionError(f"{label} plans selectors other than the unit's")
+        metadata = dict(
+            line.split("=", 1) for line in
+            (route_directory / "run-metadata.txt").read_text(encoding="utf-8").splitlines())
+        if metadata["unit_calibration"] != calibration:
+            raise AssertionError(f"{label} calibrates {metadata['unit_calibration']}, expected {calibration}")
+        if metadata["unit_id"] != unit_id:
+            raise AssertionError(f"{label} plans unit {metadata['unit_id']}")
+        if int(metadata["protocol_representative_count"]) != representative_count:
+            raise AssertionError(f"{label} plans {metadata['protocol_representative_count']} representatives, "
+                                 f"expected {representative_count}")
+        if metadata["maximum_relative_standard_error"] != ceiling:
+            raise AssertionError(f"{label} bounds precision at {metadata['maximum_relative_standard_error']}, "
+                                 f"expected {ceiling}")
 
 
 def store_host_calibration(host, score):

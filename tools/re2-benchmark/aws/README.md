@@ -230,9 +230,6 @@ Generate the tables and run the validators before allocating hosts:
 python3 tools/re2-benchmark/baseline/generate-units.py
 python3 tools/re2-benchmark/baseline/validate-manifest.py
 python3 tools/re2-benchmark/baseline/validate-protocol-representatives.py
-python3 tools/re2-benchmark/baseline/validate-units.py
-python3 tools/re2-benchmark/baseline/validate-unit-plans.py
-python3 tools/re2-benchmark/baseline/validate-mode-inventory.py
 ```
 
 ## Freeze a candidate

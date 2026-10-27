@@ -147,7 +147,10 @@ fit it feeds complete inside it. `generate-units.py` writes `units.tsv` (one
 line per unit with its counts and estimated seconds) and `unit-rows.tsv`
 (each unit's owned rows and representatives; one row ID contains a comma,
 so row lists are not packed into a column).
-`validate-units.py` checks them independently. The three tables are not checked
+The generator refuses to write units that break a measurement requirement:
+each row owned by exactly one unit, comparisons, scaling groups, and logical
+rows inside one unit, one Cartesian selector block per method share, and
+no unit over the 15-minute budget. The three tables are not checked
 in: `freeze-candidate.sh` generates them into the candidate archive and beside
 the baseline tooling, where the controller reads them, and the offline gate
 generates them before its tests. `run-unit.sh` measures one unit, and a unit
@@ -224,7 +227,7 @@ one a shard route runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
   host session's capacity gate, combines the routes, and writes
   `unit-session.tsv`, `unit-evidence.tsv`, and, once `validate-unit-results.py`
   accepts the attempt, `unit-receipt.tsv`; see `ACCEPTANCE.md`.
-- `validate-unit-plans.py` plans every unit for both protocols and replicas 1
+- `test_unit_session.py` plans every unit for both protocols and replicas 1
   to 4 in process, and checks that the selectors expand to exactly the unit's
   rows under their frozen protocols, in replica route order, with the unit's
   representatives. It also plans a deterministic sample through `run-unit.sh`,
