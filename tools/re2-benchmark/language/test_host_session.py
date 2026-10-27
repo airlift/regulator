@@ -10,9 +10,9 @@ import test_batch_acceptance
 
 
 class TestLanguageHostSession(unittest.TestCase):
-    def setUp(self, bracket=False):
+    def setUp(self):
         self.fixture = test_batch_acceptance.TestBatchAcceptance()
-        self.fixture.setUp(bracket=bracket)
+        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.root = self.fixture.fixture.root
         self.regulator = self.root / "regulator"
@@ -48,18 +48,6 @@ class TestLanguageHostSession(unittest.TestCase):
         self.assertTrue((self.result / "language-worker/build.log").is_file())
         self.assertFalse((self.result / "language-acceptance.json").exists())
 
-    def test_shell_transports_all_bracket_legs_and_control_build_receipts(self):
-        self.doCleanups()
-        self.setUp(bracket=True)
-        result = self.run_session()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        worker = self.result / "language-worker"
-        receipt = collection.load(self.result / "language-acceptance.json")
-        self.assertEqual(set(receipt["source_bracket"]["legs"]), {"results", "control-results", "after-results"})
-        self.assertTrue((worker / "source-bracket.json").is_file())
-        self.assertEqual({path.name for path in (worker / "control-jvm").iterdir()}, {"build.log", "jvm-build.json"})
-        self.assertFalse((worker / "control-source").exists())
-
 
 # Stand in only for the expensive build/timing process. The shell dispatch,
 # artifact copying, raw reducer and separate acceptance process run unchanged.
@@ -77,10 +65,6 @@ shutil.copytree(os.environ["FAKE_WORKER_RESULTS"], destination)
 (destination / "jvm/build.log").write_text("synthetic build log\n")
 (destination / "jvm/jvm-build.json").write_text("{}\n")
 (destination / "native").mkdir()
-(destination / "control-source").mkdir()
-(destination / "control-jvm/source").mkdir(parents=True)
-(destination / "control-jvm/build.log").write_text("control build log\n")
-(destination / "control-jvm/jvm-build.json").write_text("{}\n")
 if os.environ["FAKE_WORKER_FAILURE"] == "1":
     (destination / "worker.json").unlink()
     sys.exit(3)

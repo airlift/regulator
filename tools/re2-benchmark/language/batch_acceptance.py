@@ -2,72 +2,11 @@
 """Regenerate language-batch acceptance from input, raw results, and host identity."""
 
 import argparse
-import csv
 from pathlib import Path
 
 import collection
 import fleet
-import focused_controls
 import released_artifact
-import source_bracket
-
-
-def validate_source_bracket(inputs, worker, batch, environment, candidate):
-    manifest = collection.load(inputs / batch["packages"][0]["directory"] / "manifest.json")
-    control = source_bracket.validate(manifest, inputs)
-    if control is None:
-        if manifest.get("focused_controls"):
-            raise ValueError("focused controls require a source bracket")
-        return None
-    marker = collection.load(worker / "source-bracket.json")
-    if (marker["order"] != ["candidate-before", "control", "candidate-after"] or
-            marker["results"] != ["results", "control-results", "after-results"]):
-        raise ValueError("source bracket is incomplete or has the wrong order")
-    with (inputs / source_bracket.PROVENANCE).open() as file:
-        receipts = list(csv.DictReader(file, delimiter="\t"))
-    if len(receipts) != 1:
-        raise ValueError("invalid source-control provenance")
-    expected_control = {"source_commit": receipts[0]["candidate_commit"], "source_tree": receipts[0]["root_tree"]}
-    expected_candidate = {key: candidate[key] for key in ("source_commit", "source_tree")}
-    if marker["control"] != expected_control or marker["candidate"] != expected_candidate:
-        raise ValueError("source bracket identifies different source revisions")
-    hashes = {}
-    candidate_runners = None
-    for leg in marker["results"]:
-        expected_source = expected_control if leg == "control-results" else expected_candidate
-        directory = worker / leg
-        if set(directory.rglob("job.json")) != {directory / job / "job.json" for job in batch["batch"]["jobs"]}:
-            raise ValueError("source bracket leg has missing or unexpected jobs")
-        runners = None
-        hashes[leg] = {}
-        for package in batch["packages"]:
-            job = package["receipt"]["job"]
-            result = directory / job["id"]
-            if collection.load(result / "job.json") != {"job": job, "plan_sha256": batch["plan_sha256"]}:
-                raise ValueError("source bracket job identity changed")
-            partition = inputs / package["directory"]
-            data = collection.export(partition, result, write=False)
-            path = result / "language-results.json"
-            if collection.load(path) != data:
-                raise ValueError("source bracket export differs from raw evidence")
-            provenance = data["provenance"]
-            if (any(provenance[key] != value for key, value in expected_source.items()) or
-                    provenance["platform"] != environment["platform"] or
-                    provenance["instance_identity"]["instanceId"] != environment["instance_id"] or
-                    provenance["instance_identity"]["instanceType"] != environment["instance_type"] or
-                    provenance["jdk"] != candidate["jdk"] or
-                    provenance["comparators_sha256"] != candidate["comparators_sha256"]):
-                raise ValueError("source bracket changed host, source or comparator")
-            if runners is not None and runners != data["runners"]:
-                raise ValueError("source bracket changed runners within a leg")
-            runners = data["runners"]
-            hashes[leg][job["id"]] = collection.digest(path.read_bytes())
-            hashes[leg][job["id"] + "/focused"] = focused_controls.validate_results(partition, directory / partition.name, runners)
-        if leg == "results":
-            candidate_runners = runners
-        if leg == "after-results" and runners != candidate_runners:
-            raise ValueError("candidate runners differ between bracket legs")
-    return {"marker_sha256": collection.digest((worker / "source-bracket.json").read_bytes()), "legs": hashes}
 
 
 def properties(path):
@@ -157,11 +96,8 @@ def validate(directory):
         "plan_sha256": batch["plan_sha256"], "batch_sha256": collection.digest(collection.encode(batch)),
         "exports": exports,
     }
-    bracket = validate_source_bracket(inputs, worker, batch, environment, candidate)
     if candidate["released_artifact"] is not None:
         receipt["released_artifact"] = candidate["released_artifact"]
-    if bracket is not None:
-        receipt["source_bracket"] = bracket
     return receipt
 
 

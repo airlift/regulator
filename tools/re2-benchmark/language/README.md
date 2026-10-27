@@ -96,22 +96,6 @@ intervals.
 
 ## Local verification
 
-For bounded optimization investigations, a source manifest may include
-`source_control` with `archive_sha256` and `provenance_sha256`. Supply the frozen
-Git archive at `source-control/source.tar.gz` and its candidate receipt at
-`source-control/provenance.tsv` beside that manifest. The fleet carries one
-checked copy per host batch. This option is off for ordinary collection.
-
-The worker builds both revisions before timing, rejects changed benchmark
-contracts, and executes candidate-before, control, and candidate-after on the
-same isolated host. Each leg runs its own verification and fresh JVM forks with
-the unchanged measurement protocol. `results`, `control-results`, and
-`after-results` preserve the three sets of raw samples. `source-bracket.json`
-records completion and both source identities; a missing receipt is not a
-completed bracket. Ordinary fleet export includes only the first candidate leg;
-investigation analysis must examine all three legs. Optional profiles start
-after all timed legs finish.
-
 Use a patched Python with `tarfile` extraction filters, such as Python 3.9.17+
 or 3.12+. Expanding upstream TOML on the preparation machine additionally
 requires Python 3.11+. The workers do not parse TOML.
@@ -618,21 +602,3 @@ job and raw sample and rejects missing jobs, mixed candidates, language-trace
 disagreements, and reused replica hosts. Local transport/controller tests use
 synthetic timing samples; they do not qualify performance or replace the AWS
 smoke and primary phases.
-
-## Focused source-bracket controls
-
-An investigation manifest can attach `focused_controls` to exact case/language
-pairs. Each descriptor names one existing JMH method and explicit parameters.
-The benchmark source must be identical in candidate and control archives.
-These measurements use five forks, ten one-second warmups, ten one-second
-measurements, both memory modes, and the same host/CPU as their enclosing source
-bracket. They run before any diagnostic profiling.
-
-Optional lifecycle descriptors carry a UTF-8 pattern and rotating inputs with
-expected counts and Slice offsets. The existing language verifier checks them
-against JDK or Joni before timing. Direct-engine descriptors use the existing
-benchmark states and their correctness tests. Raw JMH results and checksummed
-receipts live under each leg's `focused-controls` directory. These are paired
-Regulator source controls, not additional comparator or dashboard rows. The
-standard language export does not include them; investigation analysis must
-validate these receipts and all three source-bracket legs separately.

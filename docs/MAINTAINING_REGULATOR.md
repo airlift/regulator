@@ -194,8 +194,9 @@ when they explain why maintainers should not repeat a rejected experiment.
 [`benchmarks/METHODOLOGY.md`](benchmarks/METHODOLOGY.md) defines the measurement
 protocol. Broad routing, representation, or execution-loop changes require the
 affected qualification shards or complete qualification matrix in addition to
-focused controls. Do not commit exploratory outputs. The preliminary 1.0 report
-is an explicitly labeled publication snapshot, not an exploratory campaign log.
+focused measurements. Do not commit exploratory outputs. The preliminary 1.0
+report is an explicitly labeled publication snapshot, not an exploratory
+campaign log.
 
 ### Normative Trino rows gate
 
@@ -264,20 +265,13 @@ is a separate decision, not the default development loop.
    `--execute`; inspect the job count, selected cases, batching, host limits,
    and cost allowance before launching. The plan is complete only when every
    affected path and protected control has an identified measurement.
-5. Use the language collector's
-   [source brackets](../tools/re2-benchmark/language/README.md#local-verification)
-   for candidate-before/control/candidate-after on the same host. Preserve all
-   three legs; the ordinary export contains only the first candidate leg.
-   [Focused controls](../tools/re2-benchmark/language/README.md#focused-source-bracket-controls)
-   can add existing direct-engine JMH methods to that bracket. Use the normal
-   campaign protocols and run profiles separately from timings.
-6. Qualify the affected cases. A language fleet accepts a frozen
+5. Qualify the affected cases with the normal campaign protocols, and run
+   profiles separately from timings. A language fleet accepts a frozen
    `--selection` of case/language pairs. Baseline follow-ups use repeated
    `--shard` arguments and the same selection during validation and reduction.
    The [collector guide](../tools/re2-benchmark/language/README.md#aws-dispatch-and-recovery)
-   documents both. These narrow qualification coverage; they do not replace
-   same-host source brackets with comparisons between unrelated runs.
-7. Compare absolute and normalized cost, ratios,
+   documents both.
+6. Compare absolute and normalized cost, ratios,
    allocation, scaling, and host variation using the performance gate above.
    List wins and losses separately for ordinary workloads and stress cases.
    Record accepted trade-offs in `REGULATOR_DECISIONS.md`, retain raw evidence,

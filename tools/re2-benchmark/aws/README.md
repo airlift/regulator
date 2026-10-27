@@ -183,9 +183,7 @@ a larger explicit deadline. An explicit
 resume.
 
 For a focused change, budget only the affected cases and protected controls.
-A source bracket measures three legs on each host, so include all three in its
-estimate. That does not require running the entire release campaign three
-times. Preserve accepted work and resume with unchanged frozen inputs instead
+Preserve accepted work and resume with unchanged frozen inputs instead
 of starting collection over.
 
 ## Qualification inputs

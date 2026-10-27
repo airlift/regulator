@@ -16,19 +16,11 @@ collect_artifacts()
     trap - EXIT
     mkdir -p "${result_directory}/language-worker"
     # Return raw evidence and build receipts, not the isolated source and object trees.
-    for name in results control-results after-results source-bracket.json worker.json cpu-affinity.json native-build.log; do
+    for name in results worker.json cpu-affinity.json native-build.log; do
         if [[ -e "${worker_directory}/${name}" ]]; then
             cp -a "${worker_directory}/${name}" "${result_directory}/language-worker/"
         fi
     done
-    if [[ -d "${worker_directory}/control-jvm" ]]; then
-        mkdir -p "${result_directory}/language-worker/control-jvm"
-        for name in build.log jvm-build.json; do
-            if [[ -f "${worker_directory}/control-jvm/${name}" ]]; then
-                cp "${worker_directory}/control-jvm/${name}" "${result_directory}/language-worker/control-jvm/"
-            fi
-        done
-    fi
     for name in build.log jvm-build.json; do
         if [[ -f "${worker_directory}/jvm/${name}" ]]; then
             cp "${worker_directory}/jvm/${name}" "${result_directory}/language-worker/"

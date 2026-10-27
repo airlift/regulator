@@ -1,4 +1,3 @@
-import copy
 from pathlib import Path
 import tempfile
 import unittest
@@ -70,11 +69,9 @@ class TestSlowBulkBudget(unittest.TestCase):
                     transport.validate_host_budget(package, Path('inputs'), 18000)
                 with self.assertRaises(ValueError):
                     transport.validate_host_budget({'packages': package['packages'] * 2}, Path('inputs'), expected)
-                for field in ('source_control', 'focused_controls', 'diagnostic_profiles'):
-                    with self.subTest(field=field):
-                        changed = {**manifest, field: {}}
-                        with patch.object(collection, 'load', return_value=changed), self.assertRaises(ValueError):
-                            transport.validate_host_budget(package, Path('inputs'), expected)
+                changed = {**manifest, 'diagnostic_profiles': {}}
+                with patch.object(collection, 'load', return_value=changed), self.assertRaises(ValueError):
+                    transport.validate_host_budget(package, Path('inputs'), expected)
 
 
 if __name__ == '__main__':
