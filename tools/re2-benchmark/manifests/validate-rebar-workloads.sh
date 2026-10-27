@@ -4,7 +4,6 @@ set -euo pipefail
 
 script_directory=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 workload_manifest="${script_directory}/rebar-workloads.csv"
-selected_manifest="${script_directory}/rebar-selected-workloads.tsv"
 extended_manifest="${script_directory}/rebar-extended-workloads.tsv"
 
 sha256()
@@ -33,15 +32,10 @@ verify_checksum()
 }
 
 verify_checksum "${workload_manifest}" "${script_directory}/rebar-workloads.sha256"
-verify_checksum "${selected_manifest}" "${script_directory}/rebar-selected-workloads.sha256"
 verify_checksum "${extended_manifest}" "${script_directory}/rebar-extended-workloads.sha256"
 
 if [[ $(wc -l < "${workload_manifest}") -ne 42 ]]; then
     echo "Expected 41 Rebar workloads in ${workload_manifest}" >&2
-    exit 1
-fi
-if [[ $(wc -l < "${selected_manifest}") -ne 11 ]]; then
-    echo "Expected 10 selected Rebar workloads in ${selected_manifest}" >&2
     exit 1
 fi
 if [[ $(wc -l < "${extended_manifest}") -ne 198 ]]; then
@@ -52,12 +46,6 @@ fi
 expected_workload_header='name,model,case_insensitive,unicode,pattern_length,pattern_sha256,haystack_length,haystack_sha256,expected_result,result_demand'
 if [[ "$(head -n 1 "${workload_manifest}")" != "${expected_workload_header}" ]]; then
     echo "Unexpected Rebar workload manifest header" >&2
-    exit 1
-fi
-
-expected_selected_header=$'benchmark_name\toutput_file\tuncompressed_length\tuncompressed_sha256'
-if [[ "$(head -n 1 "${selected_manifest}")" != "${expected_selected_header}" ]]; then
-    echo "Unexpected selected Rebar workload manifest header" >&2
     exit 1
 fi
 
@@ -81,15 +69,6 @@ if [[ $(tail -n +2 "${extended_manifest}" | cut -f1 | sort | uniq -d | wc -l | t
     echo "Extended Rebar workload names must be unique" >&2
     exit 1
 fi
-
-awk -F '\t' '
-    NR == 1 { next }
-    NF != 4 || $1 == "" || $2 !~ /^[A-Za-z0-9_.-]+\.klv\.gz$/ ||
-            $3 !~ /^[1-9][0-9]*$/ || $4 !~ /^[0-9a-f]{64}$/ {
-        printf "Invalid selected Rebar workload at line %d\n", NR > "/dev/stderr"
-        exit 1
-    }
-' "${selected_manifest}"
 
 if [[ $# -gt 1 ]]; then
     echo "Usage: $0 [generated-workload-manifest]" >&2

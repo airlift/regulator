@@ -43,8 +43,7 @@ def validate_host_budget(package, directory, seconds):
         if len(protocols) != 1:
             raise ValueError("slow bulk requires one comparison per host")
         manifest = manifests[0]
-        forbidden = {'source_control', 'focused_controls', 'diagnostic_profiles'}
-        if forbidden.intersection(manifest):
+        if 'diagnostic_profiles' in manifest:
             raise ValueError("slow bulk host budget excludes auxiliary diagnostic work")
         protocol = protocols[0]
         processes = 0

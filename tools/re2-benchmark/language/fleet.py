@@ -12,7 +12,6 @@ import shutil
 from pathlib import Path
 
 import collection
-import source_bracket
 import batching
 
 
@@ -102,7 +101,6 @@ def prepare(manifest_directory, destination, replicas=3, selection=None, operati
     source.mkdir()
     shutil.copyfile(manifest_directory / "manifest.json", source / "manifest.json")
     copy_inputs(manifest, manifest_directory, source)
-    source_bracket.copy(manifest, manifest_directory, source)
     parent_hash = collection.digest((manifest_directory / "manifest.json").read_bytes())
     partitions = []
     for case_index, case in enumerate(manifest["cases"]):
@@ -158,7 +156,6 @@ def validate_plan(directory, allow_archived_schema):
                 collection.has_release_1_0_languages(manifest))
     unallocated = archived and plan.get("schema_version") == 2
     collection.validate_manifest(manifest, source, archived)
-    source_bracket.validate(manifest, source)
     if "selected_languages" in manifest or "parent_manifest_sha256" in manifest:
         raise ValueError("fleet source must be unpartitioned")
     parent_hash = collection.digest((source / "manifest.json").read_bytes())
@@ -285,8 +282,6 @@ def package_validated_batch(directory, plan, batch_id, destination):
         packages.append({"directory": str(path), "receipt": receipt})
     receipt = {"batch": batch, "plan_sha256": collection.digest((directory / "plan.json").read_bytes()),
                "packages": packages}
-    manifest = collection.load(directory / "source/manifest.json")
-    source_bracket.copy(manifest, directory / "source", destination)
     collection.save(destination / "batch.json", receipt)
     validate_batch(destination)
     return receipt
@@ -309,7 +304,6 @@ def validate_batch(directory):
         actual = validate_package(path)
         job = actual["job"]
         manifest = collection.load(path / "manifest.json")
-        source_bracket.validate(manifest, directory)
         if (actual != package["receipt"] or actual["plan_sha256"] != receipt["plan_sha256"] or
                 job["platform"] != batch["platform"] or job["replica"] != batch["replica"] or
                 not batch["shard"].startswith(manifest["suite"] + "-")):

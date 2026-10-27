@@ -14,8 +14,6 @@ language bulk comparison runs:
 - `rebar-workload-taxonomy.tsv` classifies every curated and extended row as
   bulk text, compilation, or diagnostics and stress. Rules must be exhaustive
   and non-overlapping. Its adjacent checksum freezes the reviewed rules.
-- `rebar-selected-workloads.tsv` records the ten expanded KLV inputs used by
-  focused DFA campaigns.
 - the adjacent `.sha256` files protect the checked-in definitions.
 
 Run the consistency check with:

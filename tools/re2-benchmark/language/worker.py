@@ -9,7 +9,6 @@ import subprocess
 import collection
 import fleet
 import jvm_build
-import source_bracket
 
 
 def profile_partition(partition, results, java, classpath):
@@ -64,7 +63,6 @@ def run(package_directory, destination, java="java", *, measure=False, archive=N
         subprocess.run([str(collection.ROOT / "tools/re2-benchmark/build.sh")], cwd=collection.ROOT,
                        env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
     native_runners = {engine: str(native_directory / target) for engine, target in native_targets.items()}
-    control = source_bracket.prepare(manifest, package_directory, destination, java)
     results = destination / "results"
     if measure:
         # Children inherit affinity. Build first, then pin all verification and timing to one CPU.
@@ -74,8 +72,9 @@ def run(package_directory, destination, java="java", *, measure=False, archive=N
             if len(os.sched_getaffinity(0)) != 1:
                 raise ValueError("worker CPU affinity was not applied")
             collection.save(destination / "cpu-affinity.json", sorted(os.sched_getaffinity(0)))
-            source_bracket.run(control, partitions, destination, java, classpath, native_runners,
-                               build_directory / "jvm-build.json", archive, provenance, fleet.run_package)
+            for partition in partitions:
+                fleet.run_package(partition, results, java, classpath, native_runners,
+                                  build_directory / "jvm-build.json", archive, provenance)
             # No profiled process overlaps a timing process, including subsequent partitions.
             for partition in partitions:
                 profile_partition(partition, results, java, classpath)
@@ -85,10 +84,6 @@ def run(package_directory, destination, java="java", *, measure=False, archive=N
         for partition in partitions:
             output = results / partition.name if batch else results
             collection.verify(partition, output, java, classpath, native_runners)
-            if control is not None:
-                with source_bracket.source_root(control["root"]):
-                    collection.verify(partition, destination / "control-results" / partition.name,
-                                      java, control["classpath"], native_runners)
     actual = fleet.validate_batch(package_directory) if batch else fleet.validate_package(package_directory)
     if actual != package:
         raise ValueError("worker input changed during execution")

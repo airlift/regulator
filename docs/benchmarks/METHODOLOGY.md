@@ -3,11 +3,6 @@
 Use this guide to compare engines and investigate performance gaps. Commands
 and comparison rules belong here; measured results belong in the report data.
 
-For opt-in LIKE dispatch and literal-length probes, see the
-[LIKE diagnostic instructions](../../tools/re2-benchmark/trino-like/README.md).
-Their local verification is untimed; performance collection follows the
-target-host rules below.
-
 ## Analysis principles
 
 A benchmark difference must be explained at the algorithm, allocation, memory,
@@ -349,7 +344,7 @@ sets, Joni fork policy, allocation collection, and per-host equivalence
 checks. Do not replace it with a blanket five-fork or one-second setting.
 
 The [language collector](../../tools/re2-benchmark/language/README.md#target-host-measurement-and-saved-data)
-uses its own frozen protocol and receipts, including for source brackets.
+uses its own frozen protocol and receipts.
 The 1.0 measurement-quality follow-up uses separately frozen
 [replacement protocols](https://github.com/airlift/regulator/blob/a087e3a8bc7f826a63f70d6186ba32936bf2800c/tools/re2-benchmark/baseline/REMEASUREMENT.md)
 and the language profiles described in that collector guide. They preserve

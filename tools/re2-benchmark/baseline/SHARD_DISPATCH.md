@@ -61,8 +61,7 @@ iteration counts while avoiding a new forked JVM for every row:
 - The route count includes only the candidate system and Joni, except in the
   LIKE construction shards, which count every row. `trino-like` measures the
   `regulator` and Trino systems, so it counts none of its 36 rows and all of
-  them keep the one-second protocol. Its static estimate also charges none of
-  their 3,600 seconds of iterations.
+  them keep the one-second protocol.
 - The first process records GC allocation metrics. The other four processes do
   not run the GC profiler because its in-process instrumentation perturbs the
   primary timing score. All five processes contribute primary timing samples.
@@ -118,38 +117,12 @@ enumeration, so the process metadata records
 `jmh_row_order=jmh-deterministic-no-cli-randomization` rather than claiming
 counterbalancing that did not occur.
 
-Before execution, the dispatcher calculates a conservative static duration
-estimate from:
-
-- exact selected JMH row count
-- every handler-level JMH invocation
-- every independent measured process epoch
-- a two-second JVM startup allowance per process
-- a two-second startup allowance for each in-process invocation's
-  compiler-hints JVM
-- one proper-fork startup per selected Joni row and Joni fork
-- a two-second startup allowance for each forked invocation's launcher JVM
-- both qualification calibration invocations or all three smoke calibration
-  invocations, including their parent and forked JVMs
-- every representative full-protocol and bounded-protocol comparison, including
-  all six top-level JVM process startups
-- all warmup and measurement windows
-- a 900-second pinned Trino preparation, build, and route-harness allowance for
-  every host that performs that work
-- a 600-second host bootstrap allowance
-
-These are conservative acceptance-gate allowances rather than predicted wall
-times. The Trino preparation uses an explicit allowance because its duration
-depends on the host and shared-work cache state. A route is rejected before
-measurement if its estimate exceeds 90 minutes, and `run-metadata.txt` records
-each route estimate.
-
 `unit_cost.py` estimates the measurement seconds of any set of rows from their
-frozen protocols, with the same per-row, per-selector startup,
-representative, and calibration rules. It leaves out the pinned Trino
-preparation and host bootstrap allowances, which do not grow with the rows a
-host measures. The route estimate differs from it in one recorded way: it
-charges none of `trino-like`'s 3,600 seconds of iterations.
+frozen protocols: every warmup and measurement window, a two-second startup
+allowance for each JVM a selector or Joni fork starts, the calibration
+invocations, and every representative comparison. It leaves out the pinned
+Trino preparation and host bootstrap, which do not grow with the rows a host
+measures.
 
 Measured-shard normalization requires exactly one process sample group in each
 top-level JMH JSON file. Calibration retains JMH's ordinary forked shape: one
