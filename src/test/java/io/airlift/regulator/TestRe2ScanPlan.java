@@ -155,6 +155,22 @@ public class TestRe2ScanPlan
         Re2Matcher matcher = pattern.matcher(source);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.group(1)).isEqualTo(utf8Slice("höst"));
+
+        // A forced handoff continues every unanchored search on the ordinary engine before the
+        // plan's first attempt, which would match here, so with that engine unable to succeed it
+        // finds nothing.
+        Slice handoffPattern = utf8Slice("x([^/]+)/");
+        Slice handoffSource = utf8Slice("xéb/xc/");
+        for (NamedOptions options : List.of(
+                new NamedOptions("interpreted", Re2.Options.defaults()),
+                new NamedOptions("generated", Re2.Options.defaults().setGenerateBytecode(true)))) {
+            Re2 handoff = Re2.compileForcingScanPlanHandoffForTesting(handoffPattern, options.options());
+            assertThat(handoff.usesScanPlanForDiagnostics()).as(options.name()).isTrue();
+            assertThat(handoff.usesGeneratedBytecode()).as(options.name()).isEqualTo(options.options().generateBytecode());
+            disableOrdinaryEngine(handoff);
+            assertThat(handoff.find(handoffSource)).as(options.name()).isFalse();
+            assertThat(handoff.count(handoffSource)).as(options.name()).isZero();
+        }
     }
 
     @Test
