@@ -19,8 +19,9 @@ import aggregate_results
 class TestOutputContract(unittest.TestCase):
     def setUp(self):
         self.pairs = [dict(platform='c9g', shard_id='operations', replica_id=str(replica),
-                           host_epoch=f'host-{replica}', candidate_system='regulator-native-access',
-                           comparator_system='joni') for replica in range(1, 4)]
+                           host_epoch=f'host-{replica}', unit_id='unit', unit_attempt_id=f'host-{replica}/1',
+                           candidate_system='regulator-native-access', comparator_system='joni')
+                      for replica in range(1, 4)]
         self.metadata = []
         for pair in self.pairs:
             for route, systems in [('native', 'regulator-native-access'), ('safe', 'regulator,joni')]:
@@ -46,10 +47,11 @@ class TestOutputContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'mixed or unknown'):
             output_contract(self.pairs, changed)
 
-    def test_other_host_metadata_cannot_supply_missing_evidence(self):
+    def test_other_attempt_metadata_cannot_supply_missing_evidence(self):
+        # The host's next lease measured another unit of the same shard and replica.
         changed = deepcopy(self.metadata)
         for row in changed:
-            row['host_epoch'] = 'another-host'
+            row['unit_attempt_id'] = row['unit_attempt_id'].replace('/1', '/2')
         self.assertEqual(output_contract(self.pairs, changed), {})
 
     def test_duplicate_metadata_fails(self):

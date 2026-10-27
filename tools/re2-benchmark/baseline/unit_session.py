@@ -8,6 +8,7 @@ planned here instead of a handler's whole-method invocation. The combined
 unit is accepted on its own, by validate-unit-results.py.
 """
 import argparse
+import csv
 import hashlib
 import json
 import math
@@ -16,13 +17,11 @@ import shutil
 from pathlib import Path
 from typing import NoReturn
 
-import host_session
 import row_protocol
 import unit_cost
 import work_units
 from acceptance import (
     EVIDENCE_FIELDS,
-    FORMAL_UNIT_ARTIFACTS,
     GIT_OBJECT_ID,
     SESSION_FIELDS,
     SHA256,
@@ -139,6 +138,82 @@ SEMANTIC_REJECTIONS = "semantic-rejections.tsv"
 SEMANTIC_REJECTION_FIELDS = ("platform", "unit_id", "replica_id", "unit_attempt_id")
 
 
+DISPATCH_FIELDS = (
+    "shard_id",
+    "native_access_handler",
+    "native_access_systems",
+    "object_row_handler",
+    "object_row_systems",
+    "semantic_tests",
+    "blocker",
+)
+ROUTES = (
+    ("native-access", "native_access_handler", "native_access_systems"),
+    ("object-row", "object_row_handler", "object_row_systems"),
+)
+
+
+def load_dispatch(path, shard):
+    with path.open(newline="", encoding="utf-8") as input_file:
+        reader = csv.DictReader(input_file, delimiter="\t")
+        if tuple(reader.fieldnames or ()) != DISPATCH_FIELDS:
+            raise ValueError(f"Unexpected dispatch header in {path}")
+        rows = [row for row in reader if row["shard_id"] == shard]
+    if len(rows) != 1:
+        raise ValueError(f"Expected one dispatch row for shard {shard!r}, found {len(rows)}")
+    return rows[0]
+
+
+def applicable_routes(dispatch):
+    routes = []
+    for route, handler_field, systems_field in ROUTES:
+        handler = dispatch[handler_field]
+        systems = dispatch[systems_field]
+        if handler == "blocked":
+            raise ValueError(
+                f"Shard {dispatch['shard_id']!r} route {route!r} is blocked: {dispatch['blocker']}")
+        if handler == "-" or systems == "-":
+            if handler != systems:
+                raise ValueError(f"Shard {dispatch['shard_id']!r} has an incomplete {route!r} route")
+            continue
+        parsed_systems = parse_systems(systems, f"{dispatch['shard_id']} {route}")
+        routes.append((route, handler, parsed_systems))
+    if not routes:
+        raise ValueError(f"Shard {dispatch['shard_id']!r} has no applicable routes")
+    return routes
+
+
+def require_complete_route(route_directory):
+    status_path = route_directory / "status.txt"
+    if not status_path.is_file() or status_path.read_text(encoding="utf-8") != "status=complete\n":
+        raise ValueError(f"Route did not complete successfully: {route_directory}")
+
+
+def route_evidence(route_directory):
+    required = set(UNIT_ROUTE_REQUIRED_ARTIFACTS)
+    metadata = read_properties(route_directory / "run-metadata.txt")
+    qualification_required = metadata.get("protocol_qualification_required")
+    if qualification_required not in {"true", "false"}:
+        raise ValueError(f"Invalid protocol_qualification_required in {route_directory / 'run-metadata.txt'}")
+    if qualification_required == "true":
+        required.add("protocol-qualification.tsv")
+    missing = sorted(
+        artifact for artifact in required
+        if not (route_directory / artifact).is_file() or (route_directory / artifact).stat().st_size == 0)
+    if missing:
+        raise ValueError(f"Required route evidence is missing or empty in {route_directory}: {missing}")
+
+    artifacts = []
+    for path in route_directory.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(route_directory)
+        if relative.parts[0] in {"raw", "logs"}:
+            continue
+        artifacts.append((relative.as_posix(), path))
+    return sorted(artifacts)
+
+
 def load_unit(directory, unit_id):
     units = work_units.load(directory)
     if unit_id not in units:
@@ -205,9 +280,9 @@ def unit_representatives(unit, replica_id):
 
 
 def plan_routes(directory, unit, replica_id, chained=False):
-    dispatch = host_session.load_dispatch(directory / "shard-dispatch.tsv", unit["shard_id"])
+    dispatch = load_dispatch(directory / "shard-dispatch.tsv", unit["shard_id"])
     shares = ordered_shares(
-        route_shares(unit_rows(directory, unit), host_session.applicable_routes(dispatch)), replica_id)
+        route_shares(unit_rows(directory, unit), applicable_routes(dispatch)), replica_id)
     return [
         (route, handler, systems, share, calibration)
         for (route, handler, systems, share), calibration in zip(shares, calibrations(len(shares), chained))]
@@ -390,7 +465,7 @@ def combine(arguments):
     sessions = []
     for route in route_plan:
         route_directory = root / "routes" / route["route"]
-        host_session.require_complete_route(route_directory)
+        require_complete_route(route_directory)
         session = read_one_tsv(route_directory / "route-session.tsv", SESSION_FIELDS)
         if parse_systems(session["systems"], str(route_directory)) != parse_systems(route["systems"], "route plan"):
             raise ValueError(f"Route {route['route']} session systems differ from the unit route plan")
@@ -424,8 +499,7 @@ def write_unit_evidence(root, route_plan, host_evidence=None):
     """
     evidence = []
     for route in route_plan:
-        for artifact, path in host_session.route_evidence(
-                root / "routes" / route["route"], UNIT_ROUTE_REQUIRED_ARTIFACTS):
+        for artifact, path in route_evidence(root / "routes" / route["route"]):
             evidence.append({
                 "route": route["route"],
                 "artifact": f"routes/{route['route']}/{artifact}",
@@ -458,12 +532,7 @@ def write_unit_evidence(root, route_plan, host_evidence=None):
 
 
 def verify_unit_evidence(root, host_evidence=None):
-    rows = verify_evidence_manifest(
-        root / "unit-evidence.tsv", root,
-        route_required=UNIT_ROUTE_REQUIRED_ARTIFACTS,
-        formal_required=FORMAL_UNIT_ARTIFACTS,
-        capacity_artifact="unit-capacity.txt",
-        host_root=host_evidence)
+    rows = verify_evidence_manifest(root / "unit-evidence.tsv", root, host_root=host_evidence)
     return evidence_candidate_identity(rows, root)
 
 

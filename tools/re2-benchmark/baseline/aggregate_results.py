@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from acceptance import EVIDENCE_FIELDS, EXPECTED_PLATFORMS, RELEASE_1_0_PLATFORMS, ValidationError
+from acceptance import EVIDENCE_FIELDS, EXPECTED_PLATFORMS, ValidationError
 import unit_dispatch
 import unit_session
 from row_protocol import comparison_specs, identify_scaling_groups, logical_row_id, parse_parameters
@@ -198,9 +198,8 @@ def load_platforms(path):
     platforms = {row["platform"]: row for row in rows}
     if len(platforms) != len(rows):
         raise ReductionError("platform file contains duplicate platform identities")
-    if set(platforms) not in (set(EXPECTED_PLATFORMS), set(RELEASE_1_0_PLATFORMS)):
-        raise ReductionError(
-            f"platforms must be r8i and r9g, or the 1.0 release's r8i, r8g, and r9g; found {sorted(platforms)}")
+    if set(platforms) != EXPECTED_PLATFORMS:
+        raise ReductionError(f"platforms must be r8i and r9g; found {sorted(platforms)}")
     for name, platform in platforms.items():
         try:
             topology.validate(platform)
@@ -1028,7 +1027,7 @@ def build_confirmation_jobs(row_aggregates, host_rows, comparisons, scaling, ses
 
     already_confirmed = {scope(session.receipt) for session in sessions if session.confirmation}
     eligible -= already_confirmed
-    platform_order = {platform: index for index, platform in enumerate(("r8i", "r8g", "r9g"))}
+    platform_order = {platform: index for index, platform in enumerate(("r8i", "r9g"))}
     fields = ("platform", "shard_id", "unit_id")
     rows = [
         dict(zip(fields, value))
@@ -1277,7 +1276,7 @@ def aggregate(arguments):
         "campaign_id": primary[0]["campaign_id"],
         "manifest_rows": len(manifest_rows),
         "manifest_sha256": manifest_digest,
-        "platforms": [name for name in ("r8i", "r8g", "r9g") if name in platforms],
+        "platforms": [name for name in ("r8i", "r9g") if name in platforms],
         "shards": sorted(shards),
         "primary_sessions": len(primary),
         "confirmation_sessions": len(confirmation),
@@ -1290,6 +1289,8 @@ def aggregate(arguments):
         "events": len(events),
         "confirmation_jobs": len(confirmation_jobs),
         "campaign_artifact": campaign_artifact,
+        # The release whose JAR every attempt proved it measured; empty when none was required.
+        "release_version": version,
         "ratio_definition": "normalized Java cost divided by comparator cost; below 1 is faster",
     }
     (arguments.output_dir / "summary.json").write_text(

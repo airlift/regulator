@@ -377,7 +377,8 @@ not a reproducible campaign.
 The original job inventory above remains the reproduction contract for its
 archived capture. The final public report applies the mean-cost estimator and
 approximate interval rules in [the methodology](METHODOLOGY.md#statistics).
-Selected new measurements use the [isolated baseline collector](../../tools/re2-benchmark/baseline/REMEASUREMENT.md)
+Selected new measurements use the
+[isolated baseline collector](https://github.com/airlift/regulator/blob/a087e3a8bc7f826a63f70d6186ba32936bf2800c/tools/re2-benchmark/baseline/REMEASUREMENT.md)
 and frozen language `steady-state-v1` profiles. Keep original, diagnostic and
 replacement evidence separately identified.
 

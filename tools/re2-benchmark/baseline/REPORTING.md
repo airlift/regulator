@@ -33,7 +33,8 @@ With `--release-version`, for a campaign that measured a published release,
 every route of every attempt must also attest that it measured that release's
 pinned JAR: its `release-artifact.json`, the `release_version` and
 `release_artifact_sha256` in its `run-metadata.txt`, and the JAR under
-`release/`.
+`release/`. The report importer accepts only a reduction that proved the
+release it publishes.
 
 A worker host records its calibrations once, in its host session's
 `calibrations/` directory beside its attempts. The host calibrations an attempt
@@ -241,7 +242,9 @@ The reducer writes:
   `unit-capacity.txt` with `unit_capacity_sha256`
 - `confirmation-jobs.tsv`: unique primary-unstable `platform`, `shard_id`,
   `unit_id` rows still eligible for the bounded replica-4 wave
-- `summary.json`: deterministic campaign counts and identity
+- `summary.json`: deterministic campaign counts and identity, with the
+  `release_version` every attempt proved it measured, empty without
+  `--release-version`
 - `output-checksums.tsv`: checksums for every reducer output above
 
 Every per-attempt table adds `unit_id` and `unit_attempt_id` after

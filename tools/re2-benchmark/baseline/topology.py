@@ -3,7 +3,7 @@
 
 def validate(platform):
     family = platform["platform"]
-    expected = {"r8i": "intel", "r8g": "arm", "r9g": "arm"}
+    expected = {"r8i": "intel", "r9g": "arm"}
     if family not in expected or platform["architecture"] != expected[family]:
         raise ValueError("invalid platform architecture")
     if platform["instance_type"] != family + ".large" or platform["vcpus"] != "2":
