@@ -1,10 +1,10 @@
 # AWS baseline qualification
 
-The AWS tools run four kinds of jobs: `baseline-shard`, `language-batch`,
-`engine-build`, and `unit-worker`. The first two are needed for full
-qualification; `engine-build` builds engines for baseline hosts, and
-`unit-worker` measures baseline work units in place of whole shards. This
-guide gives the baseline commands; see the
+The AWS tools run four kinds of jobs: `engine-build`, `unit-worker`,
+`language-batch`, and `baseline-shard`. Full qualification builds each
+platform's engines once, measures baseline work units on unit workers, and
+collects language batches; `baseline-shard` runs one shard for diagnostics and
+remeasurement. This guide gives the baseline commands; see the
 [language guide](../language/README.md) for language collection.
 
 `baseline/run-campaign.py` plans and controls the baseline engine build and the
@@ -160,13 +160,12 @@ it requires a new campaign rather than a resume.
 
 The neighboring `fleet-state.json` coordinates both collectors with `flock`. It
 counts instances, outstanding requests, and launches not yet visible to EC2.
-Reservations remain until verified cleanup; crashes never expire them. In a
-host-session campaign, a failed benchmark or rejected artifact leaves that job
-unaccepted and unresolved after its cleanup is proven. Independent jobs
-continue, including queued work. These rejections do not trigger automatic
-retries or weaken the acceptance gates; [unit dispatch](#unit-dispatch) has its
-own retry rules. Unproven cleanup, changed frozen inputs, conflicting accepted
-identities and shared resource-policy failures halt both collectors. See the
+Reservations remain until verified cleanup; crashes never expire them. A
+rejected work unit follows the [unit dispatch](#unit-dispatch) retry rules, and
+a rejected language batch or engine build stays unaccepted and unresolved after
+its cleanup is proven while independent jobs continue. Unproven cleanup,
+changed frozen inputs, conflicting accepted identities and shared
+resource-policy failures halt both collectors. See the
 [protocol rules](../baseline/SHARD_DISPATCH.md#jmh-protocol). Preserve the
 policy and state together across restarts. More than 64 executing workers
 requires this shared policy. Ramp from canaries to the approved cap, using the
@@ -227,7 +226,6 @@ Run the validators before allocating hosts:
 python3 tools/re2-benchmark/baseline/validate-manifest.py
 python3 tools/re2-benchmark/baseline/validate-protocol-representatives.py
 python3 tools/re2-benchmark/baseline/validate-row-protocol.py
-python3 tools/re2-benchmark/baseline/validate-shard-plans.py
 python3 tools/re2-benchmark/baseline/validate-units.py
 python3 tools/re2-benchmark/baseline/validate-unit-plans.py
 python3 tools/re2-benchmark/baseline/validate-mode-inventory.py
@@ -295,8 +293,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --release-version 1.0 --fleet-budget /durable/path/fleet-policy.json
 ```
 
-The primary phase requires the accepted smoke root and runs three independent
-host replicas for every platform and shard:
+The primary phase requires the accepted smoke root and measures three
+independent replicas of every work unit of every platform and shard:
 
 ```bash
 TRINO_DIR=/path/to/trino TRANSFER_PREFIX=<transfer-prefix> \
@@ -333,22 +331,23 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
 
 Start with one canary per platform, then run full smoke before primary.
 Use `--smoke-protocol qualification` for baseline duration qualification. The
-default `smoke` protocol shortens timings and cannot establish a full shard's
+default `smoke` protocol shortens timings and cannot establish a unit's
 duration. The selection is frozen on execution and cannot change on resume.
-Spot jobs wait when quota or capacity prevents a launch. An interrupted job
-restarts after verified cleanup: on a fresh Spot host with `--spot-only`, and
-otherwise On-Demand.
 
-Add `--unit-workers` to smoke, primary, or confirmation to measure the phase's
-work units on [unit workers](#unit-workers) instead of one host per shard
-replica. The plan then writes `work-items.tsv`: replica 1 of every unit of the
-selected shards in smoke, replicas 1 to 3 in primary, and replica 4 of each
-`--confirmation-jobs` row, which then names `platform`, `shard_id`, and
-`unit_id`. The execution policy records the mode, a unit primary requires a
-unit smoke, and a unit confirmation requires a unit primary. A shared fleet
-budget must allow `max_attempt_seconds` of at least 27900, a worker's timeout
-plus 15 minutes. Each phase is still its own controller run; pipelining a
-shard's primary behind its accepted smoke is future work.
+Smoke, primary, and confirmation measure the phase's work units on [unit
+workers](#unit-workers). The plan writes `work-items.tsv`: replica 1 of every
+unit of the selected shards in smoke, replicas 1 to 3 in primary, and replica 4
+of each `--confirmation-jobs` row, which names `platform`, `shard_id`, and
+`unit_id`. A primary requires an accepted smoke, and a confirmation requires an
+accepted primary. A shared fleet budget must allow `max_attempt_seconds` of at
+least 27900, a worker's timeout plus 15 minutes. Each phase is still its own
+controller run; pipelining a shard's primary behind its accepted smoke is
+future work.
+
+The build phase and language campaigns run one host per job. Spot jobs wait
+when quota or capacity prevents a launch. An interrupted job restarts after
+verified cleanup: on a fresh Spot host with `--spot-only`, and otherwise
+On-Demand.
 
 Set `AWS_PROFILE` before any execution command when selecting a named profile;
 otherwise the AWS CLI uses its standard credential chain. `TRINO_DIR` is
@@ -422,14 +421,11 @@ manifest lists each archive's SHA-256 and per-file hashes, and its inputs: the
 candidate, the Rebar and Trino commits, the toolchain packages, and the build
 scripts. Accepted builds go to `accepted-engine-builds.json`.
 
-Smoke, primary, and confirmation execution require either `--engine-builds`,
-naming an accepted build root for every platform, or `--local-engine-builds`,
-which has every host build its own engines as before. The choice and each
-platform's manifest SHA-256 are frozen in `execution-policy.json`, and primary
-and confirmation refuse a prerequisite that used different builds. Policies
-recorded before the build phase existed resume as local builds. Language
-batches do not use engine builds; their Rust comparator still builds on the
-host.
+Smoke, primary, and confirmation execution require `--engine-builds`, naming
+an accepted build root for every platform. Each platform's manifest SHA-256 is
+frozen in `execution-policy.json`, and primary and confirmation refuse a
+prerequisite that used different builds. Language batches do not use engine
+builds; their Rust comparator still builds on the host.
 
 Hosts check every downloaded archive with `sha256sum --check`, then verify each
 archive and installed file against the manifest; a mismatch fails the session.
@@ -456,16 +452,15 @@ cleanup leaves them in place. Remove them once the campaign is done:
 aws s3 rm "s3://<bucket>/<transfer-prefix>/engine-builds/" --recursive --region <region>
 ```
 
-`--local-engine-builds` uploads no archives and needs no shared bucket.
-
 ## Single-job wrapper
 
 The controllers use `run-campaign.sh` to run one AWS job. A
 `CAMPAIGN_MODE=baseline-shard` job selects one architecture, platform, shard,
-and replica. A `CAMPAIGN_MODE=language-batch` job selects one language batch and
-its frozen inputs. A `CAMPAIGN_MODE=engine-build` job builds one platform's
-engines, and a `CAMPAIGN_MODE=unit-worker` job leases [work
-units](#unit-workers). The wrapper verifies the archive, provisions an isolated
+and replica for a [diagnostic](../diagnostics/README.md) or
+[remeasurement](../baseline/REMEASUREMENT.md) run. A
+`CAMPAIGN_MODE=language-batch` job selects one language batch and its frozen
+inputs. A `CAMPAIGN_MODE=engine-build` job builds one platform's engines, and a
+`CAMPAIGN_MODE=unit-worker` job leases [work units](#unit-workers). The wrapper verifies the archive, provisions an isolated
 instance, uploads inputs through a private temporary S3 location, downloads the
 result, and verifies instance, IAM, and S3 cleanup.
 
@@ -478,8 +473,8 @@ controller and wrapper, so it uses the same launch regions.
 modes, verifies the AMI, JDK, package, candidate, comparator, and manifest
 identities, and delegates to `baseline/run-host-session.sh`,
 `language/run-host-session.sh`, `baseline/build-engines.sh`, or
-`run-unit-worker.sh`. Language batches, engine builds, and unit workers, like
-Rebar shards, install the pinned Cargo and Rust packages, because the Rust
+`run-unit-worker.sh`. Language batches, engine builds, unit workers, and
+Rebar shards install the pinned Cargo and Rust packages, because the Rust
 language comparator builds the pinned `regex` crate on the host, the engine
 build compiles Rebar, and a unit worker measures Rebar units.
 
@@ -611,9 +606,9 @@ campaign.
 
 ### Unit dispatch
 
-With `--unit-workers`, the controller keeps a queue of the phase's work items
-and a pool of workers per platform and instance class; a concurrency-class
-unit runs on the platform's `.2xlarge` type. Each worker is a job of the
+The controller keeps a queue of the phase's work items and a pool of workers
+per platform and instance class; a concurrency-class unit runs on the
+platform's `.2xlarge` type. Each worker is a job of the
 controller's ordinary launch path, so regions, placement scores, Spot launch
 retries in the next region, `--max-concurrent`, the per-platform limit, and
 the shared budget apply to it, and its reservation lasts until its cleanup is
@@ -678,7 +673,7 @@ against the host's calibrations, is retained, and is added to
   `unit_attempt_id`) before it acts on it. No other attempt of the unit clears
   it, whether it completed before or after; the unit is listed unresolved, and
   the phase prerequisite and the reducer refuse a phase whose ledger lists a
-  rejection or is missing, as a host session's semantic failure would be.
+  rejection or is missing.
 - Work queued after the phase deadline, including work a lost, failed, or
   interrupted lease hands back, stays unresolved.
 - A marker that names another lease, unproven cleanup, and changed frozen
@@ -716,14 +711,14 @@ new result root.
 Failed jobs record their failure type. A session that fails before its first
 RunInstances request, in setup such as the default VPC lookup or the instance
 profile, is `retryable-infrastructure`, since no instance can exist; cleanup
-still removes and verifies the bucket and profile it created. In a host-session
-campaign, unclassified benchmark failures and invalid artifacts remain
-unresolved after verified cleanup while independent jobs continue; [unit
+still removes and verifies the bucket and profile it created. A failed
+language batch or engine build and its invalid artifacts remain unresolved
+after verified cleanup while independent jobs continue; [unit
 dispatch](#unit-dispatch) retries a failed unit instead. Unverifiable cleanup
 and other unsafe controller failures stop admissions across both collectors.
 
-A Spot-only campaign can exhaust its retries when one platform runs out of
-Spot capacity. Once no job awaits an ordinary retry, rerun the phase in the
+A Spot-only language campaign or build phase can exhaust its retries when one
+platform runs out of Spot capacity. Once no job awaits an ordinary retry, rerun the phase in the
 same result root with `--execute --refill-unresolved`, without `--spot-only`
 or `--fleet-budget`, to give each exhausted job one more attempt on
 On-Demand. Restart an interrupted refill with the same flag and policy.
@@ -737,7 +732,7 @@ archive, so a refill may run from a newer controller checkout and identifies
 the candidate by `--candidate-ref`. Each refill host's environment must match
 the campaign's accepted original hosts, so those hosts must already cover
 every platform, shard, and Trino use the refill needs, or it refuses before
-launching.
+launching. A baseline phase retries its own work units and takes no refill.
 
 See:
 
@@ -752,9 +747,9 @@ After verifying instance termination, the wrapper inventories and downloads
 all uploaded result objects into the session's `recovered-uploads` directory.
 It records each object's size and local SHA-256 before deleting the transfer
 prefix. A failed inventory or download retains that prefix and fails cleanup.
-A host session's recovered uploads are raw evidence and do not become
-accepted sessions; a unit worker's are settled as
-[unit dispatch](#unit-dispatch) describes.
+A unit worker's recovered uploads are settled as
+[unit dispatch](#unit-dispatch) describes; other jobs' recovered uploads are
+raw evidence and are not accepted.
 
 This covers late uploads and results available when a controller aborts.
 Measurements still on an interrupted or forcibly terminated host may never

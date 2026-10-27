@@ -10,7 +10,7 @@ import unittest
 
 DIRECTORY = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(DIRECTORY))
-import host_duration
+from acceptance import read_properties
 
 
 class TestLikeLifecycle(unittest.TestCase):
@@ -48,13 +48,12 @@ class TestLikeLifecycle(unittest.TestCase):
                     env={**os.environ, 'BASELINE_PLAN_ONLY': 'true', 'BASELINE_DEFER_ACCEPTANCE': 'true',
                          'RE2_CAMPAIGN_REPLICA_ID': '1'}, capture_output=True, check=True)
                 metadata = destination / 'run-metadata.txt'
-                properties = host_duration.read_properties(metadata)
+                properties = read_properties(metadata)
                 self.assertEqual(properties['jmh_iteration_time'], '1s')
                 self.assertEqual(properties['jmh_process_count'], '5')
                 self.assertEqual(properties['candidate_jmh_row_count'], '24')
                 self.assertEqual(properties['jmh_invocation_count'], '2')
                 self.assertGreater(float(properties['route_static_duration_estimate_seconds']), 2400)
-                self.assertLessEqual(host_duration.estimate([metadata], 600)[-1], 5400)
 
     def test_worker_verifies_lifecycle_only_after_like_classes_are_built(self):
         source = (DIRECTORY / 'run-shard.sh').read_text()
@@ -71,7 +70,7 @@ class TestLikeLifecycle(unittest.TestCase):
                 [str(DIRECTORY / 'run-shard.sh'), 'like-dfa-single-use', 'qualification', 'native-access', str(destination)],
                 env={**os.environ, 'BASELINE_PLAN_ONLY': 'true', 'BASELINE_DEFER_ACCEPTANCE': 'true',
                      'RE2_CAMPAIGN_REPLICA_ID': '1'}, capture_output=True, check=True)
-            properties = host_duration.read_properties(destination / 'run-metadata.txt')
+            properties = read_properties(destination / 'run-metadata.txt')
             self.assertEqual(properties['candidate_jmh_row_count'], '6')
             self.assertEqual(properties['jmh_invocation_count'], '3')
             self.assertEqual(properties['jmh_process_count'], '5')

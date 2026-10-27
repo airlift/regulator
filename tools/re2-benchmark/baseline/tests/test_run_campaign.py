@@ -101,7 +101,7 @@ class TestRunCampaign(unittest.TestCase):
             engine_tree="d" * 40)
 
     def test_shared_fleet_contains_rejections_after_cleanup(self):
-        for classification in ("protocol-qualification", "benchmark-failure", "none", "invalid-artifacts"):
+        for classification in ("benchmark-failure", "none", "invalid-artifacts"):
             with self.subTest(classification=classification), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 result_root = root / "results"
@@ -110,7 +110,7 @@ class TestRunCampaign(unittest.TestCase):
                 budget = Mock(policy={"hourly_rates": {self.platform.instance_type: {"spot": 0.2}}})
                 budget.reserve.return_value = (True, "")
                 arguments.shared_budget = budget
-                jobs = [RUN_CAMPAIGN.Job(self.platform, shard, 1, index, 1, "spot")
+                jobs = [RUN_CAMPAIGN.Job(self.platform, shard, 1, index, 1, "spot", "language-batch")
                         for index, shard in enumerate(("traditional-extra", "traditional-search", "traditional-capture"), 1)]
                 processes = [FakeProcess(100 + job.host_epoch, status=0 if classification == "invalid-artifacts" else 1,
                              poll_action=lambda job=job: self.write_cleanup_session(
@@ -137,14 +137,6 @@ class TestRunCampaign(unittest.TestCase):
             with self.subTest(receipt=receipt), self.assertRaisesRegex(RuntimeError, "selected release"):
                 RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, root, job, receipt)
 
-    def test_release_campaign_requires_baseline_artifact_proof_on_recovery(self):
-        root = SCRIPT.parents[3]
-        arguments = self.arguments(root)
-        arguments.release_version = "1.0"
-        job = RUN_CAMPAIGN.Job(self.platform, "engine", 1, 1, 1, "spot")
-        with self.assertRaisesRegex(RuntimeError, "recovered artifact evidence"):
-            RUN_CAMPAIGN.validate_receipt_candidate(root, arguments, root, job, {})
-
     def test_platform_limit_applies_independently_of_global_capacity(self):
         arguments = SimpleNamespace(max_concurrent=9, max_concurrent_per_platform=3)
         job = SimpleNamespace(platform=SimpleNamespace(name='r9g'))
@@ -154,20 +146,6 @@ class TestRunCampaign(unittest.TestCase):
         self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(other, running, arguments))
         del running[0]
         self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
-
-    def test_pinned_jobs_allocate_two_vcpus_except_multicore_shard(self):
-        platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
-        jobs = RUN_CAMPAIGN.build_jobs("primary", platforms, ["engine", "lifecycle-shared-cold"], None)
-        self.assertEqual(len(jobs), 12)
-        for job in jobs:
-            expected_vcpus = 8 if job.shard == "lifecycle-shared-cold" else 2
-            expected_size = ".2xlarge" if expected_vcpus == 8 else ".large"
-            self.assertEqual(job.platform.vcpus, expected_vcpus)
-            self.assertEqual(job.platform.instance_type, job.platform.name + expected_size)
-            arguments = self.arguments(SCRIPT.parents[3])
-            environment = RUN_CAMPAIGN.job_environment(job, arguments, SCRIPT.parents[3], Path("results"))
-            self.assertEqual(environment["BENCHMARK_EXPECTED_VCPUS"], str(expected_vcpus))
-            self.assertEqual(environment["BENCHMARK_CPU_LIST"], "0-7" if expected_vcpus == 8 else "0")
 
     def test_language_jobs_use_the_allocation_frozen_in_the_plan(self):
         platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
@@ -195,20 +173,20 @@ class TestRunCampaign(unittest.TestCase):
                     ("retryable-infrastructure", "wrapper failed", False)):
                 with self.subTest(attempt=attempt, classification=classification, detail=detail):
                     job = RUN_CAMPAIGN.Job(
-                        self.platform, "traditional-search", 1, 10, attempt, "spot", region="us-east-2")
+                        self.platform, "traditional-search", 1, 10, attempt, "spot", "language-batch", region="us-east-2")
                     replacement = RUN_CAMPAIGN.replacement_job(
                         job, 11, classification, detail, regions=regions, spot_only=True)
                     self.assertEqual(replacement.market, "spot")
                     self.assertEqual(replacement.attempt, attempt + 1)
                     self.assertEqual(replacement.spot_capacity_failures, ("us-east-2",) if moved else ())
         # Three counted attempts, after a move from a region with no capacity.
-        exhausted = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 4, "spot", region="us-west-2",
+        exhausted = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 4, "spot", "language-batch", region="us-west-2",
                                      spot_capacity_failures=("us-east-2",))
         with self.assertRaisesRegex(RuntimeError, "exhausted"):
             RUN_CAMPAIGN.replacement_job(
                 exhausted, 12, "retryable-spot", "launch-capacity:InsufficientInstanceCapacity",
                 regions=regions, spot_only=True)
-        on_demand = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "on-demand")
+        on_demand = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "on-demand", "language-batch")
         with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "On-Demand"):
             RUN_CAMPAIGN.replacement_job(on_demand, 11, "retryable-spot", "interrupted", spot_only=True)
 
@@ -243,7 +221,7 @@ class TestRunCampaign(unittest.TestCase):
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
                 RUN_CAMPAIGN.validate_execution_policy(refill, root)
 
-    def test_engine_builds_are_frozen_and_older_policies_resume_as_local(self):
+    def test_engine_builds_are_frozen(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             arguments = SimpleNamespace(engine_build_policy={"r8i": "1" * 64})
@@ -252,24 +230,14 @@ class TestRunCampaign(unittest.TestCase):
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
                 RUN_CAMPAIGN.validate_execution_policy(arguments, root)
 
-            policy = RUN_CAMPAIGN.execution_policy(SimpleNamespace())
-            del policy["engine_builds"]
-            (root / "execution-policy.json").write_text(json.dumps(policy))
-            arguments.engine_build_policy = "local"
-            RUN_CAMPAIGN.validate_execution_policy(arguments, root)
-            RUN_CAMPAIGN.validate_execution_policy(SimpleNamespace(refill_unresolved=True), root)
-
-    def test_baseline_execution_requires_an_explicit_engine_build_choice(self):
-        arguments = SimpleNamespace(phase="smoke", engine_builds=None, local_engine_builds=False)
-        with self.assertRaisesRegex(SystemExit, "--engine-builds .* or --local-engine-builds"):
+    def test_baseline_execution_requires_accepted_engine_builds(self):
+        arguments = SimpleNamespace(phase="smoke", engine_builds=None)
+        with self.assertRaisesRegex(SystemExit, "smoke execution requires --engine-builds from an accepted build"):
             RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
-        arguments.local_engine_builds = True
-        RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
-        self.assertEqual("local", RUN_CAMPAIGN.execution_policy(arguments)["engine_builds"])
-        arguments.phase = "build"
+        arguments = SimpleNamespace(phase="build", engine_builds=Path("builds"))
         with self.assertRaisesRegex(SystemExit, "apply only to baseline"):
             RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
-        arguments = SimpleNamespace(phase="smoke", engine_builds=Path("builds"), local_engine_builds=False,
+        arguments = SimpleNamespace(phase="smoke", engine_builds=Path("builds"),
                                     regions=["us-west-2", "us-east-2"], transfer_buckets={"us-west-2": "bucket"})
         with self.assertRaisesRegex(SystemExit, r"bucket in every allowed region; name one for \['us-east-2'\]"):
             RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
@@ -286,7 +254,7 @@ class TestRunCampaign(unittest.TestCase):
                 regions=["us-west-2", "us-east-2"], transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
                 engine_build_directories={"r8i": build},
                 engine_build_policy={"r8i": hashlib.sha256((build / "engine-build.json").read_bytes()).hexdigest()})
-            jobs = [RUN_CAMPAIGN.Job(self.platform, shard, replica, 10, 1, "spot")
+            jobs = [RUN_CAMPAIGN.Job(self.platform, shard, replica, 10, 1, "spot", "language-batch")
                     for shard in ("traditional-search", "trino-operations") for replica in (1, 2)]
             native = archives["native"]["sha256"]
             present = {("east", f"prefix/engine-builds/{native}.tar.gz"): base64.b64encode(bytes.fromhex(native)).decode()}
@@ -329,7 +297,7 @@ class TestRunCampaign(unittest.TestCase):
         self.assertIn("Spot-only policy prohibits On-Demand", result.stderr)
 
     def test_spot_only_quota_shortage_waits_without_on_demand(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             result_root = root / "results"
@@ -425,52 +393,29 @@ class TestRunCampaign(unittest.TestCase):
             candidate_provenance=provenance)
         return repository, arguments, values
 
-    def prerequisite_receipt(self):
+    @staticmethod
+    def receipt_for_job(job):
+        """The receipt a batch host accepts, as the job loop reads it."""
         return {
-            "schema_version": "2",
+            "schema_version": 1,
+            "workload": "language-batch",
             "campaign_id": "baseline",
-            "platform": "r8i",
-            "shard_id": "traditional-search",
-            "replica_id": "1",
-            "instance_id": "i-00000000000000001",
-            "host_epoch": "10",
-            "architecture": "intel",
-            "instance_type": "r8i.2xlarge",
-            "availability_zone": "us-west-2a",
-            "systems": "regulator-native-access",
-            "row_count": "1",
-            "manifest_sha256": "1" * 64,
-            "expected_rows_sha256": "2" * 64,
-            "observed_rows_sha256": "3" * 64,
-            "evidence_manifest_sha256": "4" * 64,
-            "candidate_commit": "a" * 40,
-            "candidate_archive_sha256": "5" * 64,
-            "engine_tree": "e" * 40,
-            "heap_size": "8g",
-        }
-
-    def receipt_for_job(self, job):
-        return {
-            **self.prerequisite_receipt(),
             "platform": job.platform.name,
             "shard_id": job.shard,
             "replica_id": str(job.replica),
             "host_epoch": str(job.host_epoch),
             "architecture": job.platform.architecture,
             "instance_type": job.platform.instance_type,
+            "candidate_commit": "a" * 40,
+            "candidate_archive_sha256": "5" * 64,
+            "engine_tree": "e" * 40,
+            "heap_size": "8g",
         }
 
     @staticmethod
-    def write_receipts(path, rows):
+    def write_receipt(path, receipt):
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", newline="") as output_file:
-            writer = csv.DictWriter(
-                output_file,
-                fieldnames=RUN_CAMPAIGN.RECEIPT_FIELDS,
-                delimiter="\t",
-                lineterminator="\n")
-            writer.writeheader()
-            writer.writerows(rows)
+        path.write_text(json.dumps(receipt))
 
     def write_cleanup_session(
             self,
@@ -784,86 +729,13 @@ class TestRunCampaign(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be a safe relative S3 prefix", result.stderr)
 
-    def test_prerequisite_recomputes_artifact_receipt(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            results = root / "smoke"
-            receipt = self.prerequisite_receipt()
-            self.write_receipts(results / "accepted-sessions.tsv", [receipt])
-            artifact_receipt = root / "artifact" / "acceptance-receipt.tsv"
-            self.write_receipts(artifact_receipt, [receipt])
-            arguments = SimpleNamespace(
-                phase="primary",
-                campaign_id="baseline",
-                candidate_archive_sha256="5" * 64,
-                engine_tree=receipt["engine_tree"])
-
-            with patch.object(RUN_CAMPAIGN, "validate_campaign"), \
-                    patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=artifact_receipt), \
-                    patch.object(RUN_CAMPAIGN, "validate_host_results", return_value=receipt) as regenerate, \
-                    patch.object(RUN_CAMPAIGN, "check_output", return_value="a" * 40):
-                RUN_CAMPAIGN.validate_phase_prerequisite(
-                    root, arguments, [self.platform], results, (1,), "smoke")
-
-            regenerate.assert_called_once()
-
-            arguments.release_version = '1.0'
-            with patch.object(RUN_CAMPAIGN, "validate_campaign"), \
-                    patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=artifact_receipt), \
-                    patch.object(RUN_CAMPAIGN, "validate_host_results", return_value=receipt), \
-                    patch.object(RUN_CAMPAIGN.released_artifact, "manifest", return_value={}), \
-                    patch.object(RUN_CAMPAIGN.released_artifact, "validate_baseline", side_effect=ValueError('missing release proof')):
-                with self.assertRaisesRegex(SystemExit, 'missing release proof'):
-                    RUN_CAMPAIGN.validate_phase_prerequisite(
-                        root, arguments, [self.platform], results, (1,), "smoke")
-
     def test_prerequisite_rejects_different_engine_builds(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.write_receipts(root / "accepted-sessions.tsv", [self.prerequisite_receipt()])
             (root / "execution-policy.json").write_text(json.dumps({"engine_builds": {"r8i": "1" * 64}}))
-            arguments = SimpleNamespace(phase="primary", campaign_id="baseline", engine_build_policy="local")
-            with patch.object(RUN_CAMPAIGN, "validate_campaign"):
-                with self.assertRaisesRegex(SystemExit, "engine builds its smoke prerequisite used"):
-                    RUN_CAMPAIGN.validate_phase_prerequisite(root, arguments, [self.platform], root, (1,), "smoke")
-
-    def test_prerequisite_rejects_unreproducible_receipt(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            results = root / "smoke"
-            receipt = self.prerequisite_receipt()
-            self.write_receipts(results / "accepted-sessions.tsv", [receipt])
-            artifact_receipt = root / "artifact" / "acceptance-receipt.tsv"
-            self.write_receipts(artifact_receipt, [receipt])
-            regenerated = {**receipt, "observed_rows_sha256": "9" * 64}
-            arguments = SimpleNamespace(
-                phase="primary",
-                campaign_id="baseline",
-                candidate_archive_sha256="5" * 64,
-                engine_tree=receipt["engine_tree"])
-
-            with patch.object(RUN_CAMPAIGN, "validate_campaign"), \
-                    patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=artifact_receipt), \
-                    patch.object(RUN_CAMPAIGN, "validate_host_results", return_value=regenerated), \
-                    patch.object(RUN_CAMPAIGN, "check_output", return_value="a" * 40):
-                with self.assertRaisesRegex(SystemExit, "cannot be reproduced"):
-                    RUN_CAMPAIGN.validate_phase_prerequisite(
-                        root, arguments, [self.platform], results, (1,), "smoke")
-
-    def test_prerequisite_rejects_changed_heap(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            receipt = self.prerequisite_receipt()
-            self.write_receipts(root / "accepted-sessions.tsv", [receipt])
-            arguments = SimpleNamespace(phase="primary", campaign_id="baseline",
-                                        candidate_archive_sha256="5" * 64,
-                                        engine_tree=receipt["engine_tree"], heap_size="2g")
-            with patch.object(RUN_CAMPAIGN, "validate_campaign"), \
-                    patch.object(RUN_CAMPAIGN, "check_output", return_value="a" * 40), \
-                    patch.object(RUN_CAMPAIGN, "validate_host_results", return_value=receipt), \
-                    patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=root / "accepted-sessions.tsv"):
-                with self.assertRaisesRegex(SystemExit, "heap_size"):
-                    RUN_CAMPAIGN.validate_phase_prerequisite(root, arguments, [self.platform], root, (1,), "smoke")
+            arguments = SimpleNamespace(phase="primary", campaign_id="baseline", engine_build_policy={"r8i": "2" * 64})
+            with self.assertRaisesRegex(SystemExit, "engine builds its smoke prerequisite used"):
+                RUN_CAMPAIGN.validate_unit_phase_prerequisite(root, arguments, root, (1,), "smoke")
 
     def test_capacity_evidence_rejects_failed_session(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -915,7 +787,7 @@ class TestRunCampaign(unittest.TestCase):
                     RUN_CAMPAIGN.validate_capacity(capacity)
 
     def test_replacement_uses_a_new_epoch(self):
-        initial = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        initial = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
 
         # A failure Spot did not cause retries on Spot once.
         replacement = RUN_CAMPAIGN.replacement_job(initial, 117, "retryable-infrastructure")
@@ -925,50 +797,14 @@ class TestRunCampaign(unittest.TestCase):
         self.assertEqual(replacement.attempt, 2)
         self.assertEqual(replacement.market, "spot")
 
-    def test_phase_epoch_ranges_do_not_overlap(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            confirmation_file = Path(temporary_directory) / "confirmation.tsv"
-            confirmation_file.write_text("platform\tshard_id\nr8i\ttraditional-search\n")
-            smoke = RUN_CAMPAIGN.build_jobs(
-                "smoke", [self.platform], ["traditional-search"], None)
-            primary = RUN_CAMPAIGN.build_jobs(
-                "primary", [self.platform], ["traditional-search"], None)
-            confirmation = RUN_CAMPAIGN.build_jobs(
-                "confirmation", [self.platform], ["traditional-search"], confirmation_file)
-            build = RUN_CAMPAIGN.build_jobs("build", [self.platform], ["traditional-search"], None)
+    def test_build_phase_runs_one_engine_build_per_platform(self):
+        platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
+        build = RUN_CAMPAIGN.build_engine_jobs(platforms)
 
-        self.assertEqual([("engine-build", "engine-build")], [(job.shard, job.workload) for job in build])
-        epochs = {job.host_epoch for job in smoke + primary + confirmation + build}
-        self.assertEqual(len(smoke) + len(primary) + len(confirmation) + len(build), len(epochs))
-
-    def test_rebar_jobs_run_before_shorter_shards(self):
-        second_platform = RUN_CAMPAIGN.Platform(
-            "r8g",
-            "arm",
-            "r8g.2xlarge",
-            8,
-            "ami-test",
-            "https://example.invalid/jdk.tar.gz",
-            "0" * 64,
-            "gcc",
-            "cmake",
-            "glibc",
-            "cargo",
-            "rust",
-            "time")
-
-        jobs = RUN_CAMPAIGN.build_jobs(
-            "primary",
-            [self.platform, second_platform],
-            ["traditional-search", "rebar-b", "rebar-a"],
-            None)
-
-        self.assertEqual(
-            ["rebar-a"] * 6 + ["rebar-b"] * 6 + ["traditional-search"] * 6,
-            [job.shard for job in jobs])
-        self.assertEqual(
-            [(replica, platform) for replica in (1, 2, 3) for platform in ("r8i", "r8g")],
-            [(job.replica, job.platform.name) for job in jobs[:6]])
+        self.assertEqual([(platform.name, "engine-build", "engine-build") for platform in platforms],
+                         [(job.platform.name, job.shard, job.workload) for job in build])
+        # Build hosts take epochs no baseline or language phase reaches.
+        self.assertEqual(sorted(RUN_CAMPAIGN.PHASE_HOST_EPOCH_START.values())[-1], build[0].host_epoch)
 
     def test_shared_policy_checks_the_actual_aws_account_and_region(self):
         policy = {"account": "123456789012", "region": "us-east-2",
@@ -1042,7 +878,7 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
 
     def test_spot_launch_takes_the_best_scored_region_with_headroom(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         regions = ["us-west-2", "eu-west-1", "ap-south-1"]
         # Ireland ties Mumbai but comes first, then lacks quota headroom. Without scores, the
         # first allowed region with headroom launches and no score is recorded.
@@ -1092,7 +928,7 @@ class TestRunCampaign(unittest.TestCase):
                                              [("eu-west-1", "")])):
             with self.subTest(regions=regions):
                 arguments = SimpleNamespace(regions=regions)
-                job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot",
+                job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch",
                                        spot_capacity_failures=failures)
                 with patch.object(RUN_CAMPAIGN, "check_output", side_effect=AssertionError("scores queried")):
                     self.assertEqual(expected, RUN_CAMPAIGN.launch_placements(arguments, job))
@@ -1104,7 +940,9 @@ class TestRunCampaign(unittest.TestCase):
             vcpus=2,
             concurrency_instance_type="r8i.2xlarge",
             concurrency_vcpus=8)
-        jobs = RUN_CAMPAIGN.build_jobs("smoke", [platform], ["lifecycle-shared-cold"], None)
+        # A batch runs on the worker its plan allocates, here the platform's multicore worker.
+        jobs = [RUN_CAMPAIGN.Job(RUN_CAMPAIGN.replace(platform, instance_type="r8i.2xlarge", vcpus=8),
+                                 "language-lifecycle-0000", 1, 1, 1, "spot", "language-batch")]
         arguments = SimpleNamespace(shared_budget=None, spot_only=True, spot_vcpu_reserve=4)
         spot_quota = 11
 
@@ -1165,9 +1003,16 @@ class TestRunCampaign(unittest.TestCase):
         with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
 
+    @staticmethod
+    def replica_jobs(platforms, batches):
+        """Three replicas of each batch on each platform, as a primary language phase runs them."""
+        return [RUN_CAMPAIGN.Job(platform, batch, replica, epoch, 1, "spot", "language-batch")
+                for epoch, (batch, replica, platform) in enumerate(
+                    ((batch, replica, platform) for batch in batches for replica in (1, 2, 3)
+                     for platform in platforms), start=RUN_CAMPAIGN.PHASE_HOST_EPOCH_START["primary"])]
+
     def test_campaign_concurrency_uses_configuration(self):
-        jobs = RUN_CAMPAIGN.build_jobs(
-            "primary", [self.platform], ["traditional-search"], None)
+        jobs = self.replica_jobs([self.platform], ["traditional-search"])
         arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary", regions=["us-west-2"])
         RUN_CAMPAIGN.validate_configuration(arguments, jobs)
         arguments.execute = True
@@ -1208,7 +1053,7 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
 
     def test_deadline_uses_shared_fleet_host_and_vcpu_limits(self):
-        jobs = RUN_CAMPAIGN.build_jobs("primary", [self.platform], ["traditional-search"], None)
+        jobs = self.replica_jobs([self.platform], ["traditional-search"])
         arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary",
                                     spot_only=True, spot_vcpu_reserve=0, regions=["us-west-2"],
                                     shared_budget=SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512,
@@ -1261,8 +1106,7 @@ class TestRunCampaign(unittest.TestCase):
                 "r9g", "arm", "r9g.2xlarge", 8, "ami", "jdk", "0" * 64,
                 "gcc", "cmake", "glibc", "cargo", "rust", "time"),
         ]
-        shards = [f"shard-{index}" for index in range(33)]
-        jobs = RUN_CAMPAIGN.build_jobs("primary", platforms, shards, None)
+        jobs = self.replica_jobs(platforms, [f"batch-{index}" for index in range(33)])
 
         RUN_CAMPAIGN.validate_configuration(
             SimpleNamespace(campaign_id="baseline", max_concurrent=64, phase="primary"),
@@ -1272,16 +1116,6 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(
                 SimpleNamespace(campaign_id="baseline", max_concurrent=32, phase="primary", phase_timeout_seconds=36000),
                 jobs)
-
-    def test_full_manifest_deadline_accounts_for_platform_and_vcpu_limits(self):
-        jobs = RUN_CAMPAIGN.build_jobs("primary", RUN_CAMPAIGN.read_platforms(SCRIPT.parent),
-                                       RUN_CAMPAIGN.read_shards(SCRIPT.parent), None)
-        arguments = SimpleNamespace(campaign_id="final", max_concurrent=64, phase="primary")
-        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
-        self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 6 * 5400 + 3600)
-        arguments.max_concurrent_per_platform = 10
-        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
-        self.assertEqual(RUN_CAMPAIGN.phase_timeout(arguments), 16 * 5400 + 3600)
 
     def test_campaign_phase_maps_to_execution_protocol(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1293,7 +1127,7 @@ class TestRunCampaign(unittest.TestCase):
                 candidate_archive_sha256="0" * 64,
                 engine_tree="d" * 40,
                 result_root=root)
-            job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+            job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
 
             arguments.phase = "smoke"
             self.assertEqual(
@@ -1459,7 +1293,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                 patch.dict(os.environ, {}, clear=True):
             root = Path(temporary_directory)
             arguments = self.arguments(root)
-            job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+            job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
 
             with patch.object(RUN_CAMPAIGN, "check_output"):
                 environment = RUN_CAMPAIGN.job_environment(
@@ -1474,7 +1308,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
         with (SCRIPT.parent / "shard-dispatch.tsv").open(newline="") as input_file:
             dispatch = list(csv.DictReader(input_file, delimiter="\t"))
         for row in dispatch:
-            job = RUN_CAMPAIGN.Job(self.platform, row["shard_id"], 1, 10, 1, "spot")
+            job = RUN_CAMPAIGN.Job(self.platform, row["shard_id"], 1, 10, 1, "spot", "language-batch")
             with self.subTest(shard=row["shard_id"]), tempfile.TemporaryDirectory() as temporary_directory, \
                     patch.dict(os.environ, {}, clear=True), patch.object(RUN_CAMPAIGN.subprocess, "run"):
                 root = Path(temporary_directory)
@@ -1483,18 +1317,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                         RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [job])
                 else:
                     RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [job])
-
-    def test_dependencies_reject_invalid_host_duration_plans(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
-
-        def validate(command, **kwargs):
-            if Path(command[0]).name == "validate-shard-plans.py":
-                raise subprocess.CalledProcessError(1, command)
-
-        with tempfile.TemporaryDirectory() as directory, \
-                patch.object(RUN_CAMPAIGN.subprocess, "run", side_effect=validate):
-            with self.assertRaises(subprocess.CalledProcessError):
-                RUN_CAMPAIGN.validate_dependencies(Path(directory), SimpleNamespace(), [job])
 
     def test_interruption_unavailability_quota_or_second_failure_moves_to_on_demand(self):
         # A Spot interruption, Spot launch unavailability in the only allowed region, or a second
@@ -1506,7 +1328,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                 (2, "retryable-infrastructure", "", ())):
             with self.subTest(attempt=attempt, classification=classification, regions=regions):
                 job = RUN_CAMPAIGN.Job(
-                    self.platform, "traditional-search", 1, 117, attempt, "spot", region="us-east-2")
+                    self.platform, "traditional-search", 1, 117, attempt, "spot", "language-batch", region="us-east-2")
                 replacement = RUN_CAMPAIGN.replacement_job(job, 118, classification, detail, regions=regions)
                 self.assertEqual(replacement.attempt, attempt + 1)
                 self.assertEqual(replacement.market, "on-demand")
@@ -2424,7 +2246,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_replacement_allowance_is_bounded(self):
         final_attempt = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 118, 3, "on-demand")
+            self.platform, "traditional-search", 1, 118, 3, "on-demand", "language-batch")
 
         with self.assertRaisesRegex(RuntimeError, "exhausted"):
             RUN_CAMPAIGN.replacement_job(final_attempt, 119, "retryable-infrastructure")
@@ -2436,7 +2258,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 RUN_CAMPAIGN.replace(moved, attempt=4), 120, "retryable-infrastructure")
 
     def test_retry_requires_verified_cleanup_and_aws_classification(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
@@ -2458,7 +2280,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(cleanup["failure_detail"], "instance-terminated-no-capacity")
 
     def test_retry_rejects_unverified_cleanup(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
@@ -2478,9 +2300,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_ordinary_failure_does_not_stop_independent_job(self):
         failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot")
+            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         outstanding_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 11, 1, "spot")
+            self.platform, "traditional-capture", 1, 11, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -2520,9 +2342,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_unverified_cleanup_stops_sibling_jobs(self):
         failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot")
+            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         sibling_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 11, 1, "spot")
+            self.platform, "traditional-capture", 1, 11, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -2562,15 +2384,15 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_accepted_receipt_is_persisted_without_waiting_for_campaign_success(self):
         accepted_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot")
+            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 11, 1, "spot")
+            self.platform, "traditional-capture", 1, 11, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
             result_root.mkdir()
-            receipt_path = root / "accepted-receipt.tsv"
-            self.write_receipts(receipt_path, [self.receipt_for_job(accepted_job)])
+            receipt_path = root / "accepted-receipt.json"
+            self.write_receipt(receipt_path, self.receipt_for_job(accepted_job))
             accepted_process = FakeProcess(105, status=0)
             failed_process = FakeProcess(
                 106,
@@ -2583,8 +2405,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     "Popen",
                     side_effect=[accepted_process, failed_process]), \
                     patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=receipt_path), \
-                    patch.object(RUN_CAMPAIGN, "validate_receipt_candidate"), \
-                    patch.object(RUN_CAMPAIGN, "validate_campaign"):
+                    patch.object(RUN_CAMPAIGN, "validate_receipt_candidate"):
                 with self.assertRaises(SystemExit):
                     RUN_CAMPAIGN.execute_jobs(
                         self.arguments(root, maximum_concurrent=2),
@@ -2592,20 +2413,20 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                         result_root,
                         [accepted_job, failed_job])
 
-            accepted = RUN_CAMPAIGN.read_accepted_sessions(result_root / "accepted-sessions.tsv")
+            accepted = RUN_CAMPAIGN.read_accepted_sessions(result_root / "accepted-language-sessions.json")
             self.assertEqual([RUN_CAMPAIGN.receipt_logical_identity(row) for row in accepted], [
                 accepted_job.logical_identity])
 
     def test_restart_skips_previously_accepted_job(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
             result_root.mkdir()
-            receipt_path = root / "accepted-receipt.tsv"
+            receipt_path = root / "accepted-receipt.json"
             receipt = self.receipt_for_job(job)
-            self.write_receipts(receipt_path, [receipt])
-            self.write_receipts(result_root / "accepted-sessions.tsv", [receipt])
+            self.write_receipt(receipt_path, receipt)
+            RUN_CAMPAIGN.write_ledger(result_root / "accepted-language-sessions.json", [receipt])
             arguments = self.arguments(root)
             arguments.candidate_archive_sha256 = receipt["candidate_archive_sha256"]
             arguments.engine_tree = receipt["engine_tree"]
@@ -2613,34 +2434,35 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
             with patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=receipt_path), \
                     patch.object(RUN_CAMPAIGN, "check_output", return_value=receipt["candidate_commit"]), \
-                    patch.object(RUN_CAMPAIGN, "validate_campaign"), \
                     patch.object(RUN_CAMPAIGN.subprocess, "Popen") as popen:
                 RUN_CAMPAIGN.execute_jobs(
                     arguments, root, result_root, [job])
 
             popen.assert_not_called()
             self.assertEqual(
-                RUN_CAMPAIGN.read_accepted_sessions(result_root / "accepted-sessions.tsv"),
+                RUN_CAMPAIGN.read_accepted_sessions(result_root / "accepted-language-sessions.json"),
                 [receipt])
 
     def test_recovery_rejects_receipt_from_different_heap(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             receipt = self.receipt_for_job(job)
-            ledger = root / "accepted-sessions.tsv"
-            self.write_receipts(ledger, [receipt])
+            receipt_path = root / "accepted-receipt.json"
+            self.write_receipt(receipt_path, receipt)
+            ledger = root / "accepted-language-sessions.json"
+            RUN_CAMPAIGN.write_ledger(ledger, [receipt])
             arguments = self.arguments(root)
             arguments.candidate_archive_sha256 = receipt["candidate_archive_sha256"]
             arguments.engine_tree = receipt["engine_tree"]
             arguments.heap_size = "2g"
             with patch.object(RUN_CAMPAIGN, "check_output", return_value=receipt["candidate_commit"]), \
-                    patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=ledger):
+                    patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=receipt_path):
                 with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "heap_size"):
                     RUN_CAMPAIGN.recover_accepted_sessions(root, arguments, root, [job], ledger)
 
     def test_restart_waits_for_detached_wrapper_cleanup(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2656,7 +2478,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             RUN_CAMPAIGN.validate_cleanup_manifest(result_root, job)
 
     def test_restart_rejects_detached_wrapper_without_cleanup(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2702,7 +2524,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             arguments = self.arguments(root)
-            job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 1, 1, "spot")
+            job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 1, 1, "spot", "language-batch")
             with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": ""}):
                 self.assertEqual("8g", RUN_CAMPAIGN.campaign_heap_size(arguments))
             with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": "2g"}):
@@ -2710,7 +2532,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual("8g", environment["BENCHMARK_HEAP_SIZE"])
 
     def test_starting_attempt_without_process_retries_on_fresh_epoch(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2730,7 +2552,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(next_epoch, 12)
 
     def test_budget_recovery_releases_settled_prelaunch_reservation(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2752,7 +2574,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             budget.release.assert_called_once_with("baseline", 10, cleanup_verified=True)
 
     def test_budget_recovery_requires_cleanup_after_launch(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2775,15 +2597,15 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_resume_epoch_accounts_for_accepted_replacement(self):
         accepted_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 1, 1, "spot")
+            self.platform, "traditional-search", 1, 1, 1, "spot", "language-batch")
         failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 2, 1, "spot")
+            self.platform, "traditional-capture", 1, 2, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
             accepted_epoch = RUN_CAMPAIGN.job_result_root(
                 result_root, RUN_CAMPAIGN.Job(
-                    self.platform, "traditional-search", 1, 3, 2, "spot"))
+                    self.platform, "traditional-search", 1, 3, 2, "spot", "language-batch"))
             accepted_epoch.mkdir(parents=True)
             self.write_cleanup_session(
                 result_root,
@@ -2803,9 +2625,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(next_epoch, 5)
 
     def test_refill_replaces_each_exhausted_job_once_on_demand(self):
-        accepted_job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 1, 1, "spot")
-        exhausted_job = RUN_CAMPAIGN.Job(self.platform, "traditional-capture", 1, 2, 3, "spot")
-        rejected_job = RUN_CAMPAIGN.Job(self.platform, "traditional-extra", 1, 3, 1, "spot")
+        accepted_job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 1, 1, "spot", "language-batch")
+        exhausted_job = RUN_CAMPAIGN.Job(self.platform, "traditional-capture", 1, 2, 3, "spot", "language-batch")
+        rejected_job = RUN_CAMPAIGN.Job(self.platform, "traditional-extra", 1, 3, 1, "spot", "language-batch")
         jobs = [accepted_job, RUN_CAMPAIGN.replace(exhausted_job, attempt=1), rejected_job]
         accepted = {accepted_job.logical_identity: self.receipt_for_job(accepted_job)}
         refill = RUN_CAMPAIGN.replace(exhausted_job, host_epoch=4, attempt=4, market="on-demand")
@@ -2850,15 +2672,15 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_unexpected_controller_error_stops_sibling_jobs(self):
         malformed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot")
+            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         sibling_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 11, 1, "spot")
+            self.platform, "traditional-capture", 1, 11, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
             result_root.mkdir()
-            malformed_receipt = root / "malformed.tsv"
-            malformed_receipt.write_text("wrong\nvalue\n")
+            malformed_receipt = root / "malformed.json"
+            malformed_receipt.write_text('{"schema_version": 2}')
             malformed_process = FakeProcess(
                 110,
                 status=0,
@@ -2872,7 +2694,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     "Popen",
                     side_effect=[malformed_process, sibling_process]), \
                     patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=malformed_receipt):
-                with self.assertRaisesRegex(RuntimeError, "unexpected receipt schema"):
+                with self.assertRaisesRegex(RuntimeError, "unexpected JSON receipt schema"):
                     RUN_CAMPAIGN.execute_jobs(
                         self.arguments(root, maximum_concurrent=2),
                         root,
@@ -2886,7 +2708,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         # The starting record fails before the wrapper starts, the started record after it.
         for failed_write, started in ((1, False), (2, True)):
             with self.subTest(failed_write=failed_write), tempfile.TemporaryDirectory() as temporary_directory:
-                job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+                job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
                 root = Path(temporary_directory)
                 result_root = root / "results"
                 result_root.mkdir()
@@ -2923,7 +2745,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 self.assertEqual([15 * 60] if started else [], process.wait_timeouts)
 
     def test_wrapper_that_fails_to_start_is_retried_on_a_fresh_epoch(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -3000,17 +2822,17 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertFalse(any("status" in command for command in commands))
 
     def test_conflicting_accepted_receipt_is_unsafe(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            ledger = root / "accepted-sessions.tsv"
-            first_path = root / "first.tsv"
-            second_path = root / "second.tsv"
-            self.write_receipts(first_path, [self.receipt_for_job(job)])
-            self.write_receipts(second_path, [{
+            ledger = root / "accepted-language-sessions.json"
+            first_path = root / "first.json"
+            second_path = root / "second.json"
+            self.write_receipt(first_path, self.receipt_for_job(job))
+            self.write_receipt(second_path, {
                 **self.receipt_for_job(job),
                 "host_epoch": "11",
-            }])
+            })
 
             RUN_CAMPAIGN.persist_accepted_receipt(ledger, first_path)
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "conflicting"):
@@ -3057,7 +2879,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_on_demand_capacity_accounts_for_unrelated_work_and_local_reservations(self):
         running_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "on-demand")
+            self.platform, "traditional-search", 1, 10, 1, "on-demand", "language-batch")
         instances = [
             {
                 "instance_type": "m8gd.4xlarge",
@@ -3106,7 +2928,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_spot_capacity_accounts_for_unrelated_work_and_local_reservations(self):
         running_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot")
+            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         instances = [
             {
                 "instance_id": "i-external",
@@ -3173,7 +2995,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_spot_quota_shortage_changes_unlaunched_job_to_on_demand(self):
         spot_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot")
+            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -3219,7 +3041,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             1,
             100,
             RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1,
-            "on-demand")
+            "on-demand", "language-batch")
 
         replacement = RUN_CAMPAIGN.replacement_job(job, 101, "retryable-capacity")
 
@@ -3229,7 +3051,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_on_demand_capacity_wait_queues_instead_of_aborting(self):
         job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "on-demand")
+            self.platform, "traditional-search", 1, 10, 1, "on-demand", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -3266,9 +3088,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_spot_unavailability_falls_back_to_on_demand_on_fresh_epoch(self):
         spot_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot")
+            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         on_demand_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 11, 2, "on-demand")
+            self.platform, "traditional-search", 1, 11, 2, "on-demand", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -3330,7 +3152,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_spot_unavailability_tries_each_allowed_region_before_on_demand(self):
         # Neither region has Spot capacity, and the controller restarts after the second fails.
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             result_root = root / "results"
@@ -3369,7 +3191,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_phase_tail_launches_on_demand_unless_spot_only(self):
         # Ten shard jobs leave a one-job tail.
-        jobs = [RUN_CAMPAIGN.Job(self.platform, f"rebar-{letter}", 1, epoch, 1, "spot")
+        jobs = [RUN_CAMPAIGN.Job(self.platform, f"rebar-{letter}", 1, epoch, 1, "spot", "language-batch")
                 for epoch, letter in enumerate("abcdefghij", start=1)]
         for spot_only, expected in ((False, ["spot"] * 9 + ["on-demand"]), (True, ["spot"] * 10)):
             with self.subTest(spot_only=spot_only), tempfile.TemporaryDirectory() as temporary:
@@ -3401,7 +3223,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             rates["on_demand_total"] = 2 * rates["total"]
         fixture.path.write_text(json.dumps(policy))
         # A one-job phase is all tail, so its only launch is On-Demand.
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         queried = []
 
         def aws_result(command, **_):
@@ -3445,7 +3267,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                          [{"id": "i-other", "type": "r8i.2xlarge", "vcpus": 8, "campaign_id": None, "host_epoch": None}])
 
     def test_resumed_campaign_events_keep_their_columns(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot")
+        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             session = self.write_cleanup_session(result_root, job)
@@ -3460,6 +3282,30 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 rows = list(csv.DictReader(input_file, delimiter="\t"))
             self.assertEqual(tuple(rows[0]), fields)
             self.assertEqual(rows[0]["instance_id"], "i-0123456789abcdef0")
+
+
+RELEASE_JAR = b"released regulator\n"
+RELEASE = {"schema_version": 1, "group_id": "io.airlift", "artifact_id": "regulator", "version": "1.0",
+           "source_commit": "c" * 40, "engine_tree": "b" * 40, "jar_sha256": hashlib.sha256(RELEASE_JAR).hexdigest()}
+
+
+def measure_release(directory):
+    """Record that each route of a unit attempt measured RELEASE's JAR, as run-shard.sh attests it."""
+    jar = f"/opt/re2-work/release/regulator-{RELEASE['version']}.jar"
+    attestation = json.dumps({
+        "manifest": RELEASE, "jar_path": jar,
+        "code_sources": {f"io.airlift.regulator.{name}": jar for name in RUN_CAMPAIGN.released_artifact.PUBLIC_CLASSES},
+        "production_classes": [f"{RUN_CAMPAIGN.released_artifact.PACKAGE}{name}.class"
+                               for name in RUN_CAMPAIGN.released_artifact.PUBLIC_CLASSES],
+        "classpath": [{"path": jar, "files": {Path(jar).name: RELEASE["jar_sha256"]}}],
+    }, sort_keys=True) + "\n"
+    for metadata in directory.glob("routes/*/run-metadata.txt"):
+        (metadata.parent / "release").mkdir()
+        (metadata.parent / "release" / Path(jar).name).write_bytes(RELEASE_JAR)
+        (metadata.parent / "release-artifact.json").write_text(attestation)
+        with metadata.open("a") as output:
+            output.write(f"release_version={RELEASE['version']}\n"
+                         f"release_artifact_sha256={hashlib.sha256(attestation.encode()).hexdigest()}\n")
 
 
 class FakeUnitHost:
@@ -3487,8 +3333,9 @@ class FakeUnitHost:
     "capacity-rejected", whose capacity gate failed it with status 1. "corrupt-archive" uploads a
     result that differs from its marker's checksum, and "foreign-receipt" a receipt that names another
     attempt. "foreign-marker" completes with a marker naming another campaign, and "partial-marker" with
-    one lacking its result checksum. The fleet's unit scripts give every lease of a unit, on any host, a
-    behavior.
+    one lacking its result checksum. A host whose environment names a release measures RELEASE's JAR,
+    except for a lease scripted to "unreleased", which measures the candidate's own classes. The
+    fleet's unit scripts give every lease of a unit, on any host, a behavior.
     """
 
     # Each scripted failure's exit status, as run-unit.sh reports it.
@@ -3518,6 +3365,7 @@ class FakeUnitHost:
         self.session_directory = Path(environment["RESULT_ROOT"]) / f"{self.platform}-session-{number}"
         self.session = self.session_directory.name
         self.instance_id = f"i-{self.platform}-{number}"
+        self.release_version = environment["REGULATOR_RELEASE_VERSION"]
         self.script = fleet.scripts.get(number, {})
         self.full = self.market == "spot" and fleet.full_spot.get(self.platform, 0) > 0
         if self.full:
@@ -3643,6 +3491,8 @@ class FakeUnitHost:
             uploaded = calibrations[1:] if behavior in ("lose-calibration", "stall-lose-calibration") else calibrations
             for calibration in uploaded:
                 self.put(f"calibrations/{calibration.name}", calibration.read_bytes())
+        if self.release_version and behavior != "unreleased":
+            measure_release(directory)
         fixture.accept(f"{self.session}/{sequence + 100 if behavior == 'foreign-receipt' else sequence}")
         status = self.STATUSES.get(behavior, 0)
         if behavior == "capacity-rejected":
@@ -3804,7 +3654,7 @@ class TestUnitWorkers(unittest.TestCase):
     PLATFORMS = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
 
     def run_phase(self, root, fleet, phase, shards, max_concurrent, per_platform, regions=None, on_demand=True,
-                  deadline=None, confirmations=(), primary_results=None):
+                  deadline=None, confirmations=(), primary_results=None, release_version=""):
         """Drain the phase's work items through the fleet; return the result directory.
 
         The unit attempt ledger is left in self.ledger."""
@@ -3818,9 +3668,9 @@ class TestUnitWorkers(unittest.TestCase):
         arguments = SimpleNamespace(
             phase=phase, campaign_id="campaign", max_concurrent=max_concurrent,
             max_concurrent_per_platform=per_platform, candidate_archive=root / "candidate.tar.gz",
-            candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g", unit_workers=True,
+            candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
             shared_budget=budget, selected_shards=shards, regions=regions, topology_deadline_seconds=deadline,
-            primary_results=primary_results)
+            primary_results=primary_results, release_version=release_version)
         self.arguments = arguments
         items = RUN_CAMPAIGN.build_work_items(phase, self.PLATFORMS, fleet.units, shards, confirmations)
         result_root = root / "results"
@@ -4204,7 +4054,7 @@ class TestUnitWorkers(unittest.TestCase):
     def test_worker_session_waits_for_a_whole_session_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             session = Path(temporary)
-            job = RUN_CAMPAIGN.Job(self.PLATFORMS[0], RUN_CAMPAIGN.UNIT_WORKER_SHARD, 1, 1, 1, "spot")
+            job = RUN_CAMPAIGN.Job(self.PLATFORMS[0], RUN_CAMPAIGN.UNIT_WORKER_SHARD, 1, 1, 1, "spot", "language-batch")
             worker = RUN_CAMPAIGN.UnitWorker(job, None, None, session=session)
             # The worker already knows its session directory, so the dispatcher's result root goes unread.
             dispatcher = SimpleNamespace(result_root=session)
@@ -4261,18 +4111,23 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual(calibration.name, hashlib.sha256(calibration.read_bytes()).hexdigest() + ".json")
 
     def test_completion_that_fails_its_checks_is_rejected_without_a_retry(self):
+        # The campaign measures a release, so every other completion proves it measured the release's JAR.
         for script, detail in (
                 ("lose-calibration", "named host calibration is missing"),
                 ("corrupt-archive", "result archive does not match its completion marker"),
                 ("capacity-rejected", "unit capacity gate rejected the host's resources"),
-                ("foreign-receipt", "artifact gate: unit receipt names ")):
-            with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
+                ("foreign-receipt", "artifact gate: unit receipt names "),
+                ("unreleased", "release-artifact.json")):
+            with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(RUN_CAMPAIGN.released_artifact, "manifest", return_value=RELEASE):
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}}, calibrated=True)
                 with self.assertRaisesRegex(SystemExit, f"unresolved units: .*{re.escape(detail)}"):
-                    self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                    self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1,
+                                   release_version=RELEASE["version"])
                 rejected = fleet.hosts[0]
                 self.assertEqual([(rejected.session, "1")], [(row["host_session"], row["sequence"])
                                                             for row in self.leases("rejected")])
+                self.assertTrue(self.leases("accepted"))
                 self.assertEqual(1, self.lease_count(rejected.leases[1]))
                 self.assertEqual(0, rejected.status)
 

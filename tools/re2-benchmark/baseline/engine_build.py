@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package one platform's engine builds, and install them on a baseline host whose native target matches."""
+"""Package one platform's engine builds, and install them on a unit worker whose native target matches."""
 
 import argparse
 import gzip
@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 DIRECTORY = "engine-build"
 MANIFEST = "engine-build.json"
 RECEIPT = "engine-build-receipt.json"
-# Archive members are relative to the shared work directory, where a baseline shard looks for each engine.
+# Archive members are relative to the shared work directory, where a route looks for each engine.
 NATIVE_FILES = (
     "engine-build/regexp_benchmark",
     "engine-build/rebar",
@@ -229,41 +229,34 @@ def unpack(build, archive, shared):
 
 
 def install(build, manifest_sha256, shared, environment_path, output, identity):
+    manifest = load_manifest(build, manifest_sha256)
+    environment = properties(environment_path)
+    if (manifest["platform"] != environment["platform"] or
+            manifest["candidate_commit"] != environment["regulator_commit"] or
+            manifest["candidate_archive_sha256"] != environment["regulator_archive_sha256"]):
+        raise EngineBuildError("engine build was made for a different platform or candidate")
     record = {
-        "engine_build_manifest_sha256": "none",
-        "expected_native_target": "none",
+        "engine_build_manifest_sha256": manifest_sha256,
+        "expected_native_target": manifest["native_target"],
         "host_native_target": identity["native_target"],
-        "expected_cpu_identity": "none",
+        "expected_cpu_identity": manifest["cpu_identity"],
         "host_cpu_identity": identity["cpu_identity"],
         "native_engines": "local",
-        "native_engines_reason": "no-engine-build",
+        "native_engines_reason": "",
         "native_archive_sha256": "none",
-        "trino_harness": "local",
-        "trino_archive_sha256": "none",
     }
-    if build is not None:
-        manifest = load_manifest(build, manifest_sha256)
-        environment = properties(environment_path)
-        if (manifest["platform"] != environment["platform"] or
-                manifest["candidate_commit"] != environment["regulator_commit"] or
-                manifest["candidate_archive_sha256"] != environment["regulator_archive_sha256"]):
-            raise EngineBuildError("engine build was made for a different platform or candidate")
-        record.update(engine_build_manifest_sha256=manifest_sha256,
-                      expected_native_target=manifest["native_target"],
-                      expected_cpu_identity=manifest["cpu_identity"])
-        if manifest["native_target"] != identity["native_target"]:
-            record["native_engines_reason"] = "native-target-mismatch"
-        elif manifest["cpu_identity"] != identity["cpu_identity"]:
-            record["native_engines_reason"] = "cpu-identity-mismatch"
-        else:
-            unpack(build, manifest["archives"]["native"], shared)
-            record.update(native_engines="prebuilt", native_engines_reason="host-matches-builder",
-                          native_archive_sha256=manifest["archives"]["native"]["sha256"])
-        trino = manifest["archives"]["trino"]
-        # Hosts that do not run Trino are not sent its harness; Java classes need no native target.
-        if (build / trino["file"]).exists():
-            unpack(build, trino, shared)
-            record.update(trino_harness="prebuilt", trino_archive_sha256=trino["sha256"])
+    if manifest["native_target"] != identity["native_target"]:
+        record["native_engines_reason"] = "native-target-mismatch"
+    elif manifest["cpu_identity"] != identity["cpu_identity"]:
+        record["native_engines_reason"] = "cpu-identity-mismatch"
+    else:
+        unpack(build, manifest["archives"]["native"], shared)
+        record.update(native_engines="prebuilt", native_engines_reason="host-matches-builder",
+                      native_archive_sha256=manifest["archives"]["native"]["sha256"])
+    # Java classes need no native target.
+    trino = manifest["archives"]["trino"]
+    unpack(build, trino, shared)
+    record.update(trino_harness="prebuilt", trino_archive_sha256=trino["sha256"])
     output.write_text("".join(f"{key}={value}\n" for key, value in record.items()))
     return record
 
@@ -287,8 +280,8 @@ def main():
     install_command.add_argument("--shared", type=Path, required=True)
     install_command.add_argument("--environment", type=Path, required=True)
     install_command.add_argument("--output", type=Path, required=True)
-    install_command.add_argument("--build", type=Path)
-    install_command.add_argument("--manifest-sha256")
+    install_command.add_argument("--build", type=Path, required=True)
+    install_command.add_argument("--manifest-sha256", required=True)
     checksum_command = commands.add_parser("checksums", help="print the verified native and Trino archive SHA-256")
     checksum_command.add_argument("--build", type=Path, required=True)
     checksum_command.add_argument("--manifest-sha256", required=True)
@@ -296,8 +289,6 @@ def main():
     if arguments.command == "package":
         package(arguments.shared, arguments.root, arguments.rebar_commit, arguments.result_directory)
     elif arguments.command == "install":
-        if (arguments.build is None) != (arguments.manifest_sha256 is None):
-            parser.error("--build and --manifest-sha256 go together")
         install(arguments.build, arguments.manifest_sha256, arguments.shared, arguments.environment,
                 arguments.output, host_identity())
     else:

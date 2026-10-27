@@ -5,8 +5,7 @@ run-shard.sh's route estimate, without its cold build, pinned Trino
 preparation, and host bootstrap allowances: engines are prebuilt, and those
 allowances do not scale with the rows a host measures. The estimate also
 leaves out the Rebar verification allowance, which does grow with the
-selected Rebar rows. validate-shard-plans.py checks these rules against every
-planned route.
+selected Rebar rows.
 """
 from shard_results import jmh_runtime_seconds
 

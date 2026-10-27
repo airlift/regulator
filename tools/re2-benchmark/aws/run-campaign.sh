@@ -52,8 +52,7 @@ BENCHMARK_REMEASUREMENT_PARTITION=${BENCHMARK_REMEASUREMENT_PARTITION:-}
 if [[ -n "${BENCHMARK_REMEASUREMENT_PARTITION}" ]]; then
     if [[ ! "${BENCHMARK_REMEASUREMENT_PARTITION}" =~ ^[0-9]+$ ||
             -n "${BENCHMARK_DIAGNOSTIC_PLAN}" || "${BASELINE_PROTOCOL}" != smoke ||
-            "${CAMPAIGN_MODE}" != baseline-shard || "${REGULATOR_RELEASE_VERSION}" != 1.0 ||
-            -n "${BASELINE_SELECTED_ROUTE:-}" ]]; then
+            "${CAMPAIGN_MODE}" != baseline-shard || "${REGULATOR_RELEASE_VERSION}" != 1.0 ]]; then
         echo "Replacement requires a frozen partition, release 1.0, and a complete smoke" >&2
         exit 1
     fi
@@ -80,8 +79,7 @@ if [[ -n "${BENCHMARK_DIAGNOSTIC_PLAN}" ]]; then
             ! -f "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/${BENCHMARK_DIAGNOSTIC_PLAN}.json" ||
             "${BASELINE_PROTOCOL}" != smoke || "${CAMPAIGN_MODE}" != baseline-shard ||
             ( "${CAMPAIGN_SHARD_ID}" != trino-final-line && "${CAMPAIGN_SHARD_ID}" != traditional-extra-easy2 ) ||
-            -z "${REGULATOR_RELEASE_VERSION}" ||
-            -n "${BASELINE_SELECTED_ROUTE:-}" ]]; then
+            -z "${REGULATOR_RELEASE_VERSION}" ]]; then
         echo "Diagnostics require a checked-in plan, release identity, and a supported complete smoke" >&2
         exit 1
     fi
@@ -99,7 +97,6 @@ LANGUAGE_CANDIDATE_PROVENANCE=${LANGUAGE_CANDIDATE_PROVENANCE:-}
 LANGUAGE_CANDIDATE_PROVENANCE_SHA256=${LANGUAGE_CANDIDATE_PROVENANCE_SHA256:-}
 ENGINE_BUILD_DIRECTORY=${ENGINE_BUILD_DIRECTORY:-}
 ENGINE_BUILD_MANIFEST_SHA256=${ENGINE_BUILD_MANIFEST_SHA256:-}
-BASELINE_SELECTED_ROUTE=${BASELINE_SELECTED_ROUTE:-}
 BASELINE_JONI_JMH_TIME=${BASELINE_JONI_JMH_TIME:-}
 TRINO_REVISION=${TRINO_REVISION:-}
 NATIVE_COMPILER_PACKAGE=${NATIVE_COMPILER_PACKAGE:-}
@@ -132,7 +129,7 @@ campaign_shard_handler()
 
 campaign_uses_trino()
 {
-    # The engine build prepares the pinned Trino harness for the platform's baseline hosts,
+    # The engine build prepares the pinned Trino harness for the platform's unit workers,
     # and a unit worker measures units of every shard.
     [[ "${CAMPAIGN_MODE}" == engine-build || "${CAMPAIGN_MODE}" == unit-worker ]] && return 0
     [[ "${CAMPAIGN_MODE}" == baseline-shard ]] || return 1
@@ -264,12 +261,19 @@ if [[ "${CAMPAIGN_MODE}" == baseline-shard ]] &&
     echo "CAMPAIGN_SHARD_ID is not in the baseline shard manifest: ${CAMPAIGN_SHARD_ID}" >&2
     exit 1
 fi
-if [[ -n "${ENGINE_BUILD_DIRECTORY}${ENGINE_BUILD_MANIFEST_SHA256}" ]] &&
-        { [[ ( "${CAMPAIGN_MODE}" != baseline-shard && "${CAMPAIGN_MODE}" != unit-worker ) ||
-              ! -d "${ENGINE_BUILD_DIRECTORY}" ]] ||
-          [[ ! "${ENGINE_BUILD_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; }; then
-    echo "Prebuilt engines require a baseline shard or unit worker, an engine build directory," \
-        "and its manifest SHA-256" >&2
+# A baseline shard host only prepares a shard's semantic routes for diagnostics or remeasurement.
+if [[ "${CAMPAIGN_MODE}" == baseline-shard && -z "${BENCHMARK_DIAGNOSTIC_PLAN}${BENCHMARK_REMEASUREMENT_PARTITION}" ]]; then
+    echo "A baseline shard job requires BENCHMARK_DIAGNOSTIC_PLAN or BENCHMARK_REMEASUREMENT_PARTITION;" \
+        "baseline campaigns lease work units to unit workers" >&2
+    exit 1
+fi
+if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
+    if [[ ! -d "${ENGINE_BUILD_DIRECTORY}" || ! "${ENGINE_BUILD_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "A unit worker requires prebuilt engines: an engine build directory and its manifest SHA-256" >&2
+        exit 1
+    fi
+elif [[ -n "${ENGINE_BUILD_DIRECTORY}${ENGINE_BUILD_MANIFEST_SHA256}" ]]; then
+    echo "Only a unit worker installs prebuilt engines" >&2
     exit 1
 fi
 if [[ -n "${ENGINE_BUILD_DIRECTORY}" && -z "${TRANSFER_BUCKET}" ]]; then
@@ -320,10 +324,6 @@ includes_architecture()
 case "${BASELINE_PROTOCOL_QUALIFICATION}" in
     true | false) ;;
     *) echo "BASELINE_PROTOCOL_QUALIFICATION must be true or false" >&2; exit 1 ;;
-esac
-case "${BASELINE_SELECTED_ROUTE}" in
-    "" | native-access | object-row) ;;
-    *) echo "BASELINE_SELECTED_ROUTE must be native-access or object-row" >&2; exit 1 ;;
 esac
 if [[ ! "${BASELINE_EXPECTED_ENGINE_TREE}" =~ ^[0-9a-f]{40,64}$ ]]; then
     echo "BASELINE_EXPECTED_ENGINE_TREE must be a Git object ID" >&2
@@ -1212,10 +1212,8 @@ if [[ '${ENGINE_BUILD_MANIFEST_SHA256}' != '' ]]; then
     printf '%s  %s\n' '${ENGINE_BUILD_MANIFEST_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/engine-build.json" | sha256sum --check -
     download_input 's3://${BUCKET}/${ENGINE_BUILD_NATIVE_KEY}' "\${ENGINE_BUILD_INPUT_DIR}/native.tar.gz"
     printf '%s  %s\n' '${ENGINE_BUILD_NATIVE_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/native.tar.gz" | sha256sum --check -
-    if [[ '${ENGINE_BUILD_TRINO_SHA256}' != '' ]]; then
-        download_input 's3://${BUCKET}/${ENGINE_BUILD_TRINO_KEY}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz"
-        printf '%s  %s\n' '${ENGINE_BUILD_TRINO_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz" | sha256sum --check -
-    fi
+    download_input 's3://${BUCKET}/${ENGINE_BUILD_TRINO_KEY}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz"
+    printf '%s  %s\n' '${ENGINE_BUILD_TRINO_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz" | sha256sum --check -
 fi
 
 export REGULATOR_SNAPSHOT_COMMIT='${REGULATOR_COMMIT}'
@@ -1241,7 +1239,6 @@ fi
 export BASELINE_PROTOCOL='${BASELINE_PROTOCOL}'
 export BASELINE_PROTOCOL_QUALIFICATION='${BASELINE_PROTOCOL_QUALIFICATION}'
 export BASELINE_EXPECTED_ENGINE_TREE='${BASELINE_EXPECTED_ENGINE_TREE}'
-export BASELINE_SELECTED_ROUTE='${BASELINE_SELECTED_ROUTE}'
 export BASELINE_JONI_JMH_TIME='${BASELINE_JONI_JMH_TIME}'
 export NATIVE_COMPILER_PACKAGE='${NATIVE_COMPILER_PACKAGE}'
 export CMAKE_PACKAGE='${CMAKE_PACKAGE}'
@@ -1489,9 +1486,6 @@ if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
         echo "Engine build archives do not match their manifest" >&2
         exit 1
     fi
-    if [[ "${CAMPAIGN_USES_TRINO}" != true ]]; then
-        ENGINE_BUILD_TRINO_SHA256=
-    fi
 fi
 
 REGULATOR_SHA256=$(sha256 "${SESSION_DIR}/regulator.tar.gz")
@@ -1568,12 +1562,9 @@ if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
     engine_build_prefix="${TRANSFER_PREFIX}/engine-builds"
     ENGINE_BUILD_NATIVE_KEY="${engine_build_prefix}/${ENGINE_BUILD_NATIVE_SHA256}.tar.gz"
     verify_engine_build_archive "${ENGINE_BUILD_NATIVE_SHA256}" "${ENGINE_BUILD_NATIVE_KEY}"
-    ENGINE_BUILD_SHARED_RESOURCES="\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_NATIVE_KEY}\""
-    if [[ -n "${ENGINE_BUILD_TRINO_SHA256}" ]]; then
-        ENGINE_BUILD_TRINO_KEY="${engine_build_prefix}/${ENGINE_BUILD_TRINO_SHA256}.tar.gz"
-        verify_engine_build_archive "${ENGINE_BUILD_TRINO_SHA256}" "${ENGINE_BUILD_TRINO_KEY}"
-        ENGINE_BUILD_SHARED_RESOURCES+=",\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_TRINO_KEY}\""
-    fi
+    ENGINE_BUILD_TRINO_KEY="${engine_build_prefix}/${ENGINE_BUILD_TRINO_SHA256}.tar.gz"
+    verify_engine_build_archive "${ENGINE_BUILD_TRINO_SHA256}" "${ENGINE_BUILD_TRINO_KEY}"
+    ENGINE_BUILD_SHARED_RESOURCES="\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_NATIVE_KEY}\",\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_TRINO_KEY}\""
 fi
 
 create_instance_profile
@@ -1637,7 +1628,6 @@ regulator_content_sha256=${REGULATOR_CONTENT_SHA256}
 baseline_candidate_archive_sha256=${BASELINE_CANDIDATE_ARCHIVE_SHA256:-not-used}
 baseline_protocol=${BASELINE_PROTOCOL}
 baseline_expected_engine_tree=${BASELINE_EXPECTED_ENGINE_TREE}
-baseline_selected_route=${BASELINE_SELECTED_ROUTE:-all}
 baseline_joni_jmh_time=${BASELINE_JONI_JMH_TIME:-default}
 baseline_protocol_qualification=${BASELINE_PROTOCOL_QUALIFICATION}
 trino_commit=${TRINO_COMMIT}
@@ -1696,9 +1686,7 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
             result_status=$(cat "${SESSION_DIR}/${label}/re2-results/exit-status")
             if [[ "${result_status}" != 0 ]]; then
                 echo "${label} run failed with status ${result_status}" >&2
-                if [[ "${result_status}" == 42 && "${CAMPAIGN_MODE}" == baseline-shard ]]; then
-                    record_failure_classification protocol-qualification "remote-exit-status:${result_status}"
-                elif [[ "${result_status}" == "${UNIT_WORKER_INTERRUPTED_STATUS}" && "${CAMPAIGN_MODE}" == unit-worker ]]; then
+                if [[ "${result_status}" == "${UNIT_WORKER_INTERRUPTED_STATUS}" && "${CAMPAIGN_MODE}" == unit-worker ]]; then
                     # The worker saw a Spot interruption notice and uploaded what it had.
                     record_failure_classification retryable-spot spot-interruption-notice
                 else

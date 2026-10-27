@@ -512,13 +512,13 @@ class TestShardResults(unittest.TestCase):
         self.assertIn('--print-allocation "${CAMPAIGN_PLATFORM}"', script)
         self.assertIn("BENCHMARK_EXPECTED_VCPUS=${replacement_vcpus}", script)
 
-    def testAwsHostDisablesProtocolQualificationForVerificationOnlyPreparation(self):
-        script = (SOURCE.parents[1] / "aws" / "run-host.sh").read_text(encoding="utf-8")
-        start = script.index('if [[ -n "${BENCHMARK_REMEASUREMENT_PARTITION:-}${BENCHMARK_DIAGNOSTIC_PLAN:-}" ]]')
-        block = script[start:script.index("    fi", start)]
+    def testSemanticPreparationDisablesProtocolQualification(self):
+        script = (SOURCE.parent / "run-host-session.sh").read_text(encoding="utf-8")
+        start = script.index("    BASELINE_DEFER_ACCEPTANCE=true")
+        block = script[start:script.index('"${RUN_SHARD}"', start)]
 
-        self.assertIn("export BASELINE_VERIFICATION_ONLY=true", block)
-        self.assertIn("export BASELINE_PROTOCOL_QUALIFICATION=false", block)
+        self.assertIn("BASELINE_VERIFICATION_ONLY=true", block)
+        self.assertIn("BASELINE_PROTOCOL_QUALIFICATION=false", block)
 
     def testAwsWrappersTakeTrinoUseFromTheShardHandler(self):
         campaign = (SOURCE.parents[1] / "aws" / "run-campaign.sh").read_text(encoding="utf-8")

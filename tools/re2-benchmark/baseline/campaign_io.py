@@ -5,8 +5,6 @@ import json
 import os
 import subprocess
 
-from acceptance import RECEIPT_FIELDS
-
 JSON_LEDGER_WORKLOADS = {
     "accepted-language-sessions.json": "language-batch",
     "accepted-engine-builds.json": "engine-build",
@@ -39,7 +37,7 @@ def aws_output(arguments, region=None):
     return command
 
 
-def write_ledger(path, rows, fields=RECEIPT_FIELDS,
+def write_ledger(path, rows, fields=None,
                  key=lambda row: (row["platform"], row["shard_id"], int(row["replica_id"]))):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(path.name + ".new")
@@ -50,6 +48,7 @@ def write_ledger(path, rows, fields=RECEIPT_FIELDS,
                       output_file, sort_keys=True)
             output_file.write("\n")
         else:
+            # A TSV ledger, such as a unit campaign's, names its fields.
             writer = csv.DictWriter(output_file, fieldnames=fields, delimiter="\t", lineterminator="\n")
             writer.writeheader()
             writer.writerows(rows)

@@ -8,69 +8,15 @@ standard library and are frozen with the candidate before measurement.
 ## Inputs
 
 The reducer requires the frozen `rows.tsv`, `platforms.tsv`, and `shards.tsv`,
-the primary `accepted-sessions.tsv`, and one or more artifact roots or explicit
-session directories. The required row count and coverage are checked by
+the primary `accepted-units.tsv`, and one or more artifact roots or explicit
+attempt directories. The required row count and coverage are checked by
 `validate-manifest.py` against the frozen manifest.
 
-Every accepted session directory must contain:
-
-- `acceptance-receipt.tsv`
-- `session.tsv`
-- `observed-rows.tsv`
-- `route-evidence.tsv`
-- `routes/<route>/calibration.tsv`
-- `routes/<route>/native-bracket.tsv` when that route measures native RE2
-- `routes/<route>/run-metadata.txt`
-- `routes/<route>/raw-artifacts.sha256`
-- `host-capacity.txt`
-
-The receipt ledger must contain exactly replicas 1, 2, and 3 for every
-platform/shard pair. Accepted artifact discovery must match the ledger exactly.
-The reducer rejects missing, duplicate, unexpected, or relabeled rows; receipt
-or file checksum failures; reused instances or host epochs; and platform,
-shard, system, or campaign mismatches.
-
-`route-evidence.tsv` is the acceptance-time host evidence manifest. The reducer
-verifies its receipt-bound SHA-256, every directly listed artifact, and every
-raw/log file listed by each routed `raw-artifacts.sha256`. It reads calibration,
-native brackets, and route metadata from those verified routed paths rather
-than assuming a flattened host layout. Route sessions must have the same host
-identity and their systems must exactly cover the combined host session.
-
-The receipt also binds the candidate commit, engine tree, and deployed source
-archive. When `--campaign-artifact` is supplied, its candidate commit must match
-every accepted receipt. A mismatch invalidates reduction rather than being
-reported as an informational provenance difference.
-
-Confirmation receipts are supplied separately. They may contain only replica
-4 and at most one session for a platform/shard pair. Confirmation rows are
-preserved alongside the three primary rows and identified explicitly; they
-never replace a primary host.
-
-Calibration drift above 5% invalidates a host before acceptance. Native-bracket
-drift is scoped to the benchmark identity in that bracket: drift above 5%
-marks the affected rows and comparisons unresolved and makes their shard
-eligible for confirmation without invalidating unrelated host measurements.
-Evidence for interrupted and rejected hosts is supplied through event files
-and remains separate from accepted measurements.
-
-`host-capacity.txt` is written in two stages. Acceptance binds the immutable
-memory-total and available-before prefix because GNU `time` cannot write wall
-time and peak RSS until the measured host process exits. Reduction then
-requires positive wall time and peak RSS, a zero exit status, valid before and
-after available-memory values, and peak RSS no larger than physical memory.
-The finalized file is included in the artifact inventory and immutable campaign
-archive. `capacity.tsv` preserves these values for every accepted session.
-
-### Unit Campaigns
-
-A campaign of work units supplies `accepted-units.tsv` ledgers in place of
-`accepted-sessions.tsv`; the reducer recognizes them by their `unit-receipt.tsv`
-columns and rejects a mix of the two. It also refuses a phase root whose
-`semantic-rejections.tsv` is missing or lists an attempt that failed its
-correctness stage, as [unit dispatch](../aws/README.md#unit-dispatch)
-describes, whatever the unit's other attempts show. The reducer reads each
-accepted unit attempt where the controller retains it, at
+The reducer refuses a phase root whose `semantic-rejections.tsv` is missing or
+lists an attempt that failed its correctness stage, as
+[unit dispatch](../aws/README.md#unit-dispatch) describes, whatever the unit's
+other attempts show. It reads each accepted unit attempt where the controller
+retains it, at
 `units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>` under its
 phase root, the layout `unit_dispatch.py` owns, and ignores the controller's
 staged copies under `unit-results/`. Each attempt directory must contain:
@@ -84,6 +30,12 @@ staged copies under `unit-results/`. Each attempt directory must contain:
 - `routes/<route>/native-bracket.tsv` when that route measures native RE2
 - `unit-capacity.txt`
 
+With `--release-version`, for a campaign that measured a published release,
+every route of every attempt must also attest that it measured that release's
+pinned JAR: its `release-artifact.json`, the `release_version` and
+`release_artifact_sha256` in its `run-metadata.txt`, and the JAR under
+`release/`.
+
 A worker host records its calibrations once, in its host session's
 `calibrations/` directory beside its attempts. The host calibrations an attempt
 references belong to its artifact: the inventory lists them as
@@ -96,16 +48,39 @@ reducer requires that lease to have completed with that after calibration.
 The ledgers must pass campaign unit acceptance: every platform and checked-in
 unit of the selected shards, replicas 1, 2, and 3 of a unit on distinct EC2
 instances, and at most one replica-4 confirmation per platform and unit on an
-instance none of its replicas used. Each attempt is reverified as unit
-acceptance does, and its receipt must regenerate from its evidence.
+instance none of its replicas used. Accepted artifact discovery must match the
+ledgers exactly. Each attempt is reverified as unit acceptance does, and its
+receipt must regenerate from its evidence.
+
+The receipt also binds the candidate commit, engine tree, and deployed source
+archive. When `--campaign-artifact` is supplied, its candidate commit must match
+every accepted receipt. A mismatch invalidates reduction rather than being
+reported as an informational provenance difference.
+
+Confirmation receipts are supplied separately. Confirmation rows are preserved
+alongside the three primary rows and identified explicitly; they never replace
+a primary attempt.
 
 A unit owns each of its rows or copies it. Every row has exactly one owner unit,
 whose three primary attempts and optional confirmation are that row's samples.
 A copy is a native bracket a unit measures again so that the rows it owns have
 a comparator measured beside them. It appears in `host-rows.tsv` with role
 `copy`, pairs with the candidates of its own attempt, and is never a row sample.
-Calibration drift, native-bracket drift, and finalized capacity come from each
-attempt's own files.
+
+Calibration drift above 5% invalidates an attempt before acceptance.
+Native-bracket drift is scoped to the benchmark identity in that bracket: drift
+above 5% marks the affected rows and comparisons unresolved and makes their
+unit eligible for confirmation without invalidating unrelated measurements.
+Evidence for interrupted and rejected attempts is supplied through event files
+and remains separate from accepted measurements.
+
+`unit-capacity.txt` is written in two stages. Acceptance binds the immutable
+memory-total and available-before prefix because GNU `time` cannot write wall
+time and peak RSS until the measured process exits. Reduction then requires
+positive wall time and peak RSS, a zero exit status, valid before and after
+available-memory values, and peak RSS no larger than physical memory. The
+finalized file is included in the artifact inventory and immutable campaign
+archive. `capacity.tsv` preserves these values for every accepted attempt.
 
 ### Campaign Events
 
@@ -174,7 +149,7 @@ affected host-row ratio from comparator summaries.
 ### Retrieval Metadata
 
 Each optional `--artifact-index` file must contain the session identity fields
-from `session.tsv`. All other columns are passed through to `metadata.tsv`.
+from `unit-session.tsv`. All other columns are passed through to `metadata.tsv`.
 These conventional fields are also copied directly into the artifact
 inventory:
 
@@ -185,7 +160,7 @@ artifact_uri artifact_sha256 retrieved_at
 `retrieval_uri`, `archive_sha256`, and `retrieval_timestamp` are accepted as
 equivalent names. Independently of external storage metadata, the reducer
 computes a deterministic artifact-set digest and inventories every file in the
-accepted session, including raw timing artifacts.
+accepted attempt, including raw timing artifacts.
 
 `--campaign-artifact` accepts the one-row retrieval metadata emitted by
 `archive_results.py`:
@@ -197,10 +172,10 @@ source_directory file_count source_manifest_sha256
 
 The campaign ID must match the primary receipt ledger. The immutable S3 URI,
 version, archive checksum, candidate identity, source directory, and file count
-are attached to every accepted session's metadata and inventory. Optional
-per-session artifact indexes remain available as more specific provenance.
+are attached to every accepted attempt's metadata and inventory. Optional
+per-attempt artifact indexes remain available as more specific provenance.
 The adjacent `<campaign-artifact>.source-manifest.tsv` must have the recorded
-SHA-256. Every accepted session file must appear in that exported embedded
+SHA-256. Every accepted attempt file must appear in that exported embedded
 archive manifest with its exact size and digest. This recursively binds routed
 metadata, raw manifests and artifacts, comparator provenance, finalized
 capacity, and acceptance receipts to the immutable campaign archive.
@@ -233,12 +208,11 @@ cost, so fewer retained bytes also produces a ratio below 1.
 
 ## Aggregation
 
-The host session is the independent unit, or in a unit campaign the unit
-attempt. Different units may share a host, but a row's samples come from the
-three primary attempts and the confirmation of its owner unit, each on its own
-instance. Same-host ratios pair a candidate with the comparators measured in
-the same unit attempt, owned or copied. The reducer preserves all primary and
-confirmation hosts, then reports for every platform and manifest row:
+The unit attempt is the independent sample. Different units may share a host,
+but a row's samples come from the three primary attempts and the confirmation
+of its owner unit, each on its own instance. Same-host ratios pair a candidate
+with the comparators measured in the same unit attempt, owned or copied. The
+reducer preserves all primary and confirmation attempts, then reports for every platform and manifest row:
 
 - primary and all-host medians
 - minimum and maximum score
@@ -285,49 +259,44 @@ from `general-classes.tsv`. Curated and extended Rebar rows are always grouped
 separately.
 
 `confirmation-jobs.tsv` deduplicates primary instability to the exact
-`platform, shard_id` schema consumed by `run-campaign.py`. Host CV or primary
+`platform, shard_id, unit_id` schema consumed by `run-campaign.py`:
+instability selects the owner unit of the unstable row. Host CV or primary
 same-host ratio CV above 5%, precision rejection, material direction
 disagreement, contract-identity disagreement, and scaling class disagreement
 request confirmation. After confirmation, the all-host ratio CV determines
 whether ratio variability remains unresolved. A
 deterministic allocation violation or a serious but stable ratio does not. A
-platform/shard that already has a replica-4 session is omitted because its one
-confirmation allowance is spent. In a unit campaign the schema is
-`platform, shard_id, unit_id`: instability selects the owner unit of the
-unstable row, and each platform and unit has one allowance. Its confirmation
-is that unit's replica 4 on an instance none of its replicas 1 to 3 used.
+platform and unit that already has a replica-4 attempt is omitted because its
+one confirmation allowance is spent. Its confirmation is that unit's replica 4
+on an instance none of its replicas 1 to 3 used.
 
 ## Outputs
 
 The reducer writes:
 
-- `host-rows.tsv`: every accepted host measurement; in a unit campaign every
-  owned and copied row of each attempt, with `unit_id`, `unit_attempt_id`, and
-  `role`
+- `host-rows.tsv`: every owned and copied row of each accepted attempt, with
+  `unit_id`, `unit_attempt_id`, and `role`
 - `row-aggregates.tsv`: per-platform row statistics and unresolved state
 - `host-comparator-ratios.tsv`: every same-host ratio
 - `comparison-aggregates.tsv`: per-platform comparison statistics
 - `general-classes.tsv`: class summaries without serious outliers
 - `serious-outliers.tsv`: serious comparison rows
-- `scaling.tsv`: per-host scaling signatures, per unit attempt in a unit
-  campaign
+- `scaling.tsv`: per-attempt scaling signatures
 - `gap-ledger.tsv`: unresolved conditions, serious outliers, and events
 - `events.tsv`: interruptions, rejected sessions, and exclusions
 - `artifact-inventory.tsv`: file and retrieval checksums
 - `metadata.tsv`: run and retrieval metadata passthrough
 - `capacity.tsv`: finalized wall-time, peak-RSS, and host-memory evidence, from
-  `unit-capacity.txt` with `unit_capacity_sha256` in a unit campaign
+  `unit-capacity.txt` with `unit_capacity_sha256`
 - `rebar-outcomes.tsv`: exact extended-corpus semantic mismatches by host
-- `confirmation-jobs.tsv`: unique primary-unstable platform/shard pairs, or
-  `platform`, `shard_id`, `unit_id` rows in a unit campaign, still eligible
-  for the bounded replica-4 wave
+- `confirmation-jobs.tsv`: unique primary-unstable `platform`, `shard_id`,
+  `unit_id` rows still eligible for the bounded replica-4 wave
 - `summary.json`: deterministic campaign counts and identity
 - `output-checksums.tsv`: checksums for every reducer output above
 
-Every per-session table of a unit campaign adds `unit_id` and
-`unit_attempt_id` after `host_epoch`. A host-session campaign's tables are
-unchanged except `events.tsv`, which adds the `region`, `availability_zone`,
-`placement_score`, and `failure_classification` columns of every campaign.
+Every per-attempt table adds `unit_id` and `unit_attempt_id` after
+`host_epoch`, and `events.tsv` adds the `region`, `availability_zone`,
+`placement_score`, and `failure_classification` columns.
 
 The published
 [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
@@ -352,8 +321,8 @@ output.
 
 ```bash
 python3 tools/re2-benchmark/baseline/aggregate_results.py \
-    --primary-receipts /durable/path/campaign/primary/accepted-sessions.tsv \
-    --confirmation-receipts /durable/path/campaign/confirmation/accepted-sessions.tsv \
+    --primary-receipts /durable/path/campaign/primary/accepted-units.tsv \
+    --confirmation-receipts /durable/path/campaign/confirmation/accepted-units.tsv \
     --artifacts-root /durable/path/campaign/primary \
     --artifacts-root /durable/path/campaign/confirmation \
     --events /durable/path/campaign/campaign-events.tsv \
@@ -368,12 +337,10 @@ python3 tools/re2-benchmark/baseline/render_report.py \
     --output /durable/path/campaign/BASELINE_REPORT.md
 ```
 
-A unit campaign passes each phase root the same way, with `accepted-units.tsv`
-ledgers as its receipts and `semantic-rejections.tsv` beside each; the reducer
-reads the attempts retained under each root as
-[unit campaigns](#unit-campaigns) describes.
+Each phase root keeps `semantic-rejections.tsv` beside its ledger, and the
+reducer reads the attempts retained under it as [inputs](#inputs) describes.
 
-The isolated tests use synthetic C8i, C8g, and C9g campaigns:
+The isolated tests use synthetic campaigns:
 
 ```bash
 python3 -m unittest tools/re2-benchmark/baseline/tests/test_aggregate_results.py -v
