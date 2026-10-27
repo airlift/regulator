@@ -1477,6 +1477,12 @@ and keep each search linear in its input:
 - The complete plan and its literal storage are charged against the forward
   DFA memory budget. A plan that does not fit keeps the ordinary route, so a
   pattern's retained memory stays within the bound already applied to its DFA.
+- The member table of a set of some non-ASCII characters, which only RE2, Java,
+  and Rust plans admit, is built in place as a trie, and identical nodes are
+  merged after it is complete. The shape of UTF-8 bounds that trie at 17,406
+  masks and 277 blocks, however many pieces the compiler splits the set into,
+  so the trie needs no charge of its own, even for a set of hundreds of
+  thousands of ranges.
 - Optional literals, optional forks, and literal-repeat copies share four retry
   checkpoints, as in ClickHouse, so an attempt explores at most sixteen
   combinations and its retry state fits in two longs and an int without

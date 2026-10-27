@@ -428,8 +428,10 @@ replaces:
   that the remaining bytes are continuation bytes. Other lead bytes walk a byte
   trie, one table read per byte; identical trie nodes are stored once, which
   keeps Rust's `\w` to about 12 KB, charged to the plan's retained size. The
-  reader takes a character's width from its lead byte rather than from the
-  table, so finding the next character does not wait on the table read. It scans
+  trie is built in place, so the shape of UTF-8 bounds its storage however
+  many pieces the compiler splits the set into. The reader takes a character's
+  width from its lead byte rather than from the table, so finding the next
+  character does not wait on the table read. It scans
   ASCII bytes as an `RE2_RUN` does, with the vector scanner when the set has at
   most four ASCII non-members, so ASCII input never reads the table, and counts
   bounded repetitions and minimums with the same reader. A captured run of such
