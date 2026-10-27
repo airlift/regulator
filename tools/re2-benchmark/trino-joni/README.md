@@ -42,58 +42,21 @@ tools/re2-benchmark/trino-joni/verify.sh
 ```
 
 With `TRINO_COMPARATOR_IDENTITY_ONLY=true`, both stop verifying after the
-harness's identity and provenance checks, including the Rebar runner's
-version, before any semantic verifier runs.
-A baseline shard uses this to decide whether to rebuild a prebuilt harness, and
+harness's identity and provenance checks, before any semantic verifier runs.
+A baseline unit uses this to decide whether to rebuild a prebuilt harness, and
 then runs the full verification once.
 
 `TRINO_COMPARATOR_TRINO_GIT_SOURCE` may point to a local Trino Git repository
 to avoid downloading objects. The source repository is read only; the pinned
 commit is archived and extracted beneath Regulator's `target/` directory.
 
-Run the paired JMH matrix with:
-
-```bash
-tools/re2-benchmark/trino-joni/run.sh target/trino-joni-comparator/results.json
-```
-
-The same prepared comparator also provides a KLV-protocol engine for the pinned
-Rebar workload matrix:
-
-```bash
-tools/re2-benchmark/trino-joni/run-rebar.sh --version
-```
-
-In normal use Rebar invokes `run-rebar.sh` from its generated engine definition;
-the runner consumes the workload's KLV payload on standard input and writes
-Rebar timing samples on standard output. It requires a completed `prepare.sh`
-run and uses the same pinned Joni artifact and provenance record as the
-Trino-shaped JMH comparisons.
-
-Additional arguments pass directly to JMH. For a short execution smoke test
-on a designated AWS host, without forks or warmup:
-
-```bash
-tools/re2-benchmark/trino-joni/run.sh \
-    target/trino-joni-comparator/smoke.json \
-    -f 0 -wi 0 -i 1 -r 1ms
-```
-
-The deterministic verifier checks all five workloads, both source lengths, and
-all eight operations before timing begins. It compares normalized Regulator and
-Joni results and checks a frozen SHA-256 over the corpus and operation outputs.
-
-The application-shaped comparator additionally checks 13 patterns against
-eight rotating short or medium Slice values apiece, including nonzero Slice
-offsets. Three cases are translated from the pinned Trino
+`BenchmarkEverydayTrinoJoni`, the application-shaped comparator, checks 13
+patterns against eight rotating short or medium Slice values apiece, including
+nonzero Slice offsets. Three cases are translated from the pinned Trino
 `BenchmarkRegexpFunctions`; its two synthetic single-character dot-star probes
 remain diagnostic-only and are recorded in the translation ledger. Every other
-origin is recorded as a designed control. Run its Joni side with:
-
-```bash
-tools/re2-benchmark/trino-joni/run-everyday.sh \
-    target/trino-joni-comparator/everyday-results.json
-```
+origin is recorded as a designed control. The baseline's `trino-operations`
+shard runs it from [`run-shard.sh`](../baseline/run-shard.sh).
 
 `BenchmarkSpecializedTrinoJoni` is the Joni twin of
 `BenchmarkSpecializedTrinoRegexp`, the specialized-pattern workloads described

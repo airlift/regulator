@@ -26,8 +26,7 @@ def main():
     except (OSError, ValueError) as error:
         raise SystemExit(f"unit result rejected: {error}") from error
     print(
-        f"accepted unit {receipt['unit_id']} with {receipt['owned_row_count']} owned and "
-        f"{receipt['copied_row_count']} copied rows for "
+        f"accepted unit {receipt['unit_id']} with {receipt['owned_row_count']} owned rows for "
         f"{receipt['platform']}/{receipt['shard_id']}/replica-{receipt['replica_id']}")
 
 

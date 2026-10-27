@@ -342,8 +342,6 @@ def verify_evidence_manifest(
                 f"unexpected={format_values(sorted(route_artifacts - actual_route_artifacts))}")
         session = read_one_tsv(root / prefix / "route-session.tsv", SESSION_FIELDS)
         systems = parse_systems(session["systems"], str(root / prefix / "route-session.tsv"))
-        if {"native-re2-before", "native-re2-after"}.issubset(systems) and "native-bracket.tsv" not in route_artifacts:
-            raise ValidationError(f"{path} route {route!r} is missing native-bracket.tsv")
         metadata = read_properties(route_directory / "run-metadata.txt")
         qualification_required = metadata.get("protocol_qualification_required")
         if qualification_required not in {"true", "false"}:
@@ -720,7 +718,7 @@ def validate_campaign(
             raise ValidationError(
                 f"{context} architecture is {receipt['architecture']!r}, "
                 f"expected {platform_row['architecture']!r}")
-        expected_instance = topology.instance_type(platform_row, shard_id)
+        expected_instance = platform_row["instance_type"]
         if receipt["instance_type"] != expected_instance:
             raise ValidationError(
                 f"{context} instance_type is {receipt['instance_type']!r}, "

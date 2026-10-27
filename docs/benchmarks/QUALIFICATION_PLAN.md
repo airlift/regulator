@@ -135,8 +135,8 @@ The [1.0 release results](RESULTS_1.0.md) also measured a Graviton4 R8g
 instance. The exact instance types, AMIs, and JDKs are pinned in
 [`platforms.tsv`](../../tools/re2-benchmark/baseline/platforms.tsv).
 Ordinary workers use `r8i.large` and `r9g.large`, each with two vCPUs and
-16 GiB RAM. The `lifecycle-shared-cold` shard uses the corresponding
-8-vCPU `.2xlarge` type and affinity `0-7`; ordinary work uses affinity `0`.
+16 GiB RAM. Language lifecycle comparisons on R9g use the corresponding
+8-vCPU `.2xlarge` type; every worker measures with affinity `0`.
 The measured heap is 8 GiB. Forked JMH launchers use 64–256 MiB, with the
 full heap and memory-mode options explicitly passed to the measured fork.
 Nonforked measurements retain the full heap in the running JVM.
@@ -160,12 +160,6 @@ must use the same heap setting. Route metadata and acceptance receipts record
 it separately from each benchmark's semantic checksum. Receipts or campaign
 state without this setting are not resumable under the current protocol;
 start a new campaign instead of mixing old and new evidence.
-
-Joni's Rebar verification and measurement remain bounded by their existing
-30-second and 120-second limits. A classified timeout is reported as
-`did-not-finish`, with no performance score. Successful siblings remain usable.
-If verification classifies every Joni row, no Joni measurement process runs.
-Malformed output, unknown errors, and unexpected process failures remain fatal.
 
 Record the reported CPU frequency, cache topology, memory generation, and
 available vector instruction capabilities so differences between platforms can
@@ -201,7 +195,7 @@ Required dimensions are:
 | Captures | None, group zero, one capture, many captures, and unmatched alternatives |
 | Pattern family | Literal, character class, alternation, repetition, counted repetition, anchors, dot-star, Unicode, case folding, required prefix, and high DFA-state patterns |
 | Input bytes | ASCII UTF-8, multi-byte UTF-8, Latin-1, NUL, and malformed UTF-8 where defined |
-| Cache state | Cold DFA, warm DFA, reset/thrash fallback, and shared concurrent cache |
+| Cache state | Cold DFA, warm DFA, and reset/thrash fallback |
 | Compilation | Cold compile, repeated compile, and precompiled matching |
 
 Cover every execution engine, public operation, optimization route, fallback,
@@ -217,13 +211,6 @@ penalty to engines that intentionally implement different languages or match
 reporting contracts.
 
 ## Benchmark layers
-
-### Engine layer
-
-Measure parser, simplifier, compiler, DFA, NFA, OnePass, BitState, prefix
-scanning, reverse search, capture extraction, DFA cache reset, and set matching.
-These measurements diagnose why an end-to-end result differs; they are not the
-release score by themselves.
 
 ### Public Slice layer
 
@@ -245,34 +232,22 @@ does not include Trino module wiring, SQL registration, block integration, or
 deployment work.
 
 The application matrix rotates through independent short and medium Slice
-values for each compiled pattern, including nonzero logical offsets. Report
-the fixed-input Trino and final-line diagnostics separately. These application
-workloads are designed examples, not a measured distribution of production use.
+values for each compiled pattern, including nonzero logical offsets. These
+application workloads are designed examples, not a measured distribution of
+production use.
 
 ### Rebar cross-engine layer
 
-Use the long-lived JVM runner for Rebar's KLV protocol to run all 41 workloads
-in the pinned native RE2 curated intersection. Include every applicable
-supported compile, count, span, capture, and grep model through the public Slice
-API. Report an extended compatible non-curated pass separately. Keep these
-official measurements separate from the Rebar-derived JMH routes used to
-diagnose DFA eligibility and code shape.
+The [language bulk comparison](../../tools/re2-benchmark/language/README.md)
+runs all 41 workloads in the pinned native RE2 curated intersection and the
+extended compatible non-curated cases for every language, with each
+applicable compile, count, span, capture, and grep model. Report not-compatible
+and bounded-time non-completion states without a score.
 
-Measure pinned Trino Joni for every workload/model identity declared compatible
-by the exhaustive applicability ledger. Keep its invocation separate from the
-unchanged native-before/Regulator/native-after bracket, and report
-not-compatible and bounded-time non-completion states without a score.
+### Allocation
 
-### Resource and concurrency layer
-
-Measure:
-
-- allocation per operation for boolean, capture, repeated-match, and result APIs
-- retained size of compiled patterns before and after lazy reverse compilation
-- cold and warm DFA cache size and reset behavior
-- throughput scaling with one compiled pattern shared by 1, 2, 4, 8, and all
-  physical cores
-- latency distribution while cache resets and fallback occur
+Record allocation per operation for boolean, capture, repeated-match, and
+result APIs.
 
 ## Measurement protocol
 
@@ -301,13 +276,11 @@ match ranges or output checksums.
 
 ### Statistics
 
-For the original baseline capture, report each system's median, observed host range, coefficient of variation,
-throughput or time, bytes per second where meaningful, and allocation per
-operation. The [reducer's statistics policy](../../tools/re2-benchmark/baseline/REPORTING.md#aggregation)
-does not report confidence intervals from only three or four hosts, and
-iterations are not independent hosts. Compare scaling across input sizes as
-well as ratios. Leave a result unresolved when host-to-host variation overlaps
-the claimed difference.
+The [reducer's statistics policy](../../tools/re2-benchmark/baseline/REPORTING.md#aggregation)
+defines what each baseline row reports. Unit attempts on distinct instances
+are the independent samples; iterations are not. Compare scaling across input
+sizes as well as ratios. Leave a result unresolved when host-to-host variation
+overlaps the claimed difference.
 
 Investigate any of these before accepting a number:
 
@@ -335,8 +308,7 @@ Investigate any of these before accepting a number:
   Consider both relative and absolute cost, scaling, and the measured cause;
   record any explicitly accepted tradeoff rather than treating every loss as
   an automatic veto.
-- Compile budgets, retained memory, and concurrent cache behavior remain within
-  their documented contracts.
+- Compile budgets remain within their documented contracts.
 
 ## Gap investigation
 

@@ -522,7 +522,7 @@ section("Bytes API: Rebar benchmark patterns")
 # Rebar patterns that run without Unicode mode, so only the bytes API accepts
 # them, on short texts in the shape of their haystacks. The patterns are copied
 # from Rebar commit 463d00f31887e84c38467805b9e3122c314b9521, the pin in
-# tools/re2-benchmark/rebar/README.md. Their workload identities, from
+# tools/re2-benchmark/language/rebar_inventory.py. Their workload identities, from
 # tools/re2-benchmark/manifests/rebar-workloads.csv and
 # rebar-extended-workloads.tsv, are:
 # - unicode_data_line: curated/07-unicode-character-data/parse-line

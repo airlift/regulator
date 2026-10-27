@@ -489,9 +489,9 @@ run_lease()
     unit_started=$(timestamp)
     # The unit leads its own process group, so an interruption stops all of it.
     (
-        # The host's campaign-wide comparator orders would conflict with the order
+        # The host's campaign-wide comparator order would conflict with the order
         # run-unit.sh derives from each replica.
-        unset JONI_COMPARATOR_ORDER REBAR_COMPARATOR_ORDER
+        unset JONI_COMPARATOR_ORDER
         export RE2_CAMPAIGN_REPLICA_ID=${replica_id}
         export RE2_CAMPAIGN_LEASE_SEQUENCE=${sequence}
         export BASELINE_UNIT_HOST_EVIDENCE=${HOST_DIR}

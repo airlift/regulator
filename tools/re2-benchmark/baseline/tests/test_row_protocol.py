@@ -13,24 +13,12 @@ class TestRowProtocol(unittest.TestCase):
         protocols = row_protocol.load(BASELINE / "row-protocol.tsv")
         cases = {
             # A route with more than 30 candidate and Joni rows used 50 ms windows and the 5% gate.
-            "accepted-routes/BenchmarkBoundedCharacterClassCounter.generalMatcher/sourceLength-32768/"
-            "workload-ascii/regulator-object-row": "jmh-processes 5 10 50ms 10 50ms 0.05",
-            "lifecycle/BenchmarkDfaCache.growStateCacheOnNextInsert/-/regulator-native-access":
-                "jmh-processes 5 10 1s 10 1s -",
+            "trino-operations/everyday/delimiter/contains/regulator-native-access":
+                "jmh-processes 5 10 50ms 10 50ms 0.05",
+            "trino-operations/everyday/delimiter/contains/joni": "jmh-forks 1 10 50ms 10 50ms 0.05",
             # trino-like counted none of its 36 rows, so it kept one-second windows.
             "trino-like/EXACT_MATCH/regulator": "jmh-processes 5 10 1s 10 1s -",
-            "compile-public/BenchmarkRe2CompilerPhases.analyzeExpression/pattern-(.*)-(\\d+)-of-(\\d+)/"
-            "regulator-native-access": "jmh-processes 5 10 300ms 10 50ms 0.05",
-            "traditional-capture/compile/parse/compile/regulator-native-access":
-                "jmh-processes 5 10 300ms 10 50ms 0.05",
-            "traditional-search/failed-search/easy0/dfa/32768/regulator-object-row":
-                "jmh-forks 5 10 1s 10 1s 0.05",
-            "trino-operations/BenchmarkTrinoRegexp.contains/sourceLength-1024/workload-captureSparse/joni":
-                "jmh-forks 1 10 50ms 10 50ms 0.05",
-            "traditional-extra-easy2/failed-search/easy2/dfa/16777216/native-re2-before":
-                "native-bracket 1 - - 5 1s -",
-            "rebar-a/curated/04-ruff-noqa/tweaked/grep-captures/joni": "rebar - - 5s - 5s -",
-            "retained-memory/retained-memory/joni": "memory-census - - - - - -",
+            "trino-specialized-patterns-a/urlHostPort/extract/joni": "jmh-forks 1 10 1s 10 1s -",
         }
         for row_id, expected in cases.items():
             with self.subTest(row_id=row_id):

@@ -60,9 +60,6 @@ grep -Fqx "rows_benchmark_source_sha256=$(sha256 "${SCRIPT_DIR}/src/BenchmarkTri
 grep -Fqx "rows_verifier_source_sha256=$(sha256 "${SCRIPT_DIR}/src/TrinoRowsJoniVerifier.java")" "${PROVENANCE_FILE}"
 grep -Fqx "like_rows_benchmark_source_sha256=$(sha256 "${SCRIPT_DIR}/src/BenchmarkTrinoLikeRowsTrino.java")" "${PROVENANCE_FILE}"
 grep -Fqx "like_rows_verifier_source_sha256=$(sha256 "${SCRIPT_DIR}/src/TrinoLikeRowsTrinoVerifier.java")" "${PROVENANCE_FILE}"
-grep -Fqx "rebar_runner_source_sha256=$(sha256 "${SCRIPT_DIR}/src/RebarJoniRunner.java")" "${PROVENANCE_FILE}"
-grep -Fqx "benchmark_source_sha256=$(sha256 "${SCRIPT_DIR}/src/BenchmarkTrinoJoniComparator.java")" "${PROVENANCE_FILE}"
-grep -Fqx "verifier_source_sha256=$(sha256 "${SCRIPT_DIR}/src/TrinoJoniComparatorVerifier.java")" "${PROVENANCE_FILE}"
 grep -Fqx "slice_operations_source_sha256=$(sha256 "${SCRIPT_DIR}/src/JoniSliceOperations.java")" "${PROVENANCE_FILE}"
 grep -Fqx "slice_operations_verifier_sha256=$(sha256 "${SCRIPT_DIR}/src/JoniSliceOperationsVerifier.java")" "${PROVENANCE_FILE}"
 
@@ -96,8 +93,8 @@ expected_benchmarks=$(mktemp)
 trap 'rm -f "${actual_benchmarks}" "${expected_benchmarks}"' EXIT
 
 java "${java_access_arguments[@]}" -cp "${classpath}" \
-    org.openjdk.jmh.Main -l '^io\.trino\.operator\.scalar\.(BenchmarkEverydayTrinoJoni|BenchmarkSpecializedTrinoJoni|BenchmarkTrinoJoniComparator|BenchmarkTrinoLikeRowsTrino|BenchmarkTrinoRowsJoni)\..*$' |
-    grep -E '^io\.trino\.operator\.scalar\.(BenchmarkEverydayTrinoJoni|BenchmarkSpecializedTrinoJoni|BenchmarkTrinoJoniComparator|BenchmarkTrinoLikeRowsTrino|BenchmarkTrinoRowsJoni)\.' |
+    org.openjdk.jmh.Main -l '^io\.trino\.operator\.scalar\.(BenchmarkEverydayTrinoJoni|BenchmarkSpecializedTrinoJoni|BenchmarkTrinoLikeRowsTrino|BenchmarkTrinoRowsJoni)\..*$' |
+    grep -E '^io\.trino\.operator\.scalar\.(BenchmarkEverydayTrinoJoni|BenchmarkSpecializedTrinoJoni|BenchmarkTrinoLikeRowsTrino|BenchmarkTrinoRowsJoni)\.' |
     sort > "${actual_benchmarks}"
 cat > "${expected_benchmarks}" <<'EOF'
 io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.contains
@@ -111,22 +108,6 @@ io.trino.operator.scalar.BenchmarkEverydayTrinoJoni.split
 io.trino.operator.scalar.BenchmarkSpecializedTrinoJoni.extract
 io.trino.operator.scalar.BenchmarkSpecializedTrinoJoni.extractAll
 io.trino.operator.scalar.BenchmarkSpecializedTrinoJoni.replace
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.containsJoni
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.containsRegulator
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.countJoni
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.countRegulator
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.extractAllJoni
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.extractAllRegulator
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.extractJoni
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.extractRegulator
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.positionThirdJoni
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.positionThirdRegulator
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.replaceJoni
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.replaceLambdaJoni
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.replaceLambdaRegulator
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.replaceRegulator
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.splitJoni
-io.trino.operator.scalar.BenchmarkTrinoJoniComparator.splitRegulator
 io.trino.operator.scalar.BenchmarkTrinoLikeRowsTrino.matches
 io.trino.operator.scalar.BenchmarkTrinoRowsJoni.contains
 io.trino.operator.scalar.BenchmarkTrinoRowsJoni.count
@@ -136,17 +117,9 @@ io.trino.operator.scalar.BenchmarkTrinoRowsJoni.replace
 io.trino.operator.scalar.BenchmarkTrinoRowsJoni.split
 EOF
 diff -u "${expected_benchmarks}" "${actual_benchmarks}"
-# The Rebar runner is part of the harness, so a harness built without it fails its identity.
-"${SCRIPT_DIR}/run-rebar.sh" --version | grep -F 'Trino Joni 2.1.5.3' >/dev/null
 if [[ "${IDENTITY_ONLY}" == true ]]; then
     exit 0
 fi
-
-java \
-    --add-modules jdk.incubator.vector \
-    "${java_access_arguments[@]}" \
-    -cp "${classpath}" \
-    io.trino.operator.scalar.TrinoJoniComparatorVerifier
 
 java \
     --add-modules jdk.incubator.vector \

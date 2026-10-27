@@ -1,16 +1,14 @@
 # AWS baseline qualification
 
-The AWS tools run four kinds of jobs: `engine-build`, `unit-worker`,
-`language-batch`, and `baseline-shard`. Full qualification builds each
-platform's engines once, measures baseline work units on unit workers, and
-collects language batches; `baseline-shard` runs one shard for diagnostics and
-remeasurement. This guide gives the baseline commands; see the
+The AWS tools run three kinds of jobs: `engine-build`, `unit-worker`, and
+`language-batch`. Full qualification builds each platform's Trino harness
+once, measures baseline work units on unit workers, and collects language
+batches. This guide gives the baseline commands; see the
 [language guide](../language/README.md) for language collection.
 
 `baseline/run-campaign.py` plans and controls the baseline engine build and the
 smoke, primary, and confirmation runs. `language/fleet.py` prepares language
 plans, and `language/campaign.py` controls their collection and acceptance.
-Standalone engineering diagnostics are separate from both.
 
 Do not collect performance evidence on a development machine. Local commands
 may validate manifests, scripts, and protocol behavior, but performance
@@ -42,12 +40,10 @@ it is not a complete campaign budget or a guaranteed maximum.
 Ordinary workers are `r8i.large` and `r9g.large`, each with two vCPUs and
 16 GiB RAM. Preserve the 8 GiB measured heap, use a 64–256 MiB launcher for
 forked JMH, and use 40 GiB gp3 roots after disk validation.
-The original `lifecycle-shared-cold` shard uses eight-vCPU `.2xlarge` workers.
-The measurement-quality follow-up also uses `r9g.2xlarge` for Trino, lifecycle
-and selected traditional/LIKE cohorts, based on exact production integrations
-and allocation controls. Other language work, including slow dictionary
-measurements, stays on `.large`. Count actual allocated vCPUs in admission;
-measured JVM CPU affinity is a separate protocol setting.
+On R9g the language lifecycle suite uses eight-vCPU `.2xlarge` workers. Other
+language work, including slow dictionary measurements, and all R8i work stay
+on `.large`. Count actual allocated vCPUs in admission; measured JVM CPU
+affinity is a separate protocol setting.
 
 The September 14 sizing survey observed ordinary Oregon Spot rates of
 $0.0338–0.0593 per hour across the small types and zones. Refresh prices before
@@ -152,11 +148,12 @@ For example, a policy for at most 16 ordinary workers could contain:
 ```
 
 Replace the example account, limits, and rates with the selected campaign
-values. Include `.2xlarge` price ceilings when running multicore shards. `spot`
-is the maximum Spot bid; `total` includes storage and other hourly costs, and
-`on_demand_total` is that hourly total for an On-Demand host. The controller
-validates the policy when loading it. Freeze it with the job inventory; changing
-it requires a new campaign rather than a resume.
+values. Include the R9g `.2xlarge` price ceiling when running the language
+lifecycle suite. `spot` is the maximum Spot bid; `total` includes storage and
+other hourly costs, and `on_demand_total` is that hourly total for an
+On-Demand host. The controller validates the policy when loading it. Freeze it
+with the job inventory; changing it requires a new campaign rather than a
+resume.
 
 The neighboring `fleet-state.json` coordinates both collectors with `flock`. It
 counts instances, outstanding requests, and launches not yet visible to EC2.
@@ -200,7 +197,6 @@ Execution requires:
 - the deterministic candidate archive and provenance produced by
   `baseline/freeze-candidate.sh`
 - the pinned Trino checkout for shards that compare Joni or Trino LIKE
-- the pinned Rebar checkout described in `../rebar/README.md`
 - working AWS credentials from the standard AWS credential chain, or an
   explicitly selected profile, and the configured region
 
@@ -423,14 +419,11 @@ aws s3api put-bucket-tagging --bucket <bucket> --region <region> \
 
 ### Engine builds
 
-The `build` phase builds the native RE2 benchmark, the Rebar engines and native
-runners, and the pinned Trino harness once per platform, exactly as a baseline
-host would. Each build records the compiler's expansion of `-march=native` or
-`-mcpu=native` and the builder's CPU identity, and freezes its outputs in
-`native.tar.gz` and `trino.tar.gz` under a manifest, `engine-build.json`. The
-manifest lists each archive's SHA-256 and per-file hashes, and its inputs: the
-candidate, the Rebar and Trino commits, the toolchain packages, and the build
-scripts. Accepted builds go to `accepted-engine-builds.json`.
+The `build` phase builds the pinned Trino harness once per platform, exactly as
+a baseline host would, and freezes it in `trino.tar.gz` under a manifest,
+`engine-build.json`. The manifest lists the archive's SHA-256 and per-file
+hashes, and its inputs: the candidate, the Trino commit, and the build scripts.
+Accepted builds go to `accepted-engine-builds.json`.
 
 Smoke, primary, and confirmation execution require `--engine-builds`, naming
 an accepted build root for every platform. Each platform's manifest SHA-256 is
@@ -438,18 +431,14 @@ frozen in `execution-policy.json`, and primary and confirmation refuse a
 prerequisite that used different builds. Language batches do not use engine
 builds; their Rust comparator still builds on the host.
 
-Hosts check every downloaded archive with `sha256sum --check`, then verify each
-archive and installed file against the manifest; a mismatch fails the session.
-After installing packages, the host computes its own native target and CPU
-identity. If either differs from the builder's, it ignores the native archive
-and builds the native engines locally, as before. The Java harness is installed
-either way. `engine-build.txt` records the choice and its reason beside the
-host evidence and in each route, and every route's `run-metadata.txt` records
-whether each engine was prebuilt, with its archive SHA-256, or built locally.
+Hosts check the downloaded archive with `sha256sum --check`, then verify the
+archive and each installed file against the manifest; a mismatch fails the
+session. `engine-build.txt` records the installed build beside the host
+evidence and in each route.
 
 Preflight names each allowed region that lacks the shared transfer bucket
 `--engine-builds` requires. Before it launches any host,
-the controller puts each archive once in every region that may launch a host
+the controller puts the archive once in every region that may launch a host
 installing it, under `TRANSFER_PREFIX/engine-builds/<sha256>.tar.gz`, and skips
 an object with that key and checksum. An upload slower than 256 KiB/s counts as
 stalled and is stopped and retried; the campaign stops after three failed
@@ -466,9 +455,6 @@ aws s3 rm "s3://<bucket>/<transfer-prefix>/engine-builds/" --recursive --region 
 ## Single-job wrapper
 
 The controllers use `run-campaign.sh` to run one AWS job. A
-`CAMPAIGN_MODE=baseline-shard` job selects one architecture, platform, shard,
-and replica for a [diagnostic](../diagnostics/README.md) or
-[remeasurement](../baseline/REMEASUREMENT.md) run. A
 `CAMPAIGN_MODE=language-batch` job selects one language batch and its frozen
 inputs. A `CAMPAIGN_MODE=engine-build` job builds one platform's engines, and a
 `CAMPAIGN_MODE=unit-worker` job leases [work units](#unit-workers). The wrapper verifies the archive, provisions an isolated
@@ -482,12 +468,10 @@ controller and wrapper, so it uses the same launch regions.
 
 `run-host.sh` runs on the instance. It accepts the same
 modes, verifies the AMI, JDK, package, candidate, comparator, and manifest
-identities, and delegates to `baseline/run-host-session.sh`,
-`language/run-host-session.sh`, `baseline/build-engines.sh`, or
-`run-unit-worker.sh`. Language batches, engine builds, unit workers, and
-Rebar shards install the pinned Cargo and Rust packages, because the Rust
-language comparator builds the pinned `regex` crate on the host, the engine
-build compiles Rebar, and a unit worker measures Rebar units.
+identities, and delegates to `language/run-host-session.sh`,
+`baseline/build-engines.sh`, or `run-unit-worker.sh`. Only language batches
+install the pinned Cargo and Rust packages, because the Rust language
+comparator builds the pinned `regex` crate on the host.
 
 ## Unit workers
 
@@ -496,7 +480,7 @@ its controller leases to it, one at a time, instead of one shard. It requires
 `CAMPAIGN_SHARD_ID=unit-worker` and `TIMEOUT_SECONDS` of the worker lifetime,
 `UNIT_WORKER_LIFETIME_SECONDS` (default 21600), plus 5400. The host
 bootstraps as a baseline host does: packages, the JDK, the environment record,
-and the platform's prebuilt engines once the native target matches. It then
+and the platform's prebuilt Trino harness. It then
 runs `run-unit-worker.sh`, which runs `../baseline/run-unit.sh` for each lease.
 The wrapper's `session.txt` records the host session (`session`), `bucket`,
 `input_prefix`, and `result_prefix`; every key below is under one of those
@@ -618,13 +602,12 @@ campaign.
 ### Unit dispatch
 
 The controller keeps a queue of the phase's work items and a pool of workers
-per platform and instance class; a concurrency-class unit runs on the
-platform's `.2xlarge` type. Each worker is a job of the
-controller's ordinary launch path, so regions, placement scores, Spot launch
-retries in the next region, `--max-concurrent`, the per-platform limit, and
-the shared budget apply to it, and its reservation lasts until its cleanup is
-verified. `unit-workers.tsv` freezes each worker before its launch. A pool
-launches a worker only while its queued items outnumber its idle workers.
+per platform. Each worker is a job of the controller's ordinary launch path,
+so regions, placement scores, Spot launch retries in the next region,
+`--max-concurrent`, the per-platform limit, and the shared budget apply to it,
+and its reservation lasts until its cleanup is verified. `unit-workers.tsv`
+freezes each worker before its launch. A pool launches a worker only while its
+queued items outnumber its idle workers.
 
 When several regions are allowed, a worker whose Spot launch found no capacity
 in any zone of its region cools that region for its pool for 15 minutes, and
@@ -677,9 +660,9 @@ against the host's calibrations, is retained, and is added to
   does not match its marker, and a failed artifact gate leave the unit
   unresolved without a retry while other work continues.
 - Status 44 means the route's correctness stage failed: a semantic test, the
-  DFA probe, a differential verifier or its count of verified cases, the
-  curated Rebar verification, or the pinned Trino comparator's verification,
-  including a check that could not start. The controller records the attempt
+  DFA probe, a differential verifier or its count of verified cases, or the
+  pinned Trino comparator's verification, including a check that could not
+  start. The controller records the attempt
   in `semantic-rejections.tsv` (`platform`, `unit_id`, `replica_id`,
   `unit_attempt_id`) before it acts on it. No other attempt of the unit clears
   it, whether it completed before or after; the unit is listed unresolved, and

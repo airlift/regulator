@@ -120,9 +120,8 @@ def record(build_directory, target="language_benchmark"):
         actual = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=directory).decode().strip()
         if actual != expected:
             raise ValueError(f"wrong pinned dependency: {name}")
-        # The existing build applies only its benchmark-input patch to the RE2 checkout.
         modified = subprocess.check_output(["git", "diff", "HEAD", "--name-only"], cwd=directory).decode().splitlines()
-        if modified and not (name == "re2" and modified == ["re2/testing/regexp_benchmark.cc"]):
+        if modified:
             raise ValueError(f"modified native dependency: {name}")
         dependencies[name] = actual
     evidence = {

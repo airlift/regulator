@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 
-EXPECTED = {"baseline-shard", "language-batch", "engine-build", "unit-worker"}
+EXPECTED = {"language-batch", "engine-build", "unit-worker"}
 
 
 def shell_modes(path, variable):

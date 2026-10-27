@@ -62,7 +62,7 @@ OBJECT_PREFIX=campaign
 RESULT_PREFIX=campaign/results
 CAMPAIGN_ID=test
 CAMPAIGN_PLATFORM=r9g
-CAMPAIGN_SHARD_ID=traditional-extra
+CAMPAIGN_SHARD_ID=unit-worker
 CAMPAIGN_REPLICA_ID=1
 CAMPAIGN_HOST_EPOCH=1
 discover_campaign_instances() {{ return 0; }}

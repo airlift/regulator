@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 
 import csv
-import contextlib
 import importlib.util
-import io
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -25,11 +22,8 @@ SPECIFICATION.loader.exec_module(SHARD_RESULTS)
 import row_protocol as ROW_PROTOCOL  # noqa: E402
 import unit_session as UNIT_SESSION  # noqa: E402
 import work_units as WORK_UNITS  # noqa: E402
-# The qualification process count the handler harness gives run-shard.sh.
-JMH_PROCESS_COUNT = 5
 with SOURCE.with_name("shard-dispatch.tsv").open(newline="", encoding="utf-8") as dispatch_file:
     DISPATCH = {row["shard_id"]: row for row in csv.DictReader(dispatch_file, delimiter="\t")}
-HANDLER_FUNCTIONS = {"trino-final-line": "run_final_line_shard", "jmh": "run_generic_jmh_shard"}
 
 
 def shell_function(source, name):
@@ -39,10 +33,10 @@ def shell_function(source, name):
 
 
 def run_shard_handler(shard, route, replica, joni_order="forward"):
-    """Runs the shard runner's measurement handler with java and normalization intercepted.
+    """Runs a route's measurement handler with its JMH calls and normalization intercepted.
 
-    Returns each JMH launch as (forks, filter, parameters, time unit, output), each
-    normalization call as its argument list, and the identifier of each compiler-hints JVM.
+    Returns each handler JMH call as (runner, filter, parameters, time unit, output), where the
+    runner is processes or forks, and each normalization call as its argument list.
     """
     source = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
 
@@ -60,54 +54,34 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
         subprocess.run([str(SOURCE), "expected", "--manifest", str(MANIFEST), "--shard", shard, "--systems",
                         dispatch[f"{route_column}_systems"], "--output", str(root / "expected-rows.tsv")], check=True)
         functions = [shell_function(source, name) for name in (
-            "full_protocol_benchmarks", "set_jmh_input_files", "prepare_jmh_host_compiler_arguments",
-            "run_jmh_with_classpath", "run_jmh", "run_joni_jmh_with_classpath", "run_jmh_per_workload",
-            "run_ordered_joni_comparison", "run_trino_operations_candidate", "run_trino_operations_joni",
-            "run_trino_operations_candidates", "run_trino_operations_shard", "run_trino_like_system",
-            "run_trino_like_shard", "run_final_line_candidate", "run_final_line_joni", "run_final_line_shard",
-            "frozen_protocol", "jmh_warmup_time", "set_forked_jmh_input_files", "run_generic_jmh_shard",
-            "unit_holds_rows", "run_traditional_shard", "run_lifecycle_candidate", "run_lifecycle_regulator_phase",
-            "run_lifecycle_shard")]
+            "run_jmh", "run_jmh_per_workload", "run_ordered_joni_comparison", "run_trino_operations_candidate",
+            "run_trino_operations_joni", "run_trino_operations_candidates", "run_trino_operations_shard",
+            "run_trino_like_system", "run_trino_like_shard")]
+        recorder = (
+            "    local runner=$1 filter=$3 output=$4 parameters=() unit=-\n"
+            "    shift 4\n"
+            "    while (($#)); do\n"
+            "        case $1 in\n"
+            "            -p) parameters+=(\"$2\"); shift ;;\n"
+            "            -tu) unit=$2; shift ;;\n"
+            "        esac\n"
+            "        shift\n"
+            "    done\n"
+            "    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"${runner}\" \"${filter}\" \"${parameters[*]}\" \"${unit}\" \"${output##*/}\" \\\n"
+            "        >> \"${RESULT_DIR}/launches.tsv\"\n")
         script = "\n".join([
             "set -euo pipefail",
             f"SHARD_ID={shard} ROUTE={route} CAMPAIGN_REPLICA_ID={replica} RESULT_DIR={shlex.quote(str(root))}",
-            f"systems={dispatch[f'{route_column}_systems']} MANIFEST={shlex.quote(str(MANIFEST))}",
-            f"SELECTION_MANIFEST={shlex.quote(str(MANIFEST))} UNIT_DIRECTORY=",
-            f"RESULT_TOOL={shlex.quote(str(SOURCE))} SCRIPT_DIR={shlex.quote(str(SOURCE.parent))}",
-            # The native RE2 comparator is not a JMH launch.
-            f"native_system_row_count=0 EXTENDED_WARMUP_TIME=300ms ROOT={shlex.quote(str(SOURCE.parents[2]))}",
-            f"FULL_PROTOCOL_BENCHMARKS={shlex.quote(str(SOURCE.with_name('full-protocol-benchmarks.tsv')))}",
-            f"ROW_PROTOCOL={shlex.quote(str(SOURCE.with_name('row-protocol.tsv')))}",
-            f"PROTOCOL=qualification JMH_PROCESS_COUNT={JMH_PROCESS_COUNT} JMH_PROCESS_TIME=1s JONI_JMH_FORKS=1 JONI_JMH_TIME=1s",
-            f"JMH_PROCESS_WARMUP_ITERATIONS=10 JMH_PROCESS_MEASUREMENT_ITERATIONS=10 JONI_COMPARATOR_ORDER={joni_order}",
-            "CLASSPATH=regulator SPECIAL_CLASSPATH=special PINNED_TRINO_CLASSPATH=pinned CPU_LIST=0 jmh_fork_arguments=-Xmx1g",
-            "route_jvm_arguments=()",
-            "jmh_process_jvm_arguments=() jmh_launcher_jvm_arguments=() jmh_host_compiler_arguments=()",
-            "secondary_metric_arguments=(--allow-missing-secondary-metrics) mixed_process_arguments=()",
-            "precision_arguments=() joni_process_arguments=() normalized_files=() joni_jmh_row_count=0",
-            f"candidate_system=regulator-{route} final_line_mappings=() final_line_joni_mappings=()",
+            f"systems={dispatch[f'{route_column}_systems']} SELECTION_MANIFEST={shlex.quote(str(MANIFEST))}",
+            f"RESULT_TOOL={shlex.quote(str(SOURCE))} JONI_COMPARATOR_ORDER={joni_order}",
+            "CLASSPATH=regulator SPECIAL_CLASSPATH=special PINNED_TRINO_CLASSPATH=pinned",
+            "secondary_metric_arguments=() mixed_process_arguments=() joni_process_arguments=()",
+            "precision_arguments=() normalized_files=()",
             block("JMH_SUITE_ORDER=forward\n"), block("jmh_invocation_per_workload=false\n"),
-            "taskset() { shift 2; \"$@\"; }",
-            "java() {",
-            "    if [[ \" $* \" == *' io.airlift.regulator.BenchmarkCompilerHints '* ]]; then",
-            "        printf '%s\\n' \"${@: -2:1}\" >> \"${RESULT_DIR}/compiler-hints.txt\"",
-            "        printf -- '-XX:+UnlockDiagnosticVMOptions\\n' > \"${@: -1}\"",
-            "        return",
-            "    fi",
-            "    local forks= filter= parameters=() unit=- output=",
-            "    while (($#)); do",
-            "        case $1 in",
-            "            org.openjdk.jmh.Main) filter=$2; shift ;;",
-            "            -f) forks=$2; shift ;;",
-            "            -p) parameters+=(\"$2\"); shift ;;",
-            "            -tu) unit=$2; shift ;;",
-            "            -rff) output=$2; shift ;;",
-            "        esac",
-            "        shift",
-            "    done",
-            "    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"${forks}\" \"${filter}\" \"${parameters[*]}\" \"${unit}\" \"${output##*/}\" \\",
-            "        >> \"${RESULT_DIR}/launches.tsv\"",
-            "}",
+            "record_jmh_call() {", recorder, "}",
+            "run_jmh_with_classpath() { record_jmh_call processes \"$@\"; }",
+            "run_joni_jmh_with_classpath() { record_jmh_call forks \"$@\"; }",
+            "set_jmh_input_files() { JMH_INPUT_FILES=(\"$1\"); }",
             "python3() {",
             "    if [[ $2 == normalize-* ]]; then",
             "        printf '%s\\x1f' \"$@\" >> \"${RESULT_DIR}/normalizations.txt\"",
@@ -117,14 +91,12 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
             "    fi",
             "}",
             *functions,
-            HANDLER_FUNCTIONS.get(handler, f"run_{handler.replace('-', '_')}_shard"),
+            f"run_{handler.replace('-', '_')}_shard",
         ])
         subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True)
         launches = [tuple(line.split("\t")) for line in (root / "launches.tsv").read_text().splitlines()]
         normalizations = [line.split("\x1f")[:-1] for line in (root / "normalizations.txt").read_text().splitlines()]
-        hints = root / "compiler-hints.txt"
-        compiler_hints = [Path(line).name for line in hints.read_text().splitlines()] if hints.exists() else []
-    return launches, normalizations, compiler_hints
+    return launches, normalizations
 
 
 def argument_values(arguments, name):
@@ -135,123 +107,9 @@ def argument_values(arguments, name):
 
 
 class TestShardResults(unittest.TestCase):
-    def testRebarFilterSelectsOneModel(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            manifest = Path(temporary_directory) / "rows.tsv"
-            common = {
-                "shard_id": "rebar-a",
-                "suite": "rebar-curated",
-                "system": "joni",
-                "comparator": "joni-rebar-differential",
-                "expected_result": "native-differential",
-                "allocation_contract": "not-measured",
-                "workload_checksum": "corpus",
-            }
-            SHARD_RESULTS.write_tsv(manifest, SHARD_RESULTS.MANIFEST_FIELDS, [
-                {
-                    **common,
-                    "row_id": "count/joni",
-                    "benchmark": "curated/count-only",
-                    "parameters": "model=count;workload=count",
-                },
-                {
-                    **common,
-                    "row_id": "spans/joni",
-                    "benchmark": "curated/spans-only",
-                    "parameters": "model=count-spans;workload=spans",
-                },
-            ])
-
-            completed = subprocess.run(
-                [
-                    str(SOURCE),
-                    "rebar-filter",
-                    "--manifest", str(manifest),
-                    "--shard", "rebar-a",
-                    "--system", "joni",
-                    "--model", "count",
-                ],
-                check=True,
-                capture_output=True,
-                text=True)
-
-            self.assertIn("curated/count", completed.stdout)
-            self.assertNotIn("spans-only", completed.stdout)
-
-    def testJoniUsesParameterIsolatedProperForksOnComparatorClasspaths(self):
-        script = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
-
-        self.assertIn("run_joni_jmh_with_classpath()", script)
-        self.assertIn('run_joni_jmh_with_classpath "${PINNED_TRINO_CLASSPATH}"', script)
-        self.assertIn('run_joni_jmh_with_classpath "${SPECIAL_CLASSPATH}"', script)
-        joni_runner = script.split("run_joni_jmh_with_classpath()", 1)[1].split("\n}\n", 1)[0]
-        self.assertIn('-f "${JONI_JMH_FORKS}"', joni_runner)
-        self.assertNotIn("-f 0", joni_runner)
-        self.assertIn("JONI_JMH_FORKS=1", script)
-        self.assertNotIn("JONI_JMH_FORKS=5", joni_runner)
-
-    def testRebarJoniUsesIndependentOrderedInvocation(self):
-        script = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
-
-        self.assertIn("run_rebar_primary_phase()", script)
-        self.assertIn("run_rebar_joni_phase()", script)
-        self.assertIn(
-            "run_ordered_joni_comparison run_rebar_primary_phase run_rebar_joni_phase",
-            script)
-        self.assertIn("rebar-primary-measurements.csv", script)
-        self.assertIn("rebar-joni-measurements.csv", script)
-        self.assertNotIn("regulator/re2|joni/trino", script)
-        for shard in (f"rebar-{letter}" for letter in "abcdefghijklmnopqrst"):
-            self.assertEqual(
-                "regulator-native-access,native-re2-before,native-re2-after,joni",
-                DISPATCH[shard]["native_access_systems"])
-
-    def testSpecialClasspathRunsAndRegistersFullProtocolOutputs(self):
-        source = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
-        runner_start = source.index("run_jmh_with_classpath()")
-        runner_end = source.index("\n}\n", runner_start) + 3
-        runner = source[runner_start:runner_end]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            output = Path(temporary_directory) / "result.json"
-            script = (
-                "set -euo pipefail\n"
-                "PROTOCOL=qualification\n"
-                "UNIT_DIRECTORY=\n"
-                "JMH_PROCESS_COUNT=2\n"
-                "JMH_PROCESS_TIME=50ms\n"
-                "JMH_PROCESS_WARMUP_ITERATIONS=1\n"
-                "JMH_PROCESS_MEASUREMENT_ITERATIONS=1\n"
-                "CLASSPATH=ordinary\n"
-                "CPU_LIST=0\n"
-                "jmh_process_jvm_arguments=()\n"
-                "jmh_launcher_jvm_arguments=(-Xms64m -Xmx256m)\n"
-                "jmh_host_compiler_arguments=()\n"
-                "route_jvm_arguments=()\n"
-                "jmh_fork_arguments=-Xmx1g\n"
-                "prepare_jmh_host_compiler_arguments() { jmh_host_compiler_arguments=(); }\n"
-                "full_protocol_benchmarks() { printf 'example.Benchmark.measure\\tsize=2\\tsize=1\\n'; }\n"
-                "taskset() { shift 2; \"$@\"; }\n"
-                "java() { while (($#)); do if [[ $1 == -rff ]]; then printf '[]' > \"$2\"; fi; shift; done; }\n"
-                f"{runner}\n"
-                f"run_jmh_with_classpath special '^example\\.Benchmark\\.measure$' {output}\n"
-                "printf '%s\\n' \"${JMH_INPUT_FILES[@]}\"\n")
-
-            result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True)
-
-            output_base = output.with_suffix("")
-            self.assertEqual(
-                [
-                    f"{output_base}-process-1.json",
-                    f"{output_base}-process-2.json",
-                    f"{output_base}-bounded-1-process-1.json",
-                    f"{output_base}-bounded-1-process-2.json",
-                    f"{output_base}-full-1.json",
-                ],
-                result.stdout.splitlines())
-
     def assertEachWorkloadLaunches(self, expected, launches, normalizations):
         """Checks the launches against expected (system, launch) pairs, and that each system's
-        normalization reads exactly its own launches' results as separate process sets."""
+        normalization reads exactly its own launches' results."""
         self.assertEqual([launch for _, launch in expected], [launch[:4] for launch in launches])
         self.assertEqual(len(launches), len({launch[4] for launch in launches}))
         outputs = {}
@@ -260,9 +118,6 @@ class TestShardResults(unittest.TestCase):
         self.assertEqual(list(outputs), [argument_values(arguments, "--system")[0] for arguments in normalizations])
         for arguments in normalizations:
             system = argument_values(arguments, "--system")[0]
-            self.assertIn("--allow-mixed-process-sets", arguments)
-            process_groups = "1" if system == "joni" else str(JMH_PROCESS_COUNT)
-            self.assertEqual([process_groups], argument_values(arguments, "--expected-process-groups"))
             self.assertEqual(sorted(outputs[system]), sorted(Path(path).name for path in argument_values(arguments, "--input")))
 
     def testSpecializedPatternsRunEachWorkloadInItsOwnJvms(self):
@@ -271,18 +126,18 @@ class TestShardResults(unittest.TestCase):
 
         def launches_of(shard, system, reverse):
             rows = [row for row in manifest if row["shard_id"] == shard and row["system"] == system]
-            forks, processes = ("1", 1) if system == "joni" else ("0", JMH_PROCESS_COUNT)
+            runner = "forks" if system == "joni" else "processes"
             return [
-                (system, (forks, "^" + row["benchmark"].replace(".", "\\.") + "$", row["parameters"], "-"))
-                for row in (rows[::-1] if reverse else rows)
-                for _ in range(processes)]
+                (system, (runner, "^" + row["benchmark"].replace(".", "\\.") + "$",
+                          row["parameters"].replace(";", " "), "-"))
+                for row in (rows[::-1] if reverse else rows)]
 
         # Even replicas reverse the Regulator variants and their workloads. Joni keeps its workload
         # order, and JONI_COMPARATOR_ORDER places it after or before every variant.
         for shard in ("trino-specialized-patterns-a", "trino-specialized-patterns-b"):
             for replica, joni_order in ((1, "forward"), (2, "forward"), (1, "reverse")):
                 with self.subTest(shard=shard, replica=replica, joni_order=joni_order):
-                    launches, normalizations, _ = run_shard_handler(shard, "native-access", replica, joni_order)
+                    launches, normalizations = run_shard_handler(shard, "native-access", replica, joni_order)
 
                     reverse = replica % 2 == 0
                     variants = [
@@ -295,18 +150,15 @@ class TestShardResults(unittest.TestCase):
     def testTrinoOperationsKeepsOneInvocationPerSystemOnEveryReplica(self):
         for replica in (1, 2):
             with self.subTest(replica=replica):
-                launches, normalizations, _ = run_shard_handler("trino-operations", "native-access", replica)
+                launches, normalizations = run_shard_handler("trino-operations", "native-access", replica)
 
                 self.assertEqual(
-                    [f"trino-operations-regulator-native-access-process-{index}.json"
-                     for index in range(1, JMH_PROCESS_COUNT + 1)] +
-                    ["trino-operations-joni.json"],
+                    ["trino-operations-regulator-native-access.json", "trino-operations-joni.json"],
                     [launch[4] for launch in launches])
                 self.assertEqual({""}, {launch[2] for launch in launches})
                 self.assertEqual(
                     ["regulator-native-access", "joni"],
                     [argument_values(arguments, "--system")[0] for arguments in normalizations])
-                self.assertFalse(any("--allow-mixed-process-sets" in arguments for arguments in normalizations))
 
     def testEveryLikeShardNormalizesItsOwnManifestRows(self):
         manifest = SHARD_RESULTS.load_manifest(MANIFEST)
@@ -314,7 +166,7 @@ class TestShardResults(unittest.TestCase):
         self.assertIn("trino-like-specialized", shards)
         for shard in shards:
             with self.subTest(shard=shard):
-                _, normalizations, _ = run_shard_handler(shard, "native-access", 1)
+                _, normalizations = run_shard_handler(shard, "native-access", 1)
 
                 self.assertEqual(
                     {(row["system"], row["suite"]) for row in manifest if row["shard_id"] == shard},
@@ -333,15 +185,15 @@ class TestShardResults(unittest.TestCase):
         self.assertEqual(set(methods), {row["system"] for row in manifest})
         # The TPC-H benchmark declares microseconds, so every launch requests nanoseconds.
         forward = [
-            (system, ("0", f"^io\\.airlift\\.regulator\\.BenchmarkTrinoLikeTpch\\.{method}$", row["parameters"], "ns"))
+            (system, ("processes", f"^io\\.airlift\\.regulator\\.BenchmarkTrinoLikeTpch\\.{method}$",
+                      row["parameters"], "ns"))
             for system, method in methods.items()
-            for row in manifest if row["system"] == system
-            for _ in range(JMH_PROCESS_COUNT)]
+            for row in manifest if row["system"] == system]
 
         # Even replicas reverse the whole sequence, Trino SQL included.
         for replica, expected in ((1, forward), (2, forward[::-1])):
             with self.subTest(replica=replica):
-                launches, normalizations, _ = run_shard_handler("trino-like-specialized", "native-access", replica)
+                launches, normalizations = run_shard_handler("trino-like-specialized", "native-access", replica)
 
                 self.assertEachWorkloadLaunches(expected, launches, normalizations)
                 for arguments in normalizations:
@@ -364,43 +216,13 @@ class TestShardResults(unittest.TestCase):
                 handlers.add(handler)
                 key = (unit["shard_id"], route)
                 if key not in filters:
-                    launches, _, _ = run_shard_handler(*key, 1)
+                    launches, _ = run_shard_handler(*key, 1)
                     filters[key] = [re.compile(launch[1]) for launch in launches]
                 for selector in route_selectors:
                     for benchmark in selector["benchmarks"].split(","):
                         with self.subTest(unit=unit["unit_id"], route=route, benchmark=benchmark):
                             self.assertTrue(any(pattern.search(benchmark) for pattern in filters[key]))
-        self.assertLessEqual({"jmh", "traditional", "lifecycle", "trino-like", "trino-operations"}, handlers)
-
-    def testPlannedStartupsMatchTheLaunchedJvms(self):
-        dispatch = [
-            row for shard, row in DISPATCH.items()
-            if shard.startswith("trino-specialized-patterns-") or shard == "trino-like-specialized"]
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            for row in dispatch:
-                for route in ("native-access", "object-row"):
-                    if row[f"{route.replace('-', '_')}_handler"] == "-":
-                        continue
-                    with self.subTest(shard=row["shard_id"], route=route):
-                        result_directory = Path(temporary_directory) / f"{row['shard_id']}-{route}"
-                        subprocess.run(
-                            [str(SOURCE.with_name("run-shard.sh")), row["shard_id"], "qualification", route,
-                             str(result_directory)],
-                            check=True, capture_output=True, text=True, env={**os.environ, "BASELINE_PLAN_ONLY": "true"})
-                        metadata = dict(
-                            line.split("=", 1) for line in (result_directory / "run-metadata.txt").read_text().splitlines())
-                        launches, _, compiler_hints = run_shard_handler(row["shard_id"], route, 1)
-
-                        joni_rows = int(metadata["joni_jmh_row_count"])
-                        joni_invocations = int(metadata["joni_jmh_invocation_count"])
-                        planned = SHARD_RESULTS.jmh_startup_count(
-                            int(metadata["jmh_invocation_count"]) - joni_invocations,
-                            int(metadata["jmh_process_count"]),
-                            joni_invocations,
-                            joni_rows,
-                            int(metadata["joni_jmh_forks"]) if joni_rows else 0)
-                        # Each launch measures one workload, so a forked launch starts its launcher and its forks.
-                        self.assertEqual(planned, len(compiler_hints) + sum(1 + int(launch[0]) for launch in launches))
+        self.assertEqual({"trino-like", "trino-operations"}, handlers)
 
     def testUnitHandlerCallRunsEachSelectorAtItsProtocol(self):
         source = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
@@ -426,7 +248,6 @@ class TestShardResults(unittest.TestCase):
                 "JMH_PROCESS_TIME=20ms\nJONI_JMH_TIME=20ms\nCPU_LIST=0\n"
                 "jmh_process_jvm_arguments=()\njmh_launcher_jvm_arguments=()\njmh_fork_arguments=-Xmx1g\n"
                 "prepare_jmh_host_compiler_arguments() { jmh_host_compiler_arguments=(); }\n"
-                "full_protocol_benchmarks() { :; }\n"
                 "taskset() { shift 2; \"$@\"; }\n"
                 "java() { printf '%s\\n' \"$*\"; }\n"
                 + "".join(shell_function(source, name) for name in (
@@ -475,192 +296,6 @@ class TestShardResults(unittest.TestCase):
             capture_output=True,
             check=True)
         self.assertEqual("second\nfirst\n", completed.stdout)
-
-    def testAwsWrapperPropagatesProtocolQualificationSelection(self):
-        script = (SOURCE.parents[1] / "aws" / "run-campaign.sh").read_text(encoding="utf-8")
-
-        self.assertIn("BASELINE_PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}", script)
-        self.assertIn("export BASELINE_PROTOCOL_QUALIFICATION='${BASELINE_PROTOCOL_QUALIFICATION}'", script)
-
-    def testAwsWrapperDerivesReplacementAllocationFromTheFrozenProtocol(self):
-        script = (SOURCE.parents[1] / "aws" / "run-campaign.sh").read_text(encoding="utf-8")
-
-        self.assertIn('--print-allocation "${CAMPAIGN_PLATFORM}"', script)
-        self.assertIn("BENCHMARK_EXPECTED_VCPUS=${replacement_vcpus}", script)
-
-    def testSemanticPreparationDisablesProtocolQualification(self):
-        script = (SOURCE.parent / "run-host-session.sh").read_text(encoding="utf-8")
-        start = script.index("    BASELINE_DEFER_ACCEPTANCE=true")
-        block = script[start:script.index('"${RUN_SHARD}"', start)]
-
-        self.assertIn("BASELINE_VERIFICATION_ONLY=true", block)
-        self.assertIn("BASELINE_PROTOCOL_QUALIFICATION=false", block)
-
-    def testAwsWrappersTakeTrinoUseFromTheShardHandler(self):
-        campaign = (SOURCE.parents[1] / "aws" / "run-campaign.sh").read_text(encoding="utf-8")
-        host = (SOURCE.parents[1] / "aws" / "run-host.sh").read_text(encoding="utf-8")
-        scope_start = campaign.index('case "$(campaign_shard_handler)" in\n    trino-operations | trino-final-line)')
-        # The host takes a shard's handler from dispatch, then its Trino use from that handler.
-        host_start = host.index('case "${BENCHMARK_MODE}:${RE2_CAMPAIGN_SHARD_ID:-}" in')
-        host_end = host.index("\nesac\n", host.index("\nesac\n", host_start) + 1) + 6
-        wrapper_code = "\n".join([
-            shell_function(campaign, "campaign_shard_handler"),
-            shell_function(campaign, "campaign_uses_trino"),
-            campaign[scope_start:campaign.index("\nesac\n", scope_start) + 6],
-            "campaign_uses_trino && echo campaign=true || echo campaign=false",
-            'echo "scope=${JONI_EVIDENCE_SCOPE}"',
-            "(set -- regulator ''",
-            host[host_start:host_end],
-            ") 2>/dev/null && echo host=false || echo host=true"])
-        joni_scopes = {
-            "trino-operations": "trino-operation-comparison",
-            "trino-final-line": "trino-operation-comparison",
-            "lifecycle": "retained-memory-comparison",
-            "rebar": "rebar-bulk-text-comparison",
-        }
-
-        for row in DISPATCH.values():
-            handler = row["native_access_handler"]
-            with self.subTest(shard=row["shard_id"]):
-                completed = subprocess.run(
-                    ["bash"],
-                    input=f"set -euo pipefail\nREGULATOR_DIR={shlex.quote(str(SOURCE.parents[3]))} CAMPAIGN_MODE=baseline-shard "
-                          f"BENCHMARK_MODE=baseline-shard CAMPAIGN_SHARD_ID={row['shard_id']} "
-                          f"RE2_CAMPAIGN_SHARD_ID={row['shard_id']}\n{wrapper_code}\n",
-                    text=True, capture_output=True, check=True)
-
-                # Pinned Trino serves these handlers' Joni and Trino comparators, or their LIKE corpus.
-                uses_trino = str(handler in {"trino-operations", "trino-final-line", "trino-like", "lifecycle", "rebar"}).lower()
-                self.assertEqual(
-                    [f"campaign={uses_trino}", f"scope={joni_scopes.get(handler, 'not-used')}", f"host={uses_trino}"],
-                    completed.stdout.splitlines())
-
-    def testPlanOnlyIncludesSpecializedAllowances(self):
-        expected_metadata = {
-            "trino-operations": {
-                "candidate_jmh_row_count": "184",
-                "joni_jmh_row_count": "184",
-                "joni_jmh_forks": "1",
-                "jmh_static_duration_estimate_seconds": "1710",
-                "route_static_duration_estimate_seconds": "2874",
-            },
-            "trino-specialized-patterns-a": {
-                "jmh_static_duration_estimate_seconds": "1304",
-                "route_static_duration_estimate_seconds": "2204",
-            },
-            "trino-like-specialized": {
-                "jmh_static_duration_estimate_seconds": "1568",
-                "route_static_duration_estimate_seconds": "2468",
-            },
-            "traditional-extra-easy2": {
-                "protocol_qualification_estimate_seconds": "0",
-                "native_system_row_count": "32",
-                "native_measurement_estimate_seconds": "160",
-                "native_build_startup_allowance_seconds": "900",
-                "jmh_execution_protocol": "multi-row-process-full",
-            },
-            "rebar-a": {
-                "rebar_system_row_count": "48",
-                "rebar_joni_row_count": "12",
-                "rebar_primary_verification_estimate_seconds": "1080",
-                "rebar_measurement_window_seconds_per_row": "10",
-                "rebar_measurement_estimate_seconds": "480",
-                "rebar_build_startup_allowance_seconds": "900",
-                "rebar_joni_verification_estimate_seconds": "360",
-                "pinned_trino_preparation_allowance_seconds": "900",
-                "route_static_duration_estimate_seconds": "3944",
-            },
-            "retained-memory": {
-                "pinned_trino_preparation_allowance_seconds": "900",
-                "retained_memory_census_count": "2",
-                "retained_memory_census_estimate_seconds": "1800",
-                "additional_duration_allowance_seconds": "2700",
-                "route_static_duration_estimate_seconds": "2924",
-            },
-        }
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            for shard, expected in expected_metadata.items():
-                result_directory = root / shard
-                subprocess.run(
-                    [str(SOURCE.with_name("run-shard.sh")), shard, "qualification", "native-access",
-                     str(result_directory)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    env={**os.environ, "BASELINE_PLAN_ONLY": "true"})
-                metadata = dict(
-                    line.split("=", 1)
-                    for line in (result_directory / "run-metadata.txt").read_text().splitlines())
-                for key, value in expected.items():
-                    self.assertEqual(value, metadata[key], f"{shard} {key}")
-
-    def testEveryFormalHostPlanFitsNinetyMinutes(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            for row in DISPATCH.values():
-                for route, handler in (
-                        ("native-access", row["native_access_handler"]),
-                        ("object-row", row["object_row_handler"])):
-                    if handler == "-":
-                        continue
-                    result_directory = root / f"{row['shard_id']}-{route}"
-                    subprocess.run(
-                        [str(SOURCE.with_name("run-shard.sh")), row["shard_id"],
-                         "qualification", route, str(result_directory)],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        env={**os.environ, "BASELINE_PLAN_ONLY": "true"})
-                    metadata = dict(
-                        line.split("=", 1)
-                        for line in (result_directory / "run-metadata.txt").read_text().splitlines())
-                    if row["shard_id"].startswith("traditional-extra-"):
-                        self.assertEqual("multi-row-process-full", metadata["jmh_execution_protocol"])
-                        self.assertEqual("false", metadata["protocol_qualification_required"])
-                    self.assertLessEqual(
-                        float(metadata["route_static_duration_estimate_seconds"]),
-                        float(metadata["route_static_duration_limit_seconds"]),
-                        f"{row['shard_id']} {route}")
-
-    def testSmokeUsesGoogleBenchmarkDurationSyntax(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result_directory = Path(temporary_directory) / "traditional-search"
-            subprocess.run(
-                [str(SOURCE.with_name("run-shard.sh")), "traditional-search", "smoke", "native-access",
-                 str(result_directory)],
-                check=True,
-                capture_output=True,
-                text=True,
-                env={**os.environ, "BASELINE_PLAN_ONLY": "true"})
-            metadata = dict(
-                line.split("=", 1)
-                for line in (result_directory / "run-metadata.txt").read_text().splitlines())
-
-            self.assertEqual("3", metadata["native_repetitions"])
-            self.assertEqual("0.2s", metadata["native_minimum_time"])
-            self.assertEqual("3", metadata["jmh_process_measurement_iterations"])
-            self.assertEqual("1", metadata["calibration_prime_invocations"])
-
-    def testObjectRowTrinoOperationsUsesCompleteSpecializedHandler(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result_directory = Path(temporary_directory) / "trino-operations"
-            subprocess.run(
-                [str(SOURCE.with_name("run-shard.sh")), "trino-operations", "qualification", "object-row",
-                 str(result_directory)],
-                check=True,
-                capture_output=True,
-                text=True,
-                env={**os.environ, "BASELINE_PLAN_ONLY": "true"})
-            metadata = dict(
-                line.split("=", 1)
-                for line in (result_directory / "run-metadata.txt").read_text().splitlines())
-
-            self.assertEqual("trino-operations", metadata["handler"])
-            self.assertEqual("184", metadata["candidate_jmh_row_count"])
-            self.assertEqual("0", metadata["joni_jmh_row_count"])
-            self.assertEqual("1", metadata["jmh_invocation_count"])
-            self.assertEqual("0", metadata["pinned_trino_preparation_allowance_seconds"])
 
     def testResultChecksumIgnoresRawTimingButBindsSemanticContract(self):
         expected = {field: field for field in SHARD_RESULTS.MANIFEST_FIELDS}
@@ -813,41 +448,12 @@ class TestShardResults(unittest.TestCase):
                 method_map=["actual=logical"],
                 allow_missing_secondary_metrics=False,
                 allow_mixed_process_sets=True,
-                allow_multiple_process_groups=False,
                 expected_process_groups=1,
                 maximum_relative_standard_error=None))
 
             self.assertEqual(
                 ["row/first", "row/second"],
                 [row["row_id"] for row in SHARD_RESULTS.load_observed(output)])
-
-    def testJmhRuntimeChargesForkedComparatorStartupPerRow(self):
-        arguments = SimpleNamespace(
-            rows=10,
-            invocations=1,
-            processes=5,
-            forked_rows=4,
-            forked_processes=1,
-            forked_invocations=1,
-            warmup_iterations=1,
-            measurement_iterations=1,
-            iteration_seconds=1,
-            startup_seconds=2,
-            calibration_invocations=0,
-            calibration_rows=0,
-            calibration_processes=0,
-            calibration_warmup_iterations=0,
-            calibration_measurement_iterations=0,
-            calibration_iteration_seconds=1,
-            additional_seconds=0,
-            maximum_seconds=1_000)
-
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            SHARD_RESULTS.estimate_jmh_runtime(arguments)
-        # 108 s measured, then 2 s for each of 11 JVMs: the compiler-hints JVM and five
-        # processes, and the comparator's launcher and its four row forks.
-        self.assertEqual("130", output.getvalue().strip())
 
     def testNormalizeJmhChecksumIsStableAcrossTimingFiles(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -893,8 +499,7 @@ class TestShardResults(unittest.TestCase):
                     "input": [result],
                     "output": output,
                     "semantic_receipt": semantic_receipt,
-                    "allow_traditional_unpaired": False,
-                })()
+                    })()
                 SHARD_RESULTS.normalize_jmh(arguments)
                 with output.open(newline="", encoding="utf-8") as input_file:
                     checksums.append(next(csv.DictReader(input_file, delimiter="\t"))["result_checksum"])
@@ -938,7 +543,6 @@ class TestShardResults(unittest.TestCase):
                 "input": [result],
                 "output": root / "observed.tsv",
                 "semantic_receipt": semantic_receipt,
-                "allow_traditional_unpaired": False,
             })()
 
             with self.assertRaisesRegex(ValueError, "missing gc.alloc.rate.norm"):
@@ -997,7 +601,6 @@ class TestShardResults(unittest.TestCase):
                 "input": inputs,
                 "output": output,
                 "semantic_receipt": semantic_receipt,
-                "allow_traditional_unpaired": False,
             })()
 
             SHARD_RESULTS.normalize_jmh(arguments)
@@ -1075,7 +678,7 @@ class TestShardResults(unittest.TestCase):
                 "benchmark_class": "example.Benchmark",
                 "method_map": ["containsJoni=contains"],
                 "allow_missing_secondary_metrics": False,
-                "allow_multiple_process_groups": True,
+                "allow_mixed_process_sets": True,
                 "expected_process_groups": 5,
             })()
 
@@ -1148,33 +751,6 @@ class TestShardResults(unittest.TestCase):
 
         self.assertEqual("0.0028196087686909693", SHARD_RESULTS.format_number(coefficient_of_variation))
 
-    def testRuntimeEstimateIncludesInvocationsAndProcessStartup(self):
-        arguments = type("Arguments", (), {
-            "rows": 100,
-            "invocations": 2,
-            "processes": 5,
-            "warmup_iterations": 10,
-            "measurement_iterations": 10,
-            "iteration_seconds": 0.05,
-            "startup_seconds": 2,
-            "calibration_invocations": 2,
-            "calibration_rows": 1,
-            "calibration_processes": 5,
-            "calibration_warmup_iterations": 10,
-            "calibration_measurement_iterations": 10,
-            "calibration_iteration_seconds": 1,
-            "additional_seconds": 50,
-            "maximum_seconds": 800,
-        })()
-
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            SHARD_RESULTS.estimate_jmh_runtime(arguments)
-        self.assertEqual("798", output.getvalue().strip())
-        arguments.maximum_seconds = 780
-        with self.assertRaisesRegex(ValueError, "exceeds"):
-            SHARD_RESULTS.estimate_jmh_runtime(arguments)
-
     def testValidateDriftRejectsValuesAboveFivePercent(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -1184,55 +760,15 @@ class TestShardResults(unittest.TestCase):
             ])
             arguments = type("Arguments", (), {
                 "calibration": calibration,
-                "native_bracket": [],
                 "maximum": 0.05,
             })()
 
             with self.assertRaisesRegex(ValueError, "exceeded"):
                 SHARD_RESULTS.validate_drift(arguments)
 
-    def testValidateDriftRetainsLargeNativeBracketValues(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            calibration = root / "calibration.tsv"
-            native_bracket = root / "native-bracket.tsv"
-            SHARD_RESULTS.write_tsv(calibration, ("before_after_drift",), [
-                {"before_after_drift": "0.01"},
-            ])
-            SHARD_RESULTS.write_tsv(native_bracket, ("before_after_drift",), [
-                {"before_after_drift": "0.06"},
-            ])
-            arguments = type("Arguments", (), {
-                "calibration": calibration,
-                "native_bracket": [native_bracket],
-                "maximum": 0.05,
-            })()
-
-            SHARD_RESULTS.validate_drift(arguments)
-
-    def testValidateDriftRejectsMalformedNativeBracketValues(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            calibration = root / "calibration.tsv"
-            native_bracket = root / "native-bracket.tsv"
-            SHARD_RESULTS.write_tsv(calibration, ("before_after_drift",), [
-                {"before_after_drift": "0.01"},
-            ])
-            SHARD_RESULTS.write_tsv(native_bracket, ("before_after_drift",), [
-                {"before_after_drift": "nan"},
-            ])
-            arguments = type("Arguments", (), {
-                "calibration": calibration,
-                "native_bracket": [native_bracket],
-                "maximum": 0.05,
-            })()
-
-            with self.assertRaisesRegex(ValueError, "Invalid drift"):
-                SHARD_RESULTS.validate_drift(arguments)
-
     def testCurrentManifestUsesExactTrinoSystemSets(self):
         rows = SHARD_RESULTS.load_manifest(MANIFEST)
-        shards = {"trino-operations", "trino-search-edges", "trino-specialized-patterns-a", "trino-specialized-patterns-b"}
+        shards = {"trino-operations", "trino-specialized-patterns-a", "trino-specialized-patterns-b"}
         counts = {}
         for row in rows:
             if row["shard_id"] in shards:
@@ -1243,11 +779,6 @@ class TestShardResults(unittest.TestCase):
             ("trino-everyday-operations", "joni"): 104,
             ("trino-everyday-operations", "regulator-native-access"): 104,
             ("trino-everyday-operations", "regulator-object-row"): 104,
-            ("trino-public-operations", "joni"): 80,
-            ("trino-public-operations", "regulator-native-access"): 80,
-            ("trino-public-operations", "regulator-object-row"): 80,
-            ("trino-search-edges", "regulator-native-access"): 168,
-            ("trino-search-edges", "regulator-object-row"): 168,
             **{("trino-specialized-patterns", system): 5 for system in (
                 "joni",
                 "regulator-generated-native-access",
@@ -1258,274 +789,14 @@ class TestShardResults(unittest.TestCase):
                 "regulator-regular-engine-object-row")},
         }, counts)
 
-    def testCurrentManifestUsesExactRebarShardPartitions(self):
-        rows = SHARD_RESULTS.load_manifest(MANIFEST)
-        systems = (
-            "native-re2-after",
-            "native-re2-before",
-            "regulator-native-access",
-            "regulator-object-row",
-        )
-        expected_rows_per_system = {
-            **{f"rebar-{letter}": 12 for letter in "abcdefghijklmnopqr"},
-            "rebar-s": 11,
-            "rebar-t": 11,
-        }
-        expected_joni_rows = {
-            "rebar-a": 12,
-            "rebar-b": 9,
-            "rebar-c": 12,
-            "rebar-d": 11,
-            "rebar-e": 12,
-            "rebar-f": 10,
-            "rebar-g": 12,
-            "rebar-h": 12,
-            "rebar-i": 11,
-            "rebar-j": 11,
-            "rebar-k": 12,
-            "rebar-l": 11,
-            "rebar-m": 12,
-            "rebar-n": 11,
-            "rebar-o": 11,
-            "rebar-p": 12,
-            "rebar-q": 11,
-            "rebar-r": 12,
-            "rebar-s": 10,
-            "rebar-t": 11,
-        }
-
-        for shard, expected_count in expected_rows_per_system.items():
-            selected = [row for row in rows if row["shard_id"] == shard]
-            self.assertEqual(
-                expected_count * len(systems) + expected_joni_rows[shard], len(selected))
-            for system in systems:
-                self.assertEqual(
-                    expected_count,
-                    sum(row["system"] == system for row in selected),
-                    f"{shard} {system}")
-            self.assertEqual(
-                expected_joni_rows[shard],
-                sum(row["system"] == "joni" for row in selected))
-
-            native_route = SHARD_RESULTS.selected_rows(
-                rows,
-                shard,
-                "regulator-native-access,native-re2-before,native-re2-after,joni")
-            object_route = SHARD_RESULTS.selected_rows(rows, shard, "regulator-object-row")
-            self.assertEqual(expected_count * 3 + expected_joni_rows[shard], len(native_route))
-            self.assertEqual(expected_count, len(object_route))
-
     def testCurrentManifestUsesAccurateAllocationContracts(self):
         rows = SHARD_RESULTS.load_manifest(MANIFEST)
 
-        rebar_rows = [row for row in rows if row["suite"].startswith("rebar-")]
-        self.assertEqual(1177, len(rebar_rows))
-        self.assertEqual({"not-measured"}, {row["allocation_contract"] for row in rebar_rows})
-
-        traditional_native_rows = [
-            row for row in rows
-            if row["suite"] == "traditional" and row["system"].startswith("native-re2-")]
-        self.assertEqual(596, len(traditional_native_rows))
-        self.assertEqual(
-            {"not-measured"},
-            {row["allocation_contract"] for row in traditional_native_rows})
-
-        measured_regulator_rows = [
-            row for row in rows
-            if row["system"].startswith("regulator") and not row["suite"].startswith("rebar-")]
+        measured_regulator_rows = [row for row in rows if row["system"].startswith("regulator")]
         self.assertTrue(measured_regulator_rows)
         self.assertNotIn(
             "not-measured",
             {row["allocation_contract"] for row in measured_regulator_rows})
-
-    def testNormalizeRebarRecordsClassifiedMismatchWithoutTiming(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            manifest = root / "rows.tsv"
-            expected = {
-                "row_id": "rebar-a/extended/example/count/regulator-native-access",
-                "shard_id": "rebar-a",
-                "suite": "rebar-extended",
-                "system": "regulator-native-access",
-                "benchmark": "extended/example",
-                "parameters": "model=count;workload=extended/example",
-                "comparator": "pinned-native-re2",
-                "expected_result": "native-differential",
-                "allocation_contract": "not-measured",
-                "workload_checksum": "corpus",
-            }
-            SHARD_RESULTS.write_tsv(manifest, SHARD_RESULTS.MANIFEST_FIELDS, [expected])
-            semantic_receipt = root / "semantic.tsv"
-            SHARD_RESULTS.write_tsv(semantic_receipt, SHARD_RESULTS.SEMANTIC_FIELDS, [{
-                "route": "native-access",
-                "tests": "TestExample",
-                "outcome": "accepted",
-                "semantic_result_digest": "0" * 64,
-            }])
-            detail = "count mismatch, expected 55, got 0"
-            outcomes = root / "rebar-outcomes.tsv"
-            SHARD_RESULTS.write_tsv(outcomes, SHARD_RESULTS.REBAR_OUTCOME_FIELDS, [{
-                "row_id": expected["row_id"],
-                "suite": expected["suite"],
-                "system": expected["system"],
-                "benchmark": expected["benchmark"],
-                "model": "count",
-                "outcome": "semantic-mismatch",
-                "detail": detail,
-            }])
-            measurements = root / "measurements.csv"
-            with measurements.open("w", newline="", encoding="utf-8") as output_file:
-                writer = csv.DictWriter(
-                    output_file,
-                    fieldnames=("name", "model", "engine", "engine_version", "err", "median"))
-                writer.writeheader()
-                writer.writerow({
-                    "name": expected["benchmark"],
-                    "model": "count",
-                    "engine": "regulator/re2",
-                    "engine_version": "candidate",
-                    "err": detail,
-                    "median": "",
-                })
-            normalized = root / "normalized.tsv"
-            arguments = type("Arguments", (), {
-                "manifest": manifest,
-                "shard": "rebar-a",
-                "system": "regulator-native-access",
-                "input": measurements,
-                "output": normalized,
-                "semantic_receipt": semantic_receipt,
-                "rebar_outcomes": outcomes,
-            })()
-
-            SHARD_RESULTS.normalize_rebar(arguments)
-
-            observed = SHARD_RESULTS.load_observed(normalized)
-            self.assertEqual("semantic-mismatch", observed[0]["outcome"])
-            self.assertEqual("", observed[0]["score"])
-            self.assertEqual("", observed[0]["score_unit"])
-            self.assertEqual("not-measured", observed[0]["allocation_bytes"])
-
-            combined = root / "combined.tsv"
-            SHARD_RESULTS.combine(type("Arguments", (), {
-                "expected": manifest,
-                "output": combined,
-                "inputs": [normalized],
-                "rebar_outcomes": outcomes,
-            })())
-            self.assertEqual("semantic-mismatch", SHARD_RESULTS.load_observed(combined)[0]["outcome"])
-
-            arguments.rebar_outcomes = None
-            with self.assertRaisesRegex(ValueError, "Unclassified Rebar measurement failure"):
-                SHARD_RESULTS.normalize_rebar(arguments)
-
-    def testNormalizeRebarMapsJoniEngine(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            manifest = root / "rows.tsv"
-            expected = {
-                "row_id": "rebar-a/curated/example/count/joni",
-                "shard_id": "rebar-a",
-                "suite": "rebar-curated",
-                "system": "joni",
-                "benchmark": "curated/example",
-                "parameters": "model=count;workload=curated/example",
-                "comparator": "joni-rebar-differential",
-                "expected_result": "native-differential",
-                "allocation_contract": "not-measured",
-                "workload_checksum": "corpus",
-            }
-            SHARD_RESULTS.write_tsv(manifest, SHARD_RESULTS.MANIFEST_FIELDS, [expected])
-            semantic_receipt = root / "semantic.tsv"
-            SHARD_RESULTS.write_tsv(semantic_receipt, SHARD_RESULTS.SEMANTIC_FIELDS, [{
-                "route": "native-access",
-                "tests": "TestExample",
-                "outcome": "accepted",
-                "semantic_result_digest": "0" * 64,
-            }])
-            outcomes = root / "rebar-outcomes.tsv"
-            SHARD_RESULTS.write_tsv(outcomes, SHARD_RESULTS.REBAR_OUTCOME_FIELDS, [])
-            measurements = root / "measurements.csv"
-            with measurements.open("w", newline="", encoding="utf-8") as output_file:
-                writer = csv.DictWriter(
-                    output_file,
-                    fieldnames=("name", "model", "engine", "engine_version", "err", "median"))
-                writer.writeheader()
-                writer.writerow({
-                    "name": expected["benchmark"],
-                    "model": "count",
-                    "engine": "joni/trino",
-                    "engine_version": "Trino Joni 2.1.5.3",
-                    "err": "",
-                    "median": "123ns",
-                })
-
-            normalized = root / "normalized.tsv"
-            SHARD_RESULTS.normalize_rebar(type("Arguments", (), {
-                "manifest": manifest,
-                "shard": "rebar-a",
-                "system": "joni",
-                "input": measurements,
-                "output": normalized,
-                "semantic_receipt": semantic_receipt,
-                "rebar_outcomes": outcomes,
-            })())
-
-            observed = SHARD_RESULTS.load_observed(normalized)
-            self.assertEqual("123", observed[0]["score"])
-            self.assertEqual("accepted", observed[0]["outcome"])
-
-    def testNormalizeRebarRetainsUnmeasuredJoniTimeout(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            manifest = root / "rows.tsv"
-            expected = {
-                "row_id": "rebar-a/curated/example/count/joni",
-                "shard_id": "rebar-a",
-                "suite": "rebar-curated",
-                "system": "joni",
-                "benchmark": "curated/example",
-                "parameters": "model=count;workload=curated/example",
-                "comparator": "joni-rebar-differential",
-                "expected_result": "native-differential",
-                "allocation_contract": "not-measured",
-                "workload_checksum": "corpus",
-            }
-            SHARD_RESULTS.write_tsv(manifest, SHARD_RESULTS.MANIFEST_FIELDS, [expected])
-            semantic_receipt = root / "semantic.tsv"
-            SHARD_RESULTS.write_tsv(semantic_receipt, SHARD_RESULTS.SEMANTIC_FIELDS, [{
-                "route": "native-access",
-                "tests": "TestExample",
-                "outcome": "accepted",
-                "semantic_result_digest": "0" * 64,
-            }])
-            outcomes = root / "rebar-outcomes.tsv"
-            SHARD_RESULTS.write_tsv(outcomes, SHARD_RESULTS.REBAR_OUTCOME_FIELDS, [{
-                "row_id": expected["row_id"],
-                "suite": expected["suite"],
-                "system": "joni",
-                "benchmark": expected["benchmark"],
-                "model": "count",
-                "outcome": "did-not-finish",
-                "detail": "timeout: exceeded 30s",
-            }])
-            measurements = root / "measurements.csv"
-            measurements.write_text("")
-
-            normalized = root / "normalized.tsv"
-            SHARD_RESULTS.normalize_rebar(type("Arguments", (), {
-                "manifest": manifest,
-                "shard": "rebar-a",
-                "system": "joni",
-                "input": measurements,
-                "output": normalized,
-                "semantic_receipt": semantic_receipt,
-                "rebar_outcomes": outcomes,
-            })())
-
-            observed = SHARD_RESULTS.load_observed(normalized)
-            self.assertEqual("", observed[0]["score"])
-            self.assertEqual("did-not-finish", observed[0]["outcome"])
 
     def testNormalizeJmhUsesManifestIdentifier(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1574,7 +845,6 @@ class TestShardResults(unittest.TestCase):
                 "input": [result],
                 "output": output,
                 "semantic_receipt": semantic_receipt,
-                "allow_traditional_unpaired": False,
             })()
 
             SHARD_RESULTS.normalize_jmh(arguments)
@@ -1624,7 +894,6 @@ class TestShardResults(unittest.TestCase):
                 "input": [result],
                 "output": output,
                 "semantic_receipt": semantic_receipt,
-                "allow_traditional_unpaired": False,
             })()
 
             with self.assertRaisesRegex(ValueError, "differ from the manifest"):
@@ -1671,54 +940,6 @@ class TestShardResults(unittest.TestCase):
             self.assertTrue(output.is_file())
             self.assertTrue(output.with_suffix(".tsv.sha256").is_file())
 
-    def testNativeBracketResolvesComparatorThroughManifest(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            manifest = root / "rows.tsv"
-            expected_rows = []
-            observed_rows = []
-            for system, score in (("native-re2-before", "100"), ("native-re2-after", "102")):
-                expected_rows.append({
-                    "row_id": f"shard/row/{system}",
-                    "shard_id": "shard",
-                    "suite": "traditional",
-                    "system": system,
-                    "benchmark": "benchmark",
-                    "parameters": "-",
-                    "comparator": "NativeBenchmark/threads:1",
-                    "expected_result": "paired-native-result",
-                    "allocation_contract": "allocation-free",
-                    "workload_checksum": "traditional-pair-manifest",
-                })
-                observed_rows.append({
-                    "row_id": f"shard/row/{system}",
-                    "shard_id": "shard",
-                    "system": system,
-                    "score": score,
-                    "score_unit": "ns/op",
-                    "allocation_bytes": "not-measured",
-                    "result_checksum": "0" * 64,
-                    "outcome": "accepted",
-                })
-            SHARD_RESULTS.write_tsv(manifest, SHARD_RESULTS.MANIFEST_FIELDS, expected_rows)
-            before = root / "before.tsv"
-            after = root / "after.tsv"
-            SHARD_RESULTS.write_tsv(before, SHARD_RESULTS.OBSERVED_FIELDS, [observed_rows[0]])
-            SHARD_RESULTS.write_tsv(after, SHARD_RESULTS.OBSERVED_FIELDS, [observed_rows[1]])
-            output = root / "bracket.tsv"
-            arguments = type("Arguments", (), {
-                "manifest": manifest,
-                "before": before,
-                "after": after,
-                "output": output,
-            })()
-
-            SHARD_RESULTS.bracket(arguments)
-
-            with output.open(newline="", encoding="utf-8") as input_file:
-                rows = list(csv.DictReader(input_file, delimiter="\t"))
-            self.assertEqual("NativeBenchmark/threads:1", rows[0]["benchmark"])
-            self.assertEqual("0.02", rows[0]["before_after_drift"])
 
 
 if __name__ == "__main__":

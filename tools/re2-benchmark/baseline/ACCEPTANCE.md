@@ -19,11 +19,9 @@ leased the unit and the lease's sequence number there, so each retry of a unit
 is a distinct attempt. The validator rejects the attempt unless:
 
 - the unit is one of the candidate's frozen units, its `unit-rows.tsv` is
-  exactly the frozen rows of the unit, roles included, and its ID recomputes from its owned rows,
-  copies, and representatives under the frozen row protocols
-- `expected-rows.tsv` and `observed-rows.tsv` hold exactly the owned and
-  copied rows, each observed row marked `owner` or `copy`; copies are
-  measured for pairing only
+  exactly the frozen rows of the unit, roles included, and its ID recomputes
+  from its owned rows and representatives under the frozen row protocols
+- `expected-rows.tsv` and `observed-rows.tsv` hold exactly the owned rows
 - `route-plan.tsv` is the unit's plan for its replica, route order and
   calibration split included, and every route's session matches the unit
   session's host and the unit's shard
@@ -58,12 +56,12 @@ recomputes derived values instead of trusting the receipt fields.
 
 Each row of `unit-evidence.tsv` names an artifact below the unit directory and
 its verification mode. Its route rows bind each route's session, JMH
-selectors, native bracket when applicable, semantic gate, representative
+selectors, semantic gate, representative
 protocol qualification when applicable, run metadata, normalized rows, status,
 and raw-artifact manifest, and through recursive verification of each route's
 `raw-artifacts.sha256`, every raw timing file and log. Its `host` rows bind the
 environment and engine-build provenance, route plan, unit rows, expected and
-observed rows, Rebar outcomes, calibration, unit session, and the immutable
+observed rows, calibration, unit session, and the immutable
 prefix of `unit-capacity.txt`. Any change to route metadata, raw measurements,
 logs, comparator provenance, or the capacity identity after acceptance
 invalidates the receipt.
@@ -79,7 +77,7 @@ evidence as `calibrations/<sha256>.json`; `--host-evidence` names that
 directory.
 
 On success, the validator writes `unit-receipt.tsv`: the unit session, its
-shard and owned and copied row counts, the digest of the unit's frozen row
+shard and owned row count, the digest of the unit's frozen row
 protocols, the manifest, observed-row, and evidence-manifest digests, and the
 candidate commit, archive, engine tree, and heap size.
 
@@ -132,7 +130,7 @@ shards, with replicas 1, 2, and 3. It also requires:
 - globally distinct unit attempt IDs, and each instance, host epoch, and host
   session naming one host
 - the architecture and instance type pinned for the unit's shard
-- each receipt's owned and copied row counts and row-protocol digest
+- each receipt's owned row count and row-protocol digest
   recomputed from the frozen `units.tsv` and `row-protocol.tsv`, so every
   receipt names the same frozen units and protocols
 - the frozen manifest digest and one candidate commit, engine tree, and

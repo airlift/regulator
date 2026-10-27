@@ -18,18 +18,12 @@ fi
 
 BENCHMARK_MODE=${RE2_BENCHMARK_MODE:-}
 case "${BENCHMARK_MODE}" in
-    baseline-shard | language-batch | engine-build | unit-worker) ;;
+    language-batch | engine-build | unit-worker) ;;
     *)
-        echo "RE2_BENCHMARK_MODE must be baseline-shard, language-batch, engine-build, or unit-worker" >&2
+        echo "RE2_BENCHMARK_MODE must be language-batch, engine-build, or unit-worker" >&2
         exit 1
         ;;
 esac
-# A baseline shard host prepares a shard's semantic routes for diagnostics or remeasurement.
-if [[ "${BENCHMARK_MODE}" == baseline-shard &&
-        -z "${BENCHMARK_REMEASUREMENT_PARTITION:-}${BENCHMARK_DIAGNOSTIC_PLAN:-}" ]]; then
-    echo "A baseline shard host requires BENCHMARK_DIAGNOSTIC_PLAN or BENCHMARK_REMEASUREMENT_PARTITION" >&2
-    exit 1
-fi
 # run-unit-worker.sh exits with its INTERRUPTED_STATUS after a Spot interruption notice.
 UNIT_WORKER_INTERRUPTED_STATUS=43
 CAMPAIGN_PROVENANCE=${CAMPAIGN_PROVENANCE:-}
@@ -42,7 +36,6 @@ case "${BASELINE_PROTOCOL}" in
     smoke | qualification) ;;
     *) echo "BASELINE_PROTOCOL must be smoke or qualification" >&2; exit 1 ;;
 esac
-BASELINE_JONI_JMH_TIME=${BASELINE_JONI_JMH_TIME:-}
 NATIVE_COMPILER_PACKAGE=${NATIVE_COMPILER_PACKAGE:?NATIVE_COMPILER_PACKAGE is required}
 CMAKE_PACKAGE=${CMAKE_PACKAGE:?CMAKE_PACKAGE is required}
 GLIBC_PACKAGE=${GLIBC_PACKAGE:?GLIBC_PACKAGE is required}
@@ -51,38 +44,24 @@ RUST_PACKAGE=${RUST_PACKAGE:?RUST_PACKAGE is required}
 TIME_PACKAGE=${TIME_PACKAGE:?TIME_PACKAGE is required}
 REGULATOR_DIR=$(cd "$1" && pwd)
 TRINO_DIR=
-case "${BENCHMARK_MODE}:${RE2_CAMPAIGN_SHARD_ID:-}" in
-    engine-build:engine-build | unit-worker:unit-worker)
-        # Neither job is a shard: the build prepares the Trino harness among its engines,
-        # and a unit worker measures units of every shard.
-        SHARD_HANDLER=${BENCHMARK_MODE}
-        ;;
-    engine-build:* | unit-worker:* | *:engine-build | *:unit-worker)
-        echo "RE2_BENCHMARK_MODE=${BENCHMARK_MODE} disagrees with" \
-            "RE2_CAMPAIGN_SHARD_ID=${RE2_CAMPAIGN_SHARD_ID:-unset}" >&2
-        exit 1
-        ;;
-    *)
-        # The dispatch file names each shard's route handler, which decides the shard's Trino use.
-        SHARD_HANDLER=$(awk -F '\t' -v shard="${RE2_CAMPAIGN_SHARD_ID:-}" 'NR > 1 && $1 == shard {print $2}' \
-            "${REGULATOR_DIR}/tools/re2-benchmark/baseline/shard-dispatch.tsv")
-        ;;
-esac
-case "${SHARD_HANDLER}" in
-    engine-build | unit-worker | trino-operations | trino-final-line | trino-like | lifecycle | rebar)
+case "${BENCHMARK_MODE}" in
+    engine-build | unit-worker)
+        # Neither job is a shard: the build prepares the Trino harness, and a unit
+        # worker measures units of every shard.
+        if [[ "${RE2_CAMPAIGN_SHARD_ID:-}" != "${BENCHMARK_MODE}" ]]; then
+            echo "RE2_BENCHMARK_MODE=${BENCHMARK_MODE} disagrees with" \
+                "RE2_CAMPAIGN_SHARD_ID=${RE2_CAMPAIGN_SHARD_ID:-unset}" >&2
+            exit 1
+        fi
         if [[ -z "$2" || ! -d "$2" ]]; then
-            if [[ "${SHARD_HANDLER}" == "${BENCHMARK_MODE}" ]]; then
-                echo "The ${BENCHMARK_MODE} job requires a Trino checkout" >&2
-            else
-                echo "Baseline shard ${RE2_CAMPAIGN_SHARD_ID} requires a Trino checkout" >&2
-            fi
+            echo "The ${BENCHMARK_MODE} job requires a Trino checkout" >&2
             exit 1
         fi
         TRINO_DIR=$(cd "$2" && pwd)
         ;;
     *)
         if [[ -n "$2" ]]; then
-            echo "Baseline shard ${RE2_CAMPAIGN_SHARD_ID:-unset} does not use a Trino checkout" >&2
+            echo "A ${BENCHMARK_MODE} job does not use a Trino checkout" >&2
             exit 1
         fi
         ;;
@@ -107,11 +86,7 @@ install_packages()
 {
     sudo dnf install -y "${CMAKE_PACKAGE}" "${NATIVE_COMPILER_PACKAGE}" "${GLIBC_PACKAGE}" \
         "${TIME_PACKAGE}" git jq make ninja-build perf tar gzip
-    # A unit worker measures units of every shard, Rebar's among them.
-    if [[ "${RE2_CAMPAIGN_SHARD_ID}" == rebar-* || "${BENCHMARK_MODE}" == engine-build ||
-            "${BENCHMARK_MODE}" == unit-worker ]]; then
-        sudo dnf install -y abseil-cpp-devel "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
-    elif [[ "${BENCHMARK_MODE}" == language-batch ]]; then
+    if [[ "${BENCHMARK_MODE}" == language-batch ]]; then
         # The Rust language comparator links the pinned regex crate.
         sudo dnf install -y "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
     fi
@@ -228,7 +203,6 @@ record_environment()
         printf 'logical_cpu_count=%s\n' "${LOGICAL_CPU_COUNT}"
         printf 'baseline_protocol=%s\n' "${BASELINE_PROTOCOL}"
         printf 'baseline_selected_route=all\n'
-        printf 'baseline_joni_jmh_time=%s\n' "${BASELINE_JONI_JMH_TIME:-default}"
         printf 'row_manifest_sha256=%s\n' "${row_manifest_sha256}"
         printf 'platform_manifest_sha256=%s\n' "${platform_manifest_sha256}"
         printf 'comparator_manifest_sha256=%s\n' "${comparator_manifest_sha256}"
@@ -257,8 +231,6 @@ record_environment()
         printf 'jdk_archive_sha256=%s\n' "${INSTALLED_JAVA_ARCHIVE_SHA256}"
         printf 'java_home=%s\n' "${JAVA_HOME}"
         printf 'java_runtime_version=%s\n' "$(java -XshowSettings:properties -version 2>&1 | awk -F'= ' '/java.runtime.version =/ {print $2; exit}')"
-        printf 'rebar_workload_definitions_sha256=%s\n' "${REBAR_WORKLOAD_DEFINITIONS_SHA256:-unknown}"
-        printf 'rebar_selected_definitions_sha256=%s\n' "${REBAR_SELECTED_DEFINITIONS_SHA256:-unknown}"
         printf 'joni_evidence_scope=%s\n' "${JONI_EVIDENCE_SCOPE:-not-used}"
     } > "${RESULT_DIR}/environment-manifest.txt"
 
@@ -317,9 +289,7 @@ record_environment()
 
 install_engine_build()
 {
-    # Install the platform's prebuilt engines once the compiler can resolve this
-    # host's native target. Native engines made for another target or CPU are
-    # left for the routes to build, while the Java Trino harness installs on any host.
+    # Install the platform's prebuilt Trino harness.
     python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" install \
         --build "${ENGINE_BUILD_INPUT_DIR:?A unit worker requires prebuilt engines}" \
         --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256:?}" \
@@ -358,13 +328,10 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
             "${REGULATOR_DIR}" "${RESULT_DIR}")
     elif [[ "${BENCHMARK_MODE}" == engine-build ]]; then
         session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/build-engines.sh" "${RESULT_DIR}")
-    elif [[ "${BENCHMARK_MODE}" == unit-worker ]]; then
+    else
         # The worker keeps each unit outside the host evidence it leaves here.
         session_command=("${REGULATOR_DIR}/tools/re2-benchmark/aws/run-unit-worker.sh"
             "${RESULT_DIR}" /var/tmp/re2-units)
-    else
-        session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/run-host-session.sh"
-            "${RE2_CAMPAIGN_SHARD_ID}" "${RESULT_DIR}")
     fi
     set +e
     /usr/bin/time --append --output="${capacity_file}" \
@@ -372,22 +339,6 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         "${session_command[@]}"
     host_session_status=$?
     set -e
-    if [[ ${host_session_status} -eq 0 && -n "${BENCHMARK_DIAGNOSTIC_PLAN:-}" ]]; then
-        set +e
-        python3 "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/run.py" \
-            --plan "${REGULATOR_DIR}/tools/re2-benchmark/diagnostics/${BENCHMARK_DIAGNOSTIC_PLAN}.json" \
-            --session "${RESULT_DIR}"
-        host_session_status=$?
-        set -e
-    fi
-    if [[ ${host_session_status} -eq 0 && -n "${BENCHMARK_REMEASUREMENT_PARTITION:-}" ]]; then
-        set +e
-        python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/remeasure.py" \
-            --shard "${RE2_CAMPAIGN_SHARD_ID}" --partition "${BENCHMARK_REMEASUREMENT_PARTITION}" \
-            --session "${RESULT_DIR}"
-        host_session_status=$?
-        set -e
-    fi
     memory_available_after_bytes=$(awk '/^MemAvailable:/ {print $2 * 1024; exit}' /proc/meminfo)
     swap_free_after_bytes=$(awk '/^SwapFree:/ {print $2 * 1024; exit}' /proc/meminfo)
     oom_kills_after=$(awk '$1 == "oom_kill" {print $2; exit}' /proc/vmstat)

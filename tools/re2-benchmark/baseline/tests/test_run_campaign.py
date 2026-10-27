@@ -21,7 +21,6 @@ from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 AWS_RUNNER = SCRIPT.parents[1] / "aws" / "run-campaign.sh"
-REBAR_REVISION = SCRIPT.parents[1] / "manifests" / "rebar-revision.sh"
 sys.path.insert(0, str(SCRIPT.parent))
 import test_fleet_budget  # noqa: E402
 import unit_dispatch  # noqa: E402
@@ -111,7 +110,7 @@ class TestRunCampaign(unittest.TestCase):
                 budget.reserve.return_value = (True, "")
                 arguments.shared_budget = budget
                 jobs = [RUN_CAMPAIGN.Job(self.platform, shard, 1, index, 1, "spot", "language-batch")
-                        for index, shard in enumerate(("traditional-extra", "traditional-search", "traditional-capture"), 1)]
+                        for index, shard in enumerate(("like-single-use", "like-dfa-single-use", "like-compile"), 1)]
                 processes = [FakeProcess(100 + job.host_epoch, status=0 if classification == "invalid-artifacts" else 1,
                              poll_action=lambda job=job: self.write_cleanup_session(
                                  result_root, job, failure_classification=classification)) for job in jobs]
@@ -173,20 +172,20 @@ class TestRunCampaign(unittest.TestCase):
                     ("retryable-infrastructure", "wrapper failed", False)):
                 with self.subTest(attempt=attempt, classification=classification, detail=detail):
                     job = RUN_CAMPAIGN.Job(
-                        self.platform, "traditional-search", 1, 10, attempt, "spot", "language-batch", region="us-east-2")
+                        self.platform, "like-dfa-single-use", 1, 10, attempt, "spot", "language-batch", region="us-east-2")
                     replacement = RUN_CAMPAIGN.replacement_job(
                         job, 11, classification, detail, regions=regions, spot_only=True)
                     self.assertEqual(replacement.market, "spot")
                     self.assertEqual(replacement.attempt, attempt + 1)
                     self.assertEqual(replacement.spot_capacity_failures, ("us-east-2",) if moved else ())
         # Three counted attempts, after a move from a region with no capacity.
-        exhausted = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 4, "spot", "language-batch", region="us-west-2",
+        exhausted = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 4, "spot", "language-batch", region="us-west-2",
                                      spot_capacity_failures=("us-east-2",))
         with self.assertRaisesRegex(RuntimeError, "exhausted"):
             RUN_CAMPAIGN.replacement_job(
                 exhausted, 12, "retryable-spot", "launch-capacity:InsufficientInstanceCapacity",
                 regions=regions, spot_only=True)
-        on_demand = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "on-demand", "language-batch")
+        on_demand = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "on-demand", "language-batch")
         with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "On-Demand"):
             RUN_CAMPAIGN.replacement_job(on_demand, 11, "retryable-spot", "interrupted", spot_only=True)
 
@@ -245,20 +244,18 @@ class TestRunCampaign(unittest.TestCase):
     def test_engine_archives_upload_once_per_region(self):
         with tempfile.TemporaryDirectory() as temporary:
             build = Path(temporary)
-            archives = {}
-            for name in ("native", "trino"):
-                (build / f"{name}.tar.gz").write_bytes(name.encode())
-                archives[name] = {"file": f"{name}.tar.gz", "sha256": hashlib.sha256(name.encode()).hexdigest()}
-            (build / "engine-build.json").write_text(json.dumps({"archives": archives}))
+            (build / "trino.tar.gz").write_bytes(b"trino")
+            trino = hashlib.sha256(b"trino").hexdigest()
+            (build / "engine-build.json").write_text(
+                json.dumps({"archives": {"trino": {"file": "trino.tar.gz", "sha256": trino}}}))
             arguments = SimpleNamespace(
                 regions=["us-west-2", "us-east-2"], transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
                 engine_build_directories={"r8i": build},
                 engine_build_policy={"r8i": hashlib.sha256((build / "engine-build.json").read_bytes()).hexdigest()})
             jobs = [RUN_CAMPAIGN.Job(self.platform, shard, replica, 10, 1, "spot", "language-batch")
-                    for shard in ("traditional-search", "trino-operations") for replica in (1, 2)]
-            native = archives["native"]["sha256"]
-            present = {("east", f"prefix/engine-builds/{native}.tar.gz"): base64.b64encode(bytes.fromhex(native)).decode()}
-            for stalls, expected_puts in ((1, 4), (RUN_CAMPAIGN.ENGINE_BUILD_UPLOAD_ATTEMPTS, None)):
+                    for shard in ("trino-like", "trino-operations") for replica in (1, 2)]
+            present = {("east", f"prefix/engine-builds/{trino}.tar.gz"): base64.b64encode(bytes.fromhex(trino)).decode()}
+            for stalls, expected_puts in ((1, 2), (RUN_CAMPAIGN.ENGINE_BUILD_UPLOAD_ATTEMPTS, None)):
                 with self.subTest(stalls=stalls):
                     puts = []
 
@@ -278,16 +275,13 @@ class TestRunCampaign(unittest.TestCase):
                             patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws), \
                             contextlib.redirect_stdout(io.StringIO()):
                         if expected_puts is None:
-                            with self.assertRaisesRegex(SystemExit, "could not upload the r8i trino engine archive to s3://east/"):
+                            with self.assertRaisesRegex(SystemExit, "could not upload the r8i engine archive to s3://west/"):
                                 RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
                             continue
                         RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
-                    # Each region gets each archive once; Ohio already holds the native archive, and the
-                    # stalled first upload is retried.
-                    self.assertEqual(
-                        sorted(set(puts)),
-                        sorted((bucket, f"prefix/engine-builds/{archives[name]['sha256']}.tar.gz")
-                               for bucket, name in (("east", "trino"), ("west", "native"), ("west", "trino"))))
+                    # Each region gets the archive once; Ohio already holds it, and the stalled first
+                    # upload is retried.
+                    self.assertEqual([("west", f"prefix/engine-builds/{trino}.tar.gz")], sorted(set(puts)))
                     self.assertEqual(expected_puts, len(puts))
 
     def test_spot_only_launcher_rejects_on_demand_before_aws(self):
@@ -297,7 +291,7 @@ class TestRunCampaign(unittest.TestCase):
         self.assertIn("Spot-only policy prohibits On-Demand", result.stderr)
 
     def test_spot_only_quota_shortage_waits_without_on_demand(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             result_root = root / "results"
@@ -588,36 +582,10 @@ class TestRunCampaign(unittest.TestCase):
             [str(runner)],
             capture_output=True,
             text=True,
-            env={**os.environ, "CAMPAIGN_MODE": "baseline-shard", "TIMEOUT_SECONDS": "5401"})
+            env={**os.environ, "CAMPAIGN_MODE": "engine-build", "TIMEOUT_SECONDS": "5401"})
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("require TIMEOUT_SECONDS=5400", result.stderr)
-
-    def test_diagnostic_input_archive_and_checksum_are_required_together(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            archive = Path(temporary) / "inputs.tar.gz"
-            archive.write_bytes(b"fixture")
-            for environment in (
-                    {"BENCHMARK_DIAGNOSTIC_INPUT_ARCHIVE": str(archive)},
-                    {"BENCHMARK_DIAGNOSTIC_INPUT_SHA256": "0" * 64}):
-                result = subprocess.run(
-                    [str(AWS_RUNNER)], capture_output=True, text=True,
-                    env={**os.environ, **environment})
-                with self.subTest(environment=environment):
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("Diagnostic input requires a plan, archive and SHA-256", result.stderr)
-
-    def test_native_re2_execution_requires_native_manifest_rows(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-        guard = '[[ ${native_system_row_count} -gt 0 ]]'
-
-        self.assertGreaterEqual(source.count(guard), 3)
-
-    def test_rebar_measurement_watchdog_allows_slow_valid_joni_rows(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-
-        self.assertIn("REBAR_MEASUREMENT_TIMEOUT=120s", source)
-        self.assertEqual(source.count('--timeout "${REBAR_MEASUREMENT_TIMEOUT}"'), 2)
 
     def test_user_data_waits_for_instance_profile_and_retries_transfers(self):
         source = AWS_RUNNER.read_text()
@@ -635,20 +603,12 @@ class TestRunCampaign(unittest.TestCase):
         self.assertNotIn("CAPTURE_PIPELINE", source)
         self.assertNotIn("BASELINE_CAMPAIGN_PROFILE", source)
 
-    def test_rebar_checkout_survives_candidate_clean(self):
-        source = AWS_RUNNER.read_text()
-
-        self.assertIn(
-            'REBAR_OFFICIAL_DIR=${REBAR_OFFICIAL_DIR:-"${HOME}/.cache/regulator/'
-            'rebar-463d00f31887e84c38467805b9e3122c314b9521"}',
-            source)
-
     def test_generated_user_data_is_valid_bash(self):
         source = AWS_RUNNER.read_text()
         function = source[
             source.index("create_user_data()\n{"):
             source.index("\n}\n\nlaunch_instance()") + 2]
-        for mode in ("baseline-shard", "unit-worker"):
+        for mode in ("engine-build", "unit-worker"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary_directory:
                 user_data = Path(temporary_directory) / "user-data.sh"
                 script = (
@@ -667,7 +627,7 @@ class TestRunCampaign(unittest.TestCase):
         function = source[
             source.index("create_instance_profile()\n{"):
             source.index("\n}\n\nsubnet_rotation()") + 2]
-        for mode in ("baseline-shard", "unit-worker"):
+        for mode in ("engine-build", "unit-worker"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary_directory:
                 script = (
                     "aws_cli() { :; }\nsleep() { :; }\n"
@@ -700,16 +660,15 @@ class TestRunCampaign(unittest.TestCase):
         controller = AWS_RUNNER.read_text()
         expected = controller[controller.index("expected_cargo_package=not-installed"):
                               controller.index("if [[ ! -f \"${environment_manifest}\" ]]")]
-        for mode in ("baseline-shard", "language-batch"):
-            for shard in ("rebar-1", "shard-1"):
-                script = (f"sudo() {{ echo \"$*\"; }}\nCARGO_PACKAGE=cargo-pin\nRUST_PACKAGE=rust-pin\n{install}\n"
-                          f"BENCHMARK_MODE={mode} RE2_CAMPAIGN_SHARD_ID={shard} install_packages\n"
-                          f"CAMPAIGN_MODE={mode} CAMPAIGN_SHARD_ID={shard}\n{expected}\n"
-                          "echo \"expected=${expected_cargo_package}\"\n")
-                output = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True).stdout
-                with self.subTest(mode=mode, shard=shard):
-                    self.assertEqual("cargo-pin rust-pin" in output, "expected=cargo-pin" in output)
-                    self.assertEqual("cargo-pin rust-pin" in output, mode == "language-batch" or shard == "rebar-1")
+        for mode in ("engine-build", "unit-worker", "language-batch"):
+            script = (f"sudo() {{ echo \"$*\"; }}\nCARGO_PACKAGE=cargo-pin\nRUST_PACKAGE=rust-pin\n{install}\n"
+                      f"BENCHMARK_MODE={mode} install_packages\n"
+                      f"CAMPAIGN_MODE={mode}\n{expected}\n"
+                      "echo \"expected=${expected_cargo_package}\"\n")
+            output = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True).stdout
+            with self.subTest(mode=mode):
+                self.assertEqual("cargo-pin rust-pin" in output, "expected=cargo-pin" in output)
+                self.assertEqual("cargo-pin rust-pin" in output, mode == "language-batch")
 
     def test_missing_remote_artifact_is_retryable_infrastructure(self):
         source = AWS_RUNNER.read_text()
@@ -725,7 +684,7 @@ class TestRunCampaign(unittest.TestCase):
             text=True,
             env={
                 **os.environ,
-                "CAMPAIGN_MODE": "baseline-shard",
+                "CAMPAIGN_MODE": "engine-build",
                 "TRANSFER_BUCKET": "benchmark-transfer"})
 
         self.assertNotEqual(result.returncode, 0)
@@ -738,7 +697,7 @@ class TestRunCampaign(unittest.TestCase):
             text=True,
             env={
                 **os.environ,
-                "CAMPAIGN_MODE": "baseline-shard",
+                "CAMPAIGN_MODE": "engine-build",
                 "TRANSFER_BUCKET": "benchmark-transfer",
                 "TRANSFER_PREFIX": "../another-campaign"})
 
@@ -803,7 +762,7 @@ class TestRunCampaign(unittest.TestCase):
                     RUN_CAMPAIGN.validate_capacity(capacity)
 
     def test_replacement_uses_a_new_epoch(self):
-        initial = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        initial = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
 
         # A failure Spot did not cause retries on Spot once.
         replacement = RUN_CAMPAIGN.replacement_job(initial, 117, "retryable-infrastructure")
@@ -894,7 +853,7 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
 
     def test_spot_launch_takes_the_best_scored_region_with_headroom(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         regions = ["us-west-2", "eu-west-1", "ap-south-1"]
         # Ireland ties Mumbai but comes first, then lacks quota headroom. Without scores, the
         # first allowed region with headroom launches and no score is recorded.
@@ -944,7 +903,7 @@ class TestRunCampaign(unittest.TestCase):
                                              [("eu-west-1", "")])):
             with self.subTest(regions=regions):
                 arguments = SimpleNamespace(regions=regions)
-                job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch",
+                job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch",
                                        spot_capacity_failures=failures)
                 with patch.object(RUN_CAMPAIGN, "check_output", side_effect=AssertionError("scores queried")):
                     self.assertEqual(expected, RUN_CAMPAIGN.launch_placements(arguments, job))
@@ -1028,7 +987,7 @@ class TestRunCampaign(unittest.TestCase):
                      for platform in platforms), start=RUN_CAMPAIGN.PHASE_HOST_EPOCH_START["primary"])]
 
     def test_campaign_concurrency_uses_configuration(self):
-        jobs = self.replica_jobs([self.platform], ["traditional-search"])
+        jobs = self.replica_jobs([self.platform], ["like-dfa-single-use"])
         arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary", regions=["us-west-2"])
         RUN_CAMPAIGN.validate_configuration(arguments, jobs)
         arguments.execute = True
@@ -1069,7 +1028,7 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
 
     def test_deadline_uses_shared_fleet_host_and_vcpu_limits(self):
-        jobs = self.replica_jobs([self.platform], ["traditional-search"])
+        jobs = self.replica_jobs([self.platform], ["like-dfa-single-use"])
         arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary",
                                     spot_only=True, spot_vcpu_reserve=0, regions=["us-west-2"],
                                     shared_budget=SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512,
@@ -1095,21 +1054,9 @@ class TestRunCampaign(unittest.TestCase):
         arguments.unit_platforms = {platform.name: platform for platform in platforms}
         arguments.shared_budget.policy.update(max_attempt_seconds=86400, regions={})
         items = RUN_CAMPAIGN.build_work_items("primary", platforms, RUN_CAMPAIGN.work_units.load(SCRIPT.parent),
-                                              ["traditional-search"])
+                                              ["trino-operations"])
         arguments.phase_timeout_seconds = None
         with self.assertRaisesRegex(SystemExit, "cannot admit every worker type"):
-            RUN_CAMPAIGN.validate_configuration(arguments, [], items=items)
-
-    def test_unit_campaign_refuses_the_joni_window_override(self):
-        # Units measure their frozen windows, which the Joni override would shorten.
-        platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
-        items = RUN_CAMPAIGN.build_work_items("primary", platforms, RUN_CAMPAIGN.work_units.load(SCRIPT.parent),
-                                              ["traditional-search"])
-        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=64, phase="primary", spot_only=True,
-                                    regions=["us-west-2"],
-                                    unit_platforms={platform.name: platform for platform in platforms})
-        with patch.dict(os.environ, {"BASELINE_JONI_JMH_TIME": "7ms"}), \
-                self.assertRaisesRegex(SystemExit, "unset BASELINE_JONI_JMH_TIME"):
             RUN_CAMPAIGN.validate_configuration(arguments, [], items=items)
 
     def test_primary_topology_fits_deadline_with_retry_headroom(self):
@@ -1143,7 +1090,7 @@ class TestRunCampaign(unittest.TestCase):
                 candidate_archive_sha256="0" * 64,
                 engine_tree="d" * 40,
                 result_root=root)
-            job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+            job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
 
             arguments.phase = "smoke"
             self.assertEqual(
@@ -1174,7 +1121,7 @@ aws_cli() {
 }
 VPC_ID=vpc-test
 CAMPAIGN_PLATFORM=r8i
-CAMPAIGN_SHARD_ID=rebar-i
+CAMPAIGN_SHARD_ID=trino-operations
 CAMPAIGN_REPLICA_ID=1
 for CAMPAIGN_ATTEMPT in 1 2 3 4; do
     CAMPAIGN_HOST_EPOCH=$((CAMPAIGN_ATTEMPT * 4 + 1))
@@ -1309,7 +1256,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                 patch.dict(os.environ, {}, clear=True):
             root = Path(temporary_directory)
             arguments = self.arguments(root)
-            job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+            job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
 
             with patch.object(RUN_CAMPAIGN, "check_output"):
                 environment = RUN_CAMPAIGN.job_environment(
@@ -1320,7 +1267,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
 
     def test_trino_checkout_is_required_only_for_jobs_that_use_it(self):
         # Every shard whose route handler measures or verifies against pinned Trino needs the checkout.
-        trino_handlers = {"trino-operations", "trino-final-line", "trino-like", "lifecycle", "rebar"}
+        trino_handlers = {"trino-operations", "trino-like"}
         with (SCRIPT.parent / "shard-dispatch.tsv").open(newline="") as input_file:
             dispatch = list(csv.DictReader(input_file, delimiter="\t"))
         for row in dispatch:
@@ -1344,7 +1291,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                 (2, "retryable-infrastructure", "", ())):
             with self.subTest(attempt=attempt, classification=classification, regions=regions):
                 job = RUN_CAMPAIGN.Job(
-                    self.platform, "traditional-search", 1, 117, attempt, "spot", "language-batch", region="us-east-2")
+                    self.platform, "like-dfa-single-use", 1, 117, attempt, "spot", "language-batch", region="us-east-2")
                 replacement = RUN_CAMPAIGN.replacement_job(job, 118, classification, detail, regions=regions)
                 self.assertEqual(replacement.attempt, attempt + 1)
                 self.assertEqual(replacement.market, "on-demand")
@@ -1577,8 +1524,8 @@ SESSION_ID=session LOWER_SESSION_ID=session VPC_ID=vpc-test INSTANCE_MARKET_TYPE
 FAILURE_CLASSIFICATION=none FAILURE_DETAIL= LAUNCH_ATTEMPTED=0 LAUNCH_AMBIGUOUS=0 INSTANCE_IDS=()
 INSTANCE_PROFILE_NAME=test-profile INSTANCE_ROLE_NAME=test-role BUCKET=test-bucket BUCKET_OWNED=1
 AWS_REGION=us-east-2 INTEL_AVAILABILITY_ZONE=none ARM_AVAILABILITY_ZONE=none CAMPAIGN_PLACEMENT_SCORE=9
-OBJECT_PREFIX= CAMPAIGN_MODE=baseline-shard CAMPAIGN_ID=baseline CAMPAIGN_PLATFORM=r8i
-CAMPAIGN_SHARD_ID=rebar-c CAMPAIGN_REPLICA_ID=1 CAMPAIGN_ATTEMPT=1 CAMPAIGN_HOST_EPOCH=10
+OBJECT_PREFIX= CAMPAIGN_MODE=engine-build CAMPAIGN_ID=baseline CAMPAIGN_PLATFORM=r8i
+CAMPAIGN_SHARD_ID=engine-build CAMPAIGN_REPLICA_ID=1 CAMPAIGN_ATTEMPT=1 CAMPAIGN_HOST_EPOCH=10
 DOWNLOADED_RESULT_COUNT=0
 launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 '''
@@ -1637,10 +1584,10 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 "INSTANCE_PROFILE_NAME=test-profile\n"
                 "INSTANCE_ROLE_NAME=test-role\n"
                 "BUCKET=test-bucket\n"
-                "CAMPAIGN_MODE=baseline-shard\n"
+                "CAMPAIGN_MODE=engine-build\n"
                 "CAMPAIGN_ID=baseline\n"
                 "CAMPAIGN_PLATFORM=r8i\n"
-                "CAMPAIGN_SHARD_ID=rebar-c\n"
+                "CAMPAIGN_SHARD_ID=engine-build\n"
                 "CAMPAIGN_REPLICA_ID=1\n"
                 "CAMPAIGN_HOST_EPOCH=10\n"
                 "DOWNLOADED_RESULT_COUNT=0\n"
@@ -1688,10 +1635,10 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     f"BUCKET={resources}\n"
                     f"BUCKET_OWNED={int(created)}\n"
                     "OBJECT_PREFIX=\n"
-                    "CAMPAIGN_MODE=baseline-shard\n"
+                    "CAMPAIGN_MODE=engine-build\n"
                     "CAMPAIGN_ID=baseline\n"
                     "CAMPAIGN_PLATFORM=r8i\n"
-                    "CAMPAIGN_SHARD_ID=rebar-c\n"
+                    "CAMPAIGN_SHARD_ID=engine-build\n"
                     "CAMPAIGN_REPLICA_ID=1\n"
                     "CAMPAIGN_HOST_EPOCH=10\n"
                     "DOWNLOADED_RESULT_COUNT=0\n"
@@ -1740,10 +1687,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
         self.assertIn(f"SEMANTIC_FAILURE_STATUS={RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS}\n", source)
         statements = re.sub(r"(\\|\|\||&&)\n\s*", r"\1 ", source).splitlines()
-        # A verifier that verified too few cases, and Rebar's curated verification, fail as a verdict.
-        checks = [statement for statement in statements if "grep -Fx 'Verified" in statement or (
-            "validate-rebar-shard-verification.py" in statement and "--measurement" not in statement)]
-        self.assertEqual(6, len(checks), checks)
+        # A verifier that verified too few cases fails as a verdict.
+        checks = [statement for statement in statements if "grep -Fx 'Verified" in statement]
+        self.assertEqual(3, len(checks), checks)
         self.assertTrue(all("|| semantic_failure " in statement for statement in checks), checks)
         # The DFA probe, every Java verifier, and the pinned Trino comparator's verification fail as a verdict.
         # Only the identity check of a prebuilt harness, whose failure rebuilds it, runs bare.
@@ -1752,7 +1698,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             statement) and " java " in statement]
         verifiers += [statement for statement in statements
                       if "trino-joni/verify.sh" in statement and not statement.lstrip().startswith("if ")]
-        self.assertEqual(6, len(verifiers), verifiers)
+        self.assertEqual(5, len(verifiers), verifiers)
         self.assertTrue(all(statement.lstrip().startswith("run_semantic_verifier ") for statement in verifiers),
                         verifiers)
 
@@ -1804,7 +1750,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     self.assertEqual(expected, result.returncode, result.stderr)
                     self.assertEqual(rebuilt, (root / "shared/pinned-trino/rebuilt").exists())
 
-            # A cached harness whose Rebar runner reports no version fails the real identity check, so it is
+            # A cached harness that lists no benchmark methods fails the real identity check, so it is
             # rebuilt before any semantic check runs; the full verification then runs each verifier once.
             shutil.rmtree(comparator)
             shutil.copytree(SCRIPT.parents[1] / "trino-joni", comparator, ignore=shutil.ignore_patterns("prepare.sh"))
@@ -1835,9 +1781,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             binary.mkdir()
             (binary / "java").write_text(
                 '#!/bin/bash\ncase " $* " in\n'
-                f'    *" org.openjdk.jmh.Main "*) cat {shlex.quote(str(root / "benchmarks.txt"))} ;;\n'
-                '    *" io.airlift.regulator.RebarJoniRunner --version "*)\n'
-                '        [[ -f "${TRINO_COMPARATOR_WORK_DIR}/rebuilt" ]] && echo "Trino Joni 2.1.5.3" ;;\n'
+                '    *" org.openjdk.jmh.Main "*)\n'
+                '        [[ ! -f "${TRINO_COMPARATOR_WORK_DIR}/rebuilt" ]] || '
+                f'cat {shlex.quote(str(root / "benchmarks.txt"))} ;;\n'
                 f'    *) for argument; do [[ ${{argument}} != *Verifier ]] || echo "${{argument}}" '
                 f'>> {shlex.quote(str(root / "verifiers"))}; '
                 'done ;;\nesac\n')
@@ -1849,7 +1795,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertTrue((work / "rebuilt").exists())
             verifier_classes = sorted(set(re.findall(r"io\.trino\.operator\.scalar\.(\w+Verifier)\b", verify)))
-            self.assertEqual(6, len(verifier_classes), verifier_classes)
+            self.assertEqual(5, len(verifier_classes), verifier_classes)
             self.assertEqual([f"io.trino.operator.scalar.{verifier}" for verifier in verifier_classes],
                              sorted((root / "verifiers").read_text().splitlines()))
 
@@ -1894,12 +1840,12 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 "if sys.argv[1] == 'copy-environment':\n    sys.exit()\n"
                 "output = Path(sys.argv[sys.argv.index('--output-directory') + 1])\n"
                 "(output / 'route-plan.tsv').write_text('route\\trows\\tsystems\\tcalibration\\n"
-                "native-access\\t1\\tregulator\\tbefore\\n')\nprint('traditional-search')\n")
+                "native-access\\t1\\tregulator\\tbefore\\n')\nprint('trino-operations')\n")
             (baseline / "run-shard.sh").write_text('#!/bin/bash\nexit "${SHARD_STATUS}"\n')
             for script_path in (*binary.iterdir(), baseline / "run-unit.sh", baseline / "run-shard.sh"):
                 script_path.chmod(0o755)
             environment = {name: value for name, value in os.environ.items()
-                           if not name.startswith(("BASELINE_", "RE2_", "JONI_", "REBAR_"))}
+                           if not name.startswith(("BASELINE_", "RE2_", "JONI_"))}
             environment.update({
                 "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}", "RE2_CAMPAIGN_ID": "campaign",
                 "RE2_CAMPAIGN_PLATFORM": "r8i", "RE2_CAMPAIGN_HOST_EPOCH": "1",
@@ -1942,177 +1888,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
         self.assertEqual(source.count("./mvnw -q -Dmaven.gitcommitid.skip=true"), 2)
 
-    def test_aws_wrappers_only_dispatch_baseline_shards(self):
-        host_source = (SCRIPT.parents[1] / "aws" / "run-host.sh").read_text()
-        campaign_source = (SCRIPT.parents[1] / "aws" / "run-campaign.sh").read_text()
-
-        self.assertIn('RE2_BENCHMARK_MODE must be baseline-shard', host_source)
-        self.assertIn('CAMPAIGN_MODE=${CAMPAIGN_MODE:-baseline-shard}', campaign_source)
-        self.assertIn('case "${CAMPAIGN_MODE}" in\n    baseline-shard |', campaign_source)
-        self.assertNotIn("run_trino_final_line_protocol_diagnostic", host_source)
-        self.assertNotIn("TRINO_FINAL_LINE_PROTOCOL_DIAGNOSTIC", campaign_source)
-
-    def test_host_wrapper_takes_a_job_handler_from_its_mode_and_a_shard_handler_from_dispatch(self):
-        source = (SCRIPT.parents[1] / "aws" / "run-host.sh").read_text()
-        start = source.index('case "${BENCHMARK_MODE}:${RE2_CAMPAIGN_SHARD_ID:-}" in')
-        dispatch = source[start:source.index("\nesac\n", start) + 5]
-        for mode, shard, handler in (
-                ("engine-build", "engine-build", "engine-build"),
-                ("unit-worker", "unit-worker", "unit-worker"),
-                ("baseline-shard", "like-dfa-single-use", "trino-like"),
-                ("baseline-shard", "unit-worker", None),
-                ("unit-worker", "rebar-i", None),
-                ("engine-build", "", None)):
-            with self.subTest(mode=mode, shard=shard):
-                result = subprocess.run(
-                    ["bash", "-c", f'set -euo pipefail\n{dispatch}\nprintf "%s" "${{SHARD_HANDLER}}"'],
-                    env={**os.environ, "BENCHMARK_MODE": mode, "RE2_CAMPAIGN_SHARD_ID": shard,
-                         "REGULATOR_DIR": str(SCRIPT.parents[3])},
-                    capture_output=True, text=True)
-                if handler is None:
-                    self.assertEqual(1, result.returncode, result.stdout)
-                    self.assertIn(f"RE2_BENCHMARK_MODE={mode} disagrees with RE2_CAMPAIGN_SHARD_ID=", result.stderr)
-                else:
-                    self.assertEqual((0, handler), (result.returncode, result.stdout), result.stderr)
-
-    def test_extended_rebar_manifest_check_is_concurrency_safe(self):
-        generator = SCRIPT.parents[1] / "manifests" / "generate-extended-rebar.py"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            definitions = root / "rebar" / "benchmarks" / "definitions" / "suite"
-            definitions.mkdir(parents=True)
-            (definitions / "example.toml").write_text(
-                "[[bench]]\nname = 'example'\nmodel = 'grep'\nengines = ['re2']\n")
-            output = root / "rows.tsv"
-            exclusions = root / "exclusions.tsv"
-            command = [
-                sys.executable,
-                str(generator),
-                str(root / "rebar"),
-                str(output),
-                "--exclusions-output",
-                str(exclusions),
-            ]
-            subprocess.run(command, check=True, capture_output=True, text=True)
-
-            processes = [
-                subprocess.Popen(command + ["--check"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                for _ in range(16)
-            ]
-            scratch_files_during_checks = list(root.glob("*.generated"))
-            results = [process.communicate() + (process.returncode,) for process in processes]
-
-            self.assertEqual([result for result in results if result[2] != 0], [])
-            self.assertEqual(scratch_files_during_checks, [])
-            self.assertEqual(list(root.glob("*.generated")), [])
-
-    def test_archived_rebar_revision_receipt_is_accepted(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / ".regulator-rebar-commit").write_text(
-                f"{RUN_CAMPAIGN.PINNED_REBAR_COMMIT}\n")
-
-            result = subprocess.run(
-                [str(REBAR_REVISION), str(root)],
-                capture_output=True,
-                text=True,
-                check=False)
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), RUN_CAMPAIGN.PINNED_REBAR_COMMIT)
-
-    def test_archived_rebar_revision_receipt_rejects_wrong_commit(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / ".regulator-rebar-commit").write_text(f"{'0' * 40}\n")
-
-            result = subprocess.run(
-                [str(REBAR_REVISION), str(root)],
-                capture_output=True,
-                text=True,
-                check=False)
-
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Extended Rebar validation requires", result.stderr)
-
-    def test_qualification_rebar_archive_contains_revision_receipt(self):
-        source = AWS_RUNNER.read_text()
-
-        self.assertIn(
-            '--add-virtual-file="rebar-corpus/.regulator-rebar-commit:${commit}"',
-            source)
-
-    def test_rebar_preparation_accepts_archived_revision_receipt(self):
-        source = (SCRIPT.parents[1] / "rebar" / "prepare.sh").read_text()
-
-        self.assertEqual(source.count('"$manifest_directory/rebar-revision.sh" "$rebar_root"'), 2)
-        self.assertNotIn('git -C "$rebar_root" rev-parse HEAD', source)
-
-    def test_native_rebar_build_accepts_archived_revision_receipt(self):
-        source = (SCRIPT.parents[1] / "rebar" / "build-native.sh").read_text()
-
-        self.assertIn(
-            '"$repo_root/tools/re2-benchmark/manifests/rebar-revision.sh" "$rebar_root"',
-            source)
-        self.assertNotIn('git -C "$rebar_root" status', source)
-
-    def test_native_build_leaves_the_pinned_re2_checkout_clean(self):
-        # The traditional build's benchmark patches must not leave the checkout the Rebar build requires dirty.
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            tools = root / "tools" / "re2-benchmark"
-            tools.mkdir(parents=True)
-            shutil.copy(SCRIPT.parents[1] / "build.sh", tools / "build.sh")
-            (tools / "fetch-dependencies.sh").write_text("#!/bin/sh\n")
-            (tools / "fetch-dependencies.sh").chmod(0o755)
-            re2 = root / "re2"
-            source = re2 / "re2" / "testing" / "regexp_benchmark.cc"
-            source.parent.mkdir(parents=True)
-            source.write_text("one\ntwo\n")
-            for command in (["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t",
-                                                          "commit", "-q", "-m", "pinned"]):
-                subprocess.run(["git", "-C", str(re2), *command], check=True)
-            for patch, content in (("random-text.patch", "one patched\ntwo\n"),
-                                   ("program-range.patch", "one patched\ntwo patched\n")):
-                source.write_text(content)
-                (tools / patch).write_text(subprocess.run(["git", "-C", str(re2), "diff"], capture_output=True,
-                                                          text=True, check=True).stdout)
-                subprocess.run(["git", "-C", str(re2), "add", "."], check=True)
-            subprocess.run(["git", "-C", str(re2), "reset", "-q", "--hard", "HEAD"], check=True)
-            binary = root / "bin"
-            binary.mkdir()
-            for status in (0, 1):
-                with self.subTest(cmake_status=status):
-                    (binary / "cmake").write_text(f"#!/bin/sh\ngrep -q 'one patched' {source} || exit 9\nexit {status}\n")
-                    (binary / "cmake").chmod(0o755)
-                    result = subprocess.run(
-                        ["bash", str(tools / "build.sh")], capture_output=True, text=True,
-                        env={**os.environ, "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}", "RE2_DIR": str(re2),
-                             "RE2_BENCHMARK_BUILD_DIR": str(root / "build")})
-                    self.assertEqual(status, result.returncode, result.stderr)
-                    self.assertEqual("", subprocess.run(["git", "-C", str(re2), "status", "--porcelain"],
-                                                        capture_output=True, text=True, check=True).stdout)
-
-    def test_native_rebar_build_uses_pinned_private_abseil(self):
-        source = (SCRIPT.parents[1] / "rebar" / "build-native.sh").read_text()
-        self.assertIn(
-            "readonly pinned_abseil_commit=d38452e1ee03523a208362186fd42248ff2609f6",
-            source,
-        )
-        self.assertIn('git -C "$pinned_abseil_root" rev-parse HEAD', source)
-        self.assertIn('-DCMAKE_CXX_FLAGS_RELEASE="$flags"', source)
-        self.assertIn('CXXFLAGS="$flags -I$abseil_install_root/include"', source)
-        self.assertIn(
-            'PKG_CONFIG_PATH="$abseil_install_root/lib64/pkgconfig:'
-            '$abseil_install_root/lib/pkgconfig"',
-            source,
-        )
-        self.assertIn(
-            'PKG_CONFIG_LIBDIR="$abseil_install_root/lib64/pkgconfig:'
-            '$abseil_install_root/lib/pkgconfig"',
-            source,
-        )
-
     def test_protocol_representative_awk_avoids_builtin_names(self):
         source = (SCRIPT.parent / "run-shard.sh").read_text()
 
@@ -2150,18 +1925,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "reached\n")
 
-    def test_smoke_stability_checks_use_qualification_measurement_windows(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-
-        self.assertEqual(source.count("REBAR_MAXIMUM_TIME=5s"), 2)
-        self.assertEqual(source.count("REBAR_WARMUP_TIME=5s"), 2)
-        self.assertIn("CALIBRATION_WARMUP_ITERATIONS=3", source)
-        self.assertIn("CALIBRATION_MEASUREMENT_ITERATIONS=3", source)
-        self.assertIn("CALIBRATION_WARMUP_TIME=1s", source)
-        self.assertIn("CALIBRATION_MEASUREMENT_TIME=1s", source)
-        self.assertIn('-wi "${CALIBRATION_WARMUP_ITERATIONS}"', source)
-        self.assertIn('-i "${CALIBRATION_MEASUREMENT_ITERATIONS}"', source)
-
     def test_calibration_uses_process_stable_workload(self):
         source = (SCRIPT.parent / "run-shard.sh").read_text()
 
@@ -2172,18 +1935,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         self.assertEqual(source.count('"${calibration_parameters[@]}"'), 3)
         self.assertNotIn("calibration-before.json\" -p textSize=32768", source)
         self.assertNotIn("calibration-after.json\" -p textSize=32768", source)
-
-    def test_rebar_runner_uses_current_package_and_canonical_controls(self):
-        runner = (SCRIPT.parents[1] / "rebar" / "run-regulator.sh").read_text()
-        shard = (SCRIPT.parent / "run-shard.sh").read_text()
-
-        self.assertIn("io.airlift.regulator.Dfa::search", runner)
-        self.assertNotIn("io.airlift.slice.re2", runner)
-        self.assertIn(
-            "REBAR_PRIMARY_ENGINE_FILTER='^(?:re2/pinned-host-tuned-before|regulator/re2|"
-            "re2/pinned-host-tuned-after)$'",
-            shard)
-        self.assertNotIn("re2/pinned-portable|regulator/re2", shard)
 
     def test_remote_benchmark_failure_is_classified(self):
         source = (SCRIPT.parent.parent / "aws" / "run-campaign.sh").read_text()
@@ -2204,65 +1955,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         self.assertIn("trap 'abort_campaign INT 130' INT", source)
         self.assertIn("trap 'abort_campaign TERM 143' TERM", source)
 
-    def test_compiler_rows_use_extended_warmup(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-        suites = (SCRIPT.parent / "jmh-suites.tsv").read_text()
-
-        self.assertIn("EXTENDED_WARMUP_TIME=300ms", source)
-        self.assertIn("EXTENDED_WARMUP_SECONDS=0.3", source)
-        self.assertIn('$3 == "compile" || $3 == "public-compile"', source)
-        self.assertIn('BenchmarkRe2Practical[.]compilePhase', source)
-        self.assertIn(
-            'frozen_protocol --execution jmh-processes --field warmup_time "$@"',
-            source)
-        self.assertIn(
-            'specialized_warmup_time=${EXTENDED_WARMUP_TIME}',
-            source)
-        self.assertIn(
-            '"${benchmark}" == io.airlift.regulator.BenchmarkRe2Compile*',
-            source)
-        self.assertIn(
-            'BenchmarkRe2Parse\\.searchPhoneRe2',
-            source)
-        self.assertIn(
-            'local regular_filter="^(?!${extended_prefix})${filter#^}"',
-            source)
-        self.assertIn(
-            'local extended_filter="^(?=${extended_prefix})${filter#^}"',
-            source)
-        self.assertIn(
-            'regular_selection+=(--exclude-benchmark-prefix "${benchmark_prefix}")',
-            source)
-        self.assertIn(
-            'extended_selection+=(--include-benchmark-prefix "${benchmark_prefix}")',
-            source)
-        self.assertIn(
-            'compile-public\tpublic-compile\t^io\\.airlift\\.regulator\\.'
-            'BenchmarkJavaRegexpPublicApi\\.compile$\t-\tregulator-native-access\t',
-            suites)
-
-    def test_nonforked_jmh_processes_install_jmh_compiler_hints(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-
-        self.assertIn("prepare_jmh_host_compiler_arguments()", source)
-        self.assertIn("io.airlift.regulator.BenchmarkCompilerHints", source)
-        self.assertGreaterEqual(source.count('"${jmh_host_compiler_arguments[@]}"'), 3)
-
-    def test_bounded_measurements_use_independent_jvms(self):
-        source = (SCRIPT.parent / "run-shard.sh").read_text()
-
-        self.assertEqual(source.count("-f 0"), 3)
-        self.assertGreaterEqual(source.count('java "${jmh_process_jvm_arguments[@]}"'), 2)
-        self.assertEqual(source.count('if [[ ${process_index} -eq 1 ]]'), 3)
-        self.assertEqual(source.count('profiler_arguments=(-prof gc)'), 3)
-        self.assertEqual(source.count('"${profiler_arguments[@]}"'), 2)
-        self.assertIn('secondary_metric_arguments=(--allow-missing-secondary-metrics)', source)
-        self.assertIn('jmh_process_jvm_arguments=("${route_jvm_arguments[@]}"', source)
-        self.assertGreaterEqual(source.count('-jvmArgs "${jmh_fork_arguments}"'), 2)
-
     def test_replacement_allowance_is_bounded(self):
         final_attempt = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 118, 3, "on-demand", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 118, 3, "on-demand", "language-batch")
 
         with self.assertRaisesRegex(RuntimeError, "exhausted"):
             RUN_CAMPAIGN.replacement_job(final_attempt, 119, "retryable-infrastructure")
@@ -2274,7 +1969,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 RUN_CAMPAIGN.replace(moved, attempt=4), 120, "retryable-infrastructure")
 
     def test_retry_requires_verified_cleanup_and_aws_classification(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
@@ -2296,7 +1991,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(cleanup["failure_detail"], "instance-terminated-no-capacity")
 
     def test_retry_rejects_unverified_cleanup(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
@@ -2316,9 +2011,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_ordinary_failure_does_not_stop_independent_job(self):
         failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         outstanding_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 11, 1, "spot", "language-batch")
+            self.platform, "like-compile", 1, 11, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -2352,15 +2047,15 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(failed_process.signals, [])
             self.assertEqual(outstanding_process.signals, [])
             unresolved = (result_root / "unresolved-jobs.tsv").read_text()
-            self.assertIn("traditional-search", unresolved)
-            self.assertIn("traditional-capture", unresolved)
+            self.assertIn("like-dfa-single-use", unresolved)
+            self.assertIn("like-compile", unresolved)
             RUN_CAMPAIGN.validate_cleanup_manifest(result_root, outstanding_job)
 
     def test_unverified_cleanup_stops_sibling_jobs(self):
         failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         sibling_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 11, 1, "spot", "language-batch")
+            self.platform, "like-compile", 1, 11, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -2400,9 +2095,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_accepted_receipt_is_persisted_without_waiting_for_campaign_success(self):
         accepted_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 11, 1, "spot", "language-batch")
+            self.platform, "like-compile", 1, 11, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -2434,7 +2129,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 accepted_job.logical_identity])
 
     def test_restart_skips_previously_accepted_job(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -2460,7 +2155,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 [receipt])
 
     def test_recovery_rejects_receipt_from_different_heap(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             receipt = self.receipt_for_job(job)
@@ -2478,7 +2173,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     RUN_CAMPAIGN.recover_accepted_sessions(root, arguments, root, [job], ledger)
 
     def test_restart_waits_for_detached_wrapper_cleanup(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2494,7 +2189,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             RUN_CAMPAIGN.validate_cleanup_manifest(result_root, job)
 
     def test_restart_rejects_detached_wrapper_without_cleanup(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2540,7 +2235,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             arguments = self.arguments(root)
-            job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 1, 1, "spot", "language-batch")
+            job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 1, 1, "spot", "language-batch")
             with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": ""}):
                 self.assertEqual("8g", RUN_CAMPAIGN.campaign_heap_size(arguments))
             with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": "2g"}):
@@ -2548,7 +2243,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual("8g", environment["BENCHMARK_HEAP_SIZE"])
 
     def test_starting_attempt_without_process_retries_on_fresh_epoch(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2568,7 +2263,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(next_epoch, 12)
 
     def test_budget_recovery_releases_settled_prelaunch_reservation(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2590,7 +2285,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             budget.release.assert_called_once_with("baseline", 10, cleanup_verified=True)
 
     def test_budget_recovery_requires_cleanup_after_launch(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
@@ -2613,15 +2308,15 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_resume_epoch_accounts_for_accepted_replacement(self):
         accepted_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 1, 1, "spot", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 1, 1, "spot", "language-batch")
         failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 2, 1, "spot", "language-batch")
+            self.platform, "like-compile", 1, 2, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             attempts = result_root / "job-attempts.tsv"
             accepted_epoch = RUN_CAMPAIGN.job_result_root(
                 result_root, RUN_CAMPAIGN.Job(
-                    self.platform, "traditional-search", 1, 3, 2, "spot", "language-batch"))
+                    self.platform, "like-dfa-single-use", 1, 3, 2, "spot", "language-batch"))
             accepted_epoch.mkdir(parents=True)
             self.write_cleanup_session(
                 result_root,
@@ -2641,9 +2336,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(next_epoch, 5)
 
     def test_refill_replaces_each_exhausted_job_once_on_demand(self):
-        accepted_job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 1, 1, "spot", "language-batch")
-        exhausted_job = RUN_CAMPAIGN.Job(self.platform, "traditional-capture", 1, 2, 3, "spot", "language-batch")
-        rejected_job = RUN_CAMPAIGN.Job(self.platform, "traditional-extra", 1, 3, 1, "spot", "language-batch")
+        accepted_job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 1, 1, "spot", "language-batch")
+        exhausted_job = RUN_CAMPAIGN.Job(self.platform, "like-compile", 1, 2, 3, "spot", "language-batch")
+        rejected_job = RUN_CAMPAIGN.Job(self.platform, "like-single-use", 1, 3, 1, "spot", "language-batch")
         jobs = [accepted_job, RUN_CAMPAIGN.replace(exhausted_job, attempt=1), rejected_job]
         accepted = {accepted_job.logical_identity: self.receipt_for_job(accepted_job)}
         refill = RUN_CAMPAIGN.replace(exhausted_job, host_epoch=4, attempt=4, market="on-demand")
@@ -2688,9 +2383,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_unexpected_controller_error_stops_sibling_jobs(self):
         malformed_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         sibling_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-capture", 1, 11, 1, "spot", "language-batch")
+            self.platform, "like-compile", 1, 11, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -2724,7 +2419,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         # The starting record fails before the wrapper starts, the started record after it.
         for failed_write, started in ((1, False), (2, True)):
             with self.subTest(failed_write=failed_write), tempfile.TemporaryDirectory() as temporary_directory:
-                job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+                job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
                 root = Path(temporary_directory)
                 result_root = root / "results"
                 result_root.mkdir()
@@ -2761,7 +2456,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 self.assertEqual([15 * 60] if started else [], process.wait_timeouts)
 
     def test_wrapper_that_fails_to_start_is_retried_on_a_fresh_epoch(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -2838,7 +2533,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertFalse(any("status" in command for command in commands))
 
     def test_conflicting_accepted_receipt_is_unsafe(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             ledger = root / "accepted-language-sessions.json"
@@ -2895,7 +2590,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_on_demand_capacity_accounts_for_unrelated_work_and_local_reservations(self):
         running_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "on-demand", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 10, 1, "on-demand", "language-batch")
         instances = [
             {
                 "instance_type": "m8gd.4xlarge",
@@ -2944,7 +2639,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_spot_capacity_accounts_for_unrelated_work_and_local_reservations(self):
         running_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         instances = [
             {
                 "instance_id": "i-external",
@@ -3011,7 +2706,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_spot_quota_shortage_changes_unlaunched_job_to_on_demand(self):
         spot_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -3053,7 +2748,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
     def test_on_demand_vcpu_limit_has_unbounded_capacity_retry(self):
         job = RUN_CAMPAIGN.Job(
             self.platform,
-            "traditional-search",
+            "like-dfa-single-use",
             1,
             100,
             RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1,
@@ -3067,7 +2762,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_on_demand_capacity_wait_queues_instead_of_aborting(self):
         job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "on-demand", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 10, 1, "on-demand", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -3104,9 +2799,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_spot_unavailability_falls_back_to_on_demand_on_fresh_epoch(self):
         spot_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         on_demand_job = RUN_CAMPAIGN.Job(
-            self.platform, "traditional-search", 1, 11, 2, "on-demand", "language-batch")
+            self.platform, "like-dfa-single-use", 1, 11, 2, "on-demand", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             result_root = root / "results"
@@ -3168,7 +2863,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_spot_unavailability_tries_each_allowed_region_before_on_demand(self):
         # Neither region has Spot capacity, and the controller restarts after the second fails.
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             result_root = root / "results"
@@ -3207,8 +2902,8 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_phase_tail_launches_on_demand_unless_spot_only(self):
         # Ten shard jobs leave a one-job tail.
-        jobs = [RUN_CAMPAIGN.Job(self.platform, f"rebar-{letter}", 1, epoch, 1, "spot", "language-batch")
-                for epoch, letter in enumerate("abcdefghij", start=1)]
+        jobs = [RUN_CAMPAIGN.Job(self.platform, f"language-bulk-{epoch:04d}", 1, epoch, 1, "spot", "language-batch")
+                for epoch in range(1, 11)]
         for spot_only, expected in ((False, ["spot"] * 9 + ["on-demand"]), (True, ["spot"] * 10)):
             with self.subTest(spot_only=spot_only), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -3239,7 +2934,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             rates["on_demand_total"] = 2 * rates["total"]
         fixture.path.write_text(json.dumps(policy))
         # A one-job phase is all tail, so its only launch is On-Demand.
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         queried = []
 
         def aws_result(command, **_):
@@ -3283,7 +2978,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                          [{"id": "i-other", "type": "r8i.2xlarge", "vcpus": 8, "campaign_id": None, "host_epoch": None}])
 
     def test_resumed_campaign_events_keep_their_columns(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "traditional-search", 1, 10, 1, "spot", "language-batch")
+        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "language-batch")
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory)
             session = self.write_cleanup_session(result_root, job)
@@ -3784,7 +3479,7 @@ class TestUnitWorkers(unittest.TestCase):
             fleet = FakeUnitFleet(Path(temporary) / "hosts")
             gate = RUN_CAMPAIGN.unit_session.validate_unit_campaign
             with patch.object(RUN_CAMPAIGN.unit_session, "validate_unit_campaign", wraps=gate) as validated:
-                result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                result_root = self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             validated.assert_called_once()
             self.assertEqual(2, len(fleet.hosts))
             # Each planned worker launched; a pool at its limit plans none ahead.
@@ -3821,25 +3516,12 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual((primary / "accepted-units.tsv", [confirmed]),
                              (validated.call_args.args[3], list(validated.call_args.kwargs["confirmations"])))
 
-    def test_concurrency_units_run_on_their_platforms_concurrency_workers(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fleet = FakeUnitFleet(Path(temporary) / "hosts")
-            self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "lifecycle-shared-cold"], 4, 2)
-            platforms = {platform.name: platform for platform in self.PLATFORMS}
-            placements = {(fleet.units[lease["unit_id"]]["shard_id"], host.platform, host.instance_type)
-                          for host in fleet.hosts for lease in host.leases.values() if lease.get("unit_id")}
-            self.assertEqual(
-                {(shard, name, platform.concurrency_instance_type if shard == "lifecycle-shared-cold"
-                  else platform.instance_type)
-                 for shard in ("like-dfa-single-use", "lifecycle-shared-cold") for name, platform in platforms.items()},
-                placements)
-
     def test_interruption_requeues_its_unit_on_demand(self):
         # The interruption is recorded once, whether or not the host's heartbeats reached S3.
         for script in ("interrupt", "silent-interrupt"):
             with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}})
-                result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                result_root = self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
                 interrupted, other, replacement = fleet.hosts
                 self.assertEqual(("spot", "spot", "on-demand"), (interrupted.market, other.market, replacement.market))
                 self.assertEqual(
@@ -3876,7 +3558,7 @@ class TestUnitWorkers(unittest.TestCase):
         for sequence in (1, 2):
             with self.subTest(sequence=sequence), tempfile.TemporaryDirectory() as temporary:
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {sequence: "rebalance"}})
-                result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"],
+                result_root = self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"],
                                              2, 1, regions=["us-east-2", "us-west-2"])
                 rebalanced = fleet.hosts[0]
                 replacement = next(host for host in fleet.hosts[1:] if host.platform == rebalanced.platform)
@@ -3921,11 +3603,11 @@ class TestUnitWorkers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             fleet = FakeUnitFleet(Path(temporary) / "hosts", abort_after=2)
             with self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             self.assertTrue(any(entry[0] == "complete" for entry in fleet.log))
             fleet.abort_after = None
             with self.dispatchers() as dispatchers:
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             self.assertEqual(2, len(fleet.hosts))
             # An adopted worker is booked to the region it was placed in.
             self.assertEqual({int(host.epoch): host.region for host in fleet.hosts},
@@ -3938,19 +3620,19 @@ class TestUnitWorkers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             fleet = FakeUnitFleet(Path(temporary) / "hosts", abort_after=2)
             with self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             fleet.abort_after = None
             digest = Path(temporary) / "results" / RUN_CAMPAIGN.TOOLING_DIGEST
             fleet.tooling = "d" * 64
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "started by other tooling"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             fleet.tooling = "c" * 64
             digest.unlink()
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "records no tooling digest"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
 
     def test_boot_failures_pass_to_their_slots_replacements(self):
-        shards = ["like-dfa-single-use", "rebar-s"]
+        shards = ["trino-like-specialized"]
         with self.subTest(scenario="half the boots fail"), tempfile.TemporaryDirectory() as temporary:
             # Three of six concurrent r8i boots fail; each slot's replacement measures its units.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", failed_boot=lambda host: host.number in (2, 4, 6))
@@ -4014,7 +3696,7 @@ class TestUnitWorkers(unittest.TestCase):
             # The interrupted unit must run On-Demand, which the fleet refuses until the deadline.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "interrupt"}})
             with self.assertRaisesRegex(SystemExit, "unresolved units"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1,
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
                                on_demand=False, deadline=3600)
             interrupted = fleet.hosts[0]
             self.assertEqual(
@@ -4035,7 +3717,7 @@ class TestUnitWorkers(unittest.TestCase):
             # The deadline passes while the first host holds its lease; the host is then lost.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "stall"}})
             with self.assertRaisesRegex(SystemExit, "unresolved units"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1,
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
                                deadline=1.5 * RUN_CAMPAIGN.UNIT_POLL_SECONDS)
             stalled = fleet.hosts[0]
             unresolved = self.unresolved(Path(temporary) / "results")
@@ -4045,7 +3727,7 @@ class TestUnitWorkers(unittest.TestCase):
     def test_notice_between_units_releases_the_waiting_lease(self):
         with tempfile.TemporaryDirectory() as temporary:
             fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {2: "notice"}})
-            self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             noticed = fleet.hosts[0]
             outcomes = [row["outcome"] for row in self.ledger
                         if (row["host_session"], row["sequence"]) == (noticed.session, "2")]
@@ -4085,9 +3767,9 @@ class TestUnitWorkers(unittest.TestCase):
             # The controller stops while a Spot launch that found no capacity exits.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 1}, abort_after=1)
             with self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             fleet.abort_after = None
-            self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             failed = fleet.hosts[0]
             self.assertEqual(("r8i", "spot", 1), (failed.platform, failed.market, failed.status))
             self.assertEqual({}, failed.leases)
@@ -4097,7 +3779,7 @@ class TestUnitWorkers(unittest.TestCase):
             # The only region has no Spot capacity, and On-Demand waits for the fleet's allowance.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 1}, abort_after=3)
             with self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1,
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
                                on_demand=False)
             waiting = self.budget.reserve.call_args_list[-1].args[1]
             self.assertEqual(("r8i", "on-demand"), (waiting.platform.name, waiting.market))
@@ -4105,7 +3787,7 @@ class TestUnitWorkers(unittest.TestCase):
             fleet.reservations = [{"campaign_id": "campaign", "logical_identity": waiting.logical_identity,
                                    "host_epoch": waiting.host_epoch, "attempt": waiting.attempt}]
             fleet.abort_after = None
-            self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             self.budget.release.assert_any_call("campaign", waiting.host_epoch, cleanup_verified=True)
 
     def test_restart_redoes_a_calibration_copy_a_crash_cut_short(self):
@@ -4121,8 +3803,8 @@ class TestUnitWorkers(unittest.TestCase):
 
             with patch.object(RUN_CAMPAIGN.shutil, "copyfile", side_effect=crash_while_retaining), \
                     self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
-            result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            result_root = self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             for calibration in result_root.glob("units/**/calibrations/*"):
                 self.assertEqual(calibration.name, hashlib.sha256(calibration.read_bytes()).hexdigest() + ".json")
 
@@ -4138,7 +3820,7 @@ class TestUnitWorkers(unittest.TestCase):
                     patch.object(RUN_CAMPAIGN.released_artifact, "manifest", return_value=RELEASE):
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}}, calibrated=True)
                 with self.assertRaisesRegex(SystemExit, f"unresolved units: .*{re.escape(detail)}"):
-                    self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1,
+                    self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
                                    release_version=RELEASE["version"])
                 rejected = fleet.hosts[0]
                 self.assertEqual([(rejected.session, "1")], [(row["host_session"], row["sequence"])
@@ -4157,7 +3839,7 @@ class TestUnitWorkers(unittest.TestCase):
             with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}})
                 with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, error):
-                    self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                    self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
                 self.budget.halt.assert_called_once()
                 self.assertEqual([], [host.session for host in fleet.hosts if host.status is None])
                 self.assertEqual([], self.leases("accepted"))
@@ -4170,7 +3852,7 @@ class TestUnitWorkers(unittest.TestCase):
                                   calibrated=True)
             with self.assertRaisesRegex(SystemExit, "unresolved units: r9g/.*does not chain from the completion "
                                                     "of r9g-session-2/1: calibration_after"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             chained, falsely_chained = fleet.hosts
             self.assertEqual((("r8i", "accepted"), ("r9g", "rejected")), tuple(
                 (host.platform, next(row["outcome"] for row in self.ledger if row["outcome"] != "leased" and
@@ -4189,13 +3871,13 @@ class TestUnitWorkers(unittest.TestCase):
             with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}})
                 with self.assertRaisesRegex(SystemExit, f"unresolved units: .*{detail}"):
-                    self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                    self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
                 self.assertEqual(1, self.lease_count(fleet.hosts[0].leases[1]))
 
     def test_failed_unit_is_retried_until_accepted(self):
         with tempfile.TemporaryDirectory() as temporary:
             fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "fail"}})
-            self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             failed = fleet.hosts[0]
             self.assertEqual([(failed.session, "1")],
                              [(row["host_session"], row["sequence"]) for row in self.leases("failed")])
@@ -4204,11 +3886,11 @@ class TestUnitWorkers(unittest.TestCase):
     def test_unit_that_fails_every_attempt_is_left_unresolved(self):
         with tempfile.TemporaryDirectory() as temporary:
             units = RUN_CAMPAIGN.work_units.load(SCRIPT.parent)
-            unit_id = next(unit_id for unit_id, unit in sorted(units.items()) if unit["shard_id"] == "rebar-s")
+            unit_id = next(unit_id for unit_id, unit in sorted(units.items()) if unit["shard_id"] == "trino-like-specialized")
             fleet = FakeUnitFleet(Path(temporary) / "hosts", unit_scripts={unit_id: "fail"})
             with self.assertRaisesRegex(SystemExit, f"unresolved units: r8i/{unit_id}/replica-1 .*unit failed with "
                                                     f"status 1; spent its {RUN_CAMPAIGN.MAX_UNIT_ATTEMPTS} attempts"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use", "rebar-s"], 2, 1)
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             self.assertEqual(RUN_CAMPAIGN.MAX_UNIT_ATTEMPTS, self.lease_count({"unit_id": unit_id, "replica_id": 1}))
 
     def test_semantic_failure_of_a_lost_lease_outlasts_its_replacement(self):

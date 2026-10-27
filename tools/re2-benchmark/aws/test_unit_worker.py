@@ -154,7 +154,7 @@ with open(os.environ['FAKE_RUNS'], 'a') as runs:
         'sequence': int(sequence), 'unit_id': unit_id, 'protocol': protocol, 'replica': replica,
         'replica_environment': os.environ['RE2_CAMPAIGN_REPLICA_ID'], 'pid': os.getpid(), 'child': child,
         'chained': os.environ['BASELINE_UNIT_CALIBRATION_BEFORE'],
-        'orders': [os.environ.get(name) for name in ('JONI_COMPARATOR_ORDER', 'REBAR_COMPARATOR_ORDER')],
+        'order': os.environ.get('JONI_COMPARATOR_ORDER'),
     }) + '\n')
 print(f'measuring lease {sequence}', flush=True)
 if behavior.get('notice'):
@@ -226,7 +226,7 @@ class Worker:
             'BASELINE_PROTOCOL': 'smoke', 'BASELINE_REGION': 'us-west-2',
             'UNIT_WORKER_BUCKET': 'bucket', 'UNIT_WORKER_LEASE_PREFIX': 'input/leases',
             'UNIT_WORKER_RESULT_PREFIX': 'results', 'UNIT_WORKER_POLL_SECONDS': '0.05',
-            'JONI_COMPARATOR_ORDER': 'forward', 'REBAR_COMPARATOR_ORDER': 'forward',
+            'JONI_COMPARATOR_ORDER': 'forward',
         }
         if clock:
             # A virtual second costs no real time, so the worker polls each one.
@@ -297,7 +297,7 @@ class TestUnitWorker(unittest.TestCase):
             runs = worker.runs()
             self.assertEqual([(1, UNIT['first'], '1'), (2, UNIT['second'], '2'), (3, UNIT['third'], '3')],
                              [(run['sequence'], run['unit_id'], run['replica']) for run in runs])
-            self.assertTrue(all(run['replica_environment'] == run['replica'] and run['orders'] == [None, None]
+            self.assertTrue(all(run['replica_environment'] == run['replica'] and run['order'] is None
                                 for run in runs))
             completions = [worker.json(f'units/{sequence}/completion.json') for sequence in (1, 2, 3)]
             for completion in completions:

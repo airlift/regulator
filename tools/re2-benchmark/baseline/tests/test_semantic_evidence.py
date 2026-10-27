@@ -22,36 +22,19 @@ class TestSemanticEvidence(unittest.TestCase):
                 '<testcase classname="io.airlift.TestExample" name="testOne"/></testsuite>')
             log = root / "semantic.log"
             log.write_text("noise\nVerified 80 exact comparisons\n")
-            rebar = root / "rebar.csv"
-            rebar.write_text("b,count,engine,1,OK\na,count,engine,1,OK\n")
             arguments = SimpleNamespace(
                 reports=reports,
                 expected_tests="TestExample",
                 route="native-access",
                 handler="jmh",
                 native_access="true",
-                semantic_log=log,
-                rebar_verification=[rebar])
+                semantic_log=log)
 
             rows = SEMANTIC_EVIDENCE.build_evidence(arguments)
 
             self.assertIn(("junit", "io.airlift.TestExample#testOne", "passed"), rows)
             self.assertIn(("verifier", "Verified 80 exact comparisons", "passed"), rows)
-            self.assertEqual([row for row in rows if row[0] == "rebar"][0][1], "exact-system-verification")
             self.assertEqual(rows, sorted(rows))
-
-    def testCombinesIndependentRebarVerificationInvocations(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            primary = root / "primary.csv"
-            primary.write_text("a,count,regulator/re2,1,OK\n")
-            joni = root / "joni.csv"
-            joni.write_text("a,count,joni/trino,2,OK\n")
-
-            evidence = SEMANTIC_EVIDENCE.rebar_evidence([primary, joni])
-
-            self.assertEqual(1, len(evidence))
-            self.assertEqual("exact-system-verification", evidence[0][1])
 
     def test_rejects_missing_requested_test_class(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

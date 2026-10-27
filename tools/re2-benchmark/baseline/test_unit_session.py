@@ -28,16 +28,16 @@ def load_module(name, path):
 
 SHARD_RESULTS = load_module("host_session_shard_results", BASELINE / "shard_results.py")
 UNIT_SESSION = load_module("unit_session", BASELINE / "unit_session.py")
-# A one-route object-row unit that copies the native bracket it is compared against.
-COPY_UNIT = ("traditional-extra-big-fixed", "2")
+# A unit whose rows span both memory routes.
+UNIT = ("trino-operations", "1")
 # A unit owning protocol representatives.
-REPRESENTATIVE_UNIT = ("compile-public", "2")
+REPRESENTATIVE_UNIT = ("trino-operations", "4")
 
 
 class TestUnitSession(unittest.TestCase):
-    def testUnitAttemptIsAcceptedWithCopiesMarkedPairingOnly(self):
+    def testUnitAttemptIsAccepted(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
-            fixture = UnitFixture(Path(temporary_directory), *COPY_UNIT)
+            fixture = UnitFixture(Path(temporary_directory), *UNIT)
             fixture.combine()
 
             receipt = UNIT_SESSION.validate_unit_results(fixture.root)
@@ -45,40 +45,27 @@ class TestUnitSession(unittest.TestCase):
             unit = fixture.unit
             self.assertEqual((unit["unit_id"], "host-session-1/3", "us-west-2"),
                              (receipt["unit_id"], receipt["unit_attempt_id"], receipt["region"]))
-            self.assertEqual(("7", "14"), (receipt["owned_row_count"], receipt["copied_row_count"]))
+            self.assertEqual(str(len(unit["owned"])), receipt["owned_row_count"])
             self.assertEqual(
-                UNIT_SESSION.work_units.protocol_digest([*unit["owned"], *unit["copies"]], fixture.protocols),
+                UNIT_SESSION.work_units.protocol_digest(unit["owned"], fixture.protocols),
                 receipt["row_protocol_sha256"])
-            roles = {row["row_id"]: row["role"] for row in fixture.read("observed-rows.tsv")}
-            self.assertEqual({row_id: "copy" for row_id in unit["copies"]},
-                             {row_id: role for row_id, role in roles.items() if role == "copy"})
             evidence = {row["artifact"]: row for row in fixture.read("unit-evidence.tsv")}
             self.assertEqual("capacity-prefix-sha256", evidence["unit-capacity.txt"]["verification"])
             self.assertEqual("host", evidence["calibration.tsv"]["route"])
 
     def testUnitAcceptanceRejectsAnAttemptThatBreaksItsPromises(self):
-        def swap_copy_role(fixture):
-            rows = fixture.read("observed-rows.tsv")
-            next(row for row in rows if row["role"] == "copy")["role"] = "owner"
-            fixture.write_observed(rows)
-
         def drift_calibration(fixture):
             fixture.write_calibration(100, 106)
 
-        def drop_unit_copy(fixture):
+        def drop_unit_row(fixture):
             rows = fixture.read("unit-rows.tsv")
-            rows.remove(next(row for row in rows if row["role"] == "copy"))
+            rows.pop()
             SHARD_RESULTS.write_tsv(fixture.root / "unit-rows.tsv", UNIT_SESSION.work_units.UNIT_ROW_FIELDS, rows)
 
         def add_unknown_role(fixture):
             rows = fixture.read("unit-rows.tsv")
             rows.append({**rows[0], "row_id": "bogus", "role": "spare"})
             SHARD_RESULTS.write_tsv(fixture.root / "unit-rows.tsv", UNIT_SESSION.work_units.UNIT_ROW_FIELDS, rows)
-
-        def override_joni_window(fixture):
-            metadata = fixture.route_directory() / "run-metadata.txt"
-            metadata.write_text(
-                metadata.read_text().replace("baseline_joni_jmh_time=default", "baseline_joni_jmh_time=7ms"))
 
         def shorten_selector_window(fixture):
             path = fixture.route_directory() / "jmh-selectors.tsv"
@@ -98,16 +85,14 @@ class TestUnitSession(unittest.TestCase):
             SHARD_RESULTS.write_tsv(fixture.root / "unit-session.tsv", UNIT_SESSION.UNIT_SESSION_FIELDS, rows)
 
         cases = (
-            (COPY_UNIT, None, swap_copy_role, "role is 'owner', expected 'copy'"),
-            (COPY_UNIT, None, drift_calibration, "drifted 0.0600"),
-            (COPY_UNIT, None, drop_unit_copy, "differs from the frozen rows"),
-            (COPY_UNIT, add_unknown_role, None, "differs from the frozen rows"),
-            (COPY_UNIT, override_joni_window, None, "overrides the frozen Joni JMH window: 7ms"),
-            (COPY_UNIT, shorten_selector_window, None, "differs from the selectors of the frozen protocol"),
-            (COPY_UNIT, None, tamper_route_artifact, "checksum mismatch"),
-            (COPY_UNIT, None, empty_route_plan, "route-plan.tsv is not the unit's plan for replica"),
-            (COPY_UNIT, None, misname_attempt, "unit-session.tsv unit_attempt_id must be <host_session>/<lease_seq>"),
-            (COPY_UNIT, lambda fixture: fixture.replace_semantic_report(), None,
+            (UNIT, None, drift_calibration, "drifted 0.0600"),
+            (UNIT, None, drop_unit_row, "differs from the frozen rows"),
+            (UNIT, add_unknown_role, None, "differs from the frozen rows"),
+            (UNIT, shorten_selector_window, None, "differs from the selectors of the frozen protocol"),
+            (UNIT, None, tamper_route_artifact, "checksum mismatch"),
+            (UNIT, None, empty_route_plan, "route-plan.tsv is not the unit's plan for replica"),
+            (UNIT, None, misname_attempt, "unit-session.tsv unit_attempt_id must be <host_session>/<lease_seq>"),
+            (UNIT, lambda fixture: fixture.replace_semantic_report(), None,
              "are not the files of its semantic receipt"),
             (REPRESENTATIVE_UNIT, lambda fixture: fixture.drop_representative(), None, "ran representatives"),
         )
@@ -127,9 +112,9 @@ class TestUnitSession(unittest.TestCase):
             host = Path(temporary_directory) / "host"
             first_before, shared, second_after, drifted = (
                 store_host_calibration(host, score) for score in (100, 101, 102, 107.1))
-            first = UnitFixture(Path(temporary_directory) / "first", *COPY_UNIT)
+            first = UnitFixture(Path(temporary_directory) / "first", *UNIT)
             first.calibrate_on_host(host, first_before, shared)
-            second = UnitFixture(Path(temporary_directory) / "second", *COPY_UNIT, chained=True)
+            second = UnitFixture(Path(temporary_directory) / "second", *UNIT, chained=True)
             second.chain(shared)
             second.calibrate_on_host(host, shared, second_after)
 
@@ -137,7 +122,7 @@ class TestUnitSession(unittest.TestCase):
                 UNIT_SESSION.validate_unit_results(fixture.root, host_evidence=host)
                 evidence = {row["artifact"]: row for row in fixture.read("unit-evidence.tsv")}
                 self.assertEqual("host-sha256", evidence[f"calibrations/{shared.name}"]["verification"])
-            self.assertEqual(["after"], [route["calibration"] for route in second.read("route-plan.tsv")])
+            self.assertEqual(["none", "after"], [route["calibration"] for route in second.read("route-plan.tsv")])
 
             with self.assertRaisesRegex(ValueError, "without a host evidence directory"):
                 UNIT_SESSION.validate_unit_results(second.root)
@@ -211,8 +196,7 @@ class UnitFixture:
     SMOKE_METADATA = ("jmh_process_count", "jmh_process_warmup_iterations", "jmh_process_measurement_iterations",
                       "jmh_iteration_time")
 
-    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row, role: 1,
-                 chained=False):
+    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row: 1, chained=False):
         self.root = root
         self.host_evidence = None
         units = UNIT_SESSION.work_units.load(BASELINE)
@@ -273,7 +257,7 @@ class UnitFixture:
         observed = directory / "observed-rows.tsv"
         SHARD_RESULTS.write_tsv(observed, SHARD_RESULTS.OBSERVED_FIELDS, [{
             "row_id": row["row_id"], "shard_id": row["shard_id"], "system": row["system"],
-            "score": str(self.score(row, "copy" if row["row_id"] in self.unit["copies"] else "owner")),
+            "score": str(self.score(row)),
             "score_unit": "ns/op", "allocation_bytes": "0", "result_checksum": "0" * 64, "outcome": "accepted",
         } for row in sorted(share, key=lambda row: row["row_id"])])
         (directory / "observed-rows.tsv.sha256").write_text(
@@ -284,13 +268,6 @@ class UnitFixture:
                       if row["shard_id"] == self.unit["shard_id"]]
         SHARD_RESULTS.write_tsv(directory / "jmh-selectors.tsv", UNIT_SESSION.SELECTOR_FIELDS, UNIT_SESSION.selectors(
             share, shard_rows, self.protocols, "qualification", dict(zip(UNIT_SESSION.SMOKE_SETTINGS, self.SMOKE))))
-        if UNIT_SESSION.work_units.NATIVE_COMPARATOR_SYSTEMS <= set(systems):
-            SHARD_RESULTS.write_tsv(
-                directory / "native-bracket.tsv",
-                ("benchmark", "before_score_ns", "after_score_ns", "before_after_drift"),
-                [{"benchmark": f"{row['benchmark']}[{row['parameters']}]", "before_score_ns": "100",
-                  "after_score_ns": "101", "before_after_drift": "0.01"}
-                 for row in share if row["system"] == "native-re2-before"])
         report = directory / "semantic-reports" / "TEST-Fixture.xml"
         report.write_text("<testsuite/>\n")
         (directory / "semantic-receipt.sha256").write_text(
@@ -324,7 +301,7 @@ class UnitFixture:
             f"protocol_qualification_required={'true' if representative_count else 'false'}\n"
             f"protocol_representative_count={representative_count}\n"
             f"unit_id={self.unit['unit_id']}\nunit_calibration={calibration}\n"
-            "protocol=qualification\nbaseline_joni_jmh_time=default\n" +
+            "protocol=qualification\n" +
             "".join(f"{name}={value}\n" for name, value in zip(self.SMOKE_METADATA, self.SMOKE)) +
             f"semantic_receipt=measured\nsemantic_receipt_sha256={hashlib.sha256(receipt.read_bytes()).hexdigest()}\n")
 
@@ -345,9 +322,6 @@ class UnitFixture:
     def read(self, name):
         with (self.root / name).open(newline="", encoding="utf-8") as input_file:
             return list(csv.DictReader(input_file, delimiter="\t"))
-
-    def write_observed(self, rows):
-        SHARD_RESULTS.write_tsv(self.root / "observed-rows.tsv", UNIT_SESSION.UNIT_OBSERVED_FIELDS, rows)
 
     def combine(self, attempt="host-session-1/3"):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -374,7 +348,7 @@ class UnitCampaign:
 
     PLATFORMS = {"r8i": ("intel", "r8i.large"), "r9g": ("arm", "r9g.large")}
 
-    def __init__(self, root, shard_id, replicas=(1, 2, 3), score=lambda row, role, platform, replica: 1,
+    def __init__(self, root, shard_id, replicas=(1, 2, 3), score=lambda row, platform, replica: 1,
                  host_calibrations=False, chained=False):
         self.root = root
         self.shard_id = shard_id
@@ -412,7 +386,7 @@ class UnitCampaign:
                 "campaign_id": "campaign", "platform": platform, "instance_id": f"i-{platform}-{host}",
                 "host_epoch": f"{platform}-epoch-{host}", "architecture": architecture,
                 "instance_type": instance_type, "availability_zone": "us-west-2a",
-            }, lambda row, role: self.score(row, role, platform, replica), chained=previous is not None)
+            }, lambda row: self.score(row, platform, replica), chained=previous is not None)
         scores = (100, 101)
         if self.host_calibrations:
             if previous is not None:

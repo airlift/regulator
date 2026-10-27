@@ -206,8 +206,8 @@ distinct nonnumeric results.
 The report preserves host ranges and timing-precision warnings. A range is not
 a confidence interval. Single-use and multi-use results remain separate, and
 crossover estimates are suppressed when either phase has unresolved timing
-variation. Internal compiler phases, allocation and memory-census results
-remain in the separately preserved complete baseline evidence.
+variation. Internal allocation results remain in the separately preserved
+complete baseline evidence.
 
 Every API page combines single-use and multi-use timings in its pattern
 lifecycle table. The page order is everyday operations, the specialized engine

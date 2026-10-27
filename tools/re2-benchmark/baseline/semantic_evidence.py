@@ -2,7 +2,6 @@
 
 import argparse
 import csv
-import hashlib
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
@@ -18,7 +17,6 @@ def parse_arguments():
     parser.add_argument("--handler", required=True)
     parser.add_argument("--native-access", choices=("true", "false"), required=True)
     parser.add_argument("--semantic-log", type=Path, required=True)
-    parser.add_argument("--rebar-verification", type=Path, action="append", default=[])
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -53,19 +51,6 @@ def verifier_evidence(path):
     return [("verifier", line, "passed") for line in verified]
 
 
-def rebar_evidence(paths):
-    rows = []
-    for path in paths:
-        with path.open(newline="", encoding="utf-8") as input_file:
-            rows.extend(tuple(row) for row in csv.reader(input_file))
-    rows.sort()
-    digest = hashlib.sha256()
-    for row in rows:
-        digest.update("\0".join(row).encode())
-        digest.update(b"\n")
-    return [("rebar", "exact-system-verification", digest.hexdigest())]
-
-
 def build_evidence(arguments):
     expected_tests = [value for value in arguments.expected_tests.split(",") if value]
     if not expected_tests:
@@ -77,8 +62,6 @@ def build_evidence(arguments):
     ]
     rows.extend(junit_evidence(arguments.reports, expected_tests))
     rows.extend(verifier_evidence(arguments.semantic_log))
-    if arguments.rebar_verification:
-        rows.extend(rebar_evidence(arguments.rebar_verification))
     return sorted(rows)
 
 

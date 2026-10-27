@@ -24,10 +24,9 @@ staged copies under `unit-results/`. Each attempt directory must contain:
 - `unit-receipt.tsv`
 - `unit-session.tsv`
 - `unit-rows.tsv`
-- `observed-rows.tsv`, whose `role` column marks each row `owner` or `copy`
+- `observed-rows.tsv`
 - `unit-evidence.tsv`
 - `calibration.tsv`, the unit's own before and after calibration
-- `routes/<route>/native-bracket.tsv` when that route measures native RE2
 - `unit-capacity.txt`
 
 With `--release-version`, for a campaign that measured a published release,
@@ -61,16 +60,10 @@ Confirmation receipts are supplied separately. Confirmation rows are preserved
 alongside the three primary rows and identified explicitly; they never replace
 a primary attempt.
 
-A unit owns each of its rows or copies it. Every row has exactly one owner unit,
-whose three primary attempts and optional confirmation are that row's samples.
-A copy is a native bracket a unit measures again so that the rows it owns have
-a comparator measured beside them. It appears in `host-rows.tsv` with role
-`copy`, pairs with the candidates of its own attempt, and is never a row sample.
+Every row has exactly one owner unit, whose three primary attempts and
+optional confirmation are that row's samples.
 
 Calibration drift above 5% invalidates an attempt before acceptance.
-Native-bracket drift is scoped to the benchmark identity in that bracket: drift
-above 5% marks the affected rows and comparisons unresolved and makes their
-unit eligible for confirmation without invalidating unrelated measurements.
 Evidence for interrupted and rejected attempts is supplied through event files
 and remains separate from accepted measurements.
 
@@ -113,39 +106,6 @@ they are appended as a canonical `additional={...}` suffix. Events are copied
 to `events.tsv` and represented in the gap ledger; they are never treated as
 accepted measurements or unresolved accepted results.
 
-`--rebar-exclusions` accepts the checked-in `rebar-exclusions.tsv` schema:
-
-```text
-name model definition reason
-```
-
-Each row becomes an exclusion event and a recorded gap with scope `Rebar`.
-Name, model, definition, and reason remain available without a hand-written
-campaign event.
-
-`--rebar-joni-applicability` accepts the authoritative checked-in
-`rebar-joni-applicability.tsv`:
-
-```text
-benchmark model status reason
-```
-
-The reducer validates the adjacent checksum, exhaustive workload identity set,
-exact compatible-row relationship, and digest embedded in the frozen row
-manifest. Compatible rows have measurements in `rows.tsv` and do not create
-events. A `not-compatible` row becomes a Joni-scoped exclusion event and is not
-converted into a numeric comparison.
-
-An accepted Rebar route may also contain `raw/rebar-outcomes.tsv`. It records
-complete extended-corpus verifier mismatches and compatible Joni rows that
-exceeded the 30-second verification or 120-second measurement limit. The
-outcome records the phase; a measurement timeout can follow successful
-verification. Other curated failures cannot reach an accepted session. The
-reducer verifies each outcome against the exact manifest
-row, records a result row without performance data in `host-rows.tsv`, records
-the outcome in `rebar-outcomes.tsv` and the gap ledger, and excludes the
-affected host-row ratio from comparator summaries.
-
 ### Retrieval Metadata
 
 Each optional `--artifact-index` file must contain the session identity fields
@@ -186,32 +146,24 @@ Ratios are emitted only when the manifest identifies a same-host comparator
 relationship. The reducer does not infer relationships from similar benchmark
 names or descriptive labels:
 
-- A logical family containing `native-re2-before` and `native-re2-after`
-  compares each Regulator row with the median bracket score.
 - A family whose comparator is Joni compares each Regulator row with its
   same-host `joni` row.
 - A Trino LIKE family compares `regulator`, and `regulator-generated` where
   it is measured, separately with each `trino-optimized` and `trino-sql` row
   present.
-- A `general-route-control` family compares `regulator-native-access` with
-  `regulator-object-row`.
 - Other manifest comparator labels do not create a ratio unless one of these
   concrete paired shapes is present.
-- A host-row comparison with a classified extended Rebar semantic mismatch on
-  either side is omitted because its timing is informational rather than a
-  semantically equivalent performance comparison.
 
 Ratios use normalized Java cost divided by comparator cost. Below 1 is faster;
 above 1 is slower. Time units are converted before division. Throughput units
-are inverted so the direction remains consistent. Retained-memory bytes are a
-cost, so fewer retained bytes also produces a ratio below 1.
+are inverted so the direction remains consistent.
 
 ## Aggregation
 
 The unit attempt is the independent sample. Different units may share a host,
 but a row's samples come from the three primary attempts and the confirmation
 of its owner unit, each on its own instance. Same-host ratios pair a candidate
-with the comparators measured in the same unit attempt, owned or copied. The
+with the comparators measured in the same unit attempt. The
 reducer preserves all primary and confirmation attempts, then reports for every platform and manifest row:
 
 - primary and all-host medians
@@ -220,7 +172,7 @@ reducer preserves all primary and confirmation attempts, then reports for every 
 - an explicit note that a useful confidence interval is unsupported with only
   three or four independent hosts
 - median allocation
-- maximum accepted calibration and native-bracket drift
+- maximum accepted calibration drift
 - benchmark contract-identity consistency
 - identifiable input-size scaling classification
 - every unresolved reason
@@ -255,8 +207,7 @@ A row or comparison remains unresolved when applicable if:
 
 A median ratio at or beyond 0.5 or 2.0 is a serious performance outlier. These
 rows are preserved in `serious-outliers.tsv` and the gap ledger, but excluded
-from `general-classes.tsv`. Curated and extended Rebar rows are always grouped
-separately.
+from `general-classes.tsv`.
 
 `confirmation-jobs.tsv` deduplicates primary instability to the exact
 `platform, shard_id, unit_id` schema consumed by `run-campaign.py`:
@@ -274,8 +225,8 @@ on an instance none of its replicas 1 to 3 used.
 
 The reducer writes:
 
-- `host-rows.tsv`: every owned and copied row of each accepted attempt, with
-  `unit_id`, `unit_attempt_id`, and `role`
+- `host-rows.tsv`: every row of each accepted attempt, with `unit_id` and
+  `unit_attempt_id`
 - `row-aggregates.tsv`: per-platform row statistics and unresolved state
 - `host-comparator-ratios.tsv`: every same-host ratio
 - `comparison-aggregates.tsv`: per-platform comparison statistics
@@ -288,7 +239,6 @@ The reducer writes:
 - `metadata.tsv`: run and retrieval metadata passthrough
 - `capacity.tsv`: finalized wall-time, peak-RSS, and host-memory evidence, from
   `unit-capacity.txt` with `unit_capacity_sha256`
-- `rebar-outcomes.tsv`: exact extended-corpus semantic mismatches by host
 - `confirmation-jobs.tsv`: unique primary-unstable `platform`, `shard_id`,
   `unit_id` rows still eligible for the bounded replica-4 wave
 - `summary.json`: deterministic campaign counts and identity
@@ -326,8 +276,6 @@ python3 tools/re2-benchmark/baseline/aggregate_results.py \
     --artifacts-root /durable/path/campaign/primary \
     --artifacts-root /durable/path/campaign/confirmation \
     --events /durable/path/campaign/campaign-events.tsv \
-    --rebar-exclusions tools/re2-benchmark/manifests/rebar-exclusions.tsv \
-    --rebar-joni-applicability tools/re2-benchmark/manifests/rebar-joni-applicability.tsv \
     --artifact-index /durable/path/campaign/artifact-index.tsv \
     --campaign-artifact /durable/path/campaign/retrieval-metadata.tsv \
     --output-dir /durable/path/campaign/report-data
