@@ -151,6 +151,8 @@ final class OnePass
         int range = prog.bytemapRange();
         int[] stateMatchCond = prog.onePassMatchCond();
         int[] stateAction = prog.onePassAction();
+        int[] actionAssertions = prog.onePassActionAssertions();
+        int[] matchAssertions = prog.onePassMatchAssertions();
 
         int state = 0; // start() is always mapped to the zeroth OneState.
         int position = textBegin;
@@ -171,7 +173,7 @@ final class OnePass
                 int cond = stateAction[stateOffset + cls];
 
                 // Determine whether we can reach the next state.
-                if ((cond & EMPTY_ALL_FLAGS) == 0 || satisfy(cond, context, position)) {
+                if ((cond & EMPTY_ALL_FLAGS) == 0 || satisfyAction(actionAssertions, cond, stateOffset + cls, context, position)) {
                     state = cond >>> INDEX_SHIFT;
                     stateOffset = state * range;
                     nextMatchCond = stateMatchCond[state];
@@ -188,7 +190,7 @@ final class OnePass
                 else if (matchCond != IMPOSSIBLE) {
                     // Not if the possible match is beaten by the certain match at the next byte.
                     if ((cond & MATCH_WINS) != 0 || (nextMatchCond & EMPTY_ALL_FLAGS) != 0) {
-                        if ((matchCond & EMPTY_ALL_FLAGS) == 0 || satisfy(matchCond, context, position)) {
+                        if ((matchCond & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCond, context, position)) {
                             // Copy captures so far, then apply captures for this match boundary.
                             for (int i = 2; i < captureSlotCount; i++) {
                                 matchCaptures[i] = captures[i];
@@ -219,7 +221,7 @@ final class OnePass
             if (state >= 0) {
                 int matchCond = stateMatchCond[state];
                 if (matchCond != IMPOSSIBLE &&
-                        ((matchCond & EMPTY_ALL_FLAGS) == 0 || satisfy(matchCond, context, position))) {
+                        ((matchCond & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCond, context, position))) {
                     if (matchCount > 1 && (matchCond & CAP_MASK) != 0) {
                         applyCaptures(matchCond, position, captures, captureSlotCount);
                     }
@@ -269,6 +271,8 @@ final class OnePass
         int range = prog.bytemapRange();
         int[] stateMatchCondition = prog.onePassMatchCond();
         int[] stateAction = prog.onePassAction();
+        int[] actionAssertions = prog.onePassActionAssertions();
+        int[] matchAssertions = prog.onePassMatchAssertions();
 
         int state = 0;
         int position = textBegin;
@@ -281,7 +285,7 @@ final class OnePass
             int matchCondition = nextMatchCondition;
             int condition = stateAction[stateOffset + byteClass];
 
-            if ((condition & EMPTY_ALL_FLAGS) == 0 || satisfy(condition, context, position)) {
+            if ((condition & EMPTY_ALL_FLAGS) == 0 || satisfyAction(actionAssertions, condition, stateOffset + byteClass, context, position)) {
                 state = condition >>> INDEX_SHIFT;
                 stateOffset = state * range;
                 nextMatchCondition = stateMatchCondition[state];
@@ -294,7 +298,7 @@ final class OnePass
             if (matchKind != Prog.MatchKind.FULL_MATCH &&
                     matchCondition != IMPOSSIBLE &&
                     ((condition & MATCH_WINS) != 0 || (nextMatchCondition & EMPTY_ALL_FLAGS) != 0) &&
-                    ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfy(matchCondition, context, position))) {
+                    ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCondition, context, position))) {
                 matched = true;
                 if (matchKind == Prog.MatchKind.FIRST_MATCH && (condition & MATCH_WINS) != 0) {
                     return true;
@@ -312,7 +316,7 @@ final class OnePass
         int matchCondition = stateMatchCondition[state];
         return matched ||
                 (matchCondition != IMPOSSIBLE &&
-                        ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfy(matchCondition, context, position)));
+                        ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCondition, context, position)));
     }
 
     static boolean searchGroupZero(Prog prog, Slice context, int start, int end, Prog.MatchKind matchKind, int[] submatch)
@@ -337,6 +341,8 @@ final class OnePass
         int range = prog.bytemapRange();
         int[] stateMatchCondition = prog.onePassMatchCond();
         int[] stateAction = prog.onePassAction();
+        int[] actionAssertions = prog.onePassActionAssertions();
+        int[] matchAssertions = prog.onePassMatchAssertions();
 
         int position = context.byteArrayOffset() + start;
         int textEnd = context.byteArrayOffset() + end;
@@ -354,7 +360,7 @@ final class OnePass
             int matchCondition = nextMatchCondition;
             int condition = stateAction[stateOffset + byteClass];
 
-            if ((condition & EMPTY_ALL_FLAGS) == 0 || satisfy(condition, context, position)) {
+            if ((condition & EMPTY_ALL_FLAGS) == 0 || satisfyAction(actionAssertions, condition, stateOffset + byteClass, context, position)) {
                 state = condition >>> INDEX_SHIFT;
                 stateOffset = state * range;
                 nextMatchCondition = stateMatchCondition[state];
@@ -367,7 +373,7 @@ final class OnePass
             if (matchKind != Prog.MatchKind.FULL_MATCH &&
                     matchCondition != IMPOSSIBLE &&
                     ((condition & MATCH_WINS) != 0 || (nextMatchCondition & EMPTY_ALL_FLAGS) != 0) &&
-                    ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfy(matchCondition, context, position))) {
+                    ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCondition, context, position))) {
                 matchEnd = position;
                 if (matchKind == Prog.MatchKind.FIRST_MATCH && (condition & MATCH_WINS) != 0) {
                     return matchEnd;
@@ -381,7 +387,7 @@ final class OnePass
 
         int matchCondition = stateMatchCondition[state];
         if (matchCondition != IMPOSSIBLE &&
-                ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfy(matchCondition, context, position))) {
+                ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCondition, context, position))) {
             return position;
         }
         return matchEnd;
@@ -426,6 +432,8 @@ final class OnePass
         int range = prog.bytemapRange();
         int[] stateMatchCondition = prog.onePassMatchCond();
         int[] stateAction = prog.onePassAction();
+        int[] actionAssertions = prog.onePassActionAssertions();
+        int[] matchAssertions = prog.onePassMatchAssertions();
         long[] stateMatchCapture = prog.onePassMatchCapture();
         long[] stateActionCapture = prog.onePassActionCapture();
 
@@ -449,7 +457,7 @@ final class OnePass
                 int condition = stateAction[actionIndex];
                 long captureMask = stateActionCapture[actionIndex];
 
-                if ((condition & EMPTY_ALL_FLAGS) == 0 || satisfy(condition, context, position)) {
+                if ((condition & EMPTY_ALL_FLAGS) == 0 || satisfyAction(actionAssertions, condition, actionIndex, context, position)) {
                     state = condition >>> INDEX_SHIFT;
                     stateOffset = state * range;
                     nextMatchCondition = stateMatchCondition[state];
@@ -464,7 +472,7 @@ final class OnePass
                 }
                 else if (matchCondition != IMPOSSIBLE &&
                         ((condition & MATCH_WINS) != 0 || (nextMatchCondition & EMPTY_ALL_FLAGS) != 0) &&
-                        ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfy(matchCondition, context, position))) {
+                        ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCondition, context, position))) {
                     for (int captureSlot = 2; captureSlot < captureSlotCount; captureSlot++) {
                         matchCaptures[captureSlot] = captures[captureSlot];
                     }
@@ -485,7 +493,7 @@ final class OnePass
             if (state >= 0) {
                 int matchCondition = stateMatchCondition[state];
                 if (matchCondition != IMPOSSIBLE &&
-                        ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfy(matchCondition, context, position))) {
+                        ((matchCondition & EMPTY_ALL_FLAGS) == 0 || satisfyMatch(matchAssertions, matchCondition, context, position))) {
                     applyExtendedCaptures(stateMatchCapture[state], position, captures);
                     if (captures != matchCaptures || captureFinalization == CaptureFinalization.DIRECT_REBASE) {
                         for (int captureSlot = 2; captureSlot < captureSlotCount; captureSlot++) {
@@ -567,6 +575,33 @@ final class OnePass
     public static boolean search(Prog prog, Slice text, boolean anchored, Prog.MatchKind matchKind, int[] submatch)
     {
         return search(prog, text, 0, text.length(), anchored, matchKind, submatch);
+    }
+
+    // A program with Rust assertions keeps each condition's full EmptyOp mask in a parallel array:
+    // an action's at its action index, and a match condition's at its node index, which every
+    // match condition in such a program carries above INDEX_SHIFT. These methods evaluate that
+    // mask; a condition that needs a Rust assertion carries Prog.ONEPASS_EXTENDED_ASSERTIONS
+    // among its empty-width bits, so the loops always call them for it. Each search reads the
+    // arrays once, so a program without Rust assertions pays only a null check per empty-width check.
+    private static boolean satisfyAction(int[] assertions, int condition, int actionIndex, Slice context, int position)
+    {
+        if (assertions == null) {
+            return satisfy(condition, context, position);
+        }
+        return satisfyAssertions(assertions[actionIndex], context, position);
+    }
+
+    private static boolean satisfyMatch(int[] assertions, int condition, Slice context, int position)
+    {
+        if (assertions == null) {
+            return satisfy(condition, context, position);
+        }
+        return satisfyAssertions(assertions[condition >>> INDEX_SHIFT], context, position);
+    }
+
+    private static boolean satisfyAssertions(int need, Slice context, int position)
+    {
+        return (need & ~EmptyOp.contextFlags(context, position, need)) == 0;
     }
 
     private static boolean satisfy(int cond, Slice context, int p)

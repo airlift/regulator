@@ -265,8 +265,8 @@ public class TestRustRegexp
     @Test
     public void testRustAssertionsAgreeInBoundedEngines()
     {
-        // A DFA search that quits on a non-ASCII neighbor reruns on these engines, so both
-        // must evaluate the assertions.
+        // These engines run the searches the DFA and OnePass do not, including a DFA search that
+        // quits, so both must evaluate the assertions.
         assertBoundedEngines("(?mR)^é$", "\r\né\r\n", 2, 4);
         assertBoundedEngines("\\b{start}é\\b{end}", "!é!", 1, 3);
         assertBoundedEngines("(?-u)\\b{start}a\\b{end}", "!a!", 1, 2);
@@ -429,6 +429,65 @@ public class TestRustRegexp
         for (int quit = 0; quit < 4; quit++) {
             assertThat(alternating.find()).isTrue();
             assertThat(alternating.dfaQuitStreak()).isEqualTo(quit + 1);
+        }
+    }
+
+    @Test
+    public void testRustAssertionsRunOnOnePass()
+    {
+        // Anchored capture patterns with CRLF anchors, Unicode and ASCII word boundaries, and
+        // start, end, and end-half boundaries are one-pass. Over every short text, as a view
+        // between bytes outside ASCII, and every range, OnePass reports what BitState reports, for
+        // a boolean search, group zero, every group, and, in the last pattern, more groups than a
+        // condition's capture bits hold.
+        List<String> patterns = List.of(
+                "(a+)\\b( *)",
+                "\\B(.)",
+                "(?-u:\\b{start})(a)",
+                "\\b{start}(a+)\\b{end-half}",
+                "(a)\\b{end}( )?",
+                "\\<(a)( ?)\\>",
+                "(?mR)^(a*)$(\\r\\n|\\n)?",
+                "(\\b)(a)(\\B)(a?)(\\b{end-half})( ?)");
+
+        for (boolean bytes : new boolean[] {false, true}) {
+            RustRegexp.Options options = RustRegexp.Options.defaults().setBytes(bytes);
+            for (String pattern : patterns) {
+                Prog program = compileRustProgram(pattern, options, false);
+                assertThat(program.hasTextDependentAssertions()).as(pattern).isTrue();
+                assertThat(program.isOnePass()).as(pattern).isTrue();
+                int captureSlotCount = 2 * (RustRegexp.parse(utf8Slice(pattern), options).capturingGroupCount() + 1);
+                for (byte[] text : SHORT_TEXTS) {
+                    Slice context = paddedView(text);
+                    String hex = HexFormat.of().formatHex(text);
+                    for (int start = 0; start <= text.length; start++) {
+                        for (int end = start; end <= text.length; end++) {
+                            for (Prog.MatchKind matchKind : List.of(Prog.MatchKind.FIRST_MATCH, Prog.MatchKind.LONGEST_MATCH, Prog.MatchKind.FULL_MATCH)) {
+                                for (int slots : new int[] {0, 2, captureSlotCount}) {
+                                    int[] onePass = slots == 0 ? null : new int[slots];
+                                    int[] bitState = slots == 0 ? null : new int[slots];
+                                    boolean expected = BitState.search(program, context, start, end, true, matchKind, bitState);
+                                    String description = "%s on %s [%s, %s) %s, %s slots, bytes %s".formatted(pattern, hex, start, end, matchKind, slots, bytes);
+                                    assertThat(OnePass.search(program, context, start, end, true, matchKind, onePass)).as(description).isEqualTo(expected);
+                                    if (expected && slots != 0) {
+                                        assertThat(onePass).as(description).containsExactly(bitState);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Alternatives that read the same byte under different word assertions are not
+            // one-pass, including when one alternative folds case.
+            for (Map.Entry<String, String> entry : Map.of("(\\ba|\\B[a-z])", "aa", "(\\bA|\\B(?i:a))", "aA").entrySet()) {
+                String pattern = entry.getKey();
+                assertThat(compileRustProgram(pattern, options, false).isOnePass()).as(pattern).isFalse();
+                int[] groups = new int[4];
+                assertThat(RustRegexp.compile(utf8Slice(pattern), options).lookingAtInto(utf8Slice(entry.getValue()), 1, 2, groups)).as(pattern).isTrue();
+                assertThat(groups).as(pattern).containsExactly(1, 2, 1, 2);
+            }
         }
     }
 
