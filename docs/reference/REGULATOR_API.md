@@ -435,31 +435,31 @@ boolean matched = pattern.matches(input);
 
 TrinoLikePattern escaped = TrinoLikePattern.compile(
         Slices.utf8Slice("100\\%"),
-        '\\');
+        TrinoLikePattern.Options.defaults().setEscape('\\'));
 ```
 
 `matches` always applies to the complete input. `%` matches zero or more
-characters, `_` matches exactly one character, and the optional escape may quote
-`%`, `_`, or itself. A character is one Unicode code point; in malformed input,
-each maximal invalid subpart counts as one character. Redundant wildcard runs
-are normalized during compilation. Invalid escape syntax and a pattern that is
-not valid UTF-8 throw `TrinoLikePatternSyntaxException`, whose `byteOffset()` is
+characters, `_` matches exactly one character, and the optional escape, set with
+`Options.setEscape` and removed with `Options.clearEscape`, may quote `%`, `_`,
+or itself. A character is one Unicode code point; in malformed input, each
+maximal invalid subpart counts as one character. Redundant wildcard runs are
+normalized during compilation. Invalid escape syntax and a pattern that is not
+valid UTF-8 throw `TrinoLikePatternSyntaxException`, whose `byteOffset()` is
 relative to the logical pattern Slice.
 
 The compiled pattern is immutable and safe to share across threads. This API
 has no captures, partial-input matching, match-result object, replacement
 grammar, or conversion to the RE2 language.
 
-`TrinoLikePattern.Options.setGenerateBytecode(true)`, passed to the
-`compile(pattern, options)` or `compile(pattern, escape, options)` overload, is
-an experimental option, off by default, that compiles the pattern into its own
-hidden class. Results are unchanged; `usesGeneratedBytecode()` reports whether
-the pattern has such a class, which it lacks only when the class cannot be
-generated or would be too large for HotSpot to compile. A caller holding a
-constant pattern can bind the generated code directly through
-`generatedMatches()`, an `Optional` of a `(Slice)boolean` `MethodHandle` that
-is empty for an interpreted pattern. The handle requires a non-null input but
-does not check it.
+`TrinoLikePattern.Options.setGenerateBytecode(true)`, passed to
+`compile(pattern, options)`, is an experimental option, off by default, that
+compiles the pattern into its own hidden class. Results are unchanged;
+`usesGeneratedBytecode()` reports whether the pattern has such a class, which it
+lacks only when the class cannot be generated or would be too large for HotSpot
+to compile. A caller holding a constant pattern can bind the generated code
+directly through `generatedMatches()`, an `Optional` of a `(Slice)boolean`
+`MethodHandle` that is empty for an interpreted pattern. The handle requires a
+non-null input but does not check it.
 
 ## Trino adapter
 

@@ -27,12 +27,11 @@ final class TrinoLikeParser
 {
     private TrinoLikeParser() {}
 
+    // The escape, when present, must be a valid code point; `TrinoLikePattern.Options.setEscape`
+    // checks it for public callers.
     static List<Element> parse(Slice pattern, OptionalInt escapeCodePoint)
     {
         requireNonNull(pattern, "pattern is null");
-        if (escapeCodePoint.isPresent() && !Character.isValidCodePoint(escapeCodePoint.orElseThrow())) {
-            throw new IllegalArgumentException("escape must be one code point");
-        }
         if (escapeCodePoint.isEmpty()) {
             List<Element> ascii = parseAsciiNoEscape(pattern);
             if (ascii != null) {

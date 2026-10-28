@@ -72,6 +72,7 @@ public sealed class TrinoLikePattern
     /// affect an existing [TrinoLikePattern]. Options instances are not thread-safe.
     public static final class Options
     {
+        private OptionalInt escape = OptionalInt.empty();
         private boolean generateBytecode;
         private boolean aarch64 = AARCH64;
 
@@ -80,6 +81,31 @@ public sealed class TrinoLikePattern
         public static Options defaults()
         {
             return new Options();
+        }
+
+        OptionalInt escape()
+        {
+            return escape;
+        }
+
+        /// Sets the escape character, which makes the `%`, `_`, or escape character after it
+        /// literal. The escape must be a valid Unicode code point. Only `%`, `_`, or the escape
+        /// itself may follow the escape in a pattern; otherwise compile throws a
+        /// [TrinoLikePatternSyntaxException]. A pattern has no escape character by default.
+        public Options setEscape(int escapeCodePoint)
+        {
+            if (!Character.isValidCodePoint(escapeCodePoint)) {
+                throw new IllegalArgumentException("escapeCodePoint must be a valid code point: " + escapeCodePoint);
+            }
+            escape = OptionalInt.of(escapeCodePoint);
+            return this;
+        }
+
+        /// Removes the escape character, so `%` and `_` are always wildcards.
+        public Options clearEscape()
+        {
+            escape = OptionalInt.empty();
+            return this;
         }
 
         boolean generateBytecode()
@@ -157,19 +183,9 @@ public sealed class TrinoLikePattern
         return compile(pattern, OptionalInt.empty());
     }
 
-    public static TrinoLikePattern compile(Slice pattern, int escapeCodePoint)
-    {
-        return compile(pattern, OptionalInt.of(escapeCodePoint));
-    }
-
     public static TrinoLikePattern compile(Slice pattern, Options options)
     {
-        return compile(pattern, OptionalInt.empty(), options);
-    }
-
-    public static TrinoLikePattern compile(Slice pattern, int escapeCodePoint, Options options)
-    {
-        return compile(pattern, OptionalInt.of(escapeCodePoint), options);
+        return compileWithOptions(pattern, options);
     }
 
     private static TrinoLikePattern compile(Slice pattern, OptionalInt escapeCodePoint)
@@ -358,10 +374,10 @@ public sealed class TrinoLikePattern
     // Declared after matches because javac numbers constants in declaration order: declared
     // before it, this method's constants push a constant of matches out of the one-byte ldc
     // range, which grows matches.
-    private static TrinoLikePattern compile(Slice pattern, OptionalInt escapeCodePoint, Options options)
+    private static TrinoLikePattern compileWithOptions(Slice pattern, Options options)
     {
         requireNonNull(options, "options is null");
-        TrinoLikePattern compiled = compile(pattern, escapeCodePoint);
+        TrinoLikePattern compiled = compile(pattern, options.escape());
         if (options.generateBytecode()) {
             TrinoLikePattern generated = CompiledTrinoLikePattern.create(compiled, options.aarch64());
             if (generated != null) {

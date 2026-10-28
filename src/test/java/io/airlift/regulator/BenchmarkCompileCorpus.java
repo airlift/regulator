@@ -137,7 +137,7 @@ public class BenchmarkCompileCorpus
                 case RE2 -> Re2.compile(pattern);
                 case TRINO -> TrinoRegexp.compile(pattern);
                 case JAVA -> JavaRegexp.compile(pattern);
-                case LIKE -> TrinoLikePattern.compile(pattern, '\\');
+                case LIKE -> TrinoLikePattern.compile(pattern, TrinoLikePattern.Options.defaults().setEscape('\\'));
             };
         }
 
