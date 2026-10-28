@@ -566,8 +566,9 @@ exercise this boundary without needing the full corpus on the worker.
 The controller uses the configured concurrency and shared fleet budget.
 Use `--spot-only`, a `--spot-vcpu-reserve` matching the policy, and the same
 `--fleet-budget` file for baseline and language collection. Select
-`--release-version 1.0` to reproduce measurements of the published artifact.
-See the [AWS guide](../aws/README.md#shared-fleet-budget).
+`--release-version 2.0` to measure the published 2.0 artifact. See the
+[AWS guide](../aws/README.md#shared-fleet-budget) for the fleet budget, release
+manifests and remeasuring 1.0.
 If one platform runs out of Spot capacity, finish the same result root on
 On-Demand with `--refill-unresolved`; see
 [recovery](../aws/README.md#recovery-and-evidence).
