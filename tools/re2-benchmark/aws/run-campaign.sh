@@ -894,7 +894,7 @@ archive_content_sha256()
     gzip -dc "$1" | shasum -a 256 | awk '{print $1}'
 }
 
-verify_engine_build_archive()
+verify_shared_archive()
 {
     local checksum=$1
     local key=$2
@@ -905,9 +905,9 @@ verify_engine_build_archive()
         --query ChecksumSHA256 --output text 2>/dev/null || true)
     if [[ "${existing}" != "${encoded}" ]]; then
         # The controller uploads each archive before it launches any host in this region.
-        echo "Engine build archive in the shared transfer bucket is missing, unreadable, or fails its checksum:" \
+        echo "Shared archive in the transfer bucket is missing, unreadable, or fails its checksum:" \
             "s3://${BUCKET}/${key}" >&2
-        record_failure_classification retryable-infrastructure "engine-build-archive-unavailable:s3://${BUCKET}/${key}"
+        record_failure_classification retryable-infrastructure "shared-archive-unavailable:s3://${BUCKET}/${key}"
         return 1
     fi
 }
@@ -928,10 +928,10 @@ EOF
         lease_statement=",
   {\"Effect\":\"Allow\",\"Action\":\"s3:ListBucket\",\"Resource\":\"arn:aws:s3:::${BUCKET}\",\"Condition\":{\"StringLike\":{\"s3:prefix\":\"${INPUT_PREFIX}/leases/*\"}}}"
     fi
-    if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
+    if [[ -n "${SHARED_ARCHIVE_RESOURCES}" ]]; then
         # Read only the exact shared archives this session's host installs.
         engine_build_statement=",
-  {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":[${ENGINE_BUILD_SHARED_RESOURCES}]}"
+  {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":[${SHARED_ARCHIVE_RESOURCES}]}"
     fi
     cat > "${SESSION_DIR}/instance-transfer-policy.json" <<EOF
 {"Version":"2012-10-17","Statement":[
@@ -1107,9 +1107,16 @@ if [[ '${ENGINE_BUILD_MANIFEST_SHA256}' != '' ]]; then
     mkdir -p "\${ENGINE_BUILD_INPUT_DIR}"
     download_input 's3://${BUCKET}/${INPUT_PREFIX}/engine-build.json' "\${ENGINE_BUILD_INPUT_DIR}/engine-build.json"
     printf '%s  %s\n' '${ENGINE_BUILD_MANIFEST_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/engine-build.json" | sha256sum --check -
-    download_input 's3://${BUCKET}/${ENGINE_BUILD_TRINO_KEY}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz"
-    printf '%s  %s\n' '${ENGINE_BUILD_TRINO_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/trino.tar.gz" | sha256sum --check -
 fi
+while read -r -u 3 shared_file shared_sha256 shared_key; do
+    if [[ -n "\${shared_file}" ]]; then
+        mkdir -p "/opt/re2-work/\$(dirname "\${shared_file}")"
+        download_input "s3://${BUCKET}/\${shared_key}" "/opt/re2-work/\${shared_file}"
+        printf '%s  %s\n' "\${shared_sha256}" "/opt/re2-work/\${shared_file}" | sha256sum --check -
+    fi
+done 3<<'SHARED_ARCHIVES'
+${SHARED_ARCHIVES}
+SHARED_ARCHIVES
 
 export REGULATOR_SNAPSHOT_COMMIT='${REGULATOR_COMMIT}'
 export REGULATOR_SNAPSHOT_SHA256='${REGULATOR_SHA256}'
@@ -1334,14 +1341,17 @@ if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"
 fi
 
-ENGINE_BUILD_TRINO_SHA256=
+# Each content-addressed archive a host installs from the shared transfer bucket, one line each:
+# its path under /opt/re2-work on the host, its SHA-256, and its key.
+SHARED_ARCHIVES=
 if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
-    ENGINE_BUILD_TRINO_SHA256=$(
+    engine_archives=$(
         PYTHONDONTWRITEBYTECODE=1 python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" checksum \
-            --build "${ENGINE_BUILD_DIRECTORY}" --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256}") || true
-    if [[ ! "${ENGINE_BUILD_TRINO_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-        reject_input "Engine build archive does not match its manifest"
-    fi
+            --build "${ENGINE_BUILD_DIRECTORY}" --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256}") ||
+        reject_input "Engine build archives do not match their manifest"
+    while read -r archive_file archive_sha256; do
+        SHARED_ARCHIVES+="engine-build/${archive_file} ${archive_sha256} ${TRANSFER_PREFIX}/engine-builds/${archive_sha256}.tar.gz"$'\n'
+    done <<<"${engine_archives}"
 fi
 
 REGULATOR_SHA256=$(sha256 "${SESSION_DIR}/regulator.tar.gz")
@@ -1398,16 +1408,18 @@ fi
 if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     aws_cli s3 cp "${SESSION_DIR}/trino.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/trino.tar.gz" --only-show-errors
 fi
-ENGINE_BUILD_TRINO_KEY=
-ENGINE_BUILD_SHARED_RESOURCES=
 if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
     aws_cli s3 cp "${ENGINE_BUILD_DIRECTORY}/engine-build.json" "s3://${BUCKET}/${INPUT_PREFIX}/engine-build.json" --only-show-errors
-    # Every session in the bucket's region shares one copy of the content-addressed
-    # archive; it is a campaign input, not a session resource, so cleanup keeps it.
-    ENGINE_BUILD_TRINO_KEY="${TRANSFER_PREFIX}/engine-builds/${ENGINE_BUILD_TRINO_SHA256}.tar.gz"
-    verify_engine_build_archive "${ENGINE_BUILD_TRINO_SHA256}" "${ENGINE_BUILD_TRINO_KEY}"
-    ENGINE_BUILD_SHARED_RESOURCES="\"arn:aws:s3:::${BUCKET}/${ENGINE_BUILD_TRINO_KEY}\""
 fi
+# Every session in the bucket's region shares one copy of each content-addressed
+# archive; it is a campaign input, not a session resource, so cleanup keeps it.
+SHARED_ARCHIVE_RESOURCES=
+while read -r -u 3 _ archive_sha256 archive_key; do
+    if [[ -n "${archive_key:-}" ]]; then
+        verify_shared_archive "${archive_sha256}" "${archive_key}"
+        SHARED_ARCHIVE_RESOURCES+="${SHARED_ARCHIVE_RESOURCES:+,}\"arn:aws:s3:::${BUCKET}/${archive_key}\""
+    fi
+done 3<<<"${SHARED_ARCHIVES}"
 
 create_instance_profile
 
@@ -1474,7 +1486,6 @@ baseline_protocol_qualification=${BASELINE_PROTOCOL_QUALIFICATION}
 trino_commit=${TRINO_COMMIT}
 trino_snapshot_sha256=${TRINO_SHA256}
 engine_build_manifest_sha256=${ENGINE_BUILD_MANIFEST_SHA256:-none}
-engine_build_trino_sha256=${ENGINE_BUILD_TRINO_SHA256:-none}
 joni_evidence_scope=${JONI_EVIDENCE_SCOPE}
 campaign_mode=${CAMPAIGN_MODE}
 campaign_architectures=${CAMPAIGN_ARCHITECTURES}
@@ -1542,7 +1553,8 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                 fi
                 expected_cargo_package=not-installed
                 expected_rust_package=not-installed
-                if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
+                # An engine build compiles the native Rust runner.
+                if [[ "${CAMPAIGN_MODE}" == language-batch || "${CAMPAIGN_MODE}" == engine-build ]]; then
                     expected_cargo_package=${CARGO_PACKAGE}
                     expected_rust_package=${RUST_PACKAGE}
                 fi

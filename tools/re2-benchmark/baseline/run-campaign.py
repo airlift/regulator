@@ -981,15 +981,22 @@ def upload_engine_builds(arguments, jobs):
     directories = getattr(arguments, "engine_build_directories", None)
     if not directories:
         return
+    uploads = {}
+    for job in jobs:
+        build = directories[job.platform.name]
+        manifest = engine_build.load_manifest(build, arguments.engine_build_policy[job.platform.name])
+        for name, archive in manifest["archives"].items():
+            for region in launch_regions(arguments, job):
+                uploads[region, f"{os.environ['TRANSFER_PREFIX']}/engine-builds/{archive['sha256']}.tar.gz"] = (
+                    build / archive["file"], archive["sha256"], f"{job.platform.name} {name} archive")
+    upload_shared_archives(arguments, uploads)
+
+
+def upload_shared_archives(arguments, uploads):
+    """Put each content-addressed archive, {(region, key): (path, sha256, label)}, in its region's transfer bucket."""
     buckets = shared_transfer_buckets(arguments)
-    uploads = {(job.platform.name, region) for job in jobs for region in launch_regions(arguments, job)}
-    for platform, region in sorted(uploads):
-        build = directories[platform]
-        manifest = engine_build.load_manifest(build, arguments.engine_build_policy[platform])
-        archive = manifest["archives"]["trino"]
-        path = build / archive["file"]
-        key = f"{os.environ['TRANSFER_PREFIX']}/engine-builds/{archive['sha256']}.tar.gz"
-        checksum = base64.b64encode(bytes.fromhex(archive["sha256"])).decode()
+    for (region, key), (path, sha256, label) in sorted(uploads.items()):
+        checksum = base64.b64encode(bytes.fromhex(sha256)).decode()
         prefix = aws_output(arguments, region) + ["s3api"]
         for attempt in range(1, ENGINE_BUILD_UPLOAD_ATTEMPTS + 1):
             try:
@@ -1000,7 +1007,7 @@ def upload_engine_builds(arguments, jobs):
                 existing = None
             if existing == checksum:
                 break
-            print(f"uploading {platform} engine archive to {region} (attempt {attempt})", flush=True)
+            print(f"uploading {label} to {region} (attempt {attempt})", flush=True)
             try:
                 # A single PUT keeps S3's checksum the whole-object SHA-256, which S3 verifies on upload.
                 check_output(prefix + [
@@ -1010,8 +1017,7 @@ def upload_engine_builds(arguments, jobs):
                 break
             except subprocess.SubprocessError as error:
                 if attempt == ENGINE_BUILD_UPLOAD_ATTEMPTS:
-                    raise SystemExit(f"could not upload the {platform} engine archive to "
-                                     f"s3://{buckets[region]}/{key}: {error}") from error
+                    raise SystemExit(f"could not upload the {label} to s3://{buckets[region]}/{key}: {error}") from error
 
 
 def spot_placement_scores(arguments, instance_type, regions):
