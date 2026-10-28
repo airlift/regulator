@@ -21,9 +21,10 @@ judgment:
   supported Java pattern gives that release's results, computed with the JDK's
   own code, such as `Pattern`'s `CharPredicates` and the `Character`
   predicates, applied to the pinned Unicode database. Match positions are byte
-  offsets and a `find()` after a failure resumes at the last match end, both
-  recorded under [Java Regular-Subset Frontend](#java-regular-subset-frontend),
-  and [Differences from the JDK](docs/integrations/UNICODE.md#differences-from-the-jdk)
+  offsets, a `find()` after a failure resumes at the last match end, and
+  malformed input has no promised result, all recorded under
+  [Java Regular-Subset Frontend](#java-regular-subset-frontend), and
+  [Differences from the JDK](docs/integrations/UNICODE.md#differences-from-the-jdk)
   lists the other exceptions. Where `Pattern`'s javadoc and the JDK's code
   disagree, the code wins.
   A Java property is computed as the JDK computes it even where the database
@@ -244,6 +245,12 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
 - `JavaRegexp` is a separate compiler for the documented regular subset of
   `java.util.regex.Pattern`. It does not reinterpret rejected Java syntax as
   RE2 syntax and does not add a dialect selector to `Re2.compile`.
+- A pattern that is not valid UTF-8 throws a `BAD_UTF8` parse error at its
+  first invalid byte. Inputs are not validated as UTF-8. The JDK assigns no
+  meaning to malformed UTF-8, so Java follows Trino's garbage-in/garbage-out
+  contract: Regulator makes no promise about matching malformed input. A
+  pattern that runs on a scan plan still reports what the ordinary engine
+  reports on malformed input; see [RE2 Scan Plans](#re2-scan-plans).
 - Java's `$`, `\Z`, multiline anchors, and combining-aware word boundaries use
   frontend-specific empty-width predicates, and a scan plan checks the same
   final-terminator rule for `$` and `\Z`. In the ordinary engine, programs

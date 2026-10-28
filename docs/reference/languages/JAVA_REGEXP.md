@@ -7,6 +7,12 @@
 `Pattern`. Patterns and inputs are UTF-8 `Slice` values, and positions are byte
 offsets rather than UTF-16 indexes.
 
+Inputs are not validated as UTF-8. The JDK assigns no meaning to malformed
+UTF-8, so malformed input is garbage in, garbage out: Regulator makes no promise
+about how a Java pattern matches it. A pattern must be valid UTF-8: one that is
+not throws `RegexpParseException` with error code `BAD_UTF8` at its first
+invalid byte.
+
 ```java
 JavaRegexp regexp = JavaRegexp.compile(
         Slices.utf8Slice("error: ([a-z]+)"),

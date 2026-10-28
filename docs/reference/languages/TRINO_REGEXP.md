@@ -16,10 +16,11 @@ exclusive end. The SQL-style `position()` operation instead returns a one-based
 code-point position, or `-1` when no match is found; its `start` argument also
 uses one-based code-point positions.
 
-As in Trino's Joni implementation, inputs are not validated as UTF-8. A
-pattern must be valid UTF-8: one that is not throws `RegexpParseException` with
-error code `BAD_UTF8` at its first invalid byte. This differs from Trino, which
-accepts such a pattern and compares its malformed bytes byte-for-byte.
+As in Trino's Joni implementation, inputs are not validated as UTF-8, and
+malformed input is garbage in, garbage out. A pattern must be valid UTF-8: one
+that is not throws `RegexpParseException` with error code `BAD_UTF8` at its
+first invalid byte. This differs from Trino, which accepts such a pattern and
+compares its malformed bytes byte-for-byte.
 
 ```java
 TrinoRegexp regexp = TrinoRegexp.compile(Slices.utf8Slice("([a-z]+)=([0-9]+)"));
