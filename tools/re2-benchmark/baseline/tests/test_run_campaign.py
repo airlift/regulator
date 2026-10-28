@@ -30,6 +30,8 @@ from test_unit_session import UnitCampaign, UnitFixture, store_host_calibration 
 SPEC = importlib.util.spec_from_file_location("baseline_run_campaign", SCRIPT)
 RUN_CAMPAIGN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUN_CAMPAIGN)
+# run-campaign.py puts the language tooling on the path; its campaign fixture runs attempts as workers do.
+import test_fleet  # noqa: E402
 UNIT_WORKER_WRAPPER = {"CAMPAIGN_MODE": "unit-worker", "CAMPAIGN_SHARD_ID": RUN_CAMPAIGN.UNIT_WORKER_SHARD,
                        "TIMEOUT_SECONDS": str(RUN_CAMPAIGN.unit_worker_timeout(0)),
                        "CAMPAIGN_PROVENANCE": "qualification"}
@@ -110,14 +112,14 @@ class TestRunCampaign(unittest.TestCase):
     def test_baseline_execution_requires_accepted_engine_builds(self):
         arguments = SimpleNamespace(phase="smoke", engine_builds=None)
         with self.assertRaisesRegex(SystemExit, "smoke execution requires --engine-builds from an accepted build"):
-            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
+            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments)
         arguments = SimpleNamespace(phase="build", engine_builds=Path("builds"))
-        with self.assertRaisesRegex(SystemExit, "apply only to baseline"):
-            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
+        with self.assertRaisesRegex(SystemExit, "apply only to measuring phases"):
+            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments)
         arguments = SimpleNamespace(phase="smoke", engine_builds=Path("builds"),
                                     regions=["us-west-2", "us-east-2"], transfer_buckets={"us-west-2": "bucket"})
         with self.assertRaisesRegex(SystemExit, r"bucket in every allowed region; name one for \['us-east-2'\]"):
-            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
+            RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments)
 
     def test_measuring_campaign_installs_builds_of_its_candidate_and_build_inputs(self):
         # The build phase ran under its own campaign ID and heap; any measuring campaign whose checkout
@@ -175,6 +177,7 @@ class TestRunCampaign(unittest.TestCase):
                 RUN_CAMPAIGN.campaign_started_at(builds / "campaign-state.tsv", builder)
                 RUN_CAMPAIGN.write_ledger(builds / "semantic-rejections.tsv", [],
                                           RUN_CAMPAIGN.unit_session.SEMANTIC_REJECTION_FIELDS)
+                RUN_CAMPAIGN.write_phase_complete(builds, builder)
                 if change:
                     change(builds)
                 arguments = SimpleNamespace(
@@ -182,12 +185,12 @@ class TestRunCampaign(unittest.TestCase):
                     regions=["us-west-2"], transfer_buckets={"us-west-2": "bucket"},
                     candidate_archive_sha256="5" * 64)
                 if error is None:
-                    RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments, [self.platform])
+                    RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments)
                     self.assertEqual({receipt["platform"]: receipt["observed_rows_sha256"] for receipt in receipts},
                                      arguments.engine_build_policy)
                 else:
                     with self.assertRaisesRegex(SystemExit, "engine builds are not accepted: .*" + error):
-                        RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments, [self.platform])
+                        RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments)
 
     def test_engine_archives_upload_once_per_region(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -461,7 +464,7 @@ class TestRunCampaign(unittest.TestCase):
     def test_primary_requires_accepted_smoke_results(self):
         arguments = SimpleNamespace(phase="primary", smoke_results=None)
         with self.assertRaisesRegex(SystemExit, "requires --smoke-results"):
-            RUN_CAMPAIGN.validate_prerequisites(Path("."), arguments, [self.platform])
+            RUN_CAMPAIGN.validate_prerequisites(arguments, None)
 
     def test_campaign_rejects_volatile_build_output_paths(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -592,7 +595,7 @@ class TestRunCampaign(unittest.TestCase):
             (root / "execution-policy.json").write_text(json.dumps({"engine_builds": {"r8i": "1" * 64}}))
             arguments = SimpleNamespace(phase="primary", campaign_id="baseline", engine_build_policy={"r8i": "2" * 64})
             with self.assertRaisesRegex(SystemExit, "engine builds its smoke prerequisite used"):
-                RUN_CAMPAIGN.validate_unit_phase_prerequisite(root, arguments, root, "smoke")
+                RUN_CAMPAIGN.validate_unit_phase_prerequisite(arguments, None, root, "smoke")
 
     def test_capacity_evidence_rejects_failed_session(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1011,13 +1014,67 @@ class TestRunCampaign(unittest.TestCase):
                         patch.dict(os.environ, environment), self.assertRaisesRegex(SystemExit, refusal):
                     RUN_CAMPAIGN.main()
 
+    def test_language_primary_accepts_its_attempts_and_exports_each_plan_once(self):
+        fixture = test_fleet.TestFleet()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        checkout = SCRIPT.parents[3]
+        result_root, receipts = fixture.run_campaign()
+        for receipt in receipts:
+            # Each attempt completes as run-unit.sh finishes it.
+            directory = RUN_CAMPAIGN.unit_attempt_directory(result_root, receipt)
+            with (directory / "unit-capacity.txt").open("a") as capacity:
+                capacity.write("wall_seconds=600\nmaximum_resident_kibibytes=1048576\nexit_status=0\n"
+                               "memory_available_after_bytes=29000000000\nminimum_available_memory_bytes=3435973837\n"
+                               "swap_free_after_bytes=0\noom_kills_after=0\ncapacity_status=accepted\n")
+            (directory / "status.txt").write_text("status=complete\n")
+        plan = RUN_CAMPAIGN.language_fleet.validate(fixture.directory)
+        arguments = SimpleNamespace(
+            phase="primary", campaign_id=receipts[0]["campaign_id"], heap_size="8g", max_concurrent=2,
+            candidate_archive_sha256=receipts[0]["candidate_archive_sha256"], engine_tree=receipts[0]["engine_tree"],
+            language_plans={plan["shard_id"]: fixture.directory})
+
+        def validation(root=checkout, release=""):
+            arguments.release_version = release
+            with patch.object(RUN_CAMPAIGN, "check_output", return_value=receipts[0]["candidate_commit"]):
+                return RUN_CAMPAIGN.unit_validation(root, arguments, "language", {fixture.directory: plan})
+
+        accepted = validation()
+        for receipt in receipts:
+            RUN_CAMPAIGN.validate_unit_artifacts(accepted, result_root, receipt)
+        accepted.validate_ledger(result_root / "accepted-units.tsv", "primary")
+        # The dispatcher, finding every unit accepted, passes the phase gate and exports each plan.
+        campaign = RUN_CAMPAIGN.language_fleet.campaign_units({fixture.directory: plan}, "primary")
+        platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
+        items = RUN_CAMPAIGN.build_work_items("primary", platforms, campaign["units"], sorted(campaign["allocations"]),
+                                              allocations=campaign["allocations"])
+        with FakeUnitFleet(fixture.root / "hosts").stubs():
+            RUN_CAMPAIGN.execute_units(arguments, checkout, result_root, items, platforms, accepted)
+        # A restart reproduces each plan's export, and refuses one that changed.
+        export = result_root / f"{plan['shard_id']}-results.json"
+        exported = export.read_bytes()
+        RUN_CAMPAIGN.aggregate_language_plans(arguments, result_root)
+        self.assertEqual(exported, export.read_bytes())
+        export.write_bytes(exported + b"\n")
+        with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
+            RUN_CAMPAIGN.aggregate_language_plans(arguments, result_root)
+        # A controller whose checkout pins other comparators, or which selects a release, refuses the hosts.
+        other = fixture.root / "other-checkout"
+        (other / "tools/re2-benchmark/baseline").mkdir(parents=True)
+        (other / "tools/re2-benchmark/baseline/comparators.tsv").write_text("changed\n")
+        for refused, field in ((validation(root=other), "comparator_manifest_sha256"),
+                               (validation(release="1.0"), "regulator_release_version")):
+            with self.subTest(field=field), \
+                    self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, f"comparator pins or release: .*{field}"):
+                RUN_CAMPAIGN.validate_unit_artifacts(refused, result_root, receipts[0])
+
     def test_a_lone_unit_past_the_unit_budget_runs_on_demand_unless_spot_only(self):
         items = [RUN_CAMPAIGN.WorkItem("r8i", "r8i.large", "language-bulk", unit_id, 1, seconds)
                  for unit_id, seconds in (("lone", 950.0), ("packed", 900.0))]
         for spot_only, expected in ((False, ["r8i/lone/replica-1"]), (True, [])):
             dispatcher = RUN_CAMPAIGN.UnitDispatcher(SimpleNamespace(phase="primary", spot_only=spot_only),
                                                      SCRIPT.parents[3], Path("/nonexistent"), items,
-                                                     RUN_CAMPAIGN.read_platforms(SCRIPT.parent))
+                                                     RUN_CAMPAIGN.read_platforms(SCRIPT.parent), None)
             self.assertEqual([item.identity for item in items if dispatcher.on_demand(item)], expected)
 
     def test_spot_retry_visits_each_pool_independently_of_global_epochs(self):
@@ -1895,7 +1952,8 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 engine_tree=receipt["engine_tree"], heap_size=receipt["heap_size"], phase="primary")
 
             def recover():
-                return RUN_CAMPAIGN.recover_accepted_units(SCRIPT.parents[3], arguments, result_root, ledger)
+                validation = RUN_CAMPAIGN.unit_validation(SCRIPT.parents[3], arguments, "baseline")
+                return RUN_CAMPAIGN.recover_accepted_units(validation, result_root, ledger)
 
             with patch.object(RUN_CAMPAIGN, "check_output", return_value=receipt["candidate_commit"]):
                 recover()
@@ -2179,7 +2237,8 @@ class FakeUnitHost:
     fleet finds no Spot capacity for, or whose boot the fleet fails, exits before its first
     heartbeat, as the wrapper's launch does, and one whose inputs the fleet refuses exits
     before it launches. Every host that launched uploads its host archive
-    as it exits, as the user data's exit trap does, even one that failed during bootstrap.
+    as it exits, as the user data's exit trap does, even one that failed during bootstrap. A host
+    whose cleanup the fleet leaves unverified records its bucket's removal as failed.
     In a calibrated fleet each lease uploads its host calibrations, except when it is scripted
     to "lose-calibration". A lease scripted to "chain" takes its before calibration from the
     lease before it, as the worker does within the chain window; "false-chain" claims that link
@@ -2380,16 +2439,17 @@ class FakeUnitHost:
         self.heartbeat(None)
 
     def exit(self, status, classification="none", detail="-"):
-        """Clean up as the wrapper does: recover the uploads, then record verified cleanup."""
+        """Clean up as the wrapper does: recover the uploads, then record the cleanup."""
         if self.booted and not self.full and not self.refused:
             self.put(self.archive_key, b"host archive")
         objects = self.session_directory / "recovered-uploads" / "objects"
         for key, (body, _) in self.objects.items():
             (objects / key).parent.mkdir(parents=True, exist_ok=True)
             (objects / key).write_bytes(body)
+        cleanup = "failed" if self.fleet.unverified_cleanup(self) else "verified"
         (self.session_directory / "cleanup-manifest.txt").write_text(
-            "instances_terminated=verified\niam_removed=verified\nbucket_removed=verified\n"
-            "network_resources=default-vpc-reused\ncleanup_status=verified\n"
+            f"instances_terminated=verified\niam_removed=verified\nbucket_removed={cleanup}\n"
+            f"network_resources=default-vpc-reused\ncleanup_status={cleanup}\n"
             f"run_status={'complete' if status == 0 else 'failed'}\nfailure_classification={classification}\n"
             f"failure_detail={detail}\naws_region={self.region}\n")
         if status == 0:
@@ -2418,11 +2478,13 @@ class FakeUnitFleet:
     """Unit worker hosts the stubbed wrapper launches, with their S3 leases and uploads."""
 
     def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None, calibrated=False,
-                 failed_boot=lambda host: False, refused_inputs=lambda host: False, unit_scripts=None):
+                 failed_boot=lambda host: False, refused_inputs=lambda host: False, unit_scripts=None,
+                 unverified_cleanup=lambda host: False):
         self.scratch = scratch
         self.calibrated = calibrated
         self.failed_boot = failed_boot
         self.refused_inputs = refused_inputs
+        self.unverified_cleanup = unverified_cleanup
         self.scripts = scripts or {}
         self.unit_scripts = unit_scripts or {}
         self.abort_after = abort_after
@@ -2536,8 +2598,10 @@ class TestUnitWorkers(unittest.TestCase):
         result_root.mkdir(exist_ok=True)
         RUN_CAMPAIGN.write_work_items(result_root / "work-items.tsv", items)
         with fleet.stubs():
+            self.validation = RUN_CAMPAIGN.unit_validation(SCRIPT.parents[3], arguments, "baseline")
             try:
-                RUN_CAMPAIGN.execute_units(arguments, SCRIPT.parents[3], result_root, items, self.PLATFORMS)
+                RUN_CAMPAIGN.execute_units(arguments, SCRIPT.parents[3], result_root, items, self.PLATFORMS,
+                                           self.validation)
             finally:
                 self.ledger = []
                 if (result_root / "unit-attempts.tsv").exists():
@@ -2641,6 +2705,25 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual(sorted(estimates, reverse=True), estimates)
                 self.assertEqual(True, host.leases[3].get("stop"))
                 self.assertEqual(0, host.status)
+
+    def test_next_phase_requires_the_phase_marked_complete_after_verified_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fleet = FakeUnitFleet(Path(temporary) / "hosts")
+            result_root = self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            with fleet.stubs():
+                RUN_CAMPAIGN.validate_unit_phase_prerequisite(self.arguments, self.validation, result_root, "smoke")
+                # A controller that stopped once its ledger was complete never proved its workers' cleanup.
+                (result_root / RUN_CAMPAIGN.PHASE_COMPLETE).unlink()
+                with self.assertRaisesRegex(SystemExit, "smoke prerequisite campaign is not accepted: "
+                                                        "smoke phase has no completion marker after verified cleanup"):
+                    RUN_CAMPAIGN.validate_unit_phase_prerequisite(
+                        self.arguments, self.validation, result_root, "smoke")
+        with tempfile.TemporaryDirectory() as temporary:
+            # A worker whose cleanup cannot be proven stops the phase before it is marked complete.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", unverified_cleanup=lambda host: host.number == 1)
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "cleanup could not be proven"):
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            self.assertFalse((Path(temporary) / "results" / RUN_CAMPAIGN.PHASE_COMPLETE).exists())
 
     def test_confirmation_runs_on_a_new_instance_and_is_accepted_beside_the_primary_campaign(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3074,7 +3157,7 @@ class TestUnitWorkers(unittest.TestCase):
                         SystemExit, f"smoke prerequisite campaign is not accepted: .*semantic failure: "
                                     f"\\['{stalled.session}/1'\\]"):
                     RUN_CAMPAIGN.validate_unit_phase_prerequisite(
-                        SCRIPT.parents[3], self.arguments, Path(temporary) / "results", "smoke")
+                        self.arguments, self.validation, Path(temporary) / "results", "smoke")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,10 @@ import collection
 import fleet
 
 
+# Workers record the comparator pins of the checkout they run, as collection.py does.
+COMPARATORS_SHA256 = collection.digest((collection.ROOT / "tools/re2-benchmark/baseline/comparators.tsv").read_bytes())
+
+
 class TestFleet(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -237,7 +241,7 @@ class TestFleet(unittest.TestCase):
             "manifest_sha256": manifest_hash, "runners_sha256": runners_hash, "receipts": receipts})
         collection.save(result / "provenance.json", {
             "manifest_sha256": manifest_hash, "runners_sha256": runners_hash,
-            "source_commit": source_commit, "source_tree": "tree", "comparators_sha256": "pins", "jdk": jdk,
+            "source_commit": source_commit, "source_tree": "tree", "comparators_sha256": COMPARATORS_SHA256, "jdk": jdk,
             "platform": platform, "instance_identity": {"instanceType": instance_type, "instanceId": instance_id},
             "jvm_build": {"source_tree": "tree", "jvm": runners}})
         collection.save(result / "observations.json", observations)
@@ -253,8 +257,13 @@ class TestFleet(unittest.TestCase):
             "platform": "r9g", "host_epoch": "2", "campaign_architecture": "arm", "instance_id": "i-unit",
             "instance_type": "r9g.2xlarge", "availability_zone": "us-west-2a", "logical_cpu_count": "8",
             "benchmark_heap_size": "8g", "regulator_release_version": "", "regulator_archive_sha256": "5" * 64,
-            "comparator_manifest_sha256": "pins", "java_runtime_version": "25.0.4+7-LTS", **(environment or {})}
+            "comparator_manifest_sha256": COMPARATORS_SHA256, "java_runtime_version": "25.0.4+7-LTS",
+            **(environment or {})}
         self.write_unit_environment(root)
+        # As run-unit.sh does, record the capacity prefix the unit's evidence binds before the unit runs.
+        (root / "unit-capacity.txt").write_text(
+            "memory_total_bytes=34359738368\nmemory_available_before_bytes=30000000000\n"
+            "swap_total_bytes=0\nswap_free_before_bytes=0\noom_kills_before=0\n")
         provenance = self.root / "candidate-provenance.tsv"
         provenance.write_text("candidate_commit\tengine_tree\n" + "a" * 40 + "\t" + "b" * 40 + "\n")
         affinity = {0, 1}
