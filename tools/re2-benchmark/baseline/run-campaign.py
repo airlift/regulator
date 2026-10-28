@@ -2300,6 +2300,8 @@ class UnitDispatcher:
         # Each pool's free launch slots, as (slot, consecutive failures), and the pools a slot gave up on.
         self.free_slots = {}
         self.exhausted = {}
+        # Pools whose wrapper refused its inputs, where every launch would be refused the same way.
+        self.refused = set()
         self.pool_ready = {}
         self.on_demand_ready = {}
         # Each pool's On-Demand workers admitted in its tail, and the Spot workers they retired.
@@ -2320,6 +2322,10 @@ class UnitDispatcher:
 
     def pool_workers(self, pool):
         return [worker for worker in self.workers.values() if worker.pool == pool]
+
+    def gave_up(self, pool):
+        """Whether the pool opens no new worker: its wrapper refused its inputs, or it gave up with no free slot."""
+        return pool in self.exhausted and (pool in self.refused or not self.free_slots.get(pool))
 
     def worker_session(self, worker):
         if worker.session is None:
@@ -2766,15 +2772,16 @@ class UnitDispatcher:
 
         A worker that started, by uploading worker evidence, clears its slot's count. One that failed before it
         started passes the count, one higher, to its replacement, and a slot past its replacements gives up, so
-        its pool opens no new slot. A slot whose wrapper refused its inputs gives up at once,
-        since a replacement would be refused the same way. A launch that found no capacity, or a wrapper never
-        created, booted nothing.
+        its pool opens no new slot. A wrapper that refused its inputs gives up its pool at once, every free slot
+        included, since any launch would be refused the same way. A launch that found no capacity, or a wrapper
+        never created, booted nothing.
         """
         pool = unit_worker_pool(job)
         if started:
             failures = 0
         elif status != 0 and classification == "input-rejection":
             self.exhausted[pool] = f"unit worker {job.identity} was refused before launch: {detail}"
+            self.refused.add(pool)
             return
         elif (status != 0 and not terminated and detail != WRAPPER_NOT_CREATED and
               classification != "retryable-capacity" and
@@ -2791,8 +2798,7 @@ class UnitDispatcher:
         for item in self.queued():
             if deadline_reached:
                 self.unresolved[item.identity] = f"{self.arguments.phase} campaign reached its wall-clock launch limit"
-            elif (item.pool in self.exhausted and not self.free_slots.get(item.pool) and
-                  not self.pool_workers(item.pool)):
+            elif self.gave_up(item.pool) and not self.pool_workers(item.pool):
                 self.unresolved[item.identity] = self.exhausted[item.pool]
 
     def lease_document(self, worker, sequence):
@@ -2891,7 +2897,7 @@ class UnitDispatcher:
 
     def pool_demand(self, pool, now):
         """The market of the pool's next worker, if its queued items could use one more."""
-        if pool in self.exhausted and not self.free_slots.get(pool):
+        if self.gave_up(pool):
             return None
         queued = self.queued(pool)
         waiting = [worker for worker in self.pool_workers(pool) if worker.open() and not worker.outstanding()]
