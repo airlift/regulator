@@ -8,10 +8,20 @@ import json
 import tarfile
 from pathlib import Path, PurePosixPath
 
+import row_protocol
+import unit_session
+from acceptance import EVIDENCE_FIELDS, load_platforms
+from shard_results import write_tsv
+
 
 DIRECTORY = "engine-build"
 MANIFEST = "engine-build.json"
-RECEIPT = "engine-build-receipt.json"
+# The build phase's one work unit, and its shard: one replica per platform, on a unit worker without prebuilt engines.
+UNIT_ID = SHARD = "engine-build"
+# A build took about ten minutes on r8i, so it fits a Spot lease.
+BUILD_SECONDS = 900
+# The envelope files a build attempt binds in its evidence, beside its logs and archives.
+UNIT_ARTIFACTS = ("environment-manifest.txt", "environment.txt", "unit-session.tsv", "run-metadata.txt")
 # Archive members are relative to the shared work directory, where a route looks for the harness.
 TRINO_DIRECTORY = "pinned-trino"
 TRINO_METADATA = ("classpath.txt", "joni-jar.path", "provenance.properties")
@@ -128,36 +138,98 @@ def package(shared, root, directory):
         },
     }
     (output / MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    (directory / RECEIPT).write_text(json.dumps(validate(directory), sort_keys=True) + "\n")
 
 
-def validate(directory):
-    """Regenerate an engine build's receipt from its archives and the builder's host identity."""
-    environment = properties(directory / "environment-manifest.txt")
-    manifest_path = directory / DIRECTORY / MANIFEST
+def units():
+    """The build phase's work units: the one engine build each platform needs."""
+    return {UNIT_ID: {"unit_id": UNIT_ID, "shard_id": SHARD, "unit_index": "1",
+                      "estimated_seconds": str(BUILD_SECONDS), "owned": [UNIT_ID]}}
+
+
+def inputs_sha256(build_scripts):
+    """One digest of the build scripts an engine build is made by, from {path: SHA-256}."""
+    return hashlib.sha256("".join(f"{path}  {build_scripts[path]}\n" for path in BUILD_INPUTS).encode()).hexdigest()
+
+
+def unit_evidence(root):
+    """Every artifact of a build attempt: its envelope files, its build logs, and its archives."""
+    paths = [*(root / name for name in UNIT_ARTIFACTS), *(root / "logs").rglob("*"), *(root / DIRECTORY).rglob("*")]
+    return sorted(unit_session.host_evidence_rows(root, paths), key=lambda row: row["artifact"])
+
+
+def accept(root, replica, unit_attempt, region, engine_tree):
+    """Record a build lease's session and evidence beside its packaged build, and write its receipt."""
+    environment = properties(root / "environment-manifest.txt")
+    unit_session.write_worker_unit_session(root, environment, UNIT_ID, replica, unit_attempt, region)
+    (root / "run-metadata.txt").write_text(f"unit_id={UNIT_ID}\nengine_tree={engine_tree}\n")
+    write_tsv(root / "unit-evidence.tsv", EVIDENCE_FIELDS, unit_evidence(root))
+    unit_session.write_unit_receipt(root / "unit-receipt.tsv", validate_unit_attempt(root))
+
+
+def validate_unit_attempt(root):
+    """Regenerate a build attempt's receipt from its archives, its evidence, and the builder's host identity.
+
+    Its observed digest is the build manifest's SHA-256, by which measurement phases name the build they install.
+    """
+    session = unit_session.read_unit_session(root)
+    if unit_evidence(root) != row_protocol.read_tsv(root / "unit-evidence.tsv"):
+        raise EngineBuildError("build evidence differs from the attempt's artifacts")
+    environment = properties(root / "environment-manifest.txt")
+    if session["unit_id"] != UNIT_ID:
+        raise EngineBuildError(f"build session names unit {session['unit_id']}, not the engine build {UNIT_ID}")
+    unit_session.check_worker_unit_session(session, environment)
+    # A worker that installed prebuilt engines would package them rather than build its own.
+    if (environment["verification_status"] != "verified" or environment["benchmark_mode"] != "unit-worker" or
+            (root / "engine-build.txt").exists()):
+        raise EngineBuildError("engine build lacks a verified unit worker that built its own engines")
+    manifest_path = root / DIRECTORY / MANIFEST
     manifest = json.loads(manifest_path.read_text())
-    if environment["verification_status"] != "verified" or environment["benchmark_mode"] != "engine-build":
-        raise EngineBuildError("engine build lacks a verified builder host")
     if manifest.get("schema_version") != 1 or any(
             manifest[field] != environment[key] for field, key in BUILDER_FIELDS.items()):
         raise EngineBuildError("engine build manifest differs from its builder host")
     if set(manifest["archives"]) != set(ARCHIVES):
         raise EngineBuildError("engine build has missing or unexpected archives")
     for archive in manifest["archives"].values():
-        path = check_archive(directory / DIRECTORY, archive)
+        path = check_archive(root / DIRECTORY, archive)
         if archive_contents(path) != archive["files"]:
             raise EngineBuildError(f"engine build archive differs from its manifest: {archive['file']}")
+    metadata = properties(root / "run-metadata.txt")
+    if metadata["unit_id"] != UNIT_ID:
+        raise EngineBuildError("build metadata differs from its unit")
+    # The build's inputs are both its manifest and its protocol: the scripts it was made by.
+    inputs = inputs_sha256(manifest["inputs"]["build_scripts"])
     return {
-        "schema_version": 1, "workload": "engine-build",
-        "campaign_id": environment["baseline_campaign"], "platform": environment["platform"],
-        "shard_id": environment["shard"], "replica_id": environment["replica"],
-        "host_epoch": environment["host_epoch"], "instance_id": environment["instance_id"],
-        "instance_type": environment["instance_type"], "architecture": environment["campaign_architecture"],
+        **session,
+        "shard_id": SHARD,
+        "owned_row_count": "1",
+        "row_protocol_sha256": inputs,
+        "manifest_sha256": inputs,
+        "observed_rows_sha256": sha256_file(manifest_path),
+        "evidence_manifest_sha256": sha256_file(root / "unit-evidence.tsv"),
         "candidate_commit": environment["regulator_commit"],
         "candidate_archive_sha256": environment["regulator_archive_sha256"],
-        "manifest_sha256": sha256_file(manifest_path),
-        "archives": {name: archive["sha256"] for name, archive in sorted(manifest["archives"].items())},
+        "engine_tree": metadata["engine_tree"],
+        "heap_size": environment["benchmark_heap_size"],
     }
+
+
+def validate_unit_campaign(checkout, receipts, campaign_id):
+    """Accept a build phase's receipts by the unit campaign rule: one build on every platform, made by the
+    checkout's build scripts, and one candidate."""
+    platforms = load_platforms(unit_session.DIRECTORY / "platforms.tsv")
+    inputs = inputs_sha256({path: sha256_file(checkout / path) for path in BUILD_INPUTS})
+    build_units = units()
+    unit_session.check_unit_campaign(
+        receipts, platforms, build_units, {UNIT_ID: inputs}, unit_session.platform_allocations(platforms, build_units),
+        {SHARD: inputs}, campaign_id, (1,))
+
+
+def validate_trino_pin(checkout, build):
+    """Refuse a build whose harness was made from a Trino commit other than the checkout's pin."""
+    pinned = properties(checkout / BUILD_INPUTS[0])["TRINO_COMPARATOR_TRINO_COMMIT"]
+    built = json.loads((build / MANIFEST).read_text())["inputs"]["trino_commit"]
+    if built != pinned:
+        raise EngineBuildError(f"engine build's Trino commit {built} is not the checkout's pin {pinned}")
 
 
 def load_manifest(build, manifest_sha256):
@@ -226,7 +298,13 @@ def main():
     package_command.add_argument("--shared", type=Path, required=True)
     package_command.add_argument("--root", type=Path, required=True)
     package_command.add_argument("--result-directory", type=Path, required=True)
-    install_command = commands.add_parser("install", help="install the prebuilt harness")
+    accept_command = commands.add_parser("accept", help="accept the build this unit lease packaged")
+    accept_command.add_argument("--unit-directory", type=Path, required=True)
+    accept_command.add_argument("--replica", required=True)
+    accept_command.add_argument("--unit-attempt", required=True)
+    accept_command.add_argument("--region", required=True)
+    accept_command.add_argument("--engine-tree", required=True)
+    install_command = commands.add_parser("install", help="install the prebuilt Trino harness and native runners")
     install_command.add_argument("--shared", type=Path, required=True)
     install_command.add_argument("--environment", type=Path, required=True)
     install_command.add_argument("--output", type=Path, required=True)
@@ -238,6 +316,9 @@ def main():
     arguments = parser.parse_args()
     if arguments.command == "package":
         package(arguments.shared, arguments.root, arguments.result_directory)
+    elif arguments.command == "accept":
+        accept(arguments.unit_directory, arguments.replica, arguments.unit_attempt, arguments.region,
+               arguments.engine_tree)
     elif arguments.command == "install":
         install(arguments.build, arguments.manifest_sha256, arguments.shared, arguments.environment,
                 arguments.output)

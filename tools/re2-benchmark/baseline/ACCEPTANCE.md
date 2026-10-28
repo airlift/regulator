@@ -110,12 +110,15 @@ unit replica, added atomically as soon as the attempt is accepted. Do not
 reconstruct this ledger by concatenating result files. The phase leases units
 to worker hosts and writes this ledger (`../aws/README.md`). Each attempt is
 retained at `units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>`
-under the result root, beside the host session's `calibrations/` it references. On
-restart, recovery revalidates every ledger row against that directory and
-adds a retained attempt the ledger lacks once it passes the same checks: final
-status, accepted capacity, a receipt regenerated from the evidence and the
-host's calibrations, and the frozen candidate. A `--release-version` campaign
-also requires each route's attestation that it measured the release's pinned
+under the result root; a baseline attempt sits beside the host session's
+`calibrations/` it references. On restart, recovery revalidates every ledger
+row against that directory and adds a retained attempt the ledger lacks once it
+passes the same checks: final status, accepted capacity, a receipt regenerated
+from the evidence, and the frozen candidate. A baseline unit's receipt is
+regenerated with its host's calibrations, a language unit's through the
+[language unit checks](../language/README.md#work-units), and an engine
+build's from its own archives. A `--release-version` campaign also requires
+each route's attestation that it measured the release's pinned
 JAR. The first accepted attempt of a unit replica wins; a later attempt that
 also passes, such as one leased again after its host was judged lost, is
 superseded and stays out of the ledger. The controller writes
@@ -127,8 +130,8 @@ confirmation revalidates the previous phase's ledger and attempts first,
 refusing a previous phase whose rejection ledger is missing or lists an
 attempt, even when another attempt of that unit was accepted.
 
-Campaign validation requires every platform and frozen unit of the selected
-shards, with replicas 1, 2, and 3. It also requires:
+Campaign validation of baseline units requires every platform and frozen unit
+of the selected shards, with replicas 1, 2, and 3. It also requires:
 
 - the three replicas of a unit on distinct EC2 instances; different units may
   share a host, its host epoch, and its host session
@@ -145,9 +148,13 @@ shards, with replicas 1, 2, and 3. It also requires:
 - with `--release-version`, each accepted attempt, retained beside the ledger,
   attesting on every route that it measured that release's pinned JAR
 
-The controller's phase gate applies these checks, except that it requires
-only replica 1 for a smoke phase and leaves the rejection ledger to the next
-phase's prerequisite and the reducer. The report importer revalidates the
+A language campaign applies the same rule to its plans' units, each plan
+standing in for the frozen tables, and an engine build phase requires one
+build on every platform, made by the checkout's build scripts. The
+controller's phase gate applies these checks, except that it requires only
+replica 1 for a build or smoke phase, and only the smoke units of a language
+smoke, and leaves the rejection ledger to the next phase's prerequisite and the
+reducer. The report importer revalidates the
 published campaign's ledgers. A unit confirmation is replica `4`, at most one
 per platform and unit, on an instance none of that unit's replicas used. Every
 campaign validation checks this against the primary ledger: the controller's

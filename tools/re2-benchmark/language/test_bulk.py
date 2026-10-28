@@ -70,19 +70,23 @@ class TestBulkSummary(unittest.TestCase):
         self.assertEqual(bulk.summarize(manifest, evidence)["issues"], [])
 
 
-def prepare_manifest(identity, pattern, destination, haystack=b"aab"):
+def prepare_manifest(identity, pattern, destination, haystack=b"aab", models=("count",)):
+    """A bulk manifest of one case per model; several cases are named <identity>/<index>."""
     inventory = destination.with_name(f"{destination.name}-inventory")
     inventory.mkdir()
-    fields = {"name": [identity.encode()], "model": [b"count"], "pattern": [pattern],
-              "haystack": [haystack], "unicode": [b"true"], "case-insensitive": [b"false"]}
-    payload = bulk.encode_klv(fields)
-    (inventory / "input.gz").write_bytes(gzip.compress(payload))
-    source = {"id": identity, "model": "count", "population": "curated", "family": "example",
-              "klv_file": "input.gz", "klv_sha256": collection.digest(payload),
-              "patterns": [bulk.rebar_inventory.input_identity(pattern)],
-              "haystack": bulk.rebar_inventory.input_identity(haystack),
-              "native_expected_result": 2}
-    data = {"cases": [source], "rebar_commit": "fixture"}
+    sources = []
+    for index, model in enumerate(models, 1):
+        name = identity if len(models) == 1 else f"{identity}/{index}"
+        fields = {"name": [name.encode()], "model": [model.encode()], "pattern": [pattern],
+                  "haystack": [haystack], "unicode": [b"true"], "case-insensitive": [b"false"]}
+        payload = bulk.encode_klv(fields)
+        (inventory / f"input-{index}.gz").write_bytes(gzip.compress(payload))
+        sources.append({"id": name, "model": model, "population": "curated", "family": "example",
+                        "klv_file": f"input-{index}.gz", "klv_sha256": collection.digest(payload),
+                        "patterns": [bulk.rebar_inventory.input_identity(pattern)],
+                        "haystack": bulk.rebar_inventory.input_identity(haystack),
+                        "native_expected_result": 2})
+    data = {"cases": sources, "rebar_commit": "fixture"}
     collection.save(inventory / "inventory.json", data)
     with patch.object(bulk.rebar_inventory, "validate", return_value=data):
         return bulk.prepare(inventory, destination)
@@ -188,6 +192,23 @@ class TestBulkEvidence(unittest.TestCase):
             bulk.validate_manifest(manifest, directory)
             self.assertEqual(collection.case_operations(manifest, manifest["cases"][0]), ("execute",))
             self.assertEqual(len(list(collection.observations(manifest))), 3)
+
+    def test_smoke_covers_each_language_and_model_and_each_isolated_comparison(self):
+        source = self.root / "models"
+        manifest = prepare_manifest("smoke", b"a", source, models=("count", "count", "grep"))
+        first_count, second_count, grep = (case["id"] for case in manifest["cases"])
+        # Each comparison fills a unit, so the smoke units measure exactly the selected comparisons.
+        estimates = {case["id"] + "/" + language: fleet.work_units.UNIT_SECONDS
+                     for case in manifest["cases"] for language in collection.ENGINES}
+        policy = {"schema_version": 1, "source_sha256": "a" * 64, "partition_seconds": estimates,
+                  "isolated_pairs": [[second_count, "java"]]}
+        directory = self.root / "models-fleet"
+        plan = fleet.prepare(source, directory, duration_policy=policy)
+        units = fleet.work_units.load(directory)
+        measured = {fleet.row_atom(row)[:2] for unit_id in fleet.smoke_units(directory, plan, units)
+                    for row in units[unit_id]["owned"]}
+        self.assertEqual(measured, {(case, language) for case in (first_count, grep) for language in collection.ENGINES}
+                         | {(second_count, "java")})
 
     def test_slow_bulk_units_outlast_every_measurement_deadline(self):
         manifest = collection.load(self.directory / "manifest.json")

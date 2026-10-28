@@ -15,6 +15,7 @@ from pathlib import Path
 
 DIRECTORY = Path(__file__).resolve().parent
 sys.path.insert(0, str(DIRECTORY.parent / 'baseline'))
+import engine_build
 from unit_dispatch import UNIT_COMPLETION_FIELDS
 UNIT = {name: hashlib.sha256(name.encode()).hexdigest() for name in ('first', 'second', 'third')}
 
@@ -35,6 +36,11 @@ FAKE_AWS = r'''#!/usr/bin/env python3
 import base64, hashlib, json, os, sys
 from pathlib import Path
 root = Path(os.environ['FAKE_S3'])
+def set_clock(clock, now):
+    # Replace the clock whole, so a concurrent reader never sees it empty.
+    temporary = clock.with_name(f'{clock.name}.{os.getpid()}')
+    temporary.write_text(str(now))
+    os.replace(temporary, clock)
 arguments = sys.argv[1:]
 options, positional = {}, []
 while arguments:
@@ -60,8 +66,9 @@ if os.environ.get('FAKE_CLOCK') and any(
         if trigger and not notice.exists() and (trigger == operation or trigger in target or trigger.encode() in body):
             notice.write_text('{"action": "terminate", "time": "2026-10-24T12:02:00Z"}')
             log.write(f'notice {target} {start} {start}\n')
-        clock.write_text(str(start + float(os.environ.get('FAKE_TIMEOUT_SECONDS', 3600)) - 1))
-        log.write(f'{operation} {target} {start} {clock.read_text()}\n')
+        end = start + float(os.environ.get('FAKE_TIMEOUT_SECONDS', 3600)) - 1
+        set_clock(clock, end)
+        log.write(f'{operation} {target} {start} {end}\n')
 if any(fragment in target for fragment in json.loads(os.environ.get('FAKE_FAILED_CALLS', '[]'))):
     failures = root / 'failed-calls.log'
     failure = 1 + (len(failures.read_text().splitlines()) if failures.exists() else 0)
@@ -71,8 +78,9 @@ if any(fragment in target for fragment in json.loads(os.environ.get('FAKE_FAILED
     if os.environ.get('FAKE_CLOCK'):
         clock = Path(os.environ['FAKE_CLOCK'])
         start = float(clock.read_text())
-        clock.write_text(str(start + float(os.environ.get('FAKE_TIMEOUT_SECONDS', 3600))))
-        line += f' {start} {clock.read_text()}'
+        end = start + float(os.environ.get('FAKE_TIMEOUT_SECONDS', 3600))
+        set_clock(clock, end)
+        line += f' {start} {end}'
     with failures.open('a') as log:
         log.write(line + '\n')
     if os.environ.get('FAKE_CLOCK'):
@@ -128,7 +136,10 @@ FAKE_SLEEP = r'''#!/usr/bin/env python3
 import os, sys
 from pathlib import Path
 clock = Path(os.environ['FAKE_CLOCK'])
-clock.write_text(str(float(clock.read_text()) + float(sys.argv[1])))
+# Replace the clock whole, so a concurrent reader never sees it empty.
+temporary = clock.with_name(f'{clock.name}.{os.getpid()}')
+temporary.write_text(str(float(clock.read_text()) + float(sys.argv[1])))
+os.replace(temporary, clock)
 '''
 # coreutils timeout on the virtual clock: it tells the command when it would be killed.
 FAKE_TIMEOUT = r'''#!/usr/bin/env python3
@@ -137,10 +148,17 @@ os.environ['FAKE_TIMEOUT_SECONDS'] = sys.argv[1]
 os.execvp(sys.argv[2], sys.argv[2:])
 '''
 
+# wc -c as the worker sizes a unit result: FAKE_RESULT_BYTES stands in for a large archive.
+FAKE_WC = r'''#!/usr/bin/env python3
+import os
+print(os.environ['FAKE_RESULT_BYTES'])
+'''
+
 # A unit as run-unit.sh measures it on a worker: it stores its calibrations in
 # the host evidence, chaining the before it is given, and names them in its table,
-# then exits with its scripted status. A unit scripted with a child starts one
-# that outlives it unless its process group is stopped.
+# then exits with its scripted status. An engine build, as in run-unit.sh, stores
+# no calibrations. A unit scripted with a child starts one that outlives it unless
+# its process group is stopped.
 FAKE_RUN_UNIT = r'''#!/usr/bin/env python3
 import hashlib, json, os, subprocess, sys, time
 from pathlib import Path
@@ -164,6 +182,8 @@ if behavior.get('rebalance'):
     (notices / 'events-recommendations-rebalance').write_text('{"noticeTime": "2026-10-24T12:00:00Z"}')
 # The sleep on PATH, so a unit on the virtual clock takes virtual time.
 subprocess.run(['sleep', str(behavior.get('seconds', 0))], check=True)
+if unit_id == 'engine-build':
+    sys.exit(behavior.get('status', 0))
 store = Path(os.environ['BASELINE_UNIT_HOST_EVIDENCE']) / 'calibrations'
 def stored(content):
     path = store / (hashlib.sha256(content.encode()).hexdigest() + '.json')
@@ -189,7 +209,7 @@ def lease(sequence, unit=None, replica=1, **fields):
 class Worker:
     """A unit worker on a host whose S3, metadata service, and units are fakes, optionally on a virtual clock."""
 
-    def __init__(self, root, clock=False):
+    def __init__(self, root, clock=False, result_bytes=None):
         self.root = root
         tools = root / 'tools'
         (tools / 'aws').mkdir(parents=True)
@@ -205,6 +225,8 @@ class Worker:
         if clock:
             fakes += [(binary / 'date', FAKE_DATE), (binary / 'sleep', FAKE_SLEEP),
                       (binary / 'timeout', FAKE_TIMEOUT)]
+        if result_bytes is not None:
+            fakes.append((binary / 'wc', FAKE_WC))
         for path, source in fakes:
             path.write_text(source)
             path.chmod(0o755)
@@ -232,6 +254,8 @@ class Worker:
             # A virtual second costs no real time, so the worker polls each one.
             self.environment.update({'FAKE_CLOCK': str(root / 'clock'), 'UNIT_WORKER_POLL_SECONDS': '1'})
             (root / 'clock').write_text(str(time.time()))
+        if result_bytes is not None:
+            self.environment['FAKE_RESULT_BYTES'] = str(result_bytes)
 
     def write_lease(self, document):
         path = self.bucket / 'input' / 'leases' / f'{document["sequence"]}.json'
@@ -373,13 +397,33 @@ class TestUnitWorker(unittest.TestCase):
                 heartbeat = worker.json(f'heartbeat/{len(completed) + 1}.json')
                 self.assertEqual(('stopped', reason), (heartbeat['state'], heartbeat['stop_reason']))
 
+    def test_worker_runs_the_build_phases_engine_build_lease(self):
+        # The controller leases a platform's engine build as the build phase's one unit, named rather than hashed.
+        with tempfile.TemporaryDirectory() as temporary:
+            worker = Worker(Path(temporary))
+            worker.environment['BASELINE_PROTOCOL'] = 'qualification'
+            worker.write_lease(lease(1, unit_id=engine_build.UNIT_ID, replica_id=1, phase='build',
+                                     protocol='qualification'))
+            status, output = worker.run(idle_seconds=1)
+
+            self.assertEqual(0, status, output)
+            self.assertEqual([(engine_build.UNIT_ID, '1')], [(run['unit_id'], run['replica']) for run in worker.runs()])
+            completion = worker.json('units/1/completion.json')
+            self.assertEqual(('build', engine_build.UNIT_ID, 'complete', None, None),
+                             (completion['phase'], completion['unit_id'], completion['unit_status'],
+                              completion['calibration_before'], completion['calibration_after']))
+
     def test_worker_refuses_a_lease_that_is_not_its_next(self):
         for name, body in (
                 ('malformed', '{not json'),
                 ('another host', json.dumps(lease(1, 'first', host_session='host-2'))),
                 ('another campaign', json.dumps(lease(1, 'first', campaign_id='other'))),
                 ('another sequence', json.dumps(lease(2, 'first'))),
-                ('no unit', json.dumps(lease(1)))):
+                ('no unit', json.dumps(lease(1))),
+                ('measuring engine build', json.dumps(lease(1, 'first', unit_id=engine_build.UNIT_ID))),
+                ('build of a measuring unit', json.dumps(lease(1, 'first', phase='build'))),
+                ('engine build at replica 2',
+                 json.dumps(lease(1, unit_id=engine_build.UNIT_ID, replica_id=2, phase='build', protocol='smoke')))):
             with self.subTest(lease=name), tempfile.TemporaryDirectory() as temporary:
                 worker = Worker(Path(temporary))
                 path = worker.bucket / 'input' / 'leases' / '1.json'
@@ -482,6 +526,29 @@ class TestUnitWorker(unittest.TestCase):
                 self.assertLessEqual(uploaded - notice, 120)
                 with tarfile.open(worker.object('events/1-interrupted.tar.gz')) as bundle:
                     self.assertEqual(unit, json.load(bundle.extractfile('interruption.json'))['unit_id'])
+
+    def test_spot_notice_during_a_large_result_upload_still_uploads_the_interruption_bundle(self):
+        # A 224 MiB result stretches its upload attempts past the whole interruption budget; the notice that
+        # arrives during it is acted on when the attempt ends, and the bundle gets attempts of its own.
+        with tempfile.TemporaryDirectory() as temporary:
+            worker = Worker(Path(temporary), clock=True, result_bytes=224 * 1024 * 1024)
+            worker.write_lease(lease(1, 'first'))
+            worker.environment.update({'FAKE_STALLED_CALLS': json.dumps(['results/']),
+                                       'FAKE_NOTICE_DURING_STALLED_CALL': 'result.tar.gz'})
+            status, output = worker.run()
+
+            self.assertEqual(43, status, output)
+            self.assertEqual('interrupted', worker.stop_reason())
+            self.assertTrue(worker.object('units/1/result.tar.gz').exists())
+            self.assertFalse(worker.object('units/1/completion.json').exists())
+            with tarfile.open(worker.object('events/1-interrupted.tar.gz')) as bundle:
+                self.assertEqual(UNIT['first'], json.load(bundle.extractfile('interruption.json'))['unit_id'])
+            # The result's attempt ran past an unstretched one; the interruption bundle's did not.
+            calls = [line.split() for line in (worker.s3 / 'stalled-calls.log').read_text().splitlines()]
+            seconds = {key: float(end) - float(start) for called, key, start, end in calls if called != 'notice'}
+            unstretched = 5 + 30
+            self.assertGreater(seconds['results/units/1/result.tar.gz'], unstretched)
+            self.assertLess(seconds['results/events/1-interrupted.tar.gz'], unstretched)
 
 
 if __name__ == '__main__':

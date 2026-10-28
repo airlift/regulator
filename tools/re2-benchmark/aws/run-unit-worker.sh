@@ -35,10 +35,14 @@ AWS_READ_TIMEOUT_SECONDS=30
 # An upload retries within this many seconds, so a Spot notice that arrives
 # meanwhile still leaves time to upload the interruption bundle. An attempt
 # starts only while its worst case still ends within them, and no S3 call
-# outlives the budget it runs in.
+# outlives the budget it runs in. A stretched upload's budget grows by its
+# stretch and covers at least two whole attempts.
 UPLOAD_SECONDS=${UNIT_WORKER_UPLOAD_SECONDS:-90}
 UPLOAD_ATTEMPT_SECONDS=$((AWS_CONNECT_TIMEOUT_SECONDS + AWS_READ_TIMEOUT_SECONDS))
 UPLOAD_RETRY_SECONDS=5
+# A unit result's upload attempts and budget grow by its size at this rate, so
+# a large one, such as an engine build's archives, has time to land.
+UPLOAD_MINIMUM_RATE=$((4 * 1024 * 1024))
 # A calibration serves as the next unit's before only while the host is still
 # in the state it measured.
 CHAIN_WINDOW_SECONDS=60
@@ -105,16 +109,23 @@ timestamp()
 
 aws_cli()
 {
-    # Runs one S3 call, its output in S3_OUTPUT and its errors in S3_ERRORS. Any
-    # call may stall until its timeout, so a Spot notice is checked after every
-    # one, in the worker's own shell, where an interruption can end the host.
-    local seconds=${UPLOAD_ATTEMPT_SECONDS}
+    aws_cli_within "${UPLOAD_ATTEMPT_SECONDS}" "$@"
+}
+
+aws_cli_within()
+{
+    # Runs one S3 call within the given seconds, its output in S3_OUTPUT and its
+    # errors in S3_ERRORS. Any call may stall until its timeout, so a Spot notice
+    # is checked after every one, in the worker's own shell, where an
+    # interruption can end the host.
+    local seconds=$1
     local status=0
+    shift
     if ((BASH_SUBSHELL != 0)); then
         echo "aws $1 $2 must run in the worker's own shell to act on a Spot notice" >&2
         return 1
     fi
-    # Ends within one attempt's worst case, and within the upload budget it runs in.
+    # Ends within its attempt's worst case, and within the upload budget it runs in.
     if [[ -n "${upload_deadline}" ]] && ((upload_deadline - $(now) < seconds)); then
         seconds=$((upload_deadline - $(now)))
     fi
@@ -138,26 +149,35 @@ sha256_of()
 
 put_once()
 {
-    # One PUT with a whole-object SHA-256 that S3 verifies; a key is never overwritten.
+    # One PUT with a whole-object SHA-256 that S3 verifies; a key is never
+    # overwritten. An optional stretch, in seconds, lengthens each attempt and
+    # the budget, and raises the budget to at least two whole attempts.
     local file=$1
     local key=$2
+    local stretch=${3:-0}
+    local attempt_seconds=$((UPLOAD_ATTEMPT_SECONDS + stretch))
+    local budget=$((UPLOAD_SECONDS + stretch))
     local encoded
     local attempt=0
     local errors
     local retry_at
+    if ((stretch > 0 && budget < 2 * attempt_seconds + UPLOAD_RETRY_SECONDS)); then
+        budget=$((2 * attempt_seconds + UPLOAD_RETRY_SECONDS))
+    fi
     # The interruption bundle's upload shares the budget that interrupt starts.
-    local upload_deadline=${upload_deadline:-$(($(now) + UPLOAD_SECONDS))}
+    local upload_deadline=${upload_deadline:-$(($(now) + budget))}
     encoded=$(python3 -c 'import base64, sys; print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode())' \
         "$(sha256_of "${file}")")
     while true; do
-        if (($(now) + UPLOAD_ATTEMPT_SECONDS > upload_deadline)); then
+        if (($(now) + attempt_seconds > upload_deadline)); then
             echo "Upload of s3://${BUCKET}/${key} has no time left for an attempt" >&2
             return 1
         fi
         attempt=$((attempt + 1))
         # The CLI makes one attempt, so only this loop's earlier attempts can have landed.
-        if AWS_MAX_ATTEMPTS=1 aws_cli s3api put-object --bucket "${BUCKET}" --key "${key}" --body "${file}" \
-                --if-none-match '*' --checksum-algorithm SHA256 --checksum-sha256 "${encoded}"; then
+        if AWS_MAX_ATTEMPTS=1 aws_cli_within "${attempt_seconds}" s3api put-object --bucket "${BUCKET}" \
+                --key "${key}" --body "${file}" --if-none-match '*' --checksum-algorithm SHA256 \
+                --checksum-sha256 "${encoded}"; then
             return 0
         fi
         errors=$(<"${S3_ERRORS}")
@@ -171,7 +191,7 @@ put_once()
         fi
         echo "Upload of s3://${BUCKET}/${key} failed: ${errors}" >&2
         retry_at=$(($(now) + UPLOAD_RETRY_SECONDS))
-        if ((retry_at + UPLOAD_ATTEMPT_SECONDS > upload_deadline)); then
+        if ((retry_at + attempt_seconds > upload_deadline)); then
             return 1
         fi
         while (($(now) < retry_at)); do
@@ -179,6 +199,14 @@ put_once()
             sleep "${POLL_SECONDS}"
         done
     done
+}
+
+put_result()
+{
+    # The same PUT, with each attempt stretched by the archive's size at the
+    # minimum rate. A Spot notice during a long attempt is acted on when it
+    # ends, and the interruption bundle's upload then has its own attempts.
+    put_once "$1" "$2" "$(($(wc -c < "$1") / UPLOAD_MINIMUM_RATE))"
 }
 
 heartbeat()
@@ -405,7 +433,11 @@ read_lease()
         printf 'stop\n'
         return 0
     fi
-    if [[ ! ${lease_unit} =~ ^[0-9a-f]{64}$ || ! ${lease_replica} =~ ^[1-4]$ ||
+    # A measuring phase's unit is named by its 64-hex ID; the build phase leases
+    # only engine_build.py's UNIT_ID, at replica 1.
+    if [[ ! ( ( ${lease_unit} =~ ^[0-9a-f]{64}$ && ${lease_phase} != build ) ||
+                ( ${lease_unit} == engine-build && ${lease_phase} == build && ${lease_replica} == 1 ) ) ||
+            ! ${lease_replica} =~ ^[1-4]$ ||
             "${lease_protocol}" != "${PROTOCOL}" || ! ${lease_phase} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
         echo "Lease ${sequence} does not name a unit, replica, phase, and protocol ${PROTOCOL}:" \
             "unit ${lease_unit}, replica ${lease_replica}, phase ${lease_phase}, protocol ${lease_protocol}" >&2
@@ -523,7 +555,7 @@ run_lease()
     result_sha256=$(sha256_of "${archive}")
     # A notice while the unit was packed interrupts it before its upload.
     check_notices
-    put_once "${archive}" "${RESULT_PREFIX}/units/${sequence}/result.tar.gz" || stop upload-failure 1
+    put_result "${archive}" "${RESULT_PREFIX}/units/${sequence}/result.tar.gz" || stop upload-failure 1
     completion="${UNIT_ROOT}/completion-${sequence}.json"
     jq -n \
         --arg host_session "${HOST_SESSION}" \

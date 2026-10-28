@@ -223,15 +223,20 @@ class TestReleaseCapture(unittest.TestCase):
                 if host['receipt']['instance_id'] == source['instance_id'] and host['receipt']['unit_id'] != source['unit_id'])
 
         def imported(items, change):
-            for item, accepted in zip(items, release_capture.language_receipts(items)):
+            # Each plan's imported rows, with the accepted receipts of the plan's units.
+            plans = {Path(item['plan']): release_capture.fleet.validate(Path(item['plan'])) for item in items}
+            results = []
+            for item, accepted in zip(items, release_capture.language_receipts(items, plans)):
                 data = release_capture.load(item['export'])
                 # The fixture's attempts carry no release JAR; released_artifact's own tests cover its proof.
                 for host in data['hosts']:
                     for part in host['partitions']:
                         part['provenance']['jvm_build']['released_artifact'] = {'manifest': release}
                 change(data)
-                release_capture.normalize_language(data, manifest, release, collector, accepted,
-                                                   release_capture.fleet.work_units.load(Path(item['plan'])))
+                units = release_capture.work_units.load(Path(item['plan']))
+                normalized = release_capture.normalize_language(data, manifest, release, collector, accepted, units)
+                results.append((Path(item['plan']).name, accepted, units, normalized['observations']))
+            return results
 
         rejected = [{field: receipts[0][field] for field in session.SEMANTIC_REJECTION_FIELDS}]
         cases = (
@@ -251,7 +256,19 @@ class TestReleaseCapture(unittest.TestCase):
             change = moved_row if name == 'row moved between units' else lambda data: None
             with self.subTest(name), patch.object(release_capture.released_artifact, 'validate_saved'):
                 if message is None:
-                    imported(imported_items, change)
+                    # Every row is its accepted attempt's: that unit's row of the plan, on that host and replica.
+                    for shard, accepted, units, rows in imported(imported_items, change):
+                        attempts = {receipt['unit_attempt_id']: receipt for receipt in accepted}
+                        self.assertEqual(len(rows),
+                                         sum(len(units[receipt['unit_id']]['owned']) for receipt in accepted))
+                        for row in rows:
+                            receipt = attempts[row['unit_attempt_id']]
+                            case, language, _ = release_capture.fleet.row_atom(row['id'])
+                            self.assertEqual(receipt['shard_id'], shard)
+                            self.assertIn(row['id'], units[receipt['unit_id']]['owned'])
+                            self.assertEqual(row['logical_identity'],
+                                             [manifest['suite'], case, language, receipt['platform'],
+                                              int(receipt['replica_id']), receipt['unit_id']])
                 else:
                     with self.assertRaisesRegex(ValueError, message):
                         imported(imported_items, change)

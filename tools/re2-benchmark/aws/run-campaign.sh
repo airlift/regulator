@@ -78,13 +78,6 @@ BENCHMARK_INTEL_AMI_NAME=${BENCHMARK_INTEL_AMI_NAME:-}
 BENCHMARK_ARM_AMI_NAME=${BENCHMARK_ARM_AMI_NAME:-}
 JONI_COMPARATOR_ORDER=${JONI_COMPARATOR_ORDER:-forward}
 
-campaign_uses_trino()
-{
-    # The engine build prepares the pinned Trino harness for the platform's unit workers,
-    # and a unit worker measures units of every shard.
-    [[ "${CAMPAIGN_MODE}" == engine-build || "${CAMPAIGN_MODE}" == unit-worker ]]
-}
-
 jdk_archive_url()
 {
     case "$1" in
@@ -121,14 +114,11 @@ benchmark_ami_name()
     esac
 }
 
-case "${CAMPAIGN_MODE}" in
-    engine-build | unit-worker) ;;
-    *)
-        echo "RE2 benchmark campaign mode must be engine-build or unit-worker" >&2
-        exit 1
-        ;;
-esac
-# A unit worker leases units until its lifetime, after a baseline host's bootstrap budget.
+if [[ "${CAMPAIGN_MODE}" != unit-worker ]]; then
+    echo "RE2 benchmark campaign mode must be unit-worker" >&2
+    exit 1
+fi
+# A unit worker leases units until its lifetime ends.
 UNIT_WORKER_LIFETIME_SECONDS=${UNIT_WORKER_LIFETIME_SECONDS:-21600}
 if [[ ! "${UNIT_WORKER_LIFETIME_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "UNIT_WORKER_LIFETIME_SECONDS must be a positive number of seconds" >&2
@@ -136,16 +126,12 @@ if [[ ! "${UNIT_WORKER_LIFETIME_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 # run-unit-worker.sh exits with its INTERRUPTED_STATUS after a Spot interruption notice.
 UNIT_WORKER_INTERRUPTED_STATUS=43
-if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
-    # The controller adds the pool's last unit, at least 5400 seconds, to the worker's lifetime.
-    if [[ ! "${TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ || "${TIMEOUT_SECONDS}" -lt $((UNIT_WORKER_LIFETIME_SECONDS + 5400)) ||
-            "${CAMPAIGN_SHARD_ID}" != unit-worker ]]; then
-        echo "A unit worker requires CAMPAIGN_SHARD_ID=unit-worker and TIMEOUT_SECONDS of at least its lifetime plus 5400," \
-            "found ${CAMPAIGN_SHARD_ID} and ${TIMEOUT_SECONDS}" >&2
-        exit 1
-    fi
-elif [[ "${TIMEOUT_SECONDS}" != 5400 ]]; then
-    echo "An engine build requires TIMEOUT_SECONDS=5400, found ${TIMEOUT_SECONDS}" >&2
+# The controller adds host setup, final uploads and the pool's last unit, at least 5400 seconds together,
+# to the worker's lifetime.
+if [[ ! "${TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ || "${TIMEOUT_SECONDS}" -lt $((UNIT_WORKER_LIFETIME_SECONDS + 5400)) ||
+        "${CAMPAIGN_SHARD_ID}" != unit-worker ]]; then
+    echo "A unit worker requires CAMPAIGN_SHARD_ID=unit-worker and TIMEOUT_SECONDS of at least its lifetime plus 5400," \
+        "found ${CAMPAIGN_SHARD_ID} and ${TIMEOUT_SECONDS}" >&2
     exit 1
 fi
 if [[ "${CAMPAIGN_PROVENANCE}" != qualification ]]; then
@@ -165,25 +151,18 @@ if [[ -n "${TRANSFER_PREFIX}" ]] &&
     echo "TRANSFER_PREFIX must be a safe relative S3 prefix without '..' or a trailing slash: ${TRANSFER_PREFIX}" >&2
     exit 1
 fi
-if campaign_uses_trino "${CAMPAIGN_MODE}"; then
-    if [[ -z "${TRINO_DIR}" ]] ||
-            ! git -C "${TRINO_DIR}" rev-parse --git-dir >/dev/null 2>&1; then
-        echo "TRINO_DIR must name a Trino checkout for ${CAMPAIGN_MODE}" >&2
-        exit 1
-    fi
-    if [[ ! "${TRINO_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
-        echo "TRINO_REVISION must pin a full commit ID for ${CAMPAIGN_SHARD_ID}" >&2
-        exit 1
-    fi
-    CAMPAIGN_USES_TRINO=true
-else
-    CAMPAIGN_USES_TRINO=false
+# A unit worker measures units of every shard, or builds the pinned Trino harness.
+if [[ -z "${TRINO_DIR}" ]] ||
+        ! git -C "${TRINO_DIR}" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "TRINO_DIR must name a Trino checkout" >&2
+    exit 1
 fi
-JONI_EVIDENCE_SCOPE=not-used
-if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
-    # Each leased unit's shard decides how it compares Joni.
-    JONI_EVIDENCE_SCOPE=unit-shard-comparison
+if [[ ! "${TRINO_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "TRINO_REVISION must pin a full commit ID" >&2
+    exit 1
 fi
+# Each leased unit's shard decides how it compares Joni.
+JONI_EVIDENCE_SCOPE=unit-shard-comparison
 case "${CAMPAIGN_ARCHITECTURES}" in
     intel | arm) ;;
     *) echo "CAMPAIGN_ARCHITECTURES must be intel or arm: ${CAMPAIGN_ARCHITECTURES}" >&2; exit 1 ;;
@@ -196,13 +175,10 @@ if [[ ! ${CAMPAIGN_SHARD_ID} =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$ ]]; then
     echo "CAMPAIGN_SHARD_ID must be a 1-63 character identifier: ${CAMPAIGN_SHARD_ID}" >&2
     exit 1
 fi
-if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
-    if [[ ! -d "${ENGINE_BUILD_DIRECTORY}" || ! "${ENGINE_BUILD_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-        echo "A unit worker requires prebuilt engines: an engine build directory and its manifest SHA-256" >&2
-        exit 1
-    fi
-elif [[ -n "${ENGINE_BUILD_DIRECTORY}${ENGINE_BUILD_MANIFEST_SHA256}${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
-    echo "Only a unit worker installs prebuilt engines and language plans" >&2
+# A measuring worker installs its platform's prebuilt engines; a build phase's worker has none, and builds them.
+if [[ -n "${ENGINE_BUILD_DIRECTORY}${ENGINE_BUILD_MANIFEST_SHA256}" ]] &&
+        [[ ! -d "${ENGINE_BUILD_DIRECTORY}" || ! "${ENGINE_BUILD_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Prebuilt engines require an engine build directory and its manifest SHA-256" >&2
     exit 1
 fi
 for bundle_sha256 in ${LANGUAGE_PLAN_BUNDLE_SHA256S}; do
@@ -932,23 +908,19 @@ create_instance_profile()
     cat > "${SESSION_DIR}/instance-trust-policy.json" <<'EOF'
 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}
 EOF
-    local engine_build_statement=
-    local lease_statement=
-    if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
-        # A unit worker lists only its own lease keys, to tell a lease not yet
-        # written from one it cannot read.
-        lease_statement=",
-  {\"Effect\":\"Allow\",\"Action\":\"s3:ListBucket\",\"Resource\":\"arn:aws:s3:::${BUCKET}\",\"Condition\":{\"StringLike\":{\"s3:prefix\":\"${INPUT_PREFIX}/leases/*\"}}}"
-    fi
+    local shared_archive_statement=
     if [[ -n "${SHARED_ARCHIVE_RESOURCES}" ]]; then
         # Read only the exact shared archives this session's host installs.
-        engine_build_statement=",
+        shared_archive_statement=",
   {\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":[${SHARED_ARCHIVE_RESOURCES}]}"
     fi
+    # A unit worker lists only its own lease keys, to tell a lease not yet
+    # written from one it cannot read.
     cat > "${SESSION_DIR}/instance-transfer-policy.json" <<EOF
 {"Version":"2012-10-17","Statement":[
   {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::${BUCKET}/${INPUT_PREFIX}/*"},
-  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::${BUCKET}/${RESULT_PREFIX}/*"}${engine_build_statement}${lease_statement}
+  {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::${BUCKET}/${RESULT_PREFIX}/*"}${shared_archive_statement},
+  {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::${BUCKET}","Condition":{"StringLike":{"s3:prefix":"${INPUT_PREFIX}/leases/*"}}}
 ]}
 EOF
 
@@ -1101,12 +1073,11 @@ if [[ '${LANGUAGE_PLAN_BUNDLE_SHA256S}' != '' ]]; then
     export LANGUAGE_SOURCE_ARCHIVE=/tmp/regulator.tar.gz
     export LANGUAGE_CANDIDATE_PROVENANCE=/tmp/candidate-provenance.tsv
 fi
-if [[ '${CAMPAIGN_USES_TRINO}' == true ]]; then
-    mkdir -p /opt/re2-work/trino
-    download_input 's3://${BUCKET}/${INPUT_PREFIX}/trino.tar.gz' /tmp/trino.tar.gz
-    printf '%s  %s\n' '${TRINO_SHA256}' /tmp/trino.tar.gz | sha256sum --check -
-    tar -xzf /tmp/trino.tar.gz -C /opt/re2-work/trino
-fi
+mkdir -p /opt/re2-work/trino
+download_input 's3://${BUCKET}/${INPUT_PREFIX}/trino.tar.gz' /tmp/trino.tar.gz
+printf '%s  %s\n' '${TRINO_SHA256}' /tmp/trino.tar.gz | sha256sum --check -
+tar -xzf /tmp/trino.tar.gz -C /opt/re2-work/trino
+export LANGUAGE_PLAN_INPUT_DIR=/opt/re2-work/language-plans
 export ENGINE_BUILD_INPUT_DIR=
 export ENGINE_BUILD_MANIFEST_SHA256='${ENGINE_BUILD_MANIFEST_SHA256}'
 if [[ '${ENGINE_BUILD_MANIFEST_SHA256}' != '' ]]; then
@@ -1146,7 +1117,6 @@ export GLIBC_PACKAGE='${GLIBC_PACKAGE}'
 export CARGO_PACKAGE='${CARGO_PACKAGE}'
 export RUST_PACKAGE='${RUST_PACKAGE}'
 export TIME_PACKAGE='${TIME_PACKAGE}'
-export CAMPAIGN_USES_TRINO='${CAMPAIGN_USES_TRINO}'
 export JONI_EVIDENCE_SCOPE='${JONI_EVIDENCE_SCOPE}'
 export EXPECTED_AMI_ID='${expected_ami_id}'
 export EXPECTED_AMI_NAME='${expected_ami_name}'
@@ -1160,22 +1130,16 @@ export JONI_COMPARATOR_ORDER='${JONI_COMPARATOR_ORDER}'
 export BENCHMARK_HEAP_SIZE='${BENCHMARK_HEAP_SIZE:-8g}'
 export BENCHMARK_CPU_LIST='${BENCHMARK_CPU_LIST:-0}'
 export BENCHMARK_EXPECTED_VCPUS='${BENCHMARK_EXPECTED_VCPUS:-}'
-if [[ '${CAMPAIGN_MODE}' == unit-worker ]]; then
-    export RE2_CAMPAIGN_HOST_SESSION='${SESSION_ID}'
-    export BASELINE_REGION='${AWS_REGION}'
-    export UNIT_WORKER_BUCKET='${BUCKET}'
-    export UNIT_WORKER_LEASE_PREFIX='${INPUT_PREFIX}/leases'
-    export UNIT_WORKER_RESULT_PREFIX='${RESULT_PREFIX}'
-    export UNIT_WORKER_LIFETIME_SECONDS='${UNIT_WORKER_LIFETIME_SECONDS}'
-fi
+export RE2_CAMPAIGN_HOST_SESSION='${SESSION_ID}'
+export BASELINE_REGION='${AWS_REGION}'
+export UNIT_WORKER_BUCKET='${BUCKET}'
+export UNIT_WORKER_LEASE_PREFIX='${INPUT_PREFIX}/leases'
+export UNIT_WORKER_RESULT_PREFIX='${RESULT_PREFIX}'
+export UNIT_WORKER_LIFETIME_SECONDS='${UNIT_WORKER_LIFETIME_SECONDS}'
 
-trino_directory=
-if [[ '${CAMPAIGN_USES_TRINO}' == true ]]; then
-    trino_directory=/opt/re2-work/trino
-fi
 /opt/re2-work/regulator/tools/re2-benchmark/aws/run-host.sh \
     /opt/re2-work/regulator \
-    "\${trino_directory}" \
+    /opt/re2-work/trino \
     "\${RESULT_DIR}"
 EOF
 }
@@ -1309,11 +1273,8 @@ launch_instance()
 
 REGULATOR_COMMIT=$(candidate_commit) ||
     reject_input "Frozen candidate archive does not identify a local Regulator commit"
-TRINO_COMMIT=none
-if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
-    TRINO_COMMIT=$(git -C "${TRINO_DIR}" rev-parse "${TRINO_REVISION:-HEAD}^{commit}") ||
-        reject_input "Trino revision is not a commit of the Trino checkout"
-fi
+TRINO_COMMIT=$(git -C "${TRINO_DIR}" rev-parse "${TRINO_REVISION}^{commit}") ||
+    reject_input "Trino revision is not a commit of the Trino checkout"
 
 require_clean_worktree "${REGULATOR_DIR}" Regulator
 if [[ ! -f "${BASELINE_CANDIDATE_ARCHIVE}" ||
@@ -1333,9 +1294,7 @@ if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
         reject_input "Language candidate provenance checksum mismatch"
     fi
 fi
-if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
-    package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"
-fi
+package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"
 
 # Each content-addressed archive a host installs from the shared transfer bucket, one line each:
 # its path under /opt/re2-work on the host, its SHA-256, and its key.
@@ -1355,10 +1314,7 @@ done
 
 REGULATOR_SHA256=$(sha256 "${SESSION_DIR}/regulator.tar.gz")
 REGULATOR_CONTENT_SHA256=$(archive_content_sha256 "${SESSION_DIR}/regulator.tar.gz")
-TRINO_SHA256=none
-if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
-    TRINO_SHA256=$(sha256 "${SESSION_DIR}/trino.tar.gz")
-fi
+TRINO_SHA256=$(sha256 "${SESSION_DIR}/trino.tar.gz")
 ACCOUNT_ID=$(aws_cli sts get-caller-identity --query Account --output text)
 LOWER_SESSION_ID=$(printf '%s' "${SESSION_ID}" | tr '[:upper:]' '[:lower:]')
 if [[ -n "${TRANSFER_BUCKET}" ]]; then
@@ -1403,9 +1359,7 @@ aws_cli s3 cp "${SESSION_DIR}/regulator.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/
 if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
     aws_cli s3 cp "${SESSION_DIR}/candidate-provenance.tsv" "s3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv" --only-show-errors
 fi
-if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
-    aws_cli s3 cp "${SESSION_DIR}/trino.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/trino.tar.gz" --only-show-errors
-fi
+aws_cli s3 cp "${SESSION_DIR}/trino.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/trino.tar.gz" --only-show-errors
 if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
     aws_cli s3 cp "${ENGINE_BUILD_DIRECTORY}/engine-build.json" "s3://${BUCKET}/${INPUT_PREFIX}/engine-build.json" --only-show-errors
 fi
@@ -1532,7 +1486,7 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
             result_status=$(cat "${SESSION_DIR}/${label}/re2-results/exit-status")
             if [[ "${result_status}" != 0 ]]; then
                 echo "${label} run failed with status ${result_status}" >&2
-                if [[ "${result_status}" == "${UNIT_WORKER_INTERRUPTED_STATUS}" && "${CAMPAIGN_MODE}" == unit-worker ]]; then
+                if [[ "${result_status}" == "${UNIT_WORKER_INTERRUPTED_STATUS}" ]]; then
                     # The worker saw a Spot interruption notice and uploaded what it had.
                     record_failure_classification retryable-spot spot-interruption-notice
                 else
@@ -1550,12 +1504,12 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                 else
                     expected_instance_type=${ARM_INSTANCE_TYPE}
                 fi
-                expected_cargo_package=not-installed
-                expected_rust_package=not-installed
-                # An engine build compiles the native Rust runners.
-                if [[ "${CAMPAIGN_MODE}" == engine-build ]]; then
-                    expected_cargo_package=${CARGO_PACKAGE}
-                    expected_rust_package=${RUST_PACKAGE}
+                # A worker without prebuilt engines builds them, native Rust runners included.
+                expected_cargo_package=${CARGO_PACKAGE}
+                expected_rust_package=${RUST_PACKAGE}
+                if [[ -n "${ENGINE_BUILD_MANIFEST_SHA256}" ]]; then
+                    expected_cargo_package=not-installed
+                    expected_rust_package=not-installed
                 fi
                 if [[ ! -f "${environment_manifest}" ]] ||
                         ! grep -Fqx 'verification_status=verified' "${environment_manifest}" ||
@@ -1578,18 +1532,17 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                         ! grep -Fqx "instance_id=${instance_id}" "${environment_manifest}" ||
                         ! grep -Fqx "instance_type=${expected_instance_type}" "${environment_manifest}" ||
                         ! grep -Fqx "jdk_archive_sha256=${expected_java_sha256}" "${environment_manifest}" ||
-                        ! grep -Fqx "trino_used=${CAMPAIGN_USES_TRINO}" "${environment_manifest}" ||
+                        ! grep -Fqx "trino_used=true" "${environment_manifest}" ||
                         ! grep -Fqx "joni_evidence_scope=${JONI_EVIDENCE_SCOPE}" "${environment_manifest}"; then
                     echo "${label} qualification environment manifest is missing or inconsistent" >&2
                     campaign_failed=1
                     continue
                 fi
-                if [[ "${CAMPAIGN_MODE}" == unit-worker ]] &&
-                        (! grep -Fqx "row_manifest_sha256=${BASELINE_ROW_MANIFEST_SHA256}" "${environment_manifest}" ||
+                if ! grep -Fqx "row_manifest_sha256=${BASELINE_ROW_MANIFEST_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "platform_manifest_sha256=${BASELINE_PLATFORM_MANIFEST_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "comparator_manifest_sha256=${BASELINE_COMPARATOR_MANIFEST_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "protocol_representatives_sha256=${BASELINE_PROTOCOL_REPRESENTATIVES_SHA256}" "${environment_manifest}" ||
-                        ! grep -Fqx "time_package=${TIME_PACKAGE}" "${environment_manifest}"); then
+                        ! grep -Fqx "time_package=${TIME_PACKAGE}" "${environment_manifest}"; then
                     echo "${label} baseline manifest identity is inconsistent" >&2
                     campaign_failed=1
                     continue
@@ -1601,9 +1554,8 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                     campaign_failed=1
                     continue
                 fi
-                if [[ "${CAMPAIGN_USES_TRINO}" == true ]] &&
-                        (! grep -Fqx "trino_commit=${TRINO_COMMIT}" "${environment_manifest}" ||
-                        ! grep -Fqx "trino_archive_sha256=${TRINO_SHA256}" "${environment_manifest}"); then
+                if ! grep -Fqx "trino_commit=${TRINO_COMMIT}" "${environment_manifest}" ||
+                        ! grep -Fqx "trino_archive_sha256=${TRINO_SHA256}" "${environment_manifest}"; then
                     echo "${label} qualification Trino identity is inconsistent" >&2
                     campaign_failed=1
                     continue

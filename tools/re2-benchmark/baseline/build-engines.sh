@@ -15,7 +15,10 @@ RESULT_DIR=$1
 SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${ROOT}/target/baseline-shared}
 mkdir -p "${RESULT_DIR}/logs" "${SHARED_WORK_DIR}"
 
-TRINO_COMPARATOR_WORK_DIR="${SHARED_WORK_DIR}/pinned-trino" \
+# Only the harness's identity and provenance, as run-shard.sh rebuilds it: every
+# measuring route runs the semantic verifiers, whose verdict is final there, while
+# a build that failed one would only be retried.
+TRINO_COMPARATOR_IDENTITY_ONLY=true TRINO_COMPARATOR_WORK_DIR="${SHARED_WORK_DIR}/pinned-trino" \
     "${ROOT}/tools/re2-benchmark/trino-joni/prepare.sh" \
     2>&1 | tee "${RESULT_DIR}/logs/trino-build.log"
 

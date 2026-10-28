@@ -12,18 +12,15 @@ if [[ -z ${HOME:-} ]]; then
 fi
 
 if [[ $# -ne 3 ]]; then
-    echo "Usage: $0 <regulator-directory> <trino-directory-or-empty> <result-directory>" >&2
+    echo "Usage: $0 <regulator-directory> <trino-directory> <result-directory>" >&2
     exit 1
 fi
 
 BENCHMARK_MODE=${RE2_BENCHMARK_MODE:-}
-case "${BENCHMARK_MODE}" in
-    engine-build | unit-worker) ;;
-    *)
-        echo "RE2_BENCHMARK_MODE must be engine-build or unit-worker" >&2
-        exit 1
-        ;;
-esac
+if [[ "${BENCHMARK_MODE}" != unit-worker ]]; then
+    echo "RE2_BENCHMARK_MODE must be unit-worker" >&2
+    exit 1
+fi
 # run-unit-worker.sh exits with its INTERRUPTED_STATUS after a Spot interruption notice.
 UNIT_WORKER_INTERRUPTED_STATUS=43
 CAMPAIGN_PROVENANCE=${CAMPAIGN_PROVENANCE:-}
@@ -42,30 +39,21 @@ GLIBC_PACKAGE=${GLIBC_PACKAGE:?GLIBC_PACKAGE is required}
 CARGO_PACKAGE=${CARGO_PACKAGE:?CARGO_PACKAGE is required}
 RUST_PACKAGE=${RUST_PACKAGE:?RUST_PACKAGE is required}
 TIME_PACKAGE=${TIME_PACKAGE:?TIME_PACKAGE is required}
+# A measuring worker installs its platform's prebuilt engines; a build phase's worker builds them.
+ENGINE_BUILD_MANIFEST_SHA256=${ENGINE_BUILD_MANIFEST_SHA256:-}
 REGULATOR_DIR=$(cd "$1" && pwd)
-TRINO_DIR=
-case "${BENCHMARK_MODE}" in
-    engine-build | unit-worker)
-        # Neither job is a shard: the build prepares the Trino harness, and a unit
-        # worker measures units of every shard.
-        if [[ "${RE2_CAMPAIGN_SHARD_ID:-}" != "${BENCHMARK_MODE}" ]]; then
-            echo "RE2_BENCHMARK_MODE=${BENCHMARK_MODE} disagrees with" \
-                "RE2_CAMPAIGN_SHARD_ID=${RE2_CAMPAIGN_SHARD_ID:-unset}" >&2
-            exit 1
-        fi
-        if [[ -z "$2" || ! -d "$2" ]]; then
-            echo "The ${BENCHMARK_MODE} job requires a Trino checkout" >&2
-            exit 1
-        fi
-        TRINO_DIR=$(cd "$2" && pwd)
-        ;;
-    *)
-        if [[ -n "$2" ]]; then
-            echo "A ${BENCHMARK_MODE} job does not use a Trino checkout" >&2
-            exit 1
-        fi
-        ;;
-esac
+# A unit worker is not a shard: it measures units of every shard, or builds the
+# platform's engines.
+if [[ "${RE2_CAMPAIGN_SHARD_ID:-}" != "${BENCHMARK_MODE}" ]]; then
+    echo "RE2_BENCHMARK_MODE=${BENCHMARK_MODE} disagrees with" \
+        "RE2_CAMPAIGN_SHARD_ID=${RE2_CAMPAIGN_SHARD_ID:-unset}" >&2
+    exit 1
+fi
+if [[ -z "$2" || ! -d "$2" ]]; then
+    echo "A unit worker requires a Trino checkout" >&2
+    exit 1
+fi
+TRINO_DIR=$(cd "$2" && pwd)
 RESULT_DIR=$(mkdir -p "$3" && cd "$3" && pwd)
 PHYSICAL_CPU_LIST=$(lscpu -p=CPU,CORE,SOCKET | awk -F, '!/^#/ {key=$2 ":" $3; if (!seen[key]++) {cpus=(cpus == "" ? $1 : cpus "," $1)}} END {print cpus}')
 PHYSICAL_CORE_COUNT=$(awk -F, '{print NF}' <<<"${PHYSICAL_CPU_LIST}")
@@ -86,8 +74,9 @@ install_packages()
 {
     sudo dnf install -y "${CMAKE_PACKAGE}" "${NATIVE_COMPILER_PACKAGE}" "${GLIBC_PACKAGE}" \
         "${TIME_PACKAGE}" git jq make ninja-build perf tar gzip
-    if [[ "${BENCHMARK_MODE}" == engine-build ]]; then
-        # The Rust language comparator links the pinned regex crate.
+    if [[ -z "${ENGINE_BUILD_MANIFEST_SHA256}" ]]; then
+        # A worker without prebuilt engines builds them, and the Rust language comparator links the pinned
+        # regex crate.
         sudo dnf install -y "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
     fi
 }
@@ -179,9 +168,8 @@ record_environment()
             echo "Qualification JDK archive identity is incomplete" >&2
             exit 1
         fi
-        if [[ "${CAMPAIGN_USES_TRINO:-false}" == true &&
-                (! ${TRINO_SNAPSHOT_COMMIT:-} =~ ^[0-9a-f]{40}$ ||
-                ! ${TRINO_SNAPSHOT_SHA256:-} =~ ^[0-9a-f]{64}$) ]]; then
+        if [[ ! ${TRINO_SNAPSHOT_COMMIT:-} =~ ^[0-9a-f]{40}$ ||
+                ! ${TRINO_SNAPSHOT_SHA256:-} =~ ^[0-9a-f]{64}$ ]]; then
             echo "Qualification Trino source identity is incomplete" >&2
             exit 1
         fi
@@ -216,7 +204,7 @@ record_environment()
         printf 'regulator_commit=%s\n' "${REGULATOR_SNAPSHOT_COMMIT:-unknown}"
         printf 'regulator_archive_sha256=%s\n' "${REGULATOR_SNAPSHOT_SHA256:-unknown}"
         printf 'regulator_content_sha256=%s\n' "${REGULATOR_CONTENT_SHA256:-unknown}"
-        printf 'trino_used=%s\n' "${CAMPAIGN_USES_TRINO:-false}"
+        printf 'trino_used=true\n'
         printf 'trino_commit=%s\n' "${TRINO_SNAPSHOT_COMMIT:-none}"
         printf 'trino_archive_sha256=%s\n' "${TRINO_SNAPSHOT_SHA256:-none}"
         printf 'expected_ami_id=%s\n' "${EXPECTED_AMI_ID:-unverified}"
@@ -289,9 +277,9 @@ record_environment()
 
 install_engine_build()
 {
-    # Install the platform's prebuilt Trino harness.
+    # Install the platform's prebuilt Trino harness and native runners.
     python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" install \
-        --build "${ENGINE_BUILD_INPUT_DIR:?A unit worker requires prebuilt engines}" \
+        --build "${ENGINE_BUILD_INPUT_DIR:?A measuring unit worker requires prebuilt engines}" \
         --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256:?}" \
         --shared "${BASELINE_SHARED_WORK_DIR}" \
         --environment "${RESULT_DIR}/environment-manifest.txt" \
@@ -302,7 +290,7 @@ install_language_plans()
 {
     # Install language plan bundles where run-unit.sh looks up their units.
     local bundle
-    for bundle in /opt/re2-work/language-plans/*.tar.gz; do
+    for bundle in "${LANGUAGE_PLAN_INPUT_DIR:?A unit worker requires its language plan directory}"/*.tar.gz; do
         if [[ -f "${bundle}" ]]; then
             python3 "${REGULATOR_DIR}/tools/re2-benchmark/language/fleet.py" install-bundle \
                 --bundle "${bundle}" --sha256 "$(basename "${bundle}" .tar.gz)" \
@@ -318,10 +306,10 @@ record_environment
 export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
     export BASELINE_HEAP_SIZE=${BENCHMARK_HEAP_SIZE:-8g}
     export BASELINE_SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${REGULATOR_DIR}/target/baseline-shared}
-    if [[ "${BENCHMARK_MODE}" == unit-worker ]]; then
+    if [[ -n "${ENGINE_BUILD_MANIFEST_SHA256}" ]]; then
         install_engine_build
-        install_language_plans
     fi
+    install_language_plans
     capacity_file="${RESULT_DIR}/host-capacity.txt"
     memory_total_bytes=$(awk '/^MemTotal:/ {print $2 * 1024; exit}' /proc/meminfo)
     memory_available_before_bytes=$(awk '/^MemAvailable:/ {print $2 * 1024; exit}' /proc/meminfo)
@@ -337,17 +325,11 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         printf 'oom_kills_before=%s\n' "${oom_kills_before}"
         printf 'disk_available_before_bytes=%s\n' "${disk_available_before_bytes}"
     } > "${capacity_file}"
-    if [[ "${BENCHMARK_MODE}" == engine-build ]]; then
-        session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/build-engines.sh" "${RESULT_DIR}")
-    else
-        # The worker keeps each unit outside the host evidence it leaves here.
-        session_command=("${REGULATOR_DIR}/tools/re2-benchmark/aws/run-unit-worker.sh"
-            "${RESULT_DIR}" /var/tmp/re2-units)
-    fi
     set +e
+    # The worker keeps each unit outside the host evidence it leaves here.
     /usr/bin/time --append --output="${capacity_file}" \
         --format='wall_seconds=%e\nmaximum_resident_kibibytes=%M\nexit_status=%x' \
-        "${session_command[@]}"
+        "${REGULATOR_DIR}/tools/re2-benchmark/aws/run-unit-worker.sh" "${RESULT_DIR}" /var/tmp/re2-units
     host_session_status=$?
     set -e
     memory_available_after_bytes=$(awk '/^MemAvailable:/ {print $2 * 1024; exit}' /proc/meminfo)
@@ -379,7 +361,7 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         printf 'capacity_status=%s\n' "${capacity_status}"
     } >> "${capacity_file}"
     # A worker interrupted by Spot reports the interruption, not its truncated capacity.
-    if [[ "${BENCHMARK_MODE}" == unit-worker && ${host_session_status} -eq ${UNIT_WORKER_INTERRUPTED_STATUS} ]]; then
+    if ((host_session_status == UNIT_WORKER_INTERRUPTED_STATUS)); then
         exit "${UNIT_WORKER_INTERRUPTED_STATUS}"
     fi
     if [[ "${capacity_status}" != accepted ]]; then

@@ -177,12 +177,10 @@ def write_units(directory, units):
         (directory / name).write_text(table)
 
 
-def smoke_units(directory):
-    """The plan's smoke units: those measuring the first comparison of each language and model, each
-    isolated or required comparison, and the longest unit of several comparisons."""
-    plan = validate(directory)
+def smoke_units(directory, plan, units):
+    """A validated plan's smoke units: those measuring the first comparison of each language and model, each
+    isolated or required comparison, and the longest unit that packs several atoms."""
     manifest = collection.load(directory / "source/manifest.json")
-    units = work_units.load(directory)
     cases = {case["id"]: case for case in manifest["cases"]}
     representatives = {}
     for partition in plan["partitions"]:
@@ -589,17 +587,17 @@ def verify(directory, results, java, classpath, native_runners):
         "runners_sha256": runner_hash, "receipts": receipts})
 
 
-def campaign_units(directories, phase):
-    """The units a language campaign phase measures across its plans: the smoke units in smoke, every unit
-    otherwise. Returns them by unit ID with each unit's protocol digest, and each plan's allocation and
-    plan digest by its shard."""
+def campaign_units(plans, phase):
+    """The units a language campaign phase measures across its validated plans, each by its directory: the smoke
+    units in smoke, every unit otherwise. Returns them by unit ID with each unit's protocol digest, and each
+    plan's allocation and plan digest by its shard."""
     campaign = {"units": {}, "digests": {}, "allocations": {}, "manifests": {}}
-    for directory in directories:
-        plan = validate(directory)
+    for directory, plan in plans.items():
         if plan["shard_id"] in campaign["manifests"]:
             raise ValueError(f"language plans share shard {plan['shard_id']}")
-        selected = set(smoke_units(directory)) if phase == "smoke" else None
-        for unit_id, unit in work_units.load(directory).items():
+        units = work_units.load(directory)
+        selected = set(smoke_units(directory, plan, units)) if phase == "smoke" else None
+        for unit_id, unit in units.items():
             if selected is None or unit_id in selected:
                 campaign["units"][unit_id] = unit
                 campaign["digests"][unit_id] = unit_digest(plan["partitions"], unit["owned"])
@@ -609,10 +607,11 @@ def campaign_units(directories, phase):
     return campaign
 
 
-def validate_unit_campaign(directories, receipts, campaign_id, phase="primary"):
+def validate_unit_campaign(plans, receipts, campaign_id, phase="primary"):
     """Accept a language campaign phase's unit receipts as a whole, by the baseline campaign rule: every unit of
-    the phase on every platform for each replica, its replicas on distinct instances, and one candidate."""
-    campaign = campaign_units(directories, phase)
+    the phase's validated plans on every platform for each replica, its replicas on distinct instances, and one
+    candidate."""
+    campaign = campaign_units(plans, phase)
     unit_session.check_unit_campaign(
         receipts, load_platforms(unit_session.DIRECTORY / "platforms.tsv"), campaign["units"], campaign["digests"],
         campaign["allocations"], campaign["manifests"], campaign_id, (1,) if phase == "smoke" else (1, 2, 3))
@@ -628,7 +627,7 @@ def aggregate(directory, result_root, output):
         raise ValueError("will not overwrite an existing fleet export")
     receipts = [receipt for receipt in unit_dispatch.read_accepted_units(result_root / "accepted-units.tsv")
                 if receipt["shard_id"] == plan["shard_id"]]
-    validate_unit_campaign([directory], receipts, receipts[0]["campaign_id"] if receipts else "")
+    validate_unit_campaign({directory: plan}, receipts, receipts[0]["campaign_id"] if receipts else "")
     unit_session.check_semantic_rejections(result_root)
     observations, comparisons, hosts = [], [], []
     candidate = None
