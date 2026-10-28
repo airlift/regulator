@@ -30,9 +30,12 @@ assert.equal(original.rows.length, scope.publishedRows);
 assert.equal(scope.completeCampaignRows - scope.excludedCampaignRows, scope.publishedRows);
 assert.ok(original.rows.every(row => !("reportVisible" in row)));
 assert.doesNotMatch(JSON.stringify(original), /[†‡]/, "Public data uses only measurement-level uncertainty markers");
-assert.equal(Object.keys(manifest.pages).length, 24);
+// One page for every language, CPU and memory setting the capture declares.
+const pageKeys = Object.keys(original.languages).flatMap(language => Object.keys(original.platforms)
+  .flatMap(cpu => Object.keys(original.memoryModes).map(memory => report.selectionKey({ language, cpu, memory }))));
+assert.deepEqual(Object.keys(manifest.pages).sort(), pageKeys.sort());
 const builtDataFiles = (await readdir(new URL("data/", site))).sort();
-assert.equal(builtDataFiles.filter(name => name.endsWith(".json")).length, 25);
+assert.equal(builtDataFiles.filter(name => name.endsWith(".json")).length, pageKeys.length + 1, "Compact pages and manifest.json");
 assert.deepEqual(builtDataFiles.filter(name => name.endsWith(".json.gz")).sort(), [
   inputManifest.current.replace(/\.gz$/, "") + ".gz",
   ...inputManifest.releases.map(entry => entry.file.replace(/\.gz$/, "") + ".gz"),
@@ -92,7 +95,9 @@ if (published) {
   const identity = row => [row.caseId, row.operation, row.language,
     row.platform.replace(/^c/, "r"), row.memoryMode].join("|");
   assert.deepEqual(original.rows.map(identity), published.rows.map(identity), "Publication workload inventory is frozen");
-  assert.equal(download.rows.length, 5004, "The public download contains the frozen publication inventory");
+  // These counts belong to the frozen 1.0 preliminary workload source; the R8g metadata case below follows the release label.
+  const preliminaryOneZeroWorkloads = workloadEntry.candidate === "b227617cdb717fecce2ed4750bb00b874a8c01b7";
+  if (preliminaryOneZeroWorkloads) assert.equal(download.rows.length, 5004, "The public download contains the frozen publication inventory");
   assert.equal(download.rows.length, original.rows.length, "The public download contains only publication rows");
   const workloadDetails = workload => Object.fromEntries(
     Object.entries(workload ?? {}).filter(([field]) => field !== "performanceContext"));
@@ -105,7 +110,7 @@ if (published) {
     const page = JSON.parse(await readFile(new URL(`data/${filename}`, site)));
     const {language, cpu, memory} = page.selection;
     const previousRows = published.rows.filter(row => row.language === language
-      && row.platform === cpu.replace(/^r/, "c") && row.memoryMode === memory
+      && row.platform.replace(/^c/, "r") === cpu.replace(/^c/, "r") && row.memoryMode === memory
       && report.workloadSection(row) !== "diagnostic-only");
     assert.deepEqual(page.rows.map(identity), previousRows.map(identity), `${key}: published workload order`);
     assert.equal(new Set(page.rows.map(identity)).size, page.rows.length, `${key}: no duplicate logical workloads`);
@@ -126,7 +131,7 @@ if (published) {
         { row: pair.single ?? pair.reused, reused: pair.single ? pair.reused : undefined, comparator: "Comparator" })));
     }
     const shown = report.displayedMeasurements(eligible);
-    assert.equal(shown.length, {java: 188, re2: 188, trino: 292, like: 28}[language], `${key}: published display count`);
+    if (preliminaryOneZeroWorkloads) assert.equal(shown.length, {java: 188, re2: 188, trino: 292, like: 28}[language], `${key}: published display count`);
   }
 }
 
@@ -261,8 +266,9 @@ const invalidMetadata = [
   value => { value.sources.currentLabel = {}; },
   value => { value.sources.jdk = null; },
   value => { delete value.platforms; },
-  value => { delete value.platforms[cpus[2]]; },
-  value => { delete value.platforms.r8g; }, // The 1.0 release measured R8g.
+  value => { delete value.platforms[cpus.at(-1)]; },
+  // The 1.0 release measured R8g.
+  ...(original.sources.releaseVersion === "1.0" ? [value => { delete value.platforms.r8g; }] : []),
   value => { value.platforms[cpus[0]] = []; },
   value => { value.publication = { status: "preliminary", note: {} }; },
 ];
@@ -282,6 +288,6 @@ for (const invalidate of invalidMetadata) {
       { data: { ...recovered, rows: [] }, selection })));
   }
 }
-console.log("All 24 compact pages preserve table markup, results and commentary; the gzip download preserves the public evidence.");
+console.log(`All ${pageKeys.length} compact pages preserve table markup, results and commentary; the gzip download preserves the public evidence.`);
 console.log("Loader selection, in-flight deduplication, cache, failure/retry and payload validation passed.");
 console.log("Page sizes [selection, JSON bytes, gzip bytes]:", sizes);

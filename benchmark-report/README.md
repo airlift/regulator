@@ -14,9 +14,12 @@ selection, even when opening a local file.
 Local checks require Node.js 22 or newer and Python 3.11 or newer on `PATH`.
 
 The page loads a small `data/manifest.json`, then fetches one immutable JSON
-file for the selected language, CPU, and memory setting. There are 24 page
-files. Each includes the tables and ordinary row details, so expanding a row
-needs no further download. Previously visited selections are cached in memory.
+file for the selected language, CPU, and memory setting. There is one page
+file for each language, CPU, and memory setting the capture declares: 24 for
+the published 1.0 capture's four languages on three CPUs, and 20 for a 2.0
+capture's five languages on two CPUs, each in both memory settings. Each
+includes the tables and ordinary row details, so expanding a row needs no
+further download. Previously visited selections are cached in memory.
 After a page request fails, the next attempt revalidates the manifest so an open
 tab can recover when a deployment replaces the page files. Cached pages are
 identified by selection and immutable filename, not selection alone.
@@ -95,7 +98,7 @@ capture links to its benchmark source where available. Row detail contents are
 rendered only while expanded. The largest example is `dictionary/search/english-10` in the
 text processing table.
 
-`npm run check` compares all 24 compact tables with the original data, verifies
+`npm run check` compares every compact table with the original data, verifies
 the public download and Pages file inventory, and checks selection caching and
 retry behavior. Current
 page files must stay below 1,100 KB uncompressed and 210 KB gzipped. These limits
