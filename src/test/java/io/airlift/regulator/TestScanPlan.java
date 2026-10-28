@@ -2014,13 +2014,22 @@ public class TestScanPlan
 
     static PatternWitness generatedSequence(Random random, int depth)
     {
+        return generatedSequence(random, depth, List.of());
+    }
+
+    /// Returns a random sequence of literals, quantified atoms, captures, and optional groups,
+    /// each followed by a slash, with a text it matches. A language's `extraAtoms`, each an atom
+    /// with one character it matches, join the shared atoms; with none, the draws match those of
+    /// the two-argument form, so existing seeds keep their sequences.
+    static PatternWitness generatedSequence(Random random, int depth, List<PatternWitness> extraAtoms)
+    {
         StringBuilder pattern = new StringBuilder();
         StringBuilder text = new StringBuilder();
         int count = 1 + random.nextInt(3);
         for (int index = 0; index < count; index++) {
             PatternWitness item;
             if (depth < 2 && random.nextInt(4) == 0) {
-                item = generatedSequence(random, depth + 1);
+                item = generatedSequence(random, depth + 1, extraAtoms);
             }
             else if (random.nextInt(4) == 0) {
                 String literal = List.of("ab", "é", "😀", "/", ":").get(random.nextInt(5));
@@ -2030,7 +2039,7 @@ public class TestScanPlan
                 String[] atoms = {"[a-z]", "[ab]", "[0-9]", "[^/:!]", "[^/!]", "[^\\n!]", "[\\x00-\\x7F]", ".", "[é😀]"};
                 String[] symbols = {"a", "b", "1", "é", "😀", "é", "\u0000", "😀", "é"};
                 String[] quantifiers = {"", "?", "*", "+", "{2}", "{1,3}", "{2,}", "{0,2}", "{0}"};
-                int atom = random.nextInt(atoms.length);
+                int atom = random.nextInt(atoms.length + extraAtoms.size());
                 int quantifier = random.nextInt(quantifiers.length);
                 int repetitions = switch (quantifier) {
                     case 0 -> 1;
@@ -2043,7 +2052,8 @@ public class TestScanPlan
                     case 7 -> random.nextInt(3);
                     default -> 0;
                 };
-                item = new PatternWitness(atoms[atom] + quantifiers[quantifier], symbols[atom].repeat(repetitions));
+                PatternWitness chosen = atom < atoms.length ? new PatternWitness(atoms[atom], symbols[atom]) : extraAtoms.get(atom - atoms.length);
+                item = new PatternWitness(chosen.pattern() + quantifiers[quantifier], chosen.text().repeat(repetitions));
             }
             if (random.nextBoolean()) {
                 item = new PatternWitness("(" + item.pattern() + ")", item.text());

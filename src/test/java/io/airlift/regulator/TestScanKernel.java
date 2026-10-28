@@ -332,6 +332,16 @@ public class TestScanKernel
             symbols.addAll(witnessParts(expression));
             verifySameOperations(expression, compiled, interpreted, randomSources(expression.length(), symbols, MALFORMED_SEQUENCES), true);
         }
+        // The RE2 executor class, which Java and Rust plans share, probes the byte its plan
+        // probes. TestRe2ScanPlan compares its results with the ordinary engine.
+        String expression = "été=([^/]+)/";
+        Re2 re2 = Re2.compile(utf8Slice(expression), Re2.Options.defaults().setByteFrequencies(TestingByteFrequencies.learnedJsonRecords()).setGenerateBytecode(true));
+        assertThat(re2.usesGeneratedBytecode()).as(expression).isTrue();
+        ScanPlan plan = re2.caseSensitiveScanPlan();
+        assertThat(plan).as(expression).isNotNull();
+        assertThat(plan.leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(5);
+        boolean ordinaryHandoff = re2.usesScanPlanForFindForDiagnostics() && re2.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
+        assertThat(probeOffsets(ScanKernelGenerator.re2ClassfileForDiagnostics(plan, ordinaryHandoff))).as(expression).isNotEmpty().containsOnly(5);
     }
 
     /// Compares generated and interpreted patterns over the seeded patterns of
