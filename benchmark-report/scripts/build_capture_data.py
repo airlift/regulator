@@ -38,8 +38,9 @@ def validate_released_campaign_paths(arguments):
                 if item.get(field):
                     inputs[f'language[{index}].{field}'] = Path(item[field])
             if item.get('export'):
-                inputs[f'language[{index}] acceptance ledger'] = (
-                    Path(item['export']).parent / 'accepted-language-sessions.json')
+                # The campaign's result root holds the export beside its ledgers and accepted unit attempts;
+                # a linked export names it by its target.
+                inputs[f'language[{index}] result root'] = Path(item['export']).resolve().parent
         baseline = plan.get('baseline', {})
         for field in ('primary', 'confirmation', 'reduction', 'candidate_provenance'):
             if baseline.get(field):

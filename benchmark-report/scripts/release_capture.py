@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / 'tools/re2-benchmark/language'))
 import fleet
 import released_artifact
 import unit_session
+import work_units
 
 
 def load(path):
@@ -34,90 +35,83 @@ def load_collector(item, plan, release):
     return collectors[0]
 
 
-def normalize_language(data, manifest, expected_release, collector, receipts):
+def normalize_language(data, manifest, expected_release, collector, receipts, units):
+    """Import a plan's export, whose hosts must be exactly its accepted unit attempts, receipts, each holding
+    exactly its unit's rows of the plan's units."""
     plan = data['plan']
-    if plan['replicas'] != 3 or 'selection' in plan:
-        raise ValueError('release language capture requires the complete three-host matrix')
+    if 'selection' in plan:
+        raise ValueError('release language capture requires the complete matrix')
     allocations = fleet.platform_allocations(manifest['suite'], plan['platforms'])
     if plan.get('schema_version') != 4 or plan.get('platform_allocations') != allocations:
         raise ValueError('release language capture changed its frozen worker allocations')
     expected_candidate = {'source_commit': collector['candidate_commit'], 'source_tree': collector['root_tree']}
     if any(data['candidate'][key] != value for key, value in expected_candidate.items()):
         raise ValueError('language capture changed the collector identity')
-    by_partition = {part['id']: part for part in plan['partitions']}
-    jobs = {job['id']: job for job in plan['jobs']}
-    if len(jobs) != len(plan['jobs']) or len(data['hosts']) != len(jobs):
-        raise ValueError('language capture has missing or duplicate hosts')
-    accepted = {}
     for receipt in receipts:
-        if receipt['plan_sha256'] != digest_plan(plan):
-            continue
-        if (receipt.get('released_artifact') != expected_release or
+        if (receipt['engine_tree'] != expected_release['engine_tree'] or
                 receipt['candidate_commit'] != collector['candidate_commit'] or
                 receipt['candidate_archive_sha256'] != collector['archive_sha256']):
-            raise ValueError('accepted language batch changed the released artifact or collector')
-        for job, checksum in receipt['exports'].items():
-            if job in accepted:
-                raise ValueError('duplicate accepted language export')
-            accepted[job] = (checksum, receipt['instance_id'])
-    if set(accepted) != set(jobs):
-        raise ValueError('accepted language ledger does not cover the complete plan')
+            raise ValueError('accepted language unit changed the released artifact or collector')
+    accepted = {receipt['unit_attempt_id']: receipt for receipt in receipts}
+    if (len(accepted) != len(receipts) or len(data['hosts']) != len(receipts) or
+            any(accepted.get(host['receipt']['unit_attempt_id']) != host['receipt'] for host in data['hosts'])):
+        raise ValueError('language capture has missing, duplicate, or changed hosts')
+    owned = {host['receipt']['unit_attempt_id']: set() for host in data['hosts']}
+    for row in data['observations']:
+        owned.setdefault(row['unit_attempt_id'], set()).add(row['id'])
+    if owned != {host['receipt']['unit_attempt_id']: set(units[host['receipt']['unit_id']]['owned'])
+                 for host in data['hosts']}:
+        raise ValueError("language capture's observations differ from their accepted units' rows")
+    by_partition = {part['id']: part for part in plan['partitions']}
     cases = {case['id']: case for case in manifest['cases']}
-    identities, hosts, instances = {}, [], {}
+    identities, hosts = {}, []
     for host in data['hosts']:
-        job, provenance = host['job'], host['provenance']
-        if job['id'] in identities or jobs.get(job['id']) != job:
-            raise ValueError('language host changed its frozen assignment')
-        release = provenance['jvm_build'].get('released_artifact')
-        if release is None or release['manifest'] != expected_release:
-            raise ValueError('language host did not measure the published release')
-        released_artifact.validate_saved(release, provenance['jvm_build']['jvm'])
-        if any(provenance[key] != value for key, value in expected_candidate.items()):
-            raise ValueError('language host changed the collector identity')
-        instance = provenance['instance_identity']
-        allocation = allocations.get(job['platform'])
-        planned = {key: job.get(key) for key in ('instance_type', 'vcpus')}
-        if (job['platform'] not in CURRENT_PLATFORMS or allocation is None or planned != allocation or
-                instance['instanceType'] != allocation['instance_type'] or
-                accepted[job['id']] != (host['export_sha256'], instance['instanceId'])):
-            raise ValueError('language host differs from its accepted instance or export')
-        part = by_partition[job['partition']]
-        cohort = instances.setdefault((job['platform'], job['partition']), set())
-        if instance['instanceId'] in cohort:
-            raise ValueError('release replicas require independent hosts')
-        cohort.add(instance['instanceId'])
-        identity = [manifest['suite'], part['case'], part['language'], job['platform'], job['replica']]
-        identities[job['id']] = identity
-        encoded_case = json.dumps(cases[part['case']], sort_keys=True, ensure_ascii=True, allow_nan=False).encode()
-        hosts.append({'logical_identity': identity, 'case_sha256': hashlib.sha256(encoded_case).hexdigest(),
-                      'instance_id': instance['instanceId'], 'collector': collector['candidate_commit']})
-    return {'hosts': hosts,
-            'observations': [{**row, 'logical_identity': identities[row['job']]} for row in data['observations']],
-            'comparisons': [{**row, 'logical_identity': identities[row['job']]} for row in data['comparisons']]}
+        receipt = host['receipt']
+        exports = [(part['id'], part['export_sha256']) for part in host['partitions']]
+        if fleet.exports_digest(exports) != receipt['observed_rows_sha256']:
+            raise ValueError('language host differs from its accepted exports')
+        allocation = allocations.get(receipt['platform'])
+        if (receipt['platform'] not in CURRENT_PLATFORMS or allocation is None or
+                receipt['instance_type'] != allocation['instance_type']):
+            raise ValueError("language host differs from its shard's frozen allocation")
+        for part in host['partitions']:
+            provenance = part['provenance']
+            release = provenance['jvm_build'].get('released_artifact')
+            if release is None or release['manifest'] != expected_release:
+                raise ValueError('language host did not measure the published release')
+            released_artifact.validate_saved(release, provenance['jvm_build']['jvm'])
+            if any(provenance[key] != value for key, value in expected_candidate.items()):
+                raise ValueError('language host changed the collector identity')
+            instance = provenance['instance_identity']
+            if (instance['instanceId'], instance['instanceType']) != (receipt['instance_id'], receipt['instance_type']):
+                raise ValueError('language host differs from its accepted instance')
+            comparison = by_partition[part['id']]
+            identity = [manifest['suite'], comparison['case'], comparison['language'], receipt['platform'],
+                        int(receipt['replica_id']), receipt['unit_id']]
+            identities[receipt['unit_attempt_id'], part['id']] = identity
+            encoded_case = json.dumps(cases[comparison['case']], sort_keys=True, ensure_ascii=True,
+                                      allow_nan=False).encode()
+            hosts.append({'logical_identity': identity, 'case_sha256': hashlib.sha256(encoded_case).hexdigest(),
+                          'instance_id': instance['instanceId'], 'collector': collector['candidate_commit']})
+
+    def identified(row):
+        return {**row, 'logical_identity': identities[row['unit_attempt_id'], row['partition']]}
+
+    return {'hosts': hosts, 'observations': [identified(row) for row in data['observations']],
+            'comparisons': [identified(row) for row in data['comparisons']]}
 
 
-def digest_plan(plan):
-    return hashlib.sha256(json.dumps(plan, sort_keys=True, ensure_ascii=True, allow_nan=False).encode() + b'\n').hexdigest()
-
-
-def select_language_receipts(path, plan, ledgers):
-    path = Path(path).resolve()
-    if path not in ledgers:
-        ledgers[path] = {'receipts': load(path)['receipts'], 'used': set()}
-    ledger = ledgers[path]
-    expected = digest_plan(plan)
-    selected = [index for index, receipt in enumerate(ledger['receipts'])
-                if receipt['plan_sha256'] == expected]
-    if ledger['used'].intersection(selected):
-        raise ValueError('language receipt is assigned to multiple captures')
-    ledger['used'].update(selected)
-    return [ledger['receipts'][index] for index in selected]
-
-
-def validate_language_receipt_coverage(ledgers):
-    for ledger in ledgers.values():
-        if len(ledger['used']) != len(ledger['receipts']):
-            raise ValueError('language ledger contains receipts outside the imported captures')
+def validate_language_ledger(ledger, directories):
+    """Require the accepted units of one complete language campaign of the imported plans, none of whose attempts
+    was rejected for its semantics, and return its receipts."""
+    fields = unit_session.UNIT_RECEIPT_FIELDS
+    receipts = unit_session.read_tsv(ledger, fields, fields)
+    campaigns = {receipt['campaign_id'] for receipt in receipts}
+    if len(campaigns) != 1:
+        raise ValueError(f'language ledger must hold one campaign: {ledger}')
+    fleet.validate_unit_campaign(directories, receipts, campaigns.pop())
+    unit_session.check_semantic_rejections(ledger.parent)
+    return receipts
 
 
 def validate_baseline(baseline, release, collector):
@@ -161,14 +155,27 @@ def validate_reduced_attempts(reduction, receipts):
         raise ValueError('baseline reduction changed the accepted unit attempts')
 
 
+def language_receipts(items):
+    """Each imported plan's accepted unit attempts: its shard's receipts in the ledger beside its export, once that
+    ledger holds one complete campaign of the imported plans sharing it."""
+    def ledger(item):
+        return Path(item['export']).resolve().parent / 'accepted-units.tsv'
+
+    ledgers = {}
+    for item in items:
+        ledgers.setdefault(ledger(item), []).append(Path(item['plan']))
+    accepted = {path: validate_language_ledger(path, directories) for path, directories in ledgers.items()}
+    return [[receipt for receipt in accepted[ledger(item)]
+             if receipt['shard_id'] == fleet.validate(Path(item['plan']))['shard_id']] for item in items]
+
+
 def build(plan_path):
     plan = load(plan_path)
     release = released_artifact.manifest(ROOT, plan['release_version'])
     collectors = {}
     combined = {'hosts': [], 'observations': [], 'comparisons': []}
     manifests, exports = [], []
-    language_ledgers = {}
-    for item in plan['language']:
+    for item, receipts in zip(plan['language'], language_receipts(plan['language'])):
         directory = Path(item['plan'])
         frozen = fleet.validate(directory)
         data = load(item['export'])
@@ -179,14 +186,11 @@ def build(plan_path):
         if manifest['suite'] in collectors:
             raise ValueError('release capture repeats a language suite')
         collectors[manifest['suite']] = collector
-        receipts = select_language_receipts(
-            Path(item['export']).parent / 'accepted-language-sessions.json', frozen, language_ledgers)
-        normalized = normalize_language(data, manifest, release, collector, receipts)
+        normalized = normalize_language(data, manifest, release, collector, receipts, work_units.load(directory))
         for key in combined:
             combined[key].extend(normalized[key])
         manifests.append(manifest)
         exports.append(digest(item['export']))
-    validate_language_receipt_coverage(language_ledgers)
     if sorted((manifest['suite'], len(manifest['cases'])) for manifest in manifests) != [('language-bulk', 238), ('language-lifecycle', 13)]:
         raise ValueError('release import requires all 238 bulk and 13 lifecycle cases')
     baseline = plan['baseline']

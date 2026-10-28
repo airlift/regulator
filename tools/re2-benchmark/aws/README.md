@@ -202,7 +202,7 @@ Execution requires:
 - a candidate ref under `refs/benchmarks/`
 - the deterministic candidate archive and provenance produced by
   `baseline/freeze-candidate.sh`
-- the pinned Trino checkout for shards that compare Joni or Trino LIKE
+- the pinned Trino checkout, which every unit worker receives
 - working AWS credentials from the standard AWS credential chain, or an
   explicitly selected profile, and the configured region
 
@@ -647,7 +647,9 @@ or another replica of the unit used. An item requeued for On-Demand only goes
 to an On-Demand host, and On-Demand hosts also take every other item. When
 the pool can give a worker nothing more, the worker gets a stop lease. Each
 lease, and each outcome it reaches, is a row of `unit-attempts.tsv`, written
-before the lease is.
+before the lease is. A unit estimated past the 15-minute unit budget, such as a
+slow language comparison isolated in its own unit, is On-Demand work from the
+start unless the campaign is `--spot-only`.
 
 The controller polls each worker's uploads. A completion marker's result must
 match `result_sha256` and its lease; the attempt then passes the unit gate
@@ -740,7 +742,7 @@ after verified cleanup while independent jobs continue; [unit
 dispatch](#unit-dispatch) retries a failed unit instead. Unverifiable cleanup
 and other unsafe controller failures stop admissions across both collectors.
 
-A Spot-only language campaign or build phase can exhaust its retries when one
+A Spot-only build phase can exhaust its retries when one
 platform runs out of Spot capacity. Once no job awaits an ordinary retry, rerun the phase in the
 same result root with `--execute --refill-unresolved`, without `--spot-only`
 or `--fleet-budget`, to give each exhausted job one more attempt on

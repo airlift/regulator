@@ -187,8 +187,15 @@ and lifecycle pairing. The baseline must be a complete unit campaign: its
 `output-checksums.tsv` matches every reduced file, its `summary.json` names the
 release whose JAR the reducer proved every attempt measured, and its host rows
 come from exactly the accepted unit attempts, with the campaign, host,
-candidate, and evidence identity of their receipts. Historical C-family
-datasets retain their labels.
+candidate, and evidence identity of their receipts. Each language export must
+likewise come from a complete unit campaign of its plans: the
+`accepted-units.tsv` beside it passes the same acceptance, its
+`semantic-rejections.tsv` lists no attempt, and its hosts are exactly the
+accepted attempts, each with the exports its receipt digests and exactly its
+unit's rows. Neither the public nor the complete output may lie inside a
+language result root, which holds the export beside its ledgers and attempts.
+Historical
+C-family datasets retain their labels.
 It rejects missing rows and verification failures. Timeouts and incompatibilities remain
 distinct nonnumeric results.
 

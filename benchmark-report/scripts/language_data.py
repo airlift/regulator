@@ -141,7 +141,8 @@ def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
         if key in seen:
             raise ValueError('duplicate comparison')
         seen.add(key)
-        suite, case_id, language, platform, replica = identity
+        # One case's operations may run in several units, so its host is also named by unit.
+        suite, case_id, language, platform, replica, _ = identity
         if comparison['logical_case'] != case_id or comparison['language'] != language:
             raise ValueError('comparison identity disagrees with its host')
         case = cases[suite, case_id]

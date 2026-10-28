@@ -41,7 +41,7 @@ def bulk_capture(mappings):
     for language in mappings:
         for platform in PLATFORMS:
             for replica in (1, 2, 3):
-                identity = ['language-bulk', 'fixture', language, platform, replica]
+                identity = ['language-bulk', 'fixture', language, platform, replica, f'unit-{language}']
                 data['hosts'].append({'logical_identity': identity, 'instance_id': f'host-{replica}', 'collector': 'test', 'case_sha256': case_hash})
                 for mode in MEMORY_MODES:
                     candidate, comparator = f'{mode}/candidate', f'{mode}/comparator'

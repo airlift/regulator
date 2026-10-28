@@ -310,12 +310,13 @@ The plan also packs its comparisons into work units, written as `units.tsv`
 and `unit-rows.tsv` beside `plan.json` in the baseline unit format. An atom is
 one comparison under one operation: its comparator and both memory modes,
 which stay on one host. Atoms pack into units estimated at no more than 15
-minutes. An atom longer than that, or a comparison the duration policy
-isolates, is a unit alone. A unit's identity digests the partition manifests
-and operations it measures. The units belong to one shard, which defaults to
-the suite; `--shard-id` names another, so a separate manifest of the same
-suite, such as the literal probe, keeps distinct unit IDs. Validation rebuilds
-the units from the plan and rejects any table that differs.
+minutes. An atom longer than that, which runs on On-Demand capacity, or any atom
+of a comparison the duration policy isolates, is a unit alone. A unit's identity
+digests the partition manifests and operations it measures. The units belong to
+one shard, which defaults to the suite; `--shard-id` names another, so a
+separate manifest of the same suite, such as the literal probe, keeps distinct
+unit IDs. Validation rebuilds the units from the plan and rejects any table that
+differs.
 
 ### Work units
 
@@ -390,14 +391,6 @@ pins verification and timing to one available CPU after building, restores
 its original affinity on exit, and records the selected CPU. Archive workers
 also pass `--source-archive` and `--candidate-provenance`. The package and
 provenance belong outside the extracted source directory.
-
-After collection, `fleet.py aggregate --plan-directory ... --results ...
---output ...` revalidates every raw observation and receipt without rewriting
-the source evidence. Missing jobs, conflicting language traces, changed raw
-samples, mixed source/JDK/comparator identities, wrong platforms, and replicas
-reusing the same instance all block export. A new output filename is required.
-Observations retain their job, host, fork, iteration, allocation, and operation
-identities. Aggregation does not average away host differences.
 
 ## Bulk and adversarial inventory
 
@@ -577,82 +570,87 @@ for each language.
 
 ## AWS dispatch and recovery
 
-The shared controller accepts repeated `--language-plan` arguments. Run the
-existing baseline campaign separately; language plans add coverage and do not
-replace its LIKE and Trino-operation shards.
-Keep both source manifests and fleet plans outside Maven's `target` directory
-for a final campaign.
+A language campaign runs its plans' work units on the baseline's unit
+workers, as its own controller invocation with its own result roots. Run the
+baseline campaign separately; language plans add coverage and do not replace
+its LIKE and Trino-operation shards. Keep both source manifests and fleet
+plans outside Maven's `target` directory for a final campaign.
 
 ```sh
+TRINO_DIR=/path/to/trino \
 python3 tools/re2-benchmark/baseline/run-campaign.py smoke final-v1 \
   --language-plan /path/to/lifecycle-fleet \
   --language-plan /path/to/bulk-fleet \
   --result-root /path/to/language-smoke
 ```
 
-Without `--execute`, this only writes the job manifest. Execution also requires
-the frozen `--candidate-ref`, `--candidate-archive`, and
-`--candidate-provenance`. Run `primary` with the same plans and candidate,
-a separate result root, and `--smoke-results /path/to/language-smoke` after
-that smoke is accepted. Language smoke samples each language/model/platform
-using the full measurement protocol, not abbreviated warmup. Primary requires
-three independent host replicas. The baseline-specific `confirmation` and
-parser-race recovery commands do not accept language results.
+Without `--execute`, this only writes `work-items.tsv`. Execution also
+requires the frozen `--candidate-ref`, `--candidate-archive`, and
+`--candidate-provenance`, and `--engine-builds` from an accepted build phase,
+which carries the native runners. Each plan must name a distinct shard.
 
-Fleet schema 2 records deterministic host batches. By default each batch contains
-one complete language partition, keeping its native/safe/comparator measurements
-together. Targeted campaigns can supply `--selection` as a JSON array of
-`[case ID, language]` pairs and a `--batch-operation-budget` from 1 through 16.
-Selection and batch membership are frozen in the plan and validated on reuse.
-For the complete bulk corpus, also pass `--duration-policy PATH` with frozen
-per-case/language duration estimates and isolated slow or timeout pairs.
-The packer enforces both the operation budget and batch-duration ceiling.
-Smoke includes every isolated pair and the longest estimated packed batch.
-Historical estimates plan work; smoke durations determine whether it fits.
-The operation budget alone is a packing limit, not a time estimate. Slow corpus passes
-can take seconds per iteration; check measured pass costs and all forks against
-the host deadline before grouping them. Each host builds once,
-then runs its partitions sequentially on one pinned CPU. Regenerate older
-schema-1 plans. `fleet.py package-batch` and `worker.py --batch-directory`
-exercise this boundary without needing the full corpus on the worker.
+- **Smoke** measures each plan's smoke units on replica 1. They cover the first
+  comparison of each language and model, every isolated or required pair, and
+  the longest packed unit.
+- **Primary** runs with the same plans and candidate, a separate result root,
+  and `--smoke-results /path/to/language-smoke` once that smoke is accepted.
+  It measures every unit on three replicas, each on its own instance.
+- Both phases use the full qualification protocol. A language campaign has no
+  confirmation phase.
 
-The controller uses the configured concurrency and shared fleet budget.
-Use `--spot-only`, a `--spot-vcpu-reserve` matching the policy, and the same
-`--fleet-budget` file for baseline and language collection. Select
-`--release-version 2.0` to measure the published 2.0 artifact. See the
+Each platform's workers use the instance type the plan allocates, so
+lifecycle units on R9g run on `.2xlarge` workers. The controller writes each
+plan's bundle under the result root's `language-plans/` and uploads it beside
+the [engine archives](../aws/README.md#engine-builds). Leases, retries,
+interruptions, restarts, and the shared fleet budget follow the baseline's
+[unit dispatch](../aws/README.md#unit-dispatch). A unit estimated past 15
+minutes runs only on On-Demand workers unless the campaign is `--spot-only`,
+and each pool's worker timeout covers its longest unit.
+
+The controller accepts an attempt into `accepted-units.tsv` only after the
+[unit checks](#work-units) pass again on the returned evidence, from a host
+with the campaign's comparator pins and release selection. A semantic failure
+is recorded in `semantic-rejections.tsv` and fails the phase. The phase gate
+applies the baseline campaign rule to the plans' units: every unit the phase
+selects, the smoke units in smoke and every unit in primary, on both platforms
+for each replica, on its allocated instance type, with a unit's replicas on
+distinct instances and one candidate throughout.
+
+Primary completion exports each plan as `<shard>-results.json`, through
+`fleet.py aggregate --plan-directory ... --results <result root> --output ...`.
+The export:
+
+- revalidates every accepted attempt from its retained evidence, without
+  rewriting it, and requires the campaign rule again;
+- rejects language-trace disagreement across a case's partitions and mixed
+  candidate, comparator, or JDK identities;
+- keeps each attempt's receipt with its partitions' provenance and every raw
+  sample, without averaging away host differences.
+
+A restart must reproduce each export byte for byte. The release importer reads
+`accepted-units.tsv` beside the exports and accepts them only as one complete
+campaign of the imported plans, with no semantic rejection.
+
+`--max-concurrent`, `--max-concurrent-per-platform`, `--spot-only`,
+`--fleet-budget`, and `--release-version` work as they do for the baseline.
+Select `--release-version 2.0` to measure the published 2.0 artifact. See the
 [AWS guide](../aws/README.md#shared-fleet-budget) for the fleet budget, release
-manifests and remeasuring 1.0.
-If one platform runs out of Spot capacity, finish the same result root on
-On-Demand with `--refill-unresolved`; see
-[recovery](../aws/README.md#recovery-and-evidence).
-Use `--max-concurrent` and `--max-concurrent-per-platform` to impose smaller
-total and CPU-family limits. Running retries count toward those limits. The
-language safety deadline is derived from batch count, requested concurrency,
-per-platform and vCPU waves, the 90-minute per-host limit, one retry wave,
-and a capacity-wait allowance. `--phase-timeout-seconds` can set a larger
-frozen deadline. This is a worst-case bound,
-not an ETA. The candidate, plan hashes, batch membership, heap, concurrency,
-and deadlines are persisted; changing them on restart is rejected, except
-that a refill records its own concurrency and deadline.
+manifests and remeasuring 1.0. For the
+complete bulk corpus, prepare the plan with `--duration-policy PATH`: its
+frozen per-comparison estimates raise unit estimates, and each operation of
+an isolated pair runs as a unit alone. Local controller tests use synthetic
+timing samples; they do not qualify performance or replace the AWS smoke and
+primary phases.
+
+A targeted language plan selects its coverage when it is prepared: pass
+`fleet.py prepare --selection PATH`, a JSON array of `[case ID, language]`
+pairs such as `[["case-0007", "java"], ["case-0012", "rust"]]`. The plan
+freezes the selection, and validation rejects a plan whose partitions or units
+differ from it. `--shard` selects baseline shards only.
 
 For baseline-only follow-ups, repeat `--shard NAME` on `run-campaign.py` to
 collect complete affected shards. Use the same selection with
-`aggregate_results.py`. The full checked-in
-row manifest remains unchanged and its digest stays in every receipt; selection
-only narrows required shard coverage. Missing replicas, unexpected shards, or
-mixed source identities still reject the campaign. A language fleet uses its
-own case/language selection instead of this baseline flag.
-
-Workers receive checksummed batch and source archives plus the candidate
-provenance. Language acceptance is JSON, separate from baseline TSV receipts.
-The controller checks resource cleanup and capacity, regenerates every export
-from raw evidence, and verifies exact candidate and batch coverage before
-persisting acceptance. Restart repeats these checks and skips accepted work.
-An interrupted batch is retried in full, on a fresh host, only after cleanup
-is proven. Partial attempts never contribute rows to aggregation.
-
-Primary completion exports one JSON file per suite. It retains every logical
-job and raw sample and rejects missing jobs, mixed candidates, language-trace
-disagreements, and reused replica hosts. Local transport/controller tests use
-synthetic timing samples; they do not qualify performance or replace the AWS
-smoke and primary phases.
+`aggregate_results.py`. The full checked-in row manifest remains unchanged and
+its digest stays in every receipt; selection only narrows required shard
+coverage. Missing replicas, unexpected shards, or mixed source identities still
+reject the campaign.
