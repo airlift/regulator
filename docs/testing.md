@@ -59,6 +59,15 @@ files from unicode.org:
 python3 -I tools/unicode-database/generate.py --check
 ```
 
+Before changing the Trino LIKE corpus, or after changing the benchmark
+comparator's Trino pin, check the corpus against Trino's `LikeMatcher` with the
+[Trino LIKE golden generator](../tools/trino-like-golden/README.md). It fetches
+the pinned Trino sources from GitHub and Guava and fastutil through Maven:
+
+```bash
+tools/trino-like-golden/generate.sh --check
+```
+
 ## TeaVM pattern parsing
 
 After `./mvnw install`, run `tools/teavm/verify.sh` to compile every regex

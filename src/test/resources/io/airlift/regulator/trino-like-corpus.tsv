@@ -1,4 +1,5 @@
 # Pinned Trino LIKE behavior corpus. Hex columns are raw bytes.
+# Check or regenerate the result columns with tools/trino-like-golden/generate.sh.
 # id\tpattern-hex\tescape-code-point-or--\tinput-hex\tsql-nonoptimized\toptimized
 empty-empty		-		true	true
 empty-nonempty		-	61	false	false
