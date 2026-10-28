@@ -13,6 +13,8 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.TestRe2ScanPlan.NamedDistribution;
+import io.airlift.regulator.TestScanPlan.PatternWitness;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
@@ -22,13 +24,19 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
+import java.util.regex.Pattern;
 
+import static io.airlift.regulator.TestRe2ScanPlan.PROBED_LEADS;
+import static io.airlift.regulator.TestRe2ScanPlan.PROBE_DISTRIBUTIONS;
 import static io.airlift.regulator.TestRe2ScanPlan.describe;
 import static io.airlift.regulator.TestRe2ScanPlan.disableInterpretedPlan;
 import static io.airlift.regulator.TestRe2ScanPlan.matches;
+import static io.airlift.regulator.TestRe2ScanPlan.movedProbe;
 import static io.airlift.regulator.TestRe2ScanPlan.sources;
 import static io.airlift.regulator.TestScanPlan.disableOrdinaryEngine;
+import static io.airlift.regulator.TestScanPlan.generatedSequence;
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -83,6 +91,18 @@ public class TestRustScanPlan
     // Suffixes appended to each witness: none, LF, CR LF, CR, and U+2028. Rust's $ matches only
     // at the input end.
     private static final List<String> LINE_ENDS = List.of("", "\n", "\r\n", "\r", "\u2028");
+    // Rust's Perl classes, each with a character it matches, which join the shared atoms of
+    // random plans: the Unicode classes hold some non-ASCII characters but not all, so they become
+    // set runs, and their ASCII forms hold none.
+    private static final List<PatternWitness> PERL_CLASSES = List.of(
+            new PatternWitness("\\w", "é"),
+            new PatternWitness("\\d", "\u0663"),
+            new PatternWitness("\\s", "\u3000"),
+            new PatternWitness("(?-u:\\w)", "a"),
+            new PatternWitness("(?-u:\\d)", "1"),
+            new PatternWitness("(?-u:\\s)", " "));
+    // A Unicode Perl class: one outside the (?-u:...) of its ASCII form.
+    private static final Pattern UNICODE_PERL_CLASS = Pattern.compile("(?<!-u:)\\\\[dsw]");
     // Case-insensitive plans whose every fold is a set of some non-ASCII characters, so they have
     // no ASCII-folded operation.
     private static final Set<String> GENERATED_FOLDS = Set.of("(?i)^k([^/]+)/", "(?i)s([a-z]+)=");
@@ -255,6 +275,102 @@ public class TestRustScanPlan
                 }
             }
         }
+    }
+
+    @Test
+    public void testRandomPlansMatchTheOrdinaryEngine()
+    {
+        // The shapes of TestRe2ScanPlan's random plans, where Rust's $ is \z, with Rust's Perl
+        // classes among the atoms. The pattern compiled without its plan reads Unicode classes
+        // slowly, so there are half as many iterations.
+        int[] plansPerShape = new int[9];
+        int plansWithUnicodeSetRuns = 0;
+        int plansWithMovedProbes = 0;
+        for (long seed : new long[] {241, 251, 257}) {
+            Random random = new Random(seed);
+            for (int iteration = 0; iteration < 100; iteration++) {
+                PatternWitness randomSequence = generatedSequence(random, 0, PERL_CLASSES);
+                String sequence = randomSequence.pattern();
+                String text = randomSequence.text();
+                String flags = List.of("", "(?s)", "(?i)").get(random.nextInt(3));
+                NamedDistribution distribution = PROBE_DISTRIBUTIONS.get(random.nextInt(PROBE_DISTRIBUTIONS.size()));
+                String lead = PROBED_LEADS.get(random.nextInt(PROBED_LEADS.size()));
+                String[] expressions = {
+                        flags + "^x(" + sequence + ")!" + (random.nextBoolean() ? "$" : "\\z"),
+                        flags + "^x(" + sequence + ")",
+                        flags + "^x" + sequence + "([^/]*)/.*$",
+                        flags + "x(" + sequence + ")!" + (random.nextBoolean() ? "$" : ""),
+                        flags + "([^:]+):(" + sequence + ")!",
+                        flags + "^x(" + sequence + ")([^/]+)",
+                        flags + "x(" + sequence + ")(.+)",
+                        flags + "^abc" + sequence + "([^:]+):",
+                        flags + lead + "(" + sequence + ")!",
+                };
+                String[] witnesses = {
+                        "x" + text + "!",
+                        "x" + text,
+                        "x" + text + "a/b",
+                        "x" + text + "!",
+                        "k:" + text + "!",
+                        "x" + text + "ab",
+                        "x" + text + "ab",
+                        "abc" + text + "v:",
+                        lead + text + "!",
+                };
+                for (int shape = 0; shape < expressions.length; shape++) {
+                    String expression = expressions[shape];
+                    byte[] witness = witnesses[shape].getBytes(UTF_8);
+                    String description = expression + " " + distribution.name();
+                    Re2 planned = assertPlanMatchesOrdinaryEngine(description, expression, distribution.frequencies(), sources(random, witness));
+                    if (planned == null) {
+                        continue;
+                    }
+                    // Every planned pattern has a known match, not only random misses.
+                    assertThat(planned.find(wrappedBuffer(witness))).as(description).isTrue();
+                    plansPerShape[shape]++;
+                    // A Unicode Perl class supplies a set run when the plan has more set runs than
+                    // the plan, if any, of the expression with each such class in its ASCII form.
+                    String asciiClasses = UNICODE_PERL_CLASS.matcher(expression).replaceAll("(?-u:$0)");
+                    RustRegexp.Options options = RustRegexp.Options.defaults().setByteFrequencies(distribution.frequencies());
+                    plansWithUnicodeSetRuns += setRuns(planned) > setRuns(RustRegexp.compile(utf8Slice(asciiClasses), options).pattern()) ? 1 : 0;
+                    plansWithMovedProbes += movedProbe(planned) ? 1 : 0;
+                }
+            }
+        }
+        assertThat(Arrays.stream(plansPerShape).min().orElseThrow()).as("fewest plans of one shape").isGreaterThan(80);
+        assertThat(plansWithUnicodeSetRuns).as("plans with a set run from a Unicode Perl class").isGreaterThan(300);
+        assertThat(plansWithMovedProbes).as("plans probing a leading literal past its first byte").isGreaterThan(20);
+    }
+
+    /// Compares the Rust pattern's compiles under `frequencies` as the shared overload in
+    /// [TestRe2ScanPlan] does. Returns the planned pattern, or `null`, comparing nothing, when the
+    /// pattern selects no plan.
+    private static Re2 assertPlanMatchesOrdinaryEngine(String description, String expression, ByteFrequencies frequencies, List<Slice> sources)
+    {
+        Slice pattern = utf8Slice(expression);
+        RustRegexp.Options options = RustRegexp.Options.defaults().setByteFrequencies(frequencies);
+        RustRegexp.Options generating = RustRegexp.Options.defaults().setByteFrequencies(frequencies).setGenerateBytecode(true);
+        Re2 actual = RustRegexp.compile(pattern, options).pattern();
+        if (!actual.usesScanPlanForDiagnostics()) {
+            return null;
+        }
+        TestRe2ScanPlan.assertPlanMatchesOrdinaryEngine(
+                description,
+                RustRegexp.compileWithoutScanPlanForTesting(pattern, options).pattern(),
+                actual,
+                RustRegexp.compileForcingScanPlanHandoffForTesting(pattern, options).pattern(),
+                RustRegexp.compile(pattern, generating).pattern(),
+                RustRegexp.compileForcingScanPlanHandoffForTesting(pattern, generating).pattern(),
+                sources);
+        return actual;
+    }
+
+    /// Returns the number of runs of some non-ASCII characters in the pattern's case-sensitive
+    /// plan, or 0 when it has none.
+    private static long setRuns(Re2 pattern)
+    {
+        ScanPlan plan = pattern.caseSensitiveScanPlan();
+        return plan == null ? 0 : Arrays.stream(plan.operationsForDiagnostics().split(",")).filter("RE2_SET_RUN"::equals).count();
     }
 
     /// Returns the pattern compiled with its plan, and with its plan forced to hand every

@@ -130,7 +130,20 @@ public class TestRe2ScanPlan
             new PlanCase("key=([^;]+);", HexFormat.of().parseHex("6b783be2e284aa65793d763b6b65793d773b")),
             new PlanCase("([^/\\x{85}]+)/", "a\u0085b/c/"));
 
+    // Distributions under which random plans compile: the uniform one, which keeps the probe of
+    // each leading literal on its first byte, and two that move it, the learned JSON-record
+    // frequencies onto the = of été= and rare non-letters onto the : of https://.
+    static final List<NamedDistribution> PROBE_DISTRIBUTIONS = List.of(
+            new NamedDistribution("uniform", ByteFrequencies.uniform()),
+            new NamedDistribution("JSON records", TestingByteFrequencies.learnedJsonRecords()),
+            new NamedDistribution("rare non-letters", TestingByteFrequencies.rareNonLetters()));
+    // Multi-byte literals that lead random unanchored plans, each of which one of those
+    // distributions probes past its first byte.
+    static final List<String> PROBED_LEADS = List.of("été=", "https://");
+
     private record NamedOptions(String name, Re2.Options options) {}
+
+    record NamedDistribution(String name, ByteFrequencies frequencies) {}
 
     private record PlanCase(String expression, byte[] witness)
     {
@@ -253,7 +266,7 @@ public class TestRe2ScanPlan
                 boolean unanchored = !planCase.expression().startsWith("^");
                 boolean planned = !((flags & Regexp.NEVER_NEWLINE) != 0 && leadingRun) && !((flags & Regexp.NEVER_CAPTURE) != 0 && unanchored);
                 List<Slice> sources = sources(random, planCase.witness());
-                assertThat(assertPlanMatchesOrdinaryEngine(description, planCase.expression(), options.options(), sources)).as(description).isEqualTo(planned);
+                assertThat(assertPlanMatchesOrdinaryEngine(description, planCase.expression(), options.options(), sources) != null).as(description).isEqualTo(planned);
             }
         }
         // The long cases hand off in the middle of a search: at the next candidate after the work
@@ -285,10 +298,11 @@ public class TestRe2ScanPlan
     @Test
     public void testRandomPlansMatchTheOrdinaryEngine()
     {
-        int[] plansPerShape = new int[8];
+        int[] plansPerShape = new int[9];
         int plansWithRuns = 0;
         int plansWithDelimitedCaptures = 0;
         int plansWithSetRuns = 0;
+        int plansWithMovedProbes = 0;
         for (long seed : new long[] {211, 223, 227}) {
             Random random = new Random(seed);
             for (int iteration = 0; iteration < 200; iteration++) {
@@ -296,9 +310,12 @@ public class TestRe2ScanPlan
                 String sequence = randomSequence.pattern();
                 String text = randomSequence.text();
                 String flags = List.of("", "(?s)", "(?i)").get(random.nextInt(3));
+                NamedDistribution distribution = PROBE_DISTRIBUTIONS.get(random.nextInt(PROBE_DISTRIBUTIONS.size()));
+                Re2.Options options = Re2.Options.defaults().setByteFrequencies(distribution.frequencies());
+                String lead = PROBED_LEADS.get(random.nextInt(PROBED_LEADS.size()));
                 // End-anchored, partial, compacted with a tail, unanchored, led by a run, ending
-                // in a captured run when anchored and unanchored, and partial with a delimited
-                // capture after the sequence.
+                // in a captured run when anchored and unanchored, partial with a delimited capture
+                // after the sequence, and unanchored led by a multi-byte literal.
                 String[] expressions = {
                         flags + "^x(" + sequence + ")!" + (random.nextBoolean() ? "$" : "\\z"),
                         flags + "^x(" + sequence + ")",
@@ -308,6 +325,7 @@ public class TestRe2ScanPlan
                         flags + "^x(" + sequence + ")([^/]+)",
                         flags + "x(" + sequence + ")(.+)",
                         flags + "^abc" + sequence + "([^:]+):",
+                        flags + lead + "(" + sequence + ")!",
                 };
                 String[] witnesses = {
                         "x" + text + "!",
@@ -318,19 +336,23 @@ public class TestRe2ScanPlan
                         "x" + text + "ab",
                         "x" + text + "ab",
                         "abc" + text + "v:",
+                        lead + text + "!",
                 };
                 for (int shape = 0; shape < expressions.length; shape++) {
                     byte[] witness = witnesses[shape].getBytes(UTF_8);
-                    if (!assertPlanMatchesOrdinaryEngine(expressions[shape], expressions[shape], Re2.Options.defaults(), sources(random, witness))) {
+                    String description = expressions[shape] + " " + distribution.name();
+                    Re2 planned = assertPlanMatchesOrdinaryEngine(description, expressions[shape], options, sources(random, witness));
+                    if (planned == null) {
                         continue;
                     }
                     // Every planned pattern has a known match, not only random misses.
-                    assertThat(Re2.compile(utf8Slice(expressions[shape])).find(wrappedBuffer(witness))).as(expressions[shape]).isTrue();
+                    assertThat(planned.find(wrappedBuffer(witness))).as(description).isTrue();
                     plansPerShape[shape]++;
                     String operations = plan(expressions[shape]).operationsForDiagnostics();
                     plansWithRuns += operations.contains("RE2_RUN") ? 1 : 0;
                     plansWithDelimitedCaptures += operations.contains("RE2_DELIMITED_CAPTURE") ? 1 : 0;
                     plansWithSetRuns += operations.contains("RE2_SET_RUN") ? 1 : 0;
+                    plansWithMovedProbes += movedProbe(planned) ? 1 : 0;
                 }
             }
         }
@@ -338,6 +360,7 @@ public class TestRe2ScanPlan
         assertThat(plansWithRuns).as("plans with an RE2 run").isGreaterThan(1500);
         assertThat(plansWithDelimitedCaptures).as("plans with an RE2 delimited capture").isGreaterThan(150);
         assertThat(plansWithSetRuns).as("plans with an RE2 set run").isGreaterThan(400);
+        assertThat(plansWithMovedProbes).as("plans probing a leading literal past its first byte").isGreaterThan(30);
     }
 
     @Test
@@ -391,22 +414,34 @@ public class TestRe2ScanPlan
         return views;
     }
 
-    /// Compares the operations of the pattern's plan, and of its plan forced to hand off, each
-    /// interpreted and, for a case-sensitive plan, as generated bytecode, with those of the
-    /// ordinary engine on each source. Returns false, comparing nothing, when the pattern selects
-    /// no plan.
-    private static boolean assertPlanMatchesOrdinaryEngine(String description, String expression, Re2.Options options, List<Slice> sources)
+    /// Compares the RE2 pattern's compiles under `options` as the shared overload below does.
+    /// Returns the planned pattern, or `null`, comparing nothing, when the pattern selects no
+    /// plan.
+    private static Re2 assertPlanMatchesOrdinaryEngine(String description, String expression, Re2.Options options, List<Slice> sources)
     {
         Slice pattern = utf8Slice(expression);
         Re2 actual = Re2.compile(pattern, options);
         if (!actual.usesScanPlanForDiagnostics()) {
-            return false;
+            return null;
         }
-        Re2 expected = Re2.compileWithoutScanPlanForTesting(pattern, options);
-        Re2 handoff = Re2.compileForcingScanPlanHandoffForTesting(pattern, options);
         Re2.Options generating = options.copy().setGenerateBytecode(true);
-        Re2 generated = Re2.compile(pattern, generating);
-        Re2 generatedHandoff = Re2.compileForcingScanPlanHandoffForTesting(pattern, generating);
+        assertPlanMatchesOrdinaryEngine(
+                description,
+                Re2.compileWithoutScanPlanForTesting(pattern, options),
+                actual,
+                Re2.compileForcingScanPlanHandoffForTesting(pattern, options),
+                Re2.compile(pattern, generating),
+                Re2.compileForcingScanPlanHandoffForTesting(pattern, generating),
+                sources);
+        return actual;
+    }
+
+    /// Compares the operations of a pattern compiled with its plan, with its plan forced to hand
+    /// off, and each of those with generated bytecode requested, with those of the same pattern
+    /// compiled without its plan, `expected`, on each source. A frontend passes its own
+    /// compilations, so its plans run under its own rules.
+    static void assertPlanMatchesOrdinaryEngine(String description, Re2 expected, Re2 actual, Re2 handoff, Re2 generated, Re2 generatedHandoff, List<Slice> sources)
+    {
         // Every case-sensitive plan generates.
         boolean generates = actual.caseSensitiveScanPlan() != null;
         assertThat(generated.usesGeneratedBytecode()).as(description).isEqualTo(generates);
@@ -421,7 +456,14 @@ public class TestRe2ScanPlan
                 assertThat(operations(generatedHandoff, source)).as("generated handoff " + sourceDescription).isEqualTo(expectedResults);
             }
         }
-        return true;
+    }
+
+    /// Returns whether the pattern's case-sensitive plan probes a byte of its leading literal past
+    /// the first.
+    static boolean movedProbe(Re2 pattern)
+    {
+        ScanPlan plan = pattern.caseSensitiveScanPlan();
+        return plan != null && plan.leadingLiteralProbeOffsetForDiagnostics() > 0;
     }
 
     /// Returns the results of the public matching operations on `source`: boolean and

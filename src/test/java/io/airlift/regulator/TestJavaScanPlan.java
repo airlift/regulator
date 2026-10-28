@@ -13,6 +13,8 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.TestRe2ScanPlan.NamedDistribution;
+import io.airlift.regulator.TestScanPlan.PatternWitness;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
 
@@ -25,13 +27,17 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.airlift.regulator.TestRe2ScanPlan.PROBED_LEADS;
+import static io.airlift.regulator.TestRe2ScanPlan.PROBE_DISTRIBUTIONS;
 import static io.airlift.regulator.TestRe2ScanPlan.bytes;
 import static io.airlift.regulator.TestRe2ScanPlan.describe;
 import static io.airlift.regulator.TestRe2ScanPlan.disableInterpretedPlan;
 import static io.airlift.regulator.TestRe2ScanPlan.matches;
+import static io.airlift.regulator.TestRe2ScanPlan.movedProbe;
 import static io.airlift.regulator.TestRe2ScanPlan.operations;
 import static io.airlift.regulator.TestRe2ScanPlan.sources;
 import static io.airlift.regulator.TestScanPlan.disableOrdinaryEngine;
+import static io.airlift.regulator.TestScanPlan.generatedSequence;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -126,6 +132,21 @@ public class TestJavaScanPlan
             bytes(0xE2, 0x0A),
             bytes(0xC2, 0x0D, 0x0A),
             bytes(0xED, 0xA0, 0x80, 0x0A));
+    // Runs that end random plans right before `$` or `\Z`, each with a text it matches. At a Java
+    // end the JDK gives back run characters to end before a final line terminator, so a plan
+    // keeps a variable run there only if it admits none of the terminators, or every one and is
+    // unbounded: these admit none, some, and every terminator, and the dot admits none by
+    // default, every one under (?s), and all but LF under (?d), where `$` and `\Z` end before a
+    // final LF only, which is not a Java end.
+    private static final List<PatternWitness> FINAL_RUNS = List.of(
+            new PatternWitness("[a-z]+", "ab"),
+            new PatternWitness("[é😀]{1,3}", "é"),
+            new PatternWitness("[^\\n/]*", "a\r"),
+            new PatternWitness("[\\x00-\\x7F]+", "a"),
+            new PatternWitness("[^/]+", "é"),
+            new PatternWitness("[^/]{1,3}", "éa"),
+            new PatternWitness(".*", "é"),
+            new PatternWitness(".{1,3}", "éa"));
     // Case-insensitive plans whose every fold is a set of some non-ASCII characters, so they have
     // no ASCII-folded operation.
     private static final Set<String> GENERATED_FOLDS = Set.of("(?iu)^k([^/]+)/", "(?iu)s([a-z]+)=");
@@ -258,6 +279,115 @@ public class TestJavaScanPlan
                 }
             }
         }
+    }
+
+    @Test
+    public void testRandomPlansMatchTheOrdinaryEngine()
+    {
+        // The shapes of TestRe2ScanPlan's random plans, ending in Java's $ or \Z, either of which
+        // also matches before a final line terminator, and one more: a Java end right after a
+        // final run.
+        int[] plansPerShape = new int[10];
+        int plansWithJavaEnds = 0;
+        int plansWithJavaEndsAfterRuns = 0;
+        int declinedJavaEndsAfterRuns = 0;
+        int plansWithMovedProbes = 0;
+        for (long seed : new long[] {229, 233, 239}) {
+            Random random = new Random(seed);
+            for (int iteration = 0; iteration < 200; iteration++) {
+                PatternWitness randomSequence = generatedSequence(random, 0);
+                String sequence = randomSequence.pattern();
+                String text = randomSequence.text();
+                String flags = List.of("", "(?s)", "(?d)", "(?i)").get(random.nextInt(4));
+                NamedDistribution distribution = PROBE_DISTRIBUTIONS.get(random.nextInt(PROBE_DISTRIBUTIONS.size()));
+                String lead = PROBED_LEADS.get(random.nextInt(PROBED_LEADS.size()));
+                PatternWitness finalRun = FINAL_RUNS.get(random.nextInt(FINAL_RUNS.size()));
+                String beforeEnd = flags + (random.nextBoolean() ? "^x(" : "x(") + sequence + ")(" + finalRun.pattern() + ")";
+                String endAfterRun = beforeEnd + (random.nextBoolean() ? "$" : "\\Z");
+                String[] expressions = {
+                        flags + "^x(" + sequence + ")!" + (random.nextBoolean() ? "$" : "\\Z"),
+                        flags + "^x(" + sequence + ")",
+                        flags + "^x" + sequence + "([^/]*)/.*" + (random.nextBoolean() ? "$" : "\\Z"),
+                        flags + "x(" + sequence + ")!" + (random.nextBoolean() ? "$" : ""),
+                        flags + "([^:]+):(" + sequence + ")!",
+                        flags + "^x(" + sequence + ")([^/]+)",
+                        flags + "x(" + sequence + ")(.+)",
+                        flags + "^abc" + sequence + "([^:]+):",
+                        endAfterRun,
+                        flags + lead + "(" + sequence + ")!",
+                };
+                String[] witnesses = {
+                        "x" + text + "!",
+                        "x" + text,
+                        "x" + text + "a/b",
+                        "x" + text + "!",
+                        "k:" + text + "!",
+                        "x" + text + "ab",
+                        "x" + text + "ab",
+                        "abc" + text + "v:",
+                        "x" + text + finalRun.text(),
+                        lead + text + "!",
+                };
+                for (int shape = 0; shape < expressions.length; shape++) {
+                    String expression = expressions[shape];
+                    byte[] witness = witnesses[shape].getBytes(UTF_8);
+                    List<Slice> sources = new ArrayList<>(sources(random, witness));
+                    for (String lineEnd : LINE_ENDS.subList(1, LINE_ENDS.size())) {
+                        sources.add(utf8Slice(witnesses[shape] + lineEnd));
+                    }
+                    String description = expression + " " + distribution.name();
+                    Re2 planned = assertPlanMatchesOrdinaryEngine(description, expression, distribution.frequencies(), sources);
+                    if (planned == null) {
+                        // A pattern ending in a final run that selects no plan with its Java end
+                        // but one with \z in its place is declined by the Java end rule alone.
+                        // Under (?d) its end is not a Java end, so it is not counted.
+                        boolean javaEndAfterRun = expression.equals(endAfterRun) && !flags.equals("(?d)");
+                        JavaRegexp.Options options = JavaRegexp.Options.defaults().setByteFrequencies(distribution.frequencies());
+                        if (javaEndAfterRun && JavaRegexp.compile(utf8Slice(beforeEnd + "\\z"), options).pattern().usesScanPlanForDiagnostics()) {
+                            declinedJavaEndsAfterRuns++;
+                        }
+                        continue;
+                    }
+                    // Every planned pattern has a known match, not only random misses.
+                    assertThat(planned.find(wrappedBuffer(witness))).as(description).isTrue();
+                    plansPerShape[shape]++;
+                    ScanPlan plan = planned.caseSensitiveScanPlan();
+                    if (plan != null && plan.hasJavaFinalEnd()) {
+                        plansWithJavaEnds++;
+                        plansWithJavaEndsAfterRuns += expression.equals(endAfterRun) ? 1 : 0;
+                    }
+                    plansWithMovedProbes += movedProbe(planned) ? 1 : 0;
+                }
+            }
+        }
+        assertThat(Arrays.stream(plansPerShape).min().orElseThrow()).as("fewest plans of one shape").isGreaterThan(100);
+        assertThat(plansWithJavaEnds).as("plans with a Java end").isGreaterThan(300);
+        assertThat(plansWithJavaEndsAfterRuns).as("plans with a Java end after a final run").isGreaterThan(50);
+        assertThat(declinedJavaEndsAfterRuns).as("patterns the Java end rule declines").isGreaterThan(50);
+        assertThat(plansWithMovedProbes).as("plans probing a leading literal past its first byte").isGreaterThan(30);
+    }
+
+    /// Compares the Java pattern's compiles under `frequencies` as the shared overload in
+    /// [TestRe2ScanPlan] does. Returns the planned pattern, or `null`, comparing nothing, when the
+    /// pattern selects no plan.
+    private static Re2 assertPlanMatchesOrdinaryEngine(String description, String expression, ByteFrequencies frequencies, List<Slice> sources)
+    {
+        Slice pattern = utf8Slice(expression);
+        JavaRegexp.Options options = JavaRegexp.Options.defaults().setByteFrequencies(frequencies);
+        JavaRegexp.Options generating = JavaRegexp.Options.defaults().setByteFrequencies(frequencies).setGenerateBytecode(true);
+        Re2 actual = JavaRegexp.compile(pattern, options).pattern();
+        if (!actual.usesScanPlanForDiagnostics()) {
+            return null;
+        }
+        TestRe2ScanPlan.assertPlanMatchesOrdinaryEngine(
+                description,
+                JavaRegexp.compileWithoutScanPlanForTesting(pattern, options).pattern(),
+                actual,
+                JavaRegexp.compileForcingScanPlanHandoffForTesting(pattern, options).pattern(),
+                JavaRegexp.compile(pattern, generating).pattern(),
+                JavaRegexp.compileForcingScanPlanHandoffForTesting(pattern, generating).pattern(),
+                sources);
+        return actual;
     }
 
     /// Returns the pattern compiled with its plan, and with its plan forced to hand every
