@@ -77,3 +77,20 @@ byte_texts = [b'a', b'\xc3\xa9', b'\xc3', b'\xa9', b'\xff', b'\r', b'\n', b' ']
 for index in range(400):
     text = b''.join(rng.choice(byte_texts) for _ in range(rng.randrange(12)))
     case(f"bytes_{index:03}", expression(3, byte_atoms), text, "bytes")
+
+section("Random assertion expressions over CRLF and non-ASCII texts")
+# Rust's CRLF line anchors and word boundaries next to CR, LF, and bytes outside
+# ASCII, which the DFA evaluates or quits on, alternating the string and bytes
+# APIs. String texts are valid UTF-8; bytes texts also split and break it.
+assertion_atoms = ['a', '_', r'\w', r'\W', '.', r'\b', r'\B', r'\b{start}', r'\b{end}', r'\b{start-half}',
+                   r'\b{end-half}', r'\<', r'\>', r'(?-u:\b)', r'(?-u:\b{start})', r'(?-u:\b{end-half})',
+                   '^', '$', '(?m:^)', '(?m:$)', '(?mR:^)', '(?mR:$)', '\r', '\n', '\u00e9']
+assertion_texts = ['a', '_', ' ', '\r', '\n', '\u00e9', '\u03b1']
+assertion_byte_texts = [b'a', b'_', b' ', b'\r', b'\n', b'\xc3\xa9', b'\xc3', b'\xa9', b'\xff']
+for index in range(400):
+    pattern = expression(3, assertion_atoms)
+    if index % 2 == 0:
+        text, options = ''.join(rng.choice(assertion_texts) for _ in range(rng.randrange(12))), "-"
+    else:
+        text, options = b''.join(rng.choice(assertion_byte_texts) for _ in range(rng.randrange(12))), "bytes"
+    case(f"assertion_{index:03}", pattern, text, options)

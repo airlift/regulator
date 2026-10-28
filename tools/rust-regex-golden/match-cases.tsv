@@ -150,6 +150,8 @@ boundary_half_hyphen	5c627b73746172742d68616c667d2d5c627b656e642d68616c667d	-	2d
 boundary_angle_words	5c3c5c772b5c3e	-	28616229206364	-	-
 boundary_not_word_multibyte	5c42	-	c3a9c3a9	-	-
 boundary_not_word_ascii_multibyte	283f2d753a5c4229	-	c3a9c3a9	-	-
+boundary_word_literal_after_multibyte	666f6f5c62	-	c3a920666f6f	-	-
+boundary_word_literal_before_multibyte	666f6f5c62	-	666f6fc3a920666f6f	-	-
 
 # Case folding
 fold_kelvin_lower	283f69296b	-	6b4be284aa	-	-
@@ -311,6 +313,13 @@ window_full_match_interior	62	-	616263	1	2
 window_captures	2861292862293f	-	78616279	1	2
 window_crlf_dot	283f52292e	-	610d0a62	1	3
 window_case_insensitive	283f6929e284aa	-	6be284aa6b	1	4
+window_crlf_caret_after_cr	283f6d52295e62	-	610d62	2	3
+window_crlf_dollar_before_lf	283f6d5229610d24	-	610d0a62	0	2
+window_word_boundary_after_multibyte	5c6262	-	c3a962	2	3
+window_not_word_boundary_after_multibyte	5c4262	-	c3a962	2	3
+window_word_start_after_multibyte	5c627b73746172747d62	-	c3a962	2	3
+window_word_start_half_after_multibyte	5c627b73746172742d68616c667d62	-	c3a962	2	3
+window_word_end_half_before_multibyte	615c627b656e642d68616c667d	-	61c3a9	0	1
 
 # Octal option
 octal_zero	5c30	o	6100	-	-
@@ -491,6 +500,10 @@ bytes_window_caret_at_split	283f6d295e	bytes	c3a9	1	2
 bytes_window_captures	28283f2d753a2e2929282e29	bytes	c3a9e29883	1	5
 bytes_window_malformed	5c772b	bytes	61ff626380	1	4
 bytes_window_empty_split	782a	bytes	e29883	1	3
+bytes_window_crlf_caret_after_cr	283f6d52295e61	bytes	ff0d61	2	3
+bytes_window_word_boundary_after_multibyte	5c6261	bytes	c3a961	2	3
+bytes_window_word_start_after_malformed	5c627b73746172747d61	bytes	a961	1	2
+bytes_window_word_end_half_before_malformed	615c627b656e642d68616c667d	bytes	61ff	0	1
 
 # Bytes API: Rebar benchmark patterns
 bytes_rebar_unicode_data_line	5e285b412d5a302d395d2b293b285b5e3b5d2b293b285b5e3b5d2b293b285b302d395d2b293b285b5e3b5d2b293b285b5e3b5d2a293b285b302d395d2a293b285b302d395d2a293b285b2d302d392f5d2a293b285b594e5d293b285b5e3b5d2a293b285b5e3b5d2a293b285b5e3b5d2a293b285b5e3b5d2a293b285b5e3b5d2a2924	-u,bytes	303045393b4c4154494e20534d414c4c204c4554544552204520574954482041435554453b4c6c3b303b4c3b3030363520303330313b3b3b3b4e3b4c4154494e20534d414c4c204c455454455220452041435554453b3b303043393b3b30304339	-	-
