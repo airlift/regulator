@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 BASELINE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BASELINE))
 SPECIFICATION = importlib.util.spec_from_file_location("generate_manifest", BASELINE / "generate-manifest.py")
 GENERATE_MANIFEST = importlib.util.module_from_spec(SPECIFICATION)
 sys.modules["generate_manifest"] = GENERATE_MANIFEST
@@ -18,10 +19,11 @@ class TestGenerateManifest(unittest.TestCase):
     def testSpecializedManifestFollowsTheCatalog(self):
         generated = []
         GENERATE_MANIFEST.add_specialized_rows(generated, BASELINE.parents[2])
+        shards = {entry["shard_id"] for entry in GENERATE_MANIFEST.read_specialized_catalog(BASELINE.parents[2])}
         with (BASELINE / "rows.tsv").open() as source:
             recorded = [
                 GENERATE_MANIFEST.Row(**row) for row in csv.DictReader(source, delimiter="\t")
-                if row["suite"] in {"trino-specialized-patterns", "trino-like-specialized"}]
+                if row["shard_id"] in shards]
         self.assertEqual(sorted(generated), sorted(recorded))
 
     def testEverydayTrinoRowsUseRotatingWorkloadManifest(self):

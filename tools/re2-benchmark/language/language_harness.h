@@ -217,8 +217,9 @@ void run_specialized(const Pattern& pattern, Scratch& scratch, std::string_view 
     }
 }
 
-// Prints, for each input, the number of values the operation returned and each value
-// in hex, or - for a group that did not participate, as the Regulator rows' verifier does.
+// Prints, for each input, the number of values the operation returned and each value in hex, with - for a group
+// that did not participate in an extract-all match (scalar extract never prints -), in the format
+// SpecializedPatternNativeInputs writes for the Regulator rows.
 template <typename Engine, Specialized operation>
 void verify_specialized(const Inputs& inputs, int group) {
     auto pattern = Engine::compile(inputs.pattern);
@@ -302,6 +303,7 @@ int run(int argc, char** argv, const std::string& program) {
             specialized<Engine>(inputs, argv[3], capture_group(argv[4]), true);
             return 0;
         }
+        // Times without verifying, because run-shard.sh runs the --verify-specialized gate first.
         if (argc >= 5 && std::string(argv[1]) == "--specialized") {
             Inputs inputs = read_inputs(argv[2]);
             Engine::check(inputs);

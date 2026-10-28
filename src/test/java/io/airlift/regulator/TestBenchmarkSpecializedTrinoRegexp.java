@@ -13,10 +13,10 @@
  */
 package io.airlift.regulator;
 
-import io.airlift.regulator.BenchmarkSpecializedTrinoRegexp.Variant;
 import io.airlift.regulator.TestingEverydayTrinoRegexpBenchmarkInputs.Source;
-import io.airlift.regulator.TestingSpecializedTrinoRegexpBenchmarkInputs.Operation;
-import io.airlift.regulator.TestingSpecializedTrinoRegexpBenchmarkInputs.Workload;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Operation;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Workload;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarks.Variant;
 import org.assertj.core.groups.Tuple;
 import org.junit.jupiter.api.Test;
 import org.openjdk.jmh.annotations.Param;
@@ -43,15 +43,15 @@ public class TestBenchmarkSpecializedTrinoRegexp
             throws ReflectiveOperationException
     {
         assertThat(parameters(BenchmarkSpecializedTrinoRegexp.ReplaceData.class))
-                .containsExactlyElementsOf(TestingSpecializedTrinoRegexpBenchmarkInputs.workloadIds(Operation.REPLACE));
+                .containsExactlyElementsOf(TestingSpecializedPatternBenchmarkInputs.workloadIds(Operation.REPLACE));
         assertThat(parameters(BenchmarkSpecializedTrinoRegexp.ExtractData.class))
-                .containsExactlyElementsOf(TestingSpecializedTrinoRegexpBenchmarkInputs.workloadIds(Operation.EXTRACT));
+                .containsExactlyElementsOf(TestingSpecializedPatternBenchmarkInputs.workloadIds(Operation.EXTRACT));
         assertThat(parameters(BenchmarkSpecializedTrinoRegexp.ExtractAllData.class))
-                .containsExactlyElementsOf(TestingSpecializedTrinoRegexpBenchmarkInputs.workloadIds(Operation.EXTRACT_ALL));
+                .containsExactlyElementsOf(TestingSpecializedPatternBenchmarkInputs.workloadIds(Operation.EXTRACT_ALL));
 
         // The URL workloads share one rotation of distinct URLs; the everyday test checks the others.
-        List<String> urlWorkloadIds = TestingSpecializedTrinoRegexpBenchmarkInputs.urlWorkloadIds();
-        List<Source> urls = TestingSpecializedTrinoRegexpBenchmarkInputs.create(urlWorkloadIds.getFirst()).sources();
+        List<String> urlWorkloadIds = TestingSpecializedPatternBenchmarkInputs.urlWorkloadIds();
+        List<Source> urls = TestingSpecializedPatternBenchmarkInputs.create(urlWorkloadIds.getFirst()).sources();
         assertThat(urls).hasSize(8);
         assertThat(urls).extracting(Source::sourceId).doesNotHaveDuplicates();
         assertThat(urls).extracting(Source::value).doesNotHaveDuplicates();
@@ -61,7 +61,7 @@ public class TestBenchmarkSpecializedTrinoRegexp
                 .map(url -> tuple(url.sourceId(), url.value(), url.sliceOffset()))
                 .toList();
         for (String workloadId : urlWorkloadIds) {
-            Workload workload = TestingSpecializedTrinoRegexpBenchmarkInputs.create(workloadId);
+            Workload workload = TestingSpecializedPatternBenchmarkInputs.create(workloadId);
             assertThat(workload.sources()).extracting(Source::sourceId, Source::value, Source::sliceOffset).as(workloadId).containsExactlyElementsOf(rotation);
             assertThat(workload.input().origin()).as(workloadId).isEqualTo(workloadId.equals("clickbenchHost") ? "clickbench-q29" : "designed-control");
             assertThat(workload.sources()).extracting(Source::expectedMatchCount)
@@ -83,8 +83,8 @@ public class TestBenchmarkSpecializedTrinoRegexp
                 .filter(line -> line.startsWith("trino-specialized-patterns-"))
                 .map(line -> String.join("\t", List.of(line.split("\t", -1)).subList(1, 4)))
                 .toList();
-        assertThat(catalog).containsExactlyElementsOf(TestingSpecializedTrinoRegexpBenchmarkInputs.workloadIds().stream()
-                .map(TestingSpecializedTrinoRegexpBenchmarkInputs::create)
+        assertThat(catalog).containsExactlyElementsOf(TestingSpecializedPatternBenchmarkInputs.workloadIds().stream()
+                .map(TestingSpecializedPatternBenchmarkInputs::create)
                 .map(workload -> String.join("\t", workload.workloadId(), workload.operation().benchmarkName(), workload.pattern().toStringUtf8()))
                 .toList());
     }
@@ -93,8 +93,8 @@ public class TestBenchmarkSpecializedTrinoRegexp
     public void testEveryVariantProducesTheSameResult()
             throws ReflectiveOperationException
     {
-        for (String workloadId : TestingSpecializedTrinoRegexpBenchmarkInputs.workloadIds()) {
-            Workload workload = TestingSpecializedTrinoRegexpBenchmarkInputs.create(workloadId);
+        for (String workloadId : TestingSpecializedPatternBenchmarkInputs.workloadIds()) {
+            Workload workload = TestingSpecializedPatternBenchmarkInputs.create(workloadId);
             List<Variant> variants = BenchmarkSpecializedTrinoRegexp.variantsForTesting(workloadId);
             List<Source> sources = workload.sources();
             List<Object> expected = new ArrayList<>();
@@ -128,8 +128,7 @@ public class TestBenchmarkSpecializedTrinoRegexp
             throws Exception
     {
         byte[] manifest;
-        try (InputStream input = requireNonNull(TestingSpecializedTrinoRegexpBenchmarkInputs.class
-                .getResourceAsStream("/io/airlift/regulator/specialized-trino-workloads.tsv"))) {
+        try (InputStream input = requireNonNull(TestingSpecializedPatternBenchmarkInputs.class.getResourceAsStream("/io/airlift/regulator/specialized-trino-workloads.tsv"))) {
             manifest = input.readAllBytes();
         }
 

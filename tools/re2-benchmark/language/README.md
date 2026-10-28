@@ -145,6 +145,19 @@ rotates the inputs and runs the timed operations. A bulk adapter supplies
 compile, the input check, per-search state allocated outside timing, and the
 timed loop that runs one Rebar model and optionally writes its trace.
 
+The lifecycle runners also time the native comparators of the baseline's
+[specialized-pattern shards](../baseline/SHARD_DISPATCH.md#route-handlers).
+`--specialized <inputs> <operation> <group> [benchmark flags]` times one
+operation over the rotating sources that `SpecializedPatternNativeInputs`
+writes for a workload: `extract`, the group of the first match; `extractAll`,
+the group of every match; and, in the RE2 runner only, `replace`, which
+replaces every match with the group. The adapter supplies each operation over
+per-pattern scratch state allocated before timing.
+`--verify-specialized <inputs> <operation> <group>` runs the operation once on
+each source without timing and prints the values it returns, one line per
+source. Before the shard times a native row, its semantic gate requires those
+lines to equal the values every Regulator variant returns.
+
 Run deterministic verification without collecting timings:
 
 ```sh

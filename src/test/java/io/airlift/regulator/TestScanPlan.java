@@ -2606,8 +2606,8 @@ public class TestScanPlan
                 view("level=info msg=\"done\" user_id=42"),
                 view("\"a\",\"\" b"),
                 view(""));
-        for (String workloadId : TestingSpecializedTrinoRegexpBenchmarkInputs.workloadIds()) {
-            Slice pattern = TestingSpecializedTrinoRegexpBenchmarkInputs.create(workloadId).pattern();
+        for (String workloadId : TestingSpecializedPatternBenchmarkInputs.workloadIds()) {
+            Slice pattern = TestingSpecializedPatternBenchmarkInputs.create(workloadId).pattern();
             String expression = pattern.toStringUtf8();
             Regex oracle = joniPattern(expression);
             TrinoRegexp generated = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setGenerateBytecode(true));
