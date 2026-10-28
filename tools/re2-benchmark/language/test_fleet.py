@@ -257,7 +257,8 @@ class TestFleet(unittest.TestCase):
         return results
 
     @staticmethod
-    def write_partition_results(partition, result, platform, instance_type, instance_id, jdk="JDK25", source_commit="commit"):
+    def write_partition_results(partition, result, platform, instance_type, instance_id, jdk="JDK25", source_commit="commit",
+                                traced="61"):
         """Write one partition's synthetic verification and measurements, and export them."""
         result.mkdir(parents=True, exist_ok=True)
         manifest = collection.load(partition / "manifest.json")
@@ -267,7 +268,7 @@ class TestFleet(unittest.TestCase):
         receipts, observations = {}, {}
         for identity, case, language, engine, mode in collection.observations(manifest):
             trace = "".join(str(source["expected_count"]) + ":" +
-                            ",".join(["61"] * source["expected_count"]) + "\n" for source in case["sources"])
+                            ",".join([traced] * source["expected_count"]) + "\n" for source in case["sources"])
             receipt = {"outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode()),
                        "command": ["verify", "workload.tsv"], "operations": {}}
             for operation in collection.OPERATIONS:
@@ -305,13 +306,14 @@ class TestFleet(unittest.TestCase):
         collection.save(result / "observations.json", observations)
         collection.export(partition, result)
 
-    def run_unit(self, unit_id, root, verify=None, environment=None, measured=lambda partition: {}):
-        """Run one unit attempt through fleet.run_unit, with synthetic verification and measurements;
-        measured names each partition's changes to its synthetic results."""
-        root.mkdir()
+    def run_unit(self, unit_id, root, verify=None, environment=None, replica="1", unit_attempt="host-1/1",
+                 measured=lambda partition: {}, directory=None):
+        """Run one unit attempt of the plan, by default this test's, through fleet.run_unit, with synthetic
+        verification and measurements; measured names each partition's changes to its synthetic results."""
+        root.mkdir(parents=True)
         self.unit_environment = {
             "verification_status": "verified", "benchmark_mode": "unit-worker", "baseline_campaign": "language",
-            "platform": "r9g", "host_epoch": "2", "campaign_architecture": "graviton", "instance_id": "i-unit",
+            "platform": "r9g", "host_epoch": "2", "campaign_architecture": "arm", "instance_id": "i-unit",
             "instance_type": "r9g.2xlarge", "availability_zone": "us-west-2a", "logical_cpu_count": "8",
             "benchmark_heap_size": "8g", "regulator_release_version": "", "regulator_archive_sha256": "5" * 64,
             "comparator_manifest_sha256": "pins", "java_runtime_version": "25.0.4+7-LTS", **(environment or {})}
@@ -330,7 +332,8 @@ class TestFleet(unittest.TestCase):
             collection.save(destination / "jvm-build.json", {})
 
         def measure(path, results, *args):
-            self.write_partition_results(path, results, "r9g", "r9g.2xlarge", "i-unit",
+            host = self.unit_environment
+            self.write_partition_results(path, results, host["platform"], host["instance_type"], host["instance_id"],
                                          **{"jdk": "Temurin 25.0.4+7", "source_commit": "a" * 40,
                                             **measured(results.name)})
 
@@ -340,9 +343,13 @@ class TestFleet(unittest.TestCase):
                 patch.object(fleet.jvm_build, "build", side_effect=build), \
                 patch.object(collection, "verify", side_effect=verify or (lambda path, results, *args: results.mkdir(parents=True))), \
                 patch.object(collection, "measure", side_effect=measure):
-            fleet.run_unit(self.directory, unit_id, "1", root, self.root / "native", self.root / "jvm", "host-1/1",
-                           "us-west-2", archive=self.root / "regulator.tar.gz", provenance=provenance)
-        self.assertEqual(affinity, {0, 1})
+            try:
+                fleet.run_unit(directory or self.directory, unit_id, replica, root, self.root / "native",
+                               self.root / "jvm", unit_attempt, "us-west-2", archive=self.root / "regulator.tar.gz",
+                               provenance=provenance)
+            finally:
+                # The worker's CPU affinity is restored whether or not the unit was accepted.
+                self.assertEqual(affinity, {0, 1})
 
     def write_unit_environment(self, root):
         (root / "environment-manifest.txt").write_text(
@@ -516,19 +523,82 @@ class TestFleet(unittest.TestCase):
         fleet.install_bundle(bundle, sha256, self.root / "plans")
         self.assertEqual(fleet.validate(self.root / "plans/language-lifecycle"), fleet.validate(self.directory))
 
-    def test_aggregate_retains_every_sample_and_does_not_rewrite_evidence(self):
-        plan = self.prepare_small_plan()
-        results = self.write_results(plan)
-        before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in results.rglob("*.json")}
+    def run_campaign(self, measured=lambda platform, partition: {}, directories=None):
+        """Accept every unit of the plans of one suite, by default a two-language plan, at replicas 1 to 3 on both
+        platforms, as a primary campaign does, with one synthetic worker per replica and platform running all
+        its units."""
+        if directories is None:
+            manifest = collection.load(self.source / "manifest.json")
+            fleet.prepare(self.source, self.directory, selection=[(manifest["cases"][0]["id"], "java"),
+                                                                  (manifest["cases"][0]["id"], "trino")])
+            directories = [self.directory]
+        plan = collection.load(directories[0] / "plan.json")
+        units = sorted((unit_id, directory)
+                       for directory in directories for unit_id in fleet.work_units.load(directory))
+        result_root = self.root / "campaign"
+        receipts = []
+        for platform, architecture in (("r9g", "arm"), ("r8i", "intel")):
+            allocation = plan["platform_allocations"][platform]
+            for replica in ("1", "2", "3"):
+                host = f"{platform}-{replica}"
+                environment = {"platform": platform, "campaign_architecture": architecture,
+                               "instance_type": allocation["instance_type"],
+                               "logical_cpu_count": str(allocation["vcpus"]), "instance_id": f"i-{host}",
+                               "host_epoch": str(len(receipts) + 1)}
+                for sequence, (unit_id, directory) in enumerate(units, 1):
+                    session = {"platform": platform, "unit_id": unit_id, "replica_id": replica,
+                               "unit_attempt_id": f"{host}/{sequence}"}
+                    attempt = fleet.unit_dispatch.unit_attempt_directory(result_root, session)
+                    self.run_unit(unit_id, attempt, environment=environment, replica=replica,
+                                  unit_attempt=session["unit_attempt_id"],
+                                  measured=lambda partition: measured(platform, partition), directory=directory)
+                    receipts.append(fleet.row_protocol.read_tsv(attempt / "unit-receipt.tsv")[0])
+        fleet.write_tsv(result_root / "accepted-units.tsv", fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts)
+        fleet.write_tsv(result_root / fleet.unit_session.SEMANTIC_REJECTIONS,
+                        fleet.unit_session.SEMANTIC_REJECTION_FIELDS, [])
+        return result_root, receipts
+
+    def test_aggregate_exports_the_accepted_campaign_without_rewriting_evidence(self):
+        result_root, receipts = self.run_campaign()
+
+        def evidence():
+            return {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                    for path in result_root.rglob("*") if path.is_file()}
+
+        before = evidence()
         output = self.root / "export.json"
-        fleet.aggregate(self.directory, results, output)
+        fleet.aggregate(self.directory, result_root, output)
         data = collection.load(output)
-        self.assertEqual(len(data["observations"]), 8 * 15)
-        self.assertEqual(len(data["comparisons"]), 8 * 10)
-        self.assertEqual(len(data["hosts"]), 8)
-        self.assertEqual(before, {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before})
+        # Two comparisons of five operations, three observations and two memory-mode comparisons each,
+        # on three hosts of each platform.
+        self.assertEqual(len(data["observations"]), 2 * 5 * 3 * 6)
+        self.assertEqual(len(data["comparisons"]), 2 * 5 * 2 * 6)
+        self.assertEqual([host["receipt"] for host in data["hosts"]], receipts)
+        self.assertEqual(before, evidence())
         with self.assertRaisesRegex(ValueError, "overwrite"):
-            fleet.aggregate(self.directory, results, output)
+            fleet.aggregate(self.directory, result_root, output)
+        fleet.write_tsv(result_root / "accepted-units.tsv", fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts[1:])
+        with self.assertRaisesRegex(ValueError, "unit coverage failed"):
+            fleet.aggregate(self.directory, result_root, self.root / "partial.json")
+        # A semantic rejection fails the phase, though another attempt of its unit was accepted.
+        fleet.write_tsv(result_root / "accepted-units.tsv", fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts)
+        fleet.write_tsv(result_root / fleet.unit_session.SEMANTIC_REJECTIONS,
+                        fleet.unit_session.SEMANTIC_REJECTION_FIELDS,
+                        [{key: receipts[0][key] for key in fleet.unit_session.SEMANTIC_REJECTION_FIELDS}])
+        with self.assertRaisesRegex(ValueError, "semantic failure"):
+            fleet.aggregate(self.directory, result_root, self.root / "rejected.json")
+
+    def test_aggregate_requires_agreeing_languages(self):
+        result_root, _ = self.run_campaign(
+            lambda platform, partition: {"traced": "62"} if partition.endswith("java") else {})
+        with self.assertRaisesRegex(ValueError, "partitions disagree"):
+            fleet.aggregate(self.directory, result_root, self.root / "export.json")
+
+    def test_aggregate_requires_one_candidate(self):
+        result_root, _ = self.run_campaign(
+            lambda platform, partition: {"jdk": "Temurin 25.0.4+7.1"} if platform == "r8i" else {})
+        with self.assertRaisesRegex(ValueError, "mixed candidates"):
+            fleet.aggregate(self.directory, result_root, self.root / "export.json")
 
     def test_local_preflight_checks_all_partitions_without_measurement(self):
         plan = self.prepare_small_plan()
@@ -571,49 +641,6 @@ class TestFleet(unittest.TestCase):
             measure.assert_not_called()
         actual = collection.load(self.root / 'preflight/verification.json')
         self.assertEqual(len(actual['receipts']), 3)
-
-    def test_aggregate_rejects_missing_receipts_and_mixed_candidates(self):
-        plan = self.prepare_small_plan()
-        results = self.write_results(plan)
-        result = results / plan["jobs"][0]["id"]
-        job_receipt = collection.load(result / "job.json")
-        collection.save(result / "job.json", {})
-        with self.assertRaisesRegex(ValueError, "job receipt"):
-            fleet.aggregate(self.directory, results, self.root / "export.json")
-        collection.save(result / "job.json", job_receipt)
-        provenance = collection.load(result / "provenance.json")
-        provenance["source_commit"] = "another candidate"
-        collection.save(result / "provenance.json", provenance)
-        collection.export(self.directory / "partitions" / plan["jobs"][0]["partition"], result)
-        with self.assertRaisesRegex(ValueError, "mixed candidates"):
-            fleet.aggregate(self.directory, results, self.root / "export.json")
-
-    def test_aggregate_rejects_cross_language_disagreement(self):
-        plan = self.prepare_small_plan()
-        results = self.write_results(plan)
-        job = next(job for job in plan["jobs"] if job["partition"].endswith("java"))
-        result = results / job["id"]
-        evidence = collection.load(result / "verification.json")
-        # All three engines in this partition agree, but disagree with another language.
-        for receipt in evidence["receipts"].values():
-            receipt["trace"] = receipt["trace"].replace("61", "62")
-            receipt["trace_sha256"] = collection.digest(receipt["trace"].encode())
-        collection.save(result / "verification.json", evidence)
-        collection.export(self.directory / "partitions" / job["partition"], result)
-        with self.assertRaisesRegex(ValueError, "partitions disagree"):
-            fleet.aggregate(self.directory, results, self.root / "export.json")
-
-    def test_aggregate_rejects_same_host_replicas(self):
-        plan = self.prepare_small_plan(replicas=2)
-        results = self.write_results(plan)
-        for job in plan["jobs"]:
-            result = results / job["id"]
-            provenance = collection.load(result / "provenance.json")
-            provenance["instance_identity"]["instanceId"] = "i-reused"
-            collection.save(result / "provenance.json", provenance)
-            collection.export(self.directory / "partitions" / job["partition"], result)
-        with self.assertRaisesRegex(ValueError, "independent hosts"):
-            fleet.aggregate(self.directory, results, self.root / "export.json")
 
 
 if __name__ == "__main__":

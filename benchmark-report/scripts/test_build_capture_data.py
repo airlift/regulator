@@ -51,23 +51,33 @@ class TestBuildCaptureData(unittest.TestCase):
             arguments = self.arguments(root)
             evidence = root / 'evidence'
             (evidence / 'language').mkdir(parents=True)
+            (evidence / 'plan').mkdir()
             (evidence / 'primary').mkdir()
             export = evidence / 'language/export.json'
             export.write_text('raw export')
             candidate = evidence / 'candidate.tsv'
             candidate.write_text('collector')
-            arguments.released_campaign.write_text(json.dumps({
-                'candidate_provenance': str(candidate),
-                'language': [{'plan': str(evidence / 'language'), 'export': str(export)}],
-                'baseline': {'primary': str(evidence / 'primary'),
-                             'reduction': str(evidence / 'reduction')},
-            }))
+            # The campaign may name its export through a link outside the result root.
+            link = root / 'links/export.json'
+            link.parent.mkdir()
+            link.symlink_to(export)
 
-            for output in (export, evidence / 'primary/accepted-units.tsv'):
-                changed = self.arguments(root)
-                changed.output = output
-                with self.subTest(output=output), self.assertRaisesRegex(ValueError, 'must differ'):
-                    validate_released_campaign_paths(changed)
+            for reference in (export, link):
+                arguments.released_campaign.write_text(json.dumps({
+                    'candidate_provenance': str(candidate),
+                    'language': [{'plan': str(evidence / 'plan'), 'export': str(reference)}],
+                    'baseline': {'primary': str(evidence / 'primary'),
+                                 'reduction': str(evidence / 'reduction')},
+                }))
+                # The language result root's ledgers and unit attempts, beside its export.
+                for output in (export, evidence / 'language/semantic-rejections.tsv',
+                               evidence / 'language/units/r8i/unit/replica-1/host/lease-1/unit-receipt.tsv',
+                               evidence / 'primary/accepted-units.tsv'):
+                    changed = self.arguments(root)
+                    changed.output = output
+                    with self.subTest(export=reference, output=output), \
+                            self.assertRaisesRegex(ValueError, 'must differ'):
+                        validate_released_campaign_paths(changed)
             self.assertEqual('raw export', export.read_text())
             self.assertEqual('collector', candidate.read_text())
 

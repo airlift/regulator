@@ -687,7 +687,7 @@ class TestRunCampaign(unittest.TestCase):
             (root / "execution-policy.json").write_text(json.dumps({"engine_builds": {"r8i": "1" * 64}}))
             arguments = SimpleNamespace(phase="primary", campaign_id="baseline", engine_build_policy={"r8i": "2" * 64})
             with self.assertRaisesRegex(SystemExit, "engine builds its smoke prerequisite used"):
-                RUN_CAMPAIGN.validate_unit_phase_prerequisite(root, arguments, root, (1,), "smoke")
+                RUN_CAMPAIGN.validate_unit_phase_prerequisite(root, arguments, root, "smoke")
 
     def test_capacity_evidence_rejects_failed_session(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1097,6 +1097,51 @@ class TestRunCampaign(unittest.TestCase):
                     environment["BASELINE_EXPECTED_ENGINE_TREE"],
                     "d" * 40)
 
+    def test_language_plan_runs_its_units_at_qualification_on_its_allocations(self):
+        fleet = RUN_CAMPAIGN.language_fleet
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            RUN_CAMPAIGN.language_collection.prepare(root / "source")
+            fleet.prepare(root / "source", root / "plan")
+            units = RUN_CAMPAIGN.work_units.load(root / "plan")
+            for phase, selected, replicas in (("smoke", fleet.smoke_units(root / "plan"), ("1",)),
+                                              ("primary", units, ("1", "2", "3"))):
+                with self.subTest(phase=phase):
+                    with patch.object(sys, "argv", ["run-campaign.py", phase, "language", "--language-plan",
+                                                    str(root / "plan"), "--result-root", str(root / phase)]):
+                        arguments = RUN_CAMPAIGN.parse_args()
+                    with patch.object(RUN_CAMPAIGN, "parse_args", return_value=arguments), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        RUN_CAMPAIGN.main()
+                    self.assertEqual(RUN_CAMPAIGN.phase_protocol(arguments), "qualification")
+                    with (root / phase / "work-items.tsv").open(newline="") as manifest:
+                        items = list(csv.DictReader(manifest, delimiter="\t"))
+                    # The lifecycle suite runs on the larger r9g allocation its plan freezes.
+                    self.assertEqual({(item["platform"], item["instance_type"]) for item in items},
+                                     {("r9g", "r9g.2xlarge"), ("r8i", "r8i.large")})
+                    self.assertEqual(sorted((item["platform"], item["unit_id"], item["replica"]) for item in items),
+                                     sorted((platform, unit_id, replica) for platform in ("r8i", "r9g")
+                                            for unit_id in selected for replica in replicas))
+            for phase, plans, environment, refusal in (
+                    ("confirmation", 1, {}, "only smoke and primary"),
+                    ("primary", 2, {}, "language plans share shard"),
+                    ("primary", 1, {"BENCHMARK_HEAP_SIZE": "16g"}, "language protocol requires an 8g heap")):
+                with self.subTest(refusal=refusal), \
+                        patch.object(sys, "argv", ["run-campaign.py", phase, "language",
+                                                   *["--language-plan", str(root / "plan")] * plans,
+                                                   "--result-root", str(root / "refused")]), \
+                        patch.dict(os.environ, environment), self.assertRaisesRegex(SystemExit, refusal):
+                    RUN_CAMPAIGN.main()
+
+    def test_a_lone_unit_past_the_unit_budget_runs_on_demand_unless_spot_only(self):
+        items = [RUN_CAMPAIGN.WorkItem("r8i", "r8i.large", "language-bulk", unit_id, 1, seconds)
+                 for unit_id, seconds in (("lone", 950.0), ("packed", 900.0))]
+        for spot_only, expected in ((False, ["r8i/lone/replica-1"]), (True, [])):
+            dispatcher = RUN_CAMPAIGN.UnitDispatcher(SimpleNamespace(phase="primary", spot_only=spot_only),
+                                                     SCRIPT.parents[3], Path("/nonexistent"), items,
+                                                     RUN_CAMPAIGN.read_platforms(SCRIPT.parent))
+            self.assertEqual([item.identity for item in items if dispatcher.on_demand(item)], expected)
+
     def test_spot_retry_visits_each_pool_independently_of_global_epochs(self):
         source = AWS_RUNNER.read_text()
         selector = source[source.index('subnet_rotation()'):source.index('\ncreate_user_data()')]
@@ -1269,6 +1314,12 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                         RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [job])
                 else:
                     RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [job])
+        # A language campaign's workers receive the checkout too.
+        with tempfile.TemporaryDirectory() as temporary_directory, patch.dict(os.environ, {}, clear=True), \
+                patch.object(RUN_CAMPAIGN.language_fleet, "validate"), \
+                self.assertRaisesRegex(SystemExit, "requires TRINO_DIR"):
+            RUN_CAMPAIGN.validate_dependencies(
+                Path(temporary_directory), SimpleNamespace(language_plans={"language-bulk": Path("plan")}), [])
 
     def test_interruption_unavailability_quota_or_second_failure_moves_to_on_demand(self):
         # A Spot interruption, Spot launch unavailability in the only allowed region, or a second
@@ -3851,7 +3902,7 @@ class TestUnitWorkers(unittest.TestCase):
                         SystemExit, f"smoke prerequisite campaign is not accepted: .*semantic failure: "
                                     f"\\['{stalled.session}/1'\\]"):
                     RUN_CAMPAIGN.validate_unit_phase_prerequisite(
-                        SCRIPT.parents[3], self.arguments, Path(temporary) / "results", (1,), "smoke")
+                        SCRIPT.parents[3], self.arguments, Path(temporary) / "results", "smoke")
 
 
 if __name__ == "__main__":

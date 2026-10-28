@@ -24,7 +24,7 @@ from pathlib import Path
 import engine_build
 import unit_session
 import work_units
-from acceptance import ValidationError, normalize_heap_size
+from acceptance import normalize_heap_size
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, REGION_PATTERN, BudgetError, FleetBudget, on_demand_regions, region_limits)
 from campaign_io import (
@@ -242,7 +242,7 @@ def parse_args():
     parser.add_argument("--spot-only", action="store_true",
                         help="wait and retry on Spot; prohibit On-Demand launches and fallback")
     parser.add_argument("--refill-unresolved", action="store_true",
-                        help="language and build campaigns only: resume an existing result root on On-Demand, "
+                        help="build campaigns only: resume an existing result root on On-Demand, "
                              "giving each job that exhausted its replacements one more attempt")
     parser.add_argument("--spot-vcpu-reserve", type=int, default=SPOT_VCPU_SAFETY_RESERVE)
     parser.add_argument("--release-version", default="",
@@ -259,7 +259,8 @@ def parse_args():
     parser.add_argument("--candidate-archive", type=Path)
     parser.add_argument("--candidate-provenance", type=Path)
     parser.add_argument("--language-plan", action="append", type=Path, default=[],
-                        help="expanded language fleet plan; repeat for lifecycle and bulk")
+                        help="language plan prepared by fleet.py, whose units the campaign measures instead of the "
+                             "baseline's; repeat for lifecycle and bulk")
     parser.add_argument("--region", action="append", dest="regions",
                         help="AWS region a host may launch in; repeat to let Spot placement scores choose, "
                              "ties going to the earlier region (default: AWS_REGION or us-west-2)")
@@ -311,7 +312,10 @@ def execution_policy(arguments):
             "fleet_policy": arguments.shared_budget.policy if getattr(arguments, "shared_budget", None) else None,
             # Each platform's engine-build manifest SHA-256, or "local" for phases that install no
             # prebuilt engines.
-            "engine_builds": getattr(arguments, "engine_build_policy", "local")}
+            "engine_builds": getattr(arguments, "engine_build_policy", "local"),
+            # A language campaign's plan digests by shard.
+            "language_plans": {shard: hashlib.sha256((directory / "plan.json").read_bytes()).hexdigest()
+                               for shard, directory in sorted(getattr(arguments, "language_plans", {}).items())}}
 
 
 def validate_execution_policy(arguments, result_root):
@@ -434,9 +438,10 @@ def build_engine_jobs(platforms):
             for host_epoch, platform in enumerate(platforms, start=PHASE_HOST_EPOCH_START["build"])]
 
 
-def build_work_items(phase, platforms, units, shards, confirmation_units=()):
+def build_work_items(phase, platforms, units, shards, confirmation_units=(), allocations=None):
     """Each platform's replicas of the phase's units: replica 1 in smoke, 1 to 3 in primary, and
-    the listed replica 4 confirmations."""
+    the listed replica 4 confirmations. allocations names each shard's {platform: instance type};
+    a baseline unit runs on its platform's frozen type."""
     if phase == "confirmation":
         selected = confirmation_units
     else:
@@ -447,10 +452,57 @@ def build_work_items(phase, platforms, units, shards, confirmation_units=()):
                     for platform in platforms
                     for unit_id in ordered
                     for replica in replicas]
-    instance_types = {platform.name: platform.instance_type for platform in platforms}
-    return [WorkItem(platform, instance_types[platform], units[unit_id]["shard_id"], unit_id, replica,
-                     float(units[unit_id]["estimated_seconds"]), instances)
+    allocations = allocations or {shard: {platform.name: platform.instance_type for platform in platforms}
+                                  for shard in shards}
+    return [WorkItem(platform, allocations[units[unit_id]["shard_id"]][platform], units[unit_id]["shard_id"], unit_id,
+                     replica, float(units[unit_id]["estimated_seconds"]), instances)
             for platform, unit_id, replica, instances in selected]
+
+
+def language_plans(arguments):
+    """Each language plan's directory by its shard. A language campaign has no confirmation phase and runs
+    every phase at the qualification protocol."""
+    if arguments.phase not in ("smoke", "primary"):
+        raise SystemExit("a language campaign runs only smoke and primary phases")
+    plans = {}
+    for directory in arguments.language_plan:
+        try:
+            shard = language_fleet.validate(directory)["shard_id"]
+        except (OSError, ValueError, KeyError) as error:
+            raise SystemExit(f"invalid language plan {directory}: {error}") from error
+        if shard in plans:
+            raise SystemExit(f"language plans share shard {shard}")
+        plans[shard] = directory.resolve()
+    arguments.smoke_protocol = "qualification"
+    return plans
+
+
+def write_language_bundles(arguments, result_root):
+    """Write each language plan's bundle under the result root, keeping its path and SHA-256 by shard."""
+    directory = result_root / "language-plans"
+    directory.mkdir(parents=True, exist_ok=True)
+    arguments.language_bundles = {}
+    for shard, plan in sorted(arguments.language_plans.items()):
+        bundle = directory / f"{shard}.tar.gz"
+        arguments.language_bundles[shard] = (bundle, language_fleet.write_bundle(plan, bundle))
+
+
+def aggregate_language_plans(arguments, result_root):
+    """Export each language plan's accepted primary units as <shard>-results.json; a restart must reproduce it."""
+    for shard, directory in sorted(arguments.language_plans.items()):
+        output = result_root / f"{shard}-results.json"
+        with tempfile.TemporaryDirectory(prefix="language-aggregate-", dir=result_root) as temporary:
+            export = Path(temporary) / output.name
+            try:
+                language_fleet.aggregate(directory, result_root, export)
+            except (OSError, ValueError, KeyError) as error:
+                raise SystemExit(f"language plan {shard} cannot be exported: {error}") from error
+            if output.exists():
+                if output.read_bytes() != export.read_bytes():
+                    raise UnsafeCampaignError(f"language export {output} changed on restart")
+            else:
+                os.replace(export, output)
+    fsync_directory(result_root)
 
 
 def unit_worker_job(platform, ordinal, host_epoch, market, spot_capacity_failures=()):
@@ -588,7 +640,7 @@ def validate_configuration(arguments, jobs, launched_jobs=None, items=None):
     if arguments.topology_deadline_seconds < required_seconds:
         raise SystemExit("campaign topology cannot fit its phase deadline with one retry wave: "
                          f"requires {required_seconds}s, allows {arguments.topology_deadline_seconds}s")
-    if language_campaign(arguments) and campaign_heap_size(arguments) != "8g":
+    if getattr(arguments, "language_plans", None) and campaign_heap_size(arguments) != "8g":
         raise SystemExit("language protocol requires an 8g heap")
     identities = [job.identity for job in jobs]
     if len(identities) != len(set(identities)):
@@ -762,8 +814,8 @@ def frozen_input_fingerprint(root, arguments, jobs_path):
         arguments.candidate_archive,
         arguments.candidate_provenance,
         jobs_path))
-    if language_campaign(arguments):
-        tracked_inputs.extend(directory / "plan.json" for directory, _ in language_campaign(arguments).plans.values())
+    tracked_inputs.extend(directory / "plan.json" for _, directory in
+                          sorted(getattr(arguments, "language_plans", {}).items()))
     # The policy binds each manifest's SHA-256 and each wrapper checks the archives against
     # it, so large archives are not rehashed at every launch.
     tracked_inputs.extend(directory / engine_build.MANIFEST for _, directory in
@@ -789,7 +841,26 @@ def read_receipt(path):
     return receipt
 
 
-def validate_unit_phase_prerequisite(root, arguments, result_root, expected_replicas, phase):
+def validate_unit_ledger(root, arguments, receipts_path, phase, confirmations=()):
+    """Accept a phase's ledger of unit receipts as one campaign, with the confirmations of a confirmation
+    phase: the units of a language campaign's plans, or the baseline units of the campaign's shards."""
+    plans = getattr(arguments, "language_plans", None)
+    if plans:
+        language_fleet.validate_unit_campaign(
+            list(plans.values()), read_accepted_units(receipts_path), arguments.campaign_id, phase)
+        return
+    unit_session.validate_unit_campaign(
+        campaign_manifest(root, arguments),
+        root / "tools/re2-benchmark/baseline/platforms.tsv",
+        campaign_shards(root, arguments),
+        receipts_path,
+        arguments.campaign_id,
+        (1,) if phase == "smoke" else (1, 2, 3),
+        selected_shards=getattr(arguments, "selected_shards", None),
+        confirmations=confirmations)
+
+
+def validate_unit_phase_prerequisite(root, arguments, result_root, phase):
     """Revalidate the accepted unit campaign of the previous phase and its retained attempts."""
     if result_root is None:
         raise SystemExit(f"{arguments.phase} execution requires --{phase}-results")
@@ -800,44 +871,25 @@ def validate_unit_phase_prerequisite(root, arguments, result_root, expected_repl
     accepted_units = result_root / "accepted-units.tsv"
     try:
         unit_session.check_semantic_rejections(result_root)
-        unit_session.validate_unit_campaign(
-            campaign_manifest(root, arguments),
-            root / "tools/re2-benchmark/baseline/platforms.tsv",
-            campaign_shards(root, arguments),
-            accepted_units,
-            arguments.campaign_id,
-            expected_replicas,
-            selected_shards=getattr(arguments, "selected_shards", None))
+        validate_unit_ledger(root, arguments, accepted_units, phase)
         context = None
         for receipt in read_accepted_units(accepted_units):
             context = context or unit_validation_context(root, arguments)
             validate_unit_artifacts(root, arguments, result_root, receipt, context=context)
-    except (OSError, ValidationError, UnsafeCampaignError) as error:
+    except (OSError, ValueError, UnsafeCampaignError) as error:
         raise SystemExit(f"{phase} prerequisite campaign is not accepted: {error}") from error
 
 
 def validate_prerequisites(root, arguments, platforms):
-    if language_campaign(arguments):
-        if arguments.phase == "primary":
-            if arguments.smoke_results is None:
-                raise SystemExit("primary execution requires --smoke-results")
-            from copy import copy
-            smoke_arguments = copy(arguments)
-            smoke_arguments.phase = "smoke"
-            smoke_arguments.language_campaign = LanguageCampaign(arguments.language_plan, "smoke")
-            smoke_jobs = build_language_jobs(smoke_arguments.language_campaign, platforms)
-            ledger = accepted_sessions_path(arguments.smoke_results, smoke_arguments)
-            accepted = recover_accepted_sessions(root, smoke_arguments, arguments.smoke_results, smoke_jobs, ledger)
-            validate_language_coverage(smoke_arguments, smoke_jobs, accepted)
-    elif arguments.phase == "primary":
-        validate_unit_phase_prerequisite(root, arguments, arguments.smoke_results, (1,), "smoke")
+    if arguments.phase == "primary":
+        validate_unit_phase_prerequisite(root, arguments, arguments.smoke_results, "smoke")
     elif arguments.phase == "confirmation":
-        validate_unit_phase_prerequisite(root, arguments, arguments.primary_results, (1, 2, 3), "primary")
+        validate_unit_phase_prerequisite(root, arguments, arguments.primary_results, "primary")
 
 
 def resolve_engine_builds(root, arguments, platforms):
     builds = getattr(arguments, "engine_builds", None)
-    if arguments.phase == "build" or language_campaign(arguments):
+    if arguments.phase == "build":
         if builds is not None:
             raise SystemExit("engine builds apply only to baseline smoke, primary, and confirmation")
         return
@@ -873,15 +925,16 @@ def resolve_engine_builds(root, arguments, platforms):
 
 
 def validate_dependencies(root, arguments, jobs):
-    if language_campaign(arguments):
-        # Expanded plans already contain checksummed source workloads. The JVM
-        # worker resolves and verifies the pinned Joni jar during its clean build.
-        for directory, _ in language_campaign(arguments).plans.values():
+    if getattr(arguments, "language_plans", None):
+        # Plans already contain checksummed source workloads. The unit worker
+        # resolves and verifies the pinned Joni jar during its clean build.
+        for directory in arguments.language_plans.values():
             language_fleet.validate(directory)
-        return
-    subprocess.run([str(root / "tools/re2-benchmark/baseline/validate-manifest.py")], check=True)
-    if not any(job.shard in TRINO_SHARDS for job in jobs):
-        return
+    else:
+        subprocess.run([str(root / "tools/re2-benchmark/baseline/validate-manifest.py")], check=True)
+        if not any(job.shard in TRINO_SHARDS for job in jobs):
+            return
+    # A language unit worker's wrapper ships the pinned Trino checkout as a baseline one does.
     trino_directory = os.environ.get("TRINO_DIR")
     if not trino_directory:
         raise SystemExit("campaign execution requires TRINO_DIR to name the pinned Trino checkout")
@@ -1021,6 +1074,15 @@ def upload_engine_builds(arguments, jobs):
                 uploads[region, f"{os.environ['TRANSFER_PREFIX']}/engine-builds/{archive['sha256']}.tar.gz"] = (
                     build / archive["file"], archive["sha256"], f"{job.platform.name} {name} archive")
     upload_shared_archives(arguments, uploads)
+
+
+def upload_language_bundles(arguments, jobs):
+    """Put each language plan's bundle once in every region that may launch a worker installing it."""
+    upload_shared_archives(arguments, {
+        (region, f"{os.environ['TRANSFER_PREFIX']}/language-plans/{sha256}.tar.gz"): (
+            bundle, sha256, f"{shard} language plan bundle")
+        for shard, (bundle, sha256) in getattr(arguments, "language_bundles", {}).items()
+        for job in jobs for region in launch_regions(arguments, job)})
 
 
 def upload_shared_archives(arguments, uploads):
@@ -1477,15 +1539,15 @@ def job_environment(job, arguments, root, result_root):
     if directories and unit_worker:
         environment["ENGINE_BUILD_DIRECTORY"] = str(directories[job.platform.name].resolve())
         environment["ENGINE_BUILD_MANIFEST_SHA256"] = arguments.engine_build_policy[job.platform.name]
-    if language_campaign(arguments):
-        package = result_root / "language-packages" / (job.logical_identity.replace("/", "-") + ".tar.gz")
-        checksum = language_campaign(arguments).package(job.logical_identity, package)
+    for name in ("LANGUAGE_PLAN_BUNDLE_SHA256S", "LANGUAGE_CANDIDATE_PROVENANCE", "LANGUAGE_CANDIDATE_PROVENANCE_SHA256"):
+        environment.pop(name, None)
+    bundles = getattr(arguments, "language_bundles", None)
+    if bundles and unit_worker:
+        # A language worker installs each plan's bundle and builds the candidate its provenance names.
         environment.update({
-            "LANGUAGE_BATCH_ARCHIVE": str(package.resolve()),
-            "LANGUAGE_BATCH_ARCHIVE_SHA256": checksum,
+            "LANGUAGE_PLAN_BUNDLE_SHA256S": " ".join(sha256 for _, sha256 in sorted(bundles.values())),
             "LANGUAGE_CANDIDATE_PROVENANCE": str(arguments.candidate_provenance.resolve()),
             "LANGUAGE_CANDIDATE_PROVENANCE_SHA256": hashlib.sha256(arguments.candidate_provenance.read_bytes()).hexdigest(),
-            "PYTHONDONTWRITEBYTECODE": "1",
         })
     if architecture == "intel":
         environment.update({
@@ -1851,9 +1913,19 @@ def persist_accepted_receipt(path, receipt_path):
 
 
 def unit_validation_context(root, arguments):
-    """The unit tables, frozen campaign, and selected release that a pass over unit attempts checks against."""
+    """The unit tables, frozen campaign, and selected release that a pass over unit attempts checks against.
+
+    A language campaign's attempts check their plans instead of the tables, and their host's comparator pins
+    and release selection.
+    """
     version = getattr(arguments, "release_version", "")
-    return unit_session.load_unit_tables(campaign_manifest(root, arguments)), {
+    if getattr(arguments, "language_plans", None):
+        tables = {"comparator_manifest_sha256": hashlib.sha256(
+            (root / "tools/re2-benchmark/baseline/comparators.tsv").read_bytes()).hexdigest(),
+            "regulator_release_version": version}
+    else:
+        tables = unit_session.load_unit_tables(campaign_manifest(root, arguments))
+    return tables, {
         "campaign_id": arguments.campaign_id,
         "candidate_commit": check_output(["git", "rev-parse", candidate_revision(arguments)], cwd=root),
         "candidate_archive_sha256": arguments.candidate_archive_sha256,
@@ -1879,11 +1951,18 @@ def validate_unit_artifacts(root, arguments, result_root, receipt, directory=Non
             raise RuntimeError("unit attempt did not complete")
         validate_capacity(directory / "unit-capacity.txt")
         artifact_receipt = read_unit_receipt(directory / "unit-receipt.tsv")
-        regenerated = unit_session.validate_unit_results(directory, host_evidence=directory.parent, tables=tables)
-        unit_session.check_chain_predecessor(directory, directory.parent)
-        if release:
-            released_artifact.validate_baseline(directory, release)
-    except (OSError, RuntimeError, ValueError, KeyError) as error:
+        plans = getattr(arguments, "language_plans", None)
+        if plans:
+            regenerated = language_fleet.validate_unit_attempt(directory, plans[receipt["shard_id"]])
+            environment = read_properties(directory / "environment-manifest.txt")
+            if any(environment.get(field) != value for field, value in tables.items()):
+                raise RuntimeError("host differs from the campaign's comparator pins or release")
+        else:
+            regenerated = unit_session.validate_unit_results(directory, host_evidence=directory.parent, tables=tables)
+            unit_session.check_chain_predecessor(directory, directory.parent)
+            if release:
+                released_artifact.validate_baseline(directory, release)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
         raise UnsafeCampaignError(f"unit artifacts are not accepted for {identity}: {error}") from error
     if artifact_receipt != receipt or regenerated != receipt:
         raise UnsafeCampaignError(f"accepted unit receipt cannot be reproduced from its artifacts: {identity}")
@@ -3064,7 +3143,9 @@ class UnitDispatcher:
         # Each leased item's live lease, as its worker's host epoch and lease sequence.
         self.held = {}
         self.failures = {}
-        self.on_demand_only = set()
+        # A lone language unit past the 15-minute budget would risk more Spot interruptions than it can absorb.
+        self.on_demand_only = set() if self.spot_only else {
+            item.identity for item in items if item.estimated_seconds > work_units.UNIT_SECONDS}
         self.unresolved = {}
         # Each item an attempt found semantically wrong, by that attempt, as semantic-rejections.tsv lists it;
         # no other attempt clears it.
@@ -3848,25 +3929,19 @@ class UnitDispatcher:
             details = ", ".join(f"{item.identity} {detail}" for item, detail in unresolved)
             raise SystemExit(f"campaign completed with unresolved units: {details}")
         self.validate_phase()
+        if getattr(self.arguments, "language_plans", None) and self.arguments.phase == "primary":
+            aggregate_language_plans(self.arguments, self.result_root)
 
     def validate_phase(self):
         """The phase gate: every unit replica of the phase accepted as one campaign."""
         arguments = self.arguments
-        receipts, confirmations = self.accepted_path, ()
+        receipts, confirmations, phase = self.accepted_path, (), arguments.phase
         if arguments.phase == "confirmation":
-            receipts = arguments.primary_results / "accepted-units.tsv"
+            receipts, phase = arguments.primary_results / "accepted-units.tsv", "primary"
             confirmations = read_accepted_units(self.accepted_path)
         try:
-            unit_session.validate_unit_campaign(
-                campaign_manifest(self.root, arguments),
-                self.root / "tools/re2-benchmark/baseline/platforms.tsv",
-                campaign_shards(self.root, arguments),
-                receipts,
-                arguments.campaign_id,
-                (1,) if arguments.phase == "smoke" else (1, 2, 3),
-                selected_shards=getattr(arguments, "selected_shards", None),
-                confirmations=confirmations)
-        except (OSError, ValidationError) as error:
+            validate_unit_ledger(self.root, arguments, receipts, phase, confirmations)
+        except (OSError, ValueError) as error:
             raise SystemExit(f"{arguments.phase} unit campaign is not accepted: {error}") from error
 
 
@@ -3901,16 +3976,18 @@ def main():
                 len(arguments.selected_shards) != len(set(arguments.selected_shards))):
             raise SystemExit('invalid baseline shard selection')
         shards = arguments.selected_shards
-    if arguments.language_plan or arguments.phase == "build":
-        if arguments.confirmation_jobs is not None:
-            raise SystemExit("confirmation jobs select baseline work units")
-        if arguments.language_plan and arguments.phase == "build":
-            raise SystemExit("language plans cannot be combined with engine builds")
+    if arguments.phase == "build":
+        if arguments.confirmation_jobs is not None or arguments.language_plan:
+            raise SystemExit("an engine build phase measures no work units")
         execute_host_jobs(arguments, root, result_root, platforms)
         return
     if arguments.refill_unresolved:
-        raise SystemExit("refill resumes language and build campaigns; a baseline phase retries its own work units")
-    units = work_units.load(directory)
+        raise SystemExit("refill resumes build campaigns; a unit phase retries its own work units")
+    units, allocations = work_units.load(directory), None
+    if arguments.language_plan:
+        arguments.language_plans = language_plans(arguments)
+        campaign = language_fleet.campaign_units(arguments.language_plans.values(), arguments.phase)
+        units, allocations, shards = campaign["units"], campaign["allocations"], sorted(campaign["allocations"])
     confirmation_units = ()
     if arguments.phase == "confirmation":
         if arguments.primary_results is None or arguments.confirmation_jobs is None:
@@ -3918,7 +3995,7 @@ def main():
         confirmation_units = read_confirmation_units(
             arguments.confirmation_jobs, platforms, units,
             read_accepted_units(arguments.primary_results / "accepted-units.tsv"))
-    items = build_work_items(arguments.phase, platforms, units, shards, confirmation_units)
+    items = build_work_items(arguments.phase, platforms, units, shards, confirmation_units, allocations)
     arguments.unit_platforms = pool_platforms(platforms, items)
     arguments.longest_units = longest_units(items)
     validate_configuration(arguments, [], items=items)
@@ -3936,16 +4013,15 @@ def main():
                    for pool in sorted({item.pool for item in items})]
         validate_aws(arguments, platforms, workers)
         upload_engine_builds(arguments, workers)
+        if arguments.language_plan:
+            write_language_bundles(arguments, result_root)
+            upload_language_bundles(arguments, workers)
         execute_units(arguments, root, result_root, items, platforms)
 
 
 def execute_host_jobs(arguments, root, result_root, platforms):
-    """Plan and run a language campaign's batches or the build phase's engine builds, one host each."""
-    if arguments.language_plan:
-        arguments.language_campaign = LanguageCampaign(arguments.language_plan, arguments.phase)
-        jobs = build_language_jobs(arguments.language_campaign, platforms)
-    else:
-        jobs = build_engine_jobs(platforms)
+    """Plan and run the build phase's engine builds, one host each."""
+    jobs = build_engine_jobs(platforms)
     launched_jobs = refill_launch_jobs(arguments, result_root, jobs) if arguments.refill_unresolved else None
     validate_configuration(arguments, jobs, launched_jobs)
     validate_durable_paths(root, arguments, result_root)

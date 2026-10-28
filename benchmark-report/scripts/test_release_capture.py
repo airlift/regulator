@@ -1,16 +1,18 @@
 import argparse
 import copy
 import csv
-import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import release_capture
-# release_capture puts the baseline tooling on the path; its unit campaign fixture runs attempts as hosts do.
+# release_capture puts the baseline and language tooling on the path; their campaign fixtures run attempts as
+# hosts do.
 import aggregate_results
 import collection
+import test_fleet
 from test_unit_session import UnitCampaign
 
 
@@ -19,45 +21,42 @@ class TestReleaseCapture(unittest.TestCase):
         self.release = release_capture.released_artifact.manifest(release_capture.ROOT, '1.0')
         self.collector = {'candidate_commit': 'c' * 40, 'root_tree': 'd' * 40, 'archive_sha256': 'e' * 64}
         part = {'id': 'case-0000-java', 'case': 'example', 'language': 'java'}
-        allocation = release_capture.fleet.platform_allocation('language-bulk', 'r8i')
-        jobs = [{'id': f'r8i/case-0000-java/replica-{replica}', 'platform': 'r8i', **allocation,
-                 'partition': part['id'], 'replica': replica}
-                for replica in (1, 2, 3)]
         self.manifest = {'suite': 'language-bulk', 'cases': [{'id': 'example', 'model': 'count'}]}
         platforms = release_capture.fleet.PLATFORMS
-        self.data = {'plan': {'schema_version': 4, 'replicas': 3, 'platforms': list(platforms),
+        self.data = {'plan': {'schema_version': 4, 'platforms': list(platforms),
                               'platform_allocations': release_capture.fleet.platform_allocations('language-bulk', platforms),
-                              'jobs': jobs, 'partitions': [part]},
+                              'partitions': [part]},
                      'candidate': {'source_commit': self.collector['candidate_commit'], 'source_tree': self.collector['root_tree']},
                      'hosts': [], 'observations': [], 'comparisons': []}
         self.receipts = []
+        # The fixture's hosts measured no rows of their unit.
+        self.units = {'unit': {'owned': []}}
         jar = '/worker/regulator-1.0.jar'
         classes = release_capture.released_artifact.PUBLIC_CLASSES
         artifact = {'manifest': self.release, 'jar_path': jar,
                     'production_classes': ['io/airlift/regulator/' + name + '.class' for name in classes],
                     'code_sources': {'io.airlift.regulator.' + name: jar for name in classes},
                     'classpath': [{'path': jar, 'files': {'regulator-1.0.jar': self.release['jar_sha256']}}]}
-        for job in jobs:
-            instance = 'i-' + str(job['replica'])
-            self.data['hosts'].append({'job': job, 'export_sha256': 'f' * 64,
-                                      'provenance': {**self.data['candidate'],
-                                                     'instance_identity': {'instanceId': instance,
-                                                                           'instanceType': job['instance_type']},
-                                                     'jvm_build': {'released_artifact': copy.deepcopy(artifact),
-                                                                   'jvm': {'classpath': copy.deepcopy(artifact['classpath'])}}}})
-            self.receipts.append({'plan_sha256': release_capture.digest_plan(self.data['plan']),
-                                  'candidate_archive_sha256': self.collector['archive_sha256'],
-                                  'candidate_commit': self.collector['candidate_commit'], 'released_artifact': self.release,
-                                  'instance_id': instance, 'exports': {job['id']: 'f' * 64}})
+        # Each replica of the comparison's one unit, accepted from an attempt on its own r8i host.
+        exports = hashlib.sha256(f"{part['id']}  {'f' * 64}\n".encode()).hexdigest()
+        instance_type = release_capture.fleet.platform_allocation('language-bulk', 'r8i')['instance_type']
+        for replica in (1, 2, 3):
+            receipt = {'unit_attempt_id': f'host-{replica}/1', 'platform': 'r8i', 'unit_id': 'unit',
+                       'replica_id': str(replica), 'instance_id': f'i-{replica}', 'instance_type': instance_type,
+                       'observed_rows_sha256': exports, 'engine_tree': self.release['engine_tree'],
+                       'candidate_commit': self.collector['candidate_commit'],
+                       'candidate_archive_sha256': self.collector['archive_sha256']}
+            self.receipts.append(receipt)
+            provenance = {**self.data['candidate'],
+                          'instance_identity': {'instanceId': receipt['instance_id'], 'instanceType': instance_type},
+                          'jvm_build': {'released_artifact': copy.deepcopy(artifact),
+                                        'jvm': {'classpath': copy.deepcopy(artifact['classpath'])}}}
+            self.data['hosts'].append({'receipt': dict(receipt), 'partitions': [
+                {'id': part['id'], 'export_sha256': 'f' * 64, 'provenance': provenance}]})
 
     def normalize(self):
-        return release_capture.normalize_language(self.data, self.manifest, self.release, self.collector, self.receipts)
-
-    def refresh_receipts(self):
-        plan_sha256 = release_capture.digest_plan(self.data['plan'])
-        for host, receipt in zip(self.data['hosts'], self.receipts):
-            receipt['plan_sha256'] = plan_sha256
-            receipt['exports'] = {host['job']['id']: 'f' * 64}
+        return release_capture.normalize_language(self.data, self.manifest, self.release, self.collector, self.receipts,
+                                                  self.units)
 
     def test_released_artifact_and_collector_remain_separate(self):
         data = self.normalize()
@@ -67,48 +66,25 @@ class TestReleaseCapture(unittest.TestCase):
 
     def test_lifecycle_r9g_uses_the_frozen_larger_allocation(self):
         self.manifest['suite'] = 'language-lifecycle'
-        allocation = release_capture.fleet.platform_allocation('language-lifecycle', 'r9g')
         self.data['plan']['platform_allocations'] = release_capture.fleet.platform_allocations(
             'language-lifecycle', release_capture.fleet.PLATFORMS)
-        for host in self.data['hosts']:
-            job = host['job']
-            job.update(id=job['id'].replace('r8i/', 'r9g/'), platform='r9g', **allocation)
-            host['provenance']['instance_identity']['instanceType'] = allocation['instance_type']
-        self.refresh_receipts()
+        instance_type = release_capture.fleet.platform_allocation('language-lifecycle', 'r9g')['instance_type']
+        for receipt, host in zip(self.receipts, self.data['hosts']):
+            receipt.update(platform='r9g', instance_type=instance_type)
+            host['receipt'] = dict(receipt)
+            host['partitions'][0]['provenance']['instance_identity']['instanceType'] = instance_type
         self.assertEqual(len(self.normalize()['hosts']), 3)
 
-        self.data['hosts'][0]['provenance']['instance_identity']['instanceType'] = 'r9g.large'
+        self.data['hosts'][0]['partitions'][0]['provenance']['instance_identity']['instanceType'] = 'r9g.large'
         with self.assertRaisesRegex(ValueError, 'accepted instance'):
             self.normalize()
-
-    def test_shared_language_ledger_routes_each_frozen_plan(self):
-        other_plan = {**self.data['plan'], 'suite': 'language-lifecycle'}
-        other_receipts = [{**receipt, 'plan_sha256': release_capture.digest_plan(other_plan)}
-                          for receipt in self.receipts]
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'accepted-language-sessions.json'
-            path.write_text(json.dumps({'receipts': self.receipts + other_receipts}))
-            ledgers = {}
-            selected = release_capture.select_language_receipts(path, self.data['plan'], ledgers)
-            normalized = release_capture.normalize_language(
-                self.data, self.manifest, self.release, self.collector, selected)
-            self.assertEqual(len(normalized['hosts']), 3)
-            with self.assertRaisesRegex(ValueError, 'outside the imported captures'):
-                release_capture.validate_language_receipt_coverage(ledgers)
-            self.assertEqual(other_receipts, release_capture.select_language_receipts(path, other_plan, ledgers))
-            release_capture.validate_language_receipt_coverage(ledgers)
-            with self.assertRaisesRegex(ValueError, 'multiple captures'):
-                release_capture.select_language_receipts(path, other_plan, ledgers)
-
-    def test_shared_language_ledger_rejects_unknown_plan_receipts(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'accepted-language-sessions.json'
-            unknown = {**self.receipts[0], 'plan_sha256': '0' * 64}
-            path.write_text(json.dumps({'receipts': self.receipts + [unknown]}))
-            ledgers = {}
-            self.assertEqual(self.receipts, release_capture.select_language_receipts(path, self.data['plan'], ledgers))
-            with self.assertRaisesRegex(ValueError, 'outside the imported captures'):
-                release_capture.validate_language_receipt_coverage(ledgers)
+        # Hosts whose receipts and measurements agree on an instance type other than the frozen allocation's.
+        for receipt, host in zip(self.receipts, self.data['hosts']):
+            receipt['instance_type'] = 'r9g.large'
+            host['receipt'] = dict(receipt)
+            host['partitions'][0]['provenance']['instance_identity']['instanceType'] = 'r9g.large'
+        with self.assertRaisesRegex(ValueError, 'frozen allocation'):
+            self.normalize()
 
     def test_each_capture_pins_its_own_collector(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,7 +104,7 @@ class TestReleaseCapture(unittest.TestCase):
                 {'candidate_provenance': str(paths[1])}, plan, self.release))
             with self.assertRaisesRegex(ValueError, 'changed the collector identity'):
                 release_capture.normalize_language(self.data, self.manifest, self.release,
-                                                   identities[1], self.receipts)
+                                                   identities[1], self.receipts, self.units)
             with self.assertRaisesRegex(ValueError, 'production tree'):
                 release_capture.load_collector({}, plan, {**self.release, 'engine_tree': '0' * 40})
             with self.assertRaisesRegex(ValueError, 'pinned collector'):
@@ -215,13 +191,78 @@ class TestReleaseCapture(unittest.TestCase):
                 with self.subTest(paths=paths, source=source, pin=pin), self.assertRaisesRegex(ValueError, message):
                     release_capture.validate_baseline({**baseline, **paths}, {**release, **source}, {**collector, **pin})
 
+    def test_language_imports_exactly_each_plans_share_of_one_accepted_campaign(self):
+        fixture = test_fleet.TestFleet()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        # Two plans of one case, measured by one campaign whose ledgers share its result root.
+        manifest = collection.load(fixture.source / 'manifest.json')
+        manifest['cases'] = manifest['cases'][:1]
+        collection.save(fixture.source / 'manifest.json', manifest)
+        plans = [fixture.root / shard for shard in ('language-a', 'language-b')]
+        for directory in plans:
+            release_capture.fleet.prepare(fixture.source, directory, shard_id=directory.name)
+        result_root, receipts = fixture.run_campaign(directories=plans)
+        items = []
+        for directory in plans:
+            export = result_root / f'{directory.name}-results.json'
+            release_capture.fleet.aggregate(directory, result_root, export)
+            items.append({'plan': str(directory), 'export': str(export)})
+        release = {'engine_tree': receipts[0]['engine_tree']}
+        collector = {'candidate_commit': receipts[0]['candidate_commit'], 'root_tree': 'tree',
+                     'archive_sha256': receipts[0]['candidate_archive_sha256']}
+        session = release_capture.unit_session
+
+        def moved_row(data):
+            # A row imported as another unit's, measured on the same host.
+            row = data['observations'][0]
+            source = next(host['receipt'] for host in data['hosts']
+                          if host['receipt']['unit_attempt_id'] == row['unit_attempt_id'])
+            row['unit_attempt_id'] = next(
+                host['receipt']['unit_attempt_id'] for host in data['hosts']
+                if host['receipt']['instance_id'] == source['instance_id'] and host['receipt']['unit_id'] != source['unit_id'])
+
+        def imported(items, change):
+            for item, accepted in zip(items, release_capture.language_receipts(items)):
+                data = release_capture.load(item['export'])
+                # The fixture's attempts carry no release JAR; released_artifact's own tests cover its proof.
+                for host in data['hosts']:
+                    for part in host['partitions']:
+                        part['provenance']['jvm_build']['released_artifact'] = {'manifest': release}
+                change(data)
+                release_capture.normalize_language(data, manifest, release, collector, accepted,
+                                                   release_capture.fleet.work_units.load(Path(item['plan'])))
+
+        rejected = [{field: receipts[0][field] for field in session.SEMANTIC_REJECTION_FIELDS}]
+        cases = (
+            ('complete', items, receipts, [], None),
+            ('semantic rejection', items, receipts, rejected, 'semantic failure'),
+            ('missing replica', items, [receipt for receipt in receipts if receipt['replica_id'] != '3'], [],
+             'unit coverage failed'),
+            ('plan not imported', items[:1], receipts, [], 'unexpected platform'),
+            ('reused replica host', items, [{**receipt, 'instance_id': 'i-r9g-1'} if receipt['instance_id'] == 'i-r9g-2'
+                                            else receipt for receipt in receipts], [], 'share an EC2 instance'),
+            ('row moved between units', items, receipts, [], "differ from their accepted units' rows"),
+        )
+        for name, imported_items, ledger, rejections, message in cases:
+            release_capture.fleet.write_tsv(result_root / 'accepted-units.tsv', session.UNIT_RECEIPT_FIELDS, ledger)
+            release_capture.fleet.write_tsv(result_root / session.SEMANTIC_REJECTIONS,
+                                            session.SEMANTIC_REJECTION_FIELDS, rejections)
+            change = moved_row if name == 'row moved between units' else lambda data: None
+            with self.subTest(name), patch.object(release_capture.released_artifact, 'validate_saved'):
+                if message is None:
+                    imported(imported_items, change)
+                else:
+                    with self.assertRaisesRegex(ValueError, message):
+                        imported(imported_items, change)
+
     def test_rejects_missing_hosts_or_acceptance_receipts(self):
         self.data['hosts'].pop()
-        with self.assertRaisesRegex(ValueError, 'missing or duplicate hosts'):
+        with self.assertRaisesRegex(ValueError, 'missing, duplicate, or changed hosts'):
             self.normalize()
         self.setUp()
         self.receipts.pop()
-        with self.assertRaisesRegex(ValueError, 'complete plan'):
+        with self.assertRaisesRegex(ValueError, 'missing, duplicate, or changed hosts'):
             self.normalize()
 
     def test_rejects_changed_collector_archive(self):
@@ -230,26 +271,20 @@ class TestReleaseCapture(unittest.TestCase):
             self.normalize()
 
     def test_rejects_mixed_jars_and_source_only_measurements(self):
-        receipt = self.data['hosts'][0]['provenance']['jvm_build']
-        receipt['released_artifact']['manifest'] = {**self.release, 'jar_sha256': '0' * 64}
+        jvm_build = self.data['hosts'][0]['partitions'][0]['provenance']['jvm_build']
+        jvm_build['released_artifact']['manifest'] = {**self.release, 'jar_sha256': '0' * 64}
         with self.assertRaisesRegex(ValueError, 'published release'):
             self.normalize()
-        del receipt['released_artifact']
+        del jvm_build['released_artifact']
         with self.assertRaisesRegex(ValueError, 'published release'):
             self.normalize()
 
-    def test_rejects_reused_replica_host_even_with_matching_ledger(self):
-        self.data['hosts'][1]['provenance']['instance_identity']['instanceId'] = 'i-1'
-        self.receipts[1]['instance_id'] = 'i-1'
-        with self.assertRaisesRegex(ValueError, 'independent hosts'):
+    def test_rejects_changed_export_or_scoped_plan(self):
+        self.data['hosts'][0]['partitions'][0]['export_sha256'] = '0' * 64
+        with self.assertRaisesRegex(ValueError, 'accepted exports'):
             self.normalize()
-
-    def test_rejects_changed_export_or_previous_single_host_replacement(self):
-        self.data['hosts'][0]['export_sha256'] = '0' * 64
-        with self.assertRaisesRegex(ValueError, 'accepted instance or export'):
-            self.normalize()
-        self.data['plan']['replicas'] = 1
-        with self.assertRaisesRegex(ValueError, 'three-host matrix'):
+        self.data['plan']['selection'] = [['example', 'java']]
+        with self.assertRaisesRegex(ValueError, 'complete matrix'):
             self.normalize()
 
 

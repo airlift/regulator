@@ -27,9 +27,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "baseline"))
 import engine_build  # noqa: E402
 import row_protocol  # noqa: E402
 import unit_cost  # noqa: E402
+import unit_dispatch  # noqa: E402
 import unit_session  # noqa: E402
 import work_units  # noqa: E402
-from acceptance import EVIDENCE_FIELDS, capacity_prefix_sha256, read_properties, sha256_file  # noqa: E402
+from acceptance import EVIDENCE_FIELDS, load_platforms, read_properties, sha256_file  # noqa: E402
 from shard_results import write_tsv  # noqa: E402
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS  # noqa: E402
 
@@ -756,51 +757,77 @@ def verify(directory, results, java, classpath, native_runners):
         "runners_sha256": runner_hash, "receipts": receipts})
 
 
-def aggregate(directory, results, output):
-    directory, results, output = directory.resolve(), results.resolve(), output.resolve()
+def campaign_units(directories, phase):
+    """The units a language campaign phase measures across its plans: the smoke units in smoke, every unit
+    otherwise. Returns them by unit ID with each unit's protocol digest, and each plan's allocation and
+    plan digest by its shard."""
+    campaign = {"units": {}, "digests": {}, "allocations": {}, "manifests": {}}
+    for directory in directories:
+        plan = validate(directory)
+        if plan["shard_id"] in campaign["manifests"]:
+            raise ValueError(f"language plans share shard {plan['shard_id']}")
+        selected = set(smoke_units(directory)) if phase == "smoke" else None
+        for unit_id, unit in work_units.load(directory).items():
+            if selected is None or unit_id in selected:
+                campaign["units"][unit_id] = unit
+                campaign["digests"][unit_id] = unit_digest(plan["partitions"], unit["owned"])
+        campaign["allocations"][plan["shard_id"]] = {
+            platform: allocation["instance_type"] for platform, allocation in plan["platform_allocations"].items()}
+        campaign["manifests"][plan["shard_id"]] = sha256_file(directory / "plan.json")
+    return campaign
+
+
+def validate_unit_campaign(directories, receipts, campaign_id, phase="primary"):
+    """Accept a language campaign phase's unit receipts as a whole, by the baseline campaign rule: every unit of
+    the phase on every platform for each replica, its replicas on distinct instances, and one candidate."""
+    campaign = campaign_units(directories, phase)
+    unit_session.check_unit_campaign(
+        receipts, load_platforms(unit_session.DIRECTORY / "platforms.tsv"), campaign["units"], campaign["digests"],
+        campaign["allocations"], campaign["manifests"], campaign_id, (1,) if phase == "smoke" else (1, 2, 3))
+
+
+def aggregate(directory, result_root, output):
+    """Export a plan's accepted primary units from a campaign result root, each attempt revalidated from its
+    retained evidence, without rewriting it. The phase must have rejected no attempt for its semantics, a case's
+    traces must agree across its partitions, and every attempt must have measured one candidate."""
+    directory, result_root, output = directory.resolve(), result_root.resolve(), output.resolve()
     plan = validate(directory)
     if output.exists():
         raise ValueError("will not overwrite an existing fleet export")
-    plan_hash = collection.digest((directory / "plan.json").read_bytes())
+    receipts = [receipt for receipt in unit_dispatch.read_accepted_units(result_root / "accepted-units.tsv")
+                if receipt["shard_id"] == plan["shard_id"]]
+    validate_unit_campaign([directory], receipts, receipts[0]["campaign_id"] if receipts else "")
+    unit_session.check_semantic_rejections(result_root)
     observations, comparisons, hosts = [], [], []
     candidate = None
-    replica_instances = {}
     semantic_traces = {}
-    for job in plan["jobs"]:
-        result = results / job["id"]
-        if collection.load(result / "job.json") != {"job": job, "plan_sha256": plan_hash}:
-            raise ValueError("job receipt does not identify this plan")
-        partition = directory / "partitions" / job["partition"]
-        data = collection.export(partition, result, write=False)
-        saved_export = result / "language-results.json"
-        if collection.load(saved_export) != data:
-            raise ValueError("saved export differs from its raw evidence")
-        case = data["manifest"]["cases"][0]
-        for receipt in data["verification"]["receipts"].values():
-            if receipt["outcome"] == "completed":
-                previous = semantic_traces.setdefault(case["id"], receipt["trace"])
-                if previous != receipt["trace"]:
-                    raise ValueError("verification-failed: language partitions disagree")
-        provenance = data["provenance"]
-        identity = {key: provenance[key] for key in ("source_commit", "source_tree", "comparators_sha256", "jdk")}
-        if candidate is None:
+    for receipt in receipts:
+        attempt = unit_dispatch.unit_attempt_directory(result_root, receipt)
+        if validate_unit_attempt(attempt, directory) != receipt:
+            raise ValueError(f"accepted unit attempt {receipt['unit_attempt_id']} differs from its evidence")
+        partitions = []
+        for results in sorted((attempt / "partitions").iterdir()):
+            data = collection.load(results / "language-results.json")
+            case = data["manifest"]["cases"][0]
+            for verification in data["verification"]["receipts"].values():
+                if verification["outcome"] == "completed":
+                    previous = semantic_traces.setdefault(case["id"], verification["trace"])
+                    if previous != verification["trace"]:
+                        raise ValueError("verification-failed: language partitions disagree")
+            provenance = data["provenance"]
+            identity = {key: provenance[key] for key in CANDIDATE_FIELDS}
+            if candidate not in (None, identity):
+                raise ValueError("mixed candidates or comparator versions")
             candidate = identity
-        if identity != candidate or provenance["platform"] != job["platform"]:
-            raise ValueError("mixed candidates, comparator versions, or platforms")
-        instance = provenance["instance_identity"]
-        if not instance["instanceId"] or instance["instanceType"] != job["instance_type"]:
-            raise ValueError("job host does not match platform")
-        key = (job["platform"], job["partition"])
-        if instance["instanceId"] in replica_instances.setdefault(key, set()):
-            raise ValueError("replicas must use independent hosts")
-        replica_instances[key].add(instance["instanceId"])
-        hosts.append({"job": job, "provenance": provenance,
-                      "export_sha256": collection.digest((result / "language-results.json").read_bytes())})
-        for row_id, row in data["observations"].items():
-            observations.append({**row, "job": job["id"], "id": row_id})
-        for row in data["comparisons"]:
-            comparisons.append({**row, "job": job["id"]})
-    collection.save(output, {"schema_version": 1, "plan": plan, "candidate": candidate,
+            partitions.append({"id": results.name, "provenance": provenance,
+                               "export_sha256": sha256_file(results / "language-results.json")})
+            for row_id, row in data["observations"].items():
+                observations.append({**row, "unit_attempt_id": receipt["unit_attempt_id"], "partition": results.name,
+                                     "id": row_id})
+            for row in data["comparisons"]:
+                comparisons.append({**row, "unit_attempt_id": receipt["unit_attempt_id"], "partition": results.name})
+        hosts.append({"receipt": receipt, "partitions": partitions})
+    collection.save(output, {"schema_version": 2, "plan": plan, "candidate": candidate,
                              "hosts": hosts, "observations": observations, "comparisons": comparisons})
 
 
