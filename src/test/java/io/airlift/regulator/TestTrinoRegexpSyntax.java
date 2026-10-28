@@ -95,6 +95,8 @@ public class TestTrinoRegexpSyntax
                 unsupported("\\xE9", "non-ASCII byte escapes", 0),
                 unsupported("\\351", "non-ASCII byte escapes", 0),
                 unsupported("\\uD800", "surrogate escapes", 0),
+                unsupported("\\x{D800}", "surrogate escapes", 0),
+                unsupported("[\\x{DFFF}]", "surrogate escapes", 1),
                 unsupportedFlag("(?U)x", "U", 2),
                 unsupportedFlag("(?u)x", "u", 2),
                 unsupportedFlag("(?d)x", "d", 2));

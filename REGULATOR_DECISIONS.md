@@ -282,6 +282,8 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   backreferences, atomic groups, and possessive quantifiers remain deterministic
   compile-time rejections because their observable semantics do not map to the
   current bounded linear-time execution contract.
+- Escapes that name a lone surrogate, which the JDK accepts, are rejected as
+  unsupported, because no UTF-8 text contains a lone surrogate.
 
 Java match positions remain UTF-8 byte offsets over `Slice`, not the JDK's
 UTF-16 code-unit offsets.
