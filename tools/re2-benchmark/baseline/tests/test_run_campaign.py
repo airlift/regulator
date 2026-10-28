@@ -1559,7 +1559,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(cleanup["bucket_removed"], "unverified")
             self.assertEqual(cleanup["cleanup_status"], "failed")
 
-    def test_preflight_failure_removes_what_setup_created_and_retries_as_infrastructure(self):
+    def test_preflight_failure_removes_what_setup_created_and_retries_unless_inputs_were_refused(self):
         source = AWS_RUNNER.read_text()
         cleanup_function = source[
             source.index("cleanup()\n{"):
@@ -1568,16 +1568,20 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             source.index("record_failure_classification()\n{"):
             source.index("\n}\n\nspot_request_status()") + 2]
         # Cleanup runs at two points. Before setup created anything, as after a failed default VPC or
-        # security group lookup. After setup created the bucket and instance profile, as after a launch
-        # that failed before its RunInstances request.
-        for created in (False, True):
-            with self.subTest(created=created), tempfile.TemporaryDirectory() as temporary_directory:
+        # security group lookup, or a refused frozen input. After setup created the bucket and instance
+        # profile, as after a launch that failed before its RunInstances request.
+        for created, failure, classification in (
+                (False, "false", "retryable-infrastructure"),
+                (True, "false", "retryable-infrastructure"),
+                (False, "reject_input 'Frozen candidate archive SHA-256 mismatch'", "input-rejection")):
+            with self.subTest(created=created, failure=failure), \
+                    tempfile.TemporaryDirectory() as temporary_directory:
                 session = Path(temporary_directory) / "session"
                 session.mkdir()
                 resources = "test" if created else ""
                 script = (
                     f"SESSION_DIR={session}\n"
-                    "FAILURE_CLASSIFICATION=\n"
+                    "FAILURE_CLASSIFICATION=none\n"
                     "FAILURE_DETAIL=preflight\n"
                     "LAUNCH_ATTEMPTED=0\n"
                     "INSTANCE_IDS=()\n"
@@ -1597,8 +1601,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     "verify_aws_resource_absent() { printf 'verified %s\\n' \"$1\" >&2; }\n"
                     f"{classification_function}\n"
                     f"{cleanup_function}\n"
-                    "false\n"
-                    "cleanup\n")
+                    "trap cleanup EXIT\n"
+                    f"{failure}\n"
+                    "exit 1\n")
 
                 result = subprocess.run(
                     ["bash"], input=script, text=True, capture_output=True, check=False)
@@ -1609,8 +1614,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 self.assertEqual(cleanup["iam_removed"], "verified")
                 self.assertEqual(cleanup["bucket_removed"], "verified")
                 self.assertEqual(cleanup["cleanup_status"], "verified")
-                # No instance can exist, so the controller retries it as infrastructure.
-                self.assertEqual(cleanup["failure_classification"], "retryable-infrastructure")
+                # No instance can exist, so the controller retries it as infrastructure, unless the
+                # wrapper refused an input that a retry would refuse again.
+                self.assertEqual(cleanup["failure_classification"], classification)
                 if created:
                     self.assertLessEqual(
                         {"removed delete-instance-profile", "removed delete-role", "removed delete-bucket",
@@ -2923,7 +2929,8 @@ class FakeUnitHost:
     "stall-lose-calibration" its calibrations never land. "rebalance"
     stops the host before it fetches the lease, as a rebalance recommendation does. A host the
     fleet finds no Spot capacity for, or whose boot the fleet fails, exits before its first
-    heartbeat, as the wrapper's launch does. Every host that launched uploads its host archive
+    heartbeat, as the wrapper's launch does, and one whose inputs the fleet refuses exits
+    before it launches. Every host that launched uploads its host archive
     as it exits, as the user data's exit trap does, even one that failed during bootstrap.
     In a calibrated fleet each lease uploads its host calibrations, except when it is scripted
     to "lose-calibration". A lease scripted to "chain" takes its before calibration from the
@@ -2970,6 +2977,7 @@ class FakeUnitHost:
         self.full = self.market == "spot" and fleet.full_spot.get(self.platform, 0) > 0
         if self.full:
             fleet.full_spot[self.platform] -= 1
+        self.refused = fleet.refused_inputs(self)
         self.objects = {}
         self.leases = {}
         self.sequence = 1
@@ -3002,9 +3010,11 @@ class FakeUnitHost:
         if not self.booted:
             self.session_directory.mkdir(parents=True)
             self.booted = True
-            # A launch that finds no capacity never publishes its session.
+            # A launch that finds no capacity, or whose inputs are refused, never publishes its session.
             if self.full:
                 return self.exit(1, "retryable-spot", "launch-capacity:InsufficientInstanceCapacity")
+            if self.refused:
+                return self.exit(1, "input-rejection", "Frozen candidate archive SHA-256 mismatch")
             other = "arm" if self.architecture == "intel" else "intel"
             (self.session_directory / "session.txt").write_text(
                 f"session={self.session}\nbucket=bucket\ninput_prefix={self.session}/input\n"
@@ -3123,7 +3133,7 @@ class FakeUnitHost:
 
     def exit(self, status, classification="none", detail="-"):
         """Clean up as the wrapper does: recover the uploads, then record verified cleanup."""
-        if self.booted and not self.full:
+        if self.booted and not self.full and not self.refused:
             self.put(self.archive_key, b"host archive")
         objects = self.session_directory / "recovered-uploads" / "objects"
         for key, (body, _) in self.objects.items():
@@ -3160,10 +3170,11 @@ class FakeUnitFleet:
     """Unit worker hosts the stubbed wrapper launches, with their S3 leases and uploads."""
 
     def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None, calibrated=False,
-                 failed_boot=lambda host: False, unit_scripts=None):
+                 failed_boot=lambda host: False, refused_inputs=lambda host: False, unit_scripts=None):
         self.scratch = scratch
         self.calibrated = calibrated
         self.failed_boot = failed_boot
+        self.refused_inputs = refused_inputs
         self.scripts = scripts or {}
         self.unit_scripts = unit_scripts or {}
         self.abort_after = abort_after
@@ -3552,6 +3563,16 @@ class TestUnitWorkers(unittest.TestCase):
             unresolved = self.unresolved(Path(temporary) / "results")
             self.assertEqual({"r8i"}, {platform for platform, _, _ in unresolved})
             self.assertTrue(all("exhausted their replacements" in detail for detail in unresolved.values()))
+        with self.subTest(scenario="inputs refused"), tempfile.TemporaryDirectory() as temporary:
+            # A wrapper that refuses its frozen inputs would refuse them again, so its slot gives up at once.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", refused_inputs=lambda host: host.platform == "r8i")
+            with self.assertRaisesRegex(SystemExit, "unresolved units: r8i/"):
+                self.run_phase(Path(temporary), fleet, "primary", shards, 12, 6)
+            self.assertEqual(6, sum(host.platform == "r8i" for host in fleet.hosts))
+            unresolved = self.unresolved(Path(temporary) / "results")
+            self.assertEqual({"r8i"}, {platform for platform, _, _ in unresolved})
+            self.assertTrue(all(re.search(r"unit worker r8i/.* was refused before launch: Frozen candidate archive "
+                                          "SHA-256 mismatch$", detail) for detail in unresolved.values()))
         with self.subTest(scenario="restart at every poll"), tempfile.TemporaryDirectory() as temporary:
             # A restart at every poll, and one after the phase ends, keeps each slot's count and its giving up.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", failed_boot=lambda host: host.platform == "r8i")

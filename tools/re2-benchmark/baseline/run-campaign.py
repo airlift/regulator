@@ -3507,12 +3507,16 @@ class UnitDispatcher:
 
         A worker that started, by uploading worker evidence, clears its slot's count. One that failed before it
         started passes the count, one higher, to its replacement, and a slot past its replacements gives up, as a
-        host job does, so its pool opens no new slot. A launch that found no capacity, or a wrapper never created,
-        booted nothing.
+        host job does, so its pool opens no new slot. A slot whose wrapper refused its inputs gives up at once,
+        since a replacement would be refused the same way. A launch that found no capacity, or a wrapper never
+        created, booted nothing.
         """
         pool = unit_worker_pool(job)
         if started:
             failures = 0
+        elif status != 0 and classification == "input-rejection":
+            self.exhausted[pool] = f"unit worker {job.identity} was refused before launch: {detail}"
+            return
         elif (status != 0 and not terminated and detail != WRAPPER_NOT_CREATED and
               classification != "retryable-capacity" and
               not (classification == "retryable-spot" and detail.startswith("launch-capacity:"))):

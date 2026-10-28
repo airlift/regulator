@@ -652,8 +652,10 @@ against the host's calibrations, is retained, and is added to
   replacement. A worker whose uploads include a heartbeat, a completion or an
   interruption bundle has started, even if no heartbeat landed. The host
   evidence its user data uploads on exit, even after a failed bootstrap, does
-  not show a start. A slot whose worker has failed 3 times gives up, and once the
-  pool has no worker or slot left, its queued work stays unresolved. Each
+  not show a start. A slot whose worker has failed 3 times gives up, as does one
+  whose worker's wrapper refused its inputs (`input-rejection`, under
+  [recovery and evidence](#recovery-and-evidence)), and once the pool has no
+  worker or slot left, its queued work stays unresolved. Each
   worker's `starting` record in `job-attempts.tsv` names its slot (`slot`, the
   host epoch of the slot's first worker) and the failures it inherited
   (`slot_failures`), so a restarted controller resumes every slot's count.
@@ -707,7 +709,11 @@ new result root.
 Failed jobs record their failure type. A session that fails before its first
 RunInstances request, in setup such as the default VPC lookup or the instance
 profile, is `retryable-infrastructure`, since no instance can exist; cleanup
-still removes and verifies the bucket and profile it created. A failed
+still removes and verifies the bucket and profile it created. A session whose
+frozen inputs fail their checks before launch, such as a dirty checkout or a
+candidate archive whose SHA-256 or engine tree differs, is instead
+`input-rejection`, since a retry would fail them again; such a job, or a unit
+worker's slot, is not retried. A failed
 language batch or engine build and its invalid artifacts remain unresolved
 after verified cleanup while independent jobs continue; [unit
 dispatch](#unit-dispatch) retries a failed unit instead. Unverifiable cleanup
