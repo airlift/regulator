@@ -59,7 +59,7 @@ public class TestPublicMatchCount
             throws Exception
     {
         TrinoRegexp trino = TrinoRegexp.compile(utf8Slice("[,;]"));
-        Re2 pattern = trino.pattern();
+        Re2 pattern = trino.re2();
         long reservedDfaMemory = pattern.forwardProgramForDiagnostics().dfaMemory();
         assertThat(pattern.isSingleByteMatcherComputed()).isFalse();
         pattern.forwardProgramForDiagnostics().getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
@@ -89,7 +89,7 @@ public class TestPublicMatchCount
             assertThat(literal.isSingleByteMatcherComputed()).isFalse();
             assertThat(literal.matcher(utf8Slice("a"), 0).find()).isTrue();
             assertThat(literal.isSingleByteMatcherComputed()).isTrue();
-            assertThat(literal.pattern().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
+            assertThat(literal.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
         }
 
         Re2 smallBudget = Re2.compile(utf8Slice("[,;]"), Re2.Options.defaults().setMaxMemory(1024));

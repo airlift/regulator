@@ -115,8 +115,8 @@ public final class VectorScannerProbe
     private static void verify(String expression, String operations, String requiredLiteral, boolean asciiFolded, String text, String group, int count)
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
-        check(regexp.pattern().usesScanPlanForDiagnostics(), expression + ": no scan plan");
-        check(regexp.pattern().usesAsciiFoldedScanExecutorForDiagnostics() == asciiFolded, expression + ": unexpected executor");
+        check(regexp.re2().usesScanPlanForDiagnostics(), expression + ": no scan plan");
+        check(regexp.re2().usesAsciiFoldedScanExecutorForDiagnostics() == asciiFolded, expression + ": unexpected executor");
         ParseResult parsed = TrinoRegexpParser.parse(utf8Slice(expression), Regexp.LIKE_PERL);
         ScanPlan plan = ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), ByteFrequencies.uniform());
         check(plan != null, expression + ": no plan");

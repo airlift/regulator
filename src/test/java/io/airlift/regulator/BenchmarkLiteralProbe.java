@@ -88,7 +88,7 @@ public class BenchmarkLiteralProbe
         if (!program.canPrefixAccel() || program.prefixAccelStrategy(input.length()) != Prog.PrefixAccelStrategy.REPEATED_BYTE) {
             throw new IllegalStateException("Benchmark did not select the repeated-byte prefix scan");
         }
-        if (!trino.pattern().usesScanPlanForDiagnostics()) {
+        if (!trino.re2().usesScanPlanForDiagnostics()) {
             throw new IllegalStateException("Benchmark did not select the scan plan");
         }
         if (re2Count() != expectedCount() || trinoCount() != expectedCount() || dfaSearch() < 0) {

@@ -245,7 +245,7 @@ public class BenchmarkSpecializedTrinoRegexp
             workload.requireOperation(operation);
             rotate(workload);
             regexp = TrinoRegexp.compile(workload.pattern());
-            if (regexp.pattern() == null || !regexp.pattern().usesScanPlanForDiagnostics() || regexp.usesGeneratedBytecode()) {
+            if (regexp.re2() == null || !regexp.re2().usesScanPlanForDiagnostics() || regexp.usesGeneratedBytecode()) {
                 throw new IllegalStateException("default compile does not interpret a scan plan: " + workloadId);
             }
         }
@@ -264,7 +264,7 @@ public class BenchmarkSpecializedTrinoRegexp
                 throw new IllegalStateException("regular-engine compile of %s is a %s, but its default compile is a %s"
                         .formatted(definition.workloadId(), regularEngine.getClass().getSimpleName(), data.regexp.getClass().getSimpleName()));
             }
-            if (regularEngine.pattern().usesScanPlanForDiagnostics()) {
+            if (regularEngine.re2().usesScanPlanForDiagnostics()) {
                 throw new IllegalStateException("regular-engine compile has a scan plan: " + definition.workloadId());
             }
         }

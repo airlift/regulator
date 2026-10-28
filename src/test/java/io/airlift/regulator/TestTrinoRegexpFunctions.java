@@ -209,7 +209,7 @@ public class TestTrinoRegexpFunctions
         // Each search resumes after the previous match, so an occurrence overlapping it is
         // skipped, but one at a later start position is found.
         TrinoRegexp overlapping = TrinoRegexp.compile(utf8("aba"));
-        assertThat(overlapping.pattern().booleanPartialMatchStrategyForDiagnostics())
+        assertThat(overlapping.re2().booleanPartialMatchStrategyForDiagnostics())
                 .isEqualTo(Re2.BooleanPartialMatchStrategy.EXACT_LITERAL);
         Slice overlappingSource = utf8("ababa_aba");
         assertThat(overlapping.count(overlappingSource)).isEqualTo(2);
@@ -294,9 +294,9 @@ public class TestTrinoRegexpFunctions
 
         assertThat(regexp.usesLiteralGapMatcherForDiagnostics()).isFalse();
         assertThat(regexp.contains(utf8("xxalpha💰omegayy"))).isTrue();
-        assertThat(regexp.pattern().booleanPartialMatchStrategyForDiagnostics())
+        assertThat(regexp.re2().booleanPartialMatchStrategyForDiagnostics())
                 .isEqualTo(Re2.BooleanPartialMatchStrategy.GENERAL);
-        assertThat(regexp.pattern().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH))
+        assertThat(regexp.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH))
                 .as("literal-gap contains route initialized the existing general boolean-search DFA")
                 .isNotNull();
         assertThat(regexp.contains(utf8("xxalphaomegayy"))).isFalse();
@@ -319,7 +319,7 @@ public class TestTrinoRegexpFunctions
 
         long retainedSize = regexp.orderedLiteralMatcherRetainedSizeForDiagnostics();
         assertThat(regexp.usesOrderedLiteralMatcherForDiagnostics()).isTrue();
-        assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.pattern().forwardProgramForDiagnostics().dfaMemory())
+        assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
                 .isEqualTo(retainedSize);
 
         TrinoRegexp fallback = null;
@@ -348,19 +348,19 @@ public class TestTrinoRegexpFunctions
         Re2 baseline = Re2.compileParsed(pattern, TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL), Regexp.LIKE_PERL, 96L << 20);
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
 
-        LiteralSearchKernel search = regexp.pattern().literalSearchForDiagnostics();
+        LiteralSearchKernel search = regexp.re2().literalSearchForDiagnostics();
         assertThat(search).isNotNull();
         assertThat(baseline.literalSearchForDiagnostics()).isNull();
-        assertThat(regexp.pattern().usesScanPlanForDiagnostics()).isFalse();
-        assertThat(regexp.pattern().forwardProgramForDiagnostics().size()).isEqualTo(baseline.forwardProgramForDiagnostics().size());
-        assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.pattern().forwardProgramForDiagnostics().dfaMemory())
+        assertThat(regexp.re2().usesScanPlanForDiagnostics()).isFalse();
+        assertThat(regexp.re2().forwardProgramForDiagnostics().size()).isEqualTo(baseline.forwardProgramForDiagnostics().size());
+        assertThat(baseline.forwardProgramForDiagnostics().dfaMemory() - regexp.re2().forwardProgramForDiagnostics().dfaMemory())
                 .isEqualTo(search.estimatedRetainedSize());
 
         TrinoRegexp fallback = null;
         for (long maxMemory = 512; maxMemory <= 64 * 1024; maxMemory += 64) {
             try {
                 TrinoRegexp candidate = TrinoRegexp.compile(pattern, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory));
-                if (candidate.pattern().literalSearchForDiagnostics() == null) {
+                if (candidate.re2().literalSearchForDiagnostics() == null) {
                     fallback = candidate;
                     break;
                 }
@@ -370,8 +370,8 @@ public class TestTrinoRegexpFunctions
             }
         }
         assertThat(fallback).isNotNull();
-        assertThat(fallback.pattern().forwardProgramForDiagnostics().dfaMemory()).isLessThan(search.estimatedRetainedSize());
-        assertThat(fallback.pattern().booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.CONTAINS);
+        assertThat(fallback.re2().forwardProgramForDiagnostics().dfaMemory()).isLessThan(search.estimatedRetainedSize());
+        assertThat(fallback.re2().booleanPartialMatchStrategyForDiagnostics()).isEqualTo(Re2.BooleanPartialMatchStrategy.CONTAINS);
         assertThat(fallback.usesDotStarLiteralSpanMatcherForDiagnostics()).isTrue();
         Slice source = utf8("xxliteralyy\nliteral");
         assertThat(fallback.contains(source)).isTrue();
@@ -484,7 +484,7 @@ public class TestTrinoRegexpFunctions
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8("ERROR|WARN|FATAL"));
         operation.accept(regexp);
-        assertThat(regexp.pattern()).isNull();
+        assertThat(regexp.re2()).isNull();
     }
 
     @Test
@@ -540,7 +540,7 @@ public class TestTrinoRegexpFunctions
     public void testLargeUnicodeRepeatUsesCompactProgram()
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8("\\p{L}{256}"));
-        assertThat(regexp.pattern().usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
+        assertThat(regexp.re2().usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
 
         Slice source = utf8("!" + "δ".repeat(300) + "?" + "a".repeat(256));
         assertThat(regexp.contains(source)).isTrue();
@@ -556,7 +556,7 @@ public class TestTrinoRegexpFunctions
     public void testUnboundedUnicodeRepeatUsesCompactProgram()
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8("\\p{L}+"));
-        assertThat(regexp.pattern().usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
+        assertThat(regexp.re2().usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
 
         Slice source = utf8("1δé!abc?");
         assertThat(regexp.contains(source)).isTrue();
@@ -577,11 +577,11 @@ public class TestTrinoRegexpFunctions
     private static void assertNoCachedDfa(TrinoRegexp regexp)
     {
         for (Dfa.DfaInstance.Kind kind : Dfa.DfaInstance.Kind.values()) {
-            assertThat(regexp.pattern().forwardProgramForDiagnostics().cachedDfaIfPresent(kind))
+            assertThat(regexp.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(kind))
                     .as("direct boundary operation initialized %s DFA", kind)
                     .isNull();
         }
-        assertThat(regexp.pattern().isReverseProgramComputed()).isFalse();
+        assertThat(regexp.re2().isReverseProgramComputed()).isFalse();
     }
 
     @Test
@@ -1004,20 +1004,20 @@ public class TestTrinoRegexpFunctions
     @Test
     public void testForwardOnlyCountEligibility()
     {
-        Re2 delimiter = TrinoRegexp.compile(utf8(",")).pattern();
+        Re2 delimiter = TrinoRegexp.compile(utf8(",")).re2();
         assertThat(delimiter.countMatches(utf8("a,b,,c"))).isEqualTo(3);
 
-        Re2 anchored = TrinoRegexp.compile(utf8("^a")).pattern();
+        Re2 anchored = TrinoRegexp.compile(utf8("^a")).re2();
         assertThat(anchored.countMatches(utf8("aa"))).isEqualTo(1);
 
-        Re2 nullable = TrinoRegexp.compile(utf8("x*")).pattern();
+        Re2 nullable = TrinoRegexp.compile(utf8("x*")).re2();
         assertThat(nullable.countMatches(utf8("xxx"))).isEqualTo(-1);
     }
 
     @Test
     public void testTrinoBeginLineCountUsesDfa()
     {
-        Re2 pattern = TrinoRegexp.compile(utf8("(?m)^[a-z]+")).pattern();
+        Re2 pattern = TrinoRegexp.compile(utf8("(?m)^[a-z]+")).re2();
         Prog program = pattern.forwardProgramForDiagnostics();
         Slice input = utf8("one\ntwo\n");
 
@@ -1101,7 +1101,7 @@ public class TestTrinoRegexpFunctions
     private static void assertSingleByteRepeatOperationsMatchGeneralMatcher(Slice pattern, Slice source)
     {
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
-        RegexpMatcher matcher = regexp.pattern().matcher(source);
+        RegexpMatcher matcher = regexp.re2().matcher(source);
         List<MatchBoundary> matches = new ArrayList<>();
         List<Slice> groups = new ArrayList<>();
         while (matcher.find()) {
@@ -1117,7 +1117,7 @@ public class TestTrinoRegexpFunctions
         assertThat(regexp.position(source, 1, matches.size() + 1L)).isEqualTo(-1);
 
         int byteStart = SliceUtf8.offsetOfCodePoint(source, 1);
-        RegexpMatcher offsetMatcher = regexp.pattern().matcher(source);
+        RegexpMatcher offsetMatcher = regexp.re2().matcher(source);
         long expectedOffsetPosition = offsetMatcher.find(byteStart)
                 ? SliceUtf8.countCodePoints(source, 0, offsetMatcher.start()) + 1L
                 : -1;

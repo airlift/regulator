@@ -41,7 +41,7 @@ public class TestTaggedAlternationProgram
         Slice input = utf8Slice("foo foo");
         for (RegexpMatcher matcher : List.of(
                 JavaRegexp.compile(expression).matcher(input),
-                TrinoRegexp.compile(expression).pattern().matcher(input))) {
+                TrinoRegexp.compile(expression).re2().matcher(input))) {
             assertThat(matcher.find()).isTrue();
             assertMatch(matcher, 0, 3, 1);
             assertThat(matcher.find()).isTrue();

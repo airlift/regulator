@@ -141,7 +141,7 @@ public class TestJavaRegexpDifferential
         String startAnchoredPlan = "^[xy]([a-z]+)$";
         String unanchoredPlan = "x([^/]+)/$";
         assertThat(JavaRegexp.compile(utf8Slice(startAnchoredPlan)).matcher(utf8Slice("")).startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
-        assertThat(JavaRegexp.compile(utf8Slice(unanchoredPlan)).pattern().usesScanPlanForDiagnostics()).isTrue();
+        assertThat(JavaRegexp.compile(utf8Slice(unanchoredPlan)).re2().usesScanPlanForDiagnostics()).isTrue();
         List<String> inputs = List.of("a\r\nb", "ab\r\n", "\r\nab", "a\nb", "\nab\n", "a\rb", "\r", "xaéy", "aáb", "a b a", "xab\r\n", "\r\nxé/\r\n");
         for (String pattern : List.of(
                 "^",

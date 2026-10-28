@@ -335,7 +335,7 @@ public final class DfaAbsolutePointerProbe
         }
         Slice input = wrappedBuffer(bytes);
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*(x|y).*"));
-        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
+        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
         int handOffCount = dfa.countSelfLoopMatchHandOffCount();
         for (int iteration = 0; iteration < 4; iteration++) {
             check(pattern.count(input) == 1, "count self-loop match hand-off changed the count");
@@ -357,7 +357,7 @@ public final class DfaAbsolutePointerProbe
     private static void exerciseCountSelfLoopMatchHandOffWithPairedRows()
     {
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*(x|y).*"));
-        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
+        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics().getCachedDfa(FIRST_MATCH);
         Slice noMatch = utf8Slice("\u00e9a".repeat(200));
         for (int iteration = 0; iteration < 2; iteration++) {
             check(pattern.count(noMatch) == 0, "count self-loop paired warm-up changed the count");

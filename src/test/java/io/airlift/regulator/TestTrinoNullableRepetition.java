@@ -225,7 +225,7 @@ public class TestTrinoNullableRepetition
         })).isEqualTo(utf8Slice("_"));
 
         TrinoRegexp finalLineRegexp = TrinoRegexp.compile(utf8Slice("(?:a+?){2,}$"));
-        assertThat(finalLineRegexp.pattern().findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
+        assertThat(finalLineRegexp.re2().findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(finalLineRegexp.contains(source)).isTrue();
         assertThat(finalLineRegexp.extract(source)).isEqualTo(utf8Slice("aaa"));
 
@@ -256,7 +256,7 @@ public class TestTrinoNullableRepetition
         String inputText = "x".repeat(512) + "a".repeat(65_536) + "b";
         Slice input = utf8Slice(inputText);
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("((?:a?|b)*)"));
-        Re2 pattern = regexp.pattern();
+        Re2 pattern = regexp.re2();
         assertThat(pattern.isReverseProgramComputed()).isFalse();
 
         RegexpMatcher matcher = pattern.matcher(input);
@@ -300,7 +300,7 @@ public class TestTrinoNullableRepetition
             // loop may clone its epsilon-reachable prefix, but never the post-consumption graph.
             pattern = "(?:(?:" + pattern + ")*|c?)";
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(pattern));
-            int size = regexp.pattern().programSize();
+            int size = regexp.re2().programSize();
             assertThat(size).isLessThan((depth + 8) * (depth + 8));
             assertThat(size).isGreaterThanOrEqualTo(previousSize);
             previousSize = size;
@@ -319,7 +319,7 @@ public class TestTrinoNullableRepetition
 
     private static List<MatchSnapshot> regulatorMatches(String pattern, Slice input, int start, int end)
     {
-        RegexpMatcher matcher = TrinoRegexp.compile(utf8Slice(pattern)).pattern().matcher(input);
+        RegexpMatcher matcher = TrinoRegexp.compile(utf8Slice(pattern)).re2().matcher(input);
         matcher.reset(input, start, end);
         List<MatchSnapshot> matches = new ArrayList<>();
         while (matcher.find()) {

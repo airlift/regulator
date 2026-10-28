@@ -70,7 +70,7 @@ public class BenchmarkLiteralGapMatcher
             wildcardControl = new TrinoLikeWildcardMatcher(elements, 0, matcherEnd, false);
             likePattern = TrinoLikePattern.compile(likePatternSlice);
             trinoRegexp = TrinoRegexp.compile(Slices.utf8Slice(benchmarkInput.regexpPattern()));
-            regexpPattern = trinoRegexp.pattern();
+            regexpPattern = trinoRegexp.re2();
 
             boolean likeUsesSharedMatcher = scenario != Scenario.DENSE_SHORT_FALSE_32K && scenario != Scenario.DENSE_SHORT_LATE_32K;
             if (sharedMatcher == null ||

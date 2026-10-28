@@ -196,7 +196,7 @@ public class TestTrinoReplacementPlan
         if (useMatcher) {
             return regexp.replaceWithMatcher(source, plan);
         }
-        RegexpMatcher matcher = regexp.pattern().matcher(source, 0);
+        RegexpMatcher matcher = regexp.re2().matcher(source, 0);
         while (matcher.find()) {
             plan.addMatch(matcher.start(), matcher.end());
         }

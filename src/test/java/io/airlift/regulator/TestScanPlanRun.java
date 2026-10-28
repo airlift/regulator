@@ -186,7 +186,7 @@ public class TestScanPlanRun
     private static SetCase java(String set)
     {
         JavaRegexp.Options options = JavaRegexp.Options.defaults();
-        return new SetCase(set, expression -> JavaRegexpParser.parse(utf8Slice(expression), options.parseFlags()), JavaRegexp.compileWithoutScanPlanForTesting(utf8Slice(set), options).pattern());
+        return new SetCase(set, expression -> JavaRegexpParser.parse(utf8Slice(expression), options.parseFlags()), JavaRegexp.compileWithoutScanPlanForTesting(utf8Slice(set), options).re2());
     }
 
     private static SetCase rust(String set)
@@ -195,7 +195,7 @@ public class TestScanPlanRun
         return new SetCase(
                 set,
                 expression -> RustRegexpParser.parse(utf8Slice(expression), options.syntaxFlags(), options.nestLimit()),
-                RustRegexp.compileWithoutScanPlanForTesting(utf8Slice(set), options).pattern());
+                RustRegexp.compileWithoutScanPlanForTesting(utf8Slice(set), options).re2());
     }
 
     @Test

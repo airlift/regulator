@@ -252,14 +252,14 @@ public final class RustRegexp
         }
     }
 
-    private final Re2 pattern;
+    private final Re2 re2;
     // The crate's bytes API, where an empty match may split a UTF-8 character.
     private final boolean bytes;
 
-    private RustRegexp(Re2 pattern)
+    private RustRegexp(Re2 re2)
     {
-        this.pattern = requireNonNull(pattern, "pattern is null");
-        this.bytes = (pattern.flags() & Regexp.LATIN1) != 0;
+        this.re2 = requireNonNull(re2, "re2 is null");
+        this.bytes = (re2.flags() & Regexp.LATIN1) != 0;
     }
 
     /// Validates a pattern and returns its capture metadata without constructing a matching
@@ -324,9 +324,9 @@ public final class RustRegexp
         return new RustRegexp(options.generateBytecode() ? Re2.withGeneratedBytecode(compiled) : compiled);
     }
 
-    Re2 pattern()
+    Re2 re2()
     {
-        return pattern;
+        return re2;
     }
 
     /// Returns whether this compiled pattern has a class generated for it, which only
@@ -334,14 +334,14 @@ public final class RustRegexp
     /// would run its specialized scan runs the generated class.
     public boolean usesGeneratedBytecode()
     {
-        return pattern.usesGeneratedBytecode();
+        return re2.usesGeneratedBytecode();
     }
 
     public boolean find(Slice input)
     {
         requireNonNull(input, "input is null");
-        if (!pattern.canMatchEmpty()) {
-            return pattern.find(input);
+        if (!re2.canMatchEmpty()) {
+            return re2.find(input);
         }
         return search(input, 0, input.length(), null);
     }
@@ -352,17 +352,17 @@ public final class RustRegexp
     /// returned.
     public long count(Slice input)
     {
-        return pattern.count(input);
+        return re2.count(input);
     }
 
     public boolean lookingAt(Slice input)
     {
-        return pattern.lookingAt(requireNonNull(input, "input is null"));
+        return re2.lookingAt(requireNonNull(input, "input is null"));
     }
 
     public boolean matches(Slice input)
     {
-        return pattern.matches(requireNonNull(input, "input is null"));
+        return re2.matches(requireNonNull(input, "input is null"));
     }
 
     /// Returns whether the pattern has a match in `[start, end)`.
@@ -374,25 +374,25 @@ public final class RustRegexp
     /// Returns whether the pattern matches at `start` within `[start, end)`.
     public boolean lookingAt(Slice input, int start, int end)
     {
-        return pattern.lookingAt(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
+        return re2.lookingAt(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
     }
 
     /// Returns whether the pattern matches all of `[start, end)`.
     public boolean matches(Slice input, int start, int end)
     {
-        return pattern.matches(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
+        return re2.matches(requireNonNull(input, "input is null"), start, end) && isSearchStart(input, start);
     }
 
     /// Creates a mutable matcher retaining every capturing group.
     public RegexpMatcher matcher(Slice input)
     {
-        return pattern.matcher(requireNonNull(input, "input is null"));
+        return re2.matcher(requireNonNull(input, "input is null"));
     }
 
     /// Creates a reusable matcher retaining group zero and the requested prefix of capturing groups.
     public RegexpMatcher matcher(Slice input, int retainedCapturingGroupCount)
     {
-        return pattern.matcher(requireNonNull(input, "input is null"), retainedCapturingGroupCount);
+        return re2.matcher(requireNonNull(input, "input is null"), retainedCapturingGroupCount);
     }
 
     /// Finds a match and writes byte-offset start/end pairs into caller-owned storage.
@@ -410,26 +410,26 @@ public final class RustRegexp
     /// Matches at the beginning of the input and writes byte-offset start/end pairs.
     public boolean lookingAtInto(Slice input, int[] groups)
     {
-        return pattern.lookingAtInto(requireNonNull(input, "input is null"), groups);
+        return re2.lookingAtInto(requireNonNull(input, "input is null"), groups);
     }
 
     /// Matches at `start` within `[start, end)` and writes byte-offset start/end pairs.
     public boolean lookingAtInto(Slice input, int start, int end, int[] groups)
     {
-        boolean matched = pattern.lookingAtInto(requireNonNull(input, "input is null"), start, end, groups);
+        boolean matched = re2.lookingAtInto(requireNonNull(input, "input is null"), start, end, groups);
         return anchoredAt(input, start, matched, groups);
     }
 
     /// Matches the complete input and writes byte-offset start/end pairs.
     public boolean matchesInto(Slice input, int[] groups)
     {
-        return pattern.matchesInto(requireNonNull(input, "input is null"), groups);
+        return re2.matchesInto(requireNonNull(input, "input is null"), groups);
     }
 
     /// Matches all of `[start, end)` and writes byte-offset start/end pairs.
     public boolean matchesInto(Slice input, int start, int end, int[] groups)
     {
-        boolean matched = pattern.matchesInto(requireNonNull(input, "input is null"), start, end, groups);
+        boolean matched = re2.matchesInto(requireNonNull(input, "input is null"), start, end, groups);
         return anchoredAt(input, start, matched, groups);
     }
 
@@ -453,49 +453,49 @@ public final class RustRegexp
     /// Returns the match at the beginning of the input, or `null` when there is no match.
     public MatchResult lookingAtResult(Slice input)
     {
-        return pattern.lookingAtResult(requireNonNull(input, "input is null"));
+        return re2.lookingAtResult(requireNonNull(input, "input is null"));
     }
 
     /// Returns the match at `start` within `[start, end)`, or `null`.
     public MatchResult lookingAtResult(Slice input, int start, int end)
     {
-        MatchResult result = pattern.lookingAtResult(requireNonNull(input, "input is null"), start, end);
+        MatchResult result = re2.lookingAtResult(requireNonNull(input, "input is null"), start, end);
         return isSearchStart(input, start) ? result : null;
     }
 
     /// Returns the complete-input match, or `null` when there is no match.
     public MatchResult matchesResult(Slice input)
     {
-        return pattern.matchesResult(requireNonNull(input, "input is null"));
+        return re2.matchesResult(requireNonNull(input, "input is null"));
     }
 
     /// Returns the complete-region match, or `null` when there is no match.
     public MatchResult matchesResult(Slice input, int start, int end)
     {
-        MatchResult result = pattern.matchesResult(requireNonNull(input, "input is null"), start, end);
+        MatchResult result = re2.matchesResult(requireNonNull(input, "input is null"), start, end);
         return isSearchStart(input, start) ? result : null;
     }
 
     public int capturingGroupCount()
     {
-        return pattern.capturingGroupCount();
+        return re2.capturingGroupCount();
     }
 
     public Map<String, Integer> namedCapturingGroups()
     {
-        return pattern.namedCapturingGroups();
+        return re2.namedCapturingGroups();
     }
 
     // Every unanchored search of a range comes here. Outside byte mode, the crate skips an empty
     // match that splits a UTF-8 character and searches again one byte later.
     private boolean search(Slice input, int start, int end, int[] groups)
     {
-        if (bytes || !pattern.canMatchEmpty()) {
-            return pattern.findInto(input, start, end, groups);
+        if (bytes || !re2.canMatchEmpty()) {
+            return re2.findInto(input, start, end, groups);
         }
         int[] span = groups == null ? new int[2] : groups;
         int searchStart = start;
-        while (pattern.findInto(input, searchStart, end, span)) {
+        while (re2.findInto(input, searchStart, end, span)) {
             if (span[0] != span[1] || Utf8.isCharacterBoundary(input, span[0])) {
                 return true;
             }

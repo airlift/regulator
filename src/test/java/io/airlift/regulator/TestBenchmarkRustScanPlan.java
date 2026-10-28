@@ -63,7 +63,7 @@ public class TestBenchmarkRustScanPlan
                             String re2Expression = re2.expressions[index].toStringUtf8();
                             boolean perlClass = re2Expression.contains("\\d") || re2Expression.contains("\\w");
                             unicodeClasses[index] = unicodePerlClasses && perlClass;
-                            assertThat(contains.patterns[index].pattern().usesScanPlanForDiagnostics())
+                            assertThat(contains.patterns[index].re2().usesScanPlanForDiagnostics())
                                     .as("%s pattern %s", state, index)
                                     .isEqualTo(scanPlan && re2.patterns[index].usesScanPlanForDiagnostics());
                             assertThat(contains.patterns[index].usesGeneratedBytecode())
@@ -122,8 +122,8 @@ public class TestBenchmarkRustScanPlan
                                 RustRegexp compiled = benchmark.compile(compile);
                                 assertThat(compiled.capturingGroupCount()).as(description).isEqualTo(pattern.capturingGroupCount());
                                 assertThat(compiled.find(input)).as(description).isEqualTo(match != null);
-                                assertThat(compiled.pattern().usesScanPlanForDiagnostics()).as(description)
-                                        .isEqualTo(contains.patterns[patternIndex].pattern().usesScanPlanForDiagnostics());
+                                assertThat(compiled.re2().usesScanPlanForDiagnostics()).as(description)
+                                        .isEqualTo(contains.patterns[patternIndex].re2().usesScanPlanForDiagnostics());
                                 assertThat(compiled.usesGeneratedBytecode()).as(description).isEqualTo(contains.patterns[patternIndex].usesGeneratedBytecode());
                             }
                         }
