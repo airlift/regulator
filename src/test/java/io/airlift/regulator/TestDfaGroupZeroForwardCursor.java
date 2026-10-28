@@ -86,7 +86,7 @@ public class TestDfaGroupZeroForwardCursor
         Re2 pattern = Re2.compile(Slices.utf8Slice("[a-z][a-z][a-z]"));
         byte[] denseBytes = new byte[2 * PRODUCTIVITY_EPOCH_BYTES];
         Arrays.fill(denseBytes, (byte) 'a');
-        Re2Matcher matcher = pattern.groupZeroMatcher(Slices.wrappedBuffer(denseBytes), null);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(Slices.wrappedBuffer(denseBytes), null);
 
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isZero();
@@ -113,7 +113,7 @@ public class TestDfaGroupZeroForwardCursor
         Arrays.fill(bytes, (byte) '.');
         Arrays.fill(bytes, 0, 3, (byte) 'a');
         Arrays.fill(bytes, PRODUCTIVITY_EPOCH_BYTES, bytes.length, (byte) 'a');
-        Re2Matcher matcher = pattern.groupZeroMatcher(Slices.wrappedBuffer(bytes), null);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(Slices.wrappedBuffer(bytes), null);
 
         assertThat(matcher.find(PRODUCTIVITY_EPOCH_BYTES)).isTrue();
         assertThat(matcher.start()).isEqualTo(PRODUCTIVITY_EPOCH_BYTES);

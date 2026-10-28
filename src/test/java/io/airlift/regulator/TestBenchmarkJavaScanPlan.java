@@ -99,7 +99,7 @@ public class TestBenchmarkJavaScanPlan
                                 assertThat(benchmark.boundaries(boundaries)).as(description).isEqualTo(expectedBoundaries);
                                 assertThat(benchmark.extract(extract)).as(description).isEqualTo(match == null ? null : match.groupSlice(group));
 
-                                Re2Matcher matcher = pattern.matcher(input);
+                                RegexpMatcher matcher = pattern.matcher(input);
                                 List<Slice> expectedMatches = new ArrayList<>();
                                 while (matcher.find()) {
                                     expectedMatches.add(matcher.group(group));

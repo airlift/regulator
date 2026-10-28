@@ -77,7 +77,7 @@ public class BenchmarkLanguageBulk
         private String patternText;
         private boolean rustBytes;
         private Object pattern;
-        private Re2Matcher sliceMatcher;
+        private RegexpMatcher sliceMatcher;
         private java.util.regex.Matcher jdkMatcher;
         private List<Source> sources;
 

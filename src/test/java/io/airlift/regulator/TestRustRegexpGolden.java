@@ -274,7 +274,7 @@ public class TestRustRegexpGolden
                     .isEqualTo(testCase.getString("fullCaptures"));
         }
 
-        Re2Matcher matcher = regexp.matcher(text);
+        RegexpMatcher matcher = regexp.matcher(text);
         if (windowed) {
             matcher.reset(text, start, end);
         }

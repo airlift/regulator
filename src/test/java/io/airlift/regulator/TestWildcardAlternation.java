@@ -33,7 +33,7 @@ public class TestWildcardAlternation
                 for (String input : List.of("", "a", "ab", "aaa", "é", "\n", "x")) {
                     var expected = Pattern.compile(expression).matcher(input);
                     Re2 re2 = Re2.compile(utf8Slice(expression));
-                    for (Re2Matcher actual : List.of(re2.matcher(utf8Slice(input)), JavaRegexp.compile(utf8Slice(expression)).matcher(utf8Slice(input)), TrinoRegexp.compile(utf8Slice(expression)).pattern().matcher(utf8Slice(input)))) {
+                    for (RegexpMatcher actual : List.of(re2.matcher(utf8Slice(input)), JavaRegexp.compile(utf8Slice(expression)).matcher(utf8Slice(input)), TrinoRegexp.compile(utf8Slice(expression)).pattern().matcher(utf8Slice(input)))) {
                         assertThat(actual.matches()).as(expression + " on " + input).isEqualTo(expected.matches());
                         expected.reset();
                         actual.reset(utf8Slice(input));
@@ -50,7 +50,7 @@ public class TestWildcardAlternation
         }
         assertThat(Re2.compile(utf8Slice("(?s:.|ab)"), Re2.Options.defaults().setLongestMatch(true)).findResult(utf8Slice("ab")).groupSlice(0)).isEqualTo(utf8Slice("ab"));
         assertThat(Re2.compile(utf8Slice("ab|.")).matches(utf8Slice("\n"))).isFalse();
-        Re2Matcher nested = Re2.compile(utf8Slice("(".repeat(270) + "(?s:ab|.)" + ")".repeat(270))).matcher(utf8Slice("ab"));
+        RegexpMatcher nested = Re2.compile(utf8Slice("(".repeat(270) + "(?s:ab|.)" + ")".repeat(270))).matcher(utf8Slice("ab"));
         assertThat(nested.matches()).isTrue();
         assertThat(nested.group(270)).isEqualTo(utf8Slice("ab"));
     }

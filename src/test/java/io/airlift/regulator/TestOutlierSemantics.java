@@ -48,7 +48,7 @@ public class TestOutlierSemantics
     public void testWholeInputCaptureAvoidsAutomatonWorkspace()
     {
         String value = "abcδ💰\n".repeat(100_000);
-        Re2Matcher matcher = JavaRegexp.compile(utf8Slice("(?s)^((.*)()()($))")).matcher(utf8Slice(value));
+        RegexpMatcher matcher = JavaRegexp.compile(utf8Slice("(?s)^((.*)()()($))")).matcher(utf8Slice(value));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start(2)).isZero();
         assertThat(matcher.end(2)).isEqualTo(utf8Slice(value).length());
@@ -85,7 +85,7 @@ public class TestOutlierSemantics
     public void testWordRunAvoidsAutomatonWorkspace()
     {
         // JDK finds the first complete ASCII word at 0:4, even with later Unicode input.
-        Re2Matcher matcher = JavaRegexp.compile(utf8Slice("\\b\\w+\\b"))
+        RegexpMatcher matcher = JavaRegexp.compile(utf8Slice("\\b\\w+\\b"))
                 .matcher(utf8Slice("word ".repeat(200_000) + "é"));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isZero();
@@ -176,7 +176,7 @@ public class TestOutlierSemantics
                 Slice input = wrappedBuffer(bytes);
                 int[] expected = new int[(parsed.capturingGroupCount() + 1) * 2];
                 boolean found = Nfa.search(semanticProgram, input, false, Prog.MatchKind.FIRST_MATCH, expected);
-                Re2Matcher actual = pattern.matcher(input);
+                RegexpMatcher actual = pattern.matcher(input);
                 assertThat(actual.find()).as("%s on malformed input", expression).isEqualTo(found);
                 if (found) {
                     for (int group = 0; group <= actual.groupCount(); group++) {
@@ -196,7 +196,7 @@ public class TestOutlierSemantics
         JavaRegexp pattern = JavaRegexp.compile(utf8Slice(expression));
         Slice padded = utf8Slice("!" + text + "?");
         Slice input = padded.slice(1, padded.length() - 2);
-        Re2Matcher actual = pattern.matcher(input);
+        RegexpMatcher actual = pattern.matcher(input);
         long matches = 0;
         int next = 0;
         // Compare Java matching at the cursor positions required by our UTF-8 matcher contract.

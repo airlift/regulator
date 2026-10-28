@@ -485,7 +485,7 @@ public sealed class TrinoRegexp
             return optimizedCount;
         }
 
-        Re2Matcher matcher = newGroupZeroMatcher(source);
+        RegexpMatcher matcher = newGroupZeroMatcher(source);
         long count = 0;
         while (matcher.find()) {
             count++;
@@ -541,7 +541,7 @@ public sealed class TrinoRegexp
             return SliceUtf8.countCodePoints(source, 0, repeatCursor.start()) + 1L;
         }
 
-        Re2Matcher matcher = newGroupZeroMatcher(source);
+        RegexpMatcher matcher = newGroupZeroMatcher(source);
         if (!matcher.find(byteStart)) {
             return -1;
         }
@@ -590,7 +590,7 @@ public sealed class TrinoRegexp
         if (plan != null) {
             return extractWithStartAnchoredScanPlan(plan, source, group);
         }
-        Re2Matcher matcher = group == 0 ? newGroupZeroMatcher(source) : newMatcher(source);
+        RegexpMatcher matcher = group == 0 ? newGroupZeroMatcher(source) : newMatcher(source);
         if (!matcher.find()) {
             return null;
         }
@@ -643,7 +643,7 @@ public sealed class TrinoRegexp
             return Collections.unmodifiableList(matches);
         }
 
-        Re2Matcher matcher = group == 0 ? newGroupZeroMatcher(source) : newMatcher(source);
+        RegexpMatcher matcher = group == 0 ? newGroupZeroMatcher(source) : newMatcher(source);
         List<Slice> matches = new ArrayList<>();
         while (matcher.find()) {
             matches.add(matcher.group(group));
@@ -668,7 +668,7 @@ public sealed class TrinoRegexp
             return Collections.unmodifiableList(parts);
         }
 
-        Re2Matcher matcher = newGroupZeroMatcher(source);
+        RegexpMatcher matcher = newGroupZeroMatcher(source);
         List<Slice> parts = new ArrayList<>();
         int previousEnd = 0;
         while (matcher.find()) {
@@ -700,7 +700,7 @@ public sealed class TrinoRegexp
 
         // The loop is written out rather than calling replaceWithMatcher, so C2 compiles it into
         // this method instead of reaching it through a call it declines to inline.
-        Re2Matcher matcher = maximumCapturingGroup == 0
+        RegexpMatcher matcher = maximumCapturingGroup == 0
                 ? newGroupZeroMatcher(source)
                 : pattern.matcher(source, maximumCapturingGroup);
         while (matcher.find()) {
@@ -734,7 +734,7 @@ public sealed class TrinoRegexp
     final Slice replaceWithMatcher(Slice source, TrinoReplacementPlan replacementPlan)
     {
         int maximumCapturingGroup = replacementPlan.maximumCapturingGroup();
-        Re2Matcher matcher = maximumCapturingGroup == 0
+        RegexpMatcher matcher = maximumCapturingGroup == 0
                 ? newGroupZeroMatcher(source)
                 : pattern.matcher(source, maximumCapturingGroup);
         while (matcher.find()) {
@@ -768,7 +768,7 @@ public sealed class TrinoRegexp
             return output.slice();
         }
 
-        Re2Matcher matcher = newMatcher(source);
+        RegexpMatcher matcher = newMatcher(source);
         DynamicSliceOutput output = new DynamicSliceOutput(source.length());
         int previousEnd = 0;
         boolean matched = false;
@@ -1902,7 +1902,7 @@ public sealed class TrinoRegexp
                 matchEnd);
     }
 
-    private Re2Matcher newMatcher(Slice source)
+    private RegexpMatcher newMatcher(Slice source)
     {
         if (pattern.capturingGroupCount() != 0) {
             return pattern.matcher(source);
@@ -1911,7 +1911,7 @@ public sealed class TrinoRegexp
         return pattern.matcher(source, byteMatcher == SingleByteMatcher.unsupported() ? null : byteMatcher);
     }
 
-    private Re2Matcher newGroupZeroMatcher(Slice source)
+    private RegexpMatcher newGroupZeroMatcher(Slice source)
     {
         SingleByteMatcher byteMatcher = singleByteMatcher();
         return pattern.groupZeroMatcher(source, byteMatcher == SingleByteMatcher.unsupported() ? null : byteMatcher);

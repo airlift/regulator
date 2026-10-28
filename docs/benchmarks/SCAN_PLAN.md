@@ -130,7 +130,7 @@ Rust plan agrees with the ordinary engine anyway, and its count takes the plan
 route as `find` does.
 
 A start-anchored plan, end-anchored or partial, matches only at the region
-start, and no `Re2Matcher.find` check runs ahead of it (except a Rust matcher
+start, and no `RegexpMatcher.find` check runs ahead of it (except a Rust matcher
 over a partial region; see [RE2 patterns](#re2-patterns), and a Java matcher
 region whose `$` reads a CR before it, which runs on the NFA). Its matchers
 therefore call the plan entry directly, as does `extract` of a capture group,

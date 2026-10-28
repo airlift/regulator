@@ -259,7 +259,7 @@ public class TestTrinoNullableRepetition
         Re2 pattern = regexp.pattern();
         assertThat(pattern.isReverseProgramComputed()).isFalse();
 
-        Re2Matcher matcher = pattern.matcher(input);
+        RegexpMatcher matcher = pattern.matcher(input);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(0);
         assertThat(matcher.end()).isEqualTo(0);
@@ -319,7 +319,7 @@ public class TestTrinoNullableRepetition
 
     private static List<MatchSnapshot> regulatorMatches(String pattern, Slice input, int start, int end)
     {
-        Re2Matcher matcher = TrinoRegexp.compile(utf8Slice(pattern)).pattern().matcher(input);
+        RegexpMatcher matcher = TrinoRegexp.compile(utf8Slice(pattern)).pattern().matcher(input);
         matcher.reset(input, start, end);
         List<MatchSnapshot> matches = new ArrayList<>();
         while (matcher.find()) {

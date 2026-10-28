@@ -77,7 +77,7 @@ public class BenchmarkBoundedCharacterClassCounter
     @Benchmark
     public long generalMatcher(BenchmarkData data)
     {
-        Re2Matcher matcher = data.regexp.pattern().groupZeroMatcher(data.source, null);
+        RegexpMatcher matcher = data.regexp.pattern().groupZeroMatcher(data.source, null);
         long count = 0;
         while (matcher.find()) {
             count++;

@@ -211,7 +211,7 @@ public class TestJavaScanPlan
                 assertThat(regexp.regexp().find(source)).as(description).isTrue();
                 assertThat(regexp.regexp().count(source)).as(description).isEqualTo(1);
                 assertThat(regexp.regexp().findResult(source).groupUtf8(1)).as(description).isEqualTo(jdk.group(1));
-                Re2Matcher matcher = regexp.regexp().matcher(source);
+                RegexpMatcher matcher = regexp.regexp().matcher(source);
                 assertThat(matcher.find()).as(description).isTrue();
                 assertThat(matcher.group(1)).as(description).isEqualTo(utf8Slice(jdk.group(1)));
             }

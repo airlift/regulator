@@ -124,7 +124,7 @@ public class TestDotStarLiteralSpanMatcher
         for (Slice input : inputs) {
             int start = 0;
             while (true) {
-                Re2Matcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+                RegexpMatcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
                 long span = matcher.findSpan(input, start);
                 if (generalMatcher.find(start)) {
                     assertThat(span)

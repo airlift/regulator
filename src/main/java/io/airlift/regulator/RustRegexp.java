@@ -384,13 +384,13 @@ public final class RustRegexp
     }
 
     /// Creates a mutable matcher retaining every capturing group.
-    public Re2Matcher matcher(Slice input)
+    public RegexpMatcher matcher(Slice input)
     {
         return pattern.matcher(requireNonNull(input, "input is null"));
     }
 
     /// Creates a reusable matcher retaining group zero and the requested prefix of capturing groups.
-    public Re2Matcher matcher(Slice input, int retainedCapturingGroupCount)
+    public RegexpMatcher matcher(Slice input, int retainedCapturingGroupCount)
     {
         return pattern.matcher(requireNonNull(input, "input is null"), retainedCapturingGroupCount);
     }

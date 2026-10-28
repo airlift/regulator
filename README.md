@@ -55,7 +55,7 @@ and scan the entire value.
 
 ```java
 import io.airlift.regulator.Re2;
-import io.airlift.regulator.Re2Matcher;
+import io.airlift.regulator.RegexpMatcher;
 import io.airlift.slice.Slice;
 
 import static io.airlift.slice.Slices.utf8Slice;
@@ -63,7 +63,7 @@ import static io.airlift.slice.Slices.utf8Slice;
 Re2 re2 = Re2.compile(utf8Slice("(?<key>[a-z]+)=(?<value>[0-9]+)"));
 Slice input = utf8Slice("user=alice count=42");
 
-Re2Matcher matcher = re2.matcher(input);
+RegexpMatcher matcher = re2.matcher(input);
 while (matcher.find()) {
     Slice key = matcher.group("key");
     Slice value = matcher.group("value");
@@ -71,7 +71,7 @@ while (matcher.find()) {
 ```
 
 Share compiled patterns across threads, but give each thread its own matcher.
-A `Re2Matcher` keeps mutable state and reuses its matching workspace.
+A `RegexpMatcher` keeps mutable state and reuses its matching workspace.
 
 Use the compiler matching the pattern's language:
 

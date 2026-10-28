@@ -27,7 +27,7 @@ import static java.util.Objects.requireNonNull;
 public sealed class TrinoRegexpMatcher
         permits TrinoRegexpMatcher.CompiledScanMatcher
 {
-    private final Re2Matcher matcher;
+    private final RegexpMatcher matcher;
     private final LiteralAlternationSpanMatcher literalAlternation;
     private final FixedWidthByteSpanMatcher fixedWidth;
     private Slice input;
@@ -44,7 +44,7 @@ public sealed class TrinoRegexpMatcher
     }
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
-    TrinoRegexpMatcher(Re2Matcher matcher)
+    TrinoRegexpMatcher(RegexpMatcher matcher)
     {
         this.matcher = requireNonNull(matcher, "matcher is null");
         literalAlternation = null;
@@ -88,7 +88,7 @@ public sealed class TrinoRegexpMatcher
 
     /// Finds the next non-overlapping match. Empty matches advance by one UTF-8 code point;
     /// a terminal empty match is returned once. Failure invalidates the current match, and the next
-    /// search starts again from the end of the last match, as [Re2Matcher#find()] does.
+    /// search starts again from the end of the last match, as [RegexpMatcher#find()] does.
     public boolean find()
     {
         if (matcher != null) {

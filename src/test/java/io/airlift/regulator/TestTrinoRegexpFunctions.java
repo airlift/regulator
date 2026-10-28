@@ -1101,7 +1101,7 @@ public class TestTrinoRegexpFunctions
     private static void assertSingleByteRepeatOperationsMatchGeneralMatcher(Slice pattern, Slice source)
     {
         TrinoRegexp regexp = TrinoRegexp.compile(pattern);
-        Re2Matcher matcher = regexp.pattern().matcher(source);
+        RegexpMatcher matcher = regexp.pattern().matcher(source);
         List<MatchBoundary> matches = new ArrayList<>();
         List<Slice> groups = new ArrayList<>();
         while (matcher.find()) {
@@ -1117,7 +1117,7 @@ public class TestTrinoRegexpFunctions
         assertThat(regexp.position(source, 1, matches.size() + 1L)).isEqualTo(-1);
 
         int byteStart = SliceUtf8.offsetOfCodePoint(source, 1);
-        Re2Matcher offsetMatcher = regexp.pattern().matcher(source);
+        RegexpMatcher offsetMatcher = regexp.pattern().matcher(source);
         long expectedOffsetPosition = offsetMatcher.find(byteStart)
                 ? SliceUtf8.countCodePoints(source, 0, offsetMatcher.start()) + 1L
                 : -1;
@@ -1172,7 +1172,7 @@ public class TestTrinoRegexpFunctions
             for (String source : sources) {
                 Slice input = utf8(source);
                 long expectedCount = 0;
-                Re2Matcher matcher = re2.matcher(input);
+                RegexpMatcher matcher = re2.matcher(input);
                 while (matcher.find()) {
                     expectedCount++;
                 }

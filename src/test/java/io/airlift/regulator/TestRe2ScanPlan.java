@@ -165,7 +165,7 @@ public class TestRe2ScanPlan
         assertThat(pattern.find(source)).isTrue();
         assertThat(pattern.findResult(source).groupUtf8(1)).isEqualTo("höst");
         assertThat(pattern.replaceFirst(source, utf8Slice("\\1"))).isEqualTo(utf8Slice("höst/path"));
-        Re2Matcher matcher = pattern.matcher(source);
+        RegexpMatcher matcher = pattern.matcher(source);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.group(1)).isEqualTo(utf8Slice("höst"));
 
@@ -205,7 +205,7 @@ public class TestRe2ScanPlan
             assertThat(generated.find(source)).as(expression).isTrue();
             assertThat(generated.count(source)).as(expression).isEqualTo(expression.startsWith("^") ? 1 : 2);
             assertThat(generated.findResult(source).groupUtf8("name")).as(expression).isEqualTo("abc");
-            Re2Matcher generatedMatcher = generated.matcher(source);
+            RegexpMatcher generatedMatcher = generated.matcher(source);
             assertThat(generatedMatcher.find()).as(expression).isTrue();
             assertThat(generatedMatcher.group("name")).as(expression).isEqualTo(utf8Slice("abc"));
         }
@@ -513,7 +513,7 @@ public class TestRe2ScanPlan
         if (length > 1) {
             results.add(matches(pattern.matcher(source).reset(source, 1, length)));
         }
-        Re2Matcher matcher = pattern.matcher(source);
+        RegexpMatcher matcher = pattern.matcher(source);
         results.add(matcher.lookingAt() + " " + matcher.matches());
         if (length > 0 && matcher.find(1)) {
             results.add(describe(matcher.toMatchResult()));
@@ -521,7 +521,7 @@ public class TestRe2ScanPlan
         return results;
     }
 
-    static String matches(Re2Matcher matcher)
+    static String matches(RegexpMatcher matcher)
     {
         StringBuilder matches = new StringBuilder();
         while (matcher.find()) {

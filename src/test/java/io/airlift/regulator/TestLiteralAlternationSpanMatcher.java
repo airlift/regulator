@@ -68,7 +68,7 @@ public class TestLiteralAlternationSpanMatcher
             Re2 pattern = Re2.compile(utf8Slice(expression));
             for (Slice input : inputs) {
                 for (int start = 0; start <= input.length(); start++) {
-                    Re2Matcher matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+                    RegexpMatcher matcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
                     long span = scanner.findSpan(input, start);
                     if (matcher.find(start)) {
                         assertThat(span)

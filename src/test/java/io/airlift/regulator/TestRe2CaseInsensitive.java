@@ -66,7 +66,7 @@ public class TestRe2CaseInsensitive
         assertThat(result).isNotNull();
         assertThat(toString(result.groupSlice(1))).isEqualTo("Wanda");
 
-        Re2Matcher matcher = re.matcher(Slices.wrappedBuffer(text.byteArray(), text.byteArrayOffset(), text.length()));
+        RegexpMatcher matcher = re.matcher(Slices.wrappedBuffer(text.byteArray(), text.byteArrayOffset(), text.length()));
         assertThat(matcher.find()).isTrue();
         assertThat(toString(matcher.group(1))).isEqualTo("Wanda");
     }

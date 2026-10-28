@@ -97,7 +97,7 @@ public class BenchmarkTrinoScanProfiles
         TrinoRegexp[] patterns;
         TrinoRegexpMatcher[] matchers;
         Re2[] patternsWithoutScanPlan;
-        Re2Matcher[] matchersWithoutScanPlan;
+        RegexpMatcher[] matchersWithoutScanPlan;
         int[] sourceRows;
         private int cursor;
         private MethodHandle[] neighborCallers;
@@ -118,7 +118,7 @@ public class BenchmarkTrinoScanProfiles
             TrinoRegexp[] compiled = new TrinoRegexp[count];
             TrinoRegexpMatcher[] captures = new TrinoRegexpMatcher[count];
             Re2[] compiledWithoutScanPlan = new Re2[count];
-            Re2Matcher[] capturesWithoutScanPlan = new Re2Matcher[count];
+            RegexpMatcher[] capturesWithoutScanPlan = new RegexpMatcher[count];
             for (int plan = 0; plan < count; plan++) {
                 try {
                     compiled[plan] = BenchmarkTrinoScanKernelDispatch.compile(source.expressions[plan], generateBytecode);
@@ -134,7 +134,7 @@ public class BenchmarkTrinoScanProfiles
             patterns = new TrinoRegexp[inputs.length];
             matchers = new TrinoRegexpMatcher[inputs.length];
             patternsWithoutScanPlan = new Re2[inputs.length];
-            matchersWithoutScanPlan = new Re2Matcher[inputs.length];
+            matchersWithoutScanPlan = new RegexpMatcher[inputs.length];
             sourceRows = new int[inputs.length];
             for (int row = 0; row < inputs.length; row++) {
                 int sourceRow;
@@ -264,7 +264,7 @@ public class BenchmarkTrinoScanProfiles
     public long capturesWithoutScanPlan(BenchmarkData data)
     {
         int row = data.next();
-        Re2Matcher matcher = data.matchersWithoutScanPlan[row];
+        RegexpMatcher matcher = data.matchersWithoutScanPlan[row];
         if (!matcher.reset(data.inputs[row]).find()) {
             return -1;
         }
@@ -280,7 +280,7 @@ public class BenchmarkTrinoScanProfiles
     public Slice extractWithoutScanPlan(BenchmarkData data)
     {
         int row = data.next();
-        Re2Matcher matcher = data.patternsWithoutScanPlan[row].matcher(data.inputs[row]);
+        RegexpMatcher matcher = data.patternsWithoutScanPlan[row].matcher(data.inputs[row]);
         if (!matcher.find()) {
             return null;
         }

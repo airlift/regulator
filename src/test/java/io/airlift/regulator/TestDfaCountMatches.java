@@ -107,7 +107,7 @@ public class TestDfaCountMatches
         var input = Slices.wrappedBuffer(bytes);
 
         // Pinned native RE2 finds five non-overlapping matches in this deterministic input.
-        Re2Matcher matcher = pattern.matcher(input, 0);
+        RegexpMatcher matcher = pattern.matcher(input, 0);
         int nativeMatchCount = 0;
         while (matcher.find()) {
             nativeMatchCount++;
@@ -120,7 +120,7 @@ public class TestDfaCountMatches
         int resetCount = dfa.resetCount();
         assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
 
-        Re2Matcher fallbackMatcher = pattern.matcher(input, 0);
+        RegexpMatcher fallbackMatcher = pattern.matcher(input, 0);
         int fallbackCount = 0;
         while (fallbackMatcher.find()) {
             fallbackCount++;
@@ -155,7 +155,7 @@ public class TestDfaCountMatches
                 Re2.Options.latin1().setMaxMemory(4L << 20));
         var input = Slices.wrappedBuffer(stateExplosionInput(16 * 1024));
 
-        Re2Matcher fillingMatcher = pattern.matcher(input);
+        RegexpMatcher fillingMatcher = pattern.matcher(input);
         int knownMatchStart = -1;
         int matchCount = 0;
         while (fillingMatcher.find()) {
@@ -166,7 +166,7 @@ public class TestDfaCountMatches
         }
         assertThat(matchCount).isEqualTo(5);
 
-        Re2Matcher reused = pattern.matcher(input).reset(input, knownMatchStart, input.length());
+        RegexpMatcher reused = pattern.matcher(input).reset(input, knownMatchStart, input.length());
         assertThat(reused.lookingAt()).isTrue();
 
         Re2 fresh = Re2.compile(
@@ -195,7 +195,7 @@ public class TestDfaCountMatches
             assertThat(dfa.byteScanFallbackCount()).isPositive();
             assertThat(dfa.countSearchBailedWhenSlow()).isTrue();
 
-            Re2Matcher matcher = pattern.matcher(input, 0);
+            RegexpMatcher matcher = pattern.matcher(input, 0);
             int fallbackCount = 0;
             while (matcher.find()) {
                 fallbackCount++;

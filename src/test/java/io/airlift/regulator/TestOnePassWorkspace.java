@@ -31,18 +31,18 @@ public class TestOnePassWorkspace
         assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isTrue();
 
         Slice firstInput = Slices.utf8Slice("aaa-bb trailing");
-        Re2Matcher matcher = pattern.matcher(firstInput);
-        Field workspaceField = field(Re2Matcher.class, "onePassWorkspace");
+        RegexpMatcher matcher = pattern.matcher(firstInput);
+        Field workspaceField = field(RegexpMatcher.class, "onePassWorkspace");
         assertThat(workspaceField.get(matcher)).isNull();
-        assertThat(field(Re2Matcher.class, "bitStateWorkspace").get(matcher)).isNull();
-        assertThat(field(Re2Matcher.class, "nfaWorkspace").get(matcher)).isNull();
+        assertThat(field(RegexpMatcher.class, "bitStateWorkspace").get(matcher)).isNull();
+        assertThat(field(RegexpMatcher.class, "nfaWorkspace").get(matcher)).isNull();
 
         assertThat(matcher.lookingAt()).isTrue();
         assertMatch(matcher, firstInput, 0, 6, 0, 3, 4, 6);
         Object workspace = workspaceField.get(matcher);
         assertThat(workspace).isNotNull();
-        assertThat(field(Re2Matcher.class, "bitStateWorkspace").get(matcher)).isNull();
-        assertThat(field(Re2Matcher.class, "nfaWorkspace").get(matcher)).isNull();
+        assertThat(field(RegexpMatcher.class, "bitStateWorkspace").get(matcher)).isNull();
+        assertThat(field(RegexpMatcher.class, "nfaWorkspace").get(matcher)).isNull();
         Object captures = field(OnePass.Workspace.class, "captures").get(workspace);
         Object matchCaptures = field(OnePass.Workspace.class, "matchCaptures").get(workspace);
         assertThat(captures).isNotNull();
@@ -58,7 +58,7 @@ public class TestOnePassWorkspace
     }
 
     private static void assertMatch(
-            Re2Matcher matcher,
+            RegexpMatcher matcher,
             Slice input,
             int matchStart,
             int matchEnd,

@@ -102,7 +102,7 @@ public class TestCompilerDominatorElision
 
     private static void assertFirstMatch(Re2 pattern, Slice input, int expectedStart, int expectedEnd)
     {
-        Re2Matcher matcher = pattern.matcher(input);
+        RegexpMatcher matcher = pattern.matcher(input);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(expectedStart);
         assertThat(matcher.end()).isEqualTo(expectedEnd);

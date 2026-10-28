@@ -115,7 +115,7 @@ public class TestJavaRegexpDifferential
             for (String input : List.of("", "\n", "a\n", "a\nb", "\rb", "a\r\nb", "\u0085b", "é\nb", "\u2028b")) {
                 Matcher expected = jdk.matcher(input);
                 Slice text = utf8Slice("padding" + input).slice(7, utf8Slice(input).length());
-                Re2Matcher actual = regexp.matcher(text);
+                RegexpMatcher actual = regexp.matcher(text);
                 while (expected.find()) {
                     assertThat(actual.find()).as("%s input=%s", pattern, input).isTrue();
                     assertThat(actual.start()).isEqualTo(utf8Slice(input.substring(0, expected.start())).length());
@@ -172,7 +172,7 @@ public class TestJavaRegexpDifferential
                 unanchoredPlan)) {
             Pattern jdk = Pattern.compile(pattern);
             JavaRegexp regexp = JavaRegexp.compile(utf8Slice(pattern));
-            Re2Matcher actual = regexp.matcher(utf8Slice(""));
+            RegexpMatcher actual = regexp.matcher(utf8Slice(""));
             for (String input : inputs) {
                 Slice source = utf8Slice("padding" + input).slice(7, utf8Slice(input).length());
                 String escaped = input.replace("\r", "\\r").replace("\n", "\\n");
@@ -260,7 +260,7 @@ public class TestJavaRegexpDifferential
         assertThat(spelledOut.start()).isZero();
         assertThat(spelledOut.end()).isEqualTo(3);
 
-        Re2Matcher matcher = JavaRegexp.compile(utf8Slice("\\d{3}")).matcher(utf8Slice("123 45 x"));
+        RegexpMatcher matcher = JavaRegexp.compile(utf8Slice("\\d{3}")).matcher(utf8Slice("123 45 x"));
         assertThat(matcher.find(4)).isFalse();
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isZero();
@@ -276,7 +276,7 @@ public class TestJavaRegexpDifferential
 
         // Exceed BitState's bitmap limit so the public matcher also exercises NFA assertions.
         String input = "a".repeat(program.bitStateTextMaxSize() + 1) + "\n";
-        Re2Matcher actual = JavaRegexp.compile(utf8Slice(pattern)).matcher(utf8Slice(input));
+        RegexpMatcher actual = JavaRegexp.compile(utf8Slice(pattern)).matcher(utf8Slice(input));
         Matcher expected = Pattern.compile(pattern).matcher(input);
         while (expected.find()) {
             assertThat(actual.find()).isTrue();
@@ -300,7 +300,7 @@ public class TestJavaRegexpDifferential
                     for (String input : inputs) {
                         Matcher expected = jdk.matcher(input);
                         Slice source = utf8Slice("padding" + input).slice(7, utf8Slice(input).length());
-                        Re2Matcher actual = java.matcher(source);
+                        RegexpMatcher actual = java.matcher(source);
                         boolean matched = expected.find();
                         assertThat(actual.find()).as("%s %s", pattern, input).isEqualTo(matched);
                         if (matched) {

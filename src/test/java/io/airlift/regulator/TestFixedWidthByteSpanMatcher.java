@@ -171,7 +171,7 @@ public class TestFixedWidthByteSpanMatcher
             assertThat(matcher).as(expression).isNotNull();
             for (Slice input : inputs) {
                 for (int start = 0; start <= input.length(); start++) {
-                    Re2Matcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
+                    RegexpMatcher generalMatcher = pattern.genericGroupZeroMatcherForDiagnostics(input);
                     long span = matcher.findSpan(input, start);
                     if (generalMatcher.find(start)) {
                         assertThat(span)

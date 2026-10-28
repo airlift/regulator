@@ -1755,38 +1755,38 @@ public sealed class Re2
     }
 
     /// Creates a mutable matcher retaining every capturing group.
-    public Re2Matcher matcher(Slice input)
+    public RegexpMatcher matcher(Slice input)
     {
-        return new Re2Matcher(this, input);
+        return new RegexpMatcher(this, input);
     }
 
     /// Creates a reusable matcher that retains group zero and the requested prefix of explicit
     /// capturing groups. Use zero when only complete-match boundaries are required.
-    public Re2Matcher matcher(Slice input, int retainedCapturingGroupCount)
+    public RegexpMatcher matcher(Slice input, int retainedCapturingGroupCount)
     {
-        return new Re2Matcher(this, input, null, retainedCapturingGroupCount);
+        return new RegexpMatcher(this, input, null, retainedCapturingGroupCount);
     }
 
-    Re2Matcher matcher(Slice input, SingleByteMatcher singleByteMatcher)
+    RegexpMatcher matcher(Slice input, SingleByteMatcher singleByteMatcher)
     {
-        return new Re2Matcher(this, input, singleByteMatcher);
+        return new RegexpMatcher(this, input, singleByteMatcher);
     }
 
-    Re2Matcher groupZeroMatcher(Slice input, SingleByteMatcher singleByteMatcher)
+    RegexpMatcher groupZeroMatcher(Slice input, SingleByteMatcher singleByteMatcher)
     {
-        return new Re2Matcher(this, input, singleByteMatcher, 0);
+        return new RegexpMatcher(this, input, singleByteMatcher, 0);
     }
 
-    Re2Matcher genericGroupZeroMatcherForDiagnostics(Slice input)
+    RegexpMatcher genericGroupZeroMatcherForDiagnostics(Slice input)
     {
-        return new Re2Matcher(this, input, null, 0, false);
+        return new RegexpMatcher(this, input, null, 0, false);
     }
 
     /// Returns the start-anchored scan plan that an unanchored capture search may run directly
     /// through [#findWithStartAnchoredScanPlan], or `null`. The compile-time scan
     /// strategy is the whole decision: a pattern with a scan plan never matches empty and has no
     /// candidate-start or group-zero cursor, direct lowered search, or lowered program, so no
-    /// [Re2Matcher#find()] check runs ahead of the plan. Only a caller's single-byte matcher
+    /// [RegexpMatcher#find()] check runs ahead of the plan. Only a caller's single-byte matcher
     /// can, and such a caller keeps the ordinary route. A Rust matcher over a partial region runs
     /// its Rust search instead, which reaches the plan only when the region ends at the input end.
     /// A Java matcher region whose $ reads a CR before it runs the ordinary search instead.
@@ -2065,7 +2065,7 @@ public sealed class Re2
     }
 
     /// Returns the number of non-overlapping matches, including empty matches.
-    /// Empty matches advance as in [Re2Matcher#find()], by one code point
+    /// Empty matches advance as in [RegexpMatcher#find()], by one code point
     /// in UTF-8 mode or one byte in Latin-1 mode. No capture values are returned.
     public long count(Slice input)
     {
@@ -2074,7 +2074,7 @@ public sealed class Re2
             return optimizedCount;
         }
 
-        Re2Matcher matcher = matcher(input, 0);
+        RegexpMatcher matcher = matcher(input, 0);
         long count = 0;
         while (matcher.find()) {
             count++;
@@ -2144,7 +2144,7 @@ public sealed class Re2
         return Dfa.countMatches(partialProg, text, matchKind);
     }
 
-    /// Counts the group-zero matches [Re2Matcher#find()] would return. A plan never
+    /// Counts the group-zero matches [RegexpMatcher#find()] would return. A plan never
     /// matches empty, so each search resumes at the previous match end. As in a find loop, each
     /// search starts on the plan with its own work budget, and one that hands off finds its
     /// match on the ordinary engine.
@@ -2396,7 +2396,7 @@ public sealed class Re2
             int end,
             Anchor anchor,
             int[] groups,
-            Re2Matcher workspaceOwner)
+            RegexpMatcher workspaceOwner)
     {
         return matchRegionInto(
                 text,
@@ -2460,7 +2460,7 @@ public sealed class Re2
     /// groups of [#matchRegionInto]. The region alone cannot show the CR, so the semantic
     /// program runs on the NFA told that a CR precedes the region. The case is rare, so it skips
     /// every faster engine.
-    boolean matchRegionAfterCarriageReturnInto(Slice text, int contextStart, int contextEnd, int start, Anchor anchor, int[] groups, Re2Matcher workspaceOwner)
+    boolean matchRegionAfterCarriageReturnInto(Slice text, int contextStart, int contextEnd, int start, Anchor anchor, int[] groups, RegexpMatcher workspaceOwner)
     {
         Slice context = logicalContext(text, contextStart, contextEnd);
         int relativeStart = start - contextStart;
@@ -3327,12 +3327,12 @@ public sealed class Re2
 
     private static boolean hasBitStateWorkspace(MatchWorkspaces workspaces)
     {
-        return workspaces instanceof Re2Matcher || ((FixedMatchWorkspaces) workspaces).bitStateWorkspace() != null;
+        return workspaces instanceof RegexpMatcher || ((FixedMatchWorkspaces) workspaces).bitStateWorkspace() != null;
     }
 
     private static OnePass.Workspace onePassWorkspace(MatchWorkspaces workspaces)
     {
-        if (workspaces instanceof Re2Matcher matcher) {
+        if (workspaces instanceof RegexpMatcher matcher) {
             return matcher.onePassWorkspace();
         }
         return ((FixedMatchWorkspaces) workspaces).onePassWorkspace();
@@ -3340,7 +3340,7 @@ public sealed class Re2
 
     private static BitState.Workspace bitStateWorkspace(MatchWorkspaces workspaces)
     {
-        if (workspaces instanceof Re2Matcher matcher) {
+        if (workspaces instanceof RegexpMatcher matcher) {
             return matcher.bitStateWorkspace();
         }
         return ((FixedMatchWorkspaces) workspaces).bitStateWorkspace();
@@ -3348,7 +3348,7 @@ public sealed class Re2
 
     private static Nfa.Workspace nfaWorkspace(MatchWorkspaces workspaces)
     {
-        if (workspaces instanceof Re2Matcher matcher) {
+        if (workspaces instanceof RegexpMatcher matcher) {
             return matcher.nfaWorkspace();
         }
         return ((FixedMatchWorkspaces) workspaces).nfaWorkspace();

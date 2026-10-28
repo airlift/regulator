@@ -133,7 +133,7 @@ final class TrinoReplacementPlan
     // The per-match path for a template without group references stays small enough for C2 to
     // inline into the caller's match loop: template parsing, output growth, and invalid-argument
     // failures are out of line. Copied as addMatch(int[]); keep the copy in step.
-    void addMatch(Re2Matcher matcher)
+    void addMatch(RegexpMatcher matcher)
     {
         requireNonNull(matcher, "matcher is null");
         ParsedReplacement template = this.template;
@@ -148,7 +148,7 @@ final class TrinoReplacementPlan
     }
 
     // Copied as recordMatch(int[], ParsedReplacement); keep the copy in step.
-    private void recordMatch(Re2Matcher matcher, ParsedReplacement template)
+    private void recordMatch(RegexpMatcher matcher, ParsedReplacement template)
     {
         int recordOffset = beginMatch(matcher.start(), matcher.end());
         int[] referencedGroups = template.referencedGroups();
@@ -171,9 +171,9 @@ final class TrinoReplacementPlan
     }
 
     /// Records the match whose offsets a scan-plan search wrote to `groups`, as
-    /// [#addMatch(Re2Matcher)] records a matcher's current match. Groups that did not
+    /// [#addMatch(RegexpMatcher)] records a matcher's current match. Groups that did not
     /// participate hold `-1`.
-    /// A copy of `addMatch(Re2Matcher)`.
+    /// A copy of `addMatch(RegexpMatcher)`.
     void addMatch(int[] groups)
     {
         ParsedReplacement template = this.template;
@@ -187,7 +187,7 @@ final class TrinoReplacementPlan
         recordMatch(groups, template);
     }
 
-    // A copy of recordMatch(Re2Matcher, ParsedReplacement).
+    // A copy of recordMatch(RegexpMatcher, ParsedReplacement).
     private void recordMatch(int[] groups, ParsedReplacement template)
     {
         int recordOffset = beginMatch(groups[0], groups[1]);

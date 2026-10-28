@@ -4,8 +4,8 @@ This is a single-module Maven project. Use the checked-in wrapper:
 
 ```bash
 ./mvnw clean install
-./mvnw test -Dtest=TestRe2Matcher
-./mvnw test '-Dtest=TestRe2Matcher#testMatchModesAndReset'
+./mvnw test -Dtest=TestRegexpMatcher
+./mvnw test '-Dtest=TestRegexpMatcher#testMatchModesAndReset'
 ./mvnw clean package -DskipTests
 ```
 

@@ -20,7 +20,7 @@ Positions are byte offsets, as in the crate.
 ```java
 RustRegexp regexp = RustRegexp.compile(
         Slices.utf8Slice("(?<key>[a-z]+)=(?<value>\\w+)"));
-Re2Matcher matcher = regexp.matcher(Slices.utf8Slice("name=Renée"));
+RegexpMatcher matcher = regexp.matcher(Slices.utf8Slice("name=Renée"));
 if (matcher.find()) {
     Slice value = matcher.group("value");
 }
@@ -40,12 +40,12 @@ mode and the nest limit can change the result.
 The compiled-pattern operations have the same signatures as `JavaRegexp`:
 boolean `find`, `lookingAt`, and `matches`; `count`; caller-owned capture
 arrays through `findInto`, `lookingAtInto`, and `matchesInto`; immutable
-`MatchResult` values; and reusable `Re2Matcher` instances with an optional
+`MatchResult` values; and reusable `RegexpMatcher` instances with an optional
 retained prefix of capturing groups. Matching is leftmost-first, as in the
 crate. Captures are zero-copy Slice views.
 
-`RustRegexp` returns the shared `Re2Matcher`, which applies the crate's search
-rules to Rust patterns:
+`RustRegexp` returns the shared `RegexpMatcher`, which applies the crate's
+search rules to Rust patterns:
 
 - Outside byte mode, a search never reports an empty match that splits a UTF-8
   character; it searches again one byte later. An empty pattern on `é` matches

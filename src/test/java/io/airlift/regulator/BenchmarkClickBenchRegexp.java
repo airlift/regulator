@@ -121,7 +121,7 @@ public class BenchmarkClickBenchRegexp
 
         private Re2 pattern;
         private Slice source;
-        private Re2Matcher matcher;
+        private RegexpMatcher matcher;
         private int[] bounds;
 
         @Setup

@@ -262,7 +262,7 @@ public class BenchmarkDfaCache
 
         int[] matchBounds()
         {
-            Re2Matcher matcher = pattern.matcher(text);
+            RegexpMatcher matcher = pattern.matcher(text);
             if (!matcher.find()) {
                 return new int[] {-1, -1};
             }

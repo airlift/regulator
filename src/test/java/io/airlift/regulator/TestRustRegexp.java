@@ -145,7 +145,7 @@ public class TestRustRegexp
         assertThat(regexp.lookingAtResult(input, 2, 3)).isNotNull();
         assertThat(regexp.matchesResult(input, 2, 3)).isNotNull();
 
-        Re2Matcher matcher = regexp.matcher(input);
+        RegexpMatcher matcher = regexp.matcher(input);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.group("value").toStringUtf8()).isEqualTo("a");
 
@@ -174,7 +174,7 @@ public class TestRustRegexp
         assertThat(regexp.matches(input, 1, 1)).isFalse();
         assertThat(regexp.matchesInto(input, 1, 1, groups)).isFalse();
 
-        Re2Matcher matcher = regexp.matcher(input).reset(input, 1, 4);
+        RegexpMatcher matcher = regexp.matcher(input).reset(input, 1, 4);
         assertThat(matcher.lookingAt()).isFalse();
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(4);
@@ -201,7 +201,7 @@ public class TestRustRegexp
         assertThat(regexp.matchesInto(input, 1, 1, groups)).isTrue();
         assertThat(groups).containsExactly(1, 1);
 
-        Re2Matcher matcher = regexp.matcher(input).reset(input, 1, 4);
+        RegexpMatcher matcher = regexp.matcher(input).reset(input, 1, 4);
         assertThat(matcher.lookingAt()).isTrue();
         assertThat(matcher.start()).isEqualTo(1);
         assertThat(matcher.reset(input, 1, 1).matches()).isTrue();
@@ -258,7 +258,7 @@ public class TestRustRegexp
         assertBoundedEngines("\\b{start}a|\\b{end}b", "b", -1, -1);
         assertBoundedEngines("\\b\\b{start}", "a b", 0, 0);
 
-        Re2Matcher matcher = RustRegexp.compile(utf8Slice("\\b\\b{start}")).matcher(utf8Slice("a b"));
+        RegexpMatcher matcher = RustRegexp.compile(utf8Slice("\\b\\b{start}")).matcher(utf8Slice("a b"));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(0);
         assertThat(matcher.find()).isTrue();

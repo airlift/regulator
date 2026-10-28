@@ -76,7 +76,7 @@ public class TestTraditionalBenchmarkInputs
 
         assertThat(state.progSplitHard.bitStateTextMaxSize())
                 .isGreaterThanOrEqualTo(state.splitBig2Text.length());
-        Re2Matcher matcher = state.re2SplitHard.matcher(state.splitBig2Text);
+        RegexpMatcher matcher = state.re2SplitHard.matcher(state.splitBig2Text);
         assertThat(matcher.find()).isTrue();
         assertThat(state.re2SplitHard.isReverseProgramComputed()).isFalse();
         assertThat(matcher.start()).isZero();
@@ -94,7 +94,7 @@ public class TestTraditionalBenchmarkInputs
         assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isTrue();
         assertThat(pattern.canUseDirectBitStateCapture(input.length(), 3)).isFalse();
 
-        Re2Matcher matcher = pattern.matcher(input);
+        RegexpMatcher matcher = pattern.matcher(input);
         assertThat(matcher.find()).isTrue();
         assertThat(pattern.isReverseProgramComputed()).isTrue();
         assertThat(matcher.group(1).toStringUtf8()).isEqualTo("abc");
@@ -186,7 +186,7 @@ public class TestTraditionalBenchmarkInputs
                     Prog.MatchKind.FIRST_MATCH,
                     expected);
 
-            Re2Matcher matcher = pattern.matcher(input);
+            RegexpMatcher matcher = pattern.matcher(input);
             assertThat(matcher.find()).isEqualTo(expectedMatch);
             if (expectedMatch) {
                 int[] actual = new int[expected.length];

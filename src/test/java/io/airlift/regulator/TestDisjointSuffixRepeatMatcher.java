@@ -89,7 +89,7 @@ public class TestDisjointSuffixRepeatMatcher
                 value.append("a").append("b".repeat(repeat)).append("x");
                 String text = value.toString();
                 Slice padded = utf8Slice("!" + text + "?");
-                Re2Matcher actual = pattern.matcher(padded).reset(padded, 1, padded.length() - 1);
+                RegexpMatcher actual = pattern.matcher(padded).reset(padded, 1, padded.length() - 1);
                 Matcher expected = comparator.matcher(text);
                 int count = 0;
                 while (expected.find()) {

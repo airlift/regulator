@@ -10,7 +10,7 @@ to the logical Slice. Latin-1 mode treats each input byte as one character.
 
 ```java
 Slice input = Slices.utf8Slice("key=42");
-Re2Matcher matcher = Re2.compile(Slices.utf8Slice("(?<key>[a-z]+)=([0-9]+)"))
+RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("(?<key>[a-z]+)=([0-9]+)"))
         .matcher(input);
 while (matcher.find()) {
     Slice key = matcher.group("key");

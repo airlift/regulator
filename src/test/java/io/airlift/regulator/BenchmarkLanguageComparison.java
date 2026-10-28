@@ -188,7 +188,7 @@ public class BenchmarkLanguageComparison
         List<String> matches(TestingLanguageBenchmarkInputs.Source source);
     }
 
-    private record SliceCompiled(Re2 re2, JavaRegexp java, Re2Matcher matcher)
+    private record SliceCompiled(Re2 re2, JavaRegexp java, RegexpMatcher matcher)
             implements Compiled
     {
         @Override
@@ -237,7 +237,7 @@ public class BenchmarkLanguageComparison
         }
     }
 
-    private record RustCompiled(RustRegexp pattern, Re2Matcher matcher)
+    private record RustCompiled(RustRegexp pattern, RegexpMatcher matcher)
             implements Compiled
     {
         @Override

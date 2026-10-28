@@ -41,7 +41,7 @@ public class TestWholeInputCapturePlan
     {
         for (String expression : List.of("(?s)^((.*)()()($))", "(?s)\\A(()(.*)())\\z", "(?s)(^(()).*(())$)", "(?sd)^((.*)()()($))")) {
             JavaRegexp pattern = JavaRegexp.compile(utf8Slice(expression));
-            Re2Matcher actual = pattern.matcher(utf8Slice(""));
+            RegexpMatcher actual = pattern.matcher(utf8Slice(""));
             for (String text : List.of("", "abc", "abc\r\n", "δ💰\n", "a\u0085b\u2028\u2029")) {
                 Matcher expected = Pattern.compile(expression).matcher(text);
                 assertThat(expected.matches()).isTrue();

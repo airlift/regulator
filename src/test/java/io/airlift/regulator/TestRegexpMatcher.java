@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 // Includes tests adapted from upstream RE2: re2/testing/re2_test.cc.
-public class TestRe2Matcher
+public class TestRegexpMatcher
 {
     @Test
     public void testBooleanMatchDoesNotInspectCaptureWorkspace()
@@ -66,7 +66,7 @@ public class TestRe2Matcher
     public void testGroupZeroForwardCursorFindsFixedWidthClassSequence()
             throws ReflectiveOperationException
     {
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("[ab][cd]"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("[ab][cd]"))
                 .groupZeroMatcher(Slices.utf8Slice("xxaczz"), null);
 
         assertThat(matcher.groupZeroForwardCursorEnabledForDiagnostics()).isTrue();
@@ -86,7 +86,7 @@ public class TestRe2Matcher
     public void testGroupZeroForwardCursorPreservesRegionAndUtf8Boundaries()
     {
         Slice input = Slices.utf8Slice("xαβxαx");
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("[αβ]+"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("[αβ]+"))
                 .groupZeroMatcher(input, null)
                 .reset(input, 1, 8);
 
@@ -102,7 +102,7 @@ public class TestRe2Matcher
     @Test
     public void testRepeatedFindReusesMatcher()
     {
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("(?<word>\\w+)"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("(?<word>\\w+)"))
                 .matcher(Slices.utf8Slice("one two"));
 
         assertThat(matcher.find()).isTrue();
@@ -123,7 +123,7 @@ public class TestRe2Matcher
         Re2 pattern = Re2.compile(Slices.utf8Slice("\\s*(\\w+)"));
         Slice remaining = Slices.utf8Slice("   aaa b!@#$@#$cccc");
 
-        Re2Matcher matcher = pattern.matcher(remaining);
+        RegexpMatcher matcher = pattern.matcher(remaining);
         assertThat(matcher.lookingAt()).isTrue();
         assertThat(matcher.group(1).toStringUtf8()).isEqualTo("aaa");
         remaining = remaining.slice(matcher.end(), remaining.length() - matcher.end());
@@ -139,7 +139,7 @@ public class TestRe2Matcher
     @Test
     public void testRepeatedFindSkipsNonMatchingInput()
     {
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("(\\w+)"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("(\\w+)"))
                 .matcher(Slices.utf8Slice("   aaa b!@#$@#$cccc"));
 
         assertThat(matcher.find()).isTrue();
@@ -160,7 +160,7 @@ public class TestRe2Matcher
     public void testGroupZeroMatcherDoesNotExtractCaptures()
     {
         Re2 pattern = Re2.compile(Slices.utf8Slice("(💰)"));
-        Re2Matcher matcher = pattern.groupZeroMatcher(Slices.utf8Slice("a💰b💰"), null);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(Slices.utf8Slice("a💰b💰"), null);
 
         assertThat(matcher.groupCount()).isZero();
         assertThat(matcher.find()).isTrue();
@@ -199,7 +199,7 @@ public class TestRe2Matcher
         Re2 pattern = Re2.compile(Slices.utf8Slice("(?<first>a)(?<second>b)"));
         assertThat(pattern.isNamedCapturingGroupsComputed()).isFalse();
 
-        Re2Matcher matcher = pattern.matcher(Slices.utf8Slice("zab"), 0);
+        RegexpMatcher matcher = pattern.matcher(Slices.utf8Slice("zab"), 0);
         assertThat(matcher.groupCount()).isZero();
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(1);
@@ -241,7 +241,7 @@ public class TestRe2Matcher
         SingleByteMatcher byteMatcher = pattern.createSingleByteMatcher();
         assertThat(byteMatcher).isNotNull();
 
-        Re2Matcher matcher = pattern.groupZeroMatcher(Slices.utf8Slice("a,b;c"), byteMatcher);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(Slices.utf8Slice("a,b;c"), byteMatcher);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(1);
         assertThat(matcher.end()).isEqualTo(2);
@@ -282,18 +282,18 @@ public class TestRe2Matcher
         assertGroupZeroMatchesFull(expression, Re2.compile(Slices.utf8Slice(expression)), Slices.utf8Slice(input));
     }
 
-    private static Object workspace(Re2Matcher matcher, String name)
+    private static Object workspace(RegexpMatcher matcher, String name)
             throws ReflectiveOperationException
     {
-        var field = Re2Matcher.class.getDeclaredField(name);
+        var field = RegexpMatcher.class.getDeclaredField(name);
         field.setAccessible(true);
         return field.get(matcher);
     }
 
     private static void assertGroupZeroMatchesFull(String description, Re2 pattern, Slice input)
     {
-        Re2Matcher matcher = pattern.matcher(input);
-        Re2Matcher groupZeroMatcher = pattern.groupZeroMatcher(input, null);
+        RegexpMatcher matcher = pattern.matcher(input);
+        RegexpMatcher groupZeroMatcher = pattern.groupZeroMatcher(input, null);
 
         while (matcher.find()) {
             assertThat(groupZeroMatcher.find())
@@ -314,7 +314,7 @@ public class TestRe2Matcher
     @Test
     public void testEmptyMatchesAdvanceByUtf8CodePoint()
     {
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice(""))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice(""))
                 .matcher(Slices.utf8Slice("a有💰"));
         List<Integer> starts = new ArrayList<>();
 
@@ -329,7 +329,7 @@ public class TestRe2Matcher
     @Test
     public void testEmptyMatchesAdvanceByByteInLatin1()
     {
-        Re2Matcher matcher = Re2.compile(
+        RegexpMatcher matcher = Re2.compile(
                         Slices.wrappedBuffer(new byte[0]),
                         Re2.Options.latin1())
                 .matcher(Slices.wrappedBuffer(new byte[] {(byte) 0xC3, (byte) 0xA9}));
@@ -345,7 +345,7 @@ public class TestRe2Matcher
     @Test
     public void testAnchoredEmptyMatchAdvancesNextFind()
     {
-        Re2Matcher utf8 = Re2.compile(Slices.utf8Slice(""))
+        RegexpMatcher utf8 = Re2.compile(Slices.utf8Slice(""))
                 .matcher(Slices.utf8Slice("💰"));
         assertThat(utf8.lookingAt()).isTrue();
         assertThat(utf8.start()).isZero();
@@ -355,14 +355,14 @@ public class TestRe2Matcher
         assertThat(utf8.end()).isEqualTo(4);
         assertThat(utf8.find()).isFalse();
 
-        Re2Matcher latin1 = Re2.compile(Slices.EMPTY_SLICE, Re2.Options.latin1())
+        RegexpMatcher latin1 = Re2.compile(Slices.EMPTY_SLICE, Re2.Options.latin1())
                 .matcher(Slices.wrappedBuffer(new byte[] {(byte) 0xFF, 'a'}));
         assertThat(latin1.lookingAt()).isTrue();
         assertThat(latin1.find()).isTrue();
         assertThat(latin1.start()).isEqualTo(1);
 
         Slice regionInput = Slices.utf8Slice("x💰y");
-        Re2Matcher region = Re2.compile(Slices.utf8Slice(""))
+        RegexpMatcher region = Re2.compile(Slices.utf8Slice(""))
                 .matcher(regionInput)
                 .reset(regionInput, 1, 5);
         assertThat(region.lookingAt()).isTrue();
@@ -374,18 +374,18 @@ public class TestRe2Matcher
     @Test
     public void testAnchoredMatchCursorLifecycleControls()
     {
-        Re2Matcher terminal = Re2.compile(Slices.utf8Slice(""))
+        RegexpMatcher terminal = Re2.compile(Slices.utf8Slice(""))
                 .matcher(Slices.EMPTY_SLICE);
         assertThat(terminal.matches()).isTrue();
         assertThat(terminal.find()).isFalse();
 
-        Re2Matcher nonempty = Re2.compile(Slices.utf8Slice("a"))
+        RegexpMatcher nonempty = Re2.compile(Slices.utf8Slice("a"))
                 .matcher(Slices.utf8Slice("aa"));
         assertThat(nonempty.lookingAt()).isTrue();
         assertThat(nonempty.find()).isTrue();
         assertThat(nonempty.start()).isEqualTo(1);
 
-        Re2Matcher failedAnchor = Re2.compile(Slices.utf8Slice("a"))
+        RegexpMatcher failedAnchor = Re2.compile(Slices.utf8Slice("a"))
                 .matcher(Slices.utf8Slice("ba"));
         assertThat(failedAnchor.find()).isTrue();
         assertThat(failedAnchor.start()).isEqualTo(1);
@@ -400,18 +400,18 @@ public class TestRe2Matcher
         Slice money = Slices.utf8Slice("💰");
         money.getBytes(0, padded, 4, money.length());
         Slice offsetInput = Slices.wrappedBuffer(padded, 4, money.length());
-        Re2Matcher offsetMatcher = Re2.compile(Slices.EMPTY_SLICE).matcher(offsetInput);
+        RegexpMatcher offsetMatcher = Re2.compile(Slices.EMPTY_SLICE).matcher(offsetInput);
         assertThat(offsetMatcher.lookingAt()).isTrue();
         assertThat(offsetMatcher.find()).isTrue();
         assertThat(offsetMatcher.start()).isEqualTo(4);
 
         Slice malformedInput = Slices.wrappedBuffer(new byte[] {(byte) 0xF0, 'a'});
-        Re2Matcher malformedMatcher = Re2.compile(Slices.EMPTY_SLICE).matcher(malformedInput);
+        RegexpMatcher malformedMatcher = Re2.compile(Slices.EMPTY_SLICE).matcher(malformedInput);
         assertThat(malformedMatcher.lookingAt()).isTrue();
         assertThat(malformedMatcher.find()).isTrue();
         assertThat(malformedMatcher.start()).isEqualTo(1);
 
-        Re2Matcher captureMatcher = Re2.compile(Slices.utf8Slice("()"))
+        RegexpMatcher captureMatcher = Re2.compile(Slices.utf8Slice("()"))
                 .matcher(Slices.utf8Slice("a"));
         assertThat(captureMatcher.lookingAt()).isTrue();
         assertThat(captureMatcher.start(1)).isZero();
@@ -420,20 +420,20 @@ public class TestRe2Matcher
         assertThat(captureMatcher.start()).isEqualTo(1);
         assertThat(captureMatcher.start(1)).isEqualTo(1);
 
-        Re2Matcher groupZeroMatcher = Re2.compile(Slices.EMPTY_SLICE)
+        RegexpMatcher groupZeroMatcher = Re2.compile(Slices.EMPTY_SLICE)
                 .groupZeroMatcher(Slices.utf8Slice("a"), null);
         assertThat(groupZeroMatcher.lookingAt()).isTrue();
         assertThat(groupZeroMatcher.find()).isTrue();
         assertThat(groupZeroMatcher.start()).isEqualTo(1);
 
-        Re2Matcher repeatedAnchor = Re2.compile(Slices.EMPTY_SLICE)
+        RegexpMatcher repeatedAnchor = Re2.compile(Slices.EMPTY_SLICE)
                 .matcher(Slices.utf8Slice("💰"));
         assertThat(repeatedAnchor.lookingAt()).isTrue();
         assertThat(repeatedAnchor.lookingAt()).isTrue();
         assertThat(repeatedAnchor.find()).isTrue();
         assertThat(repeatedAnchor.start()).isEqualTo(4);
 
-        Re2Matcher initialFailedAnchor = Re2.compile(Slices.utf8Slice("a"))
+        RegexpMatcher initialFailedAnchor = Re2.compile(Slices.utf8Slice("a"))
                 .matcher(Slices.utf8Slice("ba"));
         assertThat(initialFailedAnchor.lookingAt()).isFalse();
         assertThat(initialFailedAnchor.find()).isTrue();
@@ -454,7 +454,7 @@ public class TestRe2Matcher
         assertThat(Re2.compile(Slices.utf8Slice("x*$")).canReturnEmptyAtStart(Slices.utf8Slice("aaa"), 0)).isFalse();
         assertThat(Re2.compile(Slices.utf8Slice("\\b|x")).canReturnEmptyAtStart(Slices.utf8Slice("aaa"), 0)).isFalse();
 
-        Re2Matcher matcher = star.matcher(Slices.utf8Slice("xxa"));
+        RegexpMatcher matcher = star.matcher(Slices.utf8Slice("xxa"));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isZero();
         assertThat(matcher.end()).isEqualTo(2);
@@ -483,7 +483,7 @@ public class TestRe2Matcher
 
     private static void assertMatchRanges(Re2 pattern, String input, String... expectedRanges)
     {
-        Re2Matcher matcher = pattern.matcher(Slices.utf8Slice(input));
+        RegexpMatcher matcher = pattern.matcher(Slices.utf8Slice(input));
         List<String> actualRanges = new ArrayList<>();
         while (matcher.find()) {
             actualRanges.add(matcher.start() + ":" + matcher.end());
@@ -494,7 +494,7 @@ public class TestRe2Matcher
     @Test
     public void testMatchModesAndReset()
     {
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("(abc)"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("(abc)"))
                 .matcher(Slices.utf8Slice("abc"));
 
         assertThat(matcher.matches()).isTrue();
@@ -531,7 +531,7 @@ public class TestRe2Matcher
     public void testLogicalRegionValidation()
     {
         Slice originalInput = Slices.utf8Slice("a");
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("a")).matcher(originalInput);
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("a")).matcher(originalInput);
         assertThat(matcher.matches()).isTrue();
 
         assertThatThrownBy(() -> matcher.reset(Slices.utf8Slice("abc"), -1, 2))
@@ -551,7 +551,7 @@ public class TestRe2Matcher
     public void testLogicalRegionMatchModesAndSnapshot()
     {
         Slice input = Slices.utf8Slice("xabcx");
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("(abc)"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("(abc)"))
                 .matcher(input)
                 .reset(input, 1, 4);
 
@@ -574,7 +574,7 @@ public class TestRe2Matcher
     {
         Slice input = Slices.utf8Slice("x,a,y");
         Re2 pattern = Re2.compile(Slices.utf8Slice("([,;])"));
-        Re2Matcher matcher = pattern.groupZeroMatcher(input, pattern.createSingleByteMatcher())
+        RegexpMatcher matcher = pattern.groupZeroMatcher(input, pattern.createSingleByteMatcher())
                 .reset(input, 2, 4);
 
         assertThat(matcher.find()).isTrue();
@@ -599,7 +599,7 @@ public class TestRe2Matcher
         byte[] backing = new byte[logicalInput.length + 13];
         System.arraycopy(logicalInput, 0, backing, 7, logicalInput.length);
         Slice input = Slices.wrappedBuffer(backing, 7, logicalInput.length);
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice(prefix + "([0-9]+)"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice(prefix + "([0-9]+)"))
                 .matcher(input)
                 .reset(input, decoyBytes.length, decoyBytes.length + regionBytes.length);
 
@@ -644,8 +644,8 @@ public class TestRe2Matcher
     private static void assertRegionMatchesSliceView(String expression, Slice input, int regionStart, int regionEnd)
     {
         Re2 pattern = Re2.compile(Slices.utf8Slice(expression));
-        Re2Matcher regionMatcher = pattern.matcher(input).reset(input, regionStart, regionEnd);
-        Re2Matcher viewMatcher = pattern.matcher(input.slice(regionStart, regionEnd - regionStart));
+        RegexpMatcher regionMatcher = pattern.matcher(input).reset(input, regionStart, regionEnd);
+        RegexpMatcher viewMatcher = pattern.matcher(input.slice(regionStart, regionEnd - regionStart));
 
         while (viewMatcher.find()) {
             assertThat(regionMatcher.find()).as("region match for %s", expression).isTrue();
@@ -667,7 +667,7 @@ public class TestRe2Matcher
     @Test
     public void testSnapshotIsIndependentOfLaterFinds()
     {
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("(\\w+)"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("(\\w+)"))
                 .matcher(Slices.utf8Slice("one two"));
 
         assertThat(matcher.find()).isTrue();
@@ -681,7 +681,7 @@ public class TestRe2Matcher
     @Test
     public void testUnmatchedGroupAndMatchState()
     {
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("(a)|(b)"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("(a)|(b)"))
                 .matcher(Slices.utf8Slice("a"));
 
         assertThatThrownBy(matcher::start)
@@ -697,7 +697,7 @@ public class TestRe2Matcher
     @Test
     public void testResetInvalidatesWithoutClearingCaptureBuffer()
     {
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("(a)"))
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("(a)"))
                 .matcher(Slices.utf8Slice("a"));
 
         assertThat(matcher.find()).isTrue();

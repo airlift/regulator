@@ -159,7 +159,7 @@ A Trino integration should:
 - make any unsupported-language fallback explicit rather than automatic
 
 The shared compiled object is safe to reuse. Mutable matching state belongs to a
-`TrinoRegexpMatcher`, `Re2Matcher`, or operation-local workspace.
+`TrinoRegexpMatcher`, `RegexpMatcher`, or operation-local workspace.
 
 ## Correctness evidence
 
