@@ -134,16 +134,20 @@ expressions, nested up to three levels over a small set of atoms, on random
 texts over `a`, `b`, `é`, space, CR, and LF; then 600 malformed token streams
 of regex metacharacters, flag letters, and digits on a fixed list of texts;
 then 154 property-name regression rows, such as `\p{IsL}` spelled with a dotted
-capital I. It ends with 400 random expressions over byte and Unicode atoms with
-the bytes API, on random texts that split and break UTF-8: `a`, `é`, either of
-its bytes alone, `\xFF`, space, CR, and LF. Python's seeded `random` sequence
-is stable across Python 3 releases, so the table is reproducible, but editing
-an earlier section changes every later draw. A case whose pattern, text, and
-options repeat an earlier case is skipped, leaving 1926 cases, and identifiers keep the draw
-number, such as `random_042`, `malformed_147`, or `bytes_042`, so they stay
-stable. Every case searches the whole text, and every case before the bytes API
-section uses the default options. David Phillips wrote the corpus for the front
-end's first golden generator, in pull request 11.
+capital I; then 400 random expressions over byte and Unicode atoms with the
+bytes API, on random texts that split and break UTF-8: `a`, `é`, either of its
+bytes alone, `\xFF`, space, CR, and LF. It ends with 400 random expressions
+over the CRLF line anchors and every kind of word boundary. Even cases use the
+default options on valid UTF-8 texts, and odd cases use the bytes API on texts
+that may split and break UTF-8; both draw their texts from pools with CR, LF,
+and bytes outside ASCII. Python's seeded `random` sequence is stable across
+Python 3 releases, so the table is reproducible, but editing an earlier section
+changes every later draw. A case whose pattern, text, and options repeat an
+earlier case is skipped, leaving 2325 cases, and identifiers keep the draw
+number, such as `random_042`, `malformed_147`, `bytes_042`, or `assertion_042`,
+so they stay stable. Every case searches the whole text, and every case before
+the bytes API section uses the default options. David Phillips wrote the corpus
+for the front end's first golden generator, in pull request 11.
 
 ### Options
 

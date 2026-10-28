@@ -139,6 +139,8 @@ case("boundary_half_hyphen", "\\b{start-half}-\\b{end-half}", "- a-b -")
 case("boundary_angle_words", "\\<\\w+\\>", "(ab) cd")
 case("boundary_not_word_multibyte", "\\B", "\u00e9\u00e9")
 case("boundary_not_word_ascii_multibyte", "(?-u:\\B)", "\u00e9\u00e9")
+case("boundary_word_literal_after_multibyte", "foo\\b", "\u00e9 foo")
+case("boundary_word_literal_before_multibyte", "foo\\b", "foo\u00e9 foo")
 
 section("Case folding")
 for name, pattern, text in [
@@ -310,6 +312,13 @@ window("window_full_match_interior", "b", "abc", 1, 2)
 window("window_captures", "(a)(b)?", "xaby", 1, 2)
 window("window_crlf_dot", "(?R).", "a\r\nb", 1, 3)
 window("window_case_insensitive", "(?i)\u212a", "k\u212ak", 1, 4)
+window("window_crlf_caret_after_cr", "(?mR)^b", "a\rb", 2, 3)
+window("window_crlf_dollar_before_lf", "(?mR)a\r$", "a\r\nb", 0, 2)
+window("window_word_boundary_after_multibyte", "\\bb", "\u00e9b", 2, 3)
+window("window_not_word_boundary_after_multibyte", "\\Bb", "\u00e9b", 2, 3)
+window("window_word_start_after_multibyte", "\\b{start}b", "\u00e9b", 2, 3)
+window("window_word_start_half_after_multibyte", "\\b{start-half}b", "\u00e9b", 2, 3)
+window("window_word_end_half_before_multibyte", "a\\b{end-half}", "a\u00e9", 0, 1)
 
 section("Octal option")
 for name, pattern, text in [
@@ -517,6 +526,10 @@ window("bytes_window_caret_at_split", "(?m)^", "\u00e9", 1, 2, "bytes")
 window("bytes_window_captures", "((?-u:.))(.)", "\u00e9\u2603", 1, 5, "bytes")
 window("bytes_window_malformed", "\\w+", b"a\xffbc\x80", 1, 4, "bytes")
 window("bytes_window_empty_split", "x*", "\u2603", 1, 3, "bytes")
+window("bytes_window_crlf_caret_after_cr", "(?mR)^a", b"\xff\ra", 2, 3, "bytes")
+window("bytes_window_word_boundary_after_multibyte", "\\ba", "\u00e9a", 2, 3, "bytes")
+window("bytes_window_word_start_after_malformed", "\\b{start}a", b"\xa9a", 1, 2, "bytes")
+window("bytes_window_word_end_half_before_malformed", "a\\b{end-half}", b"a\xff", 0, 1, "bytes")
 
 section("Bytes API: Rebar benchmark patterns")
 # Rebar patterns that run without Unicode mode, so only the bytes API accepts
