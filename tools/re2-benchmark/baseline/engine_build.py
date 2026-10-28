@@ -16,9 +16,10 @@ RECEIPT = "engine-build-receipt.json"
 TRINO_DIRECTORY = "pinned-trino"
 TRINO_METADATA = ("classpath.txt", "joni-jar.path", "provenance.properties")
 # The native comparison runners, native RE2 and the Rust regex crate, each beside its build receipt, as build.sh
-# writes them from the candidate's sources.
+# writes them from the candidate's sources: the lifecycle runners, and the bulk runners a language unit measures.
 LANGUAGE_NATIVE_DIRECTORY = "language-native"
-LANGUAGE_NATIVE_TARGETS = ("language_benchmark", "language_rust_benchmark")
+LANGUAGE_NATIVE_TARGETS = ("language_benchmark", "language_bulk_benchmark", "language_rust_benchmark",
+                           "language_rust_bulk_benchmark")
 ARCHIVES = ("trino", "native")
 # Beyond the candidate commit, these choose what the harness is built from and how.
 BUILD_INPUTS = (
@@ -82,7 +83,9 @@ def language_native_files():
 
 
 def write_archive(shared, names, path):
-    with gzip.GzipFile(path, "wb", mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w") as archive:
+    # The gzip header names no file, so an archive's checksum does not depend on where it is written.
+    with path.open("wb") as output, gzip.GzipFile("", "wb", fileobj=output, mtime=0) as compressed, \
+            tarfile.open(fileobj=compressed, mode="w") as archive:
         for name in names:
             member = archive.gettarinfo(shared / name, arcname=name)
             member.mtime = 0
@@ -182,7 +185,7 @@ def unpack(build, archive, shared):
     for name, checksum in archive["files"].items():
         if sha256_file(shared / name) != checksum:
             raise EngineBuildError(f"installed engine file differs from its manifest: {name}")
-    # Shards read this marker to record that the harness came prebuilt, and from which archive.
+    # A route reads this marker to record that an engine came prebuilt, and from which archive.
     marker = shared / DIRECTORY / (archive["file"].removesuffix(".tar.gz") + ".sha256")
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(archive["sha256"] + "\n")
@@ -218,7 +221,8 @@ def checksums(build, manifest_sha256):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    package_command = commands.add_parser("package", help="package the harness this builder host built")
+    package_command = commands.add_parser(
+        "package", help="package the Trino harness and native runners this builder host built")
     package_command.add_argument("--shared", type=Path, required=True)
     package_command.add_argument("--root", type=Path, required=True)
     package_command.add_argument("--result-directory", type=Path, required=True)

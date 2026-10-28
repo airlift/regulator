@@ -298,6 +298,19 @@ install_engine_build()
         --output "${RESULT_DIR}/engine-build.txt"
 }
 
+install_language_plans()
+{
+    # Install language plan bundles where run-unit.sh looks up their units.
+    local bundle
+    for bundle in /opt/re2-work/language-plans/*.tar.gz; do
+        if [[ -f "${bundle}" ]]; then
+            python3 "${REGULATOR_DIR}/tools/re2-benchmark/language/fleet.py" install-bundle \
+                --bundle "${bundle}" --sha256 "$(basename "${bundle}" .tar.gz)" \
+                --plans "${REGULATOR_DIR}/target/language-plans"
+        fi
+    done
+}
+
 install_packages
 install_java
 record_environment
@@ -307,6 +320,7 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
     export BASELINE_SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${REGULATOR_DIR}/target/baseline-shared}
     if [[ "${BENCHMARK_MODE}" == unit-worker ]]; then
         install_engine_build
+        install_language_plans
     fi
     capacity_file="${RESULT_DIR}/host-capacity.txt"
     memory_total_bytes=$(awk '/^MemTotal:/ {print $2 * 1024; exit}' /proc/meminfo)
@@ -372,7 +386,7 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         exit "${UNIT_WORKER_INTERRUPTED_STATUS}"
     fi
     if [[ "${capacity_status}" != accepted ]]; then
-        echo "Host capacity gate rejected the baseline session; see ${capacity_file}" >&2
+        echo "Host capacity gate rejected the unit worker session; see ${capacity_file}" >&2
         exit 1
     fi
 # Report the session's own status only after resource checks.

@@ -114,6 +114,11 @@ UNIT_ATTEMPT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*/[1-9][0-9]*")
 ROUTE_IDENTITY_FIELDS = (
     "campaign_id", "platform", "replica_id", "instance_id", "host_epoch", "architecture", "instance_type",
     "availability_zone")
+# Each field of a unit worker's session that its host records, by its environment manifest key.
+WORKER_SESSION_FIELDS = (
+    ("campaign_id", "baseline_campaign"), ("platform", "platform"), ("instance_id", "instance_id"),
+    ("host_epoch", "host_epoch"), ("architecture", "campaign_architecture"), ("instance_type", "instance_type"),
+    ("availability_zone", "availability_zone"))
 UNIT_HOST_ARTIFACTS = (
     "environment-manifest.txt",
     "environment.txt",
@@ -136,6 +141,10 @@ UNIT_ENVIRONMENT_FILES = ("environment-manifest.txt", "environment.txt", "engine
 # its header when the phase starts, so a unit campaign phase without it is incomplete.
 SEMANTIC_REJECTIONS = "semantic-rejections.tsv"
 SEMANTIC_REJECTION_FIELDS = ("platform", "unit_id", "replica_id", "unit_attempt_id")
+# A unit's exit status when any check of its correctness stage fails, which no retry clears, and when the
+# numerical protocol rejects its measurements. run-shard.sh and run-unit.sh exit with the same values.
+SEMANTIC_FAILURE_STATUS = 44
+PROTOCOL_REJECTION_STATUS = 42
 
 
 DISPATCH_FIELDS = (
@@ -491,6 +500,16 @@ def combine(arguments):
     print(f"Combined {len(rows)} unit rows")
 
 
+def host_evidence_rows(root, paths):
+    """A unit attempt's host evidence: each of paths under root that is a file, then its capacity gate's prefix."""
+    rows = [{"route": "host", "artifact": path.relative_to(root).as_posix(), "verification": "sha256",
+             "sha256": sha256_file(path)} for path in paths if path.is_file()]
+    if (root / "unit-capacity.txt").is_file():
+        rows.append({"route": "host", "artifact": "unit-capacity.txt", "verification": "capacity-prefix-sha256",
+                     "sha256": capacity_prefix_sha256(root / "unit-capacity.txt")})
+    return rows
+
+
 def write_unit_evidence(root, route_plan, host_evidence=None):
     """Bind each route's artifacts and the unit's own, in the host-session evidence shape.
 
@@ -506,17 +525,7 @@ def write_unit_evidence(root, route_plan, host_evidence=None):
                 "verification": "sha256",
                 "sha256": sha256_file(path),
             })
-    for artifact in UNIT_HOST_ARTIFACTS:
-        if (root / artifact).is_file():
-            evidence.append({
-                "route": "host", "artifact": artifact, "verification": "sha256", "sha256": sha256_file(root / artifact)})
-    if (root / "unit-capacity.txt").is_file():
-        evidence.append({
-            "route": "host",
-            "artifact": "unit-capacity.txt",
-            "verification": "capacity-prefix-sha256",
-            "sha256": capacity_prefix_sha256(root / "unit-capacity.txt"),
-        })
+    evidence.extend(host_evidence_rows(root, [root / artifact for artifact in UNIT_HOST_ARTIFACTS]))
     if host_evidence is not None:
         for row in read_tsv(root / "calibration.tsv", ("raw_result",)):
             artifact = f"calibrations/{row['raw_result']}"
@@ -823,14 +832,23 @@ def load_unit_tables(manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTO
     }
 
 
-def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTORY / "row-protocol.tsv",
-                          host_evidence=None, tables=None):
-    """Accept one unit attempt on its own and return its receipt.
+def write_worker_unit_session(root, environment, unit_id, replica, unit_attempt, region):
+    """Write the session of a unit a worker ran on the host its environment manifest describes."""
+    write_tsv(root / "unit-session.tsv", UNIT_SESSION_FIELDS, [{
+        "schema_version": UNIT_SCHEMA_VERSION, "unit_id": unit_id, "replica_id": replica,
+        "unit_attempt_id": unit_attempt, "region": region,
+        **{field: environment[key] for field, key in WORKER_SESSION_FIELDS}}])
 
-    host_evidence is the evidence directory of the worker host that measured
-    the unit, where the calibrations it references by digest are stored.
-    tables, from load_unit_tables, replaces loading the manifest and protocol paths.
-    """
+
+def check_worker_unit_session(session, environment):
+    """A worker's unit session names the host its environment manifest describes."""
+    differing = [field for field, key in WORKER_SESSION_FIELDS if session[field] != environment[key]]
+    if differing:
+        raise ValueError(f"unit session differs from its host in {differing}")
+
+
+def read_unit_session(root):
+    """A unit attempt's session: the host, replica, and lease that measured it."""
     session = read_one_tsv(root / "unit-session.tsv", UNIT_SESSION_FIELDS)
     if session["schema_version"] != UNIT_SCHEMA_VERSION:
         reject(f"{root / 'unit-session.tsv'} schema_version must be {UNIT_SCHEMA_VERSION}")
@@ -840,6 +858,18 @@ def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_p
         reject(f"{root / 'unit-session.tsv'} unit_attempt_id must be <host_session>/<lease_seq>")
     if not session["availability_zone"].startswith(session["region"]):
         reject(f"{root / 'unit-session.tsv'} availability zone is outside region {session['region']}")
+    return session
+
+
+def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTORY / "row-protocol.tsv",
+                          host_evidence=None, tables=None):
+    """Accept one unit attempt on its own and return its receipt.
+
+    host_evidence is the evidence directory of the worker host that measured
+    the unit, where the calibrations it references by digest are stored.
+    tables, from load_unit_tables, replaces loading the manifest and protocol paths.
+    """
+    session = read_unit_session(root)
     tables = tables or load_unit_tables(manifest_path, protocol_path)
     protocols = tables["protocols"]
     manifest = tables["manifest"]

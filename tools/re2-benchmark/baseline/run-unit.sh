@@ -16,6 +16,8 @@ RUN_SHARD="${SCRIPT_DIR}/run-shard.sh"
 UNIT_TOOL="${SCRIPT_DIR}/unit_session.py"
 RESULT_TOOL="${SCRIPT_DIR}/shard_results.py"
 SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${ROOT}/target/baseline-shared}
+# run-host.sh installs each language plan's bundle here, by its shard.
+LANGUAGE_PLANS=${ROOT}/target/language-plans
 PLAN_ONLY=${BASELINE_PLAN_ONLY:-false}
 PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
 # A measured unit runs itself as its measurement stage under GNU time.
@@ -24,7 +26,8 @@ UNIT_STAGE=${BASELINE_UNIT_STAGE:-unit}
 # names the previous unit's after calibration there to chain as this unit's before.
 HOST_EVIDENCE=${BASELINE_UNIT_HOST_EVIDENCE:-}
 CHAINED_CALIBRATION=${BASELINE_UNIT_CALIBRATION_BEFORE:-}
-# run-shard.sh's status for a failed correctness stage, which a unit controller rejects rather than retries.
+# unit_session.SEMANTIC_FAILURE_STATUS: run-shard.sh's status for a failed correctness stage, which a unit
+# controller rejects rather than retries.
 SEMANTIC_FAILURE_STATUS=44
 
 case "${PROTOCOL}" in
@@ -183,16 +186,6 @@ environment_value()
     done | head -1
 }
 
-plan_arguments=()
-if [[ -n "${CHAINED_CALIBRATION}" ]]; then
-    plan_arguments+=(--chained-calibration)
-fi
-SHARD_ID=$(python3 "${UNIT_TOOL}" plan \
-    --unit "${UNIT_ID}" \
-    --replica "${REPLICA_ID}" \
-    --output-directory "${RESULT_DIR}" \
-    "${plan_arguments[@]}")
-
 # A host measures units of many shards, so the unit names the shard and the
 # caller names the replica.
 environment_replica=${RE2_CAMPAIGN_REPLICA_ID:-$(environment_value replica)}
@@ -200,7 +193,6 @@ if [[ -n "${environment_replica}" && "${environment_replica}" != "${REPLICA_ID}"
     echo "Host identity replica ${environment_replica} does not match requested replica ${REPLICA_ID}" >&2
     exit 1
 fi
-export RE2_CAMPAIGN_SHARD_ID=${SHARD_ID}
 export RE2_CAMPAIGN_REPLICA_ID=${REPLICA_ID}
 if [[ "${PLAN_ONLY}" != true ]]; then
     export RE2_CAMPAIGN_ID=${RE2_CAMPAIGN_ID:-$(environment_value baseline_campaign)}
@@ -223,6 +215,47 @@ if [[ "${PLAN_ONLY}" != true ]]; then
         fi
     done
 fi
+
+# A unit of an installed language plan measures its comparisons with the language collector.
+language_plan=
+for units_file in "${LANGUAGE_PLANS}"/*/units.tsv; do
+    if [[ -f "${units_file}" ]] &&
+            awk -F '\t' -v unit="${UNIT_ID}" 'NR > 1 && $1 == unit {found = 1} END {exit !found}' "${units_file}"; then
+        language_plan=$(dirname "${units_file}")
+        break
+    fi
+done
+if [[ -n "${language_plan}" ]]; then
+    if [[ "${PLAN_ONLY}" == true || "${PROTOCOL}" != qualification ]]; then
+        echo "Language unit ${UNIT_ID} requires PLAN_ONLY=false and PROTOCOL=qualification" >&2
+        exit 1
+    fi
+    python3 "${ROOT}/tools/re2-benchmark/language/fleet.py" run-unit \
+        --plan-directory "${language_plan}" \
+        --unit "${UNIT_ID}" \
+        --replica "${REPLICA_ID}" \
+        --unit-directory "${RESULT_DIR}" \
+        --native-directory "${SHARED_WORK_DIR}/language-native" \
+        --jvm-directory "${SHARED_WORK_DIR}/language-jvm" \
+        --unit-attempt "${RE2_CAMPAIGN_HOST_SESSION}/${RE2_CAMPAIGN_LEASE_SEQUENCE}" \
+        --region "${BASELINE_REGION}" \
+        --source-archive "${LANGUAGE_SOURCE_ARCHIVE:?A language unit requires LANGUAGE_SOURCE_ARCHIVE}" \
+        --candidate-provenance "${LANGUAGE_CANDIDATE_PROVENANCE:?A language unit requires LANGUAGE_CANDIDATE_PROVENANCE}"
+    echo "Completed language unit ${UNIT_ID} replica ${REPLICA_ID}"
+    exit 0
+fi
+
+plan_arguments=()
+if [[ -n "${CHAINED_CALIBRATION}" ]]; then
+    plan_arguments+=(--chained-calibration)
+fi
+SHARD_ID=$(python3 "${UNIT_TOOL}" plan \
+    --unit "${UNIT_ID}" \
+    --replica "${REPLICA_ID}" \
+    --output-directory "${RESULT_DIR}" \
+    "${plan_arguments[@]}")
+
+export RE2_CAMPAIGN_SHARD_ID=${SHARD_ID}
 
 mkdir -p "${RESULT_DIR}/routes"
 calibration_directory=

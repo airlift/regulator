@@ -141,6 +141,7 @@ same build installs the native RE2 and Rust runners on every unit worker, at
 `language-native/<runner>` under the shared work directory, with
 `engine-build/native.sha256` naming their archive; a route that runs them can
 record that archive with `prebuilt_engine native`, as it records the harness.
+A language unit runs the same runners.
 
 ## Work Units
 

@@ -36,6 +36,7 @@ from unit_dispatch import (
     read_unit_attempts, read_unit_receipt, recovered_keys, result_key, retain_unit_attempt, shows_worker_start,
     unit_attempt_directory, unit_logical_identity, unit_worker_instance_state, write_unit_attempt, write_unresolved,
     write_unresolved_units)
+from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
 import batch_acceptance
@@ -78,10 +79,6 @@ EARLY_REBALANCE_SECONDS = 15 * 60
 # A work item stays unresolved once this many of its leases failed, were interrupted, or were lost,
 # as a host job does; a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
-# run-shard.sh exits with this status when the numerical protocol rejects a row's measurements.
-PROTOCOL_REJECTION_STATUS = 42
-# run-shard.sh exits with this status when any check of a route's correctness stage fails.
-SEMANTIC_FAILURE_STATUS = 44
 SEMANTIC_FAILURE_DETAIL = f"semantic failure: status {SEMANTIC_FAILURE_STATUS}"
 # A unit campaign phase's digest of the tooling that started it, beside its campaign state.
 TOOLING_DIGEST = "tooling-digest.txt"

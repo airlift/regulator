@@ -176,7 +176,7 @@ def verify(directory, results, java, classpath, native_runners):
             return {**execution, "operations": {operation: execution.copy()}}
         expected = "compiled\n" if operation == "compile" else str(case["expected_result"]) + "\n"
         if execution["trace"] != expected:
-            raise ValueError(f"bulk result verification failed: {identity}")
+            raise collection.SemanticFailure(f"bulk result verification failed: {identity}")
         trace = collection.verify_command(command(engine, mode, "trace", workload), prefix / "trace", engine, mode, hash_trace=True)
         if trace["outcome"] != "completed":
             raise ValueError(f"bulk trace verification exceeded its limit, not an operation timeout: {identity}")
@@ -190,7 +190,7 @@ def verify(directory, results, java, classpath, native_runners):
         count = collection.verify_command([native, "--execute", str(source)], prefix / "execute", "native-re2", "safe")
         expected = "compiled\n" if case["model"] == "compile" else str(case["expected_result"]) + "\n"
         if count["outcome"] != "completed" or count["trace"] != expected:
-            raise ValueError(f"original native RE2 reference did not verify: {case['id']}")
+            raise collection.SemanticFailure(f"original native RE2 reference did not verify: {case['id']}")
         trace = collection.verify_command([native, "--trace", str(source)], prefix / "trace", "native-re2", "safe", hash_trace=True)
         if trace["outcome"] != "completed":
             raise ValueError(f"original native RE2 trace did not finish: {case['id']}")
@@ -204,7 +204,7 @@ def verify(directory, results, java, classpath, native_runners):
     for identity, case, language, engine, mode in observations:
         receipt = run(case, language, engine, mode, identity)
         if receipt["outcome"] == "completed" and receipt["trace"] != references[case["id"]]["trace"]:
-            raise ValueError(f"bulk translation or matching differs from native source semantics: {identity}")
+            raise collection.SemanticFailure(f"bulk translation or matching differs from native source semantics: {identity}")
         receipts[identity] = receipt
         collection.save(results / "verification.partial.json", receipts)
         if len(receipts) % 30 == 0:
@@ -241,13 +241,13 @@ def validate_receipts(manifest, receipts):
         if outcome == "completed":
             expected = "compiled\n" if operation == "compile" else str(case["expected_result"]) + "\n"
             if execution.get("trace") != expected or execution.get("trace_sha256") != collection.digest(expected.encode()):
-                raise ValueError("bulk operation result differs from expected result")
+                raise collection.SemanticFailure(f"bulk operation result differs from expected result: {identity}")
             trace = receipt.get("trace", "")
             if (len(trace) != 72 or not trace.startswith("sha256:") or not trace.endswith("\n") or
                     receipt.get("trace_sha256") != collection.digest(trace.encode())):
                 raise ValueError("invalid bulk trace hash")
             if traces.setdefault(case["id"], trace) != trace:
-                raise ValueError("bulk languages or memory modes disagree")
+                raise collection.SemanticFailure(f"bulk languages or memory modes disagree: {case['id']}")
         else:
             # This helper's timeout branch is independent of the ordinary-suite expected values.
             collection.validate_operation_receipt(case, language, operation, execution)
@@ -271,7 +271,7 @@ def validate_evidence(manifest, evidence, results):
         execution = reference["execution"]
         if (reference["outcome"] != "completed" or execution["outcome"] != "completed" or
                 execution.get("trace") != expected or execution.get("trace_sha256") != collection.digest(expected.encode())):
-            raise ValueError("original native RE2 operation did not verify")
+            raise collection.SemanticFailure(f"original native RE2 operation did not verify: {case['id']}")
         validate_trace(reference)
     for identity, case, *_ in collection.observations(manifest):
         receipt = evidence["receipts"][identity]
@@ -279,7 +279,7 @@ def validate_evidence(manifest, evidence, results):
             continue
         validate_trace(receipt)
         if receipt["trace"] != evidence["references"][case["id"]]["trace"]:
-            raise ValueError("bulk receipt differs from original native RE2")
+            raise collection.SemanticFailure(f"bulk receipt differs from original native RE2: {identity}")
 
 
 def probe_one(case, language, engine, directory, results, java, classpath, native_runners):

@@ -1,24 +1,37 @@
 #!/usr/bin/env python3
-"""Partition same-host language comparisons and validate their collected results.
+"""Plan language comparisons as work units, run a unit on a unit worker, and validate and export the results.
 
-This module does not allocate AWS resources. A worker runs one job on an
-already-provisioned qualification host with its own clean build receipts.
+This module does not allocate AWS resources. A unit worker runs each unit leased
+to it on an already-provisioned qualification host with its own clean build
+receipts.
 """
 
 import argparse
 import copy
+import csv
 import hashlib
+import os
 import re
 import shutil
 import sys
+import tarfile
+import tempfile
 from pathlib import Path
 
 import collection
 import batching
+import jvm_build
+import released_artifact
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "baseline"))
+import engine_build  # noqa: E402
+import row_protocol  # noqa: E402
 import unit_cost  # noqa: E402
+import unit_session  # noqa: E402
 import work_units  # noqa: E402
+from acceptance import EVIDENCE_FIELDS, capacity_prefix_sha256, read_properties, sha256_file  # noqa: E402
+from shard_results import write_tsv  # noqa: E402
+from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS  # noqa: E402
 
 
 PLATFORMS = ("r9g", "r8i")
@@ -28,6 +41,11 @@ DEFAULT_MAX_CONCURRENT_HOSTS = 64
 # A language unit measures its comparisons in plan order, each comparison's observations in collection order.
 UNIT_ORDER = "language-observation-order-v1"
 SHARD_ID = r"[a-z0-9][a-z0-9-]*"
+# The envelope files a language unit attempt binds in its evidence, beside its partitions' raw results.
+UNIT_ARTIFACTS = ("environment-manifest.txt", "environment.txt", "engine-build.txt", "unit-rows.tsv",
+                  "unit-session.tsv", "run-metadata.txt", "cpu-affinity.json")
+# The provenance fields that identify the candidate and comparators a language result measured.
+CANDIDATE_FIELDS = ("source_commit", "source_tree", "comparators_sha256", "jdk")
 
 
 def platform_allocation(suite, platform):
@@ -198,6 +216,235 @@ def smoke_units(directory):
     if packed:
         result.add(max(packed, key=lambda unit: (float(unit["estimated_seconds"]), unit["unit_id"]))["unit_id"])
     return sorted(result)
+
+
+class UnitRejection(Exception):
+    """A unit attempt ended with a verdict its controller must not retry."""
+
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+def write_bundle(directory, output):
+    """Write a plan's deterministic bundle, which a unit worker installs, and return its SHA-256."""
+    directory = directory.resolve()
+    validate(directory)
+    names = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*") if path.is_file())
+    return engine_build.write_archive(directory, names, output)["sha256"]
+
+
+def install_bundle(bundle, sha256, plans):
+    """Install a checksummed plan bundle as plans/<shard ID>, where run-unit.sh finds its units."""
+    if engine_build.sha256_file(bundle) != sha256:
+        raise ValueError("language plan bundle checksum mismatch")
+    engine_build.archive_contents(bundle)
+    plans.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix="plan-", dir=plans))
+    try:
+        with tarfile.open(bundle, "r:gz") as files:
+            files.extractall(staging, filter="data")
+        plan = validate(staging)
+        staging.rename(plans / plan["shard_id"])
+    except Exception:
+        # A failed install leaves no units where run-unit.sh looks for plans.
+        shutil.rmtree(staging)
+        raise
+
+
+def check_host(environment, suite):
+    """A language unit runs on its platform's allocation, with every vCPU visible and the protocol heap."""
+    allocation = platform_allocation(suite, environment["platform"])
+    differing = [key for key, value in (
+        ("verification_status", "verified"), ("benchmark_mode", "unit-worker"),
+        ("instance_type", allocation["instance_type"]), ("logical_cpu_count", str(allocation["vcpus"])))
+        if environment[key] != value]
+    if differing:
+        raise ValueError(f"language unit host does not match its platform allocation in {differing}")
+    if environment["benchmark_heap_size"] != collection.PROTOCOL["heap"]:
+        raise ValueError("language host heap differs from the measurement protocol")
+
+
+def slice_directory(directory, partition, operations, work):
+    """The directory that measures a unit's operations of one comparison: the partition itself when it
+    measures them all, otherwise a copy of the partition selecting those operations."""
+    path = directory / "partitions" / partition["id"]
+    manifest = collection.load(path / "manifest.json")
+    if operations == list(collection.case_operations(manifest, manifest["cases"][0])):
+        return path
+    destination = work / partition["id"]
+    destination.mkdir(parents=True)
+    copy_inputs(manifest, path, destination)
+    collection.save(destination / "manifest.json", {**manifest, "selected_operations": operations})
+    return destination
+
+
+def frozen_unit_rows(directory, unit_id):
+    """A unit's rows in its plan's frozen unit-rows.tsv."""
+    return [row for row in row_protocol.read_tsv(directory / "unit-rows.tsv") if row["unit_id"] == unit_id]
+
+
+def unit_partitions(plan, unit):
+    """Each partition the unit measures, with the operations it measures there."""
+    partitions = {(partition["case"], partition["language"]): partition for partition in plan["partitions"]}
+    return [(partitions[key], operations) for key, operations in unit_slices(unit["owned"]).items()]
+
+
+def jvm_build_once(destination, java, archive, provenance):
+    """Build the candidate once per host; a build cut short is rebuilt."""
+    if not (destination / "jvm-build.json").is_file():
+        shutil.rmtree(destination, ignore_errors=True)
+        jvm_build.build(destination, java, collection.ROOT, archive, provenance)
+    return destination / "jvm-build.json"
+
+
+def run_unit(directory, unit_id, replica, root, native_directory, jvm_directory, unit_attempt, region, archive,
+             provenance, java="java"):
+    """Verify and measure one unit's comparisons on this host, pinned to one CPU, and accept the attempt."""
+    directory, root = directory.resolve(), root.resolve()
+    plan = collection.load(directory / "plan.json")
+    unit = work_units.load(directory)[unit_id]
+    suite = collection.load(directory / "source/manifest.json")["suite"]
+    environment = read_properties(root / "environment-manifest.txt")
+    check_host(environment, suite)
+    collection.host_identity(environment["platform"])
+    if not hasattr(os, "sched_setaffinity"):
+        raise ValueError("qualification requires Linux CPU affinity")
+    with provenance.open() as file:
+        [candidate] = csv.DictReader(file, delimiter="\t")
+    write_tsv(root / "unit-rows.tsv", work_units.UNIT_ROW_FIELDS, frozen_unit_rows(directory, unit_id))
+    unit_session.write_worker_unit_session(root, environment, unit_id, replica, unit_attempt, region)
+    (root / "run-metadata.txt").write_text("".join(f"{key}={value}\n" for key, value in (
+        ("unit_id", unit_id), ("candidate_commit", candidate["candidate_commit"]),
+        ("engine_tree", candidate["engine_tree"]), ("heap_size", environment["benchmark_heap_size"]),
+        ("regulator_release_version", environment["regulator_release_version"]))))
+    receipt = jvm_build_once(jvm_directory, java, archive, provenance)
+    classpath = (jvm_directory / "classpath.txt").read_text().strip()
+    # Every unit of the plan runs the same binaries, whichever comparators its comparisons need.
+    native_runners = {engine: str(native_directory / collection.native_target({"suite": suite}, engine))
+                      for engine in collection.NATIVE_RUNNERS}
+    affinity = os.sched_getaffinity(0)
+    try:
+        # Children inherit affinity: all verification and timing run on one CPU.
+        os.sched_setaffinity(0, {min(affinity)})
+        if len(os.sched_getaffinity(0)) != 1:
+            raise ValueError("worker CPU affinity was not applied")
+        collection.save(root / "cpu-affinity.json", sorted(os.sched_getaffinity(0)))
+        with tempfile.TemporaryDirectory() as work:
+            for partition, operations in unit_partitions(plan, unit):
+                path = slice_directory(directory, partition, operations, Path(work))
+                results = root / "partitions" / partition["id"]
+                try:
+                    collection.verify(path, results, java, classpath, native_runners)
+                except collection.SemanticFailure as error:
+                    # Only a verdict on the regex semantics is final; a runner that failed or never
+                    # started says nothing about them.
+                    raise UnitRejection(SEMANTIC_FAILURE_STATUS, str(error)) from error
+                try:
+                    collection.measure(path, results, java, classpath, native_runners, environment["platform"],
+                                       receipt, archive, provenance)
+                except collection.BudgetOverrun as error:
+                    raise UnitRejection(PROTOCOL_REJECTION_STATUS, str(error)) from error
+    finally:
+        os.sched_setaffinity(0, affinity)
+    write_unit_evidence(root)
+    unit_session.write_unit_receipt(root / "unit-receipt.tsv", validate_unit_attempt(root, directory))
+
+
+def unit_evidence(root):
+    """Every artifact of a unit attempt: its envelope files and its partitions' raw results."""
+    paths = [*(root / name for name in UNIT_ARTIFACTS), *(root / "partitions").rglob("*")]
+    return sorted(unit_session.host_evidence_rows(root, paths), key=lambda row: row["artifact"])
+
+
+def write_unit_evidence(root):
+    write_tsv(root / "unit-evidence.tsv", EVIDENCE_FIELDS, unit_evidence(root))
+
+
+def exports_digest(exports):
+    """A unit attempt's observed digest: the SHA-256 of its sorted (partition, export SHA-256) pairs."""
+    lines = sorted(f"{partition}  {sha256}\n" for partition, sha256 in exports)
+    return hashlib.sha256("".join(lines).encode()).hexdigest()
+
+
+def validate_unit_attempt(root, directory):
+    """Regenerate a language unit attempt's receipt from its raw results, host, and frozen plan."""
+    root, directory = root.resolve(), directory.resolve()
+    session = unit_session.read_unit_session(root)
+    if unit_evidence(root) != row_protocol.read_tsv(root / "unit-evidence.tsv"):
+        raise ValueError("unit evidence differs from the attempt's artifacts")
+    plan = collection.load(directory / "plan.json")
+    unit = work_units.load(directory).get(session["unit_id"])
+    if unit is None:
+        raise ValueError(f"unit {session['unit_id']} is not a frozen unit of the language plan")
+    frozen = frozen_unit_rows(directory, unit["unit_id"])
+    digest = unit_digest(plan["partitions"], unit["owned"])
+    if (row_protocol.read_tsv(root / "unit-rows.tsv") != frozen or
+            work_units.unit_id(plan["shard_id"], unit["owned"], [], digest, UNIT_ORDER) != unit["unit_id"]):
+        raise ValueError("unit rows differ from the frozen unit")
+    environment = read_properties(root / "environment-manifest.txt")
+    check_host(environment, collection.load(directory / "source/manifest.json")["suite"])
+    unit_session.check_worker_unit_session(session, environment)
+    metadata = read_properties(root / "run-metadata.txt")
+    if metadata["unit_id"] != unit["unit_id"] or metadata["heap_size"] != environment["benchmark_heap_size"]:
+        raise ValueError("unit metadata differs from its unit or host")
+    affinity = collection.load(root / "cpu-affinity.json")
+    if len(affinity) != 1 or type(affinity[0]) is not int or affinity[0] < 0:
+        raise ValueError("language unit lacks single-CPU affinity evidence")
+    partitions = unit_partitions(plan, unit)
+    if sorted(path.name for path in (root / "partitions").iterdir()) != sorted(partition["id"] for partition, _ in partitions):
+        raise ValueError("language unit has missing or unexpected partitions")
+    version = environment["regulator_release_version"]
+    expected_release = released_artifact.manifest(collection.ROOT, version) if version else None
+    candidate = runners = None
+    observed, exports = set(), []
+    with tempfile.TemporaryDirectory() as work:
+        for partition, operations in partitions:
+            results = root / "partitions" / partition["id"]
+            data = collection.export(slice_directory(directory, partition, operations, Path(work)), results, write=False)
+            if collection.load(results / "language-results.json") != data:
+                raise ValueError("language export differs from raw evidence")
+            provenance = data["provenance"]
+            identity = provenance["instance_identity"]
+            if (provenance["platform"] != session["platform"] or identity["instanceId"] != session["instance_id"] or
+                    identity["instanceType"] != session["instance_type"] or
+                    provenance["source_commit"] != metadata["candidate_commit"]):
+                raise ValueError("language result uses a different host or candidate")
+            if (provenance["comparators_sha256"] != environment["comparator_manifest_sha256"] or
+                    collection.JDK_VERSION not in provenance["jdk"] or
+                    collection.JDK_VERSION not in environment["java_runtime_version"]):
+                raise ValueError(f"language comparator or JDK {collection.JDK_VERSION} identity differs from the host")
+            # Each native runner the attempt verified with, checked as collection.measure checked it on the host.
+            for engine, (*_, key) in collection.NATIVE_RUNNERS.items():
+                if f"{key}_binary_sha256" in data["runners"]:
+                    if f"{key}_build" not in provenance:
+                        raise ValueError(f"{engine}: language result lacks its native build receipt")
+                    collection.validate_native_build(data["manifest"], engine, provenance[f"{key}_build"],
+                                                     data["runners"][f"{key}_binary_sha256"])
+            release = provenance["jvm_build"].get("released_artifact")
+            if expected_release is not None and (release is None or release["manifest"] != expected_release):
+                raise ValueError("language partition lacks the selected released artifact")
+            current = {key: provenance[key] for key in CANDIDATE_FIELDS}
+            if candidate not in (None, current) or runners not in (None, data["runners"]):
+                raise ValueError("language unit mixes candidates, comparator revisions, or binaries")
+            candidate, runners = current, data["runners"]
+            observed.update(data["observations"])
+            exports.append((partition["id"], sha256_file(results / "language-results.json")))
+    if observed != set(unit["owned"]):
+        raise ValueError("language unit observations differ from its rows")
+    return {
+        **session,
+        "shard_id": unit["shard_id"],
+        "owned_row_count": str(len(unit["owned"])),
+        "row_protocol_sha256": digest,
+        "manifest_sha256": sha256_file(directory / "plan.json"),
+        "observed_rows_sha256": exports_digest(exports),
+        "evidence_manifest_sha256": sha256_file(root / "unit-evidence.tsv"),
+        "candidate_commit": metadata["candidate_commit"],
+        "candidate_archive_sha256": environment["regulator_archive_sha256"],
+        "engine_tree": metadata["engine_tree"],
+        "heap_size": metadata["heap_size"],
+    }
 
 
 def copy_inputs(manifest, source, destination):
@@ -586,6 +833,24 @@ def main():
     package_runner.add_argument("--jvm-build-receipt", type=Path, required=True)
     package_runner.add_argument("--source-archive", type=Path)
     package_runner.add_argument("--candidate-provenance", type=Path)
+    bundle_parser = commands.add_parser("bundle", help="write a plan's bundle for unit workers and print its SHA-256")
+    bundle_parser.add_argument("--plan-directory", type=Path, required=True)
+    bundle_parser.add_argument("--output", type=Path, required=True)
+    install_parser = commands.add_parser("install-bundle")
+    install_parser.add_argument("--bundle", type=Path, required=True)
+    install_parser.add_argument("--sha256", required=True)
+    install_parser.add_argument("--plans", type=Path, required=True)
+    unit_parser = commands.add_parser("run-unit", help="measure one work unit on this unit worker")
+    unit_parser.add_argument("--plan-directory", type=Path, required=True)
+    unit_parser.add_argument("--unit", required=True)
+    unit_parser.add_argument("--replica", required=True)
+    unit_parser.add_argument("--unit-directory", type=Path, required=True)
+    unit_parser.add_argument("--native-directory", type=Path, required=True)
+    unit_parser.add_argument("--jvm-directory", type=Path, required=True)
+    unit_parser.add_argument("--unit-attempt", required=True)
+    unit_parser.add_argument("--region", required=True)
+    unit_parser.add_argument("--source-archive", type=Path, required=True)
+    unit_parser.add_argument("--candidate-provenance", type=Path, required=True)
     for name in ("validate", "verify", "run-job", "aggregate"):
         command = commands.add_parser(name)
         command.add_argument("--plan-directory", type=Path, required=True)
@@ -611,6 +876,18 @@ def main():
         print(f"Prepared {len(plan['jobs'])} same-host jobs; no hosts allocated")
         print(work_units.summary([{**unit, "estimated_seconds": float(unit["estimated_seconds"])}
                                   for unit in work_units.load(args.output_directory).values()]))
+    elif args.command == "bundle":
+        print(write_bundle(args.plan_directory, args.output))
+    elif args.command == "install-bundle":
+        install_bundle(args.bundle, args.sha256, args.plans)
+    elif args.command == "run-unit":
+        try:
+            run_unit(args.plan_directory, args.unit, args.replica, args.unit_directory, args.native_directory,
+                     args.jvm_directory, args.unit_attempt, args.region, archive=args.source_archive,
+                     provenance=args.candidate_provenance)
+        except UnitRejection as rejection:
+            print(f"unit {args.unit} rejected: {rejection}", file=sys.stderr)
+            sys.exit(rejection.status)
     elif args.command == "package-job":
         package_job(args.plan_directory, args.job, args.output_directory)
     elif args.command == "package-batch":

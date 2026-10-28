@@ -1,9 +1,11 @@
+import contextlib
 import copy
+import io
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -247,55 +249,272 @@ class TestFleet(unittest.TestCase):
         results = self.root / "results"
         for index, job in enumerate(plan["jobs"]):
             result = results / job["id"]
-            result.mkdir(parents=True)
-            partition = self.directory / "partitions" / job["partition"]
-            manifest = collection.load(partition / "manifest.json")
-            runners = {"fixture": "JVM"}
-            runners_hash = collection.digest(collection.encode(runners))
-            manifest_hash = collection.digest((partition / "manifest.json").read_bytes())
-            receipts, observations = {}, {}
-            for identity, case, language, engine, mode in collection.observations(manifest):
-                trace = "".join(str(source["expected_count"]) + ":" +
-                                ",".join(["61"] * source["expected_count"]) + "\n" for source in case["sources"])
-                receipt = {"outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode()),
-                           "command": ["verify", "workload.tsv"], "operations": {}}
-                for operation in collection.OPERATIONS:
-                    operation_trace = collection.expected_operation_trace(case, operation)
-                    receipt["operations"][operation] = {"outcome": "completed", "trace": operation_trace,
-                                                         "trace_sha256": collection.digest(operation_trace.encode())}
-                    row_id = identity + "/" + operation
-                    raw_path = result / row_id / "raw.json"
-                    raw_path.parent.mkdir(parents=True)
-                    if engine in collection.NATIVE_RUNNERS:
-                        raw = {"benchmarks": [{"run_type": "iteration", "run_name": operation,
-                                               "time_unit": "ns", "real_time": 100} for _ in range(5)]}
-                    else:
-                        raw = [{"benchmark": collection.CLASS + "." + operation,
-                                "params": {"engine": engine, "workloadFile": "workload.tsv"},
-                                "forks": 5, "warmupIterations": 10, "measurementIterations": 10,
-                                "warmupTime": "1 s", "measurementTime": "1 s", "threads": 1, "mode": "avgt",
-                                "primaryMetric": {"scoreUnit": "ns/op", "rawData": [[100] * 10 for _ in range(5)]},
-                                "secondaryMetrics": {"gc.alloc.rate.norm": {
-                                    "scoreUnit": "B/op", "rawData": [[0] * 10 for _ in range(5)]}}}]
-                    collection.save(raw_path, raw)
-                    observations[row_id] = {"outcome": "compared", **collection.raw_samples(raw_path, engine, operation),
-                                            "raw_file": str(raw_path.relative_to(result))}
-                receipts[identity] = receipt
-            collection.save(result / "runners.json", runners)
-            collection.save(result / "verification.json", {
-                "manifest_sha256": manifest_hash, "runners_sha256": runners_hash, "receipts": receipts})
-            collection.save(result / "provenance.json", {
-                "manifest_sha256": manifest_hash, "runners_sha256": runners_hash,
-                "source_commit": "commit", "source_tree": "tree", "comparators_sha256": "pins", "jdk": "JDK25",
-                "platform": job["platform"], "instance_identity": {
-                    # Schema 2 plans recorded no allocation; their hosts were each platform's standard size.
-                    "instanceType": job.get("instance_type", job["platform"] + ".large"), "instanceId": f"i-{index}"},
-                "jvm_build": {"source_tree": "tree", "jvm": runners}})
-            collection.save(result / "observations.json", observations)
-            collection.export(partition, result)
+            # Schema 2 plans recorded no allocation; their hosts were each platform's standard size.
+            self.write_partition_results(self.directory / "partitions" / job["partition"], result, job["platform"],
+                                         job.get("instance_type", job["platform"] + ".large"), f"i-{index}")
             collection.save(result / "job.json", {
                 "job": job, "plan_sha256": collection.digest((self.directory / "plan.json").read_bytes())})
         return results
+
+    @staticmethod
+    def write_partition_results(partition, result, platform, instance_type, instance_id, jdk="JDK25", source_commit="commit"):
+        """Write one partition's synthetic verification and measurements, and export them."""
+        result.mkdir(parents=True, exist_ok=True)
+        manifest = collection.load(partition / "manifest.json")
+        runners = {"fixture": "JVM"}
+        runners_hash = collection.digest(collection.encode(runners))
+        manifest_hash = collection.digest((partition / "manifest.json").read_bytes())
+        receipts, observations = {}, {}
+        for identity, case, language, engine, mode in collection.observations(manifest):
+            trace = "".join(str(source["expected_count"]) + ":" +
+                            ",".join(["61"] * source["expected_count"]) + "\n" for source in case["sources"])
+            receipt = {"outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode()),
+                       "command": ["verify", "workload.tsv"], "operations": {}}
+            for operation in collection.OPERATIONS:
+                operation_trace = collection.expected_operation_trace(case, operation)
+                receipt["operations"][operation] = {"outcome": "completed", "trace": operation_trace,
+                                                     "trace_sha256": collection.digest(operation_trace.encode())}
+                if operation not in collection.case_operations(manifest, case):
+                    continue
+                row_id = identity + "/" + operation
+                raw_path = result / row_id / "raw.json"
+                raw_path.parent.mkdir(parents=True)
+                if engine in collection.NATIVE_RUNNERS:
+                    raw = {"benchmarks": [{"run_type": "iteration", "run_name": operation,
+                                           "time_unit": "ns", "real_time": 100} for _ in range(5)]}
+                else:
+                    raw = [{"benchmark": collection.CLASS + "." + operation,
+                            "params": {"engine": engine, "workloadFile": "workload.tsv"},
+                            "forks": 5, "warmupIterations": 10, "measurementIterations": 10,
+                            "warmupTime": "1 s", "measurementTime": "1 s", "threads": 1, "mode": "avgt",
+                            "primaryMetric": {"scoreUnit": "ns/op", "rawData": [[100] * 10 for _ in range(5)]},
+                            "secondaryMetrics": {"gc.alloc.rate.norm": {
+                                "scoreUnit": "B/op", "rawData": [[0] * 10 for _ in range(5)]}}}]
+                collection.save(raw_path, raw)
+                observations[row_id] = {"outcome": "compared", **collection.raw_samples(raw_path, engine, operation),
+                                        "raw_file": str(raw_path.relative_to(result))}
+            receipts[identity] = receipt
+        collection.save(result / "runners.json", runners)
+        collection.save(result / "verification.json", {
+            "manifest_sha256": manifest_hash, "runners_sha256": runners_hash, "receipts": receipts})
+        collection.save(result / "provenance.json", {
+            "manifest_sha256": manifest_hash, "runners_sha256": runners_hash,
+            "source_commit": source_commit, "source_tree": "tree", "comparators_sha256": "pins", "jdk": jdk,
+            "platform": platform, "instance_identity": {"instanceType": instance_type, "instanceId": instance_id},
+            "jvm_build": {"source_tree": "tree", "jvm": runners}})
+        collection.save(result / "observations.json", observations)
+        collection.export(partition, result)
+
+    def run_unit(self, unit_id, root, verify=None, environment=None, measured=lambda partition: {}):
+        """Run one unit attempt through fleet.run_unit, with synthetic verification and measurements;
+        measured names each partition's changes to its synthetic results."""
+        root.mkdir()
+        self.unit_environment = {
+            "verification_status": "verified", "benchmark_mode": "unit-worker", "baseline_campaign": "language",
+            "platform": "r9g", "host_epoch": "2", "campaign_architecture": "graviton", "instance_id": "i-unit",
+            "instance_type": "r9g.2xlarge", "availability_zone": "us-west-2a", "logical_cpu_count": "8",
+            "benchmark_heap_size": "8g", "regulator_release_version": "", "regulator_archive_sha256": "5" * 64,
+            "comparator_manifest_sha256": "pins", "java_runtime_version": "25.0.4+7-LTS", **(environment or {})}
+        self.write_unit_environment(root)
+        provenance = self.root / "candidate-provenance.tsv"
+        provenance.write_text("candidate_commit\tengine_tree\n" + "a" * 40 + "\t" + "b" * 40 + "\n")
+        affinity = {0, 1}
+
+        def set_affinity(_, cpus):
+            affinity.clear()
+            affinity.update(cpus)
+
+        def build(destination, *args):
+            destination.mkdir(parents=True)
+            (destination / "classpath.txt").write_text("classpath\n")
+            collection.save(destination / "jvm-build.json", {})
+
+        def measure(path, results, *args):
+            self.write_partition_results(path, results, "r9g", "r9g.2xlarge", "i-unit",
+                                         **{"jdk": "Temurin 25.0.4+7", "source_commit": "a" * 40,
+                                            **measured(results.name)})
+
+        with patch.object(collection, "host_identity"), \
+                patch.object(fleet.os, "sched_getaffinity", lambda _: set(affinity), create=True), \
+                patch.object(fleet.os, "sched_setaffinity", set_affinity, create=True), \
+                patch.object(fleet.jvm_build, "build", side_effect=build), \
+                patch.object(collection, "verify", side_effect=verify or (lambda path, results, *args: results.mkdir(parents=True))), \
+                patch.object(collection, "measure", side_effect=measure):
+            fleet.run_unit(self.directory, unit_id, "1", root, self.root / "native", self.root / "jvm", "host-1/1",
+                           "us-west-2", archive=self.root / "regulator.tar.gz", provenance=provenance)
+        self.assertEqual(affinity, {0, 1})
+
+    def write_unit_environment(self, root):
+        (root / "environment-manifest.txt").write_text(
+            "".join(f"{key}={value}\n" for key, value in self.unit_environment.items()))
+        if (root / "unit-evidence.tsv").exists():
+            fleet.write_unit_evidence(root)
+
+    def test_unit_attempt_measures_its_operations_and_regenerates_its_receipt(self):
+        plan = self.prepare_small_plan()
+        units = fleet.work_units.load(self.directory)
+        unit_id = next(unit_id for unit_id, unit in units.items()
+                       if any(len(operations) < len(collection.OPERATIONS)
+                              for operations in fleet.unit_slices(unit["owned"]).values()))
+        root = self.root / "attempt"
+        self.run_unit(unit_id, root)
+        receipt = fleet.row_protocol.read_tsv(root / "unit-receipt.tsv")[0]
+        self.assertEqual(receipt, fleet.validate_unit_attempt(root, self.directory))
+        self.assertEqual((receipt["owned_row_count"], receipt["candidate_commit"], receipt["engine_tree"]),
+                         (str(len(units[unit_id]["owned"])), "a" * 40, "b" * 40))
+        self.assertEqual(collection.load(root / "cpu-affinity.json"), [0])
+        self.assertEqual(sorted(path.name for path in (root / "partitions").iterdir()),
+                         sorted(partition["id"] for partition, _ in fleet.unit_partitions(plan, units[unit_id])))
+
+        original = dict(self.unit_environment)
+        for field in ("instance_id", "instance_type", "logical_cpu_count", "platform", "benchmark_heap_size",
+                      "comparator_manifest_sha256", "java_runtime_version", "benchmark_mode"):
+            with self.subTest(field=field):
+                self.unit_environment = {**original, field: "changed"}
+                self.write_unit_environment(root)
+                with self.assertRaises(ValueError):
+                    fleet.validate_unit_attempt(root, self.directory)
+        self.unit_environment = original
+        self.write_unit_environment(root)
+        for affinity in ([], [0, 1], [True]):
+            with self.subTest(affinity=affinity):
+                collection.save(root / "cpu-affinity.json", affinity)
+                fleet.write_unit_evidence(root)
+                with self.assertRaisesRegex(ValueError, "affinity"):
+                    fleet.validate_unit_attempt(root, self.directory)
+        collection.save(root / "cpu-affinity.json", [0])
+        raw = next((root / "partitions").rglob("raw.json"))
+        raw.write_text("[]\n")
+        with self.assertRaisesRegex(ValueError, "unit evidence differs"):
+            fleet.validate_unit_attempt(root, self.directory)
+        fleet.write_unit_evidence(root)
+        with self.assertRaises((ValueError, TypeError)):
+            fleet.validate_unit_attempt(root, self.directory)
+
+    def assert_rewritten_exports_validate(self, root, rewrite, rejection):
+        """Rewrite each partition's export of the attempt at root, then validate the attempt as exported:
+        accepted when rejection is None, otherwise rejected with that message."""
+        for path in sorted((root / "partitions").glob("*/language-results.json")):
+            exported = collection.load(path)
+            rewrite(exported)
+            collection.save(path, exported)
+        fleet.write_unit_evidence(root)
+        with patch.object(collection, "export", side_effect=lambda _slice, result, write=False: collection.load(
+                result / "language-results.json")):
+            if rejection is None:
+                fleet.validate_unit_attempt(root, self.directory)
+            else:
+                with self.assertRaisesRegex(ValueError, rejection):
+                    fleet.validate_unit_attempt(root, self.directory)
+
+    def test_unit_attempt_requires_release_builds_of_its_native_runners(self):
+        self.prepare_small_plan()
+        unit_id = next(iter(fleet.work_units.load(self.directory)))
+        root = self.root / "attempt"
+        self.run_unit(unit_id, root)
+        for change, rejection in (
+                ({}, None),
+                ({"binary_sha256": "2" * 64}, "native binary does not match recorded build"),
+                ({"source_sha256": "0" * 64}, "built from a different source"),
+                ({"runner_compile_commands": [{"command": "c++ -O0 runner.cc"}]}, "requires a release build"),
+                (None, "lacks its native build receipt")):
+            def rewrite(exported):
+                for engine, (*_, key) in collection.NATIVE_RUNNERS.items():
+                    exported["runners"][f"{key}_binary_sha256"] = "1" * 64
+                    source = collection.native_build.source_digest(collection.native_target(exported["manifest"], engine))
+                    exported["provenance"][f"{key}_build"] = {
+                        "binary_sha256": "1" * 64, "source_sha256": source,
+                        "runner_compile_commands": [{"command": "c++ -O3 -DNDEBUG runner.cc"}], **(change or {})}
+                    if change is None:
+                        del exported["provenance"][f"{key}_build"]
+            with self.subTest(rejection=rejection):
+                self.assert_rewritten_exports_validate(root, rewrite, rejection)
+
+    def test_unit_attempt_requires_the_selected_released_artifact(self):
+        self.prepare_small_plan()
+        unit_id = next(iter(fleet.work_units.load(self.directory)))
+        root = self.root / "attempt"
+        self.run_unit(unit_id, root)
+        expected = fleet.released_artifact.manifest(collection.ROOT, "1.0")
+        self.unit_environment["regulator_release_version"] = "1.0"
+        self.write_unit_environment(root)
+        for manifest, rejection in ((expected, None),
+                                    ({**expected, "jar_sha256": "0" * 64}, "selected released artifact")):
+            def rewrite(exported):
+                exported["provenance"]["jvm_build"]["released_artifact"] = {"manifest": manifest}
+            with self.subTest(rejection=rejection):
+                self.assert_rewritten_exports_validate(root, rewrite, rejection)
+
+    def test_unit_rejects_a_host_off_its_allocation_before_verifying(self):
+        self.prepare_small_plan()
+        unit_id = next(iter(fleet.work_units.load(self.directory)))
+        verify = Mock()
+        with self.assertRaisesRegex(ValueError, "platform allocation"):
+            self.run_unit(unit_id, self.root / "attempt", verify=verify, environment={"instance_type": "r9g.large"})
+        verify.assert_not_called()
+
+    def test_unit_verdicts_choose_their_controller_status(self):
+        self.prepare_small_plan()
+        unit_id = next(iter(fleet.work_units.load(self.directory)))
+
+        def disagreeing_trace(path, results, *args):
+            # Every engine reports one more match per source than the case expects.
+            manifest = collection.load(path / "manifest.json")
+            trace = "".join(f"{source['expected_count'] + 1}:\n" for source in manifest["cases"][0]["sources"])
+            receipt = {"outcome": "completed", "trace": trace, "trace_sha256": collection.digest(trace.encode())}
+            collection.validate_receipts(manifest, {identity: receipt for identity, *_ in collection.observations(manifest)})
+
+        def attempts(*phases):
+            # A verifier whose attempts time out in these phases, then complete.
+            outcomes = [{"outcome": "did-not-finish", "phase": phase} for phase in phases] + [{"outcome": "completed"}]
+            def verify(path, results, *args):
+                with patch.object(collection, "run_process", side_effect=outcomes):
+                    collection.verify_command(["verifier"], results / "verifier", "native-re2", "safe")
+            return verify
+
+        def runner(script):
+            return lambda path, results, *args: collection.run_process(["sh", "-c", script], results / "runner")
+
+        def over_budget(partition):
+            raise collection.BudgetOverrun(f"measurement process outran its budget: {partition}")
+
+        semantic, protocol = fleet.SEMANTIC_FAILURE_STATUS, fleet.PROTOCOL_REJECTION_STATUS
+        for index, (name, unit, status, message) in enumerate((
+                ("trace mismatch", {"verify": disagreeing_trace}, semantic, "disagrees with expected count"),
+                ("nonreproducible timeout", {"verify": attempts("execution")}, semantic, "nonreproducible timeout"),
+                ("timeout phase changed", {"verify": attempts("compile", "execution")}, semantic, "phase changed"),
+                ("runner never started", {"verify": attempts("startup")}, None, "startup timed out"),
+                ("runner killed", {"verify": runner("kill -9 $$")}, None, r"runner failed \(-9\)"),
+                ("launcher not found", {"verify": runner("exit 127")}, None, r"runner failed \(127\)"),
+                ("measurement over budget", {"measured": over_budget}, protocol, "outran its budget"))):
+            with self.subTest(verdict=name):
+                if status is None:
+                    with self.assertRaisesRegex(ValueError, message):
+                        self.run_unit(unit_id, self.root / f"attempt-{index}", **unit)
+                else:
+                    with self.assertRaisesRegex(fleet.UnitRejection, message) as rejection:
+                        self.run_unit(unit_id, self.root / f"attempt-{index}", **unit)
+                    # The run-unit command exits with the rejection's status for the controller.
+                    arguments = ["fleet.py", "run-unit", "--unit", unit_id, "--replica", "1", "--unit-attempt", "1",
+                                 "--region", "us-west-2"]
+                    for name in ("plan-directory", "unit-directory", "native-directory", "jvm-directory",
+                                 "source-archive", "candidate-provenance"):
+                        arguments += [f"--{name}", str(self.root / name)]
+                    with patch.object(fleet, "run_unit", side_effect=rejection.exception), \
+                            patch.object(sys, "argv", arguments), contextlib.redirect_stderr(io.StringIO()), \
+                            self.assertRaises(SystemExit) as exited:
+                        fleet.main()
+                    self.assertEqual(exited.exception.code, status)
+
+    def test_worker_installs_the_plan_bundle_by_shard(self):
+        self.prepare_small_plan()
+        bundle = self.root / "plan.tar.gz"
+        sha256 = fleet.write_bundle(self.directory, bundle)
+        self.assertEqual(sha256, fleet.write_bundle(self.directory, self.root / "renamed.tar.gz"))
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            fleet.install_bundle(bundle, "0" * 64, self.root / "plans")
+        fleet.install_bundle(bundle, sha256, self.root / "plans")
+        self.assertEqual(fleet.validate(self.root / "plans/language-lifecycle"), fleet.validate(self.directory))
 
     def test_aggregate_retains_every_sample_and_does_not_rewrite_evidence(self):
         plan = self.prepare_small_plan()
