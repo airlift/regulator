@@ -376,6 +376,8 @@ function Header({ label, column, sort, setSort, title }: {
 function operationDescription(row: Row): string {
   if (row.workload?.columnRows != null) return "Count the rows of one column that match a warmed LIKE pattern.";
   const operation = row.operation === "execute" ? row.model : row.operation;
+  // Only Trino's API has an extractAll call that returns a Slice list; other languages' rows loop over a matcher.
+  if (operation === "extractAll" && row.language !== "trino") return "Extract the selected capture from every match.";
   return ({
     count: "Count all non-overlapping matches in the input.",
     "count-spans": "Find all matches and sum their matched lengths.",
