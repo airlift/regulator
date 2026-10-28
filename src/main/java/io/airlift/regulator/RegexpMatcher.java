@@ -148,8 +148,14 @@ public final class RegexpMatcher
         regionStart = start;
         regionEnd = end;
         regionStartsAfterCarriageReturn = readsCarriageReturnBeforeRegion && start > 0 && start < end && input.getByte(start - 1) == '\r' && input.getByte(start) == '\n';
+        resetSearchState();
+        return this;
+    }
+
+    private void resetSearchState()
+    {
         if (candidateStartCursor != null) {
-            candidateStartCursor.reset(end - start);
+            candidateStartCursor.reset(regionLength());
         }
         if (groupZeroForwardCursor != null) {
             groupZeroForwardCursor.reset();
@@ -161,7 +167,6 @@ public final class RegexpMatcher
         retryStart = 0;
         previousMatchEnd = -1;
         invalidateMatch();
-        return this;
     }
 
     /// Finds the next non-overlapping match in the current region. After a failed `find`,
@@ -197,9 +202,7 @@ public final class RegexpMatcher
             setMatchAndAdvance(groups[0], groups[1]);
             return true;
         }
-        nextFindStart = retryStart;
-        invalidateMatch();
-        return false;
+        return failFind();
     }
 
     /// The Rust crate skips an empty match that ends where the previous match ended or, except in
@@ -235,9 +238,7 @@ public final class RegexpMatcher
         if (singleByteMatcher != null) {
             int matchStart = singleByteMatcher.find(input, regionStart + nextFindStart, regionEnd);
             if (matchStart < 0) {
-                nextFindStart = retryStart;
-                invalidateMatch();
-                return false;
+                return failFind();
             }
             matchStart -= regionStart;
             groups[0] = matchStart;
@@ -269,9 +270,7 @@ public final class RegexpMatcher
                 return true;
             }
             if (candidateBoundary == Dfa.SEARCH_NO_MATCH) {
-                nextFindStart = retryStart;
-                invalidateMatch();
-                return false;
+                return failFind();
             }
         }
 
@@ -297,9 +296,7 @@ public final class RegexpMatcher
                 }
             }
             if (matchBoundary == Dfa.SEARCH_NO_MATCH) {
-                nextFindStart = retryStart;
-                invalidateMatch();
-                return false;
+                return failFind();
             }
         }
 
@@ -317,9 +314,7 @@ public final class RegexpMatcher
                 return true;
             }
             if (matchBoundary == Dfa.SEARCH_NO_MATCH) {
-                nextFindStart = retryStart;
-                invalidateMatch();
-                return false;
+                return failFind();
             }
         }
 
@@ -328,9 +323,7 @@ public final class RegexpMatcher
             loweredCandidateStart = pattern.findLoweredCandidateStart(input, regionStart, regionEnd, searchStart);
         }
         if (loweredCandidateStart == Dfa.SEARCH_NO_MATCH) {
-            nextFindStart = retryStart;
-            invalidateMatch();
-            return false;
+            return failFind();
         }
         if (loweredCandidateStart >= 0) {
             searchStart += (int) loweredCandidateStart;
@@ -360,9 +353,7 @@ public final class RegexpMatcher
                 setMatchAndAdvance(groups[0], groups[1]);
                 return true;
             }
-            nextFindStart = retryStart;
-            invalidateMatch();
-            return false;
+            return failFind();
         }
 
         setMatchAndAdvance(groups[0], groups[1]);
@@ -382,9 +373,7 @@ public final class RegexpMatcher
                 UNANCHORED,
                 groups,
                 this)) {
-            nextFindStart = retryStart;
-            invalidateMatch();
-            return false;
+            return failFind();
         }
         toRegionOffsets();
         setMatchAndAdvance(groups[0], groups[1]);
@@ -396,9 +385,7 @@ public final class RegexpMatcher
     private boolean findNextAfterCarriageReturn()
     {
         if (!pattern.matchRegionAfterCarriageReturnInto(input, regionStart, regionEnd, regionStart + nextFindStart, UNANCHORED, groups, this)) {
-            nextFindStart = retryStart;
-            invalidateMatch();
-            return false;
+            return failFind();
         }
         setMatchAndAdvance(groups[0], groups[1]);
         return true;
@@ -416,6 +403,14 @@ public final class RegexpMatcher
                 groups[index] -= regionStart;
             }
         }
+    }
+
+    // A failed find leaves no match, and the next find searches again from retryStart.
+    private boolean failFind()
+    {
+        nextFindStart = retryStart;
+        invalidateMatch();
+        return false;
     }
 
     private void setMatchAndAdvance(int matchStart, int matchEnd)
@@ -453,12 +448,7 @@ public final class RegexpMatcher
         }
         else {
             // A whole-input matcher already has the reset region, so clear only the search state.
-            if (groupZeroForwardCursor != null) {
-                groupZeroForwardCursor.reset();
-            }
-            retryStart = 0;
-            previousMatchEnd = -1;
-            invalidateMatch();
+            resetSearchState();
         }
         nextFindStart = start;
         return find();

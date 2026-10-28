@@ -132,7 +132,7 @@ public class TestDfaCandidateStartCursor
     }
 
     @Test
-    public void testCandidateCursorFallsBackWhenAttemptExceedsBound()
+    public void testCandidateCursorFallsBackUntilReset()
     {
         Re2 pattern = compile("(a.*z|b)");
         Slice input = utf8("a" + "x".repeat(1_000) + "b");
@@ -146,6 +146,12 @@ public class TestDfaCandidateStartCursor
         assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isTrue();
         assertThat(boundaries(matcher)).containsExactly(new Boundary(2, 4));
         assertThat(matcher.candidateStartRouteCountForDiagnostics()).isEqualTo(1);
+
+        matcher.reset(input);
+        assertThat(boundaries(matcher)).containsExactly(new Boundary(1_001, 1_002));
+        assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isFalse();
+        assertThat(matcher.find(1_001)).isTrue();
+        assertThat(matcher.candidateStartRouteCountForDiagnostics()).isEqualTo(2);
     }
 
     @Test
