@@ -24,7 +24,7 @@ or silently switch to an engine with different resource guarantees.
 | `\R` | Java requires CRLF to behave as one atomic linebreak under repetition. The current character-class representation is insufficient. |
 | Nullable repeated captures | Java resets captures within repeated nullable groups according to rules not represented by the current capture program. |
 | Canonical equivalence | Supporting canonical normalization equivalence requires a defined expansion, matching, and resource policy. |
-| Raw byte and surrogate escapes | Java patterns represent Unicode code points, and Trino does not assign portable character semantics to these escape forms. Patterns must also be valid UTF-8, so a malformed byte cannot appear as literal pattern text either. |
+| Raw byte and surrogate escapes | No UTF-8 text contains a lone surrogate, so a surrogate escape could match only malformed input. Java patterns represent Unicode code points, and Trino does not assign portable character semantics to raw byte escapes. Patterns must also be valid UTF-8, so a malformed byte cannot appear as literal pattern text either. |
 | Repetition counts above 1,000 | The compiler limit bounds program expansion and follows RE2's implementation restriction. |
 
 The limits have different causes. General backreferences conflict with the

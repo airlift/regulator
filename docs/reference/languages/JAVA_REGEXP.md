@@ -137,6 +137,7 @@ option:
 - atomic groups and possessive quantifiers
 - the previous-match boundary `\G`
 - the linebreak escape `\R`
+- lone surrogate escapes such as `\uD800`, `\x{DC00}`, or `\N{HIGH SURROGATES D800}`
 - canonical equivalence
 - repeated captures whose body can match the empty string
 - repetitions above 1,000

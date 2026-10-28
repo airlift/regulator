@@ -1800,6 +1800,9 @@ final class JavaRegexpParser
                 if (digits == 0 || atEnd() || consumeByte() != '}') {
                     throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
                 }
+                if (value >= Character.MIN_SURROGATE && value <= Character.MAX_SURROGATE) {
+                    throw unsupportedConstruct("surrogate escapes", sequenceStart, index);
+                }
                 return value;
             }
 
@@ -1827,18 +1830,22 @@ final class JavaRegexpParser
         private int parseUnicodeEscape(int flags, int sequenceStart)
         {
             int value = parseFourHexDigits(sequenceStart);
-            if (Character.isHighSurrogate((char) value)) {
-                if (index + 2 > end || bytes[index] != '\\' || bytes[index + 1] != 'u') {
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
-                }
+            if (Character.isHighSurrogate((char) value) && index + 2 <= end && bytes[index] == '\\' && bytes[index + 1] == 'u') {
+                // As in the JDK, the next escape of this form must have four hex digits, but it joins
+                // this one only when it is a low surrogate.
+                int escapeEnd = index;
                 index += 2;
                 int lowSurrogate = parseFourHexDigits(sequenceStart);
-                if (!Character.isLowSurrogate((char) lowSurrogate)) {
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                if (Character.isLowSurrogate((char) lowSurrogate)) {
+                    return Character.toCodePoint((char) value, (char) lowSurrogate);
                 }
-                return Character.toCodePoint((char) value, (char) lowSurrogate);
+                index = escapeEnd;
             }
-            if (Character.isLowSurrogate((char) value) || value > Regexp.maxRune(flags)) {
+            if (Character.isSurrogate((char) value)) {
+                // The JDK accepts a lone surrogate escape, which no UTF-8 text can match.
+                throw unsupportedConstruct("surrogate escapes", sequenceStart, index);
+            }
+            if (value > Regexp.maxRune(flags)) {
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
             return value;
@@ -1873,6 +1880,9 @@ final class JavaRegexpParser
             int codePoint = JavaCharacterNames.codePointOf(name);
             if (codePoint < 0) {
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+            }
+            if (codePoint >= Character.MIN_SURROGATE && codePoint <= Character.MAX_SURROGATE) {
+                throw unsupportedConstruct("surrogate escapes", sequenceStart, index);
             }
             return codePoint;
         }

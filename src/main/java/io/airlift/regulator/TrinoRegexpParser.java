@@ -2122,6 +2122,9 @@ final class TrinoRegexpParser
                 if (digits == 0 || atEnd() || consumeByte() != '}') {
                     throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
                 }
+                if (value >= Character.MIN_SURROGATE && value <= Character.MAX_SURROGATE) {
+                    throw unsupportedConstruct("surrogate escapes", sequenceStart, index);
+                }
                 return value;
             }
 
