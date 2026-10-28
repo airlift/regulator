@@ -53,14 +53,17 @@ SPOT_VCPU_SAFETY_RESERVE = 32
 CAPACITY_RETRY_SECONDS = 30
 JOB_TIMEOUT_SECONDS = 90 * 60
 MAX_REPLACEMENTS_PER_JOB = 2
-# Once this share of a phase's jobs, rounded up, is all that remains unaccepted, new
-# launches use On-Demand so the phase's tail does not wait on Spot capacity or a reclaim.
+# Once this share of a pool's estimated work is all that remains unaccepted, the pool's new
+# launches use On-Demand so the phase's tail does not wait on Spot capacity or a reclaim,
+# unless the campaign is Spot-only.
 ON_DEMAND_TAIL_PERCENT = 10
 WRAPPER_NOT_CREATED = "wrapper process was not created"
 UNIT_WORKER_SHARD = "unit-worker"
 UNIT_WORKER_LIFETIME_SECONDS = 6 * 60 * 60
-# The wrapper waits for a unit worker's host evidence through its lifetime, its last unit and upload.
-UNIT_WORKER_TIMEOUT_SECONDS = UNIT_WORKER_LIFETIME_SECONDS + 90 * 60
+# The wrapper waits for a unit worker's host evidence through its lifetime, this allowance for its host
+# setup and final uploads, and its last unit: the pool's longest unit, and at least the unit budget.
+UNIT_WORKER_SETUP_AND_UPLOAD_SECONDS = 75 * 60
+UNIT_WORKER_LAST_UNIT_SECONDS = work_units.UNIT_SECONDS
 # A worker whose heartbeat is this stale has lost its lease once EC2 no longer runs its instance,
 # and after the longer bound whatever EC2 reports.
 UNIT_HEARTBEAT_STALE_SECONDS = 10 * 60
@@ -82,7 +85,8 @@ SEMANTIC_FAILURE_STATUS = 44
 SEMANTIC_FAILURE_DETAIL = f"semantic failure: status {SEMANTIC_FAILURE_STATUS}"
 # A unit campaign phase's digest of the tooling that started it, beside its campaign state.
 TOOLING_DIGEST = "tooling-digest.txt"
-WORK_ITEM_FIELDS = ("platform", "shard_id", "unit_id", "replica", "estimated_seconds", "excluded_instances")
+WORK_ITEM_FIELDS = ("platform", "instance_type", "shard_id", "unit_id", "replica", "estimated_seconds",
+                    "excluded_instances")
 # Lease outcomes that spend one of the item's attempts.
 COUNTED_UNIT_OUTCOMES = frozenset(("failed", "interrupted", "lost"))
 # Lease outcomes after which the lease's host can no longer change what it became.
@@ -172,8 +176,10 @@ class Platform:
 
 @dataclass(frozen=True)
 class WorkItem:
-    """One replica of a work unit on one platform, measured by any unit worker of its platform's pool."""
+    """One replica of a work unit on one platform, measured by any unit worker of its pool: the platform's
+    workers of the instance type the unit's shard is allocated."""
     platform: str
+    instance_type: str
     shard: str
     unit_id: str
     replica: int
@@ -187,7 +193,7 @@ class WorkItem:
 
     @property
     def pool(self):
-        return self.platform
+        return self.platform, self.instance_type
 
 
 @dataclass(frozen=True)
@@ -202,7 +208,7 @@ class Job:
     # Chosen at launch; empty until the controller places the attempt.
     region: str = ""
     placement_score: str = ""
-    # Regions this job's earlier Spot launches found no capacity in, each moved past once.
+    # Regions where the pool's Spot launches found no capacity within the cool-down.
     spot_capacity_failures: tuple = ()
 
     @property
@@ -444,7 +450,8 @@ def build_work_items(phase, platforms, units, shards, confirmation_units=()):
                     for platform in platforms
                     for unit_id in ordered
                     for replica in replicas]
-    return [WorkItem(platform, units[unit_id]["shard_id"], unit_id, replica,
+    instance_types = {platform.name: platform.instance_type for platform in platforms}
+    return [WorkItem(platform, instance_types[platform], units[unit_id]["shard_id"], unit_id, replica,
                      float(units[unit_id]["estimated_seconds"]), instances)
             for platform, unit_id, replica, instances in selected]
 
@@ -456,7 +463,7 @@ def unit_worker_job(platform, ordinal, host_epoch, market, spot_capacity_failure
 
 
 def unit_worker_pool(job):
-    return job.platform.name
+    return job.platform.name, job.platform.instance_type
 
 
 def allocated_platform(platform, instance_type, vcpus):
@@ -467,6 +474,32 @@ def allocated_platform(platform, instance_type, vcpus):
     if (instance_type, vcpus) not in allowed:
         raise ValueError("planned worker allocation is not available for the platform")
     return replace(platform, instance_type=instance_type, vcpus=vcpus)
+
+
+def pool_platform(platform, instance_type):
+    """The platform as a pool's workers launch it: its frozen type or its concurrency type."""
+    vcpus = platform.vcpus if instance_type == platform.instance_type else platform.concurrency_vcpus
+    return allocated_platform(platform, instance_type, vcpus)
+
+
+def pool_platforms(platforms, items):
+    """Each pool's worker platform."""
+    by_name = {platform.name: platform for platform in platforms}
+    return {item.pool: pool_platform(by_name[item.platform], item.instance_type) for item in items}
+
+
+def unit_worker_timeout(longest_unit_seconds):
+    """A worker's wrapper timeout: setup, lifetime, uploads, and a last unit as long as the pool's longest."""
+    return (UNIT_WORKER_LIFETIME_SECONDS + UNIT_WORKER_SETUP_AND_UPLOAD_SECONDS +
+            max(UNIT_WORKER_LAST_UNIT_SECONDS, math.ceil(longest_unit_seconds)))
+
+
+def longest_units(items):
+    """Each pool's longest estimated unit."""
+    longest = {}
+    for item in items:
+        longest[item.pool] = max(longest.get(item.pool, 0), item.estimated_seconds)
+    return longest
 
 
 def platform_has_capacity(candidate, running, arguments):
@@ -520,9 +553,10 @@ def validate_configuration(arguments, jobs, launched_jobs=None, items=None):
                          "the policy allows On-Demand in an allowed region holding each worker type's image")
     if getattr(arguments, "execute", False) and arguments.max_concurrent > DEFAULT_MAX_CONCURRENT and budget is None:
         raise SystemExit("more than 64 workers requires a shared fleet budget")
-    if items is not None and budget and budget.policy["max_attempt_seconds"] < UNIT_WORKER_TIMEOUT_SECONDS + 15 * 60:
+    worker_timeout = unit_worker_timeout(max(longest_units(items or ()).values(), default=0))
+    if items is not None and budget and budget.policy["max_attempt_seconds"] < worker_timeout + 15 * 60:
         raise SystemExit("unit workers require a shared fleet max_attempt_seconds of at least "
-                         f"{UNIT_WORKER_TIMEOUT_SECONDS + 15 * 60}, a worker's lifetime, last unit and cleanup")
+                         f"{worker_timeout + 15 * 60}, a worker's timeout and cleanup")
     if not arguments.campaign_id or len(arguments.campaign_id) > 63:
         raise SystemExit("campaign_id must contain 1-63 characters")
     if type(arguments.max_concurrent) is not int or arguments.max_concurrent < 1:
@@ -572,7 +606,7 @@ def campaign_worker_platforms(arguments, jobs, items):
     if items is None:
         return [job.platform for job in jobs]
     platforms = getattr(arguments, "unit_platforms", {})
-    return [platforms[name] for name in sorted({item.pool for item in items}) if name in platforms]
+    return [platforms[pool] for pool in sorted({item.pool for item in items}) if pool in platforms]
 
 
 def unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus):
@@ -582,15 +616,15 @@ def unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus):
     work = {}
     vcpu_seconds = 0
     for item in items:
-        work[item.platform] = work.get(item.platform, 0) + item.estimated_seconds
-        platform = platforms.get(item.platform)
+        work[item.pool] = work.get(item.pool, 0) + item.estimated_seconds
+        platform = platforms.get(item.pool)
         if platform is not None:
             vcpu_seconds += platform.vcpus * item.estimated_seconds
     lifetime = UNIT_WORKER_LIFETIME_SECONDS
     waves = max([math.ceil(sum(work.values()) / (host_limit * lifetime))] +
                 [math.ceil(seconds / (min(per_platform, host_limit) * lifetime)) for seconds in work.values()] +
                 ([math.ceil(vcpu_seconds / (fleet_vcpus * lifetime))] if fleet_vcpus else []))
-    return (waves + 1) * UNIT_WORKER_TIMEOUT_SECONDS
+    return (waves + 1) * unit_worker_timeout(max(longest_units(items).values(), default=0))
 
 
 def validate_durable_paths(root, arguments, result_root):
@@ -1063,7 +1097,7 @@ def launch_placements(arguments, job):
     regions = launch_regions(arguments, job)
     if job.market != "spot":
         return [(region, "") for region in regions]
-    # A Spot replacement skips the regions where this job's Spot launches found no capacity.
+    # A Spot launch skips the regions where its pool's Spot launches found no capacity within the cool-down.
     eligible = [region for region in regions if region not in job.spot_capacity_failures]
     if len(eligible) <= 1:
         return [(region, "") for region in eligible]
@@ -1347,7 +1381,7 @@ def write_jobs(path, jobs, *, extend=False):
 
 def write_work_items(path, items):
     write_manifest(path, WORK_ITEM_FIELDS, [
-        (item.platform, item.shard, item.unit_id, item.replica, f"{item.estimated_seconds:g}",
+        (item.platform, item.instance_type, item.shard, item.unit_id, item.replica, f"{item.estimated_seconds:g}",
          ",".join(sorted(item.excluded_instances)) or "-") for item in items])
 
 
@@ -1421,7 +1455,8 @@ def job_environment(job, arguments, root, result_root):
         "REGULATOR_RELEASE_VERSION": getattr(arguments, "release_version", ""),
         "BENCHMARK_CPU_LIST": "0",
         "BENCHMARK_EXPECTED_VCPUS": str(job.platform.vcpus),
-        "TIMEOUT_SECONDS": str(UNIT_WORKER_TIMEOUT_SECONDS if unit_worker else JOB_TIMEOUT_SECONDS),
+        "TIMEOUT_SECONDS": str(unit_worker_timeout(getattr(arguments, "longest_units", {}).get(
+            unit_worker_pool(job), 0)) if unit_worker else JOB_TIMEOUT_SECONDS),
         "RESULT_ROOT": str(job_result_root(result_root, job)),
         "TRINO_REVISION": "c7503d170344c4e266f03fdb39e53c82aa7e3594",
         "JONI_COMPARATOR_ORDER": "forward" if job.replica % 2 else "reverse",
@@ -2902,10 +2937,11 @@ def read_unit_workers(path, platforms):
         platform = by_name.get(row["platform"])
         if platform is None or row["shard_id"] != UNIT_WORKER_SHARD:
             raise UnsafeCampaignError(f"unit worker manifest names an unexpected worker: {row}")
-        job = unit_worker_job(platform, int(row["replica"]), int(row["host_epoch"]), row["market"])
-        if job.platform.instance_type != row["instance_type"]:
-            raise UnsafeCampaignError(f"unit worker manifest names an unexpected instance type: {row}")
-        jobs.append(job)
+        try:
+            platform = pool_platform(platform, row["instance_type"])
+        except ValueError as error:
+            raise UnsafeCampaignError(f"unit worker manifest names an unexpected instance type: {row}") from error
+        jobs.append(unit_worker_job(platform, int(row["replica"]), int(row["host_epoch"]), row["market"]))
     return jobs
 
 
@@ -3014,7 +3050,7 @@ class UnitDispatcher:
         self.result_root = result_root
         self.items = {item.identity: item for item in items}
         self.pools = sorted({item.pool for item in items})
-        self.platforms = {platform.name: platform for platform in platforms}
+        self.platforms = pool_platforms(platforms, items)
         self.budget = getattr(arguments, "shared_budget", None)
         self.spot_only = getattr(arguments, "spot_only", False)
         self.attempts_path = result_root / "job-attempts.tsv"
@@ -3878,7 +3914,6 @@ def main():
     if arguments.refill_unresolved:
         raise SystemExit("refill resumes language and build campaigns; a baseline phase retries its own work units")
     units = work_units.load(directory)
-    arguments.unit_platforms = {platform.name: platform for platform in platforms}
     confirmation_units = ()
     if arguments.phase == "confirmation":
         if arguments.primary_results is None or arguments.confirmation_jobs is None:
@@ -3887,6 +3922,8 @@ def main():
             arguments.confirmation_jobs, platforms, units,
             read_accepted_units(arguments.primary_results / "accepted-units.tsv"))
     items = build_work_items(arguments.phase, platforms, units, shards, confirmation_units)
+    arguments.unit_platforms = pool_platforms(platforms, items)
+    arguments.longest_units = longest_units(items)
     validate_configuration(arguments, [], items=items)
     validate_durable_paths(root, arguments, result_root)
     items_path = result_root / "work-items.tsv"
@@ -3898,8 +3935,8 @@ def main():
         validate_dependencies(root, arguments, items)
         resolve_engine_builds(root, arguments, platforms)
         validate_prerequisites(root, arguments, platforms)
-        workers = [unit_worker_job(arguments.unit_platforms[name], 0, 0, "spot")
-                   for name in sorted({item.pool for item in items})]
+        workers = [unit_worker_job(arguments.unit_platforms[pool], 0, 0, "spot")
+                   for pool in sorted({item.pool for item in items})]
         validate_aws(arguments, platforms, workers)
         upload_engine_builds(arguments, workers)
         execute_units(arguments, root, result_root, items, platforms)

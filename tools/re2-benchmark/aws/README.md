@@ -144,7 +144,7 @@ For example, a policy for at most 16 ordinary workers could contain:
   "max_pending_launches": 4,
   "max_machine_hours": 100,
   "max_usd": 20,
-  "max_attempt_seconds": 7200,
+  "max_attempt_seconds": 28800,
   "ancillary_reserve_usd": 5,
   "minimum_launch_interval_seconds": 1,
   "hourly_rates": {
@@ -158,9 +158,10 @@ Replace the example account, limits, and rates with the selected campaign
 values. Include the R9g `.2xlarge` price ceiling when running the language
 lifecycle suite. `spot` is the maximum Spot bid; `total` includes storage and
 other hourly costs, and `on_demand_total` is that hourly total for an
-On-Demand host. The controller validates the policy when loading it. Freeze it
-with the job inventory; changing it requires a new campaign rather than a
-resume.
+On-Demand host. `max_attempt_seconds` must cover a unit worker's wrapper timeout
+and its cleanup, at least 27900 seconds. The controller validates the policy
+when loading it. Freeze it with the job inventory; changing it requires a new
+campaign rather than a resume.
 
 The neighboring `fleet-state.json` coordinates both collectors with `flock`. It
 counts instances, outstanding requests, and launches not yet visible to EC2.
@@ -258,8 +259,8 @@ benchmark ref.
 
 ## Plan and execute
 
-Without `--execute`, the controller writes the exact job manifest without
-allocating AWS resources:
+Without `--execute`, the controller writes the phase's work items to
+`work-items.tsv` without allocating AWS resources:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
@@ -349,9 +350,10 @@ unit of the selected shards in smoke, replicas 1 to 3 in primary, and replica 4
 of each `--confirmation-jobs` row, which names `platform`, `shard_id`, and
 `unit_id`. A primary requires an accepted smoke, and a confirmation requires an
 accepted primary. A shared fleet budget must allow `max_attempt_seconds` of at
-least 27900, a worker's timeout plus 15 minutes. Each phase is still its own
-controller run; pipelining a shard's primary behind its accepted smoke is
-future work.
+least the longest pool's worker timeout plus 15 minutes: 27,900 seconds for
+baseline units, and 102,600 for a pool holding a Java or Trino slow-bulk
+comparison's 75,600-second unit. Each phase is still its own controller run;
+pipelining a shard's primary behind its accepted smoke is future work.
 
 The build phase and language campaigns run one host per job. Spot jobs wait
 when quota or capacity prevents a launch. An interrupted job restarts after
@@ -487,7 +489,9 @@ language comparator builds the pinned `regex` crate.
 A `CAMPAIGN_MODE=unit-worker` job launches a host that measures the work units
 its controller leases to it, one at a time, instead of one shard. It requires
 `CAMPAIGN_SHARD_ID=unit-worker` and `TIMEOUT_SECONDS` of the worker lifetime,
-`UNIT_WORKER_LIFETIME_SECONDS` (default 21600), plus 5400. The host
+`UNIT_WORKER_LIFETIME_SECONDS` (default 21600), plus 4500 seconds for host
+setup and final uploads, plus the time its last unit may take: 900, or the
+pool's longest estimated unit when that is longer. The host
 bootstraps as a baseline host does: packages, the JDK, the environment record,
 and the platform's prebuilt engines. It then
 runs `run-unit-worker.sh`, which runs `../baseline/run-unit.sh` for each lease.
@@ -611,7 +615,9 @@ campaign.
 ### Unit dispatch
 
 The controller keeps a queue of the phase's work items and a pool of workers
-per platform. Each worker is a job of the controller's ordinary launch path,
+per platform and instance type: a unit runs on the instance type its shard is
+allocated on that platform, which is the platform's frozen type for every
+baseline shard. Each worker is a job of the controller's ordinary launch path,
 so regions, placement scores, Spot launch retries in the next region,
 `--max-concurrent`, the per-platform limit, and the shared budget apply to it,
 and its reservation lasts until its cleanup is verified. `unit-workers.tsv`

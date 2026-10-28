@@ -35,7 +35,8 @@ if [[ "${CAMPAIGN_SPOT_ONLY}" == 1 && "${INSTANCE_MARKET_TYPE}" != spot ]]; then
     echo "Spot-only policy prohibits On-Demand launches" >&2
     exit 1
 fi
-TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-5400}
+# The controller always passes a unit worker its wrapper timeout.
+TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-}
 CAMPAIGN_PROVENANCE=${CAMPAIGN_PROVENANCE:-qualification}
 RESULT_ROOT=${RESULT_ROOT:-"${REGULATOR_DIR}/benchmark-results/re2-qualification"}
 CAMPAIGN_MODE=${CAMPAIGN_MODE:-}
@@ -136,8 +137,10 @@ fi
 # run-unit-worker.sh exits with its INTERRUPTED_STATUS after a Spot interruption notice.
 UNIT_WORKER_INTERRUPTED_STATUS=43
 if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
-    if [[ "${TIMEOUT_SECONDS}" != $((UNIT_WORKER_LIFETIME_SECONDS + 5400)) || "${CAMPAIGN_SHARD_ID}" != unit-worker ]]; then
-        echo "A unit worker requires CAMPAIGN_SHARD_ID=unit-worker and TIMEOUT_SECONDS of its lifetime plus 5400," \
+    # The controller adds the pool's last unit, at least 5400 seconds, to the worker's lifetime.
+    if [[ ! "${TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ || "${TIMEOUT_SECONDS}" -lt $((UNIT_WORKER_LIFETIME_SECONDS + 5400)) ||
+            "${CAMPAIGN_SHARD_ID}" != unit-worker ]]; then
+        echo "A unit worker requires CAMPAIGN_SHARD_ID=unit-worker and TIMEOUT_SECONDS of at least its lifetime plus 5400," \
             "found ${CAMPAIGN_SHARD_ID} and ${TIMEOUT_SECONDS}" >&2
         exit 1
     fi

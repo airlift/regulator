@@ -556,7 +556,8 @@ def check_unit_identity(root, session, units, protocols):
     owned = sorted(unit["owned"])
     representatives = sorted(unit["representatives"])
     identity = work_units.unit_id(
-        unit["shard_id"], owned, [f"{replica}:{row_id}" for replica, row_id in representatives], protocols)
+        unit["shard_id"], owned, [f"{replica}:{row_id}" for replica, row_id in representatives],
+        work_units.protocol_digest(owned, protocols))
     if identity != session["unit_id"]:
         reject(f"unit {session['unit_id']} recomputes as {identity} under the frozen row protocols")
     return unit
@@ -892,14 +893,27 @@ def check_semantic_rejections(result_root):
                f"{format_values(row['unit_attempt_id'] for row in rows)}")
 
 
-def check_unit_campaign(receipts, platforms, units, protocols, manifest_digest, campaign_id,
+def protocol_digests(units, protocols):
+    """Each baseline unit's digest of its owned rows' frozen protocols."""
+    return {unit_id: work_units.protocol_digest(unit["owned"], protocols) for unit_id, unit in units.items()}
+
+
+def platform_allocations(platforms, units):
+    """Each shard's instance type per platform: a baseline unit runs on its platform's frozen type."""
+    return {unit["shard_id"]: {name: platform["instance_type"] for name, platform in platforms.items()}
+            for unit in units.values()}
+
+
+def check_unit_campaign(receipts, platforms, units, unit_digests, allocations, manifest_digests, campaign_id,
                         expected_replica_ids=(1, 2, 3), confirmations=()):
     """Accept a campaign's unit receipts as a whole.
 
-    Every unit runs on every platform for each expected replica, the replicas of a unit run on
-    distinct EC2 instances, and every attempt measured the same candidate. Different units may
-    share a host. A confirmation is replica 4, at most one per platform and unit, on an instance
-    none of that unit's replicas used.
+    Every unit runs on every platform for each expected replica, on the instance type its shard
+    is allocated there, the replicas of a unit run on distinct EC2 instances, and every attempt
+    measured the same candidate. Different units may share a host. A confirmation is replica 4,
+    at most one per platform and unit, on an instance none of that unit's replicas used.
+    unit_digests holds each unit's row_protocol_sha256, allocations each shard's
+    {platform: instance type}, and manifest_digests each shard's manifest_sha256.
     """
     expected = {
         (platform, unit_id, str(replica))
@@ -924,8 +938,8 @@ def check_unit_campaign(receipts, platforms, units, protocols, manifest_digest, 
         if receipt["shard_id"] != unit["shard_id"]:
             reject(f"{context} names shard {receipt['shard_id']!r}, not its unit's {unit['shard_id']!r}")
         if receipt["architecture"] != platform["architecture"] or \
-                receipt["instance_type"] != platform["instance_type"]:
-            reject(f"{context} does not match the frozen platform {receipt['platform']}")
+                receipt["instance_type"] != allocations[unit["shard_id"]][receipt["platform"]]:
+            reject(f"{context} does not match its shard's frozen allocation on {receipt['platform']}")
         if confirmation:
             parse_confirmation_replica(receipt["replica_id"], context)
             confirmed.append((receipt["platform"], receipt["unit_id"]))
@@ -934,9 +948,9 @@ def check_unit_campaign(receipts, platforms, units, protocols, manifest_digest, 
             observed.append((receipt["platform"], receipt["unit_id"], receipt["replica_id"]))
         if receipt["owned_row_count"] != str(len(unit["owned"])):
             reject(f"{context} row counts differ from unit {receipt['unit_id']}")
-        if receipt["row_protocol_sha256"] != work_units.protocol_digest(unit["owned"], protocols):
+        if receipt["row_protocol_sha256"] != unit_digests[receipt["unit_id"]]:
             reject(f"{context} row_protocol_sha256 differs from the frozen row protocols")
-        if receipt["manifest_sha256"] != manifest_digest:
+        if receipt["manifest_sha256"] != manifest_digests[unit["shard_id"]]:
             reject(f"{context} manifest_sha256 does not match the frozen manifest")
         for field in ("observed_rows_sha256", "evidence_manifest_sha256"):
             if SHA256.fullmatch(receipt[field]) is None:
@@ -996,7 +1010,8 @@ def validate_unit_campaign(manifest_path, platforms_path, shards_path, receipts_
     platforms = load_platforms(platforms_path)
     units = {unit_id: unit for unit_id, unit in work_units.load(DIRECTORY).items() if unit["shard_id"] in shards}
     receipts = read_tsv(receipts_path, UNIT_RECEIPT_FIELDS, UNIT_RECEIPT_FIELDS)
-    check_unit_campaign(receipts, platforms, units, row_protocol.load(protocol_path), sha256_file(manifest_path),
+    check_unit_campaign(receipts, platforms, units, protocol_digests(units, row_protocol.load(protocol_path)),
+                        platform_allocations(platforms, units), dict.fromkeys(shards, sha256_file(manifest_path)),
                         campaign_id, expected_replica_ids, confirmations)
     return {
         "campaign_id": campaign_id,

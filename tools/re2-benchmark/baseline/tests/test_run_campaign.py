@@ -1000,6 +1000,18 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "without --spot-only or a shared fleet budget"):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
         arguments.refill_unresolved, arguments.spot_only = False, True
+        # A worker's attempt covers its setup, lifetime and uploads, then a last unit as long as its pool's
+        # longest: a baseline pool's 27,000 seconds, and a slow 75,600-second unit's 101,700, then cleanup.
+        self.assertEqual(RUN_CAMPAIGN.unit_worker_timeout(900), 27000)
+        long_items = [RUN_CAMPAIGN.WorkItem(self.platform.name, self.platform.instance_type, "shard", "unit-0001",
+                                            replica, 75600) for replica in (1, 2, 3)]
+        arguments.unit_platforms = RUN_CAMPAIGN.pool_platforms([self.platform], long_items)
+        self.assertEqual(RUN_CAMPAIGN.unit_worker_timeout(75600), 101700)
+        arguments.shared_budget.policy["max_attempt_seconds"] = 86400
+        with self.assertRaisesRegex(SystemExit, "max_attempt_seconds of at least 102600"):
+            RUN_CAMPAIGN.validate_configuration(arguments, jobs, items=long_items)
+        arguments.shared_budget.policy["max_attempt_seconds"] = 102600
+        RUN_CAMPAIGN.validate_configuration(arguments, jobs, items=long_items)
         arguments.max_concurrent = 0
         with self.assertRaisesRegex(SystemExit, "positive integer"):
             RUN_CAMPAIGN.validate_configuration(arguments, jobs)
@@ -1028,10 +1040,10 @@ class TestRunCampaign(unittest.TestCase):
         RUN_CAMPAIGN.validate_configuration(arguments, jobs)
         # A unit campaign's limits apply to its pools' worker hosts.
         platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
-        arguments.unit_platforms = {platform.name: platform for platform in platforms}
         arguments.shared_budget.policy.update(max_attempt_seconds=86400, regions={})
         items = RUN_CAMPAIGN.build_work_items("primary", platforms, RUN_CAMPAIGN.work_units.load(SCRIPT.parent),
                                               ["trino-operations"])
+        arguments.unit_platforms = RUN_CAMPAIGN.pool_platforms(platforms, items)
         arguments.phase_timeout_seconds = None
         with self.assertRaisesRegex(SystemExit, "cannot admit every worker type"):
             RUN_CAMPAIGN.validate_configuration(arguments, [], items=items)

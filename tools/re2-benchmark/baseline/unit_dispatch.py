@@ -82,7 +82,7 @@ def read_accepted_units(path):
 
 
 def persist_accepted_unit(path, receipt_path):
-    """Append one unit attempt's receipt to accepted-units.tsv atomically, as accepted sessions are."""
+    """Append one unit attempt's receipt to accepted-units.tsv atomically."""
     receipt = read_unit_receipt(receipt_path)
     rows = read_accepted_units(path)
     if accepted_row(rows, receipt, unit_logical_identity, "unit_attempt_id", "attempts") is not None:
