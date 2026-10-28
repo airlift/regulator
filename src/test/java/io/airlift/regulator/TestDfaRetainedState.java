@@ -109,8 +109,7 @@ public class TestDfaRetainedState
                 .isEqualTo(expectedTrinoCacheBytes);
         assertThat(trinoDfa.stateMemorySnapshot().totalBytes() - re2Dfa.stateMemorySnapshot().totalBytes())
                 .isEqualTo(expectedTrinoCacheBytes);
-        assertThat(trinoDfa.stateMemorySnapshot().trinoStartStateCacheBytes())
-                .isEqualTo(expectedTrinoCacheBytes);
+        assertThat(trinoDfa.stateMemorySnapshot().optionalStartStateCacheBytes()).isEqualTo(expectedTrinoCacheBytes);
 
         Dfa.CacheSnapshot cold = trinoDfa.cacheSnapshot();
         assertThat(cold.stateBudget() - cold.availableStateMemory())
@@ -124,6 +123,46 @@ public class TestDfaRetainedState
                 .isEqualTo(trinoDfa.stateMemorySnapshot().totalBytes());
         assertThat(trinoDfa.cacheSnapshot().stateBudget() - trinoDfa.cacheSnapshot().availableStateMemory())
                 .isEqualTo(trinoDfa.stateMemorySnapshot().totalBytes());
+    }
+
+    @Test
+    public void testRustStartStateCachesAreCharged()
+    {
+        assertRustStartStateCachesAreCharged(false);
+        assertRustStartStateCachesAreCharged(true);
+    }
+
+    private static void assertRustStartStateCachesAreCharged(boolean reversed)
+    {
+        long memoryBudget = 1 << 20;
+        Prog rustProgram = compileRustProgram("(?mR)^\\b[a-z]+", reversed, memoryBudget);
+        Dfa.DfaInstance rustDfa = rustProgram.getCachedDfa(LONGEST_MATCH);
+        // The caches for a start after CR and after a byte outside ASCII.
+        long expectedRustCacheBytes = 2 * 3 * sizeOfObjectArray(2);
+
+        assertThat(rustDfa.retainedStateMemory())
+                .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes());
+        assertThat(rustDfa.stateMemorySnapshot().optionalStartStateCacheBytes())
+                .isEqualTo(expectedRustCacheBytes);
+
+        Dfa.CacheSnapshot cold = rustDfa.cacheSnapshot();
+        assertThat(cold.stateBudget() - cold.availableStateMemory())
+                .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes());
+
+        // Each range has CR or é on both sides, so a forward and a reverse search start from the
+        // same cache. The search after é quits on its first byte, after caching its start state.
+        assertThat(Dfa.search(rustProgram, Slices.utf8Slice("\rabc\r"), 1, 4, true, Prog.MatchKind.LONGEST_MATCH, true))
+                .isNotEqualTo(Dfa.SEARCH_FAILED);
+        assertThat(Dfa.search(rustProgram, Slices.utf8Slice("éabcé"), 2, 5, true, Prog.MatchKind.LONGEST_MATCH, true))
+                .isEqualTo(Dfa.SEARCH_FAILED);
+        assertThat(rustDfa.cacheSnapshot().populatedStartStates()).isEqualTo(2);
+        rustDfa.resetCacheExternal();
+
+        assertThat(rustDfa.cacheSnapshot().populatedStartStates()).isZero();
+        assertThat(rustDfa.retainedStateMemory())
+                .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes());
+        assertThat(rustDfa.cacheSnapshot().stateBudget() - rustDfa.cacheSnapshot().availableStateMemory())
+                .isEqualTo(rustDfa.stateMemorySnapshot().totalBytes());
     }
 
     private static Dfa.DfaInstance compileDfa(String expression, long memoryBudget)
@@ -149,5 +188,13 @@ public class TestDfaRetainedState
         ParseResult parsed = TrinoRegexpParser.parse(Slices.utf8Slice(expression), Regexp.LIKE_PERL);
         Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
         return Compiler.compileNormalized(regexp, reversed, memoryBudget, Compiler.Dialect.TRINO, parsed.caseFolding());
+    }
+
+    private static Prog compileRustProgram(String expression, boolean reversed, long memoryBudget)
+    {
+        RustRegexp.Options options = RustRegexp.Options.defaults();
+        ParseResult parsed = RustRegexpParser.parse(Slices.utf8Slice(expression), options.syntaxFlags(), options.nestLimit());
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        return Compiler.compileNormalized(regexp, reversed, memoryBudget, Compiler.Dialect.RE2, parsed.caseFolding());
     }
 }

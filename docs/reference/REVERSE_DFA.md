@@ -19,8 +19,9 @@ End-anchored programs can start with an anchored reverse search. This quickly
 rejects text whose suffix cannot match and avoids scanning every possible start
 position from the left.
 
-If either DFA cannot be created or exhausts its cache without making progress,
-the public matcher falls back to NFA, BitState, or OnePass as appropriate.
+If either DFA cannot be created, exhausts its cache without making progress, or
+quits on text it cannot evaluate, the public matcher falls back to NFA,
+BitState, or OnePass as appropriate.
 A DFA failure means "try another engine," not "no match."
 
 ## Boundary semantics
@@ -48,6 +49,9 @@ Reverse compilation reverses instruction order and swaps directional assertions:
 | end text | begin text |
 | begin line | end line |
 | end line | begin line |
+
+Rust's CRLF line anchors swap the same way. Its word boundaries swap word start
+with word end and start-half with end-half.
 
 The runtime maps those assertions back to the original text context while
 scanning bytes from right to left. Capturing-group numbering and byte offsets do

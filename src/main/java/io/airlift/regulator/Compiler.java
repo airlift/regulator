@@ -731,8 +731,6 @@ final class Compiler
             };
         }
 
-        // The Rust assertions below map for a reversed program too, but none is built today:
-        // Re2.compileReverse refuses programs with assertions the DFA cannot evaluate.
         private static int beginLineAssertion(Regexp regexp, boolean reversed)
         {
             if ((regexp.parseFlags() & Regexp.RUST_ASSERTION) != 0) {

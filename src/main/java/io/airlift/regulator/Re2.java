@@ -123,6 +123,11 @@ public sealed class Re2
     private static final int MINIMUM_LENGTH_CHECK_LIMIT = 4 * 1024;
     private static final int DIRECT_BIT_STATE_CAPTURE_MINIMUM_LENGTH = 4 * 1024;
     private static final int LOWERED_CANDIDATE_SEARCH_BYTES = 64;
+    // After this many consecutive unanchored searches of one matcher's input whose DFA failed, in
+    // a program whose DFA can quit on a byte outside ASCII, the matcher's later searches of that
+    // input skip the DFA. Text that makes such a DFA quit in one search usually does so in the
+    // next, and each quit costs a DFA start before the fallback engines run.
+    private static final int DFA_QUIT_STREAK_LIMIT = 4;
 
     // The first-byte prefix scan restarts its word scan after each false candidate, which on rows
     // shorter than this many bytes costs more than the substring search.
@@ -2810,6 +2815,20 @@ public sealed class Re2
         }
 
         if (anchorMode == Anchor.UNANCHORED) {
+            // A matcher counts the searches whose DFA failed in a program whose DFA can quit. The
+            // count is cleared before the DFA runs, so a search that completes ends the streak,
+            // and a failure below sets it from the count read here.
+            boolean dfaCanQuit = prog.dfaQuitsOnNonAscii();
+            int previousDfaQuits = 0;
+            if (dfaCanQuit && !dfaSearchSkippedOrFailed) {
+                previousDfaQuits = dfaQuitStreak(workspaces);
+                if (previousDfaQuits >= DFA_QUIT_STREAK_LIMIT) {
+                    dfaSearchSkippedOrFailed = true;
+                }
+                else {
+                    setDfaQuitStreak(workspaces, 0);
+                }
+            }
             if (!dfaSearchSkippedOrFailed) {
                 if (prog.anchorEnd()) {
                     // The match must end with the search window, so only the reverse DFA is needed.
@@ -2828,6 +2847,9 @@ public sealed class Re2
 
                         if (reverse == Dfa.SEARCH_FAILED) {
                             dfaSearchSkippedOrFailed = true;
+                            if (dfaCanQuit) {
+                                setDfaQuitStreak(workspaces, previousDfaQuits + 1);
+                            }
                         }
                         else if (reverse == Dfa.SEARCH_NO_MATCH) {
                             return false;
@@ -2854,6 +2876,9 @@ public sealed class Re2
 
                     if (forward == Dfa.SEARCH_FAILED) {
                         dfaSearchSkippedOrFailed = true;
+                        if (dfaCanQuit) {
+                            setDfaQuitStreak(workspaces, previousDfaQuits + 1);
+                        }
                     }
                     else if (forward == Dfa.SEARCH_NO_MATCH) {
                         return false;
@@ -2895,6 +2920,9 @@ public sealed class Re2
 
                                 if (reverse == Dfa.SEARCH_FAILED) {
                                     dfaSearchSkippedOrFailed = true;
+                                    if (dfaCanQuit) {
+                                        setDfaQuitStreak(workspaces, previousDfaQuits + 1);
+                                    }
                                 }
                                 else if (reverse == Dfa.SEARCH_NO_MATCH) {
                                     return false;
@@ -3352,6 +3380,19 @@ public sealed class Re2
             return matcher.nfaWorkspace();
         }
         return ((FixedMatchWorkspaces) workspaces).nfaWorkspace();
+    }
+
+    // Only a matcher searches its input repeatedly, so only a matcher keeps a quit streak.
+    private static int dfaQuitStreak(MatchWorkspaces workspaces)
+    {
+        return workspaces instanceof RegexpMatcher matcher ? matcher.dfaQuitStreak() : 0;
+    }
+
+    private static void setDfaQuitStreak(MatchWorkspaces workspaces, int dfaQuitStreak)
+    {
+        if (workspaces instanceof RegexpMatcher matcher) {
+            matcher.setDfaQuitStreak(dfaQuitStreak);
+        }
     }
 
     private static void shiftGroupOffsets(int[] groupOffsets, int delta)

@@ -67,6 +67,9 @@ public final class RegexpMatcher
     // Set at reset when the region starts on the LF of a CR LF and the pattern's Java $ reads that
     // CR, so every search of the region runs on the NFA. See Re2.matchRegionAfterCarriageReturnInto.
     private boolean regionStartsAfterCarriageReturn;
+    // The consecutive searches of the current input whose DFA failed, in a program whose DFA can
+    // quit on a byte outside ASCII. See Re2.DFA_QUIT_STREAK_LIMIT.
+    private int dfaQuitStreak;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
 
     RegexpMatcher(Re2 pattern, Slice input)
@@ -166,6 +169,7 @@ public final class RegexpMatcher
         nextFindStart = 0;
         retryStart = 0;
         previousMatchEnd = -1;
+        dfaQuitStreak = 0;
         invalidateMatch();
     }
 
@@ -634,6 +638,16 @@ public final class RegexpMatcher
             nfaWorkspace = new Nfa.Workspace();
         }
         return nfaWorkspace;
+    }
+
+    int dfaQuitStreak()
+    {
+        return dfaQuitStreak;
+    }
+
+    void setDfaQuitStreak(int dfaQuitStreak)
+    {
+        this.dfaQuitStreak = dfaQuitStreak;
     }
 
     boolean nfaWorkspaceInitializedForDiagnostics()

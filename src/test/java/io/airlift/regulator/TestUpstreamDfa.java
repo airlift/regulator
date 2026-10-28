@@ -36,7 +36,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class TestUpstreamDfa
 {
     private static final int END_TEXT = 256;
-    private static final int MATCH_FLAG = 0x0100;
 
     /// Test data for reverse DFA matching.
     /// Ported from RE2 dfa_test.cc ReverseTest structure.
@@ -525,7 +524,7 @@ public class TestUpstreamDfa
         if (stateOffset == Dfa.T_FULL_MATCH) {
             return true;
         }
-        return (dfa.stateData[stateOffset / dfa.nextSize].flag() & MATCH_FLAG) != 0;
+        return (dfa.stateData[stateOffset / dfa.nextSize].flag() & Dfa.FLAG_MATCH) != 0;
     }
 
     private static void appendStateDump(StringJoiner dump, int[] transitions, boolean match)
