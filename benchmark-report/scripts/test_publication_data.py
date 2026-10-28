@@ -31,6 +31,8 @@ class TestPublicationData(unittest.TestCase):
         }
         measured = row('public')
         measured['workload']['performanceContext'] = 'Released implementation context'
+        # A translation can be far larger than the frozen source row's recorded size.
+        measured['mapping']['patternBytes'] = 10_213
         self.campaign = {
             'sources': {'currentLabel': 'Complete campaign'},
             'provenance': {'releasedArtifact': {'version': '1.0'}},
@@ -43,6 +45,7 @@ class TestPublicationData(unittest.TestCase):
         self.assertEqual('Frozen public description', result['rows'][0]['workload']['description'])
         self.assertEqual('', result['rows'][0]['workload']['performanceContext'])
         self.assertEqual('Released implementation context', result['rows'][0]['releasePerformanceContext'])
+        self.assertEqual(10_213, result['rows'][0]['mapping']['patternBytes'])
         self.assertEqual('Regulator 1.0 results', result['sources']['currentLabel'])
         self.assertEqual('1.0', result['sources']['releaseVersion'])
         self.assertEqual(1, result['publicationScope']['excludedCampaignRows'])

@@ -72,7 +72,8 @@ def publication_data(campaign, workloads, workload_source_sha256):
         for field in ('caseId', 'operation', 'language', 'memoryMode', 'model', 'inputBytes'):
             if row[field] != previous[field]:
                 raise ValueError(f'publication workload changed: {key}/{field}')
-        for field in ('status', 'reason', 'patternPreview', 'patternBytes'):
+        # Frozen 1.0 rows record the source pattern's size; current rows record the measured pattern's size.
+        for field in ('status', 'reason', 'patternPreview'):
             if row.get('mapping', {}).get(field) != previous.get('mapping', {}).get(field):
                 raise ValueError(f'publication pattern mapping changed: {key}/{field}')
         identity = (row['id'], row['language'], row['platform'], row['memoryMode'])
