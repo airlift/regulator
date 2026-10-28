@@ -7,24 +7,31 @@ already-provisioned qualification host with its own clean build receipts.
 
 import argparse
 import copy
+import hashlib
 import re
 import shutil
+import sys
 from pathlib import Path
 
 import collection
 import batching
 
+sys.path.append(str(Path(__file__).resolve().parents[1] / "baseline"))
+import unit_cost  # noqa: E402
+import work_units  # noqa: E402
+
 
 PLATFORMS = ("r9g", "r8i")
-# Archived plans are the 1.0 release campaign's, which also measured R8g.
-RELEASE_1_0_PLATFORMS = ("r9g", "r8g", "r8i")
 PARTITION_ID = rf"case-[0-9]{{4,}}-({'|'.join(collection.ENGINES)})"
 BATCH_OPERATION_BUDGET = 1
 DEFAULT_MAX_CONCURRENT_HOSTS = 64
+# A language unit measures its comparisons in plan order, each comparison's observations in collection order.
+UNIT_ORDER = "language-observation-order-v1"
+SHARD_ID = r"[a-z0-9][a-z0-9-]*"
 
 
 def platform_allocation(suite, platform):
-    if suite not in {"language-bulk", "language-lifecycle"} or platform not in RELEASE_1_0_PLATFORMS:
+    if suite not in {"language-bulk", "language-lifecycle"} or platform not in PLATFORMS:
         raise ValueError("unknown language suite or platform allocation")
     size = "2xlarge" if suite == "language-lifecycle" and platform == "r9g" else "large"
     return {"instance_type": f"{platform}.{size}", "vcpus": 8 if size == "2xlarge" else 2}
@@ -63,6 +70,136 @@ def host_batches(manifest, partitions, replicas, operation_budget=None, duration
             for index, group in enumerate(groups) for replica in range(1, replicas + 1) for platform in platforms]
 
 
+def row_atom(row_id):
+    """A unit row's case, language and operation; a row is an observation ID, case/language/engine/mode/operation."""
+    case, language, _, _, operation = row_id.rsplit("/", 4)
+    return case, language, operation
+
+
+def unit_slices(rows):
+    """The operations a unit measures of each (case, language) comparison, in collection order."""
+    slices = {}
+    for row in rows:
+        case, language, operation = row_atom(row)
+        slices.setdefault((case, language), set()).add(operation)
+    order = {operation: index for index, operation in enumerate((*collection.OPERATIONS, "execute"))}
+    return {key: sorted(operations, key=order.__getitem__) for key, operations in sorted(slices.items())}
+
+
+def unit_digest(partitions, rows):
+    """A unit's protocol digest: the manifest digest of each partition it measures, with the operations it measures."""
+    digests = {(partition["case"], partition["language"]): partition["manifest_sha256"] for partition in partitions}
+    lines = [f"{case}/{language}\t{digests[case, language]}\t{','.join(operations)}"
+             for (case, language), operations in unit_slices(rows).items()]
+    return hashlib.sha256("\n".join(sorted(lines)).encode()).hexdigest()
+
+
+def is_pair(value):
+    """Whether value is a [case, language] pair."""
+    return isinstance(value, list) and len(value) == 2 and all(isinstance(item, str) for item in value)
+
+
+def is_shard_id(value):
+    """Whether value is a plan's shard ID."""
+    return isinstance(value, str) and re.fullmatch(SHARD_ID, value) is not None
+
+
+def comparison_seconds(manifest, case, language, duration_policy=None):
+    """Seconds to verify and measure one comparison under one operation.
+
+    A frozen duration estimate for the whole comparison, shared by its operations, raises the estimate.
+    Under the slow bulk protocol the estimate covers every measurement process running to its deadline,
+    so the worker outlives a comparison that does not finish.
+    """
+    _, comparator = collection.ENGINES[language]
+    native = comparator in collection.NATIVE_RUNNERS
+    measured = case["mappings"][language]["status"] != "not-compatible"
+    protocol = collection.protocol_for(manifest)
+    jvm_observations = (3 - native) if measured else 0
+    operations = len(collection.case_operations(manifest, case))
+    seconds = unit_cost.language_seconds(protocol, jvm_observations, int(native and measured),
+                                         collection.verification_processes(manifest))
+    if protocol == collection.SLOW_BULK_PROTOCOL:
+        separate = protocol["measurement_profile"] in collection.SEPARATE_ALLOCATION_PROFILES
+        processes = jvm_observations * (1 + separate) + int(native and measured)
+        seconds = max(seconds, processes * protocol["measurement_timeout_seconds"])
+    if duration_policy is not None:
+        seconds = max(seconds, duration_policy["partition_seconds"][f"{case['id']}/{language}"] / operations)
+    return seconds
+
+
+def plan_units(manifest, partitions, shard_id, duration_policy=None):
+    """Pack the plan's comparisons, one atom per (case, language, operation), into work units.
+
+    An atom keeps a comparison's three observations on one host. Atoms pack into units of at most 15
+    minutes; an atom longer than that, or any atom of a comparison the duration policy isolates, is a unit alone.
+    """
+    cases = {case["id"]: case for case in manifest["cases"]}
+    seconds = {(partition["case"], partition["language"]): comparison_seconds(
+        manifest, cases[partition["case"]], partition["language"], duration_policy) for partition in partitions}
+    isolated = {tuple(pair) for pair in (duration_policy or {}).get("isolated_pairs", [])}
+
+    def cost(atom):
+        return sum(seconds[key] * len(operations) for key, operations in unit_slices(atom.owned).items())
+
+    atoms = []
+    for partition in partitions:
+        case = cases[partition["case"]]
+        subset = {**manifest, "cases": [case], "selected_languages": [partition["language"]]}
+        for operation in collection.case_operations(manifest, case):
+            atoms.append(work_units.Atom([f"{identity}/{operation}" for identity, *_ in collection.observations(subset)]))
+    lone = [atom for atom in atoms
+            if cost(atom) > work_units.UNIT_SECONDS or row_atom(atom.owned[0])[:2] in isolated]
+    lone_ids = {id(atom) for atom in lone}
+    packable = [atom for atom in atoms if id(atom) not in lone_ids]
+    packed = work_units.pack(packable, cost, work_units.UNIT_SECONDS)
+    units = [{
+        "unit_id": work_units.unit_id(shard_id, unit.owned, [], unit_digest(partitions, unit.owned), UNIT_ORDER),
+        "shard_id": shard_id,
+        "unit_index": index,
+        "owned": unit.owned,
+        "representatives": [],
+        "estimated_seconds": cost(unit),
+        "atoms": count,
+    } for index, (unit, count) in enumerate(sorted(
+        [(atom, 1) for atom in lone] + packed, key=lambda packed_unit: packed_unit[0].owned[0]), 1)]
+    work_units.check_budget(units, allow_lone_oversize=True)
+    return units
+
+
+def write_units(directory, units):
+    for name, table in zip(("units.tsv", "unit-rows.tsv"), work_units.render(units)):
+        (directory / name).write_text(table)
+
+
+def smoke_units(directory):
+    """The plan's smoke units: those measuring the first comparison of each language and model, each
+    isolated or required comparison, and the longest unit of several comparisons."""
+    plan = validate(directory)
+    manifest = collection.load(directory / "source/manifest.json")
+    units = work_units.load(directory)
+    cases = {case["id"]: case for case in manifest["cases"]}
+    representatives = {}
+    for partition in plan["partitions"]:
+        model = cases[partition["case"]].get("model", "lifecycle")
+        representatives.setdefault((partition["language"], model), (partition["case"], partition["language"]))
+    selected = set(representatives.values())
+    selected.update(tuple(pair) for pair in plan.get("duration_policy", {}).get("isolated_pairs", []))
+    comparisons = {(partition["case"], partition["language"]) for partition in plan["partitions"]}
+    for pair in manifest.get("smoke_required_pairs", []):
+        if not is_pair(pair):
+            raise ValueError("invalid required smoke case/language pair")
+        if tuple(pair) not in comparisons:
+            raise ValueError("required smoke pair is absent from the selected plan")
+        selected.add(tuple(pair))
+    result = {unit_id for unit_id, unit in units.items()
+              if any(row_atom(row)[:2] in selected for row in unit["owned"])}
+    packed = [unit for unit in units.values() if len(unit["owned"]) > 3]
+    if packed:
+        result.add(max(packed, key=lambda unit: (float(unit["estimated_seconds"]), unit["unit_id"]))["unit_id"])
+    return sorted(result)
+
+
 def copy_inputs(manifest, source, destination):
     paths = {mapping["input_file"] for case in manifest["cases"]
              for mapping in case["mappings"].values() if mapping["status"] != "not-compatible"}
@@ -76,7 +213,7 @@ def copy_inputs(manifest, source, destination):
 
 
 def prepare(manifest_directory, destination, replicas=3, selection=None, operation_budget=None, duration_policy=None,
-            max_concurrent_hosts=DEFAULT_MAX_CONCURRENT_HOSTS):
+            max_concurrent_hosts=DEFAULT_MAX_CONCURRENT_HOSTS, shard_id=None):
     manifest_directory, destination = manifest_directory.resolve(), destination.resolve()
     if operation_budget is None:
         operation_budget = BATCH_OPERATION_BUDGET
@@ -88,6 +225,10 @@ def prepare(manifest_directory, destination, replicas=3, selection=None, operati
     collection.validate_manifest(manifest, manifest_directory)
     if "parent_manifest_sha256" in manifest or "selected_languages" in manifest:
         raise ValueError("fleet requires an unpartitioned source manifest")
+    shard_id = manifest["suite"] if shard_id is None else shard_id
+    if not is_shard_id(shard_id):
+        raise ValueError("the plan's shard ID must be lowercase letters, digits and hyphens, starting with a letter "
+                         "or digit")
     complete = {(case['id'], language) for case in manifest['cases'] for language in collection.ENGINES}
     selected = set(map(tuple, selection)) if selection is not None else complete
     if not selected or not selected <= complete or (selection is not None and len(selected) != len(selection)):
@@ -121,7 +262,7 @@ def prepare(manifest_directory, destination, replicas=3, selection=None, operati
              **platform_allocation(manifest["suite"], platform),
              "partition": partition["id"], "replica": replica}
             for partition in partitions for replica in range(1, replicas + 1) for platform in PLATFORMS]
-    plan = {"schema_version": 3, "parent_manifest_sha256": parent_hash, "replicas": replicas,
+    plan = {"schema_version": 4, "shard_id": shard_id, "parent_manifest_sha256": parent_hash, "replicas": replicas,
             "platforms": list(PLATFORMS), "max_concurrent_hosts": max_concurrent_hosts,
             "platform_allocations": platform_allocations(manifest["suite"], PLATFORMS),
             "capacity_policy": "up to the limit; continue with available hosts",
@@ -132,39 +273,27 @@ def prepare(manifest_directory, destination, replicas=3, selection=None, operati
         plan["duration_policy"] = duration_policy
     if selection is not None:
         plan['selection'] = [list(identity) for identity in sorted(selected)]
+    write_units(destination, plan_units(manifest, partitions, shard_id, duration_policy))
     collection.save(destination / "plan.json", plan)
     validate(destination)
     return plan
 
 
 def validate(directory):
-    return validate_plan(directory, allow_archived_schema=False)
-
-
-def validate_archive(directory):
-    return validate_plan(directory, allow_archived_schema=True)
-
-
-def validate_plan(directory, allow_archived_schema):
     directory = directory.resolve()
     plan = collection.load(directory / "plan.json")
     source = directory / "source"
     manifest = collection.load(source / "manifest.json")
-    # Saved 1.0 plans measured three languages on three platforms. The oldest
-    # (schema 2) also predate recorded EC2 allocations.
-    archived = (allow_archived_schema and plan.get("platforms") == list(RELEASE_1_0_PLATFORMS) and
-                collection.has_release_1_0_languages(manifest))
-    unallocated = archived and plan.get("schema_version") == 2
-    collection.validate_manifest(manifest, source, archived)
+    collection.validate_manifest(manifest, source)
     if "selected_languages" in manifest or "parent_manifest_sha256" in manifest:
         raise ValueError("fleet source must be unpartitioned")
     parent_hash = collection.digest((source / "manifest.json").read_bytes())
-    platforms = RELEASE_1_0_PLATFORMS if archived else PLATFORMS
-    if (plan.get("schema_version") != 3 and not unallocated or plan["parent_manifest_sha256"] != parent_hash or
+    platforms = PLATFORMS
+    if (plan.get("schema_version") != 4 or plan["parent_manifest_sha256"] != parent_hash or
+            not isinstance(plan.get("shard_id"), str) or not re.fullmatch(SHARD_ID, plan["shard_id"]) or
             plan["platforms"] != list(platforms) or type(plan["replicas"]) is not int or plan["replicas"] < 1 or
             type(plan["max_concurrent_hosts"]) is not int or plan["max_concurrent_hosts"] < 1 or
-            (unallocated and "platform_allocations" in plan) or
-            (not unallocated and plan.get("platform_allocations") != platform_allocations(manifest["suite"], platforms))):
+            plan.get("platform_allocations") != platform_allocations(manifest["suite"], platforms)):
         raise ValueError("invalid fleet protocol or source identity")
     expected = {(case["id"], language) for case in manifest["cases"] for language in manifest["languages"]}
     if 'selection' in plan:
@@ -193,7 +322,7 @@ def validate_plan(directory, allow_archived_schema):
         actual = collection.load(path / "manifest.json")
         if actual != subset or collection.digest((path / "manifest.json").read_bytes()) != partition["manifest_sha256"]:
             raise ValueError("partition differs from its parent manifest")
-        collection.validate_manifest(actual, path, archived)
+        collection.validate_manifest(actual, path)
     if found != expected:
         raise ValueError("incomplete fleet coverage")
     expected_jobs = [{"id": f"{platform}/{partition['id']}/replica-{replica}", "platform": platform,
@@ -201,9 +330,6 @@ def validate_plan(directory, allow_archived_schema):
                       "partition": partition["id"], "replica": replica}
                      for partition in plan["partitions"] for replica in range(1, plan["replicas"] + 1)
                      for platform in platforms]
-    if unallocated:
-        expected_jobs = [{key: value for key, value in job.items() if key not in ("instance_type", "vcpus")}
-                         for job in expected_jobs]
     if plan["jobs"] != expected_jobs:
         raise ValueError("incomplete or changed job matrix")
     budget = plan.get('batch_operation_budget')
@@ -211,11 +337,11 @@ def validate_plan(directory, allow_archived_schema):
         raise ValueError('invalid batch operation budget')
     expected_batches = host_batches(
         manifest, plan["partitions"], plan["replicas"], budget, plan.get("duration_policy"), platforms)
-    if unallocated:
-        expected_batches = [{key: value for key, value in batch.items() if key not in ("instance_type", "vcpus")}
-                            for batch in expected_batches]
     if plan.get("host_batches") != expected_batches:
         raise ValueError("incomplete or changed host batch assignments")
+    units = plan_units(manifest, plan["partitions"], plan["shard_id"], plan.get("duration_policy"))
+    if tuple((directory / name).read_text() for name in ("units.tsv", "unit-rows.tsv")) != work_units.render(units):
+        raise ValueError("work units differ from the plan's comparisons")
     return plan
 
 
@@ -385,8 +511,7 @@ def verify(directory, results, java, classpath, native_runners):
 
 def aggregate(directory, results, output):
     directory, results, output = directory.resolve(), results.resolve(), output.resolve()
-    # Aggregation reads saved evidence, so 1.0 plans stay readable.
-    plan = validate_archive(directory)
+    plan = validate(directory)
     if output.exists():
         raise ValueError("will not overwrite an existing fleet export")
     plan_hash = collection.digest((directory / "plan.json").read_bytes())
@@ -416,10 +541,7 @@ def aggregate(directory, results, output):
         if identity != candidate or provenance["platform"] != job["platform"]:
             raise ValueError("mixed candidates, comparator versions, or platforms")
         instance = provenance["instance_identity"]
-        # Only archived schema 2 jobs lack an allocation. The 1.0 campaign launched them on
-        # the platform's standard size and accepted any host of the platform's family.
-        if not instance["instanceId"] or (instance["instanceType"] != job["instance_type"] if "instance_type" in job else
-                                          not instance["instanceType"].startswith(job["platform"] + ".")):
+        if not instance["instanceId"] or instance["instanceType"] != job["instance_type"]:
             raise ValueError("job host does not match platform")
         key = (job["platform"], job["partition"])
         if instance["instanceId"] in replica_instances.setdefault(key, set()):
@@ -446,6 +568,7 @@ def main():
     prepare_parser.add_argument("--selection", type=Path, help="JSON array of [case ID, language] pairs")
     prepare_parser.add_argument("--batch-operation-budget", type=int, default=BATCH_OPERATION_BUDGET)
     prepare_parser.add_argument("--duration-policy", type=Path, help="frozen partition duration estimates and isolated slow comparisons")
+    prepare_parser.add_argument("--shard-id", help="the plan's shard of work units; defaults to the suite")
     package_parser = commands.add_parser("package-job")
     package_parser.add_argument("--plan-directory", type=Path, required=True)
     package_parser.add_argument("--job", required=True)
@@ -484,8 +607,10 @@ def main():
         selection = collection.load(args.selection) if args.selection else None
         plan = prepare(args.manifest_directory, args.output_directory, args.replicas,
                        selection, args.batch_operation_budget, collection.load(args.duration_policy) if args.duration_policy else None,
-                       max_concurrent_hosts=args.max_concurrent_hosts)
+                       max_concurrent_hosts=args.max_concurrent_hosts, shard_id=args.shard_id)
         print(f"Prepared {len(plan['jobs'])} same-host jobs; no hosts allocated")
+        print(work_units.summary([{**unit, "estimated_seconds": float(unit["estimated_seconds"])}
+                                  for unit in work_units.load(args.output_directory).values()]))
     elif args.command == "package-job":
         package_job(args.plan_directory, args.job, args.output_directory)
     elif args.command == "package-batch":

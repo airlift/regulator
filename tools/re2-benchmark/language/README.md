@@ -306,6 +306,17 @@ plan and defaults to 64.
 `fleet.py` does not allocate or schedule hosts, so that field is not a capacity
 reservation or an enforced scheduler setting.
 
+The plan also packs its comparisons into work units, written as `units.tsv`
+and `unit-rows.tsv` beside `plan.json` in the baseline unit format. An atom is
+one comparison under one operation: its comparator and both memory modes,
+which stay on one host. Atoms pack into units estimated at no more than 15
+minutes. An atom longer than that, or a comparison the duration policy
+isolates, is a unit alone. A unit's identity digests the partition manifests
+and operations it measures. The units belong to one shard, which defaults to
+the suite; `--shard-id` names another, so a separate manifest of the same
+suite, such as the literal probe, keeps distinct unit IDs. Validation rebuilds
+the units from the plan and rejects any table that differs.
+
 Verify the partitions on a developer machine, without timing:
 
 ```sh
@@ -518,8 +529,9 @@ python3 tools/re2-benchmark/language/literal_probe.py prepare \
 
 The manifest uses the `language-bulk` suite and the `steady-state-v1` profile,
 so `collection.py verify`, `fleet.py prepare`, and `run-campaign.py
---language-plan` accept it unchanged. Its six cases produce 24 partitions and
-144 jobs. Smoke adds the learned-sample workload to the usual first workload
+--language-plan` accept it unchanged. Prepare it with `--shard-id
+literal-probe` so its units stay distinct from the bulk campaign's. Its six
+cases produce 24 partitions and 144 jobs. Smoke adds the learned-sample workload to the usual first workload
 for each language.
 
 ## AWS dispatch and recovery

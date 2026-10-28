@@ -1,5 +1,4 @@
 import copy
-import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -46,6 +45,44 @@ class TestFleet(unittest.TestCase):
             self.assertEqual([row[4] for row in observations], ["native", "safe", "safe"])
         with self.assertRaises(FileExistsError):
             fleet.prepare(self.source, self.directory)
+
+    def assert_units_keep_comparisons_whole(self, partitions):
+        units = fleet.work_units.load(self.directory)
+        owner = {row: unit_id for unit_id, unit in units.items() for row in unit["owned"]}
+        self.assertEqual(len(owner), sum(len(unit["owned"]) for unit in units.values()))
+        atoms = {}
+        for row, unit_id in owner.items():
+            atoms.setdefault(fleet.row_atom(row), set()).add(unit_id)
+        # Every operation of every comparison is one atom: its three observations share one unit.
+        self.assertEqual(len(atoms), partitions * len(collection.OPERATIONS))
+        self.assertEqual(len(owner), 3 * len(atoms))
+        self.assertTrue(all(len(unit_ids) == 1 for unit_ids in atoms.values()))
+        return units
+
+    def test_units_pack_comparisons_within_fifteen_minutes(self):
+        fleet.prepare(self.source, self.directory)
+        units = self.assert_units_keep_comparisons_whole(52)
+        self.assertTrue(all(float(unit["estimated_seconds"]) <= 900 for unit in units.values()))
+        self.assertTrue(any(len(unit["owned"]) > 3 for unit in units.values()))
+        table = self.directory / "unit-rows.tsv"
+        table.write_text(table.read_text().replace("\towner\t", "\trepresentative\t", 1))
+        with self.assertRaisesRegex(ValueError, "work units differ"):
+            fleet.validate(self.directory)
+
+    def test_smoke_covers_each_language_and_model_and_the_longest_packed_unit(self):
+        manifest = collection.load(self.source / "manifest.json")
+        manifest["smoke_required_pairs"] = [[manifest["cases"][-1]["id"], "trino"]]
+        collection.save(self.source / "manifest.json", manifest)
+        fleet.prepare(self.source, self.directory)
+        units = fleet.work_units.load(self.directory)
+        smoke = fleet.smoke_units(self.directory)
+        measured = {fleet.row_atom(row)[:2] for unit_id in smoke for row in units[unit_id]["owned"]}
+        self.assertEqual({language for _, language in measured}, set(collection.ENGINES))
+        self.assertIn((manifest["cases"][-1]["id"], "trino"), measured)
+        longest = max(float(unit["estimated_seconds"]) for unit in units.values() if len(unit["owned"]) > 3)
+        self.assertIn(longest, {float(units[unit_id]["estimated_seconds"]) for unit_id in smoke
+                                if len(units[unit_id]["owned"]) > 3})
+        self.assertLess(len(smoke), len(units))
 
     def test_steady_profile_survives_partition_and_batch_transport(self):
         import campaign
@@ -94,33 +131,18 @@ class TestFleet(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, "positive integer"):
                 fleet.prepare(self.source, self.root / "invalid", max_concurrent_hosts=value)
 
-    def test_archive_validation_preserves_1_0_evidence(self):
-        # 1.0 plans measured three languages, and also measured R8g after R9g.
+    def test_units_charge_verification_of_every_operation_under_a_narrow_selection(self):
         manifest = collection.load(self.source / "manifest.json")
-        manifest["languages"] = collection.RELEASE_1_0_ENGINES
-        for case in manifest["cases"]:
-            del case["mappings"]["rust"]
+        manifest["selected_operations"] = ["reusedContains"]
         collection.save(self.source / "manifest.json", manifest)
-        with patch.object(collection, "ENGINES", collection.RELEASE_1_0_ENGINES), \
-                patch.object(fleet, "PLATFORMS", fleet.RELEASE_1_0_PLATFORMS):
-            plan = self.prepare_small_plan()
-        # Archived plans use schema 3, or schema 2 without recorded EC2 allocations.
-        for schema in (3, 2):
-            if schema == 2:
-                plan["schema_version"] = 2
-                del plan["platform_allocations"]
-                for assignment in plan["jobs"] + plan["host_batches"]:
-                    del assignment["instance_type"]
-                    del assignment["vcpus"]
-            collection.save(self.directory / "plan.json", plan)
-            with self.subTest(schema=schema):
-                with self.assertRaisesRegex(ValueError, "language or memory-mode coverage"):
-                    fleet.validate(self.directory)
-                self.assertEqual(fleet.validate_archive(self.directory), plan)
-                shutil.rmtree(self.root / "results", ignore_errors=True)
-                output = self.root / f"export-{schema}.json"
-                fleet.aggregate(self.directory, self.write_results(plan), output)
-                self.assertEqual(len(collection.load(output)["hosts"]), len(plan["jobs"]))
+        compatible = [case["id"] for case in manifest["cases"] if case["mappings"]["re2"]["status"] != "not-compatible"]
+        fleet.prepare(self.source, self.directory, selection=[(case, "re2") for case in compatible[:3]])
+        units = fleet.work_units.load(self.directory)
+        # Verification still checks all five operations of each observation, so three comparisons
+        # measuring one operation no longer fit one fifteen-minute unit.
+        self.assertEqual(2, len(units))
+        self.assertTrue(all(float(unit["estimated_seconds"]) <= fleet.work_units.UNIT_SECONDS
+                            for unit in units.values()))
 
     def test_reject_incomplete_duplicate_or_changed_plan(self):
         original = self.prepare_small_plan()
@@ -161,10 +183,17 @@ class TestFleet(unittest.TestCase):
         manifest = collection.load(self.source / "manifest.json")
         estimates = {case["id"] + "/" + language: 300 for case in manifest["cases"] for language in collection.ENGINES}
         policy = {"schema_version": 1, "source_sha256": "a" * 64, "partition_seconds": estimates,
-                  "isolated_pairs": [[manifest["cases"][0]["id"], "java"]], "max_batch_seconds": 4200,
+                  "isolated_pairs": [[manifest["cases"][0]["id"], "java"]], "max_batch_seconds": 4800,
                   "bootstrap_seconds": 600}
+        # A comparison estimated past fifteen minutes per operation is a unit alone, as is an isolated one.
+        estimates[manifest["cases"][1]["id"] + "/trino"] = 5 * 950
         plan = fleet.prepare(self.source, self.directory, operation_budget=10, duration_policy=policy)
         self.assertEqual(len(plan["jobs"]), 312)
+        units = self.assert_units_keep_comparisons_whole(52)
+        for case, language in ((manifest["cases"][0]["id"], "java"), (manifest["cases"][1]["id"], "trino")):
+            alone = [unit for unit in units.values() if fleet.row_atom(unit["owned"][0])[:2] == (case, language)]
+            self.assertEqual([3] * 5, [len(unit["owned"]) for unit in alone])
+        self.assertEqual(5, sum(float(unit["estimated_seconds"]) == 950 for unit in units.values()))
         self.assertEqual(fleet.validate(self.directory), plan)
         self.assertEqual(sorted(job for batch in plan["host_batches"] for job in batch["jobs"]),
                          sorted(job["id"] for job in plan["jobs"]))

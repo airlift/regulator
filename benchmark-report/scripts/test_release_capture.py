@@ -25,7 +25,7 @@ class TestReleaseCapture(unittest.TestCase):
                 for replica in (1, 2, 3)]
         self.manifest = {'suite': 'language-bulk', 'cases': [{'id': 'example', 'model': 'count'}]}
         platforms = release_capture.fleet.PLATFORMS
-        self.data = {'plan': {'schema_version': 3, 'replicas': 3, 'platforms': list(platforms),
+        self.data = {'plan': {'schema_version': 4, 'replicas': 3, 'platforms': list(platforms),
                               'platform_allocations': release_capture.fleet.platform_allocations('language-bulk', platforms),
                               'jobs': jobs, 'partitions': [part]},
                      'candidate': {'source_commit': self.collector['candidate_commit'], 'source_tree': self.collector['root_tree']},
