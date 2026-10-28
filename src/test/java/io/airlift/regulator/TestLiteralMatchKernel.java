@@ -33,7 +33,7 @@ public class TestLiteralMatchKernel
         }
         assertThat(TrinoLikePattern.compile(Slices.utf8Slice("%needle%")).usesShortLiteralForDiagnostics()).isFalse();
         assertThat(TrinoLikePattern.compile(Slices.utf8Slice("π😀")).usesShortLiteralForDiagnostics()).isTrue();
-        assertThat(TrinoLikePattern.compile(Slices.utf8Slice("a!_b%"), '!').usesShortLiteralForDiagnostics()).isTrue();
+        assertThat(TrinoLikePattern.compile(Slices.utf8Slice("a!_b%"), TrinoLikePattern.Options.defaults().setEscape('!')).usesShortLiteralForDiagnostics()).isTrue();
     }
 
     @Test

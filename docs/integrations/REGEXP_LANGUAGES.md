@@ -10,7 +10,7 @@ parser.
 | `TrinoRegexp.compile(pattern)` | [Trino Regular-Expression Language](../reference/languages/TRINO_REGEXP.md) |
 | `JavaRegexp.compile(pattern)` | [Java Regular-Expression Language](../reference/languages/JAVA_REGEXP.md) |
 | `RustRegexp.compile(pattern)` | [Rust Regular-Expression Language](../reference/languages/RUST_REGEXP.md) |
-| `TrinoLikePattern.compile(pattern, escape)` | [Trino SQL LIKE Language](../reference/languages/TRINO_LIKE.md) |
+| `TrinoLikePattern.compile(pattern)` | [Trino SQL LIKE Language](../reference/languages/TRINO_LIKE.md) |
 
 See [unsupported features](../reference/languages/UNSUPPORTED_FEATURES.md) for
 the reasons behind the limits and what adding support would require.

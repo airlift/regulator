@@ -25,13 +25,17 @@ TrinoLikePattern pattern =
 boolean matches = pattern.matches(Slices.utf8Slice("fatal error 1"));
 ```
 
-Or supply one Unicode code point as the escape character:
+Or set one Unicode code point as the escape character in the options:
 
 ```java
-TrinoLikePattern pattern =
-        TrinoLikePattern.compile(Slices.utf8Slice("100\\%"), '\\');
+TrinoLikePattern pattern = TrinoLikePattern.compile(
+        Slices.utf8Slice("100\\%"),
+        TrinoLikePattern.Options.defaults().setEscape('\\'));
 boolean matches = pattern.matches(Slices.utf8Slice("100%"));
 ```
+
+`setEscape` throws `IllegalArgumentException` for a value that is not a valid
+code point, and `clearEscape` removes a previously set escape character.
 
 An escape character must be followed by `%`, `_`, or itself. A trailing escape
 and any other escaped code point throw `TrinoLikePatternSyntaxException`; its

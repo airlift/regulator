@@ -92,9 +92,9 @@ public final class TrinoLikeDifferentialVerifier
         TrinoLikePattern candidate;
         LikeMatcher reference;
         try {
-            candidate = escape.isPresent()
-                    ? TrinoLikePattern.compile(patternSlice, escape.orElseThrow())
-                    : TrinoLikePattern.compile(patternSlice);
+            TrinoLikePattern.Options options = TrinoLikePattern.Options.defaults();
+            escape.ifPresent(options::setEscape);
+            candidate = TrinoLikePattern.compile(patternSlice, options);
         }
         catch (IllegalArgumentException candidateFailure) {
             try {

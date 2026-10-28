@@ -165,7 +165,7 @@ public class BenchmarkEverydayTrinoRegexp
     @Benchmark
     public TrinoLikePattern constructLikeEscapedWildcardChain(BenchmarkData data)
     {
-        return TrinoLikePattern.compile(LIKE_ESCAPED_WILDCARD_CHAIN_PATTERN, '!');
+        return TrinoLikePattern.compile(LIKE_ESCAPED_WILDCARD_CHAIN_PATTERN, TrinoLikePattern.Options.defaults().setEscape('!'));
     }
 
     public static void main(String[] args)
