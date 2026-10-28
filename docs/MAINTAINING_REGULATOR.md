@@ -306,9 +306,14 @@ Run the complete frozen publication campaign only after:
 - the user-facing publication inventory is frozen independently of results
 - no additional cleanup is planned
 
-For a release, run the R9g and R8i publication campaign after release, using
-the published artifact for public-API measurements and recording its checksum
-and release tag. The 1.0 campaign, which also measured R8g, is recorded in
+For a release, record its manifest
+`tools/re2-benchmark/baseline/releases/<version>.json` like `1.0.json`: the
+release's `source_commit`, its `src/main` tree as `engine_tree`, and the
+published JAR's `jar_sha256`. The campaign's `--release-version <version>`
+option reads that manifest. Then run the R9g and R8i publication campaign,
+using the published artifact for public-API measurements and recording its
+checksum and release tag. The 1.0 campaign, which also measured R8g, is
+recorded in
 [`RESULTS_1.0.md`](benchmarks/RESULTS_1.0.md). The public report is built by
 `benchmark-report/scripts/build_capture_data.py --released-campaign` from the
 language exports and the baseline unit campaign. Measure both native-memory and
@@ -333,9 +338,9 @@ replication requirements.
 
 1. Confirm the intended `main` revision passed the full CI matrix, including
    both native-access settings on the supported JDKs. Check public contracts,
-   dependency versions, and the README/report consistency gate. For 1.0,
-   retain the explicit preliminary label until released-artifact collection
-   is complete.
+   dependency versions, and the README/report consistency gate. A preliminary
+   report keeps its explicit label until the released-artifact collection is
+   complete.
 2. Check the [release workflow](../.github/workflows/release.yml) and
    [Maven publication settings](../.mvn/settings.xml). The workflow requires
    the GPG key/passphrase and Maven Central credentials named there, plus

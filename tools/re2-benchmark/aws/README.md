@@ -80,8 +80,15 @@ capacity.
 Run both collectors on one persistent coordinator filesystem with renewable
 AWS credentials. Supply the same `--fleet-budget PATH` to every phase, with
 `--spot-only` unless the policy allows On-Demand. Set `--spot-vcpu-reserve` to
-the policy's reserved headroom and use `--release-version 1.0` when
-reproducing the published release.
+the policy's reserved headroom and use `--release-version 2.0` when measuring
+the 2.0 release. The option names the release manifest
+`tools/re2-benchmark/baseline/releases/<version>.json`, and the controller runs
+only from source whose `src/main` tree matches that release. The
+[maintenance guide](../../../docs/MAINTAINING_REGULATOR.md#final-qualification)
+says how to record a release's manifest. Remeasure the 1.0 artifact with
+`--release-version 1.0` from
+[commit `32406d25`](https://github.com/airlift/regulator/tree/32406d25a6032b15d366cddb414ade57c972d0ee);
+the published campaign's collector revisions are in its capture provenance.
 
 The policy records the expected AWS account and home region, resource and
 spending ceilings, and hourly price ceilings for each selected worker type.
@@ -292,7 +299,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --engine-builds /durable/path/<campaign-id>/build \
   --transfer-bucket us-west-2=<bucket> \
   --max-concurrent 16 --spot-only --spot-vcpu-reserve 16 \
-  --release-version 1.0 --fleet-budget /durable/path/fleet-policy.json
+  --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
 ```
 
 The primary phase requires the accepted smoke root and measures three
@@ -310,7 +317,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --engine-builds /durable/path/<campaign-id>/build \
   --transfer-bucket us-west-2=<bucket> \
   --max-concurrent 16 --spot-only --spot-vcpu-reserve 16 \
-  --release-version 1.0 --fleet-budget /durable/path/fleet-policy.json
+  --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
 ```
 
 Use confirmation only for the bounded list emitted by preliminary reduction:
@@ -328,7 +335,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --engine-builds /durable/path/<campaign-id>/build \
   --transfer-bucket us-west-2=<bucket> \
   --max-concurrent 16 --spot-only --spot-vcpu-reserve 16 \
-  --release-version 1.0 --fleet-budget /durable/path/fleet-policy.json
+  --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
 ```
 
 Start with one canary per platform, then run full smoke before primary.
