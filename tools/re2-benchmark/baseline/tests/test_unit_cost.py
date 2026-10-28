@@ -24,6 +24,9 @@ class TestUnitCost(unittest.TestCase):
             # Every JMH fork starts its own JVM.
             (protocol("jmh-forks", 1, 10, "50ms", 10, "50ms"), 3),
             (protocol("jmh-forks", 5, 10, "1s", 10, "1s"), 110),
+            # Google Benchmark's sizing runs and overshoot of each minimum time, unequal so that swapped
+            # warmup and measurement charges differ.
+            (protocol("native-repetitions", 1, 10, "1s", 10, "50ms"), 25.75),
         )
         for row_protocol_fields, seconds in cases:
             with self.subTest(protocol=row_protocol_fields):

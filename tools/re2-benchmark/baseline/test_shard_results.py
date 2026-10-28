@@ -899,6 +899,73 @@ class TestShardResults(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "differ from the manifest"):
                 SHARD_RESULTS.normalize_jmh(arguments)
 
+    def testNormalizeNativeTakesEachWorkloadsMedianRepetition(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest = root / "rows.tsv"
+            expected = [{
+                "row_id": f"shard/{workload}/extract/native-re2",
+                "shard_id": "shard",
+                "suite": "re2-specialized-patterns",
+                "system": "native-re2",
+                "benchmark": "extract",
+                "parameters": f"workload={workload}",
+                "comparator": "native-re2",
+                "expected_result": "native-re2-differential",
+                "allocation_contract": "not-measured",
+                "workload_checksum": "specialized=0",
+            } for workload in ("keyValue", "quotedField")]
+            SHARD_RESULTS.write_tsv(manifest, SHARD_RESULTS.MANIFEST_FIELDS, expected)
+            semantic_receipt = root / "semantic.tsv"
+            SHARD_RESULTS.write_tsv(semantic_receipt, SHARD_RESULTS.SEMANTIC_FIELDS, [{
+                "route": "native-access", "tests": "TestExample", "outcome": "accepted",
+                "semantic_result_digest": "0" * 64}])
+
+            def result(workload, times, repetitions=3, indices=None, context=(), error=False):
+                path = root / f"{workload}.json"
+                failure = {"error_occurred": True, "error_message": "runner failed"} if error else {}
+                # The score is the median wall time, so the CPU time differs from it.
+                path.write_text(json.dumps({
+                    "context": {"host_name": "host", "parameter.workload": workload, **dict(context)},
+                    "benchmarks": [
+                        *({"name": "extract", "run_name": "extract", "run_type": "iteration",
+                           "repetitions": repetitions, "repetition_index": index, "iterations": 1000,
+                           "real_time": time, "cpu_time": time * 2, "time_unit": "ns", **failure}
+                          for index, time in zip(indices or range(len(times)), times)),
+                        {"name": "extract_median", "run_name": "extract", "run_type": "aggregate",
+                         "aggregate_name": "median", "repetitions": repetitions, "real_time": 1,
+                         "time_unit": "ns"}]}))
+                return path
+
+            output = root / "observed.tsv"
+            arguments = SimpleNamespace(manifest=manifest, shard="shard", system="native-re2", output=output,
+                                        semantic_receipt=semantic_receipt, expected_repetitions=3,
+                                        input=[result("keyValue", (300, 10, 20)), result("quotedField", (5, 7, 6))])
+            SHARD_RESULTS.normalize_native(arguments)
+            rows = SHARD_RESULTS.load_observed(output)
+            self.assertEqual([(row["row_id"], row["score"], row["score_unit"], row["allocation_bytes"])
+                              for row in rows], [
+                (expected[0]["row_id"], "20", "ns/op", "not-measured"),
+                (expected[1]["row_id"], "6", "ns/op", "not-measured")])
+            # A run that stopped early has fewer repetitions than it planned.
+            arguments.input = [result("keyValue", (30, 10)), result("quotedField", (5, 7, 6))]
+            with self.assertRaisesRegex(ValueError, "has 2 of 3 repetitions"):
+                SHARD_RESULTS.normalize_native(arguments)
+            # Setting BENCHMARK_DRY_RUN in the environment makes a dry run, which times one repetition.
+            arguments.input = [result("keyValue", (30,), repetitions=1, context={"dry_run": "true"}),
+                               result("quotedField", (5, 7, 6))]
+            with self.assertRaisesRegex(ValueError, "is a dry run"):
+                SHARD_RESULTS.normalize_native(arguments)
+            arguments.input = [result("keyValue", (30, 10, 20), indices=(0, 0, 1)), result("quotedField", (5, 7, 6))]
+            with self.assertRaisesRegex(ValueError, "repetition indices"):
+                SHARD_RESULTS.normalize_native(arguments)
+            arguments.input = [result("keyValue", (30, 10, 20), error=True), result("quotedField", (5, 7, 6))]
+            with self.assertRaisesRegex(ValueError, "failed or was skipped"):
+                SHARD_RESULTS.normalize_native(arguments)
+            arguments.input = arguments.input[1:]
+            with self.assertRaisesRegex(ValueError, "differ from the manifest"):
+                SHARD_RESULTS.normalize_native(arguments)
+
     def testCombineRequiresExactRowSet(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

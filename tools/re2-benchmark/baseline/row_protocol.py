@@ -17,7 +17,7 @@ FIELDS = (
     "measurement_time",
     "maximum_relative_standard_error",
 )
-EXECUTIONS = ("jmh-processes", "jmh-forks")
+EXECUTIONS = ("jmh-processes", "jmh-forks", "native-repetitions")
 ROUTES = (
     ("native_access_handler", "native_access_systems"),
     ("object_row_handler", "object_row_systems"),
@@ -35,6 +35,12 @@ FULL_WINDOW = "1s"
 BOUNDED_WINDOW = "50ms"
 BOUNDED_MAXIMUM_RELATIVE_STANDARD_ERROR = "0.05"
 JONI_FORKS = 1
+# A native comparator runs in one process: one warmup as long as the JMH warmup iterations together, then
+# one Google Benchmark repetition per JMH measurement iteration, ten samples as a Joni fork has.
+# SHARD_DISPATCH.md describes how Google Benchmark sizes them.
+NATIVE_SYSTEMS = frozenset({"native-re2", "rust-regex"})
+# The systems a logical row's Regulator variants are compared with, measured in the same unit.
+COMPARATOR_SYSTEMS = ("joni", "trino-optimized", "trino-sql", "native-re2", "jdk", "rust-regex")
 DURATION_UNITS = {"ms": 0.001, "s": 1.0}
 # LIKE rows name a logical operation; one JMH method per system measures it.
 TRINO_LIKE_CLASS = "io.airlift.regulator.benchmark.BenchmarkTrinoLike"
@@ -104,6 +110,9 @@ def protocol_key(protocol):
 def row_protocol(row, window, precision):
     if row["system"] == "joni":
         return protocol(row["row_id"], "jmh-forks", JONI_FORKS, JMH_WARMUP_ITERATIONS, window,
+                        JMH_MEASUREMENT_ITERATIONS, window, precision)
+    if row["system"] in NATIVE_SYSTEMS:
+        return protocol(row["row_id"], "native-repetitions", 1, JMH_WARMUP_ITERATIONS, window,
                         JMH_MEASUREMENT_ITERATIONS, window, precision)
     return protocol(row["row_id"], "jmh-processes", JMH_PROCESS_COUNT, JMH_WARMUP_ITERATIONS, window,
                     JMH_MEASUREMENT_ITERATIONS, window, precision)
@@ -193,10 +202,7 @@ def comparison_specs(manifest_rows):
     for logical_id, rows in groups.items():
         by_system = {row["system"]: row for row in rows}
         candidate_systems = [system for system in by_system if system.startswith("regulator")]
-        if "joni" in by_system:
-            for system in candidate_systems:
-                specs.append((logical_id, by_system[system], "joni", (by_system["joni"],)))
-        for comparator in ("trino-optimized", "trino-sql"):
+        for comparator in COMPARATOR_SYSTEMS:
             if comparator in by_system:
                 for system in candidate_systems:
                     specs.append((logical_id, by_system[system], comparator, (by_system[comparator],)))

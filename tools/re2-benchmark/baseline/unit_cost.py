@@ -35,6 +35,13 @@ def row_seconds(protocol):
     if execution == "jmh-forks":
         forks = int(protocol["processes"])
         return measured_seconds(protocol, forks) + forks * JMH_STARTUP_SECONDS
+    if execution == "native-repetitions":
+        warmup = int(protocol["warmup_iterations"]) * row_protocol.seconds(protocol["warmup_time"])
+        measurement = int(protocol["measurement_iterations"]) * row_protocol.seconds(protocol["measurement_time"])
+        # Google Benchmark grows the warmup and the first repetition through shorter sizing runs, aiming each
+        # at 1.4 times its minimum time, the margin its iteration estimate adds; later repetitions reuse the
+        # first one's iteration count. SHARD_DISPATCH.md describes the sizing.
+        return 2.5 * warmup + 1.5 * measurement
     raise ValueError(f"no cost rule for execution {execution!r}")
 
 
@@ -42,7 +49,7 @@ def selector_startup_seconds(protocol):
     """Top-level JVM startups of one JMH selector; forks charge their own startups per row.
 
     A process selector starts its compiler-hints JVM and then its processes; a
-    forked selector starts its launcher JVM.
+    forked selector starts its launcher JVM, and a native selector its runner.
     """
     if protocol["execution"] == "jmh-processes":
         return (int(protocol["processes"]) + 1) * JMH_STARTUP_SECONDS

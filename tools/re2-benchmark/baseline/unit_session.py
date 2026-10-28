@@ -78,6 +78,8 @@ SELECTOR_FIELDS = (
     "rows",
 )
 SELECTION_FIELDS = SELECTOR_FIELDS + ("filter",)
+# How run-shard.sh launches a selector of each frozen execution; JMH processes are the default.
+EXECUTION_KINDS = {"jmh-forks": "forks", "native-repetitions": "native"}
 # A selector whose values JMH cannot express runs a whole method with its handler's arguments.
 ROUTE_ARGUMENTS = "route"
 SMOKE_SETTINGS = ("processes", "warmup_iterations", "measurement_iterations", "time")
@@ -330,7 +332,7 @@ def parameter_block(rows):
 def execution_settings(system, protocol, protocol_name, smoke):
     """How a selector runs: qualification keeps its frozen protocol; smoke keeps the route's smoke windows."""
     if protocol_name == "qualification":
-        kind = "forks" if protocol["execution"] == "jmh-forks" else "processes"
+        kind = EXECUTION_KINDS.get(protocol["execution"], "processes")
         if kind == "forks" and protocol["warmup_time"] != protocol["measurement_time"]:
             raise ValueError(f"Forked protocol {protocol['row_id']} has distinct warmup and measurement windows")
         return {
@@ -338,12 +340,13 @@ def execution_settings(system, protocol, protocol_name, smoke):
             **{field: protocol[field] for field in (
                 "processes", "warmup_iterations", "warmup_time", "measurement_iterations", "measurement_time")},
         }
-    # Smoke forks only Joni, as many times as its frozen protocol, and runs every
-    # candidate row in the route's smoke processes.
-    kind = "forks" if system == "joni" else "processes"
+    # Smoke forks only Joni, as many times as its frozen protocol, runs a native
+    # comparator in its one process, and runs every candidate row in the route's
+    # smoke processes.
+    kind = "forks" if system == "joni" else EXECUTION_KINDS.get(protocol["execution"], "processes")
     return {
         "kind": kind,
-        "processes": protocol["processes"] if kind == "forks" else smoke["processes"],
+        "processes": smoke["processes"] if kind == "processes" else protocol["processes"],
         "warmup_iterations": smoke["warmup_iterations"],
         "warmup_time": smoke["time"],
         "measurement_iterations": smoke["measurement_iterations"],

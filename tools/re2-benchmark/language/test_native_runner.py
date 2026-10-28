@@ -11,14 +11,16 @@ class NativeRunnerChecks:
     RUNNER = None
     # Matches of a* in "ab": RE2 also reports the empty match where "a" ended; Rust skips it.
     EMPTY_AFTER_MATCH = None
+    # Whether the runner has the specialized replace operation.
+    REPLACES = None
 
-    def run_case(self, pattern, source, count, offset=3, operation=None):
+    def run_case(self, pattern, source, count, offset=3, operation=None, mode="--verify-operation"):
         runner = os.environ[self.RUNNER]
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "input.tsv"
             path.write_text(pattern.encode().hex() + f"\n{offset}\t{count}\t" + source.encode().hex() + "\n")
             command = [runner, "--verify", str(path)] if operation is None else [
-                runner, "--verify-operation", str(path), operation]
+                runner, mode, str(path), *operation.split()]
             return subprocess.run(command,
                                   capture_output=True, text=True, timeout=10)
 
@@ -67,11 +69,29 @@ class NativeRunnerChecks:
         result = self.run_case("a", "a", 0, operation="reusedCount")
         self.assertNotEqual(result.returncode, 0)
 
+    def test_specialized_operations_print_each_value(self):
+        # The second match has no "a", so its first group does not participate.
+        expected = {"extract 1": "1:61\n", "extract 2": "1:62\n", "extractAll 1": "2:61,-\n",
+                    "extractAll 2": "2:62,62\n", "replace 2": "1:" + "b b q".encode().hex() + "\n"}
+        for operation, values in expected.items():
+            with self.subTest(operation=operation):
+                result = self.run_case("x(a)?(b)", "xab xb q", 0, operation=operation, mode="--verify-specialized")
+                if operation.startswith("replace") and not self.REPLACES:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("unknown specialized operation", result.stderr)
+                    continue
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, values)
+        result = self.run_case("x(a)?(b)", "q", 0, operation="extract 1", mode="--verify-specialized")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "0:\n")
+
 
 @unittest.skipUnless(os.environ.get("LANGUAGE_NATIVE_RUNNER"), "build and set LANGUAGE_NATIVE_RUNNER for native checks")
 class TestNativeRunner(NativeRunnerChecks, unittest.TestCase):
     RUNNER = "LANGUAGE_NATIVE_RUNNER"
     EMPTY_AFTER_MATCH = (3, "3:61,,\n")
+    REPLACES = True
 
 
 @unittest.skipUnless(os.environ.get("LANGUAGE_NATIVE_RUST_RUNNER"),
@@ -79,6 +99,7 @@ class TestNativeRunner(NativeRunnerChecks, unittest.TestCase):
 class TestNativeRustRunner(NativeRunnerChecks, unittest.TestCase):
     RUNNER = "LANGUAGE_NATIVE_RUST_RUNNER"
     EMPTY_AFTER_MATCH = (2, "2:61,\n")
+    REPLACES = False
 
 
 if __name__ == "__main__":
