@@ -107,7 +107,7 @@ public class TestLiteralAlternationSpanMatcher
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("ERROR|WARN|FATAL"));
         LiteralAlternationSpanMatcher matcher = regexp.literalAlternationSpanMatcher();
         assertThat(matcher).isNotNull();
-        assertThat(regexp.pattern()).isNull();
+        assertThat(regexp.re2()).isNull();
         long maxMemory = TrinoRegexp.Options.defaults().maxMemory();
         long forwardMemory = maxMemory - Math.max(1, maxMemory / 3);
         assertThat(matcher.estimatedRetainedSize()).isLessThan(forwardMemory);

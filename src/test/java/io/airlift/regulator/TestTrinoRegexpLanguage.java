@@ -161,7 +161,7 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testFinalLineDollarUsesLiteralPlans()
     {
-        Re2 pattern = TrinoRegexp.compile(utf8Slice("a$")).pattern();
+        Re2 pattern = TrinoRegexp.compile(utf8Slice("a$")).re2();
         assertThat(pattern.findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.ENDS_WITH_FINAL_LINE);
         assertThat(pattern.lookingAtPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.EQUALS_FINAL_LINE);
         assertThat(pattern.matchesPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.EQUALS);
@@ -176,17 +176,17 @@ public class TestTrinoRegexpLanguage
         assertThat(pattern.matches(utf8Slice("a\n"))).isFalse();
         assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).isNull();
 
-        Re2 newline = TrinoRegexp.compile(utf8Slice("\\n$")).pattern();
+        Re2 newline = TrinoRegexp.compile(utf8Slice("\\n$")).re2();
         assertThat(newline.findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.ENDS_WITH_FINAL_LINE);
         assertThat(newline.find(utf8Slice("a\n"))).isTrue();
 
-        Re2 anchored = TrinoRegexp.compile(utf8Slice("\\Aa$")).pattern();
+        Re2 anchored = TrinoRegexp.compile(utf8Slice("\\Aa$")).re2();
         assertThat(anchored.findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.EQUALS_FINAL_LINE);
         assertThat(anchored.find(utf8Slice("a"))).isTrue();
         assertThat(anchored.find(utf8Slice("a\n"))).isTrue();
         assertThat(anchored.find(utf8Slice("xa\n"))).isFalse();
 
-        Re2 exactEnd = TrinoRegexp.compile(utf8Slice("a$\\z")).pattern();
+        Re2 exactEnd = TrinoRegexp.compile(utf8Slice("a$\\z")).re2();
         assertThat(exactEnd.findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.ENDS_WITH);
         assertThat(exactEnd.find(utf8Slice("a"))).isTrue();
         assertThat(exactEnd.find(utf8Slice("a\n"))).isFalse();
@@ -195,7 +195,7 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testTerminalFinalLineDollarUsesLoweredBooleanProgram()
     {
-        Re2 pattern = TrinoRegexp.compile(utf8Slice("[a-z]+$")).pattern();
+        Re2 pattern = TrinoRegexp.compile(utf8Slice("[a-z]+$")).re2();
         assertThat(pattern.findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(pattern.lookingAtPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(pattern.matchesPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.GENERAL);
@@ -227,35 +227,35 @@ public class TestTrinoRegexpLanguage
         assertThat(pattern.matches(utf8Slice("abc"))).isTrue();
         assertThat(pattern.matches(utf8Slice("abc\n"))).isFalse();
 
-        Re2 alternation = TrinoRegexp.compile(utf8Slice("(?:foo|bar)+$")).pattern();
+        Re2 alternation = TrinoRegexp.compile(utf8Slice("(?:foo|bar)+$")).re2();
         assertThat(alternation.find(utf8Slice("prefixfoobar\n"))).isTrue();
         assertThat(alternation.find(utf8Slice("prefixbaz\n"))).isFalse();
         assertThat(alternation.isReverseProgramComputed()).isTrue();
         assertThat(alternation.reverseProgramIfComputedForDiagnostics()).isNotNull();
         assertThat(alternation.reverseProgramIfComputedForDiagnostics().hasTextDependentAssertions()).isFalse();
 
-        Re2 nonterminal = TrinoRegexp.compile(utf8Slice("a$\\n")).pattern();
+        Re2 nonterminal = TrinoRegexp.compile(utf8Slice("a$\\n")).re2();
         assertThat(nonterminal.booleanProgramForDiagnostics()).isNull();
         assertThat(nonterminal.find(utf8Slice("a\n"))).isTrue();
 
-        Re2 repeatedAssertion = TrinoRegexp.compile(utf8Slice("(?:a$)+")).pattern();
+        Re2 repeatedAssertion = TrinoRegexp.compile(utf8Slice("(?:a$)+")).re2();
         assertThat(repeatedAssertion.booleanProgramForDiagnostics()).isNull();
         assertThat(repeatedAssertion.find(utf8Slice("a\n"))).isTrue();
 
-        Re2 unicodeBoundary = TrinoRegexp.compile(utf8Slice("\\ba$")).pattern();
+        Re2 unicodeBoundary = TrinoRegexp.compile(utf8Slice("\\ba$")).re2();
         assertThat(unicodeBoundary.booleanProgramForDiagnostics()).isNull();
         assertThat(unicodeBoundary.find(utf8Slice(" a\n"))).isTrue();
 
-        Re2 fullFold = TrinoRegexp.compile(utf8Slice("(?i)ss$")).pattern();
+        Re2 fullFold = TrinoRegexp.compile(utf8Slice("(?i)ss$")).re2();
         assertThat(fullFold.booleanProgramForDiagnostics()).isNull();
         assertThat(fullFold.find(utf8Slice("SS\n"))).isTrue();
 
-        Re2 nullable = TrinoRegexp.compile(utf8Slice("(?:a?)*$")).pattern();
+        Re2 nullable = TrinoRegexp.compile(utf8Slice("(?:a?)*$")).re2();
         assertThat(nullable.findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(nullable.lookingAtPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(nullable.find(utf8Slice("bbb\n"))).isTrue();
 
-        Re2 finalLineEnd = TrinoRegexp.compile(utf8Slice("$")).pattern();
+        Re2 finalLineEnd = TrinoRegexp.compile(utf8Slice("$")).re2();
         assertThat(finalLineEnd.findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(finalLineEnd.find(utf8Slice("abc\n"))).isTrue();
         assertThat(finalLineEnd.lookingAt(utf8Slice("\n"))).isTrue();
@@ -269,24 +269,24 @@ public class TestTrinoRegexpLanguage
         Slice source = utf8Slice("123abc\n");
 
         int[] groups = new int[4];
-        assertThat(regexp.pattern().findInto(source, groups)).isTrue();
+        assertThat(regexp.re2().findInto(source, groups)).isTrue();
         assertThat(groups).containsExactly(3, 6, 3, 6);
 
-        MatchResult result = regexp.pattern().findResult(source);
+        MatchResult result = regexp.re2().findResult(source);
         assertThat(result.start(0)).isEqualTo(3);
         assertThat(result.end(0)).isEqualTo(6);
         assertThat(result.groupSlice(0)).isEqualTo(utf8Slice("abc"));
         assertThat(result.groupSlice(1)).isEqualTo(utf8Slice("abc"));
 
-        MatchResult rangedResult = regexp.pattern().findResult(source, 3, source.length());
+        MatchResult rangedResult = regexp.re2().findResult(source, 3, source.length());
         assertThat(rangedResult.start(0)).isEqualTo(3);
         assertThat(rangedResult.end(0)).isEqualTo(6);
 
-        MatchResult lookingAtResult = regexp.pattern().lookingAtResult(utf8Slice("abc\n"));
+        MatchResult lookingAtResult = regexp.re2().lookingAtResult(utf8Slice("abc\n"));
         assertThat(lookingAtResult.start(0)).isZero();
         assertThat(lookingAtResult.end(0)).isEqualTo(3);
-        assertThat(regexp.pattern().matchesResult(utf8Slice("abc"))).isNotNull();
-        assertThat(regexp.pattern().matchesResult(utf8Slice("abc\n"))).isNull();
+        assertThat(regexp.re2().matchesResult(utf8Slice("abc"))).isNotNull();
+        assertThat(regexp.re2().matchesResult(utf8Slice("abc\n"))).isNull();
 
         assertThat(regexp.count(source)).isEqualTo(1);
         assertThat(regexp.position(source)).isEqualTo(4);
@@ -306,7 +306,7 @@ public class TestTrinoRegexpLanguage
     public void testTerminalFinalLineDollarResultOperationsUseLoweredCandidate()
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("([a-z]+)$"));
-        Re2 pattern = regexp.pattern();
+        Re2 pattern = regexp.re2();
 
         assertThat(pattern.isReverseProgramComputed()).isFalse();
         assertThat(regexp.extract(utf8Slice("1111111111111111abc\n"))).isEqualTo(utf8Slice("abc"));
@@ -316,7 +316,7 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testTerminalFinalLineDollarCandidateSearchIsBounded()
     {
-        Re2 pattern = TrinoRegexp.compile(utf8Slice("([a-z]+)$")).pattern();
+        Re2 pattern = TrinoRegexp.compile(utf8Slice("([a-z]+)$")).re2();
 
         Slice shortMatch = utf8Slice("1111111111111111abc\n");
         assertThat(pattern.findLoweredCandidateStart(shortMatch, 0, shortMatch.length(), 0)).isEqualTo(16);
@@ -332,7 +332,7 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testTerminalFinalLineDollarGroupZeroBoundaryUsesLoweredProgram()
     {
-        Re2 pattern = TrinoRegexp.compile(utf8Slice("(?:foo|bar)+$")).pattern();
+        Re2 pattern = TrinoRegexp.compile(utf8Slice("(?:foo|bar)+$")).re2();
         Slice input = utf8Slice("foo".repeat(1_024) + "\n");
 
         assertThat(pattern.findLoweredCandidateStart(input, 0, input.length(), 0))
@@ -350,11 +350,11 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testTerminalFinalLineDollarGroupZeroBoundaryFallsBackWhenNotEquivalent()
     {
-        Re2 newlineConsuming = TrinoRegexp.compile(utf8Slice("(?s:.+)$")).pattern();
+        Re2 newlineConsuming = TrinoRegexp.compile(utf8Slice("(?s:.+)$")).re2();
         assertThat(newlineConsuming.findLoweredGroupZeroBoundary(utf8Slice("a\n"), 0, 2, 0))
                 .isEqualTo(Dfa.CANDIDATE_SEARCH_FALLBACK);
 
-        Re2 nullable = TrinoRegexp.compile(utf8Slice("[a-z]*$")).pattern();
+        Re2 nullable = TrinoRegexp.compile(utf8Slice("[a-z]*$")).re2();
         assertThat(nullable.findLoweredGroupZeroBoundary(utf8Slice("a\n"), 0, 2, 0))
                 .isEqualTo(Dfa.CANDIDATE_SEARCH_FALLBACK);
     }
@@ -376,7 +376,7 @@ public class TestTrinoRegexpLanguage
                 continue;
             }
 
-            Re2 pattern = regexp.pattern();
+            Re2 pattern = regexp.re2();
             if (pattern.booleanProgramForDiagnostics() == null) {
                 assertThat(pattern.forwardProgramForDiagnostics().hasTextDependentAssertions()).isTrue();
                 assertThat(regexp.contains(source)).isTrue();
@@ -512,7 +512,7 @@ public class TestTrinoRegexpLanguage
     public void testMultilineBeginLineUsesForwardAndReverseDfa()
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("(?m)^[a-z]+"));
-        Re2 pattern = regexp.pattern();
+        Re2 pattern = regexp.re2();
 
         assertThat(regexp.extract(utf8Slice("!abc?").slice(1, 3))).isEqualTo(utf8Slice("abc"));
         assertThat(regexp.extract(utf8Slice("123\nneedle\n456"))).isEqualTo(utf8Slice("needle"));
@@ -553,7 +553,7 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testMultilineBeginLineDfaStartStatesDoNotAlias()
     {
-        Re2 pattern = TrinoRegexp.compile(utf8Slice("(?m)^")).pattern();
+        Re2 pattern = TrinoRegexp.compile(utf8Slice("(?m)^")).re2();
 
         assertThat(matchBoundaries(pattern.matcher(utf8Slice("a\nb"))))
                 .containsExactly(new MatchBoundary(0, 0), new MatchBoundary(2, 2));
@@ -602,7 +602,7 @@ public class TestTrinoRegexpLanguage
                         .isEqualTo(joniPattern.matcher(inputBytes).search(0, inputBytes.length, Option.DEFAULT) >= 0);
 
                 Matcher lookingAtMatcher = joniPattern.matcher(inputBytes);
-                assertThat(regexp.pattern().lookingAt(input))
+                assertThat(regexp.re2().lookingAt(input))
                         .as("lookingAt %s against %s", patternText, inputText)
                         .isEqualTo(lookingAtMatcher.match(0, inputBytes.length, Option.DEFAULT) >= 0);
 
@@ -610,7 +610,7 @@ public class TestTrinoRegexpLanguage
                 boolean joniMatches = matchesMatcher.match(0, inputBytes.length, Option.DEFAULT) >= 0 &&
                         matchesMatcher.getBegin() == 0 &&
                         matchesMatcher.getEnd() == inputBytes.length;
-                assertThat(regexp.pattern().matches(input))
+                assertThat(regexp.re2().matches(input))
                         .as("matches %s against %s", patternText, inputText)
                         .isEqualTo(joniMatches);
             }
@@ -637,7 +637,7 @@ public class TestTrinoRegexpLanguage
                 ".*$",
                 "(?s:.*)$")) {
             Slice patternSlice = utf8Slice(patternText);
-            Re2 pattern = TrinoRegexp.compile(patternSlice).pattern();
+            Re2 pattern = TrinoRegexp.compile(patternSlice).re2();
             Regex joniPattern = joniPattern(patternSlice);
 
             for (String inputText : inputs) {
@@ -726,7 +726,7 @@ public class TestTrinoRegexpLanguage
                 assertThat(regexp.count(text)).as(expression + " on " + input).isEqualTo(expected.size());
             }
         }
-        Re2 ordinary = TrinoRegexp.compile(utf8Slice("(?i)hello|help")).pattern();
+        Re2 ordinary = TrinoRegexp.compile(utf8Slice("(?i)hello|help")).re2();
         assertThat(ordinary.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
         assertThat(ordinary.reverseProgramSize()).isGreaterThan(0);
         assertThat(ordinary.regexp().op()).isEqualTo(RegexpOp.CONCAT);
@@ -761,7 +761,7 @@ public class TestTrinoRegexpLanguage
                 assertThat(TrinoRegexp.compile(expression).extract(text, 1)).as(body + " on " + input).isEqualTo(expected);
             }
         }
-        Re2 pattern = TrinoRegexp.compile(utf8Slice("(?i:s+ss)")).pattern();
+        Re2 pattern = TrinoRegexp.compile(utf8Slice("(?i:s+ss)")).re2();
         assertThat(pattern.forwardProgramForDiagnostics().hasFullCaseFold()).isTrue();
         assertThat(Nfa.fullMatch(pattern.forwardProgramForDiagnostics(), utf8Slice("sß"))).isTrue();
         assertFirstMatchMatchesJoni("(".repeat(270) + "(?i:s+ss)" + ")".repeat(270), "sß");
@@ -772,7 +772,7 @@ public class TestTrinoRegexpLanguage
         assertFirstMatchMatchesJoni("\\A(?i:ff{1})\\z", "ﬀ");
         assertFirstMatchMatchesJoni("\\A(?i:ff{1}?)\\z", "ﬀ");
         assertFirstMatchMatchesJoni("\\A(?i:ff{1,1})\\z", "ﬀ");
-        assertThat(TrinoRegexp.compile(utf8Slice("(?i:a+aa)")).pattern().forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
+        assertThat(TrinoRegexp.compile(utf8Slice("(?i:a+aa)")).re2().forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
         // Capital sharp S joined Unicode in 5.1; pinned Joni's fold tables are Unicode 4.1 data,
         // so it does not fold it. Regulator follows its pinned Unicode full case folding.
         assertThat(TrinoRegexp.compile(utf8Slice("(?i:ss)")).extract(utf8Slice("ẞ"))).isEqualTo(utf8Slice("ẞ"));
@@ -911,7 +911,7 @@ public class TestTrinoRegexpLanguage
             String nextMember = String.format(Locale.ROOT, "\\x{%x}", source + 1);
             for (String pattern : List.of("(?i)[" + member + "]", "(?i)[" + member + "-" + nextMember + "]", "(?i)[^" + member + "]")) {
                 Slice patternSlice = utf8Slice(pattern);
-                Re2 regexp = TrinoRegexp.compile(patternSlice).pattern();
+                Re2 regexp = TrinoRegexp.compile(patternSlice).re2();
                 Regex joni = joniPattern(patternSlice);
                 for (String input : inputs) {
                     Slice inputSlice = utf8Slice(input);
@@ -944,27 +944,27 @@ public class TestTrinoRegexpLanguage
     @Test
     public void testSpecialSemanticsOnlyDisableIncompatibleEngines()
     {
-        Re2 finalLine = TrinoRegexp.compile(utf8Slice("a$")).pattern();
+        Re2 finalLine = TrinoRegexp.compile(utf8Slice("a$")).re2();
         assertThat(finalLine.forwardProgramForDiagnostics().hasTextDependentAssertions()).isTrue();
         assertThat(finalLine.forwardProgramForDiagnostics().isOnePass()).isFalse();
         assertThat(finalLine.reverseProgramSize()).isEqualTo(-1);
 
-        Re2 fullFold = TrinoRegexp.compile(utf8Slice("(?i)ss")).pattern();
+        Re2 fullFold = TrinoRegexp.compile(utf8Slice("(?i)ss")).re2();
         assertThat(fullFold.forwardProgramForDiagnostics().hasFullCaseFold()).isTrue();
         assertThat(fullFold.reverseProgramSize()).isEqualTo(-1);
 
-        Re2 simpleFold = TrinoRegexp.compile(utf8Slice("(?i)hello")).pattern();
+        Re2 simpleFold = TrinoRegexp.compile(utf8Slice("(?i)hello")).re2();
         assertThat(simpleFold.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
         assertThat(simpleFold.reverseProgramSize()).isGreaterThan(0);
 
-        Re2 classFold = TrinoRegexp.compile(utf8Slice("(?i)[ﬃ]")).pattern();
+        Re2 classFold = TrinoRegexp.compile(utf8Slice("(?i)[ﬃ]")).re2();
         assertThat(classFold.forwardProgramForDiagnostics().hasFullCaseFold()).isFalse();
         assertThat(classFold.reverseProgramSize()).isGreaterThan(0);
-        Re2 finalLineClassFold = TrinoRegexp.compile(utf8Slice("(?i)[ﬃ]$")).pattern();
+        Re2 finalLineClassFold = TrinoRegexp.compile(utf8Slice("(?i)[ﬃ]$")).re2();
         assertThat(finalLineClassFold.findPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
         assertThat(finalLineClassFold.lookingAtPlanForDiagnostics()).isEqualTo(Re2.BooleanPlanKind.LOWERED_PROGRAM);
 
-        Re2 nonAsciiSimpleFold = TrinoRegexp.compile(utf8Slice("(?i)seek")).pattern();
+        Re2 nonAsciiSimpleFold = TrinoRegexp.compile(utf8Slice("(?i)seek")).re2();
         assertThat(nonAsciiSimpleFold.regexp().requiredPrefix(nonAsciiSimpleFold.caseFolding())).isNull();
         assertThat(nonAsciiSimpleFold.regexp().requiredPrefixForAccel(nonAsciiSimpleFold.caseFolding())).isNull();
     }
@@ -984,7 +984,7 @@ public class TestTrinoRegexpLanguage
     private static int fullCaseFoldProgramSize(int repetitions)
     {
         return TrinoRegexp.compile(utf8Slice("(?i)" + "ss".repeat(repetitions)))
-                .pattern()
+                .re2()
                 .forwardProgramForDiagnostics()
                 .size();
     }
@@ -1275,7 +1275,7 @@ public class TestTrinoRegexpLanguage
         Slice pattern = utf8Slice(patternText);
         Slice input = utf8Slice(inputText);
 
-        MatchResult result = TrinoRegexp.compile(pattern).pattern().findResult(input);
+        MatchResult result = TrinoRegexp.compile(pattern).re2().findResult(input);
         assertThat(result).isNotNull();
         assertThat(new MatchBoundary(result.start(), result.end())).as(patternText).isEqualTo(expected);
 
@@ -1290,7 +1290,7 @@ public class TestTrinoRegexpLanguage
         Slice pattern = utf8Slice(patternText);
         Slice input = utf8Slice(inputText);
 
-        assertThat(TrinoRegexp.compile(pattern).pattern().findResult(input)).as(patternText).isNull();
+        assertThat(TrinoRegexp.compile(pattern).re2().findResult(input)).as(patternText).isNull();
 
         byte[] inputBytes = input.getBytes();
         Matcher matcher = joniPattern(pattern).matcher(inputBytes);
@@ -1302,7 +1302,7 @@ public class TestTrinoRegexpLanguage
         Slice pattern = utf8Slice(patternText);
         Slice input = utf8Slice(inputText);
 
-        MatchResult result = TrinoRegexp.compile(pattern).pattern().findResult(input);
+        MatchResult result = TrinoRegexp.compile(pattern).re2().findResult(input);
         byte[] inputBytes = input.getBytes();
         Matcher matcher = joniPattern(pattern).matcher(inputBytes);
         int joniResult = matcher.search(0, inputBytes.length, Option.DEFAULT);
@@ -1409,7 +1409,7 @@ public class TestTrinoRegexpLanguage
         Slice inputBytes = utf8Slice(inputText);
         Slice input = utf8Slice("!" + inputText + "?").slice(1, inputBytes.length());
 
-        assertThat(matchBoundaries(TrinoRegexp.compile(pattern).pattern().matcher(input)))
+        assertThat(matchBoundaries(TrinoRegexp.compile(pattern).re2().matcher(input)))
                 .as("Regulator %s against %s", patternText, inputText)
                 .isEqualTo(expected);
         assertThat(joniMatchBoundaries(joniPattern(pattern), input))
@@ -1423,7 +1423,7 @@ public class TestTrinoRegexpLanguage
         Slice inputBytes = utf8Slice(inputText);
         Slice input = utf8Slice("!" + inputText + "?").slice(1, inputBytes.length());
 
-        assertThat(matchBoundaries(TrinoRegexp.compile(pattern).pattern().matcher(input)))
+        assertThat(matchBoundaries(TrinoRegexp.compile(pattern).re2().matcher(input)))
                 .as("%s against %s", patternText, inputText)
                 .isEqualTo(joniMatchBoundaries(joniPattern(pattern), input));
     }

@@ -357,7 +357,7 @@ public class TestDfaCountMatches
     {
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*[0-9].*"));
         assertThat(pattern.count(utf8Slice("a".repeat(32_768)))).isZero();
-        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(dfa.countSelfLoopScanCount()).isZero();
         assertThat(dfa.pairedTransitionMemory()).isPositive();
@@ -373,7 +373,7 @@ public class TestDfaCountMatches
     {
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*[0-9].*"));
         Slice input = utf8Slice(("a".repeat(50) + "1\n").repeat(20) + "a".repeat(300));
-        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
         assertThat(pattern.count(input)).isEqualTo(20);
@@ -395,7 +395,7 @@ public class TestDfaCountMatches
     {
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(".*(x|y).*"));
         LineInput input = lineInput(new Random(15), true, false);
-        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
         for (int iteration = 0; iteration < 50; iteration++) {
@@ -521,7 +521,7 @@ public class TestDfaCountMatches
     {
         String expression = ".*(x|y).*";
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
-        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         Slice warmingInput = utf8Slice("x\n" + "\n".repeat(254));
         assertThat(pattern.count(warmingInput)).isEqualTo(1);
@@ -704,7 +704,7 @@ public class TestDfaCountMatches
     {
         TestingTrinoRegexpBenchmarkInputs.Input input = TestingTrinoRegexpBenchmarkInputs.create("captureSparse", 32_768);
         TrinoRegexp pattern = TrinoRegexp.compile(input.pattern());
-        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         long expected = trinoMatcherCount(input.pattern().toStringUtf8(), input.source());
         assertThat(expected).isEqualTo(3);
@@ -725,7 +725,7 @@ public class TestDfaCountMatches
         String expression = "([a-z]+)-([0-9]+)";
         Slice source = utf8Slice("abc-123.".repeat(4_096));
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
-        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
         for (int iteration = 0; iteration < 3; iteration++) {
@@ -747,7 +747,7 @@ public class TestDfaCountMatches
         Slice[] sources = {Slices.wrappedBuffer(bytes, 7, 32_768), utf8Slice("abcd-1" + ".".repeat(32_762))};
         for (Slice source : sources) {
             TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
-            Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+            Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                     .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
             // The sample from the text start lands on the candidates of the first match and
@@ -772,7 +772,7 @@ public class TestDfaCountMatches
         for (int fillerLength : new int[] {4_095, 4_096}) {
             Slice source = utf8Slice("abcd-1" + ".".repeat(fillerLength));
             TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
-            Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+            Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                     .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
             for (int iteration = 0; iteration < 3; iteration++) {
@@ -797,7 +797,7 @@ public class TestDfaCountMatches
         for (int fillerLength : new int[] {4_000, 4_200}) {
             Slice source = utf8Slice(dense + ".".repeat(fillerLength));
             TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
-            Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+            Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                     .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
             assertThat(pattern.count(source))
@@ -822,7 +822,7 @@ public class TestDfaCountMatches
         // final span, which is shorter than 4 KiB and reaches the start-byte scan without sampling.
         Slice source = utf8Slice("a:1.".repeat(64) + ".".repeat(8_000) + "b:2" + ".".repeat(2_000));
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
-        Dfa.DfaInstance dfa = pattern.pattern().forwardProgramForDiagnostics()
+        Dfa.DfaInstance dfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
 
         for (int iteration = 0; iteration < 3; iteration++) {
@@ -874,7 +874,7 @@ public class TestDfaCountMatches
         scanCountAssertion.accept(countSelfLoopScanCount(pattern));
 
         // Re2.count falls back to the matcher loop for a negative result, so also check the DFA directly.
-        Prog program = TrinoRegexp.compile(utf8Slice(expression)).pattern().forwardProgramForDiagnostics();
+        Prog program = TrinoRegexp.compile(utf8Slice(expression)).re2().forwardProgramForDiagnostics();
         assertThat(Dfa.countMatches(program, source, Prog.MatchKind.FIRST_MATCH))
                 .as(expression)
                 .isEqualTo(expected);
@@ -887,7 +887,7 @@ public class TestDfaCountMatches
     {
         String expression = ".*(x|y).*";
         TrinoRegexp pattern = TrinoRegexp.compile(utf8Slice(expression));
-        Dfa.DfaInstance patternDfa = pattern.pattern().forwardProgramForDiagnostics()
+        Dfa.DfaInstance patternDfa = pattern.re2().forwardProgramForDiagnostics()
                 .getCachedDfa(Dfa.DfaInstance.Kind.FIRST_MATCH);
         assertThat(pattern.count(source))
                 .isEqualTo(trinoMatcherCount(expression, source))
@@ -908,7 +908,7 @@ public class TestDfaCountMatches
 
     private static int countSelfLoopScanCount(TrinoRegexp pattern)
     {
-        return countSelfLoopScanCount(pattern.pattern(), Dfa.DfaInstance.Kind.FIRST_MATCH);
+        return countSelfLoopScanCount(pattern.re2(), Dfa.DfaInstance.Kind.FIRST_MATCH);
     }
 
     private static int countSelfLoopScanCount(Re2 pattern, Dfa.DfaInstance.Kind kind)

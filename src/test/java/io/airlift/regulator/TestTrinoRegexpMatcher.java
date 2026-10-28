@@ -114,7 +114,7 @@ public class TestTrinoRegexpMatcher
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("[0-9]{2}:"));
         assertThat(regexp).isInstanceOf(TrinoRegexp.FixedWidthByteTrinoRegexp.class);
-        Prog placeholder = regexp.pattern().forwardProgramForDiagnostics();
+        Prog placeholder = regexp.re2().forwardProgramForDiagnostics();
         assertThat(placeholder.start()).isZero();
         Slice input = utf8Slice("!12:34:?").slice(1, 6);
         TrinoRegexpMatcher matcher = regexp.matcher(input, 0);
@@ -142,7 +142,7 @@ public class TestTrinoRegexpMatcher
         assertThat(matcher.find()).isFalse();
         input.setByte(0, '9');
         assertThat(first).isEqualTo(utf8Slice("92:"));
-        assertThat(regexp.pattern().forwardProgramForDiagnostics()).isSameAs(placeholder);
+        assertThat(regexp.re2().forwardProgramForDiagnostics()).isSameAs(placeholder);
         assertThat(placeholder.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
     }
 
@@ -151,14 +151,14 @@ public class TestTrinoRegexpMatcher
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("foo|bar"));
         assertThat(regexp.literalAlternationSpanMatcher()).isNotNull();
-        assertThat(regexp.pattern()).isNull();
+        assertThat(regexp.re2()).isNull();
         TrinoRegexpMatcher matcher = regexp.matcher(utf8Slice("barfoo"));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.group()).isEqualTo(utf8Slice("bar"));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.group()).isEqualTo(utf8Slice("foo"));
         assertThat(matcher.find()).isFalse();
-        assertThat(regexp.pattern()).isNull();
+        assertThat(regexp.re2()).isNull();
     }
 
     @Test

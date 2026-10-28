@@ -114,7 +114,7 @@ public final class BenchmarkTrinoScanKernelCost
     {
         List<ScanKernelGenerator.TrinoRoutes> routes = new ArrayList<>(count);
         for (int index = 0; index < count; index++) {
-            ScanKernelGenerator.TrinoRoutes route = ScanKernelGenerator.TrinoRoutes.of(TrinoRegexp.compile(expression(index)).pattern());
+            ScanKernelGenerator.TrinoRoutes route = ScanKernelGenerator.TrinoRoutes.of(TrinoRegexp.compile(expression(index)).re2());
             if (route == null || ScanKernelGenerator.Attempt.of(route.plan()) != ScanKernelGenerator.Attempt.END_ANCHORED) {
                 throw new IllegalStateException("Pattern " + index + " has no end-anchored scan plan to generate");
             }

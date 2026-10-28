@@ -74,7 +74,7 @@ public class TestBenchmarkTrinoRows
             TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(row.get("pattern")));
             String cell = row.get("workload") + "/" + row.get("literal_id");
             assertThat(regexp.usesDotStarLiteralSpanMatcherForDiagnostics()).as(cell).isTrue();
-            assertThat(regexp.pattern().booleanPartialMatchStrategyForDiagnostics()).as(cell).isEqualTo(CONTAINS);
+            assertThat(regexp.re2().booleanPartialMatchStrategyForDiagnostics()).as(cell).isEqualTo(CONTAINS);
         }
     }
 

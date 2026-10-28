@@ -273,8 +273,8 @@ public class TestScanKernel
         for (String expression : expressions) {
             TrinoRegexp generated = generated(expression);
             assertThat(generated.usesGeneratedBytecode()).as(expression).isTrue();
-            invoked.addAll(invokedMethods(ScanKernelGenerator.trinoClassfileForDiagnostics(TrinoRoutes.of(generated.pattern()))));
-            kinds.addAll(List.of(generated.pattern().caseSensitiveScanPlan().operationsForDiagnostics().split(",")));
+            invoked.addAll(invokedMethods(ScanKernelGenerator.trinoClassfileForDiagnostics(TrinoRoutes.of(generated.re2()))));
+            kinds.addAll(List.of(generated.re2().caseSensitiveScanPlan().operationsForDiagnostics().split(",")));
             List<String> symbols = new ArrayList<>(SYMBOLS);
             symbols.addAll(witnessParts(expression));
             List<Slice> sources = new ArrayList<>(randomSources(200 + index++, symbols, MALFORMED_SEQUENCES));
@@ -297,7 +297,7 @@ public class TestScanKernel
         assertThat(re2Kinds).contains("RE2_RUN", "RE2_SET_RUN", "RE2_DELIMITED_CAPTURE");
         // A Java end, whose class checks the final line terminator. TestJavaScanPlan compares its
         // results with the JDK.
-        Re2 javaEnd = JavaRegexp.compile(utf8Slice("^x([a-z]+)$"), JavaRegexp.Options.defaults().setGenerateBytecode(true)).pattern();
+        Re2 javaEnd = JavaRegexp.compile(utf8Slice("^x([a-z]+)$"), JavaRegexp.Options.defaults().setGenerateBytecode(true)).re2();
         assertThat(javaEnd.usesGeneratedBytecode()).isTrue();
         boolean javaEndHandoff = javaEnd.usesScanPlanForFindForDiagnostics() && javaEnd.usesOrdinaryUnanchoredBooleanSearchForDiagnostics();
         invoked.addAll(invokedMethods(ScanKernelGenerator.re2ClassfileForDiagnostics(javaEnd.caseSensitiveScanPlan(), javaEndHandoff)));
@@ -312,7 +312,7 @@ public class TestScanKernel
 
     private static ScanPlanRun leadingRun(String expression)
     {
-        ScanPlan plan = TrinoRegexp.compile(utf8Slice(expression)).pattern().caseSensitiveScanPlan();
+        ScanPlan plan = TrinoRegexp.compile(utf8Slice(expression)).re2().caseSensitiveScanPlan();
         return plan.step(plan.leadingOperation()).run();
     }
 
@@ -332,9 +332,9 @@ public class TestScanKernel
             String expression = probeCase.expression();
             TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(probeCase.frequencies()));
             TrinoRegexp compiled = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(probeCase.frequencies()).setGenerateBytecode(true));
-            assertThat(interpreted.pattern().caseSensitiveScanPlan().leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(probeCase.probe());
+            assertThat(interpreted.re2().caseSensitiveScanPlan().leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(probeCase.probe());
             assertThat(compiled.usesGeneratedBytecode()).as(expression).isTrue();
-            byte[] classfile = ScanKernelGenerator.trinoClassfileForDiagnostics(TrinoRoutes.of(compiled.pattern()));
+            byte[] classfile = ScanKernelGenerator.trinoClassfileForDiagnostics(TrinoRoutes.of(compiled.re2()));
             assertThat(probeOffsets(classfile)).as(expression).isNotEmpty().containsOnly(probeCase.probe());
             List<String> symbols = new ArrayList<>(SYMBOLS);
             symbols.addAll(witnessParts(expression));
@@ -374,7 +374,7 @@ public class TestScanKernel
                 for (String expression : expressions) {
                     TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression));
                     TrinoRegexp compiled = generated(expression);
-                    boolean eligible = interpreted.getClass() == TrinoRegexp.class && TrinoRoutes.of(interpreted.pattern()) != null;
+                    boolean eligible = interpreted.getClass() == TrinoRegexp.class && TrinoRoutes.of(interpreted.re2()) != null;
                     assertThat(compiled.usesGeneratedBytecode()).as(expression).isEqualTo(eligible);
                     if (!eligible) {
                         continue;
@@ -421,7 +421,7 @@ public class TestScanKernel
             String expression = search.expression();
             TrinoRegexp compiled = generated(expression);
             TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression));
-            if (interpreted.pattern().usesAsciiFoldedScanExecutorForDiagnostics()) {
+            if (interpreted.re2().usesAsciiFoldedScanExecutorForDiagnostics()) {
                 assertThat(compiled.usesGeneratedBytecode()).as(expression).isFalse();
                 continue;
             }
@@ -464,8 +464,8 @@ public class TestScanKernel
                         "(?:0(?:1(?:2(?:3" + "(-bcdefghijklmnop)".repeat(literals) + ")?)?)?)?-bcdefghijklmnop[a-z]+", 7));
         List<Language> languages = List.of(
                 new Language("RE2", Re2::compile, false),
-                new Language("Java", expression -> JavaRegexp.compile(expression).pattern(), false),
-                new Language("Trino", expression -> TrinoRegexp.compile(expression).pattern(), true));
+                new Language("Java", expression -> JavaRegexp.compile(expression).re2(), false),
+                new Language("Trino", expression -> TrinoRegexp.compile(expression).re2(), true));
         for (Family family : families) {
             for (Attempt attempt : Attempt.values()) {
                 String lead = attempt == Attempt.UNANCHORED ? family.unanchoredLead() : family.anchoredLead();
@@ -677,7 +677,7 @@ public class TestScanKernel
             }
             handles.verify(sourceDescription, expected, source, count, replacements);
             if (attempts) {
-                verifySameAttempts(sourceDescription, actual.attemptHandleForDiagnostics(), expected.pattern().caseSensitiveScanPlan(), source, groupCount);
+                verifySameAttempts(sourceDescription, actual.attemptHandleForDiagnostics(), expected.re2().caseSensitiveScanPlan(), source, groupCount);
             }
         }
     }

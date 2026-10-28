@@ -110,22 +110,22 @@ public sealed class TrinoRegexp
     // TrinoRegexp.Options has no syntax settings, so parsing always starts from the same flags.
     private static final int PARSE_FLAGS = Regexp.LIKE_PERL;
 
-    private final Re2 pattern;
+    private final Re2 re2;
     private final boolean mayHaveSingleByteRepeatMatcher;
     private volatile SingleByteRepeatMatcher singleByteRepeatMatcher;
     private volatile TrinoReplacementPlan.CachedTemplate replacementTemplate;
 
     private TrinoRegexp()
     {
-        this.pattern = null;
+        this.re2 = null;
         this.mayHaveSingleByteRepeatMatcher = false;
     }
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only private final nested implementations")
-    private TrinoRegexp(Re2 pattern)
+    private TrinoRegexp(Re2 re2)
     {
-        this.pattern = requireNonNull(pattern, "pattern is null");
-        this.mayHaveSingleByteRepeatMatcher = pattern.canMatchEmpty();
+        this.re2 = requireNonNull(re2, "re2 is null");
+        this.mayHaveSingleByteRepeatMatcher = re2.canMatchEmpty();
     }
 
     /// Validates a pattern and returns its capture metadata without constructing a matching
@@ -244,12 +244,12 @@ public sealed class TrinoRegexp
             return new TrinoRegexpMatcher(literalAlternation, source);
         }
         return new TrinoRegexpMatcher(retainedCapturingGroupCount == 0 ? newGroupZeroMatcher(source) :
-                pattern.matcher(source, retainedCapturingGroupCount));
+                re2.matcher(source, retainedCapturingGroupCount));
     }
 
-    Re2 pattern()
+    Re2 re2()
     {
-        return pattern;
+        return re2;
     }
 
     /// Returns whether this compiled pattern has a class generated for it, which only
@@ -382,34 +382,34 @@ public sealed class TrinoRegexp
 
     boolean isSingleByteMatcherComputed()
     {
-        return pattern != null && pattern.isSingleByteMatcherComputed();
+        return re2 != null && re2.isSingleByteMatcherComputed();
     }
 
     /// Returns the number of capturing groups.
     public int capturingGroupCount()
     {
-        return pattern.capturingGroupCount();
+        return re2.capturingGroupCount();
     }
 
     /// Returns named capturing groups mapped to their one-based group indexes.
     public Map<String, Integer> namedCapturingGroups()
     {
-        return pattern.namedCapturingGroups();
+        return re2.namedCapturingGroups();
     }
 
     /// Returns whether the source contains a match.
     public boolean contains(Slice source)
     {
         requireNonNull(source, "source is null");
-        return pattern.find(source);
+        return re2.find(source);
     }
 
     private static final class BeginLineTrinoRegexp
             extends TrinoRegexp
     {
-        private BeginLineTrinoRegexp(Re2 pattern)
+        private BeginLineTrinoRegexp(Re2 re2)
         {
-            super(pattern);
+            super(re2);
         }
 
         @Override
@@ -440,9 +440,9 @@ public sealed class TrinoRegexp
     {
         private final OrderedLiteralMatcher matcher;
 
-        private OrderedLiteralTrinoRegexp(Re2 pattern, OrderedLiteralMatcher matcher)
+        private OrderedLiteralTrinoRegexp(Re2 re2, OrderedLiteralMatcher matcher)
         {
-            super(pattern);
+            super(re2);
             this.matcher = requireNonNull(matcher, "matcher is null");
         }
 
@@ -480,7 +480,7 @@ public sealed class TrinoRegexp
             return repeatMatcher.count(source);
         }
 
-        long optimizedCount = pattern.countMatches(source);
+        long optimizedCount = re2.countMatches(source);
         if (optimizedCount >= 0) {
             return optimizedCount;
         }
@@ -602,7 +602,7 @@ public sealed class TrinoRegexp
     private ScanPlan startAnchoredExtractPlan(int group)
     {
         // A capture matcher has no single-byte matcher, so it would run this plan directly.
-        return group == 0 ? null : pattern.startAnchoredScanPlan();
+        return group == 0 ? null : re2.startAnchoredScanPlan();
     }
 
     boolean extractsWithStartAnchoredScanPlanForDiagnostics(int group)
@@ -615,7 +615,7 @@ public sealed class TrinoRegexp
     private Slice extractWithStartAnchoredScanPlan(ScanPlan plan, Slice source, int group)
     {
         int[] groups = new int[2 * group + 2];
-        if (!pattern.findWithStartAnchoredScanPlan(plan, source, 0, source.length(), groups)) {
+        if (!re2.findWithStartAnchoredScanPlan(plan, source, 0, source.length(), groups)) {
             return null;
         }
         int start = groups[2 * group];
@@ -702,7 +702,7 @@ public sealed class TrinoRegexp
         // this method instead of reaching it through a call it declines to inline.
         RegexpMatcher matcher = maximumCapturingGroup == 0
                 ? newGroupZeroMatcher(source)
-                : pattern.matcher(source, maximumCapturingGroup);
+                : re2.matcher(source, maximumCapturingGroup);
         while (matcher.find()) {
             replacementPlan.addMatch(matcher);
         }
@@ -736,7 +736,7 @@ public sealed class TrinoRegexp
         int maximumCapturingGroup = replacementPlan.maximumCapturingGroup();
         RegexpMatcher matcher = maximumCapturingGroup == 0
                 ? newGroupZeroMatcher(source)
-                : pattern.matcher(source, maximumCapturingGroup);
+                : re2.matcher(source, maximumCapturingGroup);
         while (matcher.find()) {
             replacementPlan.addMatch(matcher);
         }
@@ -798,8 +798,8 @@ public sealed class TrinoRegexp
         if (group < 0) {
             throw new IllegalArgumentException("group cannot be negative");
         }
-        if (group > pattern.capturingGroupCount()) {
-            throw new IllegalArgumentException("pattern has " + pattern.capturingGroupCount() +
+        if (group > re2.capturingGroupCount()) {
+            throw new IllegalArgumentException("pattern has " + re2.capturingGroupCount() +
                     " groups; cannot access group " + group);
         }
     }
@@ -809,15 +809,15 @@ public sealed class TrinoRegexp
     {
         private final DotStarLiteralSpanMatcher spanMatcher;
 
-        private DotStarLiteralTrinoRegexp(Re2 pattern, DotStarLiteralSpanMatcher spanMatcher)
+        private DotStarLiteralTrinoRegexp(Re2 re2, DotStarLiteralSpanMatcher spanMatcher)
         {
-            super(pattern);
+            super(re2);
             this.spanMatcher = spanMatcher;
         }
 
-        DotStarLiteralTrinoRegexp(Re2 pattern)
+        DotStarLiteralTrinoRegexp(Re2 re2)
         {
-            super(pattern);
+            super(re2);
             this.spanMatcher = null;
         }
 
@@ -990,9 +990,9 @@ public sealed class TrinoRegexp
     {
         private final FixedWidthByteSpanMatcher spanMatcher;
 
-        FixedWidthByteTrinoRegexp(Re2 pattern, FixedWidthByteSpanMatcher spanMatcher)
+        FixedWidthByteTrinoRegexp(Re2 re2, FixedWidthByteSpanMatcher spanMatcher)
         {
-            super(pattern);
+            super(re2);
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
         }
 
@@ -1367,9 +1367,9 @@ public sealed class TrinoRegexp
     private static final class ExactLiteralTrinoRegexp
             extends TrinoRegexp
     {
-        private ExactLiteralTrinoRegexp(Re2 pattern)
+        private ExactLiteralTrinoRegexp(Re2 re2)
         {
-            super(pattern);
+            super(re2);
         }
 
         @Override
@@ -1379,7 +1379,7 @@ public sealed class TrinoRegexp
             long count = 0;
             int searchStart = 0;
             while (searchStart <= source.length()) {
-                long span = pattern().findExactLiteralSpan(source, searchStart);
+                long span = re2().findExactLiteralSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
@@ -1409,9 +1409,9 @@ public sealed class TrinoRegexp
                 return -1;
             }
 
-            long span = pattern().findExactLiteralSpan(source, byteStart);
+            long span = re2().findExactLiteralSpan(source, byteStart);
             for (long match = 1; match < occurrence && span >= 0; match++) {
-                span = pattern().findExactLiteralSpan(source, nextExactLiteralSearchStart(source, span));
+                span = re2().findExactLiteralSpan(source, nextExactLiteralSearchStart(source, span));
             }
             if (span < 0) {
                 return -1;
@@ -1427,7 +1427,7 @@ public sealed class TrinoRegexp
             if (group != 0) {
                 return super.extract(source, group);
             }
-            long span = pattern().findExactLiteralSpan(source, 0);
+            long span = re2().findExactLiteralSpan(source, 0);
             return span < 0 ? null : source.slice(spanStart(span), spanEnd(span) - spanStart(span));
         }
 
@@ -1443,7 +1443,7 @@ public sealed class TrinoRegexp
             List<Slice> matches = new ArrayList<>();
             int searchStart = 0;
             while (searchStart <= source.length()) {
-                long span = pattern().findExactLiteralSpan(source, searchStart);
+                long span = re2().findExactLiteralSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
@@ -1461,7 +1461,7 @@ public sealed class TrinoRegexp
             int previousEnd = 0;
             int searchStart = 0;
             while (searchStart <= source.length()) {
-                long span = pattern().findExactLiteralSpan(source, searchStart);
+                long span = re2().findExactLiteralSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
@@ -1487,7 +1487,7 @@ public sealed class TrinoRegexp
             TrinoReplacementPlan.GroupFreeReplacer replacer = replacementPlan.groupFreeReplacer();
             int searchStart = 0;
             while (searchStart <= source.length()) {
-                long span = pattern().findExactLiteralSpan(source, searchStart);
+                long span = re2().findExactLiteralSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
@@ -1504,7 +1504,7 @@ public sealed class TrinoRegexp
         {
             requireNonNull(source, "source is null");
             requireNonNull(replacement, "replacement is null");
-            if (pattern().capturingGroupCount() != 0) {
+            if (re2().capturingGroupCount() != 0) {
                 return super.replace(source, replacement);
             }
 
@@ -1514,7 +1514,7 @@ public sealed class TrinoRegexp
             boolean matched = false;
             List<Slice> groups = List.of();
             while (searchStart <= source.length()) {
-                long span = pattern().findExactLiteralSpan(source, searchStart);
+                long span = re2().findExactLiteralSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
@@ -1541,9 +1541,9 @@ public sealed class TrinoRegexp
     private static final class CharacterClassTrinoRegexp
             extends TrinoRegexp
     {
-        private CharacterClassTrinoRegexp(Re2 pattern)
+        private CharacterClassTrinoRegexp(Re2 re2)
         {
-            super(pattern);
+            super(re2);
         }
 
         @Override
@@ -1566,9 +1566,9 @@ public sealed class TrinoRegexp
                 return -1;
             }
 
-            long span = pattern().findCharacterClassSpan(source, byteStart);
+            long span = re2().findCharacterClassSpan(source, byteStart);
             for (long match = 1; match < occurrence && span >= 0; match++) {
-                span = pattern().findCharacterClassSpan(source, spanEnd(span));
+                span = re2().findCharacterClassSpan(source, spanEnd(span));
             }
             if (span < 0) {
                 return -1;
@@ -1584,7 +1584,7 @@ public sealed class TrinoRegexp
             if (group != 0) {
                 return super.extract(source, group);
             }
-            long span = pattern().findCharacterClassSpan(source, 0);
+            long span = re2().findCharacterClassSpan(source, 0);
             return span < 0 ? null : source.slice(spanStart(span), spanEnd(span) - spanStart(span));
         }
 
@@ -1600,7 +1600,7 @@ public sealed class TrinoRegexp
             List<Slice> matches = new ArrayList<>();
             int searchStart = 0;
             while (searchStart < source.length()) {
-                long span = pattern().findCharacterClassSpan(source, searchStart);
+                long span = re2().findCharacterClassSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
@@ -1618,7 +1618,7 @@ public sealed class TrinoRegexp
             int previousEnd = 0;
             int searchStart = 0;
             while (searchStart < source.length()) {
-                long span = pattern().findCharacterClassSpan(source, searchStart);
+                long span = re2().findCharacterClassSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
@@ -1644,7 +1644,7 @@ public sealed class TrinoRegexp
             TrinoReplacementPlan.GroupFreeReplacer replacer = replacementPlan.groupFreeReplacer();
             int searchStart = 0;
             while (searchStart < source.length()) {
-                long span = pattern().findCharacterClassSpan(source, searchStart);
+                long span = re2().findCharacterClassSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
@@ -1661,7 +1661,7 @@ public sealed class TrinoRegexp
         {
             requireNonNull(source, "source is null");
             requireNonNull(replacement, "replacement is null");
-            if (pattern().capturingGroupCount() != 0) {
+            if (re2().capturingGroupCount() != 0) {
                 return super.replace(source, replacement);
             }
 
@@ -1671,7 +1671,7 @@ public sealed class TrinoRegexp
             boolean matched = false;
             List<Slice> groups = List.of();
             while (searchStart < source.length()) {
-                long span = pattern().findCharacterClassSpan(source, searchStart);
+                long span = re2().findCharacterClassSpan(source, searchStart);
                 if (span < 0) {
                     break;
                 }
@@ -1709,20 +1709,20 @@ public sealed class TrinoRegexp
         private final ScanKernelGenerator.CompiledTrinoKernel generated;
         private final CompiledTrinoScan scan;
 
-        private CompiledScanTrinoRegexp(Re2 pattern, boolean contains, ScanKernelGenerator.CompiledTrinoKernel generated)
+        private CompiledScanTrinoRegexp(Re2 re2, boolean contains, ScanKernelGenerator.CompiledTrinoKernel generated)
         {
-            super(pattern);
+            super(re2);
             this.contains = contains;
             this.generated = generated;
             this.scan = generated.scan();
         }
 
-        /// Returns `pattern` with a generated class, or `null` when the pattern is not
+        /// Returns `re2` with a generated class, or `null` when the pattern is not
         /// eligible or the class cannot be generated. The declared type keeps verification of the
         /// base class from loading this class.
-        static TrinoRegexp create(Re2 pattern)
+        static TrinoRegexp create(Re2 re2)
         {
-            ScanKernelGenerator.TrinoRoutes routes = ScanKernelGenerator.TrinoRoutes.of(pattern);
+            ScanKernelGenerator.TrinoRoutes routes = ScanKernelGenerator.TrinoRoutes.of(re2);
             if (routes == null) {
                 return null;
             }
@@ -1736,7 +1736,7 @@ public sealed class TrinoRegexp
                 // interpreted.
                 return null;
             }
-            return new CompiledScanTrinoRegexp(pattern, routes.contains(), generated);
+            return new CompiledScanTrinoRegexp(re2, routes.contains(), generated);
         }
 
         @Override
@@ -1808,7 +1808,7 @@ public sealed class TrinoRegexp
         @Override
         MethodHandle attemptHandleForDiagnostics()
         {
-            return ScanKernelGenerator.attemptHandleForDiagnostics(scan, pattern().caseSensitiveScanPlan());
+            return ScanKernelGenerator.attemptHandleForDiagnostics(scan, re2().caseSensitiveScanPlan());
         }
 
         @Override
@@ -1904,22 +1904,22 @@ public sealed class TrinoRegexp
 
     private RegexpMatcher newMatcher(Slice source)
     {
-        if (pattern.capturingGroupCount() != 0) {
-            return pattern.matcher(source);
+        if (re2.capturingGroupCount() != 0) {
+            return re2.matcher(source);
         }
         SingleByteMatcher byteMatcher = singleByteMatcher();
-        return pattern.matcher(source, byteMatcher == SingleByteMatcher.unsupported() ? null : byteMatcher);
+        return re2.matcher(source, byteMatcher == SingleByteMatcher.unsupported() ? null : byteMatcher);
     }
 
     private RegexpMatcher newGroupZeroMatcher(Slice source)
     {
         SingleByteMatcher byteMatcher = singleByteMatcher();
-        return pattern.groupZeroMatcher(source, byteMatcher == SingleByteMatcher.unsupported() ? null : byteMatcher);
+        return re2.groupZeroMatcher(source, byteMatcher == SingleByteMatcher.unsupported() ? null : byteMatcher);
     }
 
     private SingleByteRepeatMatcher.Cursor newSingleByteRepeatCursor(Slice source, boolean capturingGroupsRequired)
     {
-        if (!mayHaveSingleByteRepeatMatcher || (capturingGroupsRequired && pattern.capturingGroupCount() != 0)) {
+        if (!mayHaveSingleByteRepeatMatcher || (capturingGroupsRequired && re2.capturingGroupCount() != 0)) {
             return null;
         }
         SingleByteRepeatMatcher repeatMatcher = singleByteRepeatMatcher();
@@ -1928,7 +1928,7 @@ public sealed class TrinoRegexp
 
     private SingleByteMatcher singleByteMatcher()
     {
-        SingleByteMatcher byteMatcher = pattern.sharedSingleByteMatcher();
+        SingleByteMatcher byteMatcher = re2.sharedSingleByteMatcher();
         return byteMatcher == null ? SingleByteMatcher.unsupported() : byteMatcher;
     }
 
@@ -1939,7 +1939,7 @@ public sealed class TrinoRegexp
         }
         SingleByteRepeatMatcher repeatMatcher = singleByteRepeatMatcher;
         if (repeatMatcher == null) {
-            repeatMatcher = pattern.createSingleByteRepeatMatcher();
+            repeatMatcher = re2.createSingleByteRepeatMatcher();
             if (repeatMatcher == null) {
                 repeatMatcher = SingleByteRepeatMatcher.unsupported();
             }

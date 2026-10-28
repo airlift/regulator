@@ -200,19 +200,19 @@ public class BenchmarkTrinoRegexpSearchEdges
     @Benchmark
     public boolean containsGeneral(BenchmarkData data)
     {
-        return data.regexp.pattern().matchInto(data.source, UNANCHORED, null);
+        return data.regexp.re2().matchInto(data.source, UNANCHORED, null);
     }
 
     @Benchmark
     public boolean lookingAt(BenchmarkData data)
     {
-        return data.regexp.pattern().lookingAt(data.source);
+        return data.regexp.re2().lookingAt(data.source);
     }
 
     @Benchmark
     public boolean lookingAtGeneral(BenchmarkData data)
     {
-        return data.regexp.pattern().matchInto(data.source, ANCHOR_START, null);
+        return data.regexp.re2().matchInto(data.source, ANCHOR_START, null);
     }
 
     @Benchmark

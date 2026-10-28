@@ -33,7 +33,7 @@ public class TestWildcardAlternation
                 for (String input : List.of("", "a", "ab", "aaa", "é", "\n", "x")) {
                     var expected = Pattern.compile(expression).matcher(input);
                     Re2 re2 = Re2.compile(utf8Slice(expression));
-                    for (RegexpMatcher actual : List.of(re2.matcher(utf8Slice(input)), JavaRegexp.compile(utf8Slice(expression)).matcher(utf8Slice(input)), TrinoRegexp.compile(utf8Slice(expression)).pattern().matcher(utf8Slice(input)))) {
+                    for (RegexpMatcher actual : List.of(re2.matcher(utf8Slice(input)), JavaRegexp.compile(utf8Slice(expression)).matcher(utf8Slice(input)), TrinoRegexp.compile(utf8Slice(expression)).re2().matcher(utf8Slice(input)))) {
                         assertThat(actual.matches()).as(expression + " on " + input).isEqualTo(expected.matches());
                         expected.reset();
                         actual.reset(utf8Slice(input));
@@ -63,7 +63,7 @@ public class TestWildcardAlternation
             assertThat(Re2.compile(utf8Slice(expression)).matches(utf8Slice(input))).isTrue();
         }
         for (String expression : List.of("(?is:ß|.)", "(?is:[ß]|.)")) {
-            assertThat(TrinoRegexp.compile(utf8Slice(expression)).pattern().matches(utf8Slice("ss"))).isTrue();
+            assertThat(TrinoRegexp.compile(utf8Slice(expression)).re2().matches(utf8Slice("ss"))).isTrue();
         }
     }
 

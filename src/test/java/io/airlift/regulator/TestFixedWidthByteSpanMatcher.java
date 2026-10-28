@@ -42,7 +42,7 @@ public class TestFixedWidthByteSpanMatcher
     {
         Slice expression = utf8Slice("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
         TrinoRegexp regexp = TrinoRegexp.compile(expression);
-        Re2 pattern = regexp.pattern();
+        Re2 pattern = regexp.re2();
 
         // Pinned re2_golden reports group zero at 1:37 for this unanchored search.
         Slice input = utf8Slice("!123e4567-e89b-12d3-a456-426614174000?");
@@ -79,7 +79,7 @@ public class TestFixedWidthByteSpanMatcher
     {
         Slice expression = utf8Slice("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
         long maxMemory = 4 * 1024;
-        Re2 pattern = TrinoRegexp.compile(expression, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)).pattern();
+        Re2 pattern = TrinoRegexp.compile(expression, TrinoRegexp.Options.defaults().setMaxMemory(maxMemory)).re2();
         FixedWidthByteSpanMatcher matcher = pattern.createFixedWidthByteSpanMatcher();
         assertThat(pattern.hasRetainedFixedWidthByteSpanMatcher()).isTrue();
         assertThat(Compiler.estimatedProgramMemory(pattern.forwardProgramForDiagnostics()) + matcher.estimatedRetainedSize())
