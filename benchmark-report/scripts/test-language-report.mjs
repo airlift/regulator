@@ -313,7 +313,8 @@ delete context.window;
 // Each specialized pattern is one row: absolute variant times, gains over the page's
 // first measured variant with host speed cancelled, and the last variant against the comparator.
 // Rows are shaped as the baseline import emits them, each variant with gain warnings over every earlier one.
-const specializedSuites = { trino: ['trino-specialized-patterns', 'trino-specialized'], like: ['trino-like-specialized', 'trino-like-specialized'], re2: ['re2-specialized-patterns', 're2-specialized'] };
+const specializedSuites = { re2: ['re2-specialized-patterns', 're2-specialized'], java: ['java-specialized-patterns', 'java-specialized'],
+  trino: ['trino-specialized-patterns', 'trino-specialized'], like: ['trino-like-specialized', 'trino-like-specialized'], rust: ['rust-specialized-patterns', 'rust-specialized'] };
 const specialized = (language, workload, operation, variant, candidateNs, ratio, ratioInterval, gains, candidateUncertainty = .01) => {
   const [suite, prefix] = specializedSuites[language];
   return { ...reused, id: `baseline/${suite}/${workload}${language === 'like' ? '' : `/${operation}`}${variant}`, caseId: `${prefix}/${workload}${variant}`, name: workload,
@@ -384,10 +385,23 @@ assert.match(likePage.section, /Each time is one scan of the first 16,384 rows o
 const likeDetails = renderToStaticMarkup(React.createElement(RowEvidence, { row: likeSpecialized[0], comparator: 'Trino SQL LIKE' }));
 assert.match(likeDetails, /Count the rows of one column that match a warmed LIKE pattern\..*first 16,384 rows of TPC-H part.type/s);
 assert.doesNotMatch(likeDetails, /one complete input/);
-// A language whose catalog rows the import accepts gets the section with its own comparator and variants.
-const re2Page = specializedPage('re2', [...data.rows, ...specializedVariants('re2', 'literal-prefix', 'contains', [['', 100, .5, [.4, .6]], ['/generated', 50, .25, [.2, .3]]])]);
-assert.deepEqual(re2Page.columns, ['Pattern / operation', 'native RE2', 'Specialized engine', 'Compiled', 'Compiled vs specialized', 'Compiled vs native RE2']);
-assert.match(re2Page.section, /literal-prefix<small>contains<\/small>/);
+// Every regex language whose catalog rows the import accepts gets the section with its own comparator and variants.
+const withRust = { ...data, languages: { ...data.languages, rust: { label: 'Rust regex', comparator: 'Rust regex crate' } } };
+// Only Trino's API has an extractAll call that returns a Slice list; the other languages' rows loop over a matcher.
+const extractAllDetails = (language, comparator) => renderToStaticMarkup(React.createElement(RowEvidence, {
+  row: specialized(language, 'query-parameter-names', 'extractAll', '', 100, .5, [.4, .6], {}), comparator }));
+assert.match(extractAllDetails('trino', 'Joni'), /every match into a Slice list/);
+for (const [language, comparator] of [['re2', 'native RE2'], ['java', 'JDK Pattern'], ['rust', 'Rust regex crate']]) {
+  const page = specializedPage(language, [...data.rows.map(entry => ({ ...entry, language })),
+    ...specializedVariants(language, 'query-parameter-names', 'extractAll', [['/regular-engine', 200, 1, [.9, 1.1]], ['', 100, .5, [.4, .6]], ['/generated', 50, .25, [.2, .3]]])], withRust);
+  assert.deepEqual(page.columns, ['Pattern / operation', comparator, 'Regular engine', 'Specialized engine', 'Compiled',
+    'Specialized vs regular', 'Compiled vs regular', `Compiled vs ${comparator}`], language);
+  assert.match(page.section, /query-parameter-names<small>extractAll<\/small>/);
+  assert.match(page.section, regularClause);
+  const details = extractAllDetails(language, comparator);
+  assert.match(details, /Extract the selected capture from every match\./);
+  assert.doesNotMatch(details, /Slice list/);
+}
 
 // Without intervals, a gain cell shows the host-paired warnings the import supplies, not either variant's
 // warnings against Joni. Against Joni the regular engine is 0.8, 1.0 and 1.2 and compiled code 0.1, 0.125 and

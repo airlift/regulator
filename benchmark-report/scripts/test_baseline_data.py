@@ -8,8 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import baseline_data
-from baseline_data import (BENCHMARK_TOOLS, COMPARATOR_LANGUAGES, baseline_rows, output_contract, read_rows,
-                           specialized_patterns, specialized_suite)
+from baseline_data import BENCHMARK_TOOLS, baseline_rows, output_contract, read_rows, specialized_patterns, specialized_suite
 from language_data import SPECIALIZED_VARIANT_SUFFIXES
 
 sys.path.insert(0, str(BENCHMARK_TOOLS / 'baseline'))
@@ -63,6 +62,9 @@ class TestSpecializedPatternRows(unittest.TestCase):
     MANIFEST = [row for row in read_rows(BENCHMARK_TOOLS / 'baseline/rows.tsv') if specialized_suite(row['suite'])]
     CATALOG = baseline_data.SPECIALIZED_CATALOG.read_text().splitlines()
     GENERATED = 'trino-specialized-patterns-a/clickbenchHost/replace/regulator-generated-native-access'
+    # The language page of each case prefix, stated apart from the report's comparator mapping.
+    PAGES = {'trino-specialized/': 'trino', 're2-specialized/': 're2', 'java-specialized/': 'java',
+             'rust-specialized/': 'rust', 'trino-like-specialized/': 'like'}
     # A workload of a hypothetical third shard that the catalog does not list.
     UNCATALOGUED = [{'row_id': f'trino-specialized-patterns-c/literalPrefix/contains/{system}', 'shard_id': 'trino-specialized-patterns-c',
                      'suite': 'trino-specialized-patterns', 'system': system, 'benchmark': 'io.airlift.regulator.BenchmarkSpecializedTrinoRegexp.contains',
@@ -104,22 +106,26 @@ class TestSpecializedPatternRows(unittest.TestCase):
 
     def test_every_variant_pairs_with_its_specialized_engine_row_and_earlier_variants(self):
         rows = self.rows()
-        catalog = {(workload, operation): entry for (_, workload, operation), entry in specialized_patterns().items()}
+        # Every regex language measures the same workloads, so its case prefix tells them apart.
+        catalog = {(entry['case_prefix'], workload, operation): entry for (_, workload, operation), entry in specialized_patterns().items()}
         self.assertEqual({row['population'] for row in rows}, {'specialized-patterns'})
         self.assertEqual({row['comparator'] for row in rows}, {None})
         views = {}
         for row in rows:
             views.setdefault((row['language'], row['memoryMode']), []).append(row)
         # LIKE has no memory routes, so its rows appear in both views. LIKE has no regular-engine variant.
-        variants = {'trino': {'/regular-engine', '', '/generated'}, 'like': {'', '/generated'}}
-        patterns = Counter(COMPARATOR_LANGUAGES[entry['comparator']] for entry in catalog.values())
+        variants = {language: {'', '/generated'} if language == 'like' else {'/regular-engine', '', '/generated'}
+                    for language in self.PAGES.values()}
+        patterns = Counter(self.PAGES[entry['case_prefix']] for entry in catalog.values())
         self.assertEqual({view: len(view_rows) for view, view_rows in views.items()},
                          {(language, mode): count * len(variants[language]) for language, count in patterns.items() for mode in ('native', 'safe')})
         for view_rows in views.values():
             self.assertEqual(len({row['id'] for row in view_rows}), len(view_rows))
             anchors = {}
             for row in view_rows:
-                expected = catalog[row['caseId'].split('/')[1], row['operation']]
+                prefix, workload = row['caseId'].split('/')[:2]
+                self.assertEqual(row['language'], self.PAGES[prefix + '/'], row['caseId'])
+                expected = catalog[prefix + '/', workload, row['operation']]
                 self.assertEqual((row['name'], row['workload']['pattern'], row['workload']['description']),
                                  (expected['name'], expected['pattern'], expected['description']))
                 anchor = expected['case_prefix'] + expected['workload']
@@ -170,10 +176,10 @@ class TestSpecializedPatternRows(unittest.TestCase):
         self.assertEqual(gains(hosts=rejected)[1][regular['id']], ['At least one original host exceeded the sample precision gate'])
 
     def test_two_operations_on_one_workload_remain_two_rows(self):
-        extract = [row for row in self.MANIFEST if '/urlHostPort/extract/' in row['row_id']]
+        extract = [row for row in self.MANIFEST if row['row_id'].startswith('trino-specialized-patterns-a/urlHostPort/extract/')]
         replace = [{**row, 'row_id': row['row_id'].replace('/extract/', '/replace/'), 'benchmark': row['benchmark'].replace('.extract', '.replace')}
                    for row in extract]
-        url = next(line for line in self.CATALOG if '\turlHostPort\textract\t' in line)
+        url = next(line for line in self.CATALOG if line.startswith('trino-specialized-patterns-a\turlHostPort\textract\t'))
         with self.catalog([*self.CATALOG, url.replace('\textract\t', '\treplace\t')]):
             rows = [row for row in self.rows(self.MANIFEST + replace)
                     if row['caseId'] == 'trino-specialized/urlHostPort' and row['memoryMode'] == 'native']

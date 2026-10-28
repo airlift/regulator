@@ -214,16 +214,19 @@ the frozen publication inventory remain in the public JSON download, without a
 separate construction or compiler-stress table.
 
 The specialized engine and compiler table has one row per pattern and
-operation. It shows the comparator and each measured Regulator variant's time:
-the regular engine, the specialized engine, and compiled. Each later variant's
-gain over the variant first in column order divides their comparator-relative
-ratios, as the literal-probe table's tuned-versus-default gain does. The
-variants share each host's comparator measurement, so baseline import takes the
-gain's host variation and direction warnings from each host's own pair of
-variant times, not from either variant's comparison with the comparator, and
-adds the raw-sample precision warning when either variant's own measurement
-failed precision. Baseline import rejects variants with a different host cohort
-or comparator measurement, an unknown variant system, a suite or comparator the
+operation. The comparator a specialized-pattern catalog row names selects its
+page: RE2 for native RE2, Java for JDK `Pattern`, Trino regex for Joni, Rust
+for the `regex` crate, and LIKE for Trino SQL LIKE. The table shows the
+comparator and each measured Regulator variant's time: the regular engine, the
+specialized engine, and compiled. Each later variant's gain over the variant
+first in column order divides their comparator-relative ratios, as the
+literal-probe table's tuned-versus-default gain does. The variants share each
+host's comparator measurement, so baseline import takes the gain's host
+variation and direction warnings from each host's own pair of variant times,
+not from either variant's comparison with the comparator, and adds the
+raw-sample precision warning when either variant's own measurement failed
+precision. Baseline import rejects variants with a different host cohort or
+comparator measurement, an unknown variant system, a suite or comparator the
 specialized-pattern catalog does not name, and any unit other than ns/op on
 either the variant or the comparator. Report validation rejects a variant
 without its specialized-engine row. The last column compares the last variant

@@ -25,7 +25,7 @@ SPECIALIZED_SYSTEM_VARIANTS = {'': '', '-regular-engine': '/regular-engine', '-g
 # Regex variants run on each memory route; LIKE has no routes, so its rows appear in both views.
 SPECIALIZED_ROUTES = {'-native-access': ('native',), '-object-row': ('safe',), '': ('native', 'safe')}
 # The report language of each baseline comparator a specialized-pattern catalog row can name.
-COMPARATOR_LANGUAGES = {'joni': 'trino', 'trino-sql': 'like'}
+COMPARATOR_LANGUAGES = {'native-re2': 're2', 'jdk': 'java', 'joni': 'trino', 'rust-regex': 'rust', 'trino-sql': 'like'}
 BENCHMARK_TOOLS = Path(__file__).resolve().parents[2] / 'tools/re2-benchmark'
 SPECIALIZED_CATALOG = BENCHMARK_TOOLS / 'baseline/specialized-patterns.tsv'
 
