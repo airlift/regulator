@@ -1,9 +1,9 @@
 """Static measurement seconds of manifest rows under their frozen protocols.
 
 These are the per-row, per-selector, representative, and calibration costs of
-a unit's JMH runs. Engines are prebuilt, so building, pinned Trino preparation,
-and host bootstrap are not charged; they do not scale with the rows a host
-measures.
+a unit's JMH runs, and the cost of a language comparison's runs. Engines are
+prebuilt, so building, pinned Trino preparation, and host bootstrap are not
+charged; they do not scale with the rows a host measures.
 """
 from shard_results import jmh_runtime_seconds
 
@@ -86,6 +86,30 @@ def selectors(rows, protocols):
                row["row_id"] if runs_each_workload(row) else None)
         result.setdefault(key, protocol)
     return result
+
+
+def language_jmh_seconds(protocol):
+    """One language observation's JMH run: its launcher, its timed forks, and the separate allocation pass
+    of a protocol that has one."""
+    seconds = (JMH_STARTUP_SECONDS + protocol["forks"] * JMH_STARTUP_SECONDS + jmh_runtime_seconds(
+        1, protocol["forks"], protocol["warmup_iterations"], protocol["measurement_iterations"],
+        protocol["iteration_seconds"]))
+    if "allocation_forks" in protocol:
+        seconds += (JMH_STARTUP_SECONDS + protocol["allocation_forks"] * JMH_STARTUP_SECONDS + jmh_runtime_seconds(
+            1, protocol["allocation_forks"], protocol["allocation_warmup_iterations"],
+            protocol["allocation_measurement_iterations"], protocol["iteration_seconds"]))
+    return seconds
+
+
+def language_seconds(protocol, jvm_observations, native_observations, verification_processes):
+    """Seconds to verify and measure one language comparison under one of its case's operations.
+
+    JVM observations run JMH; a native comparator warms up and measures each repetition. Verification
+    starts verification_processes processes for each of the comparison's three observations.
+    """
+    native = protocol["native_repetitions"] * (protocol["native_warmup_seconds"] + protocol["native_min_time_seconds"])
+    return (jvm_observations * language_jmh_seconds(protocol) + native_observations * native +
+            3 * verification_processes * JMH_STARTUP_SECONDS)
 
 
 def measurement_seconds(rows, protocols):

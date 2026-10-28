@@ -588,6 +588,12 @@ def case_operations(manifest, case):
     return tuple(manifest.get("selected_operations", OPERATIONS))
 
 
+def verification_processes(manifest):
+    """Processes that verifying one observation starts: a lifecycle observation checks its whole case and then
+    every operation, whichever ones are selected; a bulk observation executes and then traces its one operation."""
+    return 2 if manifest.get("suite") == "language-bulk" else 1 + len(OPERATIONS)
+
+
 def benchmark_class(manifest):
     return "io.airlift.regulator.BenchmarkLanguageBulk" if manifest.get("suite") == "language-bulk" else CLASS
 

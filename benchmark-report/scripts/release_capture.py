@@ -39,7 +39,7 @@ def normalize_language(data, manifest, expected_release, collector, receipts):
     if plan['replicas'] != 3 or 'selection' in plan:
         raise ValueError('release language capture requires the complete three-host matrix')
     allocations = fleet.platform_allocations(manifest['suite'], plan['platforms'])
-    if plan.get('schema_version') != 3 or plan.get('platform_allocations') != allocations:
+    if plan.get('schema_version') != 4 or plan.get('platform_allocations') != allocations:
         raise ValueError('release language capture changed its frozen worker allocations')
     expected_candidate = {'source_commit': collector['candidate_commit'], 'source_tree': collector['root_tree']}
     if any(data['candidate'][key] != value for key, value in expected_candidate.items()):
@@ -170,7 +170,7 @@ def build(plan_path):
     language_ledgers = {}
     for item in plan['language']:
         directory = Path(item['plan'])
-        frozen = fleet.validate_archive(directory)
+        frozen = fleet.validate(directory)
         data = load(item['export'])
         if data['plan'] != frozen:
             raise ValueError('language export changed the frozen plan')

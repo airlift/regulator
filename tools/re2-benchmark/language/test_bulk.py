@@ -284,6 +284,10 @@ class TestBulkEvidence(unittest.TestCase):
 
         self.assertEqual(len(plan["host_batches"]), len(plan["jobs"]))
         self.assertTrue(all(len(batch["jobs"]) == 1 for batch in plan["host_batches"]))
+        # Each JVM observation measures in two processes and the native comparator in one, all to the deadline.
+        seconds = {fleet.row_atom(unit["owned"][0])[1]: float(unit["estimated_seconds"])
+                   for unit in fleet.work_units.load(directory).values()}
+        self.assertEqual(seconds, {"java": 75600, "trino": 75600, "re2": 63000, "rust": 63000})
 
     @patch.object(fleet, "BATCH_OPERATION_BUDGET", 4)
     def test_batch_worker_builds_once_and_runs_each_language_partition(self):
