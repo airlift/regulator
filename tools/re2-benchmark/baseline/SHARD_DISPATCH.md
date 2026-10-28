@@ -290,12 +290,14 @@ smoke or qualification protocol.
   workloads; Joni's workloads keep their forward order, and
   `JONI_COMPARATOR_ORDER` still places Joni before or after all the variants.
 - `specialized-patterns` runs `re2-specialized-patterns-a` and `-b` the same
-  way beside native RE2, and `java-specialized-patterns-a` and `-b` beside the
-  JDK. Before measuring native RE2, it writes each workload's inputs and the
-  values every Regulator variant returns for each source, and the native
-  runner must print the same values. Each native row then runs in its own
-  runner process at its planned selector's protocol. The JDK's values are
-  checked by the shard's semantic tests.
+  way beside native RE2, `java-specialized-patterns-a` and `-b` beside the
+  JDK, and `rust-specialized-patterns-a` and `-b` beside the `regex` crate.
+  Before measuring a native comparator, it writes each workload's inputs and
+  the values every Regulator variant returns for each source, and the native
+  runner must print the same values. Unit hosts install no Rust toolchain, so
+  the Rust shards need the engine build's runner. Each native row then runs in
+  its own runner process at its planned selector's protocol. The JDK's values
+  are checked by the shard's semantic tests.
 - `trino-like` runs the Regulator, Trino optimized, and Trino SQL methods as
   separate exact filters. For `trino-like-specialized` it runs
   `BenchmarkTrinoLikeTpch`'s interpreted, generated, and Trino SQL methods over

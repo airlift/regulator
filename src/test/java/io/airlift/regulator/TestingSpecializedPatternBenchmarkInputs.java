@@ -23,7 +23,7 @@ import java.util.Map;
 
 /// The specialized-pattern workloads: each applies one Trino operation to a rotation of inputs.
 /// Every language's specialized-pattern regex benchmark applies the same workloads, except that
-/// Java, whose API has no replacement call, extracts the replacement's group in place of
+/// Java and Rust, whose APIs have no replacement call, extract the replacement's group in place of
 /// `replace`; the LIKE benchmarks have their own workloads. The URL workloads share a rotation in
 /// `specialized-trino-workloads.tsv`; the others reuse their everyday rotation.
 public final class TestingSpecializedPatternBenchmarkInputs

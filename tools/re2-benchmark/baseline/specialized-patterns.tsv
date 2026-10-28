@@ -14,6 +14,11 @@ java-specialized-patterns-a	urlHostPort	extract	^https?://(www\.)?([^/:]+)(?::([
 java-specialized-patterns-a	queryParameterNames	extractAll	[?&]([^=]+)=	Query parameter names	Extracts the name of every parameter in each URL's query string.	jdk	java-specialized/
 java-specialized-patterns-b	keyValue	extractAll	([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)	Key-value values	Extracts the value of every key=value pair in each log line.	jdk	java-specialized/
 java-specialized-patterns-b	quotedField	extract	"([^"]*)"	Quoted field	Extracts the contents of the first double-quoted field in each value.	jdk	java-specialized/
+rust-specialized-patterns-a	clickbenchHost	extract	^https?://(?:www\.)?([^/]+)/.*$	ClickBench host · q29	Extracts the host of each URL, the value ClickBench query 29 groups page views by.	rust-regex	rust-specialized/
+rust-specialized-patterns-a	urlHostPort	extract	^https?://(www\.)?([^/:]+)(?::([0-9]{1,5}))?/.*$	URL host	Extracts the host of each URL, skipping a leading www and any port.	rust-regex	rust-specialized/
+rust-specialized-patterns-a	queryParameterNames	extractAll	[?&]([^=]+)=	Query parameter names	Extracts the name of every parameter in each URL's query string.	rust-regex	rust-specialized/
+rust-specialized-patterns-b	keyValue	extractAll	([A-Za-z_][A-Za-z0-9_]*)=([^ ]+)	Key-value values	Extracts the value of every key=value pair in each log line.	rust-regex	rust-specialized/
+rust-specialized-patterns-b	quotedField	extract	"([^"]*)"	Quoted field	Extracts the contents of the first double-quoted field in each value.	rust-regex	rust-specialized/
 trino-like-specialized	Q02_TYPE_BRASS	matches	%BRASS	TPC-H part type · q2	Matches part types that end in BRASS, as TPC-H query 2 selects parts.	trino-sql	trino-like-specialized/
 trino-like-specialized	Q09_NAME_GREEN	matches	%green%	TPC-H part name · q9	Matches part names that contain green, as TPC-H query 9 selects parts.	trino-sql	trino-like-specialized/
 trino-like-specialized	Q13_ORDER_COMMENT	matches	%special%requests%	TPC-H order comment · q13	Matches order comments that contain special and, later, requests, which TPC-H query 13 excludes.	trino-sql	trino-like-specialized/

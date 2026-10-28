@@ -79,16 +79,19 @@ public final class SpecializedPatternNativeInputs
     {
         return switch (comparator) {
             case "native-re2" -> BenchmarkSpecializedRe2.variantsForTesting(workloadId);
+            case "rust-regex" -> BenchmarkSpecializedRustRegexp.variantsForTesting(workloadId);
             default -> throw new IllegalArgumentException("not a native comparator: " + comparator);
         };
     }
 
     /// The operation the runner times for `workload`: native RE2 applies the workload's own, as
-    /// [BenchmarkSpecializedRe2] does.
+    /// [BenchmarkSpecializedRe2] does, and the `regex` crate applies the
+    /// [capture operation][Workload#captureOperation()] that [BenchmarkSpecializedRustRegexp] times.
     private static String runnerOperation(String comparator, Workload workload)
     {
         return switch (comparator) {
             case "native-re2" -> workload.operation().benchmarkName();
+            case "rust-regex" -> workload.captureOperation().benchmarkName();
             default -> throw new IllegalArgumentException("not a native comparator: " + comparator);
         };
     }

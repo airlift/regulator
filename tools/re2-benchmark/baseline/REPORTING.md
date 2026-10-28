@@ -256,7 +256,8 @@ The published
 [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)
 builds its `specialized-patterns` population from the
 `trino-specialized-patterns`, `re2-specialized-patterns`,
-`java-specialized-patterns`, and `trino-like-specialized` suites. Each regex suite's workloads are split between
+`java-specialized-patterns`, `rust-specialized-patterns`, and
+`trino-like-specialized` suites. Each regex suite's workloads are split between
 its shards `-a` and `-b`, so their row IDs begin with the shard, but report row
 IDs name the suite. Each Regulator variant's ratio to its same-host comparator
 becomes one row.
