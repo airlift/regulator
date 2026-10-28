@@ -13,12 +13,10 @@
  */
 package io.airlift.regulator;
 
-import io.airlift.jcodings.specific.NonStrictUTF8Encoding;
 import io.airlift.joni.Matcher;
 import io.airlift.joni.Option;
 import io.airlift.joni.Regex;
 import io.airlift.joni.Region;
-import io.airlift.joni.Syntax;
 import io.airlift.slice.DynamicSliceOutput;
 import io.airlift.slice.Slice;
 import org.junit.jupiter.api.Test;
@@ -33,8 +31,9 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
 
-import static io.airlift.slice.SliceUtf8.countCodePoints;
-import static io.airlift.slice.SliceUtf8.lengthOfCodePointFromStartByte;
+import static io.airlift.regulator.TestingTrinoJoni.group;
+import static io.airlift.regulator.TestingTrinoJoni.joniMatches;
+import static io.airlift.regulator.TestingTrinoJoni.joniPattern;
 import static io.airlift.slice.Slices.EMPTY_SLICE;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
@@ -2652,12 +2651,6 @@ public class TestScanPlan
         return ScanPlan.analyze(parsed.regexp(), parsed.capturingGroupCount(), ScanPlan.Language.TRINO, false, parsed.caseFolding(), frequencies);
     }
 
-    private static Regex joniPattern(String expression)
-    {
-        byte[] pattern = expression.getBytes(UTF_8);
-        return new Regex(pattern, 0, pattern.length, Option.DEFAULT, NonStrictUTF8Encoding.INSTANCE, Syntax.Java);
-    }
-
     /// Returns 400 views, each of up to 23 symbols drawn from `text` and then
     /// `malformed`, with a byte on either side outside the view.
     static List<Slice> randomSources(long seed, List<String> text, List<byte[]> malformed)
@@ -2969,112 +2962,10 @@ public class TestScanPlan
         verifyOperations(expression + " after handoff", TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, options), source -> joniMatches(oracle, source), validSources, scanPlan);
     }
 
-    /// Compares every public operation of `regexp` on each source with the matches, as
-    /// start/end pairs for each group, that `expectedMatches` returns for it.
     private static void verifyOperations(String description, TrinoRegexp regexp, Function<Slice, List<int[]>> expectedMatches, List<Slice> sources, boolean scanPlan)
     {
         assertThat(regexp.re2().usesScanPlanForDiagnostics()).as(description).isEqualTo(scanPlan);
-        int groupCount = regexp.capturingGroupCount();
-        int replacementGroup = groupCount == 0 ? 0 : 1;
-        Slice replacementPattern = utf8Slice("$" + replacementGroup);
-        TrinoRegexpMatcher reusable = regexp.matcher(EMPTY_SLICE);
-        TrinoRegexpMatcher groupZero = regexp.matcher(EMPTY_SLICE, 0);
-        for (Slice source : sources) {
-            String sourceDescription = description + " on " + (Utf8.firstInvalidOffset(source) < 0 ? source.toStringUtf8() : HexFormat.of().formatHex(source.getBytes()));
-            List<int[]> matches = expectedMatches.apply(source);
-            assertThat(regexp.contains(source)).as(sourceDescription).isEqualTo(!matches.isEmpty());
-            assertThat(regexp.count(source)).as(sourceDescription).isEqualTo(matches.size());
-            for (int occurrence = 1; occurrence <= matches.size() + 1; occurrence++) {
-                long position = occurrence > matches.size() ? -1 : countCodePoints(source, 0, matches.get(occurrence - 1)[0]) + 1L;
-                assertThat(regexp.position(source, 1, occurrence)).as("%s, occurrence %s", sourceDescription, occurrence).isEqualTo(position);
-            }
-
-            reusable.reset(source);
-            groupZero.reset(source);
-            for (int[] match : matches) {
-                assertThat(reusable.find()).as(sourceDescription).isTrue();
-                assertThat(groupZero.find()).as(sourceDescription).isTrue();
-                assertThat(groupZero.start()).as(sourceDescription).isEqualTo(match[0]);
-                assertThat(groupZero.end()).as(sourceDescription).isEqualTo(match[1]);
-                for (int group = 0; group <= groupCount; group++) {
-                    assertThat(reusable.start(group)).as(sourceDescription).isEqualTo(match[2 * group]);
-                    assertThat(reusable.end(group)).as(sourceDescription).isEqualTo(match[2 * group + 1]);
-                    assertThat(reusable.group(group)).as("%s, group %s", sourceDescription, group).isEqualTo(group(source, match, group));
-                }
-            }
-            assertThat(reusable.find()).as(sourceDescription).isFalse();
-            assertThatThrownBy(reusable::start).isInstanceOf(IllegalStateException.class);
-            assertThat(groupZero.find()).as(sourceDescription).isFalse();
-
-            for (int group = 0; group <= groupCount; group++) {
-                Slice first = matches.isEmpty() ? null : group(source, matches.getFirst(), group);
-                assertThat(regexp.extract(source, group)).as("%s, group %s", sourceDescription, group).isEqualTo(first);
-                List<Slice> all = new ArrayList<>();
-                for (int[] match : matches) {
-                    all.add(group(source, match, group));
-                }
-                assertThat(regexp.extractAll(source, group)).as("%s, group %s", sourceDescription, group).isEqualTo(all);
-            }
-
-            List<Slice> parts = new ArrayList<>();
-            DynamicSliceOutput replaced = new DynamicSliceOutput(source.length());
-            DynamicSliceOutput replacedByCallback = new DynamicSliceOutput(source.length());
-            int previousEnd = 0;
-            for (int[] match : matches) {
-                parts.add(source.slice(previousEnd, match[0] - previousEnd));
-                replaced.writeBytes(source, previousEnd, match[0] - previousEnd);
-                replacedByCallback.writeBytes(source, previousEnd, match[0] - previousEnd);
-                Slice replacementValue = group(source, match, replacementGroup);
-                replaced.writeBytes(replacementValue == null ? EMPTY_SLICE : replacementValue);
-                List<Slice> groups = new ArrayList<>();
-                for (int group = 1; group <= groupCount; group++) {
-                    groups.add(group(source, match, group));
-                }
-                replacedByCallback.writeBytes(callbackReplacement(groups));
-                previousEnd = match[1];
-            }
-            parts.add(source.slice(previousEnd, source.length() - previousEnd));
-            replaced.writeBytes(source, previousEnd, source.length() - previousEnd);
-            replacedByCallback.writeBytes(source, previousEnd, source.length() - previousEnd);
-            assertThat(regexp.split(source)).as(sourceDescription).isEqualTo(parts);
-            if (matches.isEmpty()) {
-                assertThat(regexp.replace(source, replacementPattern)).as(sourceDescription).isSameAs(source);
-            }
-            else {
-                assertThat(regexp.replace(source, replacementPattern)).as(sourceDescription).isEqualTo(replaced.slice());
-            }
-            assertThat(regexp.replace(source, TestScanPlan::callbackReplacement)).as(sourceDescription).isEqualTo(replacedByCallback.slice());
-        }
-    }
-
-    /// Returns every non-overlapping Joni match as start/end pairs for each group, searching again
-    /// from the previous match end as Trino's Joni functions do.
-    private static List<int[]> joniMatches(Regex oracle, Slice source)
-    {
-        int base = source.byteArrayOffset();
-        Matcher matcher = oracle.matcher(source.byteArray(), base, base + source.length());
-        List<int[]> matches = new ArrayList<>();
-        int next = 0;
-        while (next <= source.length() && matcher.search(base + next, base + source.length(), Option.DEFAULT) >= 0) {
-            Region region = matcher.getEagerRegion();
-            int[] match = new int[2 * (oracle.numberOfCaptures() + 1)];
-            for (int group = 0; group <= oracle.numberOfCaptures(); group++) {
-                match[2 * group] = region.beg[group];
-                match[2 * group + 1] = region.end[group];
-            }
-            matches.add(match);
-            next = matcher.getEnd();
-            if (matcher.getBegin() == next) {
-                next += next < source.length() ? lengthOfCodePointFromStartByte(source.getByte(next)) : 1;
-            }
-        }
-        return matches;
-    }
-
-    private static Slice group(Slice source, int[] match, int group)
-    {
-        int start = match[2 * group];
-        return start < 0 ? null : source.slice(start, match[2 * group + 1] - start);
+        TestingTrinoJoni.verifyOperations(description, regexp, expectedMatches, sources);
     }
 
     static Slice callbackReplacement(List<Slice> groups)

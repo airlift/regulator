@@ -919,7 +919,25 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("[a-c-[x]]", "-", true),
                 new MatchCase("[a-c-[x]]", "[", false),
                 new MatchCase("(?i)[a-c-e]", "-", true),
-                new MatchCase("[^a-c-e]", "-", false))) {
+                new MatchCase("[^a-c-e]", "-", false),
+                // Pinned Joni runs the body of a reluctant {0}? when what follows fails.
+                new MatchCase("\\Aa{0}?$", "a", false),
+                // Pinned Joni's results for a nullable body repeated two or more times depend on how it
+                // compiles the repeat: it rejects ss here, though the pattern with the outer repeat written
+                // out twice matches it.
+                new MatchCase("\\A(?:(?:\\As*){2,}){2,}s\\z", "ss", true),
+                // Directly after a greedy .+, pinned Joni's \B reads a stale previous character.
+                new MatchCase(".+\\B", "a b", false),
+                // Pinned Joni tests a non-ASCII character by its first byte in a class that holds a negated
+                // class.
+                new MatchCase("[[^\\P{ASCII}]]", "é", false),
+                // Pinned Joni misses the empty match before $ after a multibyte character longer in bytes than
+                // the expression can match.
+                new MatchCase("q?$", "Ω", true),
+                // Pinned Joni tries only the search start for a dotall .* that only anchors precede.
+                new MatchCase("(?s)$.*", "ab", true),
+                // Pinned jcodings gives Olck the internal number pinned Joni uses for ASCII \s.
+                new MatchCase("\\p{Olck}", " ", false))) {
             Slice pattern = utf8Slice(matchCase.pattern());
             Slice input = utf8Slice(matchCase.input());
             assertThat(TrinoRegexp.compile(pattern).contains(input))
@@ -931,6 +949,14 @@ public class TestTrinoRegexpLanguage
         assertThat(TrinoRegexp.compile(utf8Slice("[a-c-\\d]")).contains(utf8Slice("-"))).isTrue();
         assertThat(TrinoRegexp.compile(utf8Slice("[a-c-\\d]")).contains(utf8Slice("5"))).isTrue();
         assertThatThrownBy(() -> joniPattern(utf8Slice("[a-c-\\d]"))).isInstanceOf(ArrayIndexOutOfBoundsException.class);
+
+        // After a greedy quantifier, pinned Joni misreads a braced property in a class as brace-less.
+        assertThat(TrinoRegexp.compile(utf8Slice("a?[\\p{Greek}]")).contains(utf8Slice("α"))).isTrue();
+        assertThatThrownBy(() -> joniPattern(utf8Slice("a?[\\p{Greek}]"))).isInstanceOf(CharacterPropertyException.class);
+
+        // Pinned Joni fails on an empty group repeated exactly 2 through 100 times.
+        assertThat(TrinoRegexp.compile(utf8Slice("(?:){2}")).contains(utf8Slice(""))).isTrue();
+        assertThatThrownBy(() -> joniPattern(utf8Slice("(?:){2}"))).isInstanceOf(NullPointerException.class);
 
         // Pinned Joni reads \\u12 as U+0012 and [\\u] as U+0000; modern Joni rejects both.
         assertThatThrownBy(() -> TrinoRegexp.compile(utf8Slice("\\u12"))).isInstanceOf(RegexpParseException.class);

@@ -87,7 +87,8 @@ Where Trino's pinned Joni, `io.airlift:joni:2.1.5.3`, and modern Joni disagree,
 each behavior is judged a bug or intended Trino behavior. A bug is replaced with
 the rule modern Joni and Oniguruma settled on, intended behavior stays, and the
 [Trino language reference](../reference/languages/TRINO_REGEXP.md) records each
-call.
+call. A defect in how pinned Joni compiles or searches a pattern is never
+copied, whether or not modern Joni fixed it.
 
 Trino's non-strict path assumes UTF-8 data is valid but does not validate it.
 Regulator likewise treats malformed input as garbage in, garbage out rather
