@@ -795,9 +795,10 @@ public class TestTrinoRegexpLanguage
     public void testFullFoldSpansLiteralRuns()
     {
         // Literals written next to each other under the same case-insensitivity fold as one
-        // sequence, through escapes, quotes, extended-mode whitespace and comments, {1}, other
-        // flag changes, and the bounds of unquantified noncapturing groups, whatever those groups
-        // contain. Pinned Joni ends a run where its tokenization splits the source.
+        // sequence, through escapes, quotes, extended-mode whitespace and comments, comment
+        // groups, {1}, other flag changes, and the bounds of unquantified noncapturing groups,
+        // whatever those groups contain. Pinned Joni ends a run where its tokenization splits
+        // the source.
         for (String[] example : List.of(
                 new String[] {"(?i:s(?:s))", "ß"},
                 new String[] {"(?i:sß)", "ßs"},
@@ -819,6 +820,7 @@ public class TestTrinoRegexpLanguage
             assertThat(joniMatchBoundaries(joniPattern(utf8Slice(example[0])), input)).as(example[0]).isEmpty();
         }
         assertFirstMatchBoundaryMatchesJoni("(?ix)f # comment\nf", "ﬀ", new MatchBoundary(0, 3));
+        assertFirstMatchBoundaryMatchesJoni("(?i)f(?#comment)f", "ﬀ", new MatchBoundary(0, 3));
         // Pinned Joni rewrites an exact repeat into one string, so its (?i)ß{2} matches sßs.
         Slice sharpSInput = utf8Slice("sßs");
         assertThat(TrinoRegexp.compile(utf8Slice("(?i)ß{2}")).extract(sharpSInput)).isNull();
@@ -1027,8 +1029,23 @@ public class TestTrinoRegexpLanguage
     }
 
     @Test
-    public void testCommentsSeparatedNestedQuantifiersMatchJoni()
+    public void testStackedQuantifiersMatchJoni()
     {
+        // As in Joni, a quantifier can follow another directly and repeats the repetition before
+        // it. A + directly after a reluctant quantifier, or after a comment group, is another
+        // quantifier rather than a possessive one.
+        for (String pattern : List.of("a**", "a*{2}", "a{2}{3}", "a*?+", "a??*", "a{2}?+", "a+*", "a{1}*", "a*(?#comment)+", "a*(?#comment)?", "(?:ab)**?", "(a)*?+")) {
+            Slice patternSlice = utf8Slice(pattern);
+            TrinoRegexp regexp = TrinoRegexp.compile(patternSlice);
+            Regex joni = joniPattern(patternSlice);
+            for (String input : List.of("", "a", "aaa", "aaaaaaa", "abab")) {
+                Slice inputSlice = utf8Slice(input);
+                assertThat(matchBoundaries(regexp.re2().matcher(inputSlice)))
+                        .as("%s against %s", pattern, input)
+                        .isEqualTo(joniMatchBoundaries(joni, inputSlice));
+            }
+        }
+
         MatchBoundary greedyMatch = new MatchBoundary(0, 3);
         assertFirstMatchBoundaryMatchesJoni("(?x)a* ?", "aaa", greedyMatch);
         assertFirstMatchBoundaryMatchesJoni("(?x)a* # comment\n ?", "aaa", greedyMatch);
@@ -1049,6 +1066,19 @@ public class TestTrinoRegexpLanguage
         assertFirstMatchBoundaryMatchesJoni("(?x)(?:ab){1} *", "abab", new MatchBoundary(0, 4));
 
         assertFirstMatchBoundaryMatchesJoni("(?x)a*?", "aaa", new MatchBoundary(0, 0));
+    }
+
+    @Test
+    public void testCommentGroupsMatchJoni()
+    {
+        // As in Joni, a comment group outside a class or quote is ignored like extended-mode
+        // whitespace, and ends at the first ) not escaped by a backslash.
+        assertFirstMatchBoundaryMatchesJoni("(?#comment)a", "a", new MatchBoundary(0, 1));
+        assertFirstMatchBoundaryMatchesJoni("a(?#comment)*", "aaa", new MatchBoundary(0, 3));
+        assertFirstMatchBoundaryMatchesJoni("a(?#a\\)b)b", "ab", new MatchBoundary(0, 2));
+        assertFirstMatchBoundaryMatchesJoni("(?x)a(?#x # y)b", "ab", new MatchBoundary(0, 2));
+        assertFirstMatchBoundaryMatchesJoni("\\Q(?#x)\\E", "(?#x)", new MatchBoundary(0, 5));
+        assertFirstMatchBoundaryMatchesJoni("[(?#x)]", "#", new MatchBoundary(0, 1));
     }
 
     @Test
