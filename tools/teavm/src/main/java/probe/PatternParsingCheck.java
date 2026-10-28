@@ -39,6 +39,7 @@ public final class PatternParsingCheck
             throw new AssertionError("Incorrect Slice copy or view");
         }
         checkInfo("Rust options", RustRegexp.parse(utf8Slice("#(ignored)\n(a)"), RustRegexp.Options.defaults().setComments(true)), 1, Map.of());
+        checkInfo("Rust bytes", RustRegexp.parse(utf8Slice("(?-u)(\\xFF)"), RustRegexp.Options.bytes()), 1, Map.of());
         checkError("Rust", () -> RustRegexp.parse(utf8Slice("é(")), 2, "(");
 
         checkInfo("RE2", Re2.parse(view("(?i)(?P<letter>\\pL)(b)?")), 2, Map.of("letter", 1));
