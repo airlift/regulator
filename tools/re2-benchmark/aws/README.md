@@ -710,7 +710,10 @@ launch, the pool's Spot launches go on for the items Spot may run. A
 `--spot-only` campaign never switches. Once every item is accepted or
 unresolved, the controller waits for every worker's verified cleanup, lists the
 unresolved items in `unresolved-units.tsv`, and otherwise validates the phase's
-accepted units as one campaign.
+accepted units as one campaign. Only then does it write `phase-complete.txt` in
+the result root, atomically; a later phase, including one consuming an engine
+build root, refuses a root without it, such as one whose controller stopped
+after its ledger was complete.
 
 ## Recovery and evidence
 

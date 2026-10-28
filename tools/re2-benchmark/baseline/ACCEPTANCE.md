@@ -101,9 +101,12 @@ The candidate archive, provenance, and result root must remain outside Maven's
 
 Primary execution requires the complete accepted smoke result root through
 `--smoke-results`. Confirmation execution similarly requires the complete
-accepted primary result root through `--primary-results`. The controller
-revalidates cleanup, capacity, exact artifacts, and regenerated receipts before
-starting the next phase.
+accepted primary result root through `--primary-results`, and smoke, primary,
+and confirmation require the accepted build root through `--engine-builds`. A
+phase's controller writes `phase-complete.txt` in its result root only after it
+has verified every worker's cleanup and the phase gate has passed. Before
+starting the next phase, the controller requires that marker, then revalidates
+capacity, exact artifacts, and regenerated receipts.
 
 A phase keeps `accepted-units.tsv`: one `unit-receipt.tsv` row per accepted
 unit replica, added atomically as soon as the attempt is accepted. Do not
