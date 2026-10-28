@@ -47,7 +47,7 @@ without compiling it; see
 | Anchors | `^`, `$`, `\A`, and `\z` |
 | Boundaries | Trino-compatible Unicode `\b` and `\B` |
 | Character classes | Ranges, negation, union, intersection, subtraction, ASCII predefined classes, and Unicode POSIX classes |
-| Unicode properties | Categories, scripts, blocks, binary properties, and `java...` properties from the pinned Unicode 18.0 database, using Trino's accepted spellings |
+| Unicode properties | Categories, scripts, blocks, binary properties, ages, and `java...` properties from the pinned Unicode 18.0 database, using pinned jcodings' names |
 | Escapes | Trino quoting and escape forms that identify Unicode code points |
 | Inline flags | `i`, `m`, `s`, and `x`, including scoped forms |
 | Comments | `(?#...)` comment groups, and whitespace and `#` comments in extended mode |
@@ -83,20 +83,37 @@ and `SS`.
 
 ### Unicode data and case folding
 
-Unicode property membership, apart from the POSIX names described below, is
-the JDK's computation over Regulator's pinned Unicode 18.0 database,
-case-insensitive matching uses its full case folding, `CaseFolding.txt`
-statuses C and F, and word boundaries use its word characters, so all three
-are the same on every JVM. That membership agrees with Java's `Pattern` except
-where Unicode changed since the JDK's Unicode version, as
-[`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) lists.
-Property names are ASCII only, without `_`, `=`, or an `Is` prefix, as in
-Joni. Modern Joni also ignores spaces, `-`, and `_` in a name and accepts
-aliases such as `wspace` and `ahex`; `TrinoRegexp` keeps the pinned Joni's
-stricter spelling as intended behavior. Word boundaries also count `²`, `³`,
-`¹`, `¼`, `½`, and `¾` as word characters, though `\p{Word}` does not contain
-them, as every Joni and Oniguruma does through a shared Latin-1 character
-table.
+Unicode property membership comes from Regulator's pinned Unicode 18.0
+database, case-insensitive matching uses its full case folding,
+`CaseFolding.txt` statuses C and F, and word boundaries use its word
+characters, so all three are the same on every JVM. A property is the
+database's values, apart from the POSIX names described below and the
+`java...` names; a `java...` name is the JDK's computation over the database.
+Word boundaries also count `²`, `³`, `¹`, `¼`, `½`, and `¾` as word characters,
+though `\p{Word}` does not contain them, as every Joni and Oniguruma does
+through a shared Latin-1 character table.
+
+Property names are pinned jcodings' names, built from the database by the
+rule of jcodings' table generator: each Unicode category, script, or binary
+property name or alias, or block name, lowercased without spaces, hyphens, or
+underscores, such as `UppercaseLetter`, `Qaac`, `WSpace`, and `AHex`. The
+binary property `Bidi_Mirrored`, which jcodings never reads, has no name. A
+block takes the `In` prefix, such as `InLatin1Supplement`, and `InNoBlock`
+holds the code points of no block. `age=1.1` holds the code points assigned in
+Unicode 1.1 or earlier; `Any`, `Assigned`, and `Newline` complete upstream
+jcodings' names. Trino's fork of jcodings adds `all`, `L1`, `LD`,
+`perlHorizontalWhiteSpace`, `perlVerticalWhiteSpace`, the earlier block names
+`InGreek`, `InCyrillicSupplementary`, and `InCombiningMarksForSymbols`, and the
+18 `java...` names
+([airlift/jcodings e81c0a3](https://github.com/airlift/jcodings/commit/e81c0a3cc942bee1c8e4c07127b6b7f50d6c3b05)).
+A name matches in any ASCII casing; a name with a character outside ASCII,
+or any other spelling, such as `InLatin-1Supplement`, `Old_Italic`, `IsGreek`,
+or `script=Greek`, names no property. Names Unicode added after pinned
+jcodings' 6.1 tables, such as `Emoji`, `Adlam`, and `age=7.0`, follow the same
+rule, and `TrinoRegexp` does not copy the 40-character name limit of Trino's
+fork of jcodings, which rejects `InUnifiedCanadianAboriginalSyllabicsExtended`.
+Modern Joni also ignores spaces, `-`, and `_` in a name; `TrinoRegexp` keeps
+pinned Joni's spelling as intended behavior.
 
 The POSIX names, such as `\p{Alpha}` and `[[:alpha:]]`, use the Unicode
 definitions of Trino's pinned Joni over the same database. `\p{...}` takes these

@@ -20,7 +20,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-import static io.airlift.regulator.UnicodeGroups.addRanges;
 import static io.airlift.regulator.UnicodeGroups.alphabetic;
 import static io.airlift.regulator.UnicodeGroups.any;
 import static io.airlift.regulator.UnicodeGroups.assigned;
@@ -35,8 +34,8 @@ import static io.airlift.regulator.UnicodeGroups.word;
 import static java.util.Objects.requireNonNull;
 
 /// Resolves the Unicode property names of Java patterns to the classes [UnicodeGroups]
-/// builds from the pinned [UnicodeDatabase]; [TrinoRegexpParser] maps its names other
-/// than the POSIX ones onto them. The names cover aliases, blocks, binary properties, and the
+/// builds from the pinned [UnicodeDatabase]; [TrinoUnicodeProperties] maps the Java predicates
+/// of Trino patterns onto them. The names cover aliases, blocks, binary properties, and the
 /// properties of [Character]; each property is computed as the JDK computes it. A Java
 /// pattern must give the JDK's results, so keep the JDK's computation even where the database
 /// stores a Unicode property of the same name.
@@ -60,16 +59,15 @@ final class JavaUnicodeProperties
 
     private JavaUnicodeProperties() {}
 
-    /// Returns the long names of the Java and Trino scripts, which are the scripts of Scripts.txt
-    /// and Unknown.
+    /// Returns the long names of the Java scripts, which are the scripts of Scripts.txt and
+    /// Unknown.
     static List<String> scriptNames()
     {
         return ScriptNames.NAMES;
     }
 
     /// Returns the class of a Java property name, such as Lu, IsGreek, InBasicLatin, script=Greek,
-    /// IsAlphabetic, or javaLowerCase, or null if the name is not one. [TrinoRegexpParser]
-    /// maps its names other than the POSIX ones onto these.
+    /// IsAlphabetic, or javaLowerCase, or null if the name is not one.
     public static CharClass lookup(String name)
     {
         requireNonNull(name, "name is null");
@@ -136,17 +134,7 @@ final class JavaUnicodeProperties
         if (longName == null) {
             return null;
         }
-        if (longName.equals(UNKNOWN_SCRIPT)) {
-            return cached("sc:" + UNKNOWN_SCRIPT, () -> {
-                CharClassBuilder builder = new CharClassBuilder();
-                for (String script : UnicodeDatabase.scripts().names()) {
-                    addRanges(builder, UnicodeDatabase.scripts().ranges(script));
-                }
-                builder.negate();
-                return builder.toCharClass();
-            });
-        }
-        return UnicodeGroups.script(longName);
+        return longName.equals(UNKNOWN_SCRIPT) ? UnicodeGroups.unknownScript() : UnicodeGroups.script(longName);
     }
 
     // Character.UnicodeBlock.forName uppercases the name with Locale.US, and accepts a block's
@@ -161,7 +149,7 @@ final class JavaUnicodeProperties
         if (block.equals(SURROGATES_AREA)) {
             return cached("blk:" + SURROGATES_AREA, () -> new CharClassBuilder().toCharClass());
         }
-        return cached("blk:" + block, () -> codePoints(UnicodeDatabase.blocks().ranges(block)));
+        return UnicodeGroups.block(block);
     }
 
     // The Unicode properties of java.util.regex, computed as CharPredicates computes them, even

@@ -16,6 +16,7 @@ package io.airlift.regulator;
 import io.airlift.jcodings.Config;
 import io.airlift.jcodings.IntHolder;
 import io.airlift.jcodings.constants.CharacterType;
+import io.airlift.jcodings.exception.CharacterPropertyException;
 import io.airlift.jcodings.specific.NonStrictUTF8Encoding;
 import io.airlift.joni.Matcher;
 import io.airlift.joni.Option;
@@ -688,6 +689,66 @@ public class TestTrinoRegexpLanguage
         assertThat(TrinoRegexp.compile(utf8Slice("\\p{Seal}")).contains(utf8Slice("\uD8B4\uDC00"))).isTrue();
     }
 
+    // Trino's property names are pinned jcodings' names: Unicode's names and aliases lowercased
+    // without spaces, hyphens, or underscores, in any ASCII casing, and the names Trino's fork
+    // adds. The membership of each matches pinned Joni on characters whose properties have not
+    // changed since pinned jcodings' Unicode 6.1 tables.
+    @Test
+    public void testPropertyNamesMatchPinnedJoni()
+    {
+        List<List<String>> acceptedNames = List.of(
+                // General_Category short and long names and their aliases
+                List.of("Lu", "lu", "UppercaseLetter", "LC", "lc", "CasedLetter", "Mark", "CombiningMark", "C", "Other", "Cn", "Unassigned", "Zs", "SpaceSeparator"),
+                // scripts and their aliases
+                List.of("Greek", "GREK", "OldItalic", "Ital", "Common", "Zyyy", "Unknown", "Zzzz", "Inherited", "Qaai", "Coptic", "Qaac", "Java"),
+                // binary properties and their aliases
+                List.of("WhiteSpace", "WSpace", "AHex", "ASCIIHexDigit", "Hex", "Alphabetic", "OAlpha", "Dash", "Ideo", "CI", "XIDC", "NChar", "Radical"),
+                // blocks, named without spaces, hyphens, or underscores
+                List.of("InBasicLatin", "InLatin1Supplement", "inlatinextendeda", "InGreekandCoptic", "InCyrillicSupplement", "InNoBlock", "InPrivateUseArea"),
+                // ages, each holding the characters assigned in it or earlier, and upstream
+                // jcodings' names that no Unicode file defines
+                List.of("age=1.1", "AGE=2.0", "age=6.1", "Any", "any", "Assigned", "Newline"),
+                // Trino's additions
+                List.of("ALL", "L1", "LD", "ld", "perlHorizontalWhiteSpace", "perlVerticalWhiteSpace", "InGreek", "InCyrillicSupplementary", "InCombiningMarksForSymbols"),
+                List.of("javaMirrored", "javaWhitespace", "JAVASPACECHAR"));
+        List<String> rejectedNames = List.of(
+                "Titlecase", "InLatin-1Supplement", "InLatinExtended-A", "InAegean Numbers", "Old_Italic", "IsGreek", "isL", "script=Greek", "BidiMirrored", "age=1.1.0");
+        int[] characters = {
+                0x00, '\t', '\n', 0x0B, ' ', '$', '(', '-', '0', 'A', 'F', 'G', '_', 'a', 0x7F, 0x85, 0xA0, 0xAA, 0xB2, 0xB5, 0xD7, 0xDF, 0xFF, 0x100, 0x1C5, 0x2B0,
+                0x300, 0x345, 0x378, 0x3B1, 0x3E2, 0x416, 0x500, 0x5D0, 0x628, 0x915, 0x20D0, 0x2028, 0x2160, 0x2190, 0x2F00, 0x3000, 0x3042, 0x4E2D, 0xA984, 0xAC00,
+                0xE000, 0xFB01, 0xFDD0, 0xFF10, 0xFF21, 0xFFFD, 0x10300, 0x10400, 0x1D400, 0x1F600, 0x20000, 0x50000, 0xE0001, 0x10FFFF,
+        };
+        for (String name : acceptedNames.stream().flatMap(List::stream).toList()) {
+            Slice pattern = utf8Slice("\\p{" + name + "}");
+            Regex joni = joniPattern(pattern);
+            TrinoRegexp regexp = TrinoRegexp.compile(pattern);
+            for (int character : characters) {
+                byte[] input = Character.toString(character).getBytes(UTF_8);
+                assertThat(regexp.contains(wrappedBuffer(input))).as("%s on U+%04X", name, character).isEqualTo(joni.matcher(input).search(0, input.length, Option.DEFAULT) >= 0);
+            }
+        }
+        for (String name : rejectedNames) {
+            Slice pattern = utf8Slice("\\p{" + name + "}");
+            assertThatThrownBy(() -> joniPattern(pattern)).as(name).isInstanceOf(CharacterPropertyException.class);
+            assertThatThrownBy(() -> TrinoRegexp.compile(pattern)).as(name).isInstanceOf(RegexpParseException.class);
+        }
+
+        // Names that only the newer Unicode database has, each with a member, and a block name
+        // longer than the 40-character limit of Trino's fork of jcodings.
+        Map<String, Integer> newerNames = Map.of(
+                "Emoji", 0x1F600,
+                "ExtPict", 0x1F600,
+                "Adlam", 0x1E900,
+                "InAdlam", 0x1E900,
+                "age=7.0", 0x1F642,
+                "InUnifiedCanadianAboriginalSyllabicsExtended", 0x18B0);
+        newerNames.forEach((name, member) -> {
+            Slice pattern = utf8Slice("\\p{" + name + "}");
+            assertThatThrownBy(() -> joniPattern(pattern)).as(name).isInstanceOf(CharacterPropertyException.class);
+            assertThat(TrinoRegexp.compile(pattern).contains(utf8Slice(Character.toString(member)))).as(name).isTrue();
+        });
+    }
+
     @Test
     public void testWordClassificationIncludesPinnedJoniWordCharacters()
     {
@@ -1239,12 +1300,6 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("(?i)\\A[[^a]]\\z", "A", true),
                 new MatchCase("(?i)\\A[^[^\ufb03]]\\z", "\ufb03", true),
                 new MatchCase("(?i)\\A[^[^\ufb03]]\\z", "ffi", false),
-                new MatchCase("\\p{Alphabetic}+", "abc", true),
-                new MatchCase("\\p{lu}+", "ABC", true),
-                new MatchCase("\\p{inBasicLatin}+", "abc", true),
-                new MatchCase("\\p{JAVALOWERCASE}+", "abc", true),
-                new MatchCase("\\p{OldItalic}", "\uD800\uDF00", true),
-                new MatchCase("\\p{InBasicLatin}+", "abc", true),
                 // Joni defines each POSIX name by one Unicode table, and \p{...} takes the name in any ASCII casing.
                 new MatchCase("\\A\\p{Alpha}\\z", "\u0345", true),
                 new MatchCase("\\A\\p{Alnum}\\z", "\u00AA", true),

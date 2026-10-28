@@ -110,15 +110,25 @@ construction fails.
   they do not change with the JDK. Pinned upstream RE2's generated Unicode
   tables are intentionally not retained.
 - The database holds only Unicode data. RE2 names it by upstream's rule, as
-  RE2 Unicode Property Groups describes. Java and Trino layer the JDK's names
-  on it: categories with their long names and `LC`, `LD`, and `Cn`, scripts
-  with their ISO 15924 codes, blocks with the JDK's identifiers, the `In`
-  form, binary properties, and `java...` properties; Java also layers the
-  `Is`, `gc=`, `sc=`, and `blk=` forms and its POSIX classes. Each JDK
-  property is the JDK's own computation over the database, as Language
-  Authorities describes, and a JDK choice that is not Unicode data is a
-  constant citing the JDK. Rust layers the regex crate's names on it, as Rust
-  Frontend describes.
+  RE2 Unicode Property Groups describes. Java layers the JDK's names on it:
+  categories with their long names and `LC`, `LD`, and `Cn`, scripts with
+  their ISO 15924 codes, blocks with the JDK's identifiers, the `In`, `Is`,
+  `gc=`, `sc=`, and `blk=` forms, binary properties, `java...` properties,
+  and its POSIX classes. Each JDK property is the JDK's own computation over
+  the database, as Language Authorities describes, and a JDK choice that is
+  not Unicode data is a constant citing the JDK. Rust layers the regex crate's
+  names on it, as Rust Frontend describes.
+- Trino layers pinned jcodings' names on the database, built by the rule of
+  jcodings' table generator: each Unicode name or alias of a category,
+  script, or binary property other than Bidi_Mirrored, which jcodings never
+  reads, or block name (`In` form), lowercased without spaces, hyphens, or
+  underscores, plus each cumulative Age (`age=6.0` form), matched in any
+  ASCII casing. So `InLatin1Supplement`, `WSpace`, and `age=1.1` resolve and
+  `InLatin-1Supplement` and the JDK's `Titlecase` do not. Names Unicode added
+  after pinned jcodings' 6.1 tables follow the same rule, and the 40-character
+  limit of Trino's fork is not copied. The names Trino's fork adds in
+  [airlift/jcodings e81c0a3](https://github.com/airlift/jcodings/commit/e81c0a3cc942bee1c8e4c07127b6b7f50d6c3b05)
+  are kept; its `java...` names are Java's computation.
 - Trino's POSIX names, such as `\p{Alpha}` and `[[:alpha:]]`, use the
   definitions of Trino's pinned Joni over the database, such as Alphabetic
   for alpha. Pinned Joni's bracket punct is Unicode punctuation alone, so
@@ -151,22 +161,24 @@ construction fails.
 
 Java and Trino properties, word boundaries, and name normalization, and Java's
 character names, previously came from the running JVM's `Character` and
-`String` APIs, so their results changed with each JDK upgrade. Except for
-Trino's POSIX names, they now agree with the JDK at every code point its own
-Unicode version assigns, 16.0 on Java 25 and 17.0 on Java 26, apart from two
-changes Unicode 17.0 made to older characters: U+0295 moved from `Ll` to `Lo`,
-and 689 code points that are not emoji, such as U+2605 BLACK STAR, lost
-Extended_Pictographic.
+`String` APIs, so their results changed with each JDK upgrade. Java's
+properties, name normalization, and character names, Trino's `java...` names,
+and both languages' word boundaries now agree with the JDK at every code point
+its own Unicode version assigns, 16.0 on Java 25 and 17.0 on Java 26, apart
+from two changes Unicode 17.0 made to older characters: U+0295 moved from `Ll`
+to `Lo`, and 689 code points that are not emoji, such as U+2605 BLACK STAR,
+lost Extended_Pictographic.
 Name case conversions agree where their input and output contain only
 characters assigned in the JDK's Unicode version; Unicode 18.0 also uppercases
 some older characters to newer ones, such as U+0277 to U+A7DD, but neither is
 ASCII, so no name resolves differently. Characters and names Unicode added
 after the JDK's version, such as the Unicode 18.0 scripts Jurchen and Seal and
 the names of their characters, resolve only in Regulator. This agreement is of
-property membership, which, outside Trino's POSIX names, is the JDK's
-computation over the pinned database. Java's accepted property spellings keep
-Regulator's existing rules, which are not identical to `Pattern`'s, and
-Trino's are Joni's ASCII-only names.
+property membership, which is the JDK's computation over the pinned database
+for Java and for Trino's `java...` names, and the database's values for
+Trino's other names apart from its POSIX names. Java's accepted property
+spellings keep Regulator's existing rules, which are not identical to
+`Pattern`'s, and Trino's are pinned jcodings' names.
 
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.
