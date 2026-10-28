@@ -1333,7 +1333,7 @@ final class JavaRegexpParser
                     case 'a' -> 0x07;
                     case 'e' -> 0x1B;
                     case 'H', 'V', 'h' -> escapedByte;
-                    case 'c' -> parseControlEscape(sequenceStart);
+                    case 'c' -> parseControlEscape(flags, sequenceStart);
                     case 'N' -> parseNamedCodePoint(sequenceStart);
                     case 'x' -> parseHexEscape(flags, sequenceStart);
                     case 'u' -> parseUnicodeEscape(flags, sequenceStart);
@@ -1436,7 +1436,7 @@ final class JavaRegexpParser
                 case 'f' -> literalFromRune('\f');
                 case 'a' -> literalFromRune(0x07);
                 case 'e' -> literalFromRune(0x1B);
-                case 'c' -> literalFromRune(parseControlEscape(sequenceStart));
+                case 'c' -> literalFromRune(parseControlEscape(flags, sequenceStart));
                 case 'N' -> literalFromRune(parseNamedCodePoint(sequenceStart));
                 case 'x' -> literalFromRune(parseHexEscape(flags, sequenceStart));
                 case 'u' -> literalFromRune(parseUnicodeEscape(flags, sequenceStart));
@@ -1851,16 +1851,13 @@ final class JavaRegexpParser
             return value;
         }
 
-        private int parseControlEscape(int sequenceStart)
+        private int parseControlEscape(int flags, int sequenceStart)
         {
             if (atEnd()) {
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
-            int character = consumeByte();
-            if (character >= 0x80) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
-            }
-            return character ^ 64;
+            // As in the JDK, flip bit 6 of the whole next code point, which keeps it a scalar value.
+            return readRune(flags) ^ 64;
         }
 
         private int parseNamedCodePoint(int sequenceStart)
