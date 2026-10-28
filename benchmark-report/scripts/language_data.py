@@ -169,9 +169,9 @@ def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
         if operation == 'compile' and size is not None:
             raise ValueError('compilation must not be normalized per input byte')
         mapping = case['mappings'][language]
-        pattern = mapping.get('pattern')
-        if pattern is None:
-            pattern = bytes.fromhex(mapping['pattern_hex']).decode('utf-8', errors='backslashreplace')
+        # The size describes the measured pattern, which a translation can make far larger than its source.
+        encoded = mapping['pattern'].encode() if mapping.get('pattern') is not None else bytes.fromhex(mapping['pattern_hex'])
+        pattern = encoded.decode('utf-8', errors='backslashreplace')
         rows.append({
             'id': f'{suite}/{case_id}/{operation}', 'caseId': case_id,
             'name': case_id, 'operation': operation, 'model': case.get('model', operation),
@@ -179,7 +179,7 @@ def language_rows(data, manifests, selection=None, platforms=PLATFORMS):
             'language': language, 'platform': platform, 'memoryMode': mode,
             'inputBytes': size, 'source': 'language',
             'mapping': {'status': mapping['status'], 'reason': mapping['reason'],
-                        'patternPreview': pattern[:240], 'patternBytes': case['pattern_bytes']},
+                        'patternPreview': pattern[:240], 'patternBytes': len(encoded)},
             'result': reduce_hosts(evidence, size),
         })
         if descriptions[key].get('work_contract') is not None:

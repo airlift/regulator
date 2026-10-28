@@ -160,7 +160,7 @@ assert.doesNotMatch(evidence(projected), /full pattern is also included/);
 const fullPattern = compactReport({ ...original, rows: [{ ...mappedRow,
   workload: { pattern: "a".repeat(5000) } }] }, report).rows[0];
 assert.match(evidence(fullPattern), /full pattern is also included/);
-// The actual UTF-8 pattern wins over a mapping's declared source size.
+// The actual UTF-8 pattern wins over a mapping's recorded size.
 const shortPattern = compactReport({ ...original, rows: [{ ...mappedRow, workload: { pattern: "é" } }] }, report).rows[0];
 assert.equal(shortPattern.patternSummary, undefined);
 const boundaryPattern = bytes => compactReport({ ...original, rows: [{ ...mappingOnly,

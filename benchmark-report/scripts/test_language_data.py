@@ -33,6 +33,26 @@ def report_fixture(platforms=PLATFORMS, languages=RELEASE_1_0_LANGUAGES):
             'methodology': ['Fixture only'], 'provenance': {'fixture': True}, 'rows': rows}
 
 
+def bulk_capture(mappings):
+    case = {'id': 'fixture', 'model': 'count', 'population': 'bulk-text', 'family': 'test', 'pattern_bytes': 1, 'mappings': mappings}
+    manifest = {'suite': 'language-bulk', 'cases': [case]}
+    case_hash = hashlib.sha256(json.dumps(case, sort_keys=True, ensure_ascii=True, allow_nan=False).encode()).hexdigest()
+    data = {'hosts': [], 'observations': [], 'comparisons': []}
+    for language in mappings:
+        for platform in PLATFORMS:
+            for replica in (1, 2, 3):
+                identity = ['language-bulk', 'fixture', language, platform, replica]
+                data['hosts'].append({'logical_identity': identity, 'instance_id': f'host-{replica}', 'collector': 'test', 'case_sha256': case_hash})
+                for mode in MEMORY_MODES:
+                    candidate, comparator = f'{mode}/candidate', f'{mode}/comparator'
+                    for identifier in (candidate, comparator):
+                        data['observations'].append({'logical_identity': identity, 'id': identifier, 'outcome': 'compared', 'samples_ns': [[10]]})
+                    data['comparisons'].append({'logical_identity': identity, 'id': mode, 'logical_case': 'fixture', 'language': language,
+                                                'mode': mode, 'operation': 'execute', 'candidate': candidate, 'comparator': comparator,
+                                                'input_bytes_per_operation': 1, 'work_contract': 'bulk-matched-outputs-v1' if language == 'trino' else 'public-find-count-v2'})
+    return data, manifest
+
+
 class TestLanguageData(unittest.TestCase):
     def test_release_report_supports_r_family_and_integrated_like_lifecycle(self):
         data = report_fixture()
@@ -66,24 +86,7 @@ class TestLanguageData(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'incomplete language/lifecycle'):
             validate_language_report(released)
     def test_host_call_contracts_must_agree_and_survive_reduction(self):
-        languages = ('re2', 'java', 'trino')
-        case = {'id': 'fixture', 'model': 'count', 'population': 'bulk-text', 'family': 'test', 'pattern_bytes': 1,
-                'mappings': {language: {'pattern': 'a', 'status': 'compatible', 'reason': 'same bytes'} for language in languages}}
-        manifest = {'suite': 'language-bulk', 'cases': [case]}
-        case_hash = hashlib.sha256(json.dumps(case, sort_keys=True, ensure_ascii=True, allow_nan=False).encode()).hexdigest()
-        data = {'hosts': [], 'observations': [], 'comparisons': []}
-        for language in languages:
-            for platform in PLATFORMS:
-                for replica in (1, 2, 3):
-                    identity = ['language-bulk', 'fixture', language, platform, replica]
-                    data['hosts'].append({'logical_identity': identity, 'instance_id': f'host-{replica}', 'collector': 'test', 'case_sha256': case_hash})
-                    for mode in MEMORY_MODES:
-                        candidate, comparator = f'{mode}/candidate', f'{mode}/comparator'
-                        for identifier in (candidate, comparator):
-                            data['observations'].append({'logical_identity': identity, 'id': identifier, 'outcome': 'compared', 'samples_ns': [[10]]})
-                        data['comparisons'].append({'logical_identity': identity, 'id': mode, 'logical_case': 'fixture', 'language': language,
-                                                    'mode': mode, 'operation': 'execute', 'candidate': candidate, 'comparator': comparator,
-                                                    'input_bytes_per_operation': 1, 'work_contract': 'bulk-matched-outputs-v1' if language == 'trino' else 'public-find-count-v2'})
+        data, manifest = bulk_capture({language: {'pattern': 'a', 'status': 'compatible', 'reason': 'same bytes'} for language in ('re2', 'java', 'trino')})
         reduced = language_rows(data, [manifest])
         self.assertEqual(len(reduced), 18)
         self.assertTrue(all(row['workContract'] == 'public-find-count-v2' for row in reduced if row['language'] != 'trino'))
@@ -97,6 +100,17 @@ class TestLanguageData(unittest.TestCase):
         for comparison in data['comparisons']:
             del comparison['work_contract']
         self.assertTrue(all('workContract' not in row for row in language_rows(data, [manifest])))
+
+    def test_pattern_size_is_the_measured_translation(self):
+        # The source pattern is one byte; its translation is 7,000 UTF-8 bytes.
+        translated = '[a-zé]' * 1000
+        for form, java in (('pattern', translated), ('pattern_hex', translated.encode().hex())):
+            with self.subTest(form=form):
+                data, manifest = bulk_capture({
+                    're2': {'pattern_hex': b'a'.hex(), 'status': 'identical', 'reason': 'same bytes'},
+                    'java': {form: java, 'status': 'translated', 'reason': 'expanded class'}})
+                sizes = {row['language']: row['mapping']['patternBytes'] for row in language_rows(data, [manifest])}
+                self.assertEqual(sizes, {'re2': 1, 'java': 7000})
 
     def test_standalone_build_keeps_data_inline_and_escapes_html(self):
         scripts = Path(__file__).resolve().parent

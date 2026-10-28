@@ -236,8 +236,11 @@ class TestReportData(unittest.TestCase):
             'jar_sha256': 'c' * 64,
         }
         source = report_fixture()
-        source['rows'][0].update(population='ordinary-scalar', family='fixture')
+        source['rows'][0].update(population='ordinary-scalar', family='fixture',
+                                 mapping={'status': 'translated', 'reason': 'expanded class', 'patternPreview': 'a', 'patternBytes': 1})
         current = use_release_platforms(copy.deepcopy(source))
+        # The frozen row records the source pattern's size; the current row records the measured translation's.
+        current['rows'][0]['mapping']['patternBytes'] = 7000
         current['sources'].update(currentCandidate=release['source_commit'],
                                   engineTree=release['engine_tree'], releaseVersion='1.0')
         current['provenance']['releasedArtifact'] = copy.deepcopy(release)

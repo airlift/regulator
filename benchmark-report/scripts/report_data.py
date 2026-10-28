@@ -268,7 +268,8 @@ def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict
                            if key != 'performanceContext'}
         if current_workload != source_workload:
             raise ValueError(f'publication workload details changed at row {index}')
-        for field in ('status', 'reason', 'patternPreview', 'patternBytes'):
+        # Frozen 1.0 rows record the source pattern's size; current rows record the measured pattern's size.
+        for field in ('status', 'reason', 'patternPreview'):
             if row.get('mapping', {}).get(field) != previous.get('mapping', {}).get(field):
                 raise ValueError(f'publication pattern mapping changed at row {index}')
 
