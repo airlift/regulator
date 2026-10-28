@@ -6,7 +6,6 @@ import os
 import subprocess
 
 JSON_LEDGER_WORKLOADS = {
-    "accepted-language-sessions.json": "language-batch",
     "accepted-engine-builds.json": "engine-build",
 }
 

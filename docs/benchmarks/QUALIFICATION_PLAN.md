@@ -115,7 +115,7 @@ the private archive rather than the public download.
 The shared everyday and lifecycle collector is documented in
 [`tools/re2-benchmark/language`](../../tools/re2-benchmark/language/README.md).
 It includes explicit bulk language mappings, original-source result and byte
-trace verification, raw-evidence export, same-host batch planning, and
+trace verification, raw-evidence export, work-unit planning, and
 archive-based worker builds. The shared controller schedules these suites with
 `--language-plan`; its existing baseline shards remain a separate required
 campaign. Both campaigns must measure the same released library artifact and

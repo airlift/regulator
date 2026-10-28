@@ -230,7 +230,7 @@ its timing samples never enter the timing result. Both raw files and their
 hashes are revalidated during export. The original CPU affinity, G1 collector,
 heap and operation contracts remain unchanged. This profile is for prospectively
 planned recollection after warmup diagnostics, not relabeling old results.
-Batch estimates must include its longer duration before launching a fleet.
+Unit estimates include its longer duration.
 
 `steady-lifecycle-v2` keeps that lifecycle protocol and extends warmup to sixty
 one-second iterations. The 1.0 follow-up uses it uniformly for R9g lifecycle
@@ -238,8 +238,8 @@ comparisons on `r9g.2xlarge`, with the original one-CPU allowance and 8 GiB heap
 Longer warmup and larger allocation were qualified before the production run;
 their combined timing change is not proof of a particular JVM or kernel cause.
 The fleet plan records the instance type and allocated vCPU count for every
-suite and platform. Dispatch, admission and acceptance all use that saved
-allocation.
+suite and platform. Dispatch, the unit's host check and acceptance all use that
+saved allocation.
 
 `steady-slow-bulk-v2` preserves the bulk timing settings and changes only the
 aggregate measurement-process deadline to 12,600 seconds. A corpus pass can
@@ -247,17 +247,12 @@ take longer than a nominal one-second JMH iteration. Five forks with sixty
 warmups and twenty measured iterations can therefore exceed the ordinary
 3,600-second process limit even when every operation passes its 30-second
 verification limit. Do not shorten or discard iterations to fit that deadline.
-The frozen slow profile applies to one complete comparison per host. Transport
-derives the host deadline from the checksummed manifest: each observation and
-operation receives its full 12,600-second process budget, each JVM observation
-receives another allocation-process budget, and the host receives 5,400
-seconds for setup and verification. The current Java and Trino slow batches
-therefore use `TIMEOUT_SECONDS=81000`; a native RE2 or Rust comparison uses
-68,400 seconds. Transport rejects a different deadline, auxiliary diagnostic
-work, or multiple comparisons in a slow batch. Ordinary batches retain the
-5,400-second host deadline. The general campaign controller still plans
-90-minute jobs; the slow profile requires direct wrapper scheduling with its
-recorded deadline, as in the archived follow-up controller.
+Under the slow profile a comparison's unit estimate covers every measurement
+process running to that deadline: each observation and operation receives its
+full 12,600-second budget, and each JVM observation another for its allocation
+process. A Java or Trino comparison is therefore estimated at 75,600 seconds
+per operation and a native RE2 or Rust comparison at 63,000, each operation a
+unit alone on On-Demand capacity whose worker timeout covers it.
 
 The original profile remains supported for reproducing earlier campaigns.
 JMH uses five forks, ten one-second warmups, ten one-second measurement
@@ -286,9 +281,9 @@ The operation-receipt format is schema version 2. Recreate manifests and
 verification from older versions; they cannot establish operation-specific
 non-completion or substitute for the clean JVM build receipt.
 
-## Same-host job preparation
+## Plan preparation
 
-Prepare jobs without allocating any resources:
+Prepare a plan without allocating any resources:
 
 ```sh
 python3 tools/re2-benchmark/language/fleet.py prepare \
@@ -300,13 +295,9 @@ python3 tools/re2-benchmark/language/fleet.py validate \
 
 Each partition contains one logical case and one language, with the comparator
 and both Regulator memory modes kept together. The everyday corpus produces
-52 partitions and 312 jobs across R9g and R8i, each with three independent
-host replicas. `--max-concurrent-hosts` records the intended concurrency in the
-plan and defaults to 64.
-`fleet.py` does not allocate or schedule hosts, so that field is not a capacity
-reservation or an enforced scheduler setting.
+52 partitions, each measured on R9g and R8i in three independent replicas.
 
-The plan also packs its comparisons into work units, written as `units.tsv`
+The plan packs its comparisons into work units, written as `units.tsv`
 and `unit-rows.tsv` beside `plan.json` in the baseline unit format. An atom is
 one comparison under one operation: its comparator and both memory modes,
 which stay on one host. Atoms pack into units estimated at no more than 15
@@ -370,27 +361,8 @@ python3 tools/re2-benchmark/language/fleet.py verify \
   --native-rust-runner target/re2-benchmark-build/language_rust_benchmark
 ```
 
-This also compares semantic traces across language partitions. Verification
-must be repeated on the measurement host with that host's build receipts.
-The worker entry point `fleet.py run-job` accepts the plan, exact job ID, result
-root, classpath, native runner, and JVM receipt. Archive workers also supply the
-source archive and candidate provenance. It verifies and measures the complete
-partition on that host.
-
-`fleet.py package-job --plan-directory ... --job ... --output-directory ...`
-copies only that job's partition and records its parent-plan and manifest
-hashes. `fleet.py run-package` executes this package with existing build
-receipts; it does not need the other partitions or the full corpus on the
-worker. Aggregation still validates against the original complete plan.
-
-`worker.py --package-directory ... --output-directory ...` builds the clean
-candidate and appropriate native runner, then verifies both memory modes and
-the comparator. Its default output is explicitly verification-only. Add
-`--measure` on a qualification host to collect timings. The measured worker
-pins verification and timing to one available CPU after building, restores
-its original affinity on exit, and records the selected CPU. Archive workers
-also pass `--source-archive` and `--candidate-provenance`. The package and
-provenance belong outside the extracted source directory.
+This also compares semantic traces across language partitions. Each unit
+repeats verification on its measurement host with that host's build receipts.
 
 ## Bulk and adversarial inventory
 
@@ -508,7 +480,7 @@ on any result disagreement. A completed operation whose trace times out is a
 verification failure, never an execution timeout. Raw traces remain on disk;
 receipts store their hashes. Measurement and export recheck the original
 native reference and every completed trace. `collection.py measure` and
-`export`, and the same-host `fleet.py` partition commands, accept both suite
+`export`, and the `fleet.py` plan and unit commands, accept both suite
 manifests. Bulk cases measure only their original operation, compilation for
 compile cases and execution for the other five models.
 
@@ -563,10 +535,10 @@ python3 tools/re2-benchmark/language/literal_probe.py prepare \
 
 The manifest uses the `language-bulk` suite and the `steady-state-v1` profile,
 so `collection.py verify`, `fleet.py prepare`, and `run-campaign.py
---language-plan` accept it unchanged. Prepare it with `--shard-id
-literal-probe` so its units stay distinct from the bulk campaign's. Its six
-cases produce 24 partitions and 144 jobs. Smoke adds the learned-sample workload to the usual first workload
-for each language.
+--language-plan` accept it unchanged. Prepare its plan with `fleet.py prepare
+--shard-id literal-probe` so its units stay distinct from the bulk campaign's.
+Its six cases produce 24 partitions. Smoke adds the learned-sample workload to
+the usual first workload for each language.
 
 ## AWS dispatch and recovery
 

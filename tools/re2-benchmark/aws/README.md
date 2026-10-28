@@ -1,14 +1,14 @@
 # AWS baseline qualification
 
-The AWS tools run three kinds of jobs: `engine-build`, `unit-worker`, and
-`language-batch`. Full qualification builds each platform's Trino harness
-once, measures baseline work units on unit workers, and collects language
-batches. This guide gives the baseline commands; see the
-[language guide](../language/README.md) for language collection.
+The AWS tools run two kinds of jobs: `engine-build` and `unit-worker`. Full
+qualification builds each platform's Trino harness and language runners once,
+then measures baseline and language work units on unit workers. This guide
+gives the baseline commands; see the [language guide](../language/README.md)
+for language collection.
 
-`baseline/run-campaign.py` plans and controls the baseline engine build and the
-smoke, primary, and confirmation runs. `language/fleet.py` prepares language
-plans, and `language/campaign.py` controls their collection and acceptance.
+`baseline/run-campaign.py` plans and controls the engine build and the smoke,
+primary, and confirmation runs, of baseline shards or of the language plans
+that `language/fleet.py` prepares.
 
 Do not collect performance evidence on a development machine. Local commands
 may validate manifests, scripts, and protocol behavior, but performance
@@ -167,8 +167,8 @@ The neighboring `fleet-state.json` coordinates both collectors with `flock`. It
 counts instances, outstanding requests, and launches not yet visible to EC2.
 Reservations remain until verified cleanup; crashes never expire them. A
 rejected work unit follows the [unit dispatch](#unit-dispatch) retry rules, and
-a rejected language batch or engine build stays unaccepted and unresolved after
-its cleanup is proven while independent jobs continue. Unproven cleanup,
+a rejected engine build stays unaccepted and unresolved after its cleanup is
+proven while independent jobs continue. Unproven cleanup,
 changed frozen inputs, conflicting accepted identities and shared
 resource-policy failures halt both collectors. See the
 [protocol rules](../baseline/SHARD_DISPATCH.md#jmh-protocol). Preserve the
@@ -355,7 +355,7 @@ baseline units, and 102,600 for a pool holding a Java or Trino slow-bulk
 comparison's 75,600-second unit. Each phase is still its own controller run;
 pipelining a shard's primary behind its accepted smoke is future work.
 
-The build phase and language campaigns run one host per job. Spot jobs wait
+The build phase runs one host per job. Spot jobs wait
 when quota or capacity prevents a launch. An interrupted job restarts after
 verified cleanup: on a fresh Spot host with `--spot-only`, and otherwise
 On-Demand.
@@ -436,9 +436,8 @@ Accepted builds go to `accepted-engine-builds.json`.
 Smoke, primary, and confirmation execution require `--engine-builds`, naming
 an accepted build root for every platform. Each platform's manifest SHA-256 is
 frozen in `execution-policy.json`, and primary and confirmation refuse a
-prerequisite that used different builds. Language batches do not use engine
-builds; their Rust comparator still builds on the host. A language unit worker
-runs the native runners of its platform's engine build.
+prerequisite that used different builds. A language unit worker runs the
+native runners of its platform's engine build.
 
 Hosts check each downloaded archive with `sha256sum --check`, then verify the
 archive and each installed file against the manifest; a mismatch fails the
@@ -471,24 +470,21 @@ aws s3 rm "s3://<bucket>/<transfer-prefix>/language-plans/" --recursive --region
 
 ## Single-job wrapper
 
-The controllers use `run-campaign.sh` to run one AWS job. A
-`CAMPAIGN_MODE=language-batch` job selects one language batch and its frozen
-inputs. A `CAMPAIGN_MODE=engine-build` job builds one platform's engines, and a
+The controller uses `run-campaign.sh` to run one AWS job. A
+`CAMPAIGN_MODE=engine-build` job builds one platform's engines, and a
 `CAMPAIGN_MODE=unit-worker` job leases [work units](#unit-workers). The wrapper verifies the archive, provisions an isolated
 instance, uploads inputs through a private temporary S3 location, downloads the
 result, and verifies instance, IAM, and S3 cleanup.
 
 The fleet controller should normally invoke this wrapper. Direct invocation is
 appropriate only while diagnosing one qualification job and still requires all
-pinned identity variables. The language fleet launches through the same
-controller and wrapper, so it uses the same launch regions.
+pinned identity variables.
 
 `run-host.sh` runs on the instance. It accepts the same
 modes, verifies the AMI, JDK, package, candidate, comparator, and manifest
-identities, and delegates to `language/run-host-session.sh`,
-`baseline/build-engines.sh`, or `run-unit-worker.sh`. Only language batches
-and engine builds install the pinned Cargo and Rust packages, because the Rust
-language comparator builds the pinned `regex` crate.
+identities, and delegates to `baseline/build-engines.sh` or
+`run-unit-worker.sh`. Only engine builds install the pinned Cargo and Rust
+packages, because the Rust language comparator builds the pinned `regex` crate.
 
 ## Unit workers
 
@@ -737,7 +733,7 @@ frozen inputs fail their checks before launch, such as a dirty checkout or a
 candidate archive whose SHA-256 or engine tree differs, is instead
 `input-rejection`, since a retry would fail them again; such a job, or a unit
 worker's slot, is not retried. A failed
-language batch or engine build and its invalid artifacts remain unresolved
+engine build and its invalid artifacts remain unresolved
 after verified cleanup while independent jobs continue; [unit
 dispatch](#unit-dispatch) retries a failed unit instead. Unverifiable cleanup
 and other unsafe controller failures stop admissions across both collectors.

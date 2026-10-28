@@ -263,9 +263,9 @@ is a separate decision, not the default development loop.
 4. Freeze each measured source revision with the
    [candidate preparation procedure](../tools/re2-benchmark/aws/README.md#freeze-a-candidate).
    Keep archives, manifests, and results outside `target`. Plan without
-   `--execute`; inspect the job count, selected cases, batching, host limits,
-   and cost allowance before launching. The plan is complete only when every
-   affected path and protected control has an identified measurement.
+   `--execute`; inspect the work items, selected cases, unit estimates, host
+   limits, and cost allowance before launching. The plan is complete only when
+   every affected path and protected control has an identified measurement.
 5. Qualify the affected cases with the normal campaign protocols, and run
    profiles separately from timings. A language fleet accepts a frozen
    `--selection` of case/language pairs. Baseline follow-ups use repeated
