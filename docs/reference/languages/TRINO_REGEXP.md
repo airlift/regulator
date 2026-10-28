@@ -8,13 +8,17 @@ behavior differ from both stock Joni and Java `Pattern`. Where Trino's pinned
 Joni, `io.airlift:joni:2.1.5.3`, and modern Joni disagree, each behavior is
 judged a bug or intended Trino behavior. `TrinoRegexp` follows the rule modern
 Joni and Oniguruma settled on in place of a bug, keeps intended behavior, and
-this reference notes each call.
+this reference notes each call. A defect in how pinned Joni compiles or
+searches a pattern is never copied, whether or not modern Joni fixed it.
 
 Patterns, inputs, and text results are UTF-8 `Slice` values. Matcher `start` and
 `end` return zero-based byte offsets relative to the logical Slice, with an
 exclusive end. The SQL-style `position()` operation instead returns a one-based
 code-point position, or `-1` when no match is found; its `start` argument also
-uses one-based code-point positions.
+uses one-based code-point positions. As in Trino, a search that starts past the
+last code point, as every search of an empty source does, finds nothing, even
+where the pattern matches empty text, while an earlier start can still find an
+empty match at the end, so `$` on `a` from start 1 returns `2`.
 
 As in Trino's Joni implementation, inputs are not validated as UTF-8, and
 malformed input is garbage in, garbage out. A pattern must be valid UTF-8: one
@@ -241,6 +245,53 @@ differs: it drops a dash after a range unless the dash ends the class or an
 intersection operand, or another dash follows, so in Trino `[a-zA-Z0-9-_]` does
 not match `-`. It also reads the `[` in `[a-c-[x]]` as a literal, so that class
 matches `[`, and it fails on `[a-c-\d]`.
+
+Regulator does not copy these defects of how pinned Joni compiles and searches a
+pattern. Each departs from what the pattern says. A link names the commit that
+introduced the defect, a modern Joni or Oniguruma commit that fixed it, or a
+report of it:
+
+- After a greedy quantifier or a brace-less `\pL`, a braced property in a class
+  is misread as brace-less, so `a?[\p{Greek}]` is rejected. The lexer keeps the
+  quantifier's flag in the field that Trino's fork added for brace-less `\pL`
+  ([airlift/joni 807c625](https://github.com/airlift/joni/commit/807c62538b6b3d4b18d3f7b7edcae509cd109fc6));
+  the misreading is accidental, not Trino's intent.
+- An empty group repeated exactly 2 through 100 times, such as `(?:){2}`,
+  fails with an internal error.
+- A reluctant `{0}?` runs its body when what follows fails, so `a{0}?$` matches
+  `a`, and a reluctant counted repeat of an empty capture ends the loop around
+  it, so `(?:(){2}?.)*` matches `ab` one character at a time (Oniguruma
+  [2b725c1](https://github.com/kkos/oniguruma/commit/2b725c132854cd2e253321bd1bfc3dbac5647589)
+  and
+  [ca64663](https://github.com/kkos/oniguruma/commit/ca64663ca8bb34ca7dc219d18ec6e475cca9dec8)).
+- A body that can match empty, repeated with a count of two or more, gives
+  results that depend on how Joni compiles the repeat: `(\p{L}?){2}.` on `a`
+  reports group 1 ending before it starts, `(?:\P{Sm}+x^|\S|\A){3}` matches only
+  empty text in `0`, and `(?:(?:\As*){2,}){2,}s` matches `s` in `ss`, though
+  the same pattern with the outer repeat written out twice matches `ss`.
+- Directly after a greedy `.*` or `.+`, `\b` and `\B` read a stale previous
+  character, so `.*\b` matches all of `a!` and `.+\B` matches `a b` (Joni
+  [e97e5bf](https://github.com/jruby/joni/commit/e97e5bf0bac9664d93fc13ac6c0d382e84cfab9c),
+  [Onigmo #96](https://github.com/k-takata/Onigmo/issues/96)).
+- A class that holds a negated class can test a non-ASCII character by its
+  first byte alone, so `[[^\P{ASCII}]]` matches `é`, `[,-ω&&[^c-ß²-𐐀]]`
+  matches the Ohm sign U+2126, and `[^[^[:^ascii:]]]` rejects `é` (Oniguruma
+  [ce189d1](https://github.com/kkos/oniguruma/commit/ce189d190417b783ba0e249eca7cc1875c012861)
+  fixed the first two).
+- An expression that can match empty text misses its empty match before `$` or
+  `\z` at the end of an input whose last character is multibyte and longer in
+  bytes than the expression can match, so `q?$` does not match `Ω` (Oniguruma
+  [b77e5f3](https://github.com/kkos/oniguruma/commit/b77e5f34d3640ae46cc63b71f08aafe5362c7092),
+  [Ruby #8210](https://bugs.ruby-lang.org/issues/8210)).
+- A dotall `.*` that only anchors and boundaries precede makes Joni try only the
+  search start, so `(?s)$.*` does not match `ab`.
+- In pinned jcodings, `Olck`, `Sundanese`, and `Saurashtra` have the internal
+  numbers pinned Joni uses for ASCII `\s`, `\d`, and `\w`, so `\p{Olck}`
+  matches only ASCII whitespace, `\p{Sundanese}` only ASCII digits, and
+  `\p{Saurashtra}` only ASCII word characters, none of their script's
+  characters. The other spellings `OlChiki`, `Sund`, and `Saur` do not collide
+  (Joni
+  [416f5f9](https://github.com/jruby/joni/commit/416f5f9bcd8ce9482648702fbe428aa5ae0b51e6)).
 
 ## Operations
 

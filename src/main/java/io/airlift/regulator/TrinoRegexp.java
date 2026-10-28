@@ -512,7 +512,9 @@ public sealed class TrinoRegexp
     }
 
     /// Returns the one-based code-point position of the first match at or after `start`, or
-    /// `-1`. The start position is one-based.
+    /// `-1`. The start position is one-based. As in Trino, a start past the last code point, as
+    /// on an empty source, finds nothing, even where the pattern matches empty text, while an
+    /// earlier start can still find an empty match at the end: `$` on `a` from 1 returns 2.
     public long position(Slice source, long start)
     {
         return position(source, start, 1);

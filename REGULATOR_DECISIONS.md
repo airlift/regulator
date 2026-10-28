@@ -429,6 +429,43 @@ UTF-16 code-unit offsets.
   such a pattern and compares its malformed bytes byte-for-byte; that reading
   is unspecified, so Regulator treats the pattern as a syntax error. Inputs are
   not validated as UTF-8, matching Trino's garbage-in/garbage-out contract.
+- Behavior of pinned Joni that depends on how it compiles or searches a
+  pattern, rather than on what the pattern says, is an engine defect and is not
+  copied, whether or not modern Joni or Oniguruma fixed it. The seeded
+  differential test against pinned Joni found most of these, and its grammar
+  leaves out each one:
+  - a braced property in a class read as brace-less after a greedy quantifier
+    or a brace-less `\pL`, through a lexer field that Trino's fork added for
+    brace-less `\pL`
+    ([airlift/joni 807c625](https://github.com/airlift/joni/commit/807c62538b6b3d4b18d3f7b7edcae509cd109fc6)),
+    which Trino did not intend
+  - an internal error for an empty group repeated exactly 2 through 100 times,
+    such as `(?:){2}`
+  - a reluctant `{0}?` that runs its body, and a reluctant counted repeat of an
+    empty capture that ends the loop around it (Oniguruma
+    [2b725c1](https://github.com/kkos/oniguruma/commit/2b725c132854cd2e253321bd1bfc3dbac5647589),
+    [ca64663](https://github.com/kkos/oniguruma/commit/ca64663ca8bb34ca7dc219d18ec6e475cca9dec8))
+  - counted repeats of two or more over a body that can match empty, whose
+    captures and empty-iteration stops depend on the compiled repeat
+  - a stale previous character for `\b` and `\B` after a greedy `.*` or `.+`
+    (Joni
+    [e97e5bf](https://github.com/jruby/joni/commit/e97e5bf0bac9664d93fc13ac6c0d382e84cfab9c))
+  - a class holding a negated class that tests a non-ASCII character by its
+    first byte, after set operations leave the class with no multibyte ranges
+    (Oniguruma
+    [ce189d1](https://github.com/kkos/oniguruma/commit/ce189d190417b783ba0e249eca7cc1875c012861)
+    fixed the matching case)
+  - the missed empty match at the end of a multibyte input, recorded under
+    [Trino Text-Dependent Assertions And Full Case Folding](#trino-text-dependent-assertions-and-full-case-folding)
+  - a search tried only at the start when a dotall `.*` follows only anchors and
+    boundaries, so `(?s)$.*` does not match `ab`
+  - the scripts `Olck`, `Sundanese`, and `Saurashtra`, which share the internal
+    numbers pinned Joni uses for ASCII `\s`, `\d`, and `\w` and so match those
+    instead of their scripts' characters (Joni
+    [416f5f9](https://github.com/jruby/joni/commit/416f5f9bcd8ce9482648702fbe428aa5ae0b51e6))
+
+  The [Trino language reference](docs/reference/languages/TRINO_REGEXP.md)
+  gives an example of each.
 - Where Trino's pinned Joni, `io.airlift:joni:2.1.5.3`, and modern Joni
   disagree, the behavior is judged a bug or intended Trino behavior, as
   [Language Authorities](#language-authorities) describes. A bug is not copied;
@@ -1446,9 +1483,16 @@ unlike Trino's non-strict Joni path, which compares malformed literal pattern
 bytes byte-for-byte, Regulator rejects such a pattern. Neither rule exposes a
 separate Latin-1 fallback language.
 
-Pinned Joni also misses a valid empty match for a nullable expression before
-`$` at the end of some multibyte inputs, while Java `Pattern` finds it. This is
-treated as a Joni search-optimizer defect rather than a Trino language rule.
+Pinned Joni also misses the empty match of a nullable expression before `$` or
+`\z` at the end of an input whose last character is multibyte and longer in
+bytes than the expression can match, so `q?$` does not match `Ω`, while Java
+`Pattern` finds it. Its search optimizer moves the first search position to the
+expression's maximum length in bytes before the end, rounds a position inside
+that character up to the end, and then tries no position at all. This is
+treated as a Joni search-optimizer defect rather than a Trino language rule;
+Oniguruma
+[b77e5f3](https://github.com/kkos/oniguruma/commit/b77e5f34d3640ae46cc63b71f08aafe5362c7092)
+fixed it ([Ruby #8210](https://bugs.ruby-lang.org/issues/8210)).
 `TrinoRegexp` follows the Java semantics and has a direct regression test for
 this case. The final benchmark matrix must cover direct, lowered, short
 OnePass, allocation, and ordinary-route final-line cases.
