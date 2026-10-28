@@ -116,10 +116,21 @@ public class TestTrinoRegexpLanguage
         PatternInfo info = TrinoRegexp.parse(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(3);
         assertThat(info.namedCapturingGroups()).isEqualTo(Map.of("word", 1, "never", 3));
+        assertThat(info.capturingGroupNames()).isEqualTo(Map.of(1, "word", 3, "never"));
 
         TrinoRegexp compiled = TrinoRegexp.compile(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
         assertThat(info.namedCapturingGroups()).isEqualTo(compiled.namedCapturingGroups());
+        assertThat(info.capturingGroupNames()).isEqualTo(compiled.capturingGroupNames());
+
+        // A literal alternation compiles to a matcher with no RE2 pattern behind it.
+        Slice alternation = utf8Slice("ERROR|WARN|FATAL");
+        TrinoRegexp literalAlternation = TrinoRegexp.compile(alternation);
+        assertThat(literalAlternation.re2()).isNull();
+        assertThat(literalAlternation.pattern()).isEqualTo(alternation);
+        literalAlternation.pattern().setByte(0, 'X');
+        assertThat(literalAlternation.pattern()).isEqualTo(alternation);
+        assertThat(literalAlternation.capturingGroupNames()).isEqualTo(TrinoRegexp.parse(alternation).capturingGroupNames());
 
         // Trino options affect only compilation and matching, so parsing ignores them.
         PatternInfo tinyMemory = TrinoRegexp.parse(utf8Slice("(a)"), TrinoRegexp.Options.defaults().setMaxMemory(1));
@@ -136,6 +147,7 @@ public class TestTrinoRegexpLanguage
         pattern.setByte(3, 'X');
 
         assertThat(regexp.replace(utf8Slice("a"), utf8Slice("${name}")).toStringUtf8()).isEqualTo("a");
+        assertThat(regexp.pattern()).isEqualTo(utf8Slice("(?<name>a)"));
     }
 
     @Test

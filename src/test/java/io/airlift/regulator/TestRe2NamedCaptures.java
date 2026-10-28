@@ -104,10 +104,12 @@ public class TestRe2NamedCaptures
         PatternInfo info = Re2.parse(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(3);
         assertThat(info.namedCapturingGroups()).isEqualTo(Map.of("word", 1, "never", 3));
+        assertThat(info.capturingGroupNames()).isEqualTo(Map.of(1, "word", 3, "never"));
 
         Re2 compiled = Re2.compile(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
         assertThat(info.namedCapturingGroups()).isEqualTo(compiled.namedCapturingGroups());
+        assertThat(info.capturingGroupNames()).isEqualTo(compiled.capturingGroupNames());
 
         PatternInfo literal = Re2.parse(utf8("(?P<name>a)"), Re2.Options.defaults().setLiteral(true));
         assertThat(literal.capturingGroupCount()).isZero();

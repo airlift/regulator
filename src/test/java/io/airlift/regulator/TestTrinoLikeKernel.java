@@ -149,6 +149,7 @@ public class TestTrinoLikeKernel
                 TrinoLikePattern.Options options = TrinoLikePattern.Options.defaults().setGenerateBytecode(true).setAarch64ForTesting(aarch64);
                 TrinoLikePattern generated = TrinoLikePattern.compile(utf8Slice(pattern), options);
                 assertThat(generated.usesGeneratedBytecode()).as(pattern).isTrue();
+                assertThat(generated.pattern()).as(pattern).isEqualTo(utf8Slice(pattern));
                 MethodHandle handle = generated.generatedMatches().orElseThrow();
                 assertThat(handle.type()).as(pattern).isEqualTo(MATCHES);
                 byte[] classfile = TrinoLikeKernelGenerator.classfileForDiagnostics(generated.kernelForDiagnostics(), aarch64);

@@ -40,10 +40,12 @@ public class TestRustRegexp
         PatternInfo info = RustRegexp.parse(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(3);
         assertThat(info.namedCapturingGroups()).isEqualTo(Map.of("word", 1, "never", 3));
+        assertThat(info.capturingGroupNames()).isEqualTo(Map.of(1, "word", 3, "never"));
 
         RustRegexp compiled = RustRegexp.compile(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
         assertThat(info.namedCapturingGroups()).isEqualTo(compiled.namedCapturingGroups());
+        assertThat(info.capturingGroupNames()).isEqualTo(compiled.capturingGroupNames());
     }
 
     @Test
@@ -97,6 +99,7 @@ public class TestRustRegexp
         pattern.setByte(3, 'X');
 
         assertThat(regexp.namedCapturingGroups()).containsOnlyKeys("name");
+        assertThat(regexp.pattern()).isEqualTo(utf8Slice("(?<name>a)"));
     }
 
     @Test

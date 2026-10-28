@@ -377,6 +377,12 @@ public final class JavaRegexp
         return re2.matchesResult(requireNonNull(input, "input is null"), start, end);
     }
 
+    /// Returns a copy of the compiled pattern bytes.
+    public Slice pattern()
+    {
+        return re2.pattern();
+    }
+
     public int capturingGroupCount()
     {
         return re2.capturingGroupCount();
@@ -385,5 +391,11 @@ public final class JavaRegexp
     public Map<String, Integer> namedCapturingGroups()
     {
         return re2.namedCapturingGroups();
+    }
+
+    /// Returns an immutable mapping from group numbers to capture names.
+    public Map<Integer, String> capturingGroupNames()
+    {
+        return re2.capturingGroupNames();
     }
 }

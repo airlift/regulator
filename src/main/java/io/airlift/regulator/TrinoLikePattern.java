@@ -140,6 +140,7 @@ public sealed class TrinoLikePattern
         }
     }
 
+    private final Slice pattern;
     private final int minimumSize;
     private final int maximumSize;
     private final Slice prefix;
@@ -150,6 +151,7 @@ public sealed class TrinoLikePattern
 
     @SuppressFBWarnings(value = "CT_CONSTRUCTOR_THROW", justification = "The sealed hierarchy permits only a private final nested implementation")
     private TrinoLikePattern(
+            Slice pattern,
             int minimumSize,
             int maximumSize,
             Slice prefix,
@@ -157,6 +159,7 @@ public sealed class TrinoLikePattern
             Matcher matcher,
             byte strategy)
     {
+        this.pattern = requireNonNull(pattern, "pattern is null");
         this.minimumSize = minimumSize;
         this.maximumSize = maximumSize;
         this.prefix = requireNonNull(prefix, "prefix is null");
@@ -178,11 +181,13 @@ public sealed class TrinoLikePattern
         }
     }
 
+    /// Compiles a copied snapshot of `pattern` with [Options#defaults()].
     public static TrinoLikePattern compile(Slice pattern)
     {
         return compile(pattern, OptionalInt.empty());
     }
 
+    /// Compiles a copied snapshot of `pattern` and the current option values.
     public static TrinoLikePattern compile(Slice pattern, Options options)
     {
         return compileWithOptions(pattern, options);
@@ -191,14 +196,15 @@ public sealed class TrinoLikePattern
     private static TrinoLikePattern compile(Slice pattern, OptionalInt escapeCodePoint)
     {
         requireNonNull(pattern, "pattern is null");
+        Slice patternCopy = pattern.copy();
         if (escapeCodePoint.isEmpty()) {
-            TrinoLikePattern simplePattern = tryCompileSimpleAscii(pattern);
+            TrinoLikePattern simplePattern = tryCompileSimpleAscii(patternCopy);
             if (simplePattern != null) {
                 return simplePattern;
             }
         }
 
-        List<Element> elements = TrinoLikeParser.parse(pattern, escapeCodePoint);
+        List<Element> elements = TrinoLikeParser.parse(patternCopy, escapeCodePoint);
         int minimumSize = 0;
         int maximumSize = 0;
         boolean unbounded = false;
@@ -268,6 +274,7 @@ public sealed class TrinoLikePattern
             }
         }
         return new TrinoLikePattern(
+                patternCopy,
                 minimumSize,
                 unbounded ? -1 : maximumSize,
                 prefix,
@@ -276,6 +283,8 @@ public sealed class TrinoLikePattern
                 encode(plan));
     }
 
+    // A compiled result retains `pattern` and slices of it, so a caller that keeps the result
+    // passes a private copy.
     private static TrinoLikePattern tryCompileSimpleAscii(Slice pattern)
     {
         int patternLength = pattern.length();
@@ -300,9 +309,10 @@ public sealed class TrinoLikePattern
             }
         }
 
-        Slice literal = pattern.copy(literalStart, literalEnd - literalStart);
+        Slice literal = pattern.slice(literalStart, literalEnd - literalStart);
         if (!leadingWildcard && !trailingWildcard) {
             return new TrinoLikePattern(
+                    pattern,
                     literal.length(),
                     literal.length(),
                     literal,
@@ -312,6 +322,7 @@ public sealed class TrinoLikePattern
         }
         if (!leadingWildcard) {
             return new TrinoLikePattern(
+                    pattern,
                     literal.length(),
                     -1,
                     literal,
@@ -321,6 +332,7 @@ public sealed class TrinoLikePattern
         }
         if (!trailingWildcard) {
             return new TrinoLikePattern(
+                    pattern,
                     literal.length(),
                     -1,
                     Slices.EMPTY_SLICE,
@@ -329,6 +341,7 @@ public sealed class TrinoLikePattern
                     ENDS_WITH);
         }
         return new TrinoLikePattern(
+                pattern,
                 literal.length(),
                 -1,
                 Slices.EMPTY_SLICE,
@@ -390,6 +403,7 @@ public sealed class TrinoLikePattern
     // Declared after matches for the same reason.
     private TrinoLikePattern(TrinoLikePattern pattern)
     {
+        this.pattern = pattern.pattern;
         this.minimumSize = pattern.minimumSize;
         this.maximumSize = pattern.maximumSize;
         this.prefix = pattern.prefix;
@@ -397,6 +411,12 @@ public sealed class TrinoLikePattern
         this.matcher = pattern.matcher;
         this.strategy = pattern.strategy;
         this.shortLiteral = pattern.shortLiteral;
+    }
+
+    /// Returns a copy of the compiled pattern bytes.
+    public Slice pattern()
+    {
+        return pattern.copy();
     }
 
     /// Returns whether this compiled pattern has a class generated for it, which only

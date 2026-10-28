@@ -62,6 +62,8 @@ public class TestRe2SliceApi
         sourcePattern.setByte(0, 'x');
 
         assertThat(pattern.pattern().toStringUtf8()).isEqualTo("abc");
+        pattern.pattern().setByte(0, 'y');
+        assertThat(pattern.pattern().toStringUtf8()).isEqualTo("abc");
         assertThat(pattern.matches(Slices.utf8Slice("abc"))).isTrue();
         assertThat(pattern.matches(Slices.utf8Slice("xbc"))).isFalse();
     }

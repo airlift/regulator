@@ -476,6 +476,12 @@ public final class RustRegexp
         return isSearchStart(input, start) ? result : null;
     }
 
+    /// Returns a copy of the compiled pattern bytes.
+    public Slice pattern()
+    {
+        return re2.pattern();
+    }
+
     public int capturingGroupCount()
     {
         return re2.capturingGroupCount();
@@ -484,6 +490,12 @@ public final class RustRegexp
     public Map<String, Integer> namedCapturingGroups()
     {
         return re2.namedCapturingGroups();
+    }
+
+    /// Returns an immutable mapping from group numbers to capture names.
+    public Map<Integer, String> capturingGroupNames()
+    {
+        return re2.capturingGroupNames();
     }
 
     // Every unanchored search of a range comes here. Outside byte mode, the crate skips an empty

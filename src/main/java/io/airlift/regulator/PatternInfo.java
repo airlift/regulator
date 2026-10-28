@@ -13,23 +13,28 @@
  */
 package io.airlift.regulator;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+
 import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
 
-/// Capture metadata for a validated pattern.
+/// Capture metadata for a validated pattern: the group count and names that the compiled pattern
+/// reports.
 public final class PatternInfo
 {
     private final int capturingGroupCount;
     private final Map<String, Integer> namedCapturingGroups;
+    private final Map<Integer, String> capturingGroupNames;
 
-    PatternInfo(int capturingGroupCount, Map<String, Integer> namedCapturingGroups)
+    PatternInfo(int capturingGroupCount, Map<Integer, String> capturingGroupNames)
     {
         if (capturingGroupCount < 0) {
             throw new IllegalArgumentException("capturingGroupCount is negative: " + capturingGroupCount);
         }
         this.capturingGroupCount = capturingGroupCount;
-        this.namedCapturingGroups = Map.copyOf(requireNonNull(namedCapturingGroups, "namedCapturingGroups is null"));
+        this.capturingGroupNames = Map.copyOf(requireNonNull(capturingGroupNames, "capturingGroupNames is null"));
+        this.namedCapturingGroups = ParseResult.namedCapturingGroups(this.capturingGroupNames);
     }
 
     /// Returns the number of capturing groups, excluding group zero (the whole match).
@@ -40,8 +45,15 @@ public final class PatternInfo
 
     /// Returns an immutable mapping from capture names to group numbers. Named groups also
     /// count toward [#capturingGroupCount()].
+    @SuppressFBWarnings(value = "EI_EXPOSE_REP", justification = "The returned map is immutable")
     public Map<String, Integer> namedCapturingGroups()
     {
         return namedCapturingGroups;
+    }
+
+    /// Returns an immutable mapping from group numbers to capture names.
+    public Map<Integer, String> capturingGroupNames()
+    {
+        return capturingGroupNames;
     }
 }

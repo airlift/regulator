@@ -46,7 +46,8 @@ A pattern must be valid UTF-8. One that is not throws
 `JavaRegexp`, `RustRegexp`, and UTF-8 `Re2` patterns do. This differs from
 Trino, which accepts such a pattern and replaces its malformed bytes.
 
-The compiled pattern is immutable and safe to share across threads.
+The compiled pattern is immutable and safe to share across threads, and its
+`pattern()` returns a copy of the pattern bytes given to `compile`.
 
 ## UTF-8 and malformed input
 
