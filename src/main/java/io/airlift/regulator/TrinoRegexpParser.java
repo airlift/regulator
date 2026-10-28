@@ -689,18 +689,20 @@ final class TrinoRegexpParser
             RELUCTANT_STAR,
             RELUCTANT_QUEST,
             GREEDY_PLUS_RELUCTANT_QUEST,
-            RELUCTANT_PLUS_GREEDY_QUEST,
         }
 
         // Rows are child ?, *, +, ??, *?, +?; columns are the enclosing quantifier in the same
         // order. Joni applies this table only while parsing directly nested popular quantifiers.
+        // This is modern Joni's table: pinned Joni also reduced (?:x+?)* to (?:x+?)? and
+        // (?:x+?)+ to x+?, which change what the pattern matches, and modern Joni removed them
+        // (jruby/joni f757501, Ruby bug 17341).
         private static final RepetitionReduction[][] NESTED_POPULAR_REPETITION_REDUCTIONS = {
                 {RepetitionReduction.REMOVE_PARENT, RepetitionReduction.GREEDY_STAR, RepetitionReduction.GREEDY_STAR, RepetitionReduction.RELUCTANT_QUEST, RepetitionReduction.RELUCTANT_STAR, RepetitionReduction.KEEP},
                 {RepetitionReduction.REMOVE_PARENT, RepetitionReduction.REMOVE_PARENT, RepetitionReduction.REMOVE_PARENT, RepetitionReduction.GREEDY_PLUS_RELUCTANT_QUEST, RepetitionReduction.GREEDY_PLUS_RELUCTANT_QUEST, RepetitionReduction.REMOVE_PARENT},
                 {RepetitionReduction.GREEDY_STAR, RepetitionReduction.GREEDY_STAR, RepetitionReduction.REMOVE_PARENT, RepetitionReduction.KEEP, RepetitionReduction.GREEDY_PLUS_RELUCTANT_QUEST, RepetitionReduction.REMOVE_PARENT},
                 {RepetitionReduction.REMOVE_PARENT, RepetitionReduction.RELUCTANT_STAR, RepetitionReduction.RELUCTANT_STAR, RepetitionReduction.REMOVE_PARENT, RepetitionReduction.RELUCTANT_STAR, RepetitionReduction.RELUCTANT_STAR},
                 {RepetitionReduction.REMOVE_PARENT, RepetitionReduction.REMOVE_PARENT, RepetitionReduction.REMOVE_PARENT, RepetitionReduction.REMOVE_PARENT, RepetitionReduction.REMOVE_PARENT, RepetitionReduction.REMOVE_PARENT},
-                {RepetitionReduction.KEEP, RepetitionReduction.RELUCTANT_PLUS_GREEDY_QUEST, RepetitionReduction.REMOVE_PARENT, RepetitionReduction.RELUCTANT_STAR, RepetitionReduction.RELUCTANT_STAR, RepetitionReduction.REMOVE_PARENT},
+                {RepetitionReduction.KEEP, RepetitionReduction.KEEP, RepetitionReduction.KEEP, RepetitionReduction.RELUCTANT_STAR, RepetitionReduction.RELUCTANT_STAR, RepetitionReduction.REMOVE_PARENT},
         };
 
         private static Regexp reduceNestedPopularRepetition(Regexp parent)
@@ -724,11 +726,6 @@ final class TrinoRegexpParser
                         parent.parseFlags(),
                         true,
                         unary(RegexpOp.PLUS, child.parseFlags(), false, repeatedExpression));
-                case RELUCTANT_PLUS_GREEDY_QUEST -> unary(
-                        RegexpOp.QUEST,
-                        parent.parseFlags(),
-                        false,
-                        unary(RegexpOp.PLUS, child.parseFlags(), true, repeatedExpression));
             };
         }
 
