@@ -2895,7 +2895,7 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual({"r8i"}, {platform for platform, _, _ in unresolved})
             self.assertTrue(all("exhausted their replacements" in detail for detail in unresolved.values()))
         with self.subTest(scenario="inputs refused"), tempfile.TemporaryDirectory() as temporary:
-            # A wrapper that refuses its frozen inputs would refuse them again, so its slot gives up at once.
+            # A wrapper that refuses its frozen inputs would refuse them again, so its pool gives up at once.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", refused_inputs=lambda host: host.platform == "r8i")
             with self.assertRaisesRegex(SystemExit, "unresolved units: r8i/"):
                 self.run_phase(Path(temporary), fleet, "primary", shards, 12, 6)
@@ -2904,6 +2904,13 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual({"r8i"}, {platform for platform, _, _ in unresolved})
             self.assertTrue(all(re.search(r"unit worker r8i/.* was refused before launch: Frozen candidate archive "
                                           "SHA-256 mismatch$", detail) for detail in unresolved.values()))
+        with self.subTest(scenario="inputs refused beside a free slot"), tempfile.TemporaryDirectory() as temporary:
+            # An interrupted worker frees its slot; a sibling's refusal gives up the pool, that free slot included.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "interrupt"}},
+                                  refused_inputs=lambda host: host.platform == "r8i" and host.number > 1)
+            with self.assertRaisesRegex(SystemExit, "unresolved units: r8i/"):
+                self.run_phase(Path(temporary), fleet, "smoke", shards, 4, 2)
+            self.assertEqual(1, sum(host.refused for host in fleet.hosts))
         with self.subTest(scenario="restart at every poll"), tempfile.TemporaryDirectory() as temporary:
             # A restart at every poll, and one after the phase ends, keeps each slot's count and its giving up.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", failed_boot=lambda host: host.platform == "r8i")
