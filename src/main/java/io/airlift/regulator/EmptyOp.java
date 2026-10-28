@@ -25,7 +25,8 @@ final class EmptyOp
     public static final int EMPTY_END_TEXT = 1 << 3;
     public static final int EMPTY_WORD_BOUNDARY = 1 << 4;
     public static final int EMPTY_NO_WORD_BOUNDARY = 1 << 5;
-    // DFA-supported empty-width assertions must fit in one byte; these use the last two bits.
+    // The DFA keeps the first eight assertions as state flags and maps the Rust ones below onto
+    // its own flags; these use the last two of the eight.
     public static final int EMPTY_TRINO_BEGIN_LINE = 1 << 6;
     public static final int EMPTY_TRINO_END_LINE = 1 << 7;
     public static final int EMPTY_END_TEXT_OR_FINAL_NEWLINE = 1 << 8;
@@ -58,13 +59,13 @@ final class EmptyOp
     public static final int EMPTY_RUST_UNICODE_VALID_AFTER = 1 << 31;
     // All 32 assertion bits are allocated.
 
-    private static final int RUST_CRLF_LINE = EMPTY_RUST_CRLF_BEGIN_LINE | EMPTY_RUST_CRLF_END_LINE;
+    static final int RUST_CRLF_LINE = EMPTY_RUST_CRLF_BEGIN_LINE | EMPTY_RUST_CRLF_END_LINE;
     private static final int RUST_WORD_SIDES =
             EMPTY_RUST_WORD_BEFORE |
                     EMPTY_RUST_NON_WORD_BEFORE |
                     EMPTY_RUST_WORD_AFTER |
                     EMPTY_RUST_NON_WORD_AFTER;
-    private static final int RUST_UNICODE_WORD_ASSERTIONS =
+    static final int RUST_UNICODE_WORD_ASSERTIONS =
             EMPTY_RUST_UNICODE_WORD_BEFORE |
                     EMPTY_RUST_UNICODE_NON_WORD_BEFORE |
                     EMPTY_RUST_UNICODE_WORD_AFTER |
@@ -73,7 +74,8 @@ final class EmptyOp
                     EMPTY_RUST_NO_UNICODE_WORD_BOUNDARY |
                     EMPTY_RUST_UNICODE_VALID_BEFORE |
                     EMPTY_RUST_UNICODE_VALID_AFTER;
-    private static final int RUST_ASSERTIONS = RUST_CRLF_LINE | RUST_WORD_SIDES | RUST_UNICODE_WORD_ASSERTIONS;
+    static final int RUST_WORD_ASSERTIONS = RUST_WORD_SIDES | RUST_UNICODE_WORD_ASSERTIONS;
+    static final int RUST_ASSERTIONS = RUST_CRLF_LINE | RUST_WORD_ASSERTIONS;
 
     // The JDK's Dollar assertions: $, multiline $, and \Z.
     static final int JAVA_END_ASSERTIONS = EMPTY_JAVA_END_LINE | EMPTY_JAVA_END_TEXT_OR_FINAL_TERMINATOR;

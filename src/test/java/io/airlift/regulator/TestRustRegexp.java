@@ -19,7 +19,9 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -29,6 +31,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestRustRegexp
 {
+    private static final List<String> DFA_ROUTE_PATTERNS = List.of(
+            "\\bfoo\\b",
+            "\\B",
+            "(?mR)^\\w+$",
+            "\\b{start}\\w+\\b{end}",
+            "\\b{start-half}",
+            "\\b{end-half}",
+            "\\<",
+            "\\>",
+            "(?-u)\\b{start}");
+    // Every text of up to four bytes over an ASCII word byte, an ASCII non-word byte, CR, LF, both
+    // bytes of é, and a byte that is never UTF-8.
+    private static final List<byte[]> SHORT_TEXTS = shortTexts();
+
     @Test
     public void testParse()
     {
@@ -249,8 +265,8 @@ public class TestRustRegexp
     @Test
     public void testRustAssertionsAgreeInBoundedEngines()
     {
-        // These assertions keep a program off the DFA and OnePass engines, so both bounded
-        // engines must evaluate them.
+        // A DFA search that quits on a non-ASCII neighbor reruns on these engines, so both
+        // must evaluate the assertions.
         assertBoundedEngines("(?mR)^é$", "\r\né\r\n", 2, 4);
         assertBoundedEngines("\\b{start}é\\b{end}", "!é!", 1, 3);
         assertBoundedEngines("(?-u)\\b{start}a\\b{end}", "!a!", 1, 2);
@@ -268,6 +284,228 @@ public class TestRustRegexp
         assertThat(matcher.start()).isEqualTo(2);
         assertThat(matcher.find()).isFalse();
         assertThat(matcher.find()).isFalse();
+    }
+
+    @Test
+    public void testRustAssertionsUseForwardAndReverseDfa()
+    {
+        Slice text = utf8Slice("x foo bar\r\nbaz");
+        for (RustRegexp.Options options : List.of(RustRegexp.Options.defaults(), RustRegexp.Options.bytes())) {
+            for (String pattern : DFA_ROUTE_PATTERNS) {
+                Re2 compiled = RustRegexp.compile(utf8Slice(pattern), options).re2();
+                Prog forward = compiled.forwardProgramForDiagnostics();
+                assertThat(forward.hasDfaUnsupportedAssertions()).as(pattern).isFalse();
+                assertThat(compiled.findInto(text, new int[2])).as(pattern).isTrue();
+                assertThat(forward.cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).as(pattern).isNotNull();
+            }
+
+            // A match of variable length takes its start from the reverse program.
+            Re2 words = RustRegexp.compile(utf8Slice("\\b{start}\\w+\\b{end}"), options).re2();
+            int[] groups = new int[2];
+            assertThat(words.findInto(utf8Slice("!! foo"), groups)).isTrue();
+            assertThat(groups).containsExactly(3, 6);
+            Prog reverse = words.reverseProgramIfComputedForDiagnostics();
+            assertThat(reverse).isNotNull();
+            assertThat(reverse.cachedDfaIfPresent(Dfa.DfaInstance.Kind.LONGEST_MATCH)).isNotNull();
+        }
+    }
+
+    @Test
+    public void testRustAssertionDfaAgreesWithNfaExhaustively()
+    {
+        // Every short text, as a view between bytes outside ASCII, searched over every range with
+        // the view as context: the DFA finds what the NFA finds, or quits, which it may do only on
+        // text outside ASCII in a program with a Unicode word assertion.
+        List<String> patterns = new ArrayList<>(DFA_ROUTE_PATTERNS);
+        patterns.replaceAll(pattern -> pattern.replace("foo", "a"));
+        // In (?mR)^\b, the word boundary is reached only after the line start holds, so the state
+        // that evaluates the line start must quit before it needs the boundary; \b(?mR)$ does the
+        // same in the reverse program.
+        patterns.addAll(List.of("a\\b", "(?mR)^\\b", "\\b(?mR)$", "(?mR)$", "(?mR)^"));
+
+        for (boolean bytes : new boolean[] {false, true}) {
+            RustRegexp.Options options = RustRegexp.Options.defaults().setBytes(bytes);
+            for (String pattern : patterns) {
+                Prog forward = compileRustProgram(pattern, options, false);
+                Prog reverse = compileRustProgram(pattern, options, true);
+                boolean unicodeWordAssertions = (forward.textDependentAssertions() & EmptyOp.RUST_UNICODE_WORD_ASSERTIONS) != 0;
+                for (byte[] text : SHORT_TEXTS) {
+                    Slice context = paddedView(text);
+                    String description = "%s on %s, bytes %s".formatted(pattern, HexFormat.of().formatHex(text), bytes);
+                    boolean mayQuit = unicodeWordAssertions && !isAscii(text);
+                    for (int start = 0; start <= text.length; start++) {
+                        for (int end = start; end <= text.length; end++) {
+                            assertDfaAgreesWithNfa(description, forward, reverse, context, start, end, mayQuit);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testUnicodeWordAssertionDfaQuitIsLazyAndNotCached()
+    {
+        // In a program with a Unicode word assertion, the DFA quits only where a state that needs
+        // an assertion meets a non-ASCII byte, so a non-ASCII byte before the match does not stop
+        // it.
+        Prog endBoundary = compileRustProgram("foo\\b", RustRegexp.Options.defaults(), false);
+        assertThat(Dfa.search(endBoundary, utf8Slice("é foo"), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(6);
+
+        // Byte 0x7F is ASCII, so \B next to it does not quit.
+        Prog nonBoundary = compileRustProgram("\\B", RustRegexp.Options.defaults(), false);
+        assertThat(Dfa.search(nonBoundary, Slices.wrappedBuffer((byte) 0x7F), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(0);
+
+        Prog boundaries = compileRustProgram("\\bfoo\\b", RustRegexp.Options.defaults(), false);
+        Slice nonAscii = utf8Slice("é foo");
+        assertThat(Dfa.search(boundaries, nonAscii, false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+        assertThat(Dfa.countMatches(boundaries, nonAscii, Prog.MatchKind.FIRST_MATCH)).isEqualTo(Dfa.COUNT_UNSUPPORTED);
+
+        // A quit is not cache exhaustion, so later ASCII searches keep the DFA.
+        assertThat(Dfa.countSearchBailedWhenSlow(boundaries, Prog.MatchKind.FIRST_MATCH)).isFalse();
+        assertThat(Dfa.countMatches(boundaries, utf8Slice("foo foo"), Prog.MatchKind.FIRST_MATCH)).isEqualTo(2);
+        assertThat(Dfa.search(boundaries, utf8Slice("a foo"), false, Prog.MatchKind.FIRST_MATCH, true)).isEqualTo(5);
+
+        Slice text = utf8Slice("aé");
+        for (RustRegexp.Options options : List.of(RustRegexp.Options.defaults(), RustRegexp.Options.bytes())) {
+            // A count over ASCII text long enough to probe the self-loop's exit bytes keeps the DFA.
+            Prog boundariesProgram = compileRustProgram("\\bfoo\\b", options, false);
+            assertThat(Dfa.countMatches(boundariesProgram, utf8Slice("foo ".repeat(100)), Prog.MatchKind.FIRST_MATCH)).isEqualTo(100);
+
+            // When the reverse program quits after the forward program found the end, and when a
+            // count quits, the search reruns without the DFA.
+            Re2 compiled = RustRegexp.compile(utf8Slice("a|é\\b"), options).re2();
+            int[] groups = new int[2];
+            assertThat(compiled.findInto(text, groups)).isTrue();
+            assertThat(groups).containsExactly(0, 1);
+            Prog reverse = compiled.reverseProgramIfComputedForDiagnostics();
+            assertThat(reverse).isNotNull();
+            assertThat(Dfa.search(reverse, text, 0, 1, true, Prog.MatchKind.LONGEST_MATCH, true)).isEqualTo(Dfa.SEARCH_FAILED);
+            assertThat(compiled.count(text)).isEqualTo(2);
+        }
+    }
+
+    @Test
+    public void testDfaQuitStreakSkipsDfaForRestOfInput()
+    {
+        // Each search over the Cyrillic words quits the forward DFA at its start. After four
+        // quits, the matcher's later searches of the input skip the DFA, including those over the
+        // ASCII words that follow, and still find every match.
+        RustRegexp words = RustRegexp.compile(utf8Slice("\\b\\w+\\b"));
+        Slice text = utf8Slice("жж ".repeat(8) + "foo bar");
+        RegexpMatcher matcher = words.matcher(text, 0);
+        List<String> spans = new ArrayList<>();
+        for (int quit = 0; quit < 4; quit++) {
+            assertThat(matcher.find()).isTrue();
+            spans.add(matcher.start() + "-" + matcher.end());
+            assertThat(matcher.dfaQuitStreak()).isEqualTo(quit + 1);
+        }
+        Dfa.DfaInstance forward = words.re2().forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH);
+        assertThat(forward).isNotNull();
+        int stateCount = forward.cacheSnapshot().stateCount();
+        while (matcher.find()) {
+            spans.add(matcher.start() + "-" + matcher.end());
+        }
+
+        List<String> expected = new ArrayList<>();
+        for (int word = 0; word < 8; word++) {
+            expected.add((5 * word) + "-" + (5 * word + 4));
+        }
+        expected.addAll(List.of("40-43", "44-47"));
+        assertThat(spans).isEqualTo(expected);
+        assertThat(matcher.dfaQuitStreak()).isEqualTo(4);
+        assertThat(forward.cacheSnapshot().stateCount()).isEqualTo(stateCount);
+
+        // A reset ends the streak, so the DFA runs over the ASCII words again.
+        matcher.reset(text, 40, text.length());
+        assertThat(matcher.find()).isTrue();
+        assertThat(matcher.start()).isEqualTo(40);
+        assertThat(matcher.end()).isEqualTo(43);
+        assertThat(forward.cacheSnapshot().stateCount()).isGreaterThan(stateCount);
+
+        // A search whose reverse DFA quits after the forward DFA found the end counts toward the
+        // streak too, so searches that alternate reverse and forward quits reach the limit.
+        RegexpMatcher alternating = RustRegexp.compile(utf8Slice("a|é\\b")).matcher(utf8Slice("aé ".repeat(4)), 0);
+        for (int quit = 0; quit < 4; quit++) {
+            assertThat(alternating.find()).isTrue();
+            assertThat(alternating.dfaQuitStreak()).isEqualTo(quit + 1);
+        }
+    }
+
+    private static void assertDfaAgreesWithNfa(String description, Prog forward, Prog reverse, Slice context, int start, int end, boolean mayQuit)
+    {
+        int[] groups = new int[2];
+        long expectedEnd = Nfa.search(forward, context, start, end, false, Prog.MatchKind.FIRST_MATCH, groups) ? groups[1] : Dfa.SEARCH_NO_MATCH;
+        long forwardEnd = Dfa.search(forward, context, start, end, false, Prog.MatchKind.FIRST_MATCH, true);
+        if (forwardEnd == Dfa.SEARCH_FAILED) {
+            assertThat(mayQuit).as("forward quit: %s [%s, %s)", description, start, end).isTrue();
+        }
+        else {
+            assertThat(forwardEnd).as("forward: %s [%s, %s)", description, start, end).isEqualTo(expectedEnd);
+        }
+
+        // The reverse program finds the leftmost start of a match that ends at the range end.
+        int matchStart = start;
+        while (matchStart <= end && !Nfa.search(forward, context, matchStart, end, true, Prog.MatchKind.FULL_MATCH, null)) {
+            matchStart++;
+        }
+        long expectedStart = matchStart <= end ? matchStart - start : Dfa.SEARCH_NO_MATCH;
+        long reverseStart = Dfa.search(reverse, context, start, end, true, Prog.MatchKind.LONGEST_MATCH, true);
+        if (reverseStart == Dfa.SEARCH_FAILED) {
+            assertThat(mayQuit).as("reverse quit: %s [%s, %s)", description, start, end).isTrue();
+        }
+        else {
+            assertThat(reverseStart).as("reverse: %s [%s, %s)", description, start, end).isEqualTo(expectedStart);
+        }
+    }
+
+    private static List<byte[]> shortTexts()
+    {
+        byte[] alphabet = {'a', ' ', '\r', '\n', (byte) 0xC3, (byte) 0xA9, (byte) 0xFF};
+        List<byte[]> texts = new ArrayList<>();
+        addTexts(texts, alphabet, new byte[0], 4);
+        return List.copyOf(texts);
+    }
+
+    private static void addTexts(List<byte[]> texts, byte[] alphabet, byte[] prefix, int remaining)
+    {
+        texts.add(prefix);
+        if (remaining == 0) {
+            return;
+        }
+        for (byte value : alphabet) {
+            byte[] text = Arrays.copyOf(prefix, prefix.length + 1);
+            text[prefix.length] = value;
+            addTexts(texts, alphabet, text, remaining - 1);
+        }
+    }
+
+    // A view of `text` between the two bytes of é, so a search that reads past the view decodes a
+    // word character.
+    private static Slice paddedView(byte[] text)
+    {
+        byte[] padded = new byte[text.length + 2];
+        padded[0] = (byte) 0xC3;
+        System.arraycopy(text, 0, padded, 1, text.length);
+        padded[padded.length - 1] = (byte) 0xA9;
+        return Slices.wrappedBuffer(padded, 1, text.length);
+    }
+
+    private static boolean isAscii(byte[] text)
+    {
+        for (byte value : text) {
+            if (value < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static Prog compileRustProgram(String pattern, RustRegexp.Options options, boolean reversed)
+    {
+        ParseResult parsed = RustRegexpParser.parse(utf8Slice(pattern), options.syntaxFlags(), options.nestLimit());
+        Regexp regexp = Simplifier.simplify(parsed.regexp(), parsed.caseFolding());
+        return Compiler.compileNormalized(regexp, reversed, 1 << 20, Compiler.Dialect.RE2, parsed.caseFolding());
     }
 
     private static void assertBoundedEngines(String pattern, String text, int start, int end)

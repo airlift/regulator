@@ -90,6 +90,8 @@ final class Dfa
     @SuppressWarnings("StaticAssignmentOfThrowable")
     private static final RetrySearchException RETRY_SEARCH = new RetrySearchException();
     @SuppressWarnings("StaticAssignmentOfThrowable")
+    private static final QuitSearchException QUIT_SEARCH = new QuitSearchException();
+    @SuppressWarnings("StaticAssignmentOfThrowable")
     private static final StartStateAllocationException START_STATE_ALLOCATION_FAILED = new StartStateAllocationException();
     @SuppressWarnings("StaticAssignmentOfThrowable")
     private static final TestingFailureError TESTING_FAILURE = new TestingFailureError();
@@ -440,7 +442,7 @@ final class Dfa
                 }
                 return searchForward(dfa, bytes, textBegin, textEnd, ctxEnd, startOffset, startIsMatch, false, endMatch, wantEarliestMatch);
             }
-            catch (StartStateAllocationException ignored) {
+            catch (StartStateAllocationException | QuitSearchException ignored) {
                 return SEARCH_FAILED;
             }
             catch (RetrySearchException ignored) {
@@ -572,7 +574,7 @@ final class Dfa
                 }
                 return count;
             }
-            catch (StartStateAllocationException ignored) {
+            catch (StartStateAllocationException | QuitSearchException ignored) {
                 return COUNT_UNSUPPORTED;
             }
             catch (RetrySearchException ignored) {
@@ -655,7 +657,7 @@ final class Dfa
                         textBegin,
                         cursor.fixedDistanceByteCandidates);
             }
-            catch (StartStateAllocationException ignored) {
+            catch (StartStateAllocationException | QuitSearchException ignored) {
                 return SEARCH_FAILED;
             }
             catch (RetrySearchException ignored) {
@@ -734,6 +736,11 @@ final class Dfa
             }
             catch (StartStateAllocationException ignored) {
                 cursor.disabled = true;
+                cursor.fallbackCount++;
+                return CANDIDATE_SEARCH_FALLBACK;
+            }
+            catch (QuitSearchException ignored) {
+                // The text, not the cache, stopped the DFA, so the cursor stays enabled.
                 cursor.fallbackCount++;
                 return CANDIDATE_SEARCH_FALLBACK;
             }
@@ -1584,7 +1591,7 @@ final class Dfa
                 }
                 return matched ? ManyMatchResult.MATCH : ManyMatchResult.NO_MATCH;
             }
-            catch (StartStateAllocationException ignored) {
+            catch (StartStateAllocationException | QuitSearchException ignored) {
                 matches.clear();
                 return ManyMatchResult.RESOURCE_EXHAUSTED;
             }
@@ -1695,7 +1702,7 @@ final class Dfa
                 stateOffset = transition & ~T_MATCH_BIT;
                 return minimumMatchId(dfa.stateData[stateOffset / dfa.nextSize]);
             }
-            catch (StartStateAllocationException ignored) {
+            catch (StartStateAllocationException | QuitSearchException ignored) {
                 return -1;
             }
             catch (RetrySearchException ignored) {
@@ -3497,10 +3504,27 @@ final class Dfa
     }
 
     private static final int BYTE_END_TEXT = 256;
-    private static final int FLAG_MATCH = 0x0100;
-    private static final int FLAG_LAST_WORD = 0x0200;
-    private static final int FLAG_EMPTY_MASK = 0x00FF;
-    private static final int FLAG_NEED_SHIFT = 16;
+    // A state's flag word. Bits 0-13 are the assertions that hold at the state's position: the
+    // first eight EmptyOp bits, then the DFA's own bits for the Rust CRLF anchors and word sides.
+    // Unicode \b and \B use the EmptyOp word boundary bits; dfaEmptyFlags maps each Rust
+    // assertion. Bit 14 marks a match, bits 15-17 describe the byte before the position, and the
+    // bits from FLAG_NEED_SHIFT up are the assertions the state's instructions need, numbered as
+    // bits 0-13.
+    private static final int FLAG_CRLF_BEGIN_LINE = 1 << 8;
+    private static final int FLAG_CRLF_END_LINE = 1 << 9;
+    private static final int FLAG_WORD_BEFORE = 1 << 10;
+    private static final int FLAG_NON_WORD_BEFORE = 1 << 11;
+    private static final int FLAG_WORD_AFTER = 1 << 12;
+    private static final int FLAG_NON_WORD_AFTER = 1 << 13;
+    static final int FLAG_MATCH = 1 << 14;
+    private static final int FLAG_EMPTY_MASK = FLAG_MATCH - 1;
+    // The byte before the state's position: an ASCII word byte; the byte that starts a CR LF pair
+    // in the direction of the search, CR forward and LF in reverse, whether or not the other byte
+    // follows; or a byte outside ASCII.
+    private static final int FLAG_LAST_WORD = 1 << 15;
+    private static final int FLAG_HALF_CRLF = 1 << 16;
+    private static final int FLAG_LAST_NON_ASCII = 1 << 17;
+    private static final int FLAG_NEED_SHIFT = 18;
 
     // Transition table sentinel values (stored in transitions[])
     static final int T_UNCOMPUTED = -3;    // not yet computed (must have sign bit set for isAbnormal)
@@ -3540,10 +3564,58 @@ final class Dfa
                 b == '_';
     }
 
+    /// Returns the DFA's assertion bits for an instruction's EmptyOp bits: the first eight EmptyOp
+    /// bits unchanged, and each Rust assertion as the DFA's evaluation of it. The other EmptyOp
+    /// bits are dropped; programs that need them never reach the DFA.
+    private static int dfaEmptyFlags(int empty)
+    {
+        int rustAssertions = empty & EmptyOp.RUST_ASSERTIONS;
+        int flags = empty & 0xFF;
+        while (rustAssertions != 0) {
+            int assertion = Integer.lowestOneBit(rustAssertions);
+            flags |= rustAssertionFlag(assertion);
+            rustAssertions ^= assertion;
+        }
+        return flags;
+    }
+
+    // The DFA evaluates a Unicode word assertion only where each neighbor is an ASCII byte or an
+    // edge of the text, and quits before evaluating it anywhere else. Between those neighbors the
+    // crate decodes each byte as its own character, every side decodes, and the Unicode word
+    // characters are the ASCII ones, so each Unicode assertion is its ASCII form. The valid-UTF-8
+    // assertions map to nothing because the compiler always pairs one with a non-word side in the
+    // same instruction, and that side carries the evaluation.
+    private static int rustAssertionFlag(int assertion)
+    {
+        return switch (assertion) {
+            case EmptyOp.EMPTY_RUST_CRLF_BEGIN_LINE -> FLAG_CRLF_BEGIN_LINE;
+            case EmptyOp.EMPTY_RUST_CRLF_END_LINE -> FLAG_CRLF_END_LINE;
+            case EmptyOp.EMPTY_RUST_WORD_BEFORE, EmptyOp.EMPTY_RUST_UNICODE_WORD_BEFORE -> FLAG_WORD_BEFORE;
+            case EmptyOp.EMPTY_RUST_NON_WORD_BEFORE, EmptyOp.EMPTY_RUST_UNICODE_NON_WORD_BEFORE -> FLAG_NON_WORD_BEFORE;
+            case EmptyOp.EMPTY_RUST_WORD_AFTER, EmptyOp.EMPTY_RUST_UNICODE_WORD_AFTER -> FLAG_WORD_AFTER;
+            case EmptyOp.EMPTY_RUST_NON_WORD_AFTER, EmptyOp.EMPTY_RUST_UNICODE_NON_WORD_AFTER -> FLAG_NON_WORD_AFTER;
+            case EmptyOp.EMPTY_RUST_UNICODE_WORD_BOUNDARY -> EmptyOp.EMPTY_WORD_BOUNDARY;
+            case EmptyOp.EMPTY_RUST_NO_UNICODE_WORD_BOUNDARY -> EmptyOp.EMPTY_NO_WORD_BOUNDARY;
+            case EmptyOp.EMPTY_RUST_UNICODE_VALID_BEFORE, EmptyOp.EMPTY_RUST_UNICODE_VALID_AFTER -> 0;
+            default -> throw new IllegalArgumentException("not a Rust assertion: " + assertion);
+        };
+    }
+
     private static final class RetrySearchException
             extends RuntimeException
     {
         private RetrySearchException()
+        {
+            super(null, null, false, false);
+        }
+    }
+
+    // A transition may evaluate a Unicode word assertion next to a byte outside ASCII. The search
+    // fails, and the caller reruns it on an engine that decodes the text.
+    private static final class QuitSearchException
+            extends RuntimeException
+    {
+        private QuitSearchException()
         {
             super(null, null, false, false);
         }
@@ -3756,7 +3828,7 @@ final class Dfa
             long stateDataArrayBytes,
             long stateReferenceArrayBytes,
             long selfLoopExitByteSetBytes,
-            long trinoStartStateCacheBytes,
+            long optionalStartStateCacheBytes,
             long stateReferenceRowBytes,
             long instructionBytes,
             long stateMetadataBytes,
@@ -4304,6 +4376,13 @@ final class Dfa
         private final byte[] startByteNibbleTables;
         private final boolean nullableStartByteCandidates;
         private final int trinoLineFlag;
+        // Rust CRLF anchors read a CR LF pair in the direction of the search: its first byte is CR
+        // forward and LF in reverse, and its second byte is the other.
+        private final boolean hasCrlfLineAssertions;
+        private final int crlfFirstByte;
+        private final int crlfSecondByte;
+        private final boolean hasRustWordAssertions;
+        private final boolean quitsOnNonAscii;
         private volatile Prog.FixedDistanceByteCandidates fixedDistanceByteCandidates;
         private volatile int fixedDistanceSmallByteSet;
         private long fixedDistanceByteCandidateMemory;
@@ -4375,6 +4454,10 @@ final class Dfa
         private final StateData[][] startTrinoLine;
         private final StateData[][] startAfterWord = new StateData[2][2];
         private final StateData[][] startAfterNonWord = new StateData[2][2];
+        // Only programs with Rust CRLF anchors allocate the first, and only programs with a Unicode
+        // word assertion allocate the second.
+        private final StateData[][] startAfterCarriageReturn;
+        private final StateData[][] startAfterNonAscii;
 
         // Observability
         private volatile int resetCount;
@@ -4404,6 +4487,14 @@ final class Dfa
                     ? prog.textDependentAssertions() & EmptyOp.EMPTY_TRINO_END_LINE
                     : prog.textDependentAssertions() & EmptyOp.EMPTY_TRINO_BEGIN_LINE;
             this.startTrinoLine = trinoLineFlag == 0 || prog.reversed() ? null : new StateData[2][2];
+            int textDependentAssertions = prog.textDependentAssertions();
+            this.hasCrlfLineAssertions = (textDependentAssertions & EmptyOp.RUST_CRLF_LINE) != 0;
+            this.crlfFirstByte = prog.reversed() ? '\n' : '\r';
+            this.crlfSecondByte = prog.reversed() ? '\r' : '\n';
+            this.hasRustWordAssertions = (textDependentAssertions & EmptyOp.RUST_WORD_ASSERTIONS) != 0;
+            this.quitsOnNonAscii = prog.dfaQuitsOnNonAscii();
+            this.startAfterCarriageReturn = hasCrlfLineAssertions ? new StateData[2][2] : null;
+            this.startAfterNonAscii = quitsOnNonAscii ? new StateData[2][2] : null;
 
             this.q0 = new WorkQueue(prog.size(), nmark);
             this.q1 = new WorkQueue(prog.size(), nmark);
@@ -4660,7 +4751,13 @@ final class Dfa
                 throw RETRY_SEARCH;
             }
 
+            int stateFlag = stateData[stateIndex].flag();
             for (int value = 0; value < 256; value++) {
+                // A byte the DFA quits on stays uncomputed, so it leaves the self-loop, and a search
+                // that reaches it quits there.
+                if (quitsOnNonAscii && quits(stateFlag, value)) {
+                    continue;
+                }
                 if (computeTransition(stateOffset, value) == Integer.MIN_VALUE) {
                     selfLoopExitByteSets[stateIndex] = SELF_LOOP_EXIT_BYTE_SET_REJECTED;
                     return 0;
@@ -4725,7 +4822,9 @@ final class Dfa
                     countPopulatedStartStates(startBeginLine) +
                     (startTrinoLine == null ? 0 : countPopulatedStartStates(startTrinoLine)) +
                     countPopulatedStartStates(startAfterWord) +
-                    countPopulatedStartStates(startAfterNonWord);
+                    countPopulatedStartStates(startAfterNonWord) +
+                    (startAfterCarriageReturn == null ? 0 : countPopulatedStartStates(startAfterCarriageReturn)) +
+                    (startAfterNonAscii == null ? 0 : countPopulatedStartStates(startAfterNonAscii));
 
             return new CacheSnapshot(
                     stateCount,
@@ -4750,7 +4849,7 @@ final class Dfa
             long stateDataArrayBytes = sizeOfObjectArray(stateData.length);
             long stateReferenceArrayBytes = sizeOfObjectArray(stateRefArrays.length);
             long selfLoopExitByteSetBytes = sizeOfIntArray(selfLoopExitByteSets.length);
-            long trinoStartStateCacheBytes = trinoStartStateCacheMemory();
+            long optionalStartStateCacheBytes = optionalStartStateCacheMemory();
             long stateReferenceRowBytes = 0;
             long instructionBytes = 0;
             int stateLimit = Math.min(nextFreeOffset / nextSize, stateData.length);
@@ -4771,7 +4870,7 @@ final class Dfa
                     stateDataArrayBytes +
                     stateReferenceArrayBytes +
                     selfLoopExitByteSetBytes +
-                    trinoStartStateCacheBytes +
+                    optionalStartStateCacheBytes +
                     stateReferenceRowBytes +
                     instructionBytes +
                     stateMetadataBytes +
@@ -4782,7 +4881,7 @@ final class Dfa
                     stateDataArrayBytes,
                     stateReferenceArrayBytes,
                     selfLoopExitByteSetBytes,
-                    trinoStartStateCacheBytes,
+                    optionalStartStateCacheBytes,
                     stateReferenceRowBytes,
                     instructionBytes,
                     stateMetadataBytes,
@@ -5486,6 +5585,12 @@ final class Dfa
             }
             selectedCount = selectCachedStartRows(selected, startAfterWord[1], maximumRows, selectedCount);
             selectedCount = selectCachedStartRows(selected, startAfterNonWord[1], maximumRows, selectedCount);
+            if (startAfterCarriageReturn != null) {
+                selectedCount = selectCachedStartRows(selected, startAfterCarriageReturn[1], maximumRows, selectedCount);
+            }
+            if (startAfterNonAscii != null) {
+                selectedCount = selectCachedStartRows(selected, startAfterNonAscii[1], maximumRows, selectedCount);
+            }
 
             int[] selfLoopCounts = new int[stateLimit];
             for (int stateIndex = 1; stateIndex < stateLimit; stateIndex++) {
@@ -5577,11 +5682,11 @@ final class Dfa
             StateData[] startCache;
             if (runForward) {
                 if (textBegin == ctxBegin) {
-                    flags = EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE | trinoLineFlag;
+                    flags = EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE | trinoLineFlag | crlfStartFlags(-1);
                     startCache = startBeginText[dirIndex];
                 }
                 else if (bytes[textBegin - 1] == '\n') {
-                    flags = EmptyOp.EMPTY_BEGIN_LINE;
+                    flags = EmptyOp.EMPTY_BEGIN_LINE | crlfStartFlags('\n');
                     if (textBegin < ctxEnd && trinoLineFlag != 0) {
                         flags |= trinoLineFlag;
                         startCache = startTrinoLine[dirIndex];
@@ -5594,6 +5699,14 @@ final class Dfa
                     flags = FLAG_LAST_WORD;
                     startCache = startAfterWord[dirIndex];
                 }
+                else if (bytes[textBegin - 1] == '\r' && startAfterCarriageReturn != null) {
+                    flags = crlfStartFlags('\r');
+                    startCache = startAfterCarriageReturn[dirIndex];
+                }
+                else if (bytes[textBegin - 1] < 0 && startAfterNonAscii != null) {
+                    flags = FLAG_LAST_NON_ASCII;
+                    startCache = startAfterNonAscii[dirIndex];
+                }
                 else {
                     flags = 0;
                     startCache = startAfterNonWord[dirIndex];
@@ -5601,16 +5714,24 @@ final class Dfa
             }
             else {
                 if (textEnd == ctxEnd) {
-                    flags = EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE;
+                    flags = EmptyOp.EMPTY_BEGIN_TEXT | EmptyOp.EMPTY_BEGIN_LINE | crlfStartFlags(-1);
                     startCache = startBeginText[dirIndex];
                 }
                 else if (bytes[textEnd] == '\n') {
-                    flags = EmptyOp.EMPTY_BEGIN_LINE;
+                    flags = EmptyOp.EMPTY_BEGIN_LINE | crlfStartFlags('\n');
                     startCache = startBeginLine[dirIndex];
                 }
                 else if (isWordChar(bytes[textEnd] & 0xFF)) {
                     flags = FLAG_LAST_WORD;
                     startCache = startAfterWord[dirIndex];
+                }
+                else if (bytes[textEnd] == '\r' && startAfterCarriageReturn != null) {
+                    flags = crlfStartFlags('\r');
+                    startCache = startAfterCarriageReturn[dirIndex];
+                }
+                else if (bytes[textEnd] < 0 && startAfterNonAscii != null) {
+                    flags = FLAG_LAST_NON_ASCII;
+                    startCache = startAfterNonAscii[dirIndex];
                 }
                 else {
                     flags = 0;
@@ -5641,6 +5762,20 @@ final class Dfa
             return start;
         }
 
+        // The Rust CRLF flags for a search that starts after `previousByte`, or at the start of the
+        // text when it is -1. A line starts after a pair's second byte. After its first byte, the
+        // state records that byte, and the transition over the next byte decides the line start.
+        private int crlfStartFlags(int previousByte)
+        {
+            if (!hasCrlfLineAssertions) {
+                return 0;
+            }
+            if (previousByte == -1 || previousByte == crlfSecondByte) {
+                return FLAG_CRLF_BEGIN_LINE;
+            }
+            return previousByte == crlfFirstByte ? FLAG_HALF_CRLF : 0;
+        }
+
         private int byteMap(int c)
         {
             if (c == BYTE_END_TEXT) {
@@ -5660,10 +5795,29 @@ final class Dfa
                 return existing;
             }
 
+            // A quit reads only the source state, so it is reported before taking exclusive
+            // access and is never cached; every later search over the byte reaches it again.
+            if (quitsOnNonAscii && quits(stateData[stateOffset / nextSize].flag(), c)) {
+                throw QUIT_SEARCH;
+            }
             if (!cacheMutationLock.isHeldByCurrentThread()) {
                 throw RETRY_SEARCH;
             }
             return computeTransitionLocked(stateOffset, c, cls);
+        }
+
+        /// Returns whether the transition from a state with `flag` over `c` may evaluate a Unicode
+        /// word assertion next to a byte outside ASCII, where either the byte before the state's
+        /// position or `c` is outside ASCII. `c` is the next byte; at the end of a range that ends
+        /// before its context, it is the byte after the range. Any assertion the state needs
+        /// counts, because a line anchor that holds can lead to a word assertion that is not yet
+        /// among the state's needs. Every malformed UTF-8 sequence contains a byte outside ASCII,
+        /// so the DFA never evaluates the crate's decoding rules. A byte class shares one cached
+        /// transition, so this relies on the byte map never putting a byte outside ASCII in a
+        /// class with an ASCII byte.
+        private static boolean quits(int flag, int c)
+        {
+            return (flag >>> FLAG_NEED_SHIFT) != 0 && ((flag & FLAG_LAST_NON_ASCII) != 0 || (c >= 0x80 && c != BYTE_END_TEXT));
         }
 
         private int computeTransitionLocked(int stateOffset, int c, int cls)
@@ -5673,7 +5827,7 @@ final class Dfa
             // Convert state into work queue
             stateToWorkQueue(state, q0);
 
-            int needflag = (state.flag() >> FLAG_NEED_SHIFT) & 0xFF;
+            int needflag = state.flag() >>> FLAG_NEED_SHIFT;
             int beforeflag = state.flag() & FLAG_EMPTY_MASK;
             int oldbeforeflag = beforeflag;
             int afterflag = 0;
@@ -5711,6 +5865,27 @@ final class Dfa
                 beforeflag |= EmptyOp.EMPTY_WORD_BOUNDARY;
             }
 
+            // A Rust CRLF line ends before a first byte, before a second byte that does not follow
+            // a first byte, and at the end of the text. It starts after a second byte, after a
+            // first byte that a second byte does not follow, and at the start of the text, which
+            // the start state carries.
+            if (hasCrlfLineAssertions) {
+                boolean halfCrlf = (state.flag() & FLAG_HALF_CRLF) != 0;
+                if (c == crlfFirstByte || c == BYTE_END_TEXT || (c == crlfSecondByte && !halfCrlf)) {
+                    beforeflag |= FLAG_CRLF_END_LINE;
+                }
+                if (halfCrlf && c != crlfSecondByte) {
+                    beforeflag |= FLAG_CRLF_BEGIN_LINE;
+                }
+                if (c == crlfSecondByte) {
+                    afterflag |= FLAG_CRLF_BEGIN_LINE;
+                }
+            }
+            if (hasRustWordAssertions) {
+                beforeflag |= isLastWord ? FLAG_WORD_BEFORE : FLAG_NON_WORD_BEFORE;
+                beforeflag |= isWord ? FLAG_WORD_AFTER : FLAG_NON_WORD_AFTER;
+            }
+
             if ((beforeflag & ~oldbeforeflag & needflag) != 0) {
                 runWorkQueueOnEmptyString(q0, q1, beforeflag);
                 swapWorkQueue();
@@ -5726,6 +5901,12 @@ final class Dfa
             }
             if (isWord) {
                 flag |= FLAG_LAST_WORD;
+            }
+            if (hasCrlfLineAssertions && c == crlfFirstByte) {
+                flag |= FLAG_HALF_CRLF;
+            }
+            if (quitsOnNonAscii && c >= 0x80 && c != BYTE_END_TEXT) {
+                flag |= FLAG_LAST_NON_ASCII;
             }
 
             StateData ns;
@@ -5827,7 +6008,7 @@ final class Dfa
                 }
 
                 if (op == InstOp.EMPTY_WIDTH) {
-                    needflags |= instruction.empty();
+                    needflags |= dfaEmptyFlags(instruction.empty());
                 }
 
                 if (id > 0 && prog.inst(id - 1).last()) {
@@ -6113,18 +6294,23 @@ final class Dfa
                     sizeOfObjectArray(stateData.length) +
                     sizeOfObjectArray(stateRefArrays.length) +
                     sizeOfIntArray(selfLoopExitByteSets.length) +
-                    trinoStartStateCacheMemory() +
+                    optionalStartStateCacheMemory() +
                     STATE_CACHE_BYTES +
                     cache.tableBytes();
         }
 
-        private long trinoStartStateCacheMemory()
+        private long optionalStartStateCacheMemory()
         {
-            if (startTrinoLine == null) {
+            return startStateCacheMemory(startTrinoLine) + startStateCacheMemory(startAfterCarriageReturn) + startStateCacheMemory(startAfterNonAscii);
+        }
+
+        private static long startStateCacheMemory(StateData[][] startCache)
+        {
+            if (startCache == null) {
                 return 0;
             }
-            long memory = sizeOfObjectArray(startTrinoLine.length);
-            for (StateData[] row : startTrinoLine) {
+            long memory = sizeOfObjectArray(startCache.length);
+            for (StateData[] row : startCache) {
                 memory += sizeOfObjectArray(row.length);
             }
             return memory;
@@ -6147,6 +6333,12 @@ final class Dfa
                     }
                     startAfterWord[i][j] = null;
                     startAfterNonWord[i][j] = null;
+                    if (startAfterCarriageReturn != null) {
+                        startAfterCarriageReturn[i][j] = null;
+                    }
+                    if (startAfterNonAscii != null) {
+                        startAfterNonAscii[i][j] = null;
+                    }
                 }
             }
 
@@ -6242,7 +6434,7 @@ final class Dfa
                             if (!instruction.last()) {
                                 stack[stackPointer++] = id + 1;
                             }
-                            if ((instruction.empty() & ~flag) != 0) {
+                            if ((dfaEmptyFlags(instruction.empty()) & ~flag) != 0) {
                                 break;
                             }
                             id = instruction.out();

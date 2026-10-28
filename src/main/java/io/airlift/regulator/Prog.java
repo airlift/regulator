@@ -524,8 +524,15 @@ final class Prog
 
     public boolean hasDfaUnsupportedAssertions()
     {
-        int dfaSupported = EmptyOp.EMPTY_TRINO_BEGIN_LINE | EmptyOp.EMPTY_TRINO_END_LINE;
+        int dfaSupported = EmptyOp.EMPTY_TRINO_BEGIN_LINE | EmptyOp.EMPTY_TRINO_END_LINE | EmptyOp.RUST_ASSERTIONS;
         return (textDependentAssertions & ~dfaSupported) != 0;
+    }
+
+    /// Returns whether this program's DFA can quit on a byte outside ASCII, as one with a Rust
+    /// Unicode word assertion does, so that an engine that decodes the text runs the search.
+    public boolean dfaQuitsOnNonAscii()
+    {
+        return (textDependentAssertions & EmptyOp.RUST_UNICODE_WORD_ASSERTIONS) != 0;
     }
 
     public int textDependentAssertions()
@@ -1855,6 +1862,8 @@ final class Prog
 
         boolean markedLineBoundaries = false;
         boolean markedWordBoundaries = false;
+        boolean markedCarriageReturn = false;
+        boolean markedNonAscii = false;
 
         for (int id = 0; id < size(); id++) {
             Inst instruction = inst(id);
@@ -1896,12 +1905,27 @@ final class Prog
                 if ((empty & (EmptyOp.EMPTY_BEGIN_LINE |
                         EmptyOp.EMPTY_END_LINE |
                         EmptyOp.EMPTY_TRINO_BEGIN_LINE |
-                        EmptyOp.EMPTY_TRINO_END_LINE)) != 0 && !markedLineBoundaries) {
+                        EmptyOp.EMPTY_TRINO_END_LINE |
+                        EmptyOp.RUST_CRLF_LINE)) != 0 && !markedLineBoundaries) {
                     builder.mark('\n', '\n');
                     builder.merge();
                     markedLineBoundaries = true;
                 }
-                if ((empty & (EmptyOp.EMPTY_WORD_BOUNDARY | EmptyOp.EMPTY_NO_WORD_BOUNDARY)) != 0 && !markedWordBoundaries) {
+                // The DFA evaluates a Rust CRLF anchor from CR and LF separately, and a Rust word
+                // assertion from whether each neighboring byte is an ASCII word byte. In a program
+                // with a Unicode word assertion, it quits on a byte outside ASCII, which a byte
+                // class can carry only if the bytes 0x80-0xFF never share it with an ASCII byte.
+                if ((empty & EmptyOp.RUST_CRLF_LINE) != 0 && !markedCarriageReturn) {
+                    builder.mark('\r', '\r');
+                    builder.merge();
+                    markedCarriageReturn = true;
+                }
+                if ((empty & EmptyOp.RUST_UNICODE_WORD_ASSERTIONS) != 0 && !markedNonAscii) {
+                    builder.mark(0x80, 0xFF);
+                    builder.merge();
+                    markedNonAscii = true;
+                }
+                if ((empty & (EmptyOp.EMPTY_WORD_BOUNDARY | EmptyOp.EMPTY_NO_WORD_BOUNDARY | EmptyOp.RUST_WORD_ASSERTIONS)) != 0 && !markedWordBoundaries) {
                     // Keep the original two-phase order:
                     // first mark word ranges, then mark non-word ranges.
                     markRanges(builder, WORD_RANGES);

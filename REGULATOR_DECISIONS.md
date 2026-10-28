@@ -343,13 +343,30 @@ UTF-16 code-unit offsets.
   either: its results match the crate on any input.
 - CRLF multi-line anchors, Unicode `\b` and `\B`, and the start, end, and
   half word boundaries are Rust-only empty-width predicates, evaluated only
-  when a program contains one. Like Java's text-dependent assertions, they keep
-  a program on BitState or NFA; DFA transition loops do not contain
-  Rust-language branches. ASCII `\b` and `\B` reuse RE2's boundaries. Unicode
-  `\b` and `\B` are Rust predicates because the crate decodes the character
-  on each side and treats a side that does not decode as a non-word character,
-  and `\B` also requires each side that is present to decode; byte mode
-  exposes both rules.
+  when a program contains one. ASCII `\b` and `\B` reuse RE2's boundaries.
+  Unicode `\b` and `\B` are Rust predicates because the crate decodes the
+  character on each side and treats a side that does not decode as a non-word
+  character, and `\B` also requires each side that is present to decode; byte
+  mode exposes both rules.
+- The forward and reverse DFAs evaluate these predicates. A state records
+  whether the byte before its position is an ASCII word byte, a CR (an LF in
+  reverse), or a byte outside ASCII. The DFA evaluates a Unicode word
+  assertion only between ASCII bytes and text edges, where it is its ASCII
+  form. In a program with a Unicode word assertion, a transition from a
+  state that needs any assertion quits when the byte before or after it is
+  outside ASCII, and the search reruns on BitState or the NFA. A
+  state that needs only a line anchor quits too, because a line anchor that
+  holds can lead to a word assertion the state does not need yet. The crate's
+  lazy DFA makes the same ASCII assumption but quits on every byte outside
+  ASCII; this DFA quits only at those transitions, so text with non-ASCII bytes
+  away from the assertions keeps it. A quit depends on the text, so it is never
+  cached and, unlike cache exhaustion, marks nothing on the program. Only the
+  matcher that saw it reacts: after four consecutive unanchored searches whose
+  DFA fails, its later unanchored searches of that input skip the DFA until it
+  is reset, because text that quits one search usually quits the next, and
+  each quit costs a DFA start before the fallback. A search whose DFA
+  completes ends the streak. The transition loops contain no Rust-language
+  branches; the predicates live where states are built.
 - Unicode properties, `\d`, `\s`, `\w`, and Unicode word boundaries read the
   pinned database, as Pinned Unicode Properties describes. `\w` and the word
   boundaries use the database's word characters, the UTS #18 class that Java's
@@ -1354,8 +1371,9 @@ end-of-text. The reversed program supplies the corresponding end-line bit when
 it crosses an internal LF or reaches the original input beginning, while
 suppressing it before a terminal LF. Start-state caches distinguish internal LF
 boundaries from a terminal LF, including nonzero Slice offsets. Other
-text-dependent assertions remain ineligible for DFA execution, and OnePass
-remains disabled for all of them.
+text-dependent assertions, except Rust's (see [Rust Frontend](#rust-frontend)),
+remain ineligible for DFA execution, and OnePass remains disabled for all of
+them.
 
 Non-nullable counts containing only the Trino line assertions use the same DFA
 route and do not allocate a matcher. The exact multiline begin-line expression
