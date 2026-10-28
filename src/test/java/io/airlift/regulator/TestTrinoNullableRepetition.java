@@ -70,6 +70,8 @@ public class TestTrinoNullableRepetition
                 "(?:a|^)+b",
                 "((?:a|^)+)b",
                 "(?:(a)|(^))+b",
+                "(([^\\x00-\\x{10FFFF}])*)+",
+                "(([q&&ω])*)+",
         }) {
             for (Slice input : new Slice[] {
                     utf8Slice(""),
