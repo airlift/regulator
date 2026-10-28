@@ -1951,6 +1951,12 @@ operation by operation.
   retained heap, and the class lives in metaspace and the code cache, which the
   heap estimate cannot measure. A caller compiling many distinct patterns with
   the option bounds that cost by bounding the patterns it retains.
+- There is no size guard. A method longer than HotSpot's 8,000-byte
+  huge-method limit is never JIT-compiled, but the plan's operation and
+  optional limits hold the attempt, the only generated method that grows with
+  the plan, far below it, in this class and in the RE2 executor class.
+  `TestScanKernel` pins the largest plans of each operation kind below the
+  limit.
 
 ## Generated RE2 Scan Kernels
 
