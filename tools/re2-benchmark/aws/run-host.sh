@@ -86,7 +86,7 @@ install_packages()
 {
     sudo dnf install -y "${CMAKE_PACKAGE}" "${NATIVE_COMPILER_PACKAGE}" "${GLIBC_PACKAGE}" \
         "${TIME_PACKAGE}" git jq make ninja-build perf tar gzip
-    if [[ "${BENCHMARK_MODE}" == language-batch ]]; then
+    if [[ "${BENCHMARK_MODE}" == language-batch || "${BENCHMARK_MODE}" == engine-build ]]; then
         # The Rust language comparator links the pinned regex crate.
         sudo dnf install -y "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
     fi

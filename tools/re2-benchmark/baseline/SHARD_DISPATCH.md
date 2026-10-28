@@ -137,7 +137,10 @@ route's `run-metadata.txt` records `trino_harness_build` as
 `prebuilt:<archive-sha256>`, `local`, or `not-used`, and `engine-build.txt` in
 the route records the installed build. Engine builds change where the harness
 came from, not what a route measures or how it is accepted and reduced. The
-language comparison does not use them.
+same build installs the native RE2 and Rust runners on every unit worker, at
+`language-native/<runner>` under the shared work directory, with
+`engine-build/native.sha256` naming their archive; a route that runs them can
+record that archive with `prebuilt_engine native`, as it records the harness.
 
 ## Work Units
 

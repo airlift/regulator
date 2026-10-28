@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package one platform's pinned Trino harness, and install it on that platform's unit workers."""
+"""Package one platform's pinned Trino harness and native comparison runners, and install them on its unit workers."""
 
 import argparse
 import gzip
@@ -15,12 +15,18 @@ RECEIPT = "engine-build-receipt.json"
 # Archive members are relative to the shared work directory, where a route looks for the harness.
 TRINO_DIRECTORY = "pinned-trino"
 TRINO_METADATA = ("classpath.txt", "joni-jar.path", "provenance.properties")
+# The native comparison runners, native RE2 and the Rust regex crate, each beside its build receipt, as build.sh
+# writes them from the candidate's sources.
+LANGUAGE_NATIVE_DIRECTORY = "language-native"
+LANGUAGE_NATIVE_TARGETS = ("language_benchmark", "language_rust_benchmark")
+ARCHIVES = ("trino", "native")
 # Beyond the candidate commit, these choose what the harness is built from and how.
 BUILD_INPUTS = (
     "tools/re2-benchmark/trino-joni/pins.env",
     "tools/re2-benchmark/trino-joni/prepare.sh",
     "tools/re2-benchmark/baseline/build-engines.sh",
     "tools/re2-benchmark/baseline/engine_build.py",
+    "tools/re2-benchmark/build.sh",
 )
 # A build manifest records its builder host's environment fields under these names.
 BUILDER_FIELDS = {"platform": "platform", "architecture": "campaign_architecture", "instance_type": "instance_type",
@@ -70,6 +76,11 @@ def trino_files(shared):
     return sorted(files)
 
 
+def language_native_files():
+    return sorted(f"{LANGUAGE_NATIVE_DIRECTORY}/{target}{suffix}"
+                  for target in LANGUAGE_NATIVE_TARGETS for suffix in ("", ".build.json"))
+
+
 def write_archive(shared, names, path):
     with gzip.GzipFile(path, "wb", mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w") as archive:
         for name in names:
@@ -110,6 +121,7 @@ def package(shared, root, directory):
         },
         "archives": {
             "trino": write_archive(shared, trino_files(shared), output / "trino.tar.gz"),
+            "native": write_archive(shared, language_native_files(), output / "native.tar.gz"),
         },
     }
     (output / MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -126,7 +138,7 @@ def validate(directory):
     if manifest.get("schema_version") != 1 or any(
             manifest[field] != environment[key] for field, key in BUILDER_FIELDS.items()):
         raise EngineBuildError("engine build manifest differs from its builder host")
-    if set(manifest["archives"]) != {"trino"}:
+    if set(manifest["archives"]) != set(ARCHIVES):
         raise EngineBuildError("engine build has missing or unexpected archives")
     for archive in manifest["archives"].values():
         path = check_archive(directory / DIRECTORY, archive)
@@ -183,18 +195,24 @@ def install(build, manifest_sha256, shared, environment_path, output):
             manifest["candidate_commit"] != environment["regulator_commit"] or
             manifest["candidate_archive_sha256"] != environment["regulator_archive_sha256"]):
         raise EngineBuildError("engine build was made for a different platform or candidate")
-    trino = manifest["archives"]["trino"]
-    unpack(build, trino, shared)
+    for name in ARCHIVES:
+        unpack(build, manifest["archives"][name], shared)
     record = {"engine_build_manifest_sha256": manifest_sha256, "trino_harness": "prebuilt",
-              "trino_archive_sha256": trino["sha256"]}
+              "trino_archive_sha256": manifest["archives"]["trino"]["sha256"],
+              "native_archive_sha256": manifest["archives"]["native"]["sha256"]}
     output.write_text("".join(f"{key}={value}\n" for key, value in record.items()))
     return record
 
 
-def checksum(build, manifest_sha256):
+def checksums(build, manifest_sha256):
+    """Each verified archive's file name and SHA-256, one line each."""
     manifest = load_manifest(build, manifest_sha256)
-    check_archive(build, manifest["archives"]["trino"])
-    return manifest["archives"]["trino"]["sha256"]
+    lines = []
+    for name in ARCHIVES:
+        archive = manifest["archives"][name]
+        check_archive(build, archive)
+        lines.append(f"{archive['file']} {archive['sha256']}\n")
+    return "".join(lines)
 
 
 def main():
@@ -210,7 +228,7 @@ def main():
     install_command.add_argument("--output", type=Path, required=True)
     install_command.add_argument("--build", type=Path, required=True)
     install_command.add_argument("--manifest-sha256", required=True)
-    checksum_command = commands.add_parser("checksum", help="print the verified Trino archive SHA-256")
+    checksum_command = commands.add_parser("checksum", help="print each verified archive's file and SHA-256")
     checksum_command.add_argument("--build", type=Path, required=True)
     checksum_command.add_argument("--manifest-sha256", required=True)
     arguments = parser.parse_args()
@@ -220,7 +238,7 @@ def main():
         install(arguments.build, arguments.manifest_sha256, arguments.shared, arguments.environment,
                 arguments.output)
     else:
-        print(checksum(arguments.build, arguments.manifest_sha256))
+        print(checksums(arguments.build, arguments.manifest_sha256), end="")
 
 
 if __name__ == "__main__":

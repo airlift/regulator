@@ -275,7 +275,7 @@ class TestRunCampaign(unittest.TestCase):
                             patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws), \
                             contextlib.redirect_stdout(io.StringIO()):
                         if expected_puts is None:
-                            with self.assertRaisesRegex(SystemExit, "could not upload the r8i engine archive to s3://west/"):
+                            with self.assertRaisesRegex(SystemExit, "could not upload the r8i trino archive to s3://west/"):
                                 RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
                             continue
                         RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
@@ -652,7 +652,7 @@ class TestRunCampaign(unittest.TestCase):
             output = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True).stdout
             with self.subTest(mode=mode):
                 self.assertEqual("cargo-pin rust-pin" in output, "expected=cargo-pin" in output)
-                self.assertEqual("cargo-pin rust-pin" in output, mode == "language-batch")
+                self.assertEqual("cargo-pin rust-pin" in output, mode != "unit-worker")
 
     def test_shared_transfer_bucket_requires_prefix(self):
         result = subprocess.run(

@@ -422,9 +422,13 @@ aws s3api put-bucket-tagging --bucket <bucket> --region <region> \
 ### Engine builds
 
 The `build` phase builds the pinned Trino harness once per platform, exactly as
-a baseline host would, and freezes it in `trino.tar.gz` under a manifest,
-`engine-build.json`. The manifest lists the archive's SHA-256 and per-file
-hashes, and its inputs: the candidate, the Trino commit, and the build scripts.
+a baseline host would, and the native comparison runners from the candidate's
+sources: native RE2 (`language_benchmark`) and the Rust `regex` crate
+(`language_rust_benchmark`), with generic tuning, each beside its build
+receipt. It freezes them in `trino.tar.gz` and `native.tar.gz` under a
+manifest, `engine-build.json`. The manifest lists each archive's SHA-256 and
+per-file hashes, and its inputs: the candidate, the Trino commit, and the build
+scripts.
 Accepted builds go to `accepted-engine-builds.json`.
 
 Smoke, primary, and confirmation execution require `--engine-builds`, naming
@@ -433,14 +437,17 @@ frozen in `execution-policy.json`, and primary and confirmation refuse a
 prerequisite that used different builds. Language batches do not use engine
 builds; their Rust comparator still builds on the host.
 
-Hosts check the downloaded archive with `sha256sum --check`, then verify the
+Hosts check each downloaded archive with `sha256sum --check`, then verify the
 archive and each installed file against the manifest; a mismatch fails the
-session. `engine-build.txt` records the installed build beside the host
-evidence and in each route.
+session. Every unit worker installs both archives: the runners land in
+`language-native/` under the shared work directory, and
+`engine-build/<archive>.sha256` marks each installed archive.
+`engine-build.txt` records the installed build beside the host evidence and in
+each route.
 
 Preflight names each allowed region that lacks the shared transfer bucket
 `--engine-builds` requires. Before it launches any host,
-the controller puts the archive once in every region that may launch a host
+the controller puts each archive once in every region that may launch a host
 installing it, under `TRANSFER_PREFIX/engine-builds/<sha256>.tar.gz`, and skips
 an object with that key and checksum. An upload slower than 256 KiB/s counts as
 stalled and is stopped and retried; the campaign stops after three failed
@@ -472,8 +479,8 @@ controller and wrapper, so it uses the same launch regions.
 modes, verifies the AMI, JDK, package, candidate, comparator, and manifest
 identities, and delegates to `language/run-host-session.sh`,
 `baseline/build-engines.sh`, or `run-unit-worker.sh`. Only language batches
-install the pinned Cargo and Rust packages, because the Rust language
-comparator builds the pinned `regex` crate on the host.
+and engine builds install the pinned Cargo and Rust packages, because the Rust
+language comparator builds the pinned `regex` crate.
 
 ## Unit workers
 
@@ -482,7 +489,7 @@ its controller leases to it, one at a time, instead of one shard. It requires
 `CAMPAIGN_SHARD_ID=unit-worker` and `TIMEOUT_SECONDS` of the worker lifetime,
 `UNIT_WORKER_LIFETIME_SECONDS` (default 21600), plus 5400. The host
 bootstraps as a baseline host does: packages, the JDK, the environment record,
-and the platform's prebuilt Trino harness. It then
+and the platform's prebuilt engines. It then
 runs `run-unit-worker.sh`, which runs `../baseline/run-unit.sh` for each lease.
 The wrapper's `session.txt` records the host session (`session`), `bucket`,
 `input_prefix`, and `result_prefix`; every key below is under one of those

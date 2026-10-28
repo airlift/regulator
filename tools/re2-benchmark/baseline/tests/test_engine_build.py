@@ -22,6 +22,9 @@ class TestEngineBuild(unittest.TestCase):
         (trino / "classpath.txt").write_text(f"{trino / 'classes'}:{root / 'regulator/target/classes'}")
         (trino / "joni-jar.path").write_text("joni.jar\n")
         (trino / "provenance.properties").write_text("trino_commit=c7503d17\n")
+        (shared / ENGINE_BUILD.LANGUAGE_NATIVE_DIRECTORY).mkdir()
+        for file in ENGINE_BUILD.language_native_files():
+            (shared / file).write_text(file + "\n")
         result = root / "result"
         result.mkdir()
         (result / "environment-manifest.txt").write_text(
@@ -41,7 +44,7 @@ class TestEngineBuild(unittest.TestCase):
                                "regulator_archive_sha256=" + "5" * 64 + "\n")
         return result / ENGINE_BUILD.DIRECTORY, receipt["manifest_sha256"], environment
 
-    def test_host_installs_the_prebuilt_trino_harness(self):
+    def test_host_installs_the_prebuilt_trino_harness_and_native_runners(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             build, manifest_sha256, environment = self.package(root)
@@ -51,6 +54,8 @@ class TestEngineBuild(unittest.TestCase):
             self.assertEqual("prebuilt", record["trino_harness"])
             self.assertTrue((shared / "pinned-trino/classes/io/trino/Benchmark.class").is_file())
             self.assertTrue((shared / "engine-build/trino.sha256").is_file())
+            self.assertTrue((shared / "language-native/language_rust_benchmark").is_file())
+            self.assertTrue((shared / "engine-build/native.sha256").is_file())
             self.assertIn(f"engine_build_manifest_sha256={manifest_sha256}\n",
                           (root / "engine-build.txt").read_text())
 
