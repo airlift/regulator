@@ -145,23 +145,41 @@ public class TestTrinoNullableRepetition
     }
 
     @Test
-    public void testNestedPopularRepetitionsMatchPinnedJoni()
+    public void testNestedPopularRepetitionsMatchJoni()
     {
-        String[] quantifiers = {"?", "*", "+", "??", "*?", "+?", "{0,1}", "{0,}", "{1,}"};
+        String[] quantifiers = {"?", "*", "+", "??", "*?", "+?", "{0,1}", "{0,}", "{1,}", "{1,}?"};
         for (String innerQuantifier : quantifiers) {
             for (String outerQuantifier : quantifiers) {
-                for (String pattern : new String[] {
-                        "(?:(?:a?|b)" + innerQuantifier + ")" + outerQuantifier,
-                        "((?:(a?|b)" + innerQuantifier + ")" + outerQuantifier + ")",
+                // Modern Joni removed pinned Joni's reductions of a reluctant + under a greedy *
+                // or +, which changed what the pattern matches. Pinned Joni never reduces through
+                // a flag group, so the same pattern with the inner group written as (?-x:...)
+                // gives modern Joni's answer.
+                boolean removedReduction = List.of("+?", "{1,}?").contains(innerQuantifier) && List.of("*", "+", "{0,}", "{1,}").contains(outerQuantifier);
+                String innerGroup = removedReduction ? "(?-x:" : "(?:";
+                for (String template : new String[] {
+                        "%s(?:a?|b)" + innerQuantifier + ")" + outerQuantifier,
+                        "(%s(a?|b)" + innerQuantifier + ")" + outerQuantifier + ")",
                 }) {
+                    String pattern = template.formatted("(?:");
+                    String oracle = template.formatted(innerGroup);
                     for (Slice input : new Slice[] {utf8Slice(""), utf8Slice("aa"), utf8Slice("aab")}) {
-                        assertThat(regulatorMatches(pattern, input))
-                                .as("%s against %s", pattern, input)
-                                .isEqualTo(joniMatches(pattern, input));
+                        assertThat(regulatorMatches(pattern, input)).as("%s against %s", pattern, input).isEqualTo(joniMatches(oracle, input));
                     }
                 }
             }
         }
+    }
+
+    @Test
+    public void testNestedReluctantPlusIsNotReduced()
+    {
+        Slice input = utf8Slice("aa");
+        // Modern Joni's answers. Pinned Joni reduces the first two to a+? and (?:a+?)?, which
+        // match each a separately. The option group prevents pinned Joni's reduction, so the
+        // third case agrees with pinned Joni.
+        assertThat(regulatorMatches("(?:a+?)+", input)).containsExactly(new MatchSnapshot(new int[] {0, 2}));
+        assertThat(regulatorMatches("(?:a+?)*", input)).containsExactly(new MatchSnapshot(new int[] {0, 2}), new MatchSnapshot(new int[] {2, 2}));
+        assertThat(regulatorMatches("(?m:a+?)+", input)).containsExactly(new MatchSnapshot(new int[] {0, 2}));
     }
 
     @Test
@@ -171,7 +189,7 @@ public class TestTrinoNullableRepetition
         assertThat(reducedReluctantQuestion.op()).isEqualTo(RegexpOp.STAR);
         assertThat(reducedReluctantQuestion.parseFlags() & Regexp.NON_GREEDY).isNotZero();
 
-        Regexp reducedPopularRepeat = parse("(?:a+?){1,}");
+        Regexp reducedPopularRepeat = parse("(?:a+?){1,}?");
         assertThat(reducedPopularRepeat.op()).isEqualTo(RegexpOp.PLUS);
         assertThat(reducedPopularRepeat.parseFlags() & Regexp.NON_GREEDY).isNotZero();
 
@@ -181,7 +199,7 @@ public class TestTrinoNullableRepetition
         assertThat(preservedCountedRepeat.max()).isEqualTo(-1);
         assertThat(preservedCountedRepeat.child(0).op()).isEqualTo(RegexpOp.PLUS);
 
-        Regexp reducedPopularChild = parse("(?:a{1,}?)+");
+        Regexp reducedPopularChild = parse("(?:a{1,}?)+?");
         assertThat(reducedPopularChild.op()).isEqualTo(RegexpOp.REPEAT);
         assertThat(reducedPopularChild.min()).isEqualTo(1);
         assertThat(reducedPopularChild.max()).isEqualTo(-1);
@@ -196,7 +214,6 @@ public class TestTrinoNullableRepetition
     public void testCountedUnboundedNestedRepetitionMatchesPinnedJoni()
     {
         for (String pattern : new String[] {
-                "(?:a+?){1,}",
                 "(?:a+?){2,}",
                 "(?:a+?){3,}",
                 "(?:a+?){2}",

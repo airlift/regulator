@@ -154,8 +154,11 @@ These differences do not come from Unicode versions.
 
 For greedy unbounded repetition of a nullable expression, matching stops when
 the selected iteration succeeds without consuming input. Directly nested common
-quantifiers follow Joni's reductions, including its handling of mixed greedy
-and reluctant repetition.
+quantifiers follow modern Joni's reductions, including its handling of mixed
+greedy and reluctant repetition. Trino's pinned Joni also reduces `(?:x+?)+` to
+`x+?` and `(?:x+?)*` to `(?:x+?)?`, which change what the pattern matches, and
+modern Joni and Oniguruma removed both as bugs, so `(?:a+?)+` matches all of
+`aa`, while in Trino it matches each `a` separately.
 
 Loops whose bodies can match empty input can also differ when captures affect
 Joni's backtracking decisions. Joni retains capture histories and can revisit

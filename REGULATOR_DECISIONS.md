@@ -387,8 +387,15 @@ UTF-16 code-unit offsets.
   program counters. It clones each epsilon-reachable instruction at most once
   per loop, charges every retained instruction to the existing program budget,
   and leaves the shared execution engines unchanged. Directly nested `?`, `*`,
-  and `+` quantifiers, in greedy or reluctant form, first use Joni's parser
-  reduction table in the Trino parser before counted repetitions are expanded.
+  and `+` quantifiers, in greedy or reluctant form, first use modern Joni's
+  parser reduction table in the Trino parser before counted repetitions are
+  expanded. Trino's pinned Joni also reduced `(?:x+?)+` to `x+?` and
+  `(?:x+?)*` to `(?:x+?)?`, which change what the pattern matches; Joni
+  [f757501](https://github.com/jruby/joni/commit/f7575010f3ca4deff55642f34062a9ea09783091)
+  and Oniguruma
+  [7dde69a](https://github.com/kkos/oniguruma/commit/7dde69aef839ffa7ab12f5c14133f8c7dd28d237)
+  removed them as bugs ([Ruby #17341](https://bugs.ruby-lang.org/issues/17341)),
+  so `(?:a+?)+` matches all of `aa`, where Trino matches each `a`.
 - Capture-sensitive nullable loops can differ from Joni after that no-progress
   point. Joni's backtracking engine retains capture histories and may reconsider
   a different iteration path to extend the match; Regulator's bounded Thompson
