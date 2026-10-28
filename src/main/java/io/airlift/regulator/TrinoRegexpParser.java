@@ -485,6 +485,8 @@ final class TrinoRegexpParser
         }
 
         // repeat := atom (('*' | '+' | '?' | '{m,n}') '?'?)*
+        // As in Joni, each quantifier wraps the repetition before it, so a** and a{2}{3} are
+        // valid, and directly nested popular quantifiers are then reduced.
         private Regexp parseRepeat()
         {
             return parseRepeatSuffix(parseAtom());
@@ -501,13 +503,8 @@ final class TrinoRegexpParser
         // return the result.
         private Regexp parseRepeatSuffix(Regexp atom, ExpressionBuilder grouping)
         {
-            boolean appliedRepeat = false;
-            boolean separatedFromPreviousRepeat = false;
-
             while (!atEnd()) {
-                int indexBeforeIgnoredText = index;
                 skipIgnored();
-                separatedFromPreviousRepeat |= index != indexBeforeIgnoredText;
                 if (atEnd()) {
                     break;
                 }
@@ -528,18 +525,10 @@ final class TrinoRegexpParser
                     if (nextByte == '{' && !isValidRepeatBrace()) {
                         break;
                     }
-
-                    // Stacked repetition operators are a syntax error in Perl extensions mode.
-                    // In non-Perl extensions mode, they are allowed and will be simplified later.
-                    if (appliedRepeat && !separatedFromPreviousRepeat && (flags & Regexp.PERL_EXTENSIONS) != 0) {
-                        throw error(RegexpParseErrorCode.BAD_REPEAT_OP, errorArgAtCurrent());
-                    }
                     atom = applyRepeat(atom, grouping);
                     if (atom != null) {
                         grouping = null;
                     }
-                    appliedRepeat = true;
-                    separatedFromPreviousRepeat = false;
                     continue;
                 }
                 break;
@@ -644,6 +633,9 @@ final class TrinoRegexpParser
                 nonGreedy = greedyByDefault;
             }
             else if ((flags & Regexp.PERL_EXTENSIONS) != 0 && !atEnd() && peekByte() == '+') {
+                // As in Joni's Java syntax, + directly after a greedy quantifier makes it
+                // possessive, which this parser rejects, while one after a reluctant quantifier,
+                // or after ignored text, repeats it again: a*?+ is (?:a*?)+.
                 throw unsupportedConstruct("possessive quantifiers", index, index + 1);
             }
 
@@ -1334,13 +1326,23 @@ final class TrinoRegexpParser
             return Regexp.concat(nodeFlags, List.of(step, foldSpellings(folded, next, nodeFlags, classFlags)));
         }
 
+        // Skips text Joni ignores between tokens outside a class or quote: comment groups such as
+        // (?#...), and in extended mode whitespace and # comments. Like whitespace, a comment
+        // group neither ends a literal run nor takes a quantifier, so a(?#x)* is a*.
         private void skipIgnored()
         {
-            if (inQuote || (flags & COMMENTS) == 0) {
+            if (inQuote) {
                 return;
             }
             while (!atEnd()) {
                 int current = peekByte();
+                if (isCommentGroupStart()) {
+                    skipCommentGroup();
+                    continue;
+                }
+                if ((flags & COMMENTS) == 0) {
+                    return;
+                }
                 if (isAsciiPatternWhitespace(current)) {
                     consumeByte();
                     continue;
@@ -1353,6 +1355,29 @@ final class TrinoRegexpParser
                 }
                 while (!atEnd() && peekByte() != '\n' && peekByte() != '\r');
             }
+        }
+
+        private boolean isCommentGroupStart()
+        {
+            return (flags & Regexp.PERL_EXTENSIONS) != 0 && index + 2 < end && bytes[index] == '(' && bytes[index + 1] == '?' && bytes[index + 2] == '#';
+        }
+
+        // As in Joni, a comment group ends at the first ) not escaped by a backslash.
+        private void skipCommentGroup()
+        {
+            int commentStart = index;
+            index += 3;
+            while (!atEnd()) {
+                int current = consumeByte();
+                if (current == ')') {
+                    return;
+                }
+                if (current == '\\' && !atEnd()) {
+                    consumeByte();
+                }
+            }
+            index = commentStart;
+            throw error(RegexpParseErrorCode.MISSING_PAREN, Slices.wrappedBuffer(bytes, commentStart, end - commentStart));
         }
 
         private static boolean isAsciiPatternWhitespace(int value)

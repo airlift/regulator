@@ -76,6 +76,7 @@ public class TestTrinoRegexpSyntax
                 unsupported("x?+", "possessive quantifiers", 2),
                 unsupported("x{1,2}+", "possessive quantifiers", 6),
                 unsupported("x{1}+", "possessive quantifiers", 4),
+                unsupported("x*?++", "possessive quantifiers", 4),
                 unsupported("(x)\\1", "backreferences", 3),
                 unsupported("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\\10", "backreferences", 30),
                 unsupported("(?<name>x)\\k<name>", "backreferences", 10),
@@ -129,7 +130,7 @@ public class TestTrinoRegexpSyntax
 
     private static List<SyntaxCase> syntaxCases()
     {
-        return TsvTestData.load(SYNTAX_CASES, 3, 78).stream()
+        return TsvTestData.load(SYNTAX_CASES, 3, 84).stream()
                 .map(row -> new SyntaxCase(row.field(1), Expected.valueOf(row.field(0)), row.field(2)))
                 .toList();
     }

@@ -42,7 +42,7 @@ without compiling it; see
 |---|---|
 | Atoms | Literals, `.`, quoted literals, and character classes |
 | Composition | Concatenation and ordered alternation with `|` |
-| Repetition | Greedy and reluctant `*`, `+`, `?`, `{n}`, `{n,}`, and `{n,m}` |
+| Repetition | Greedy and reluctant `*`, `+`, `?`, `{n}`, `{n,}`, and `{n,m}`, including stacked quantifiers such as `a{2}{3}` |
 | Groups | Numbered captures, noncapturing groups, `(?<name>...)`, and `(?'name'...)` |
 | Anchors | `^`, `$`, `\A`, and `\z` |
 | Boundaries | Trino-compatible Unicode `\b` and `\B` |
@@ -50,6 +50,7 @@ without compiling it; see
 | Unicode properties | Categories, scripts, blocks, binary properties, and `java...` properties from the pinned Unicode 18.0 database, using Trino's accepted spellings |
 | Escapes | Trino quoting and escape forms that identify Unicode code points |
 | Inline flags | `i`, `m`, `s`, and `x`, including scoped forms |
+| Comments | `(?#...)` comment groups, and whitespace and `#` comments in extended mode |
 
 As in Joni, a flag written alone, such as `(?i)`, which Oniguruma calls an
 isolated option, opens a group that runs to the end of its enclosing group or of
@@ -58,12 +59,27 @@ before the flag is required in each: `ab(?i)c|def` means `ab(?i:c|def)` and
 matches `abDEF` but not `def`. Java's `Pattern` instead reads it as
 `ab(?i:c)|(?i:def)`.
 
-Repetition counts are limited to 1,000. The default `$` assertion matches at
-the end of input or before one final LF, and multiline mode recognizes LF as
-the line terminator. Multiline `^` matches at the start of input and after an
-internal LF, but not after a terminal LF; it also matches at the start of empty
-input. Case-insensitive matching includes Unicode multi-code-point folds such
-as `ß` and `SS`.
+As in Joni, a quantifier can follow another and repeats the repetition before
+it, so `a{2}{3}` matches six `a`s; directly nested `?`, `*`, and `+` are then
+reduced as described under
+[Other matching differences from Joni](#other-matching-differences-from-joni).
+A `+` written directly after a quantifier that is not reluctant makes it
+possessive, which is unsupported, so `a*+` and `a{2}+` are rejected; after a
+reluctant quantifier it is another quantifier, so `a*?+` is `(?:a*?)+`.
+
+A comment group, `(?#...)`, ends at the first `)` not escaped by a backslash.
+As in Joni, it is ignored wherever it appears outside a class or a quote, like
+whitespace in extended mode, so a quantifier after it applies to the atom
+before it: `a(?#note)*` is `a*`.
+
+Repetition counts are limited to 1,000, and nested or stacked counts multiply
+toward the limit, so `a{50}{50}` and `(?:a{50}){50}` are rejected though pinned
+Joni accepts them. The default `$` assertion matches at the end of input or
+before one final LF, and multiline mode recognizes LF as the line terminator.
+Multiline `^` matches at the start of input and after an internal LF, but not
+after a terminal LF; it also matches at the start of empty input.
+Case-insensitive matching includes Unicode multi-code-point folds such as `ß`
+and `SS`.
 
 ### Unicode data and case folding
 
@@ -134,12 +150,12 @@ String uppercasing with the root locale produces `SS`.
 Literal characters written next to each other under the same
 case-insensitivity form one run, which full case folding matches as one
 sequence, including through escapes, quotes, extended-mode whitespace and
-comments, an exact repeat of one, such as `{1}`, `{1,1}`, or `{1}?`, and flag
-changes other than `i`. A noncapturing group without a quantifier does not end
-a run; its contents act as if written in its place. Any other construct ends
-the run, as does any change of `i`. For example, Regulator's `(?i:s(?:s))`
-matches `ß` and `(?i:f(?s)f)` matches `ﬀ`, while pinned Joni does not, and
-`(?i)ff{0}f` does not match `ﬀ` in either.
+comments, comment groups, an exact repeat of one, such as `{1}`, `{1,1}`, or
+`{1}?`, and flag changes other than `i`. A noncapturing group without a
+quantifier does not end a run; its contents act as if written in its place.
+Any other construct ends the run, as does any change of `i`. For example,
+Regulator's `(?i:s(?:s))` matches `ß` and `(?i:f(?s)f)` matches `ﬀ`, while
+pinned Joni does not, and `(?i)ff{0}f` does not match `ﬀ` in either.
 
 Regulator does not follow these results of pinned Joni's tokenization:
 
@@ -260,7 +276,8 @@ currently rejected:
 - empty character-class intersection operands
 - character classes used as range endpoints
 - malformed POSIX classes such as `[[:a:b:]]`
-- repetitions above 1,000
+- repetitions above 1,000, and nested or stacked repetitions whose counts
+  multiply past 1,000
 
 Duplicate or digit-leading capture names are invalid patterns rather than
 unsupported features.
