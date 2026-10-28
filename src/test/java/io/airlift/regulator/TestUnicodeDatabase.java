@@ -17,6 +17,7 @@ import io.airlift.regulator.UnicodeDatabase.Aliases;
 import io.airlift.regulator.UnicodeDatabase.CodePointMappings;
 import io.airlift.regulator.UnicodeDatabase.MultiCharacterMappings;
 import io.airlift.regulator.UnicodeDatabase.PropertyValues;
+import io.airlift.regulator.teavm.TeaVMParsingSupport;
 import org.assertj.core.api.AbstractBooleanAssert;
 import org.junit.jupiter.api.Test;
 
@@ -126,6 +127,23 @@ public class TestUnicodeDatabase
         assertThat(valueAliases.get("sc")).contains(new Aliases("Zinh", "Inherited", List.of("Qaai")));
         assertThat(valueAliases.get("age")).contains(new Aliases("1.1", "V1_1", List.of()));
         assertThat(valueAliases.get("WB")).contains(new Aliases("LE", "ALetter", List.of()));
+    }
+
+    // The TeaVM support repeats the database's resource paths and the name of the class that
+    // loads character names, which the TeaVM package cannot reference, so a Unicode update or a
+    // rename that leaves its copies stale fails here rather than only in the TeaVM check.
+    @Test
+    public void testTeaVMSupportIncludesDatabaseResources()
+            throws ClassNotFoundException
+    {
+        String directory = UnicodeDatabase.class.getPackageName().replace('.', '/') + "/";
+        String resource = directory + UnicodeDatabase.RESOURCE;
+        String namesResource = directory + UnicodeDatabase.NAMES_RESOURCE;
+        Class<?> names = Class.forName(UnicodeDatabase.class.getName() + "$Names", false, UnicodeDatabase.class.getClassLoader());
+
+        TeaVMParsingSupport support = new TeaVMParsingSupport();
+        assertThat(support.supplyResources(List.of())).containsExactly(resource);
+        assertThat(support.supplyResources(List.of(names.getName()))).containsExactly(resource, namesResource);
     }
 
     private static void assertResourceHash(String resource, String expectedHash)
