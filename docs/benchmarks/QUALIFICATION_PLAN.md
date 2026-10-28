@@ -57,6 +57,15 @@ Freeze one candidate commit only after all of the following are true:
 - review-readiness cleanup and final review repairs are complete
 - the RE2 differential, exhaustive, randomized, native-golden, and Trino
   compatibility suites pass
+- the Java differential suite against JDK `Pattern`
+  (`TestJavaRegexpDifferential`) and the JDK Unicode agreement suite
+  (`TestJdkUnicodeAgreement`) pass
+- the Rust golden suite (`TestRustRegexpGolden`) passes on fixtures generated
+  from the pinned `regex` crate by
+  [`tools/rust-regex-golden`](../../tools/rust-regex-golden/README.md)
+- the LIKE corpus suite (`TestTrinoLikeCorpus`) passes on a corpus that
+  [`tools/trino-like-golden`](../../tools/trino-like-golden/README.md)
+  `--check` confirms against the pinned Trino `LikeMatcher`
 - the public API and benchmark corpus will not change during a comparison run
 - the reviewer-facing commit stack and current documentation agree with the
   candidate source
@@ -299,8 +308,19 @@ Investigate any of these before accepting a number:
 - Java and native RE2 have the same scaling class for every common case.
 - Every supported native RE2 case is at least as fast through the public Slice
   API, unless an exception is explicitly approved with a quantified cause.
+- `JavaRegexp` is faster than JDK `Pattern` for the agreed common workload.
+  Cases the JDK cannot represent, and cases that do not finish, are reported
+  separately.
 - The Trino adapter is faster than Joni for the agreed common workload. Syntax
   unavailable to RE2 is reported separately.
+- Every supported Rust `regex` crate case is reported through `RustRegexp`
+  beside the crate. The bar against the crate will be set once benchmark data
+  exists: the goal is the native RE2 bar, at least as fast as the crate, but
+  the crate is a very strong engine, and the 2.0 benchmark runs are where we
+  learn how Regulator compares.
+- `TrinoLikePattern` is faster than Trino's SQL LIKE route for warmed matches,
+  with both DFA settings where Trino's DFA optimization applies. The
+  dense-false stress case is reported separately.
 - Every applicable Rebar curated workload and supported model is reported, with
   individual results retained alongside any geometric summary.
 - Evaluate architecture-specific regressions using the quantified tradeoff
