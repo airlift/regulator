@@ -910,6 +910,12 @@ matcher. Its compiled variant binds `replaceAll` or `extract` to the
 generated-bytecode compile, or the matcher loop to its matcher and group, in
 the same per-pattern hidden class.
 
+`BenchmarkSpecializedJavaRegexp` does the same through the public Java API,
+which has no replacement call: every operation reuses one matcher, and the
+`replace` workload extracts the group its replacement keeps. Its `*Jdk`
+methods apply each operation with a reused JDK `Matcher` over the sources
+decoded to strings before timing.
+
 The `trino-specialized-patterns-a` and `-b` baseline shards divide the
 workloads between two shards, so each host runs part of them, with each
 workload and variant in separate JVMs. Every call site sees one pattern, as in
@@ -917,8 +923,10 @@ a Trino query, on both memory routes beside their Joni twin, this repository's
 `BenchmarkSpecializedTrinoJoni`, on pinned Joni. The
 `re2-specialized-patterns-a` and `-b` shards run the RE2 class the same way,
 beside native RE2's `GlobalReplace`, `Extract`, and `Match`. The
-`trino-like-specialized` shard runs `BenchmarkTrinoLikeTpch`'s `PROMO%`,
-`%BRASS`, `%green%`, and `%special%requests%` workloads on the specialized
-engine and compiled, beside Trino's SQL LIKE matcher, again one pattern per
-JVM; its compiled LIKE is const-bound the same way. These shards time warmed
-steady-state operations and exclude compilation.
+`java-specialized-patterns-a` and `-b` shards run the Java class beside its JDK
+methods, which fork as Joni does. The `trino-like-specialized` shard runs
+`BenchmarkTrinoLikeTpch`'s `PROMO%`, `%BRASS`, `%green%`, and
+`%special%requests%` workloads on the specialized engine and compiled, beside
+Trino's SQL LIKE matcher, again one pattern per JVM; its compiled LIKE is
+const-bound the same way. These shards time warmed steady-state operations and
+exclude compilation.

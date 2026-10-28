@@ -679,9 +679,9 @@ def print_frozen_route_protocol(arguments):
     processes = frozen_selection(protocols, rows, "jmh-processes")
     if processes:
         print("\t".join(["process", *frozen_fields(processes, FROZEN_PROCESS_FIELDS)]))
-    joni = frozen_selection(protocols, [row for row in rows if row["system"] == "joni"], "jmh-forks")
-    if joni:
-        print("\t".join(["joni", *frozen_fields(joni, ("processes", "measurement_time"))]))
+    forks = frozen_selection(protocols, rows, "jmh-forks")
+    if forks:
+        print("\t".join(["forks", *frozen_fields(forks, ("processes", "measurement_time"))]))
     with arguments.representatives.open(newline="", encoding="utf-8") as input_file:
         representatives = {row["manifest_row_id"] for row in csv.DictReader(input_file, delimiter="\t")}
     for row in rows:

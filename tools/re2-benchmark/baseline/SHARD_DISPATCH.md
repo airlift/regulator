@@ -45,7 +45,10 @@ iteration counts while avoiding a new forked JVM for every row:
   A Joni row therefore has ten samples on each host, not the 50 samples used by
   the bounded Regulator process set. Rows over the 5% relative standard-error
   ceiling remain explicitly precision-rejected and are candidates for a
-  targeted longer-protocol rerun.
+  targeted longer-protocol rerun. The JDK comparator of the Java
+  specialized-pattern shards has the same fork protocol as Joni: one JMH fork
+  per host with ten warmup and ten measurement iterations, on Regulator's
+  classpath.
 - Native comparators, `native-re2` and `rust-regex`, run under
   `native-repetitions`: one runner process measures one row with Google
   Benchmark, warming it for the total of its ten warmup windows and then timing
@@ -130,11 +133,12 @@ counterbalancing that did not occur.
 
 `unit_cost.py` estimates the measurement seconds of any set of rows from their
 frozen protocols: every warmup and measurement window, a two-second startup
-allowance for each JVM a selector or Joni fork starts, the calibration
-invocations, and every representative comparison. For Google Benchmark's sizing
-runs, it charges a native row 2.5 times its warmup windows and 1.5 times its
-measurement windows. It leaves out the pinned Trino preparation and host
-bootstrap, which do not grow with the rows a host measures.
+allowance for each JVM a selector or a Joni or JDK fork starts, the
+calibration invocations, and every representative comparison. For Google
+Benchmark's sizing runs, it charges a native row 2.5 times its warmup windows
+and 1.5 times its measurement windows. It leaves out the pinned Trino
+preparation and host bootstrap, which do not grow with the rows a host
+measures.
 
 Measured-shard normalization requires exactly one process sample group in each
 top-level JMH JSON file. Calibration retains JMH's ordinary forked shape: one
@@ -286,10 +290,12 @@ smoke or qualification protocol.
   workloads; Joni's workloads keep their forward order, and
   `JONI_COMPARATOR_ORDER` still places Joni before or after all the variants.
 - `specialized-patterns` runs `re2-specialized-patterns-a` and `-b` the same
-  way beside native RE2. Before measuring, it writes each workload's inputs and
-  the values every Regulator variant returns for each source, and the native
+  way beside native RE2, and `java-specialized-patterns-a` and `-b` beside the
+  JDK. Before measuring native RE2, it writes each workload's inputs and the
+  values every Regulator variant returns for each source, and the native
   runner must print the same values. Each native row then runs in its own
-  runner process at its planned selector's protocol.
+  runner process at its planned selector's protocol. The JDK's values are
+  checked by the shard's semantic tests.
 - `trino-like` runs the Regulator, Trino optimized, and Trino SQL methods as
   separate exact filters. For `trino-like-specialized` it runs
   `BenchmarkTrinoLikeTpch`'s interpreted, generated, and Trino SQL methods over

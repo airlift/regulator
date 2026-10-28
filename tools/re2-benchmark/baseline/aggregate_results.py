@@ -1317,7 +1317,7 @@ def parser():
     argument_parser.add_argument("--artifact-index", type=Path, action="append", default=[])
     argument_parser.add_argument("--campaign-artifact", type=Path)
     argument_parser.add_argument("--output-dir", type=Path, required=True)
-    argument_parser.add_argument("--expected-manifest-rows", type=int, default=484)
+    argument_parser.add_argument("--expected-manifest-rows", type=int, default=519)
     argument_parser.add_argument("--release-version", default="",
                                  help="require every attempt to prove it measured this release's JAR")
     return argument_parser

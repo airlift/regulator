@@ -34,7 +34,9 @@ JMH_MEASUREMENT_ITERATIONS = 10
 FULL_WINDOW = "1s"
 BOUNDED_WINDOW = "50ms"
 BOUNDED_MAXIMUM_RELATIVE_STANDARD_ERROR = "0.05"
-JONI_FORKS = 1
+JMH_FORK_COUNT = 1
+# A JVM comparator runs in JMH forks of one launcher, as Joni does.
+FORKED_SYSTEMS = frozenset({"joni", "jdk"})
 # A native comparator runs in one process: one warmup as long as the JMH warmup iterations together, then
 # one Google Benchmark repetition per JMH measurement iteration, ten samples as a Joni fork has.
 # SHARD_DISPATCH.md describes how Google Benchmark sizes them.
@@ -108,8 +110,8 @@ def protocol_key(protocol):
 
 
 def row_protocol(row, window, precision):
-    if row["system"] == "joni":
-        return protocol(row["row_id"], "jmh-forks", JONI_FORKS, JMH_WARMUP_ITERATIONS, window,
+    if row["system"] in FORKED_SYSTEMS:
+        return protocol(row["row_id"], "jmh-forks", JMH_FORK_COUNT, JMH_WARMUP_ITERATIONS, window,
                         JMH_MEASUREMENT_ITERATIONS, window, precision)
     if row["system"] in NATIVE_SYSTEMS:
         return protocol(row["row_id"], "native-repetitions", 1, JMH_WARMUP_ITERATIONS, window,

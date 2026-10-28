@@ -14,6 +14,7 @@
 package io.airlift.regulator;
 
 import io.airlift.regulator.TestingEverydayTrinoRegexpBenchmarkInputs.Source;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Operation;
 import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Workload;
 import io.airlift.slice.Slice;
 
@@ -41,11 +42,27 @@ import static java.lang.constant.ConstantDescs.CD_void;
 import static java.lang.constant.ConstantDescs.INIT_NAME;
 
 /// What every language's specialized-pattern benchmark shares: the rotation of a workload's
-/// sources, the variants tests and verifiers call, and the const-bound caller of the compiled
-/// variant.
+/// sources, the variants tests and verifiers call, the const-bound caller of the compiled variant,
+/// and, for a language without a replacement call, the workloads each capture operation times.
 public final class TestingSpecializedPatternBenchmarks
 {
     private TestingSpecializedPatternBenchmarks() {}
+
+    /// The workloads whose [capture operation][Workload#captureOperation()] is `operation`, which a
+    /// language without a replacement call times in its `operation` benchmarks.
+    static List<String> captureWorkloadIds(Operation operation)
+    {
+        return TestingSpecializedPatternBenchmarkInputs.workloadIds().stream()
+                .filter(workloadId -> TestingSpecializedPatternBenchmarkInputs.create(workloadId).captureOperation() == operation)
+                .toList();
+    }
+
+    static void requireCaptureOperation(Workload workload, Operation expected)
+    {
+        if (workload.captureOperation() != expected) {
+            throw new IllegalStateException("%s captures with %s, not %s".formatted(workload.workloadId(), workload.captureOperation().benchmarkName(), expected.benchmarkName()));
+        }
+    }
 
     abstract static class Rotation
     {
@@ -67,9 +84,15 @@ public final class TestingSpecializedPatternBenchmarks
 
         Slice nextSource()
         {
-            Slice source = sources.get(sourceIndex).value();
+            return sources.get(nextSourceIndex()).value();
+        }
+
+        /// Returns the index of the next source and advances the rotation past it.
+        int nextSourceIndex()
+        {
+            int index = sourceIndex;
             sourceIndex = (sourceIndex + 1) & (sources.size() - 1);
-            return source;
+            return index;
         }
     }
 

@@ -22,9 +22,10 @@ import java.util.List;
 import java.util.Map;
 
 /// The specialized-pattern workloads: each applies one Trino operation to a rotation of inputs.
-/// Every language's specialized-pattern benchmark applies the same workloads.
-/// The URL workloads share a rotation in `specialized-trino-workloads.tsv`; the others
-/// reuse their everyday rotation.
+/// Every language's specialized-pattern regex benchmark applies the same workloads, except that
+/// Java, whose API has no replacement call, extracts the replacement's group in place of
+/// `replace`; the LIKE benchmarks have their own workloads. The URL workloads share a rotation in
+/// `specialized-trino-workloads.tsv`; the others reuse their everyday rotation.
 public final class TestingSpecializedPatternBenchmarkInputs
 {
     private static final String RESOURCE = "/io/airlift/regulator/specialized-trino-workloads.tsv";
@@ -128,6 +129,13 @@ public final class TestingSpecializedPatternBenchmarkInputs
                 throw new IllegalStateException("%s replacement is not a single `$N` reference: %s".formatted(workloadId(), replacement));
             }
             return Integer.parseInt(replacement.substring(1));
+        }
+
+        /// The operation a language without a replacement call applies: `extract` of the
+        /// [captured group][#capturedGroup()] in place of `replace`, otherwise the workload's own.
+        public Operation captureOperation()
+        {
+            return operation == Operation.REPLACE ? Operation.EXTRACT : operation;
         }
 
         public void requireOperation(Operation expected)

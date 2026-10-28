@@ -68,7 +68,7 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
             for group, row in enumerate(native_rows, 1)))
         functions = [shell_function(source, name) for name in (
             "run_jmh", "run_jmh_per_workload", "run_ordered_comparison", "run_regulator_candidate",
-            "run_trino_operations_joni", "run_regulator_candidates", "run_trino_operations_shard",
+            "run_forked_comparator", "run_regulator_candidates", "run_trino_operations_shard",
             "prepare_specialized_comparator", "window_seconds", "run_specialized_native",
             "run_specialized_patterns_shard", "run_trino_like_system", "run_trino_like_shard")]
         # The comparator's runner and inputs are already in place.
@@ -100,12 +100,12 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
             "CLASSPATH=regulator SPECIAL_CLASSPATH=special PINNED_TRINO_CLASSPATH=pinned",
             f"UNIT_TOOL={shlex.quote(str(SOURCE.with_name('unit_session.py')))} CPU_LIST=0 handler={handler}",
             f"NATIVE_RUNNER=runner NATIVE_INPUT_DIR={shlex.quote(str(root / 'native'))}",
-            "secondary_metric_arguments=() mixed_process_arguments=() joni_process_arguments=()",
+            "secondary_metric_arguments=() mixed_process_arguments=() forked_process_arguments=()",
             "precision_arguments=() normalized_files=()",
             block("JMH_SUITE_ORDER=forward\n"), block("jmh_invocation_per_workload=false\n"),
             "record_jmh_call() {", recorder, "}",
             "run_jmh_with_classpath() { record_jmh_call processes \"$@\"; }",
-            "run_joni_jmh_with_classpath() { record_jmh_call forks \"$@\"; }",
+            "run_forked_jmh_with_classpath() { record_jmh_call forks \"$@\"; }",
             "taskset() {", native_recorder, "}",
             "set_jmh_input_files() { JMH_INPUT_FILES=(\"$1\"); }",
             "python3() {",
@@ -160,7 +160,7 @@ class TestShardResults(unittest.TestCase):
                 units = [f"group {group} --benchmark_min_warmup_time=10 --benchmark_min_time=1s "
                          "--benchmark_repetitions=10 --benchmark_dry_run=false" for group in range(1, len(rows) + 1)]
             else:
-                runner = "forks" if system == "joni" else "processes"
+                runner = "forks" if system in ROW_PROTOCOL.FORKED_SYSTEMS else "processes"
                 units = ["-"] * len(rows)
             launches = [
                 (system, (runner, "^" + row["benchmark"].replace(".", "\\.") + "$",
@@ -171,7 +171,7 @@ class TestShardResults(unittest.TestCase):
         # Even replicas reverse the Regulator variants and their workloads. The comparator keeps its
         # workload order, and JONI_COMPARATOR_ORDER places it after or before every variant.
         shards = [shard for shard in DISPATCH if "-specialized-patterns-" in shard]
-        self.assertIn("re2-specialized-patterns-a", shards)
+        self.assertIn("java-specialized-patterns-a", shards)
         for shard in shards:
             comparator = next(row["comparator"] for row in manifest if row["shard_id"] == shard)
             for replica, joni_order in ((1, "forward"), (2, "forward"), (1, "reverse")):
@@ -287,13 +287,13 @@ class TestShardResults(unittest.TestCase):
                 f"UNIT_DIRECTORY={shlex.quote(str(root))}\n"
                 f"RESULT_DIR={shlex.quote(str(root))}\n"
                 f"UNIT_TOOL={shlex.quote(str(SOURCE.with_name('unit_session.py')))}\n"
-                "JMH_PROCESS_TIME=20ms\nJONI_JMH_TIME=20ms\nCPU_LIST=0\n"
+                "JMH_PROCESS_TIME=20ms\nJMH_FORK_TIME=20ms\nCPU_LIST=0\n"
                 "jmh_process_jvm_arguments=()\njmh_launcher_jvm_arguments=()\njmh_fork_arguments=-Xmx1g\n"
                 "prepare_jmh_host_compiler_arguments() { jmh_host_compiler_arguments=(); }\n"
                 "taskset() { shift 2; \"$@\"; }\n"
                 "java() { printf '%s\\n' \"$*\"; }\n"
                 + "".join(shell_function(source, name) for name in (
-                    "run_jmh_with_classpath", "run_joni_jmh_with_classpath", "run_unit_jmh_selectors",
+                    "run_jmh_with_classpath", "run_forked_jmh_with_classpath", "run_unit_jmh_selectors",
                     "set_jmh_input_files"))
                 + f"run_jmh_with_classpath cp '^example\\.(A\\.(first|joni)|B\\..*)$' {shlex.quote(str(output))} "
                 "-p scenario=x,y\n"
@@ -884,7 +884,8 @@ class TestShardResults(unittest.TestCase):
             ("trino-everyday-operations", "regulator-native-access"): 104,
             ("trino-everyday-operations", "regulator-object-row"): 104,
             **{(suite, system): 5
-               for suite, comparator in (("trino-specialized-patterns", "joni"), ("re2-specialized-patterns", "native-re2"))
+               for suite, comparator in (("trino-specialized-patterns", "joni"), ("re2-specialized-patterns", "native-re2"),
+                                         ("java-specialized-patterns", "jdk"))
                for system in (comparator, *variants)},
         }, counts)
 
