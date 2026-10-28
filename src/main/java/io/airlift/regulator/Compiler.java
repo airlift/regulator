@@ -993,7 +993,12 @@ final class Compiler
             if (originalId == consumedExit) {
                 return emptyExit;
             }
-            if (originalId <= 0 || originalId >= originalInstructionLimit) {
+            // Instruction zero is FAIL. An edge to it, such as the body of a repetition of an
+            // impossible class, never matches, so the clone keeps the same failing edge.
+            if (originalId == 0) {
+                return 0;
+            }
+            if (originalId < 0 || originalId >= originalInstructionLimit) {
                 throw new RegexpCompileException("invalid nullable-loop instruction: " + originalId);
             }
             if (clones.hasIndex(originalId)) {
