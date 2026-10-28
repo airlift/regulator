@@ -28,13 +28,13 @@ from acceptance import normalize_heap_size
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, REGION_PATTERN, BudgetError, FleetBudget, on_demand_regions, region_limits)
 from campaign_io import (
-    JSON_LEDGER_WORKLOADS, UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
+    UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
 from unit_dispatch import (
-    UNIT_COMPLETION_FIELDS, accepted_row, calibration_key, completion_key, extract_unit_result,
+    UNIT_COMPLETION_FIELDS, calibration_key, completion_key, extract_unit_result,
     get_unit_worker_result, heartbeat_key, heartbeat_sequence, interruption_key, list_unit_worker_results,
     persist_accepted_unit, persist_semantic_rejection, put_unit_lease, read_accepted_units, read_semantic_rejections,
     read_unit_attempts, read_unit_receipt, recovered_keys, result_key, retain_unit_attempt, shows_worker_start,
-    unit_attempt_directory, unit_logical_identity, unit_worker_instance_state, write_unit_attempt, write_unresolved,
+    unit_attempt_directory, unit_logical_identity, unit_worker_instance_state, write_unit_attempt,
     write_unresolved_units)
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
@@ -49,7 +49,6 @@ STANDARD_SPOT_QUOTA_CODE = "L-34B43A08"
 STANDARD_INSTANCE_FAMILIES = frozenset("acdhimrtz")
 SPOT_VCPU_SAFETY_RESERVE = 32
 CAPACITY_RETRY_SECONDS = 30
-JOB_TIMEOUT_SECONDS = 90 * 60
 MAX_REPLACEMENTS_PER_JOB = 2
 # Once this share of a pool's estimated work is all that remains unaccepted, the pool's new
 # launches use On-Demand so the phase's tail does not wait on Spot capacity or a reclaim,
@@ -73,8 +72,8 @@ SPOT_REGION_COOL_DOWN_SECONDS = 15 * 60
 # A Spot worker that stops for a rebalance recommendation this soon after launch, or before it
 # completes a unit, found its region short of Spot capacity, and the region cools as above.
 EARLY_REBALANCE_SECONDS = 15 * 60
-# A work item stays unresolved once this many of its leases failed, were interrupted, or were lost,
-# as a host job does; a lease released before it started does not count.
+# A work item stays unresolved once this many of its leases failed, were interrupted, or were lost;
+# a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
 SEMANTIC_FAILURE_DETAIL = f"semantic failure: status {SEMANTIC_FAILURE_STATUS}"
 # A unit campaign phase's digest of the tooling that started it, beside its campaign state.
@@ -90,32 +89,10 @@ PINNED_AMI_REGION = "us-west-2"
 AMAZON_AMI_OWNER = "137112412989"
 # Spot placement scores are rate-limited per configuration, so reuse each answer briefly.
 PLACEMENT_SCORE_CACHE_SECONDS = 5 * 60
-# Host environment fields the controller checkout chooses, each with the fields an
-# original receipt's environment must share to have been given the same value.
-REFILL_ENVIRONMENT_SCOPES = {
-    **dict.fromkeys((
-        "row_manifest_sha256", "platform_manifest_sha256", "comparator_manifest_sha256",
-        "protocol_representatives_sha256", "baseline_protocol", "baseline_selected_route",
-        "benchmark_heap_size", "regulator_release_version", "java_home"), ()),
-    **dict.fromkeys((
-        "ami", "jdk_archive_url", "jdk_archive_sha256", "java_runtime_version",
-        "native_compiler_package", "cmake_package", "glibc_package", "time_package"), ("platform",)),
-    **dict.fromkeys(("trino_commit", "trino_archive_sha256"), ("trino_used",)),
-    **dict.fromkeys(("benchmark_mode", "trino_used", "joni_evidence_scope", "cargo_package", "rust_package"),
-                    ("shard",)),
-}
-# A shard needs the pinned Trino checkout when shard-dispatch.tsv gives it one of these handlers.
-TRINO_HANDLERS = frozenset({"trino-operations", "trino-like"})
-# The build phase's one job per platform; it prepares the pinned Trino harness.
-ENGINE_BUILD_SHARD = "engine-build"
-TRINO_SHARDS = frozenset(
-    row["shard_id"] for row in csv.DictReader(
-        (Path(__file__).resolve().parent / "shard-dispatch.tsv").read_text().splitlines(), delimiter="\t")
-    if row["native_access_handler"] in TRINO_HANDLERS) | {ENGINE_BUILD_SHARD}
-# An engine archive upload slower than this has stalled; it is retried rather than left to
+# A shared archive upload slower than this has stalled; it is retried rather than left to
 # hold every launch behind it.
-ENGINE_BUILD_UPLOAD_MINIMUM_RATE = 256 * 1024
-ENGINE_BUILD_UPLOAD_ATTEMPTS = 3
+SHARED_ARCHIVE_UPLOAD_MINIMUM_RATE = 256 * 1024
+SHARED_ARCHIVE_UPLOAD_ATTEMPTS = 3
 CANDIDATE_PROVENANCE_FIELDS = (
     "candidate_ref",
     "candidate_commit",
@@ -143,9 +120,6 @@ PHASE_HOST_EPOCH_START = {
     "confirmation": 200_001,
     "build": 300_001,
 }
-RECEIPT_NAMES = {
-    "engine-build": engine_build.RECEIPT,
-}
 
 
 @dataclass(frozen=True)
@@ -170,7 +144,8 @@ class Platform:
 @dataclass(frozen=True)
 class WorkItem:
     """One replica of a work unit on one platform, measured by any unit worker of its pool: the platform's
-    workers of the instance type the unit's shard is allocated."""
+    workers of the unit's instance type, the frozen type for a baseline unit or engine build and the plan's
+    allocation for a language unit."""
     platform: str
     instance_type: str
     shard: str
@@ -217,13 +192,6 @@ def campaign_engine_tree(arguments):
     return arguments.engine_tree
 
 
-def candidate_revision(arguments):
-    # Hosts measure the candidate archive, so a refill may run a newer controller.
-    if getattr(arguments, "refill_unresolved", False):
-        return f"{arguments.candidate_ref}^{{commit}}"
-    return "HEAD"
-
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", choices=PHASE_TIMEOUT_SECONDS)
@@ -237,9 +205,6 @@ def parse_args():
     parser.add_argument("--max-concurrent-per-platform", type=int, default=DEFAULT_MAX_CONCURRENT)
     parser.add_argument("--spot-only", action="store_true",
                         help="wait and retry on Spot; prohibit On-Demand launches and fallback")
-    parser.add_argument("--refill-unresolved", action="store_true",
-                        help="build campaigns only: resume an existing result root on On-Demand, "
-                             "giving each job that exhausted its replacements one more attempt")
     parser.add_argument("--spot-vcpu-reserve", type=int, default=SPOT_VCPU_SAFETY_RESERVE)
     parser.add_argument("--release-version", default="",
                         help="measure the pinned published JAR for this version instead of source-built classes")
@@ -261,8 +226,8 @@ def parse_args():
                         help="AWS region a host may launch in; repeat to let Spot placement scores choose, "
                              "ties going to the earlier region (default: AWS_REGION or us-west-2)")
     parser.add_argument("--engine-builds", type=Path,
-                        help="accepted build-phase result root whose per-platform engines hosts install "
-                             "when their native target matches")
+                        help="accepted build-phase result root whose per-platform Trino harness and native "
+                             "runners every measuring unit worker installs")
     parser.add_argument("--transfer-bucket", action="append", default=[], metavar="REGION=BUCKET",
                         help="shared transfer bucket for hosts launched in REGION; regions without one "
                              "use a per-session bucket")
@@ -313,13 +278,6 @@ def execution_policy(arguments):
 def validate_execution_policy(arguments, result_root):
     expected = execution_policy(arguments)
     path = result_root / "execution-policy.json"
-    if getattr(arguments, "refill_unresolved", False):
-        # A refill keeps the campaign's policy and records its own beside it.
-        original = json.loads(path.read_text())
-        if any(original.get(field) != expected[field] for field in ("release_version", "smoke_protocol",
-                                                                     "engine_builds")):
-            raise UnsafeCampaignError("refill must measure the campaign's release and protocol with its engine builds")
-        path = result_root / "refill-execution-policy.json"
     if path.exists():
         recorded = json.loads(path.read_text())
         if recorded != expected:
@@ -339,10 +297,6 @@ def phase_timeout(arguments):
     if getattr(arguments, "topology_deadline_seconds", None) is not None:
         return arguments.topology_deadline_seconds
     return PHASE_TIMEOUT_SECONDS[arguments.phase]
-
-
-def accepted_sessions_path(result_root, arguments):
-    return result_root / "accepted-engine-builds.json"
 
 
 def read_platforms(directory):
@@ -411,19 +365,14 @@ def read_confirmation_units(path, platforms, units, primary_receipts):
     return selected
 
 
-def build_engine_jobs(platforms):
-    return [Job(platform, ENGINE_BUILD_SHARD, 1, host_epoch, 1, "spot", "engine-build")
-            for host_epoch, platform in enumerate(platforms, start=PHASE_HOST_EPOCH_START["build"])]
-
-
 def build_work_items(phase, platforms, units, shards, confirmation_units=(), allocations=None):
-    """Each platform's replicas of the phase's units: replica 1 in smoke, 1 to 3 in primary, and
-    the listed replica 4 confirmations. allocations names each shard's {platform: instance type};
-    a baseline unit runs on its platform's frozen type."""
+    """Each platform's replicas of the phase's units: replica 1 in build and smoke, 1 to 3 in primary,
+    and the listed replica 4 confirmations. allocations names each shard's {platform: instance type};
+    a baseline unit or engine build runs on its platform's frozen type."""
     if phase == "confirmation":
         selected = confirmation_units
     else:
-        replicas = (1,) if phase == "smoke" else (1, 2, 3)
+        replicas = (1,) if phase in ("build", "smoke") else (1, 2, 3)
         ordered = [unit_id for unit_id, unit in sorted(units.items(), key=lambda entry: (
             entry[1]["shard_id"], int(entry[1]["unit_index"]))) if unit["shard_id"] in shards]
         selected = [(platform.name, unit_id, replica, frozenset())
@@ -438,19 +387,21 @@ def build_work_items(phase, platforms, units, shards, confirmation_units=(), all
 
 
 def language_plans(arguments):
-    """Each language plan's directory by its shard. A language campaign has no confirmation phase and runs
-    every phase at the qualification protocol."""
+    """Each language plan, validated, by its directory; arguments.language_plans names each directory by its
+    shard. A language campaign has no confirmation phase and runs every phase at the qualification protocol."""
     if arguments.phase not in ("smoke", "primary"):
         raise SystemExit("a language campaign runs only smoke and primary phases")
-    plans = {}
+    plans, arguments.language_plans = {}, {}
     for directory in arguments.language_plan:
+        directory = directory.resolve()
         try:
-            shard = language_fleet.validate(directory)["shard_id"]
+            plan = language_fleet.validate(directory)
         except (OSError, ValueError, KeyError) as error:
             raise SystemExit(f"invalid language plan {directory}: {error}") from error
-        if shard in plans:
-            raise SystemExit(f"language plans share shard {shard}")
-        plans[shard] = directory.resolve()
+        if plan["shard_id"] in arguments.language_plans:
+            raise SystemExit(f"language plans share shard {plan['shard_id']}")
+        plans[directory] = plan
+        arguments.language_plans[plan["shard_id"]] = directory
     arguments.smoke_protocol = "qualification"
     return plans
 
@@ -534,13 +485,11 @@ def platform_has_capacity(candidate, running, arguments):
     return sum(job.platform.name == candidate.platform.name for _, job, _ in running.values()) < limit
 
 
-def validate_configuration(arguments, jobs, launched_jobs=None, items=None):
-    """Check the campaign's limits and derive its phase deadline; items are a unit campaign's work."""
+def validate_configuration(arguments, items):
+    """Check the campaign's limits and derive its phase deadline from the phase's work items."""
     campaign_heap_size(arguments)
     if getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) < 0:
         raise SystemExit("Spot vCPU reserve must not be negative")
-    if getattr(arguments, "spot_only", False) and any(job.market != "spot" for job in jobs):
-        raise SystemExit("Spot-only campaigns cannot contain On-Demand jobs")
     regions = campaign_regions(arguments)
     if len(regions) != len(set(regions)) or not all(re.fullmatch(REGION_PATTERN, region) for region in regions):
         raise SystemExit(f"allowed regions must be distinct AWS region names: {regions}")
@@ -560,10 +509,9 @@ def validate_configuration(arguments, jobs, launched_jobs=None, items=None):
     if shared_transfer_buckets(arguments) and not os.environ.get("TRANSFER_PREFIX"):
         raise SystemExit("--transfer-bucket and TRANSFER_BUCKET require TRANSFER_PREFIX")
     budget = getattr(arguments, "shared_budget", None)
-    if getattr(arguments, "refill_unresolved", False) and (getattr(arguments, "spot_only", False) or budget):
-        raise SystemExit("refill runs On-Demand without --spot-only or a shared fleet budget")
     # Each worker type launches only in the allowed regions that hold its image.
-    workers = campaign_worker_platforms(arguments, jobs, items)
+    unit_platforms = getattr(arguments, "unit_platforms", {})
+    workers = [unit_platforms[pool] for pool in sorted({item.pool for item in items}) if pool in unit_platforms]
     launchable = {platform.name: [region for region in regions if amis is None or (platform.name, region) in amis]
                   for platform in workers}
     fleet_limits, fleet_vcpus = {}, None
@@ -580,8 +528,8 @@ def validate_configuration(arguments, jobs, launched_jobs=None, items=None):
                          "the policy allows On-Demand in an allowed region holding each worker type's image")
     if getattr(arguments, "execute", False) and arguments.max_concurrent > DEFAULT_MAX_CONCURRENT and budget is None:
         raise SystemExit("more than 64 workers requires a shared fleet budget")
-    worker_timeout = unit_worker_timeout(max(longest_units(items or ()).values(), default=0))
-    if items is not None and budget and budget.policy["max_attempt_seconds"] < worker_timeout + 15 * 60:
+    worker_timeout = unit_worker_timeout(max(longest_units(items).values(), default=0))
+    if budget and budget.policy["max_attempt_seconds"] < worker_timeout + 15 * 60:
         raise SystemExit("unit workers require a shared fleet max_attempt_seconds of at least "
                          f"{worker_timeout + 15 * 60}, a worker's timeout and cleanup")
     if not arguments.campaign_id or len(arguments.campaign_id) > 63:
@@ -591,27 +539,13 @@ def validate_configuration(arguments, jobs, launched_jobs=None, items=None):
     per_platform = getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT)
     if type(per_platform) is not int or per_platform < 1:
         raise SystemExit("per-platform concurrency must be a positive integer")
-    if arguments.phase == "primary" and len(jobs if items is None else items) == 0:
-        raise SystemExit("primary campaign has no jobs")
-    # A refill's deadline only needs to fit the attempts it launches.
-    launched_jobs = jobs if launched_jobs is None else launched_jobs
-    counts = {}
-    for job in launched_jobs:
-        counts[job.platform.name] = counts.get(job.platform.name, 0) + 1
+    if arguments.phase == "primary" and not items:
+        raise SystemExit("primary campaign has no work items")
     host_limit = min(arguments.max_concurrent, budget.policy["max_hosts"]) if budget else arguments.max_concurrent
-    vcpu_waves = 0
-    if budget:
-        if any(platform.vcpus > max((fleet_limits[region]["max_vcpus"] for region in launchable[platform.name]
-                                     if region in fleet_limits), default=0) for platform in workers):
-            raise SystemExit("shared fleet vCPU limit cannot admit every worker type")
-        vcpu_waves = math.ceil(sum(job.platform.vcpus for job in jobs) / fleet_vcpus)
-    if items is None:
-        bounded_waves = max(math.ceil(len(launched_jobs) / host_limit),
-                            max((math.ceil(count / per_platform) for count in counts.values()), default=0),
-                            vcpu_waves)
-        required_seconds = (bounded_waves + 1) * JOB_TIMEOUT_SECONDS
-    else:
-        required_seconds = unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus)
+    if budget and any(platform.vcpus > max((fleet_limits[region]["max_vcpus"] for region in launchable[platform.name]
+                                            if region in fleet_limits), default=0) for platform in workers):
+        raise SystemExit("shared fleet vCPU limit cannot admit every worker type")
+    required_seconds = unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus)
     explicit_deadline = getattr(arguments, "phase_timeout_seconds", None)
     arguments.topology_deadline_seconds = (explicit_deadline if explicit_deadline is not None else
                                           max(PHASE_TIMEOUT_SECONDS[arguments.phase], required_seconds + 3600))
@@ -620,20 +554,6 @@ def validate_configuration(arguments, jobs, launched_jobs=None, items=None):
                          f"requires {required_seconds}s, allows {arguments.topology_deadline_seconds}s")
     if getattr(arguments, "language_plans", None) and campaign_heap_size(arguments) != "8g":
         raise SystemExit("language protocol requires an 8g heap")
-    identities = [job.identity for job in jobs]
-    if len(identities) != len(set(identities)):
-        raise SystemExit("campaign contains duplicate job identities")
-    epochs = [job.host_epoch for job in jobs]
-    if len(epochs) != len(set(epochs)):
-        raise SystemExit("campaign contains reused host epochs")
-
-
-def campaign_worker_platforms(arguments, jobs, items):
-    """The worker types a campaign launches: its host jobs' platforms, or its unit pools' hosts."""
-    if items is None:
-        return [job.platform for job in jobs]
-    platforms = getattr(arguments, "unit_platforms", {})
-    return [platforms[pool] for pool in sorted({item.pool for item in items}) if pool in platforms]
 
 
 def unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus):
@@ -724,9 +644,9 @@ def validate_source(root, arguments):
         raise SystemExit("campaign execution requires a clean Regulator worktree")
     head = check_output(["git", "rev-parse", "HEAD"], cwd=root)
     candidate = check_output(["git", "rev-parse", f"{arguments.candidate_ref}^{{commit}}"], cwd=root)
-    if head != candidate and not getattr(arguments, "refill_unresolved", False):
+    if head != candidate:
         raise SystemExit(f"candidate ref {arguments.candidate_ref} is {candidate}, but HEAD is {head}")
-    engine_tree = check_output(["git", "rev-parse", f"{candidate_revision(arguments)}:src/main"], cwd=root)
+    engine_tree = check_output(["git", "rev-parse", "HEAD:src/main"], cwd=root)
     with arguments.candidate_provenance.open(newline="") as input_file:
         reader = csv.DictReader(input_file, delimiter="\t")
         if tuple(reader.fieldnames or ()) != CANDIDATE_PROVENANCE_FIELDS:
@@ -741,7 +661,7 @@ def validate_source(root, arguments):
     expected = {
         "candidate_ref": arguments.candidate_ref,
         "candidate_commit": candidate,
-        "root_tree": check_output(["git", "rev-parse", f"{candidate_revision(arguments)}^{{tree}}"], cwd=root),
+        "root_tree": check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root),
         "engine_tree": engine_tree,
         "archive_sha256": archive_sha256,
         "archive_file_list_sha256": archive_file_list_sha256(arguments.candidate_archive),
@@ -784,14 +704,14 @@ def tooling_digest(root):
     return digest.hexdigest()
 
 
-def frozen_input_fingerprint(root, arguments, jobs_path):
+def frozen_input_fingerprint(root, arguments, items_path):
     if not (root / ".git").exists():
         return None
     tracked_inputs = tracked_tooling(root)
     tracked_inputs.extend((
         arguments.candidate_archive,
         arguments.candidate_provenance,
-        jobs_path))
+        items_path))
     tracked_inputs.extend(directory / "plan.json" for _, directory in
                           sorted(getattr(arguments, "language_plans", {}).items()))
     # The policy binds each manifest's SHA-256 and each wrapper checks the archives against
@@ -805,27 +725,25 @@ def frozen_input_fingerprint(root, arguments, jobs_path):
     )
 
 
-def validate_frozen_inputs(root, arguments, jobs_path, expected_fingerprint):
+def validate_frozen_inputs(root, arguments, items_path, expected_fingerprint):
     if expected_fingerprint is None:
         return
-    if frozen_input_fingerprint(root, arguments, jobs_path) != expected_fingerprint:
+    if frozen_input_fingerprint(root, arguments, items_path) != expected_fingerprint:
         raise UnsafeCampaignError("the frozen candidate or campaign manifest changed during execution")
-
-
-def read_receipt(path):
-    receipt = json.loads(path.read_text())
-    if receipt.get("schema_version") != 1 or receipt.get("workload") not in JSON_LEDGER_WORKLOADS.values():
-        raise RuntimeError(f"unexpected JSON receipt schema in {path}")
-    return receipt
 
 
 def validate_unit_ledger(root, arguments, receipts_path, phase, confirmations=()):
     """Accept a phase's ledger of unit receipts as one campaign, with the confirmations of a confirmation
-    phase: the units of a language campaign's plans, or the baseline units of the campaign's shards."""
+    phase: each platform's engine build, the units of a language campaign's plans, or the baseline units of
+    the campaign's shards."""
+    if phase == "build":
+        engine_build.validate_unit_campaign(root, read_accepted_units(receipts_path), arguments.campaign_id)
+        return
     plans = getattr(arguments, "language_plans", None)
     if plans:
         language_fleet.validate_unit_campaign(
-            list(plans.values()), read_accepted_units(receipts_path), arguments.campaign_id, phase)
+            {directory: language_fleet.validate(directory) for directory in plans.values()},
+            read_accepted_units(receipts_path), arguments.campaign_id, phase)
         return
     unit_session.validate_unit_campaign(
         campaign_manifest(root, arguments),
@@ -880,29 +798,34 @@ def resolve_engine_builds(root, arguments, platforms):
         raise SystemExit(f"--engine-builds requires a shared transfer bucket in every allowed region; "
                          f"name one for {missing} with --transfer-bucket REGION=BUCKET, created as "
                          "aws/README.md \"Launch regions\" describes")
-    from copy import copy
-    build_arguments = copy(arguments)
-    build_arguments.phase = "build"
-    jobs = build_engine_jobs(platforms)
+    # The build phase's accepted units, one build per platform, each revalidated from its retained attempt.
+    # Any measuring campaign may install them, so they are checked under the build phase's own campaign ID, and
+    # against this checkout only for what the engines are made from: the candidate, the build scripts, the
+    # Trino pin, and each platform's builder.
+    accepted = builds / "accepted-units.tsv"
     try:
-        accepted = recover_accepted_sessions(
-            root, build_arguments, builds, jobs, accepted_sessions_path(builds, build_arguments))
-    except (OSError, RuntimeError, ValueError) as error:
+        state = read_campaign_state(builds / "campaign-state.tsv")
+        if state["schema_version"] != "2" or state["phase"] != "build" or not state["campaign_id"]:
+            raise ValueError(f"{builds} is not a build phase's result root")
+        build_arguments = argparse.Namespace(phase="build", campaign_id=state["campaign_id"])
+        unit_session.check_semantic_rejections(builds)
+        validate_unit_ledger(root, build_arguments, accepted, "build")
+        receipts = read_accepted_units(accepted)
+        context = None, {"campaign_id": build_arguments.campaign_id,
+                         "candidate_commit": check_output(["git", "rev-parse", "HEAD"], cwd=root),
+                         "candidate_archive_sha256": arguments.candidate_archive_sha256}, None
+        for receipt in receipts:
+            validate_unit_artifacts(root, build_arguments, builds, receipt, context=context)
+            engine_build.validate_trino_pin(root, unit_attempt_directory(builds, receipt) / engine_build.DIRECTORY)
+    except (OSError, RuntimeError, ValueError, UnsafeCampaignError) as error:
         raise SystemExit(f"engine builds are not accepted: {error}") from error
-    missing = [job.platform.name for job in jobs if job.logical_identity not in accepted]
-    if missing:
-        raise SystemExit(f"engine builds have no accepted build for platforms {missing}")
-    arguments.engine_build_policy = {}
-    arguments.engine_build_directories = {}
-    for job in jobs:
-        receipt = accepted[job.logical_identity]
-        session = single_session(builds, replace(job, host_epoch=int(receipt["host_epoch"])))
-        arguments.engine_build_policy[job.platform.name] = receipt["manifest_sha256"]
-        arguments.engine_build_directories[job.platform.name] = (
-            session / job.platform.architecture / "re2-results" / engine_build.DIRECTORY)
+    # A measuring worker names its platform's build by the build manifest's SHA-256.
+    arguments.engine_build_policy = {receipt["platform"]: receipt["observed_rows_sha256"] for receipt in receipts}
+    arguments.engine_build_directories = {
+        receipt["platform"]: unit_attempt_directory(builds, receipt) / engine_build.DIRECTORY for receipt in receipts}
 
 
-def validate_dependencies(root, arguments, jobs):
+def validate_dependencies(root, arguments):
     if getattr(arguments, "language_plans", None):
         # Plans already contain checksummed source workloads. The unit worker
         # resolves and verifies the pinned Joni jar during its clean build.
@@ -910,9 +833,7 @@ def validate_dependencies(root, arguments, jobs):
             language_fleet.validate(directory)
     else:
         subprocess.run([str(root / "tools/re2-benchmark/baseline/validate-manifest.py")], check=True)
-        if not any(job.shard in TRINO_SHARDS for job in jobs):
-            return
-    # A language unit worker's wrapper ships the pinned Trino checkout as a baseline one does.
+    # Every unit worker's wrapper ships the pinned Trino checkout, whatever its units measure.
     trino_directory = os.environ.get("TRINO_DIR")
     if not trino_directory:
         raise SystemExit("campaign execution requires TRINO_DIR to name the pinned Trino checkout")
@@ -982,8 +903,6 @@ def validate_aws(arguments, platforms, jobs=None):
                       f"spot={spot_quota:g}, on-demand={on_demand_quota:g}")
     if getattr(arguments, "spot_only", False) and not has_spot_capacity:
         raise SystemExit("Standard Spot quota cannot admit one host after the configured reserve")
-    if getattr(arguments, "refill_unresolved", False) and not has_on_demand_capacity:
-        raise SystemExit("Standard On-Demand quota cannot admit one host after its safety reserve")
     if not has_spot_capacity and not has_on_demand_capacity:
         raise SystemExit(
             f"Neither Standard Spot nor On-Demand quota can admit one host after safety reserves: "
@@ -1069,7 +988,7 @@ def upload_shared_archives(arguments, uploads):
     for (region, key), (path, sha256, label) in sorted(uploads.items()):
         checksum = base64.b64encode(bytes.fromhex(sha256)).decode()
         prefix = aws_output(arguments, region) + ["s3api"]
-        for attempt in range(1, ENGINE_BUILD_UPLOAD_ATTEMPTS + 1):
+        for attempt in range(1, SHARED_ARCHIVE_UPLOAD_ATTEMPTS + 1):
             try:
                 existing = check_output(prefix + [
                     "head-object", "--bucket", buckets[region], "--key", key, "--checksum-mode", "ENABLED",
@@ -1084,10 +1003,10 @@ def upload_shared_archives(arguments, uploads):
                 check_output(prefix + [
                     "put-object", "--bucket", buckets[region], "--key", key, "--body", str(path),
                     "--checksum-algorithm", "SHA256", "--checksum-sha256", checksum],
-                    timeout=60 + path.stat().st_size / ENGINE_BUILD_UPLOAD_MINIMUM_RATE)
+                    timeout=60 + path.stat().st_size / SHARED_ARCHIVE_UPLOAD_MINIMUM_RATE)
                 break
             except subprocess.SubprocessError as error:
-                if attempt == ENGINE_BUILD_UPLOAD_ATTEMPTS:
+                if attempt == SHARED_ARCHIVE_UPLOAD_ATTEMPTS:
                     raise SystemExit(f"could not upload the {label} to s3://{buckets[region]}/{key}: {error}") from error
 
 
@@ -1460,7 +1379,6 @@ def job_environment(job, arguments, root, result_root):
         environment["CAMPAIGN_SPOT_MAX_PRICE"] = str(arguments.shared_budget.policy["hourly_rates"][job.platform.instance_type]["spot"])
     architecture = job.platform.architecture
     benchmark_protocol = phase_protocol(arguments)
-    unit_worker = job.workload == "unit-worker"
     region = job.region or campaign_regions(arguments)[0]
     amis = getattr(arguments, "regional_amis", None)
     ami_id = job.platform.ami_id if amis is None else amis.get((job.platform.name, region))
@@ -1493,7 +1411,7 @@ def job_environment(job, arguments, root, result_root):
         "BENCHMARK_CPU_LIST": "0",
         "BENCHMARK_EXPECTED_VCPUS": str(job.platform.vcpus),
         "TIMEOUT_SECONDS": str(unit_worker_timeout(getattr(arguments, "longest_units", {}).get(
-            unit_worker_pool(job), 0)) if unit_worker else JOB_TIMEOUT_SECONDS),
+            unit_worker_pool(job), 0))),
         "RESULT_ROOT": str(job_result_root(result_root, job)),
         "TRINO_REVISION": "c7503d170344c4e266f03fdb39e53c82aa7e3594",
         "JONI_COMPARATOR_ORDER": "forward" if job.replica % 2 else "reverse",
@@ -1508,19 +1426,18 @@ def job_environment(job, arguments, root, result_root):
         "BASELINE_EXPECTED_ENGINE_TREE": campaign_engine_tree(arguments),
         "BENCHMARK_HEAP_SIZE": campaign_heap_size(arguments),
     })
-    if unit_worker:
-        environment["UNIT_WORKER_LIFETIME_SECONDS"] = str(UNIT_WORKER_LIFETIME_SECONDS)
-    # Only unit workers install engine builds; never pass the controller's own environment through.
+    environment["UNIT_WORKER_LIFETIME_SECONDS"] = str(UNIT_WORKER_LIFETIME_SECONDS)
+    # Only a measuring phase's workers install engine builds; never pass the controller's own environment through.
     environment.pop("ENGINE_BUILD_DIRECTORY", None)
     environment.pop("ENGINE_BUILD_MANIFEST_SHA256", None)
     directories = getattr(arguments, "engine_build_directories", None)
-    if directories and unit_worker:
+    if directories:
         environment["ENGINE_BUILD_DIRECTORY"] = str(directories[job.platform.name].resolve())
         environment["ENGINE_BUILD_MANIFEST_SHA256"] = arguments.engine_build_policy[job.platform.name]
     for name in ("LANGUAGE_PLAN_BUNDLE_SHA256S", "LANGUAGE_CANDIDATE_PROVENANCE", "LANGUAGE_CANDIDATE_PROVENANCE_SHA256"):
         environment.pop(name, None)
     bundles = getattr(arguments, "language_bundles", None)
-    if bundles and unit_worker:
+    if bundles:
         # A language worker installs each plan's bundle and builds the candidate its provenance names.
         environment.update({
             "LANGUAGE_PLAN_BUNDLE_SHA256S": " ".join(sha256 for _, sha256 in sorted(bundles.values())),
@@ -1726,28 +1643,6 @@ def validate_capacity(path):
     return values
 
 
-def validate_job_artifacts(result_root, job):
-    session, _ = validate_cleanup_manifest(result_root, job)
-    if (session / "campaign-success").read_text() != "complete\n":
-        raise RuntimeError(f"{job.identity} has no campaign success marker")
-    label = job.platform.architecture
-    receipt = session / label / "re2-results" / RECEIPT_NAMES[job.workload]
-    if not receipt.is_file():
-        raise RuntimeError(f"{job.identity} has no acceptance receipt")
-    validate_capacity(session / label / "re2-results" / "host-capacity.txt")
-    if job.platform.concurrency_instance_type:
-        environment = read_properties(receipt.parent / "environment-manifest.txt")
-        if environment.get("logical_cpu_count") != str(job.platform.vcpus):
-            raise UnsafeCampaignError("host logical CPU count differs from the frozen topology")
-    if job.workload == "engine-build":
-        try:
-            if engine_build.validate(receipt.parent) != read_receipt(receipt):
-                raise ValueError("saved engine build receipt differs from its archives")
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            raise RuntimeError(f"invalid engine build for {job.identity}: {error}") from error
-    return receipt
-
-
 def single_session(result_root, job):
     job_root = job_result_root(result_root, job)
     if not job_root.is_dir():
@@ -1756,38 +1651,6 @@ def single_session(result_root, job):
     if len(sessions) != 1:
         raise RuntimeError(f"{job.identity} produced {len(sessions)} session directories")
     return sessions[0]
-
-
-def validate_failed_job(result_root, job):
-    session, cleanup = validate_cleanup_manifest(result_root, job)
-    if cleanup.get("run_status") != "failed":
-        raise RuntimeError(f"{job.identity} retry classification does not describe a failed run")
-    return session, cleanup
-
-
-def replacement_job(job, host_epoch, failure_classification, failure_detail="", *, regions=(), spot_only=False):
-    tried = (*job.spot_capacity_failures, job.region)
-    if (job.market == "spot" and job.region and
-            failure_classification == "retryable-spot" and failure_detail.startswith("launch-capacity:") and
-            any(region not in tried for region in regions)):
-        # A Spot launch that found no capacity tries Spot in the next allowed region first. Each
-        # region is tried once, so these moves do not spend the replacement allowance.
-        return replace(job, host_epoch=host_epoch, attempt=job.attempt + 1, spot_capacity_failures=tried)
-    counted_attempt = job.attempt - len(job.spot_capacity_failures)
-    if (failure_classification != "retryable-capacity" and
-            counted_attempt >= MAX_REPLACEMENTS_PER_JOB + 1):
-        raise RuntimeError(f"{job.logical_identity} exhausted its bounded replacement allowance")
-    if spot_only:
-        if job.market != "spot":
-            raise UnsafeCampaignError("Spot-only policy cannot resume an On-Demand attempt")
-        market = "spot"
-    elif job.market == "spot" and failure_classification == "retryable-infrastructure" and counted_attempt < 2:
-        # A failure Spot did not cause gets one more Spot attempt. A reclaim or Spot
-        # unavailability moves directly to the same On-Demand instance type.
-        market = "spot"
-    else:
-        market = "on-demand"
-    return replace(job, host_epoch=host_epoch, attempt=job.attempt + 1, market=market)
 
 
 def write_attempt(path, job, outcome, detail="-"):
@@ -1855,43 +1718,16 @@ def write_event(path, event_type, campaign_id, job, session, reason, details="",
         os.fsync(output_file.fileno())
 
 
-def receipt_logical_identity(receipt):
-    return f"{receipt['platform']}/{receipt['shard_id']}/replica-{receipt['replica_id']}"
-
-
-def attempt_logical_identity(row):
-    return f"{row['platform']}/{row['shard_id']}/replica-{row['replica']}"
-
-
-def read_accepted_sessions(path):
-    if not path.exists():
-        return []
-    data = json.loads(path.read_text())
-    if data.get("schema_version") != 1 or data.get("workload") != JSON_LEDGER_WORKLOADS.get(path.name):
-        raise UnsafeCampaignError(f"unexpected JSON ledger schema in {path}")
-    rows = data["receipts"]
-    identities = [receipt_logical_identity(row) for row in rows]
-    if len(identities) != len(set(identities)):
-        raise UnsafeCampaignError(f"accepted-session ledger contains duplicate logical jobs: {path}")
-    return rows
-
-
-def persist_accepted_receipt(path, receipt_path):
-    receipt = read_receipt(receipt_path)
-    rows = read_accepted_sessions(path)
-    if accepted_row(rows, receipt, receipt_logical_identity, "host_epoch", "epochs") is None:
-        write_ledger(path, [*rows, receipt])
-    return receipt
-
-
 def unit_validation_context(root, arguments):
     """The unit tables, frozen campaign, and selected release that a pass over unit attempts checks against.
 
     A language campaign's attempts check their plans instead of the tables, and their host's comparator pins
-    and release selection.
+    and release selection; an engine build's check only their own archives.
     """
     version = getattr(arguments, "release_version", "")
-    if getattr(arguments, "language_plans", None):
+    if arguments.phase == "build":
+        tables = None
+    elif getattr(arguments, "language_plans", None):
         tables = {"comparator_manifest_sha256": hashlib.sha256(
             (root / "tools/re2-benchmark/baseline/comparators.tsv").read_bytes()).hexdigest(),
             "regulator_release_version": version}
@@ -1899,11 +1735,11 @@ def unit_validation_context(root, arguments):
         tables = unit_session.load_unit_tables(campaign_manifest(root, arguments))
     return tables, {
         "campaign_id": arguments.campaign_id,
-        "candidate_commit": check_output(["git", "rev-parse", candidate_revision(arguments)], cwd=root),
+        "candidate_commit": check_output(["git", "rev-parse", "HEAD"], cwd=root),
         "candidate_archive_sha256": arguments.candidate_archive_sha256,
         "engine_tree": campaign_engine_tree(arguments),
         "heap_size": campaign_heap_size(arguments),
-    }, released_artifact.manifest(root, version) if version else None
+    }, released_artifact.manifest(root, version) if version and tables is not None else None
 
 
 def validate_unit_artifacts(root, arguments, result_root, receipt, directory=None, context=None):
@@ -1924,7 +1760,9 @@ def validate_unit_artifacts(root, arguments, result_root, receipt, directory=Non
         validate_capacity(directory / "unit-capacity.txt")
         artifact_receipt = read_unit_receipt(directory / "unit-receipt.tsv")
         plans = getattr(arguments, "language_plans", None)
-        if plans:
+        if arguments.phase == "build":
+            regenerated = engine_build.validate_unit_attempt(directory)
+        elif plans:
             regenerated = language_fleet.validate_unit_attempt(directory, plans[receipt["shard_id"]])
             environment = read_properties(directory / "environment-manifest.txt")
             if any(environment.get(field) != value for field, value in tables.items()):
@@ -1969,154 +1807,6 @@ def recover_accepted_units(root, arguments, result_root, accepted_units):
         context = context or unit_validation_context(root, arguments)
         validate_unit_artifacts(root, arguments, result_root, receipt, context=context)
         accepted[identity] = persist_accepted_unit(accepted_units, receipt_path)
-    return accepted
-
-
-def validate_receipt_candidate(root, arguments, result_root, job, receipt, receipt_path=None):
-    expected = {
-        "campaign_id": arguments.campaign_id,
-        "platform": job.platform.name,
-        "shard_id": job.shard,
-        "replica_id": str(job.replica),
-        "host_epoch": str(job.host_epoch),
-        "architecture": job.platform.architecture,
-        "instance_type": job.platform.instance_type,
-        "candidate_commit": check_output(["git", "rev-parse", candidate_revision(arguments)], cwd=root),
-        "candidate_archive_sha256": arguments.candidate_archive_sha256,
-        "engine_tree": campaign_engine_tree(arguments),
-        "heap_size": campaign_heap_size(arguments),
-    }
-    if job.workload == "engine-build":
-        # The candidate commit and archive bind the tree; the build does not depend on the heap.
-        del expected["engine_tree"], expected["heap_size"]
-    mismatches = [field for field, value in expected.items() if receipt.get(field) != value]
-    if mismatches:
-        raise UnsafeCampaignError(
-            f"accepted receipt does not match the frozen campaign for {job.identity}: {mismatches}")
-    validate_refill_environment(result_root, arguments, job, receipt_path)
-
-
-def refill_environment_references(result_root, arguments, granted):
-    originals = sorted(
-        (receipt for receipt in read_accepted_sessions(accepted_sessions_path(result_root, arguments))
-         if receipt_logical_identity(receipt) not in granted),
-        key=lambda receipt: (receipt["platform"], receipt["shard_id"], int(receipt["replica_id"]),
-                             int(receipt["host_epoch"])))
-    references = []
-    for receipt in originals:
-        paths = list((result_root / "jobs" / receipt["platform"] / receipt["shard_id"] /
-                      f"replica-{receipt['replica_id']}" / f"epoch-{receipt['host_epoch']}").glob(
-            f"*/{receipt['architecture']}/re2-results/environment-manifest.txt"))
-        if len(paths) != 1:
-            raise UnsafeCampaignError(
-                f"accepted receipt {receipt_logical_identity(receipt)} has no single environment manifest")
-        references.append(read_properties(paths[0]))
-    return references
-
-
-def refill_field_references(references, environment):
-    # Each field maps to the first original sharing its scope, or None when none does.
-    return {
-        field: next((reference for reference in references
-                     if all(reference.get(key) == environment.get(key) for key in scope)), None)
-        for field, scope in REFILL_ENVIRONMENT_SCOPES.items()}
-
-
-def refill_field_differs(field, reference, environment):
-    if field != "ami":
-        return reference.get(field) != environment.get(field)
-    # Regional copies of one image share its name but not its ID. Hosts that predate
-    # recorded names can only be compared by ID.
-    names = [manifest.get("expected_ami_name", "unverified") for manifest in (reference, environment)]
-    if "unverified" not in names:
-        return names[0] != names[1]
-    return any(reference.get(name) != environment.get(name) for name in ("expected_ami_id", "actual_ami_id"))
-
-
-def validate_refill_references(result_root, arguments, granted_jobs):
-    # A refilled host must match an original sharing its platform, shard, or Trino use,
-    # so refuse before launching a job for which no such original exists.
-    references = refill_environment_references(
-        result_root, arguments, {job.logical_identity for job in granted_jobs})
-    missing = {}
-    for job in granted_jobs:
-        scope = {"platform": job.platform.name, "shard": job.shard,
-                 "trino_used": "true" if job.shard in TRINO_SHARDS else "false"}
-        fields = [field for field, reference in refill_field_references(references, scope).items()
-                  if reference is None]
-        if fields:
-            missing[job.logical_identity] = fields
-    if missing:
-        raise UnsafeCampaignError(f"refill has no accepted original host environment to compare: {missing}")
-
-
-def validate_refill_environment(result_root, arguments, job, receipt_path):
-    # A refill may run a newer controller checkout, which chooses the AMI, JDK, packages,
-    # and Trino inputs, so a refilled host must match the accepted originals.
-    # Ordinary restarts check too, so they never accept a receipt the refill rejected.
-    granted = refill_granted_identities(result_root) or set()
-    if job.logical_identity not in granted:
-        return
-    environment = read_properties(receipt_path.parent / "environment-manifest.txt")
-    matched = refill_field_references(refill_environment_references(result_root, arguments, granted), environment)
-    missing = [field for field, reference in matched.items() if reference is None]
-    if missing:
-        raise UnsafeCampaignError(
-            f"refill host environment for {job.identity} has no accepted original to compare: {missing}")
-    mismatches = [field for field, reference in matched.items() if refill_field_differs(field, reference, environment)]
-    if mismatches:
-        raise UnsafeCampaignError(
-            f"refill host environment for {job.identity} differs from the campaign's: {mismatches}")
-
-
-def recover_accepted_sessions(root, arguments, result_root, jobs, accepted_sessions):
-    jobs_by_logical_identity = {job.logical_identity: job for job in jobs}
-    accepted = {}
-    for receipt in read_accepted_sessions(accepted_sessions):
-        logical_identity = receipt_logical_identity(receipt)
-        base_job = jobs_by_logical_identity.get(logical_identity)
-        if base_job is None:
-            raise UnsafeCampaignError(f"accepted ledger contains an unexpected job: {logical_identity}")
-        job = replace(base_job, host_epoch=int(receipt["host_epoch"]))
-        receipt_path = validate_job_artifacts(result_root, job)
-        artifact_receipt = read_receipt(receipt_path)
-        if artifact_receipt != receipt:
-            raise UnsafeCampaignError(f"accepted ledger differs from artifacts for {job.identity}")
-        validate_receipt_candidate(root, arguments, result_root, job, receipt, receipt_path)
-        accepted[logical_identity] = receipt
-
-    for base_job in jobs:
-        if base_job.logical_identity in accepted:
-            continue
-        replica_root = (result_root / "jobs" / base_job.platform.name / base_job.shard /
-                        f"replica-{base_job.replica}")
-        if not replica_root.is_dir():
-            continue
-        accepted_candidates = []
-        for epoch_root in sorted(replica_root.glob("epoch-*")):
-            try:
-                host_epoch = int(epoch_root.name.removeprefix("epoch-"))
-            except ValueError:
-                raise UnsafeCampaignError(f"invalid host epoch directory: {epoch_root}")
-            job = replace(base_job, host_epoch=host_epoch)
-            receipt_name = RECEIPT_NAMES[job.workload]
-            receipt_paths = list(epoch_root.glob(f"*/{job.platform.architecture}/re2-results/{receipt_name}"))
-            if not receipt_paths:
-                continue
-            if len(receipt_paths) != 1:
-                raise UnsafeCampaignError(f"{job.identity} contains multiple acceptance receipts")
-            receipt_path = validate_job_artifacts(result_root, job)
-            receipt = read_receipt(receipt_path)
-            validate_receipt_candidate(root, arguments, result_root, job, receipt, receipt_path)
-            accepted_candidates.append((job, receipt_path, receipt))
-        if len(accepted_candidates) > 1:
-            epochs = [job.host_epoch for job, _, _ in accepted_candidates]
-            raise UnsafeCampaignError(
-                f"multiple completed sessions exist for {base_job.logical_identity}: {epochs}")
-        if accepted_candidates:
-            job, receipt_path, receipt = accepted_candidates[0]
-            persist_accepted_receipt(accepted_sessions, receipt_path)
-            accepted[base_job.logical_identity] = receipt
     return accepted
 
 
@@ -2169,18 +1859,6 @@ def recover_budget_reservations(budget, arguments, result_root, jobs, attempts_p
         budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
 
 
-def job_from_attempt(row, jobs_by_logical_identity):
-    logical_identity = attempt_logical_identity(row)
-    base_job = jobs_by_logical_identity.get(logical_identity)
-    if base_job is None:
-        raise UnsafeCampaignError(f"attempt ledger contains an unexpected job: {logical_identity}")
-    return replace(
-        base_job,
-        host_epoch=int(row["host_epoch"]),
-        attempt=int(row["attempt"]),
-        market=row["market"])
-
-
 def wrapper_process_id(job, detail):
     marker = "wrapper_pid="
     if marker in detail:
@@ -2207,294 +1885,24 @@ def wrapper_process_id(job, detail):
     return matches[0] if matches else None
 
 
-def settle_detached_attempts(result_root, jobs, attempts_path):
-    attempts = read_attempts(attempts_path)
-    latest_by_epoch = {}
-    for row in attempts:
-        key = (row["platform"], row["shard_id"], row["replica"], row["host_epoch"])
-        latest_by_epoch[key] = row
-    jobs_by_logical_identity = {job.logical_identity: job for job in jobs}
-    detached = [
-        (job_from_attempt(row, jobs_by_logical_identity), row)
-        for row in latest_by_epoch.values()
-        if row["outcome"] in {"starting", "started"}
-    ]
-    deadline = time.monotonic() + JOB_TIMEOUT_SECONDS + 15 * 60
-    while detached:
-        remaining = []
-        for job, row in detached:
-            try:
-                session = single_session(result_root, job)
-            except (OSError, RuntimeError):
-                session = None
-            if session is not None and (session / "cleanup-manifest.txt").is_file():
-                continue
-            process_id = wrapper_process_id(job, row["detail"])
-            if process_id is None:
-                time.sleep(2)
-                try:
-                    session = single_session(result_root, job)
-                except (OSError, RuntimeError):
-                    session = None
-                if session is None and row["outcome"] == "starting":
-                    write_attempt(
-                        attempts_path,
-                        job,
-                        "retryable-infrastructure",
-                        WRAPPER_NOT_CREATED)
-                    continue
-                if session is None or not (session / "cleanup-manifest.txt").is_file():
-                    raise UnsafeCampaignError(
-                        f"detached wrapper for {job.identity} exited without cleanup evidence")
-                continue
-            remaining.append((job, row))
-        if not remaining:
-            return
-        if time.monotonic() >= deadline:
-            identities = [job.identity for job, _ in remaining]
-            raise UnsafeCampaignError(f"detached wrappers exceeded their completion deadline: {identities}")
-        detached = remaining
-        time.sleep(15)
+CAMPAIGN_STATE_FIELDS = ("schema_version", "campaign_id", "phase", "started_at_epoch_seconds", "heap_size")
 
 
-def prepare_resumed_jobs(result_root, jobs, attempts_path, accepted, *, spot_only=False, job_regions=None, refill=None,
-                         superseded=None, settled=True):
-    attempts = read_attempts(attempts_path)
-    attempts_by_epoch = {
-        (row["platform"], row["shard_id"], int(row["replica"]), int(row["host_epoch"])): row
-        for row in attempts
-    }
-    starts_by_epoch = {
-        (row["platform"], row["shard_id"], int(row["replica"]), int(row["host_epoch"])): row
-        for row in attempts if row["outcome"] == "starting"
-    }
-    attempts_by_logical_identity = {}
-    for row in attempts:
-        attempts_by_logical_identity[attempt_logical_identity(row)] = row
-    all_epoch_roots = list((result_root / "jobs").glob("*/*/replica-*/epoch-*"))
-    directory_epochs = []
-    for epoch_root in all_epoch_roots:
-        try:
-            directory_epochs.append(int(epoch_root.name.removeprefix("epoch-")))
-        except ValueError as error:
-            raise UnsafeCampaignError(f"invalid host epoch directory: {epoch_root}") from error
-    maximum_epoch = max(
-        [job.host_epoch for job in jobs] +
-        [int(row["host_epoch"]) for row in attempts] +
-        directory_epochs)
-    pending = []
-    unresolved = []
-
-    def replace_or_resolve(previous_job, classification, detail, outcome):
-        nonlocal maximum_epoch
-        later_epoch = superseded(previous_job) if superseded else None
-        if later_epoch:
-            unresolved.append((previous_job, f"later attempt at epoch {later_epoch} failed before its host started"))
-            return
-        try:
-            replacement = replacement_job(
-                previous_job, maximum_epoch + 1, classification, detail,
-                regions=job_regions(previous_job) if job_regions else (), spot_only=spot_only)
-            ready_at = CAPACITY_RETRY_SECONDS if classification == "retryable-capacity" else 0
-        except RuntimeError as error:
-            if refill is None or not refill(previous_job, outcome):
-                unresolved.append((previous_job, str(error)))
-                return
-            # A granted refill is one On-Demand attempt beyond the exhausted allowance.
-            replacement = replace(
-                previous_job, host_epoch=maximum_epoch + 1, attempt=previous_job.attempt + 1, market="on-demand")
-            ready_at = 0
-        maximum_epoch += 1
-        pending.append((replacement, ready_at))
-
-    for base_job in jobs:
-        if base_job.logical_identity in accepted:
-            continue
-        replica_root = (result_root / "jobs" / base_job.platform.name / base_job.shard /
-                        f"replica-{base_job.replica}")
-        epoch_roots = list(replica_root.glob("epoch-*")) if replica_root.is_dir() else []
-        if not epoch_roots:
-            attempt_row = attempts_by_logical_identity.get(base_job.logical_identity)
-            if attempt_row is None:
-                pending.append((base_job, 0))
-                continue
-            previous_job = job_from_attempt(
-                attempt_row,
-                {base_job.logical_identity: base_job})
-            classification = attempt_row["outcome"]
-            if classification == "queued-capacity" and not any(
-                    int(row["host_epoch"]) == previous_job.host_epoch and row["outcome"] in {"starting", "started"}
-                    for row in attempts):
-                pending.append((previous_job, 0))
-                continue
-            if classification not in {
-                    "retryable-spot", "retryable-capacity", "retryable-infrastructure"}:
-                unresolved.append((
-                    previous_job,
-                    f"attempt without artifacts cannot be resumed: outcome={classification}"))
-                continue
-            replace_or_resolve(previous_job, classification, attempt_row["detail"], classification)
-            continue
-        epochs = []
-        for epoch_root in epoch_roots:
-            try:
-                epochs.append(int(epoch_root.name.removeprefix("epoch-")))
-            except ValueError as error:
-                raise UnsafeCampaignError(f"invalid host epoch directory: {epoch_root}") from error
-        maximum_epoch = max(maximum_epoch, *epochs)
-        latest_epoch = max(epochs)
-        attempt_row = attempts_by_epoch.get((
-            base_job.platform.name, base_job.shard, base_job.replica, latest_epoch))
-        if attempt_row is None:
-            raise UnsafeCampaignError(
-                f"{base_job.logical_identity} has artifacts for epoch {latest_epoch} without an attempt record")
-        # The attempt's launch record names its region and the regions its chain already moved past.
-        start = starts_by_epoch.get((base_job.platform.name, base_job.shard, base_job.replica, latest_epoch))
-        launch = launch_record(start) if start else {}
-        previous_job = replace(
-            base_job,
-            host_epoch=latest_epoch,
-            attempt=int(attempt_row["attempt"]),
-            market=attempt_row["market"],
-            region=launch.get("region", ""),
-            spot_capacity_failures=tuple(filter(None, launch.get("spot_capacity_failures", "").split(","))))
-        try:
-            session, cleanup = validate_cleanup_manifest(result_root, previous_job)
-        except (OSError, RuntimeError) as error:
-            if not settled:
-                # Execution waits for a detached attempt before it plans.
-                unresolved.append((previous_job, f"attempt has not settled: {error}"))
-                continue
-            raise UnsafeCampaignError(
-                f"cannot safely resume {previous_job.identity}: {error}") from error
-        outcome = cleanup.get("failure_classification", "")
-        detail = cleanup.get("failure_detail", "unknown")
-        classification = "retryable-infrastructure" if outcome == "controller-abort" else outcome
-        if classification in {"retryable-spot", "retryable-capacity", "retryable-infrastructure"}:
-            replace_or_resolve(previous_job, classification, detail, outcome)
-            continue
-        unresolved.append((
-            previous_job,
-            f"previous attempt was not accepted: classification={classification or 'none'}; detail={detail}"))
-    return pending, unresolved, maximum_epoch + 1
-
-
-def read_refill_grants(result_root):
-    path = result_root / "refill-jobs.tsv"
-    if not path.exists():
-        return None
+def read_campaign_state(path):
+    """A phase's campaign state: the one row its controller recorded when the phase first started."""
     with path.open(newline="") as input_file:
         reader = csv.DictReader(input_file, delimiter="\t")
-        if tuple(reader.fieldnames or ()) != JOB_MANIFEST_FIELDS:
-            raise UnsafeCampaignError(f"unexpected refill grant schema in {path}")
-        return list(reader)
-
-
-def refill_granted_identities(result_root):
-    # None until a refill records its grants.
-    rows = read_refill_grants(result_root)
-    if rows is None:
-        return None
-    return {attempt_logical_identity(row) for row in rows}
-
-
-def refill_granted_jobs(result_root, jobs):
-    granted = refill_granted_identities(result_root)
-    if granted is None:
-        return None
-    return [job for job in jobs if job.logical_identity in granted]
-
-
-def latest_launched_epochs(result_root, attempts_path):
-    final_rows = {}
-    for row in read_attempts(attempts_path):
-        final_rows[(attempt_logical_identity(row), int(row["host_epoch"]))] = row
-    latest = {}
-    for (identity, epoch), row in final_rows.items():
-        # A capacity wait, or a controller stopped before it started the wrapper, tried nothing.
-        if row["outcome"] != "queued-capacity" and row["detail"] != WRAPPER_NOT_CREATED:
-            latest[identity] = max(latest.get(identity, 0), epoch)
-    for epoch_root in (result_root / "jobs").glob("*/*/replica-*/epoch-*"):
-        epoch = epoch_root.name.removeprefix("epoch-")
-        if epoch.isdigit():
-            identity = "/".join(epoch_root.parts[-4:-1])
-            latest[identity] = max(latest.get(identity, 0), int(epoch))
-    return latest
-
-
-def prepare_refill(result_root, jobs, attempts_path, accepted, *, record=True, settled=True):
-    # The first refill records the exhausted attempts it replaces, and restarts grant only
-    # those. A grant passes only to a job's latest launched attempt, so a refill attempt that
-    # failed, even before its host started, stays unresolved. An operator interrupt never
-    # consumes a grant: an aborted refill attempt passes it to one new attempt, recorded the same way.
-    rows = read_refill_grants(result_root)
-    recorded = None if rows is None else {
-        f"{attempt_logical_identity(row)}/epoch-{row['host_epoch']}" for row in rows}
-    recorded_jobs = {identity.rsplit("/", 1)[0] for identity in recorded or ()}
-    latest = latest_launched_epochs(result_root, attempts_path)
-    granted = []
-
-    def superseded(job):
-        # Artifacts mark a granted job's last attempt only if no later one failed before creating any.
-        if job.logical_identity in recorded_jobs and latest.get(job.logical_identity, 0) > job.host_epoch:
-            return latest[job.logical_identity]
-        return None
-
-    def grant(job, outcome):
-        if latest.get(job.logical_identity, job.host_epoch) > job.host_epoch:
-            return False
-        if recorded is not None and job.identity not in recorded and (
-                outcome != "controller-abort" or job.logical_identity not in recorded_jobs):
-            return False
-        if recorded is None or job.identity not in recorded:
-            granted.append(job)
-        return True
-
-    pending, unresolved, next_host_epoch = prepare_resumed_jobs(
-        result_root, jobs, attempts_path, accepted, refill=grant, superseded=superseded, settled=settled)
-    if recorded is None and (not granted or len(pending) != len(granted)):
-        raise SystemExit("refill requires a campaign whose only remaining retryable jobs "
-                         "exhausted their replacements; resume it normally first")
-    if record and granted:
-        jobs_by_logical_identity = {job.logical_identity: job for job in jobs}
-        previous = [job_from_attempt(row, jobs_by_logical_identity) for row in rows or ()]
-        write_jobs(result_root / "refill-jobs.tsv", previous + granted, extend=True)
-    return pending, unresolved, next_host_epoch
-
-
-def refill_launch_jobs(arguments, result_root, jobs):
-    # The jobs that size a refill's deadline. Recorded grants fix it across restarts. Before
-    # the first refill records them, plan without waiting for detached attempts; execution
-    # settles them and records the grants under the controller lock.
-    if not (result_root / "execution-policy.json").exists():
-        raise SystemExit("refill requires an existing campaign result root")
-    granted = refill_granted_jobs(result_root, jobs)
-    if granted is not None:
-        return granted
-    accepted = {receipt_logical_identity(receipt): receipt for receipt in
-                read_accepted_sessions(accepted_sessions_path(result_root, arguments))}
-    pending, _, _ = prepare_refill(
-        result_root, jobs, result_root / "job-attempts.tsv", accepted, record=False, settled=False)
-    return [job for job, _ in pending]
-
-
-def write_unresolved_jobs(path, unresolved):
-    write_unresolved(path, ("platform", "shard_id", "replica", "host_epoch", "attempt", "market", "detail"), [
-        (job.platform.name, job.shard, job.replica, job.host_epoch, job.attempt, job.market, detail)
-        for job, detail in unresolved])
+        if tuple(reader.fieldnames or ()) != CAMPAIGN_STATE_FIELDS:
+            raise UnsafeCampaignError(f"unexpected campaign-state schema in {path}")
+        rows = list(reader)
+    if len(rows) != 1:
+        raise UnsafeCampaignError(f"campaign state must contain exactly one row: {path}")
+    return rows[0]
 
 
 def campaign_started_at(path, arguments):
-    fields = ("schema_version", "campaign_id", "phase", "started_at_epoch_seconds", "heap_size")
     if path.exists():
-        with path.open(newline="") as input_file:
-            reader = csv.DictReader(input_file, delimiter="\t")
-            if tuple(reader.fieldnames or ()) != fields:
-                raise UnsafeCampaignError(f"unexpected campaign-state schema in {path}")
-            rows = list(reader)
-        if len(rows) != 1:
-            raise UnsafeCampaignError(f"campaign state must contain exactly one row: {path}")
-        row = rows[0]
+        row = read_campaign_state(path)
         if row["schema_version"] != "2" or row["heap_size"] != campaign_heap_size(arguments):
             raise UnsafeCampaignError(f"campaign state has a different schema or heap_size: {path}")
         if row["campaign_id"] != arguments.campaign_id or row["phase"] != arguments.phase:
@@ -2507,7 +1915,7 @@ def campaign_started_at(path, arguments):
     started_at = time.time()
     temporary_path = path.with_name(path.name + ".new")
     with temporary_path.open("w", newline="") as output_file:
-        writer = csv.DictWriter(output_file, fieldnames=fields, delimiter="\t", lineterminator="\n")
+        writer = csv.DictWriter(output_file, fieldnames=CAMPAIGN_STATE_FIELDS, delimiter="\t", lineterminator="\n")
         writer.writeheader()
         writer.writerow({
             "schema_version": "2",
@@ -2684,197 +2092,6 @@ def controller_lock(result_root):
         yield
 
 
-def execute_jobs(arguments, root, result_root, jobs):
-    with controller_lock(result_root):
-        return execute_jobs_locked(arguments, root, result_root, jobs)
-
-
-def execute_jobs_locked(arguments, root, result_root, jobs):
-    refill = getattr(arguments, "refill_unresolved", False)
-    attempts_path = result_root / "job-attempts.tsv"
-    accepted_sessions = accepted_sessions_path(result_root, arguments)
-    if refill:
-        # Settled attempts and recovered receipts fix the grants, which size the refill's
-        # deadline before its policy is recorded.
-        settle_detached_attempts(result_root, jobs, attempts_path)
-        accepted = recover_accepted_sessions(root, arguments, result_root, jobs, accepted_sessions)
-        pending, unresolved, next_host_epoch = prepare_refill(result_root, jobs, attempts_path, accepted)
-        granted_jobs = refill_granted_jobs(result_root, jobs)
-        validate_refill_references(result_root, arguments, granted_jobs)
-        validate_configuration(arguments, jobs, granted_jobs)
-    validate_execution_policy(arguments, result_root)
-    runner = root / "tools/re2-benchmark/aws/run-campaign.sh"
-    jobs_path = result_root / "jobs.tsv"
-    expected_fingerprint = frozen_input_fingerprint(root, arguments, jobs_path)
-    running = {}
-    events_path = result_root / "campaign-events.tsv"
-    # A refill's deadline runs from its own start, not the original campaign's.
-    started_at = campaign_started_at(result_root / ("refill-state.tsv" if refill else "campaign-state.tsv"), arguments)
-    budget = getattr(arguments, "shared_budget", None)
-    if not refill:
-        settle_detached_attempts(result_root, jobs, attempts_path)
-        if budget:
-            recover_budget_reservations(budget, arguments, result_root, jobs, attempts_path)
-        accepted = recover_accepted_sessions(
-            root, arguments, result_root, jobs, accepted_sessions)
-        pending, unresolved, next_host_epoch = prepare_resumed_jobs(
-            result_root, jobs, attempts_path, accepted, spot_only=getattr(arguments, "spot_only", False),
-            job_regions=lambda job: launch_regions(arguments, job))
-    pending = [(job, time.monotonic() + delay) for job, delay in pending]
-    tail_jobs = math.ceil(len(jobs) * ON_DEMAND_TAIL_PERCENT / 100)
-    capacity_waits = set()
-    elapsed_seconds = max(0, time.time() - started_at)
-    remaining_seconds = max(0, phase_timeout(arguments) - elapsed_seconds)
-    deadline = time.monotonic() + remaining_seconds
-    deadline_reached = False
-    try:
-        while pending or running:
-            if budget:
-                budget.check()
-            now = time.monotonic()
-            if now >= deadline and not deadline_reached:
-                deadline_reached = True
-                for job, _ in pending:
-                    unresolved.append((job, f"{arguments.phase} campaign reached its wall-clock launch limit"))
-                pending.clear()
-
-            launched = False
-            while pending and len(running) < arguments.max_concurrent:
-                selected_index = None
-                blocked_vcpus = None
-                for index, (candidate, ready_at) in enumerate(pending):
-                    if ready_at > now:
-                        continue
-                    if not platform_has_capacity(candidate, running, arguments):
-                        continue
-                    if budget and blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
-                        continue
-                    if (candidate.market == "spot" and not getattr(arguments, "spot_only", False) and
-                            len(pending) + len(running) <= tail_jobs):
-                        candidate = replace(candidate, market="on-demand")
-                    candidate, ready_at, admitted, scan, blocked = admit_launch(
-                        arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now,
-                        [record[1] for record in running.values()])
-                    pending[index] = (candidate, ready_at)
-                    if admitted:
-                        selected_index = index
-                        break
-                    blocked_vcpus = blocked or blocked_vcpus
-                    if not scan:
-                        break
-                if selected_index is None:
-                    break
-                job, _ = pending.pop(selected_index)
-                validate_frozen_inputs(root, arguments, jobs_path, expected_fingerprint)
-                try:
-                    process, log = start_wrapper(arguments, root, result_root, runner, attempts_path, job)
-                except WrapperStartError as error:
-                    if budget:
-                        budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
-                    detail = f"controller could not start wrapper: {error}"
-                    write_attempt(attempts_path, job, "retryable-infrastructure", detail)
-                    try:
-                        replacement = replacement_job(
-                            job, next_host_epoch, "retryable-infrastructure", detail,
-                            regions=launch_regions(arguments, job),
-                            spot_only=getattr(arguments, "spot_only", False))
-                    except RuntimeError as replacement_error:
-                        unresolved.append((job, str(replacement_error)))
-                    else:
-                        next_host_epoch += 1
-                        pending.append((replacement, now + CAPACITY_RETRY_SECONDS))
-                    continue
-                running[process.pid] = (process, job, log)
-                write_attempt(attempts_path, job, "started", f"wrapper_pid={process.pid}")
-                launched = True
-                now = time.monotonic()
-            completed = []
-            for process_id, (process, job, log) in list(running.items()):
-                status = process.poll()
-                if status is None:
-                    continue
-                validate_frozen_inputs(root, arguments, jobs_path, expected_fingerprint)
-                log.close()
-                completed.append(process_id)
-                if status != 0:
-                    try:
-                        failed_session, cleanup = validate_failed_job(result_root, job)
-                    except (OSError, RuntimeError) as error:
-                        raise UnsafeCampaignError(
-                            f"cleanup could not be proven for failed job {job.identity}: {error}") from error
-                    classification = cleanup.get("failure_classification", "")
-                    detail = cleanup.get("failure_detail", "unknown")
-                    if classification in {"retryable-spot", "retryable-capacity", "retryable-infrastructure"}:
-                        try:
-                            replacement = replacement_job(
-                                job, next_host_epoch, classification, detail,
-                                regions=launch_regions(arguments, job),
-                                spot_only=getattr(arguments, "spot_only", False))
-                        except RuntimeError as error:
-                            failure_detail = f"status={status}; {error}; detail={detail}"
-                            unresolved.append((job, failure_detail))
-                            write_attempt(attempts_path, job, "unresolved", failure_detail)
-                            write_event(
-                                events_path, "rejected-session", arguments.campaign_id, job,
-                                failed_session, "replacement-exhausted", failure_detail)
-                        else:
-                            next_host_epoch += 1
-                            delay = CAPACITY_RETRY_SECONDS if classification == "retryable-capacity" else 0
-                            pending.append((replacement, time.monotonic() + delay))
-                            write_attempt(attempts_path, job, classification, detail)
-                            write_event(
-                                events_path, "interruption", arguments.campaign_id, job,
-                                failed_session, detail,
-                                f"replacement_epoch={replacement.host_epoch};replacement_market={replacement.market}")
-                    else:
-                        failure_detail = f"status={status}; classification={classification or 'none'}; detail={detail}"
-                        write_attempt(attempts_path, job, "rejected", failure_detail)
-                        write_event(
-                            events_path, "rejected-session", arguments.campaign_id, job,
-                            failed_session, "job-failure", failure_detail)
-                        unresolved.append((job, failure_detail))
-                        # Cleanup is proven. Preserve the rejection and let independent jobs finish.
-                else:
-                    try:
-                        receipt_path = validate_job_artifacts(result_root, job)
-                    except (OSError, RuntimeError) as error:
-                        failure_detail = f"artifact gate: {error}"
-                        try:
-                            validate_cleanup_manifest(result_root, job)
-                        except (OSError, RuntimeError) as cleanup_error:
-                            raise UnsafeCampaignError(
-                                f"{failure_detail}; cleanup gate: {cleanup_error}") from cleanup_error
-                        write_attempt(attempts_path, job, "rejected", failure_detail)
-                        try:
-                            failed_session = single_session(result_root, job)
-                            write_event(
-                                events_path, "rejected-session", arguments.campaign_id, job,
-                                failed_session, "artifact-gate", failure_detail)
-                        except (OSError, RuntimeError):
-                            pass
-                        unresolved.append((job, failure_detail))
-                        # Cleanup is proven. Preserve the rejection and let independent jobs finish.
-                    else:
-                        receipt = read_receipt(receipt_path)
-                        validate_receipt_candidate(root, arguments, result_root, job, receipt, receipt_path)
-                        persist_accepted_receipt(accepted_sessions, receipt_path)
-                        write_attempt(attempts_path, job, "accepted")
-                        accepted[job.logical_identity] = receipt
-            for process_id in completed:
-                if budget:
-                    budget.release(arguments.campaign_id, running[process_id][1].host_epoch, cleanup_verified=True)
-                del running[process_id]
-            if running or (pending and not launched):
-                time.sleep(1 if budget else 5)
-    except (Exception, KeyboardInterrupt) as error:
-        halt_and_clean_up(arguments, result_root, budget, running, error)
-        raise
-    write_unresolved_jobs(result_root / "unresolved-jobs.tsv", unresolved)
-    if unresolved:
-        details = ", ".join(f"{job.identity} {detail}" for job, detail in unresolved)
-        raise SystemExit(f"campaign completed with unresolved jobs: {details}")
-
-
 def read_unit_workers(path, platforms):
     """The phase's planned unit worker hosts, read from unit-workers.tsv."""
     if not path.exists():
@@ -2991,8 +2208,8 @@ class UnitWorker:
 class UnitDispatcher:
     """One phase's unit queue: the work items that remain, each worker's leases, and what each became.
 
-    Workers are host jobs in unit-worker mode, launched, budgeted and cleaned up as other hosts
-    are. unit-workers.tsv freezes each worker before its launch, and unit-attempts.tsv records
+    Workers are hosts the campaign wrapper launches and cleans up, each within the fleet budget.
+    unit-workers.tsv freezes each worker before its launch, and unit-attempts.tsv records
     each lease before it is written and each outcome it reaches, so a restart rebuilds this state
     from the ledgers, the live workers' uploads, and the uploads recovered while cleaning up exited workers.
     """
@@ -3012,7 +2229,7 @@ class UnitDispatcher:
         self.events_path = result_root / "campaign-events.tsv"
         self.accepted_path = result_root / "accepted-units.tsv"
         self.rejections_path = result_root / unit_session.SEMANTIC_REJECTIONS
-        self.jobs_path = result_root / "work-items.tsv"
+        self.items_path = result_root / "work-items.tsv"
         self.runner = root / "tools/re2-benchmark/aws/run-campaign.sh"
         # The frozen inputs' fingerprint, taken when the phase runs; each launch checks it.
         self.fingerprint = None
@@ -3237,7 +2454,7 @@ class UnitDispatcher:
                 "unit_attempt_id": unit_session.format_unit_attempt(worker.host_session, sequence)}
 
     def reject(self, worker, sequence, detail):
-        """Leave the item unresolved without retrying it, as a rejected host job is, and let other work go on."""
+        """Leave the item unresolved without retrying it, and let other work go on."""
         item = self.items[worker.leases[sequence]]
         self.settle(worker, sequence, "rejected", detail)
         if item.identity not in self.accepted:
@@ -3435,7 +2652,7 @@ class UnitDispatcher:
         except (OSError, RuntimeError) as error:
             raise UnsafeCampaignError(
                 f"cleanup could not be proven for unit worker {worker.job.identity}: {error}") from error
-        validate_frozen_inputs(self.root, self.arguments, self.jobs_path, self.fingerprint)
+        validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
         if worker.log is not None:
             worker.log.close()
         if self.budget:
@@ -3465,13 +2682,13 @@ class UnitDispatcher:
                             "rebalance-recommendation", rebalance, unit_id="")
             return
         if status != 0 and worker.job.host_epoch not in self.terminated:
-            # Each launch that failed before its worker started is recorded as a host job's failure is.
+            # Each launch that failed before its worker started is recorded as a failed session.
             retryable = classification in ("retryable-spot", "retryable-capacity", "retryable-infrastructure")
             write_event(self.events_path, "interruption" if retryable else "rejected-session",
                         self.arguments.campaign_id, worker.job, session, detail if retryable else "job-failure",
                         f"status={status}; classification={classification}; detail={detail}", unit_id="")
         if classification == "retryable-spot" and detail.startswith("launch-capacity:"):
-            # Spot moves past a region whose launch found no capacity, as a host job's replacement does.
+            # Spot moves past a region whose launch found no capacity.
             self.cool_down(pool, cleanup.get("aws_region") or worker.job.region)
         elif classification == "retryable-capacity":
             self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
@@ -3503,8 +2720,8 @@ class UnitDispatcher:
         """Free the launch slot of an exited worker, from its exit as the attempts ledger records it.
 
         A worker that started, by uploading worker evidence, clears its slot's count. One that failed before it
-        started passes the count, one higher, to its replacement, and a slot past its replacements gives up, as a
-        host job does, so its pool opens no new slot. A slot whose wrapper refused its inputs gives up at once,
+        started passes the count, one higher, to its replacement, and a slot past its replacements gives up, so
+        its pool opens no new slot. A slot whose wrapper refused its inputs gives up at once,
         since a replacement would be refused the same way. A launch that found no capacity, or a wrapper never
         created, booted nothing.
         """
@@ -3709,7 +2926,7 @@ class UnitDispatcher:
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
         slots = self.free_slots.get(pool)
         slot, slot_failures = slots.pop(0) if slots else (job.host_epoch, 0)
-        validate_frozen_inputs(self.root, self.arguments, self.jobs_path, self.fingerprint)
+        validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
         try:
             process, log = start_wrapper(self.arguments, self.root, self.result_root, self.runner,
                                          self.attempts_path, job, slot, slot_failures)
@@ -3758,7 +2975,7 @@ class UnitDispatcher:
     def run(self):
         arguments = self.arguments
         validate_execution_policy(arguments, self.result_root)
-        self.fingerprint = frozen_input_fingerprint(self.root, arguments, self.jobs_path)
+        self.fingerprint = frozen_input_fingerprint(self.root, arguments, self.items_path)
         started_at = self.start_campaign()
         remaining_seconds = max(0, phase_timeout(arguments) - max(0, time.time() - started_at))
         deadline = time.monotonic() + remaining_seconds
@@ -3835,10 +3052,7 @@ def main():
     root = directory.parents[2]
     if arguments.release_version:
         release = released_artifact.manifest(root, arguments.release_version)
-        if arguments.refill_unresolved:
-            production_tree = check_output(["git", "rev-parse", f"{candidate_revision(arguments)}:src/main"], cwd=root)
-        else:
-            production_tree = released_artifact.production_tree(root)
+        production_tree = released_artifact.production_tree(root)
         if production_tree != release["engine_tree"]:
             raise SystemExit("production source differs from the selected release")
     result_root = arguments.result_root or root / "benchmark-results" / "pre-review-baseline" / arguments.campaign_id / arguments.phase
@@ -3853,17 +3067,14 @@ def main():
                 len(arguments.selected_shards) != len(set(arguments.selected_shards))):
             raise SystemExit('invalid baseline shard selection')
         shards = arguments.selected_shards
+    units, allocations = work_units.load(directory), None
     if arguments.phase == "build":
         if arguments.confirmation_jobs is not None or arguments.language_plan:
-            raise SystemExit("an engine build phase measures no work units")
-        execute_host_jobs(arguments, root, result_root, platforms)
-        return
-    if arguments.refill_unresolved:
-        raise SystemExit("refill resumes build campaigns; a unit phase retries its own work units")
-    units, allocations = work_units.load(directory), None
-    if arguments.language_plan:
-        arguments.language_plans = language_plans(arguments)
-        campaign = language_fleet.campaign_units(arguments.language_plans.values(), arguments.phase)
+            raise SystemExit("an engine build phase builds each platform's engines and measures nothing")
+        units, shards = engine_build.units(), [engine_build.SHARD]
+    elif arguments.language_plan:
+        plans = language_plans(arguments)
+        campaign = language_fleet.campaign_units(plans, arguments.phase)
         units, allocations, shards = campaign["units"], campaign["allocations"], sorted(campaign["allocations"])
     confirmation_units = ()
     if arguments.phase == "confirmation":
@@ -3875,7 +3086,7 @@ def main():
     items = build_work_items(arguments.phase, platforms, units, shards, confirmation_units, allocations)
     arguments.unit_platforms = pool_platforms(platforms, items)
     arguments.longest_units = longest_units(items)
-    validate_configuration(arguments, [], items=items)
+    validate_configuration(arguments, items)
     validate_durable_paths(root, arguments, result_root)
     items_path = result_root / "work-items.tsv"
     write_work_items(items_path, items)
@@ -3883,7 +3094,7 @@ def main():
     print(f"work item manifest: {items_path}")
     if arguments.execute:
         validate_source(root, arguments)
-        validate_dependencies(root, arguments, items)
+        validate_dependencies(root, arguments)
         resolve_engine_builds(root, arguments, platforms)
         validate_prerequisites(root, arguments, platforms)
         workers = [unit_worker_job(arguments.unit_platforms[pool], 0, 0, "spot")
@@ -3894,25 +3105,6 @@ def main():
             write_language_bundles(arguments, result_root)
             upload_language_bundles(arguments, workers)
         execute_units(arguments, root, result_root, items, platforms)
-
-
-def execute_host_jobs(arguments, root, result_root, platforms):
-    """Plan and run the build phase's engine builds, one host each."""
-    jobs = build_engine_jobs(platforms)
-    launched_jobs = refill_launch_jobs(arguments, result_root, jobs) if arguments.refill_unresolved else None
-    validate_configuration(arguments, jobs, launched_jobs)
-    validate_durable_paths(root, arguments, result_root)
-    jobs_path = result_root / "jobs.tsv"
-    write_jobs(jobs_path, jobs)
-    print(f"planned {len(jobs)} jobs with maximum concurrency {arguments.max_concurrent}")
-    print(f"job manifest: {jobs_path}")
-    if arguments.execute:
-        validate_source(root, arguments)
-        validate_dependencies(root, arguments, jobs)
-        resolve_engine_builds(root, arguments, platforms)
-        validate_prerequisites(root, arguments, platforms)
-        validate_aws(arguments, platforms, jobs)
-        execute_jobs(arguments, root, result_root, jobs)
 
 
 if __name__ == "__main__":

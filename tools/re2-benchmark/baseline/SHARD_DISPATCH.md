@@ -145,18 +145,22 @@ A language unit runs the same runners.
 
 ## Work Units
 
-A work unit is a set of one shard's rows that a host can measure between two
-chained calibrations in about 15 minutes, with every comparison and scaling
-fit it feeds complete inside it. `generate-units.py` writes `units.tsv` (one
-line per unit with its counts and estimated seconds) and `unit-rows.tsv`
-(each unit's owned rows and representatives; one row ID contains a comma,
-so row lists are not packed into a column).
-The generator refuses to write units that break a measurement requirement:
-each row owned by exactly one unit, comparisons, scaling groups, and logical
-rows inside one unit, one Cartesian selector block per method share, and
-no unit over the 15-minute budget. The three tables are not checked
-in: `freeze-candidate.sh` generates them into the candidate archive and beside
-the baseline tooling, where the controller reads them, and the offline gate
+A baseline work unit is a set of one shard's rows that a host can measure
+between two chained calibrations in about 15 minutes, with every comparison and
+scaling fit it feeds complete inside it. The build phase's one unit per
+platform, `engine-build`, builds that platform's engines instead, and a language
+plan packs its comparisons into units of its own; see the
+[language guide](../language/README.md#plan-preparation).
+
+`generate-units.py` writes `units.tsv` (one line per unit with its counts and
+estimated seconds) and `unit-rows.tsv` (each unit's owned rows and
+representatives; one row ID contains a comma, so row lists are not packed into a
+column). The generator refuses to write units that break a measurement
+requirement: each row owned by exactly one unit, comparisons, scaling groups,
+and logical rows inside one unit, one Cartesian selector block per method share,
+and no unit over the 15-minute budget. The three tables are not checked in:
+`freeze-candidate.sh` generates them into the candidate archive and beside the
+baseline tooling, where the controller reads them, and the offline gate
 generates them before its tests. `run-unit.sh` measures one unit, and a unit
 worker host leases units one at a time (see
 [Unit workers](../aws/README.md#unit-workers)).
@@ -196,6 +200,10 @@ worker host leases units one at a time (see
 plans the unit with `unit_session.py` and runs `run-shard.sh` once for each
 route its rows need, so every route handler, verifier, and normalizer is the
 one a shard route runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
+The `engine-build` unit runs the platform's engine build instead, and a unit of
+an installed language plan runs with `fleet.py run-unit`, as the
+[language guide](../language/README.md#work-units) describes; the rest of this
+section covers baseline units.
 
 - Each route reads the unit's expected rows. Its JMH runners execute the
   unit's selectors instead of the handler's whole filter: one exact method

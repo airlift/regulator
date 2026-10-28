@@ -22,12 +22,17 @@ from unittest.mock import Mock, patch
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 AWS_RUNNER = SCRIPT.parents[1] / "aws" / "run-campaign.sh"
 sys.path.insert(0, str(SCRIPT.parent))
+import test_engine_build  # noqa: E402
 import test_fleet_budget  # noqa: E402
 import unit_dispatch  # noqa: E402
+from shard_results import write_tsv  # noqa: E402
 from test_unit_session import UnitCampaign, UnitFixture, store_host_calibration  # noqa: E402
 SPEC = importlib.util.spec_from_file_location("baseline_run_campaign", SCRIPT)
 RUN_CAMPAIGN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUN_CAMPAIGN)
+UNIT_WORKER_WRAPPER = {"CAMPAIGN_MODE": "unit-worker", "CAMPAIGN_SHARD_ID": RUN_CAMPAIGN.UNIT_WORKER_SHARD,
+                       "TIMEOUT_SECONDS": str(RUN_CAMPAIGN.unit_worker_timeout(0)),
+                       "CAMPAIGN_PROVENANCE": "qualification"}
 
 
 def shell_function(source, name):
@@ -38,39 +43,6 @@ def shell_function(source, name):
 
 def shell_functions(source, *names):
     return "".join(shell_function(source, name) for name in names)
-
-
-class FakeProcess:
-    def __init__(self, process_id, status=None, wait_action=None, poll_action=None):
-        self.pid = process_id
-        self.status = status
-        self.wait_action = wait_action
-        self.poll_action = poll_action
-        self.signals = []
-        self.wait_timeouts = []
-        self.killed = False
-
-    def poll(self):
-        if self.poll_action is not None:
-            self.poll_action()
-            self.poll_action = None
-        return self.status
-
-    def send_signal(self, sent_signal):
-        self.signals.append(sent_signal)
-
-    def wait(self, timeout):
-        self.wait_timeouts.append(timeout)
-        if self.wait_action is not None:
-            self.wait_action()
-            self.wait_action = None
-        if self.status is None:
-            self.status = 143
-        return self.status
-
-    def kill(self):
-        self.killed = True
-        self.status = -9
 
 
 class TestRunCampaign(unittest.TestCase):
@@ -99,34 +71,6 @@ class TestRunCampaign(unittest.TestCase):
             candidate_archive_sha256="0" * 64,
             engine_tree="d" * 40)
 
-    def test_shared_fleet_contains_rejections_after_cleanup(self):
-        for classification in ("benchmark-failure", "none", "invalid-artifacts"):
-            with self.subTest(classification=classification), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                result_root = root / "results"
-                result_root.mkdir()
-                arguments = self.arguments(root, maximum_concurrent=2)
-                budget = Mock(policy={"hourly_rates": {self.platform.instance_type: {"spot": 0.2}}})
-                budget.reserve.return_value = (True, "")
-                arguments.shared_budget = budget
-                jobs = [RUN_CAMPAIGN.Job(self.platform, shard, 1, index, 1, "spot", "engine-build")
-                        for index, shard in enumerate(("like-single-use", "like-dfa-single-use", "like-compile"), 1)]
-                processes = [FakeProcess(100 + job.host_epoch, status=0 if classification == "invalid-artifacts" else 1,
-                             poll_action=lambda job=job: self.write_cleanup_session(
-                                 result_root, job, failure_classification=classification)) for job in jobs]
-                with patch.object(RUN_CAMPAIGN, "recover_budget_reservations"), \
-                        patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=processes), \
-                        patch.object(RUN_CAMPAIGN.time, "sleep"):
-                    with self.assertRaises(SystemExit):
-                        RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, jobs)
-                budget.halt.assert_not_called()
-                self.assertEqual(budget.release.call_count, 3)
-                self.assertTrue(all(not process.signals for process in processes))
-                unresolved = (result_root / "unresolved-jobs.tsv").read_text()
-                for job in jobs:
-                    self.assertIn(job.shard, unresolved)
-                self.assertNotIn("accepted", (result_root / "job-attempts.tsv").read_text())
-
     def test_platform_limit_applies_independently_of_global_capacity(self):
         arguments = SimpleNamespace(max_concurrent=9, max_concurrent_per_platform=3)
         job = SimpleNamespace(platform=SimpleNamespace(name='r9g'))
@@ -136,34 +80,6 @@ class TestRunCampaign(unittest.TestCase):
         self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(other, running, arguments))
         del running[0]
         self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
-
-    def test_spot_only_replacements_never_fall_back(self):
-        # A Spot capacity failure moves to the next allowed region without spending the allowance.
-        regions = ("us-east-2", "us-west-2")
-        for attempt in (1, 2):
-            for classification, detail, moved in (
-                    ("retryable-spot", "launch-capacity:InsufficientInstanceCapacity", True),
-                    ("retryable-spot", "instance-terminated-capacity-oversubscribed", False),
-                    ("retryable-capacity", "vcpu-limit:VcpuLimitExceeded", False),
-                    ("retryable-infrastructure", "wrapper failed", False)):
-                with self.subTest(attempt=attempt, classification=classification, detail=detail):
-                    job = RUN_CAMPAIGN.Job(
-                        self.platform, "like-dfa-single-use", 1, 10, attempt, "spot", "engine-build", region="us-east-2")
-                    replacement = RUN_CAMPAIGN.replacement_job(
-                        job, 11, classification, detail, regions=regions, spot_only=True)
-                    self.assertEqual(replacement.market, "spot")
-                    self.assertEqual(replacement.attempt, attempt + 1)
-                    self.assertEqual(replacement.spot_capacity_failures, ("us-east-2",) if moved else ())
-        # Three counted attempts, after a move from a region with no capacity.
-        exhausted = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 4, "spot", "engine-build", region="us-west-2",
-                                     spot_capacity_failures=("us-east-2",))
-        with self.assertRaisesRegex(RuntimeError, "exhausted"):
-            RUN_CAMPAIGN.replacement_job(
-                exhausted, 12, "retryable-spot", "launch-capacity:InsufficientInstanceCapacity",
-                regions=regions, spot_only=True)
-        on_demand = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "on-demand", "engine-build")
-        with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "On-Demand"):
-            RUN_CAMPAIGN.replacement_job(on_demand, 11, "retryable-spot", "interrupted", spot_only=True)
 
     def test_spot_only_policy_and_reserve_are_frozen_on_resume(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -181,20 +97,6 @@ class TestRunCampaign(unittest.TestCase):
             arguments.smoke_protocol = 'qualification'
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
                 RUN_CAMPAIGN.validate_execution_policy(arguments, root)
-
-            refill = SimpleNamespace(refill_unresolved=True, smoke_protocol="qualification")
-            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "release and protocol"):
-                RUN_CAMPAIGN.validate_execution_policy(refill, root)
-            with self.assertRaisesRegex(SystemExit, "existing campaign"):
-                RUN_CAMPAIGN.refill_launch_jobs(refill, root / "jobs", [])
-            original = (root / "execution-policy.json").read_bytes()
-            refill.smoke_protocol = "smoke"
-            RUN_CAMPAIGN.validate_execution_policy(refill, root)
-            RUN_CAMPAIGN.validate_execution_policy(refill, root)
-            self.assertEqual((root / "execution-policy.json").read_bytes(), original)
-            refill.max_concurrent = 3
-            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
-                RUN_CAMPAIGN.validate_execution_policy(refill, root)
 
     def test_engine_builds_are_frozen(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -217,6 +119,76 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, r"bucket in every allowed region; name one for \['us-east-2'\]"):
             RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments, [self.platform])
 
+    def test_measuring_campaign_installs_builds_of_its_candidate_and_build_inputs(self):
+        # The build phase ran under its own campaign ID and heap; any measuring campaign whose checkout
+        # makes the same engines may install them.
+        checkout = SCRIPT.parents[3]
+        candidate = RUN_CAMPAIGN.check_output(["git", "rev-parse", "HEAD"], cwd=checkout)
+        pin = RUN_CAMPAIGN.engine_build.properties(
+            checkout / "tools/re2-benchmark/trino-joni/pins.env")["TRINO_COMPARATOR_TRINO_COMMIT"]
+
+        def other_scripts(root):
+            scripts = root / "other-checkout"
+            for path in RUN_CAMPAIGN.engine_build.BUILD_INPUTS:
+                (scripts / path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(checkout / path, scripts / path)
+            with (scripts / "tools/re2-benchmark/build.sh").open("a") as script:
+                script.write("# changed\n")
+            return {"checkout": scripts}
+
+        def rewrite_state(**changes):
+            def rewrite(builds):
+                path = builds / "campaign-state.tsv"
+                state = {**RUN_CAMPAIGN.read_campaign_state(path), **changes}
+                write_tsv(path, RUN_CAMPAIGN.CAMPAIGN_STATE_FIELDS, [state])
+            return rewrite
+
+        def reject(builds):
+            receipt = RUN_CAMPAIGN.read_accepted_units(builds / "accepted-units.tsv")[0]
+            item = SimpleNamespace(platform=receipt["platform"], unit_id=receipt["unit_id"], replica=1)
+            RUN_CAMPAIGN.persist_semantic_rejection(builds / "semantic-rejections.tsv", item, "session-r8i/2")
+
+        for name, build, change, error in (
+                ("accepted", {}, None, None),
+                ("other candidate", {"candidate": "f" * 40}, None, "candidate_commit"),
+                ("other build scripts", other_scripts, None, "row_protocol_sha256 differs"),
+                ("other Trino revision", {"trino_commit": "0" * 40}, None, "is not the checkout's pin"),
+                ("no campaign state", {}, lambda builds: (builds / "campaign-state.tsv").unlink(),
+                 "campaign-state.tsv"),
+                ("campaign state of another campaign", {}, rewrite_state(campaign_id="other-build"), "other-build"),
+                ("campaign state of a measuring phase", {}, rewrite_state(phase="smoke"), "not a build phase"),
+                ("semantic rejection", {}, reject, "semantic failure")):
+            with self.subTest(name), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                builds = root / "builds"
+                options = build(root) if callable(build) else build
+                receipts = []
+                for platform in test_engine_build.PLATFORMS:
+                    package = {"candidate": candidate, "trino_commit": pin, **options}
+                    _, receipt, _ = test_engine_build.TestEngineBuild().package(root, platform, **package)
+                    directory = RUN_CAMPAIGN.unit_attempt_directory(builds, receipt)
+                    directory.parent.mkdir(parents=True)
+                    (root / platform[0]).rename(directory)
+                    RUN_CAMPAIGN.persist_accepted_unit(builds / "accepted-units.tsv", directory / "unit-receipt.tsv")
+                    receipts.append(receipt)
+                builder = SimpleNamespace(phase="build", campaign_id="baseline", heap_size="8g")
+                RUN_CAMPAIGN.campaign_started_at(builds / "campaign-state.tsv", builder)
+                RUN_CAMPAIGN.write_ledger(builds / "semantic-rejections.tsv", [],
+                                          RUN_CAMPAIGN.unit_session.SEMANTIC_REJECTION_FIELDS)
+                if change:
+                    change(builds)
+                arguments = SimpleNamespace(
+                    phase="smoke", campaign_id="language", heap_size="16g", engine_builds=builds,
+                    regions=["us-west-2"], transfer_buckets={"us-west-2": "bucket"},
+                    candidate_archive_sha256="5" * 64)
+                if error is None:
+                    RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments, [self.platform])
+                    self.assertEqual({receipt["platform"]: receipt["observed_rows_sha256"] for receipt in receipts},
+                                     arguments.engine_build_policy)
+                else:
+                    with self.assertRaisesRegex(SystemExit, "engine builds are not accepted: .*" + error):
+                        RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments, [self.platform])
+
     def test_engine_archives_upload_once_per_region(self):
         with tempfile.TemporaryDirectory() as temporary:
             build = Path(temporary)
@@ -230,7 +202,7 @@ class TestRunCampaign(unittest.TestCase):
                 engine_build_policy={"r8i": hashlib.sha256((build / "engine-build.json").read_bytes()).hexdigest()})
             jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
             present = {("east", f"prefix/engine-builds/{trino}.tar.gz"): base64.b64encode(bytes.fromhex(trino)).decode()}
-            for stalls, expected_puts in ((1, 2), (RUN_CAMPAIGN.ENGINE_BUILD_UPLOAD_ATTEMPTS, None)):
+            for stalls, expected_puts in ((1, 2), (RUN_CAMPAIGN.SHARED_ARCHIVE_UPLOAD_ATTEMPTS, None)):
                 with self.subTest(stalls=stalls):
                     puts = []
 
@@ -265,28 +237,28 @@ class TestRunCampaign(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Spot-only policy prohibits On-Demand", result.stderr)
 
+    def admit(self, arguments, result_root, job):
+        """Place and admit one launch as the unit dispatcher does: the job as placed, and whether it was admitted."""
+        candidate, _, admitted, _, _ = RUN_CAMPAIGN.admit_launch(
+            arguments, result_root, result_root / "job-attempts.tsv", set(), job, 0, 0, [])
+        return candidate, admitted
+
     def test_spot_only_quota_shortage_waits_without_on_demand(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
+        job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "spot", "unit-worker")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            result_root = root / "results"
-            result_root.mkdir()
             arguments = self.arguments(root)
             arguments.spot_only, arguments.spot_vcpu_reserve = True, 0
-            process = FakeProcess(110, status=1, poll_action=lambda: self.write_cleanup_session(
-                result_root, job, failure_classification="benchmark-failure"))
             with patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=[
                         {"available": 0}, {"available": 8}]), \
-                    patch.object(RUN_CAMPAIGN, "current_on_demand_capacity") as on_demand, \
-                    patch.object(RUN_CAMPAIGN, "CAPACITY_RETRY_SECONDS", 0), \
-                    patch.object(RUN_CAMPAIGN.time, "sleep"), \
-                    patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process) as popen:
-                with self.assertRaises(SystemExit):
-                    RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, [job])
+                    patch.object(RUN_CAMPAIGN, "current_on_demand_capacity") as on_demand:
+                waiting, admitted = self.admit(arguments, root, job)
+                self.assertEqual(("spot", False), (waiting.market, admitted))
+                launched, admitted = self.admit(arguments, root, job)
+                self.assertEqual(("spot", True), (launched.market, admitted))
             on_demand.assert_not_called()
-            self.assertEqual(popen.call_args.kwargs["env"]["INSTANCE_MARKET_TYPE"], "spot")
-            self.assertEqual(popen.call_args.kwargs["env"]["CAMPAIGN_SPOT_ONLY"], "1")
-            self.assertIn("Spot-only policy waiting", (result_root / "job-attempts.tsv").read_text())
+            self.assertEqual("1", RUN_CAMPAIGN.job_environment(launched, arguments, root, root)["CAMPAIGN_SPOT_ONLY"])
+            self.assertIn("Spot-only policy waiting", (root / "job-attempts.tsv").read_text())
 
     def freeze_archive(self, repository, archive):
         """Archive HEAD with generated tables beside the baseline tooling, as freeze-candidate.sh does."""
@@ -374,60 +346,26 @@ class TestRunCampaign(unittest.TestCase):
             candidate_provenance=provenance)
         return repository, arguments, values
 
-    @staticmethod
-    def receipt_for_job(job):
-        """The receipt a build host accepts, as the job loop reads it."""
-        return {
-            "schema_version": 1,
-            "workload": "engine-build",
-            "campaign_id": "baseline",
-            "platform": job.platform.name,
-            "shard_id": job.shard,
-            "replica_id": str(job.replica),
-            "host_epoch": str(job.host_epoch),
-            "architecture": job.platform.architecture,
-            "instance_type": job.platform.instance_type,
-            "candidate_commit": "a" * 40,
-            "candidate_archive_sha256": "5" * 64,
-            "engine_tree": "e" * 40,
-            "heap_size": "8g",
-        }
-
-    @staticmethod
-    def write_receipt(path, receipt):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(receipt))
-
-    def write_cleanup_session(
-            self,
-            result_root,
-            job,
-            *,
-            failure_classification="controller-abort",
-            failure_detail="test failure",
-            bucket_removed="verified",
-            launched=True,
-            region="us-east-2"):
-        """Leave the session a wrapper leaves after its launch in region ends."""
+    def write_cleanup_session(self, result_root, job):
+        """Leave the session a wrapper leaves after its launch ends."""
         session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
         session.mkdir(parents=True)
-        if launched:
-            (session / "session.txt").write_text(
-                "session=session\n"
-                "bucket=re2-baseline-test-bucket\n"
-                "intel_instance_id=i-0123456789abcdef0\n"
-                "arm_instance_id=none\n")
+        (session / "session.txt").write_text(
+            "session=session\n"
+            "bucket=re2-baseline-test-bucket\n"
+            "intel_instance_id=i-0123456789abcdef0\n"
+            "arm_instance_id=none\n")
         (session / "cleanup-manifest.txt").write_text(
             "instances_terminated=verified\n"
             "iam_removed=verified\n"
-            f"bucket_removed={bucket_removed}\n"
+            "bucket_removed=verified\n"
             "network_resources=default-vpc-reused\n"
-            f"cleanup_status={'verified' if bucket_removed == 'verified' else 'failed'}\n"
+            "cleanup_status=verified\n"
             "run_status=failed\n"
-            f"failure_classification={failure_classification}\n"
-            f"failure_detail={failure_detail}\n"
-            f"aws_region={region}\n"
-            f"intel_availability_zone={region}b\n"
+            "failure_classification=controller-abort\n"
+            "failure_detail=test failure\n"
+            "aws_region=us-east-2\n"
+            "intel_availability_zone=us-east-2b\n"
             "arm_availability_zone=none\n"
             "placement_score=9\n")
         return session
@@ -490,14 +428,12 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual(arguments.engine_tree, values["engine_tree"])
             self.assertEqual(arguments.candidate_archive_sha256, values["archive_sha256"])
 
-            # Only a refill may run a controller newer than the candidate it measures.
-            (repository / "controller.py").write_text("refill\n")
+            # The controller runs the candidate it measures.
+            (repository / "controller.py").write_text("newer\n")
             subprocess.run(["git", "add", "."], cwd=repository, check=True)
             subprocess.run(["git", "commit", "-qm", "Controller"], cwd=repository, check=True)
             with self.assertRaisesRegex(SystemExit, "but HEAD is"):
                 RUN_CAMPAIGN.validate_source(repository, arguments)
-            arguments.refill_unresolved = True
-            RUN_CAMPAIGN.validate_source(repository, arguments)
 
     def test_archive_listing_preserves_directory_slashes_from_freeze_script(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -551,83 +487,77 @@ class TestRunCampaign(unittest.TestCase):
                 with self.subTest(label=label), self.assertRaisesRegex(SystemExit, label):
                     RUN_CAMPAIGN.validate_durable_paths(root, case_arguments, result_root)
 
-    def test_formal_wrapper_rejects_nonstandard_timeout(self):
-        runner = SCRIPT.parents[1] / "aws" / "run-campaign.sh"
+    def test_unit_worker_wrapper_rejects_a_timeout_short_of_its_lifetime(self):
         result = subprocess.run(
-            [str(runner)],
+            [str(AWS_RUNNER)],
             capture_output=True,
             text=True,
-            env={**os.environ, "CAMPAIGN_MODE": "engine-build", "TIMEOUT_SECONDS": "5401"})
+            env={**os.environ, **UNIT_WORKER_WRAPPER, "TIMEOUT_SECONDS": "5400"})
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("requires TIMEOUT_SECONDS=5400", result.stderr)
+        self.assertIn("TIMEOUT_SECONDS of at least its lifetime plus 5400", result.stderr)
 
     def test_generated_user_data_is_valid_bash(self):
         source = AWS_RUNNER.read_text()
         function = source[
             source.index("create_user_data()\n{"):
             source.index("\n}\n\nlaunch_instance()") + 2]
-        for mode in ("engine-build", "unit-worker"):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary_directory:
+        # A language campaign's worker also fetches the candidate provenance its plan bundles name.
+        provenance_check = f"'{'2' * 64}' /tmp/candidate-provenance.tsv | sha256sum --check -"
+        language = f"LANGUAGE_PLAN_BUNDLE_SHA256S={'1' * 64} LANGUAGE_CANDIDATE_PROVENANCE_SHA256={'2' * 64}"
+        for settings in ("", language):
+            with self.subTest(language=bool(settings)), tempfile.TemporaryDirectory() as temporary_directory:
                 user_data = Path(temporary_directory) / "user-data.sh"
                 script = (
                     f"{function}\n"
-                    f"CAMPAIGN_MODE={mode}\n"
-                    f"create_user_data test x86_64 result.tar.gz {user_data} ami url sha\n"
+                    f"{settings} create_user_data test x86_64 result.tar.gz {user_data} ami url sha\n"
                     f"bash -n {user_data}\n")
 
-                result = subprocess.run(
-                    ["bash"], input=script, text=True, capture_output=True, check=False)
+                result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
 
                 self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(bool(settings), provenance_check in user_data.read_text())
 
-    def test_only_a_unit_worker_may_list_and_only_its_leases(self):
+    def test_a_unit_worker_lists_only_its_leases(self):
         source = AWS_RUNNER.read_text()
         function = source[
             source.index("create_instance_profile()\n{"):
             source.index("\n}\n\nsubnet_rotation()") + 2]
-        for mode in ("engine-build", "unit-worker"):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary_directory:
-                script = (
-                    "aws_cli() { :; }\nsleep() { :; }\n"
-                    f"{function}\n"
-                    f"CAMPAIGN_MODE={mode} SESSION_DIR={shlex.quote(temporary_directory)} LOWER_SESSION_ID=session\n"
-                    "BUCKET=transfer INPUT_PREFIX=campaign/session/input RESULT_PREFIX=campaign/session/results\n"
-                    "ENGINE_BUILD_DIRECTORY=\n"
-                    "create_instance_profile\n")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            script = (
+                "aws_cli() { :; }\nsleep() { :; }\n"
+                f"{function}\n"
+                f"SESSION_DIR={shlex.quote(temporary_directory)} LOWER_SESSION_ID=session\n"
+                "BUCKET=transfer INPUT_PREFIX=campaign/session/input RESULT_PREFIX=campaign/session/results\n"
+                "create_instance_profile\n")
 
-                result = subprocess.run(
-                    ["bash"], input=script, text=True, capture_output=True, check=False)
+            result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
 
-                self.assertEqual(result.returncode, 0, result.stderr)
-                policy = json.loads((Path(temporary_directory) / "instance-transfer-policy.json").read_text())
-                listings = [statement for statement in policy["Statement"] if statement["Action"] == "s3:ListBucket"]
-                expected = [{
-                    "Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::transfer",
-                    "Condition": {"StringLike": {"s3:prefix": "campaign/session/input/leases/*"}},
-                }] if mode == "unit-worker" else []
-                self.assertEqual(expected, listings)
-                self.assertEqual(
-                    [("s3:GetObject", "arn:aws:s3:::transfer/campaign/session/input/*"),
-                     ("s3:PutObject", "arn:aws:s3:::transfer/campaign/session/results/*")],
-                    [(statement["Action"], statement["Resource"]) for statement in policy["Statement"]
-                     if statement["Action"] != "s3:ListBucket"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            policy = json.loads((Path(temporary_directory) / "instance-transfer-policy.json").read_text())
+            self.assertEqual(
+                sorted([("s3:GetObject", "arn:aws:s3:::transfer/campaign/session/input/*"),
+                        ("s3:PutObject", "arn:aws:s3:::transfer/campaign/session/results/*"),
+                        ("s3:ListBucket", "arn:aws:s3:::transfer")]),
+                sorted((statement["Action"], statement["Resource"]) for statement in policy["Statement"]))
+            listing = next(statement for statement in policy["Statement"] if statement["Action"] == "s3:ListBucket")
+            self.assertEqual({"StringLike": {"s3:prefix": "campaign/session/input/leases/*"}}, listing["Condition"])
 
     def test_host_installs_rust_exactly_when_the_controller_expects_it(self):
         host = (AWS_RUNNER.parent / "run-host.sh").read_text()
         install = host[host.index("install_packages()\n{"):host.index("\n}\n\ninstall_java()") + 2]
         controller = AWS_RUNNER.read_text()
-        expected = controller[controller.index("expected_cargo_package=not-installed"):
+        expected = controller[controller.index("expected_cargo_package=${CARGO_PACKAGE}"):
                               controller.index("if [[ ! -f \"${environment_manifest}\" ]]")]
-        for mode in ("engine-build", "unit-worker"):
+        # A build phase's worker, with no prebuilt engines, builds the native Rust runners.
+        for manifest in ("", "a" * 64):
             script = (f"sudo() {{ echo \"$*\"; }}\nCARGO_PACKAGE=cargo-pin\nRUST_PACKAGE=rust-pin\n{install}\n"
-                      f"BENCHMARK_MODE={mode} install_packages\n"
-                      f"CAMPAIGN_MODE={mode}\n{expected}\n"
+                      f"ENGINE_BUILD_MANIFEST_SHA256={manifest}\ninstall_packages\n{expected}\n"
                       "echo \"expected=${expected_cargo_package}\"\n")
             output = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True).stdout
-            with self.subTest(mode=mode):
+            with self.subTest(manifest=manifest):
                 self.assertEqual("cargo-pin rust-pin" in output, "expected=cargo-pin" in output)
-                self.assertEqual("cargo-pin rust-pin" in output, mode != "unit-worker")
+                self.assertEqual("cargo-pin rust-pin" in output, not manifest)
 
     def test_shared_transfer_bucket_requires_prefix(self):
         result = subprocess.run(
@@ -636,7 +566,7 @@ class TestRunCampaign(unittest.TestCase):
             text=True,
             env={
                 **os.environ,
-                "CAMPAIGN_MODE": "engine-build",
+                **UNIT_WORKER_WRAPPER,
                 "TRANSFER_BUCKET": "benchmark-transfer"})
 
         self.assertNotEqual(result.returncode, 0)
@@ -649,7 +579,7 @@ class TestRunCampaign(unittest.TestCase):
             text=True,
             env={
                 **os.environ,
-                "CAMPAIGN_MODE": "engine-build",
+                **UNIT_WORKER_WRAPPER,
                 "TRANSFER_BUCKET": "benchmark-transfer",
                 "TRANSFER_PREFIX": "../another-campaign"})
 
@@ -713,25 +643,15 @@ class TestRunCampaign(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, message):
                     RUN_CAMPAIGN.validate_capacity(capacity)
 
-    def test_replacement_uses_a_new_epoch(self):
-        initial = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-
-        # A failure Spot did not cause retries on Spot once.
-        replacement = RUN_CAMPAIGN.replacement_job(initial, 117, "retryable-infrastructure")
-
-        self.assertEqual(replacement.logical_identity, initial.logical_identity)
-        self.assertEqual(replacement.host_epoch, 117)
-        self.assertEqual(replacement.attempt, 2)
-        self.assertEqual(replacement.market, "spot")
-
     def test_build_phase_runs_one_engine_build_per_platform(self):
         platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
-        build = RUN_CAMPAIGN.build_engine_jobs(platforms)
+        engine_build = RUN_CAMPAIGN.engine_build
+        items = RUN_CAMPAIGN.build_work_items("build", platforms, engine_build.units(), [engine_build.SHARD])
 
-        self.assertEqual([(platform.name, "engine-build", "engine-build") for platform in platforms],
-                         [(job.platform.name, job.shard, job.workload) for job in build])
-        # Build hosts take epochs no baseline or language phase reaches.
-        self.assertEqual(sorted(RUN_CAMPAIGN.PHASE_HOST_EPOCH_START.values())[-1], build[0].host_epoch)
+        # Each platform's build is one Spot-eligible lease on its frozen instance type.
+        self.assertEqual([(platform.name, platform.instance_type, engine_build.UNIT_ID, 1) for platform in platforms],
+                         [(item.platform, item.instance_type, item.unit_id, item.replica) for item in items])
+        self.assertTrue(all(item.estimated_seconds <= RUN_CAMPAIGN.work_units.UNIT_SECONDS for item in items))
 
     def test_shared_policy_checks_the_actual_aws_account_and_region(self):
         policy = {"account": "123456789012", "region": "us-east-2",
@@ -833,15 +753,10 @@ class TestRunCampaign(unittest.TestCase):
                         raise subprocess.CalledProcessError(254, command)
                     return "us-west-2\t3\neu-west-1\t9\nap-south-1\t9\n"
 
-                process = FakeProcess(110, status=1, poll_action=lambda: self.write_cleanup_session(
-                    result_root, job, failure_classification="benchmark-failure"))
                 with patch.object(RUN_CAMPAIGN, "check_output", side_effect=placement_scores), \
-                        patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=spot_capacity), \
-                        patch.object(RUN_CAMPAIGN.time, "sleep"), \
-                        patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process) as popen:
-                    with self.assertRaises(SystemExit):
-                        RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, [job])
-                environment = popen.call_args.kwargs["env"]
+                        patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=spot_capacity):
+                    launched, _ = self.admit(arguments, result_root, job)
+                environment = RUN_CAMPAIGN.job_environment(launched, arguments, root, result_root)
                 self.assertEqual(queried, expected_queries)
                 self.assertEqual(environment["AWS_REGION"], expected_region)
                 self.assertEqual(environment["CAMPAIGN_PLACEMENT_SCORE"], expected_score)
@@ -930,97 +845,88 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
 
     @staticmethod
-    def replica_jobs(platforms, batches):
-        """Three replicas of each batch on each platform, as a primary language phase runs them."""
-        return [RUN_CAMPAIGN.Job(platform, batch, replica, epoch, 1, "spot", "engine-build")
-                for epoch, (batch, replica, platform) in enumerate(
-                    ((batch, replica, platform) for batch in batches for replica in (1, 2, 3)
-                     for platform in platforms), start=RUN_CAMPAIGN.PHASE_HOST_EPOCH_START["primary"])]
+    def replica_items(arguments, platforms, units, seconds):
+        """Three replicas of each unit on each platform, as a primary phase runs them, with their pools."""
+        items = [RUN_CAMPAIGN.WorkItem(platform.name, platform.instance_type, "shard", unit, replica, seconds)
+                 for unit in units for replica in (1, 2, 3) for platform in platforms]
+        arguments.unit_platforms = RUN_CAMPAIGN.pool_platforms(platforms, items)
+        return items
 
     def test_campaign_concurrency_uses_configuration(self):
-        jobs = self.replica_jobs([self.platform], ["like-dfa-single-use"])
         arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary", regions=["us-west-2"])
-        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        items = self.replica_items(arguments, [self.platform], ["unit-0001"], 900)
+        RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.execute = True
         with self.assertRaisesRegex(SystemExit, "requires a shared fleet budget"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.shared_budget = SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512, "max_vcpus": 1024,
-                                                          "spot_vcpu_reserve": 16})
+                                                          "spot_vcpu_reserve": 16, "max_attempt_seconds": 86400})
         arguments.spot_only, arguments.spot_vcpu_reserve = True, 16
-        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.spot_vcpu_reserve = 0
         with self.assertRaisesRegex(SystemExit, "reserve matching its policy"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.spot_vcpu_reserve = 16
         # A shared fleet runs On-Demand only where its policy allows it.
         arguments.spot_only = False
         arguments.shared_budget.policy.update(regions={
             "eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 64}})
         with self.assertRaisesRegex(SystemExit, "--spot-only unless the policy allows On-Demand"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.regions.append("eu-west-1")
-        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        RUN_CAMPAIGN.validate_configuration(arguments, items)
         # An allowance in a region without the worker type's image cannot launch it.
         arguments.regional_amis = {("r8i", "us-west-2"): "ami", ("r9g", "eu-west-1"): "ami"}
         with self.assertRaisesRegex(SystemExit, "--spot-only unless the policy allows On-Demand"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.regional_amis[("r8i", "eu-west-1")] = "ami"
-        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
-        arguments.spot_only = True
-        arguments.refill_unresolved = True
-        with self.assertRaisesRegex(SystemExit, "without --spot-only or a shared fleet budget"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
-        arguments.spot_only = False
-        with self.assertRaisesRegex(SystemExit, "without --spot-only or a shared fleet budget"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
-        arguments.refill_unresolved, arguments.spot_only = False, True
+        RUN_CAMPAIGN.validate_configuration(arguments, items)
         # A worker's attempt covers its setup, lifetime and uploads, then a last unit as long as its pool's
         # longest: a baseline pool's 27,000 seconds, and a slow 75,600-second unit's 101,700, then cleanup.
         self.assertEqual(RUN_CAMPAIGN.unit_worker_timeout(900), 27000)
-        long_items = [RUN_CAMPAIGN.WorkItem(self.platform.name, self.platform.instance_type, "shard", "unit-0001",
-                                            replica, 75600) for replica in (1, 2, 3)]
-        arguments.unit_platforms = RUN_CAMPAIGN.pool_platforms([self.platform], long_items)
+        long_items = self.replica_items(arguments, [self.platform], ["unit-0001"], 75600)
         self.assertEqual(RUN_CAMPAIGN.unit_worker_timeout(75600), 101700)
-        arguments.shared_budget.policy["max_attempt_seconds"] = 86400
         with self.assertRaisesRegex(SystemExit, "max_attempt_seconds of at least 102600"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs, items=long_items)
+            RUN_CAMPAIGN.validate_configuration(arguments, long_items)
         arguments.shared_budget.policy["max_attempt_seconds"] = 102600
-        RUN_CAMPAIGN.validate_configuration(arguments, jobs, items=long_items)
+        RUN_CAMPAIGN.validate_configuration(arguments, long_items)
         arguments.max_concurrent = 0
         with self.assertRaisesRegex(SystemExit, "positive integer"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
 
     def test_deadline_uses_shared_fleet_host_and_vcpu_limits(self):
-        jobs = self.replica_jobs([self.platform], ["like-dfa-single-use"])
         arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary",
                                     spot_only=True, spot_vcpu_reserve=0, regions=["us-west-2"],
                                     shared_budget=SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512,
-                                                                         "max_vcpus": 8, "spot_vcpu_reserve": 0}),
-                                    phase_timeout_seconds=2 * RUN_CAMPAIGN.JOB_TIMEOUT_SECONDS)
+                                                                         "max_vcpus": 8, "spot_vcpu_reserve": 0,
+                                                                         "max_attempt_seconds": 86400}),
+                                    phase_timeout_seconds=54000)
+        # 18 worker hours of units: one worker lifetime and a retry wave on three workers, but not on one.
+        items = self.replica_items(arguments, [self.platform], [f"unit-{index}" for index in range(24)], 900)
         with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.shared_budget.policy.update(max_vcpus=1024, max_hosts=1)
         with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.shared_budget.policy["max_hosts"] = 512
-        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.shared_budget.policy["max_vcpus"] = 1
         with self.assertRaisesRegex(SystemExit, "cannot admit every worker type"):
-            RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
         # Another allowed region's limit admits the workers, and a wave fills every region's limit at once:
-        # the three 8-vCPU jobs need Oregon's one vCPU beside Ireland's 23.
+        # the three 8-vCPU workers need Oregon's one vCPU beside Ireland's 23.
         arguments.regions.append("eu-west-1")
         arguments.shared_budget.policy["regions"] = {"eu-west-1": {"max_vcpus": 23, "spot_vcpu_reserve": 0}}
-        RUN_CAMPAIGN.validate_configuration(arguments, jobs)
+        RUN_CAMPAIGN.validate_configuration(arguments, items)
         # A unit campaign's limits apply to its pools' worker hosts.
         platforms = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
-        arguments.shared_budget.policy.update(max_attempt_seconds=86400, regions={})
+        arguments.shared_budget.policy["regions"] = {}
         items = RUN_CAMPAIGN.build_work_items("primary", platforms, RUN_CAMPAIGN.work_units.load(SCRIPT.parent),
                                               ["trino-operations"])
         arguments.unit_platforms = RUN_CAMPAIGN.pool_platforms(platforms, items)
         arguments.phase_timeout_seconds = None
         with self.assertRaisesRegex(SystemExit, "cannot admit every worker type"):
-            RUN_CAMPAIGN.validate_configuration(arguments, [], items=items)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
 
     def test_primary_topology_fits_deadline_with_retry_headroom(self):
         platforms = [
@@ -1032,16 +938,14 @@ class TestRunCampaign(unittest.TestCase):
                 "r9g", "arm", "r9g.2xlarge", 8, "ami", "jdk", "0" * 64,
                 "gcc", "cmake", "glibc", "cargo", "rust", "time"),
         ]
-        jobs = self.replica_jobs(platforms, [f"batch-{index}" for index in range(33)])
+        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=64, phase="primary")
+        items = self.replica_items(arguments, platforms, [f"unit-{index}" for index in range(33)], 2700)
 
-        RUN_CAMPAIGN.validate_configuration(
-            SimpleNamespace(campaign_id="baseline", max_concurrent=64, phase="primary"),
-            jobs)
+        RUN_CAMPAIGN.validate_configuration(arguments, items)
 
+        arguments.max_concurrent, arguments.phase_timeout_seconds = 32, 57600
         with self.assertRaisesRegex(SystemExit, "cannot fit its phase deadline"):
-            RUN_CAMPAIGN.validate_configuration(
-                SimpleNamespace(campaign_id="baseline", max_concurrent=32, phase="primary", phase_timeout_seconds=36000),
-                jobs)
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
 
     def test_campaign_phase_maps_to_execution_protocol(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1076,9 +980,9 @@ class TestRunCampaign(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             fleet.collection.prepare(root / "source")
-            fleet.prepare(root / "source", root / "plan")
+            plan = fleet.prepare(root / "source", root / "plan")
             units = RUN_CAMPAIGN.work_units.load(root / "plan")
-            for phase, selected, replicas in (("smoke", fleet.smoke_units(root / "plan"), ("1",)),
+            for phase, selected, replicas in (("smoke", fleet.smoke_units(root / "plan", plan, units), ("1",)),
                                               ("primary", units, ("1", "2", "3"))):
                 with self.subTest(phase=phase):
                     with patch.object(sys, "argv", ["run-campaign.py", phase, "language", "--language-plan",
@@ -1273,42 +1177,16 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
             self.assertNotIn("AWS_PROFILE", environment)
             self.assertNotIn("TRINO_DIR", environment)
 
-    def test_trino_checkout_is_required_only_for_jobs_that_use_it(self):
-        # Every shard whose route handler measures or verifies against pinned Trino needs the checkout.
-        trino_handlers = {"trino-operations", "trino-like"}
-        with (SCRIPT.parent / "shard-dispatch.tsv").open(newline="") as input_file:
-            dispatch = list(csv.DictReader(input_file, delimiter="\t"))
-        for row in dispatch:
-            job = RUN_CAMPAIGN.Job(self.platform, row["shard_id"], 1, 10, 1, "spot", "engine-build")
-            with self.subTest(shard=row["shard_id"]), tempfile.TemporaryDirectory() as temporary_directory, \
-                    patch.dict(os.environ, {}, clear=True), patch.object(RUN_CAMPAIGN.subprocess, "run"):
-                root = Path(temporary_directory)
-                if row["native_access_handler"] in trino_handlers:
-                    with self.assertRaisesRegex(SystemExit, "requires TRINO_DIR"):
-                        RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [job])
-                else:
-                    RUN_CAMPAIGN.validate_dependencies(root, SimpleNamespace(), [job])
-        # A language campaign's workers receive the checkout too.
-        with tempfile.TemporaryDirectory() as temporary_directory, patch.dict(os.environ, {}, clear=True), \
-                patch.object(RUN_CAMPAIGN.language_fleet, "validate"), \
-                self.assertRaisesRegex(SystemExit, "requires TRINO_DIR"):
-            RUN_CAMPAIGN.validate_dependencies(
-                Path(temporary_directory), SimpleNamespace(language_plans={"language-bulk": Path("plan")}), [])
-
-    def test_interruption_unavailability_quota_or_second_failure_moves_to_on_demand(self):
-        # A Spot interruption, Spot launch unavailability in the only allowed region, or a second
-        # failure of any kind. Other allowed regions do not delay On-Demand after a host started.
-        for attempt, classification, detail, regions in (
-                (1, "retryable-spot", "instance-terminated-no-capacity", ("us-east-2", "us-west-2")),
-                (1, "retryable-spot", "launch-capacity:InsufficientInstanceCapacity", ("us-east-2",)),
-                (1, "retryable-capacity", "", ()),
-                (2, "retryable-infrastructure", "", ())):
-            with self.subTest(attempt=attempt, classification=classification, regions=regions):
-                job = RUN_CAMPAIGN.Job(
-                    self.platform, "like-dfa-single-use", 1, 117, attempt, "spot", "engine-build", region="us-east-2")
-                replacement = RUN_CAMPAIGN.replacement_job(job, 118, classification, detail, regions=regions)
-                self.assertEqual(replacement.attempt, attempt + 1)
-                self.assertEqual(replacement.market, "on-demand")
+    def test_every_campaign_requires_the_trino_checkout_its_workers_ship(self):
+        # The wrapper ships the pinned Trino checkout to every unit worker, so preflight refuses a baseline
+        # campaign, whatever its shards, and a language campaign without it.
+        for name, arguments in (("baseline", SimpleNamespace()),
+                                ("language", SimpleNamespace(language_plans={"language-bulk": Path("plan")}))):
+            with self.subTest(campaign=name), tempfile.TemporaryDirectory() as temporary_directory, \
+                    patch.dict(os.environ, {}, clear=True), patch.object(RUN_CAMPAIGN.subprocess, "run"), \
+                    patch.object(RUN_CAMPAIGN.language_fleet, "validate"), \
+                    self.assertRaisesRegex(SystemExit, "requires TRINO_DIR"):
+                RUN_CAMPAIGN.validate_dependencies(Path(temporary_directory), arguments)
 
     def test_termination_signal_marks_campaign_failed(self):
         source = AWS_RUNNER.read_text()
@@ -1512,8 +1390,8 @@ SESSION_ID=session LOWER_SESSION_ID=session VPC_ID=vpc-test INSTANCE_MARKET_TYPE
 FAILURE_CLASSIFICATION=none FAILURE_DETAIL= LAUNCH_ATTEMPTED=0 LAUNCH_AMBIGUOUS=0 INSTANCE_IDS=()
 INSTANCE_PROFILE_NAME=test-profile INSTANCE_ROLE_NAME=test-role BUCKET=test-bucket BUCKET_OWNED=1
 AWS_REGION=us-east-2 INTEL_AVAILABILITY_ZONE=none ARM_AVAILABILITY_ZONE=none CAMPAIGN_PLACEMENT_SCORE=9
-OBJECT_PREFIX= CAMPAIGN_MODE=engine-build CAMPAIGN_ID=baseline CAMPAIGN_PLATFORM=r8i
-CAMPAIGN_SHARD_ID=engine-build CAMPAIGN_REPLICA_ID=1 CAMPAIGN_ATTEMPT=1 CAMPAIGN_HOST_EPOCH=10
+OBJECT_PREFIX= CAMPAIGN_MODE=unit-worker CAMPAIGN_ID=baseline CAMPAIGN_PLATFORM=r8i
+CAMPAIGN_SHARD_ID=unit-worker CAMPAIGN_REPLICA_ID=1 CAMPAIGN_ATTEMPT=1 CAMPAIGN_HOST_EPOCH=10
 DOWNLOADED_RESULT_COUNT=0
 launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 '''
@@ -1572,10 +1450,10 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 "INSTANCE_PROFILE_NAME=test-profile\n"
                 "INSTANCE_ROLE_NAME=test-role\n"
                 "BUCKET=test-bucket\n"
-                "CAMPAIGN_MODE=engine-build\n"
+                "CAMPAIGN_MODE=unit-worker\n"
                 "CAMPAIGN_ID=baseline\n"
                 "CAMPAIGN_PLATFORM=r8i\n"
-                "CAMPAIGN_SHARD_ID=engine-build\n"
+                "CAMPAIGN_SHARD_ID=unit-worker\n"
                 "CAMPAIGN_REPLICA_ID=1\n"
                 "CAMPAIGN_HOST_EPOCH=10\n"
                 "DOWNLOADED_RESULT_COUNT=0\n"
@@ -1627,10 +1505,10 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     f"BUCKET={resources}\n"
                     f"BUCKET_OWNED={int(created)}\n"
                     "OBJECT_PREFIX=\n"
-                    "CAMPAIGN_MODE=engine-build\n"
+                    "CAMPAIGN_MODE=unit-worker\n"
                     "CAMPAIGN_ID=baseline\n"
                     "CAMPAIGN_PLATFORM=r8i\n"
-                    "CAMPAIGN_SHARD_ID=engine-build\n"
+                    "CAMPAIGN_SHARD_ID=unit-worker\n"
                     "CAMPAIGN_REPLICA_ID=1\n"
                     "CAMPAIGN_HOST_EPOCH=10\n"
                     "DOWNLOADED_RESULT_COUNT=0\n"
@@ -1900,235 +1778,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "reached\n")
 
-    def test_replacement_allowance_is_bounded(self):
-        final_attempt = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 118, 3, "on-demand", "engine-build")
-
-        with self.assertRaisesRegex(RuntimeError, "exhausted"):
-            RUN_CAMPAIGN.replacement_job(final_attempt, 119, "retryable-infrastructure")
-        # A move past a region without Spot capacity is not a replacement.
-        moved = RUN_CAMPAIGN.replace(final_attempt, spot_capacity_failures=("us-east-2",))
-        self.assertEqual(RUN_CAMPAIGN.replacement_job(moved, 119, "retryable-infrastructure").attempt, 4)
-        with self.assertRaisesRegex(RuntimeError, "exhausted"):
-            RUN_CAMPAIGN.replacement_job(
-                RUN_CAMPAIGN.replace(moved, attempt=4), 120, "retryable-infrastructure")
-
-    def test_retry_requires_verified_cleanup_and_aws_classification(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result_root = Path(temporary_directory)
-            session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
-            session.mkdir(parents=True)
-            (session / "cleanup-manifest.txt").write_text(
-                "instances_terminated=verified\n"
-                "iam_removed=verified\n"
-                "bucket_removed=verified\n"
-                "network_resources=default-vpc-reused\n"
-                "cleanup_status=verified\n"
-                "run_status=failed\n"
-                "failure_classification=retryable-spot\n"
-                "failure_detail=instance-terminated-no-capacity\n")
-
-            actual_session, cleanup = RUN_CAMPAIGN.validate_failed_job(result_root, job)
-
-            self.assertEqual(actual_session, session)
-            self.assertEqual(cleanup["failure_classification"], "retryable-spot")
-            self.assertEqual(cleanup["failure_detail"], "instance-terminated-no-capacity")
-
-    def test_retry_rejects_unverified_cleanup(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result_root = Path(temporary_directory)
-            session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
-            session.mkdir(parents=True)
-            (session / "cleanup-manifest.txt").write_text(
-                "instances_terminated=verified\n"
-                "iam_removed=verified\n"
-                "bucket_removed=retained-for-recovery\n"
-                "network_resources=default-vpc-reused\n"
-                "cleanup_status=failed\n"
-                "run_status=failed\n"
-                "failure_classification=retryable-spot\n"
-                "failure_detail=instance-terminated-no-capacity\n")
-
-            with self.assertRaisesRegex(RuntimeError, "bucket_removed"):
-                RUN_CAMPAIGN.validate_failed_job(result_root, job)
-
-    def test_ordinary_failure_does_not_stop_independent_job(self):
-        failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        outstanding_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-compile", 1, 11, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            result_root = root / "results"
-            result_root.mkdir()
-            failed_process = FakeProcess(
-                101,
-                status=1,
-                poll_action=lambda: self.write_cleanup_session(
-                    result_root, failed_job, failure_classification="benchmark-failure"))
-            outstanding_process = FakeProcess(
-                102,
-                status=1,
-                poll_action=lambda: self.write_cleanup_session(
-                    result_root, outstanding_job, failure_classification="benchmark-failure"))
-
-            with patch.object(
-                    RUN_CAMPAIGN.subprocess,
-                    "Popen",
-                    side_effect=[failed_process, outstanding_process]):
-                with self.assertRaises(SystemExit) as failure:
-                    RUN_CAMPAIGN.execute_jobs(
-                        self.arguments(root, maximum_concurrent=2),
-                        root,
-                        result_root,
-                        [failed_job, outstanding_job])
-
-            message = str(failure.exception)
-            self.assertIn("campaign completed with unresolved jobs", message)
-            self.assertIn(failed_job.identity, message)
-            self.assertIn(outstanding_job.identity, message)
-            self.assertEqual(failed_process.signals, [])
-            self.assertEqual(outstanding_process.signals, [])
-            unresolved = (result_root / "unresolved-jobs.tsv").read_text()
-            self.assertIn("like-dfa-single-use", unresolved)
-            self.assertIn("like-compile", unresolved)
-            RUN_CAMPAIGN.validate_cleanup_manifest(result_root, outstanding_job)
-
-    def test_unverified_cleanup_stops_sibling_jobs(self):
-        failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        sibling_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-compile", 1, 11, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            result_root = root / "results"
-            result_root.mkdir()
-            failed_process = FakeProcess(
-                103,
-                status=1,
-                poll_action=lambda: self.write_cleanup_session(
-                    result_root,
-                    failed_job,
-                    failure_classification="benchmark-failure",
-                    bucket_removed="retained-for-recovery"))
-            sibling_process = FakeProcess(
-                104,
-                wait_action=lambda: self.write_cleanup_session(result_root, sibling_job))
-
-            with patch.object(
-                    RUN_CAMPAIGN.subprocess,
-                    "Popen",
-                    side_effect=[failed_process, sibling_process]):
-                with self.assertRaises(RUN_CAMPAIGN.UnsafeCampaignError) as failure:
-                    RUN_CAMPAIGN.execute_jobs(
-                        self.arguments(root, maximum_concurrent=2),
-                        root,
-                        result_root,
-                        [failed_job, sibling_job])
-
-            message = str(failure.exception)
-            self.assertIn("cleanup could not be proven", message)
-            self.assertIn("wrapper_pid=103", message)
-            self.assertIn(failed_job.identity, message)
-            self.assertIn("bucket=re2-baseline-test-bucket", message)
-            self.assertIn("intel_instance_id=i-0123456789abcdef0", message)
-            self.assertIn("bucket_removed='retained-for-recovery'", message)
-            self.assertEqual(sibling_process.signals, [RUN_CAMPAIGN.signal.SIGTERM])
-            self.assertEqual(sibling_process.wait_timeouts, [15 * 60])
-
-    def test_accepted_receipt_is_persisted_without_waiting_for_campaign_success(self):
-        accepted_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-compile", 1, 11, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            result_root = root / "results"
-            result_root.mkdir()
-            receipt_path = root / "accepted-receipt.json"
-            self.write_receipt(receipt_path, self.receipt_for_job(accepted_job))
-            accepted_process = FakeProcess(105, status=0)
-            failed_process = FakeProcess(
-                106,
-                status=1,
-                poll_action=lambda: self.write_cleanup_session(
-                    result_root, failed_job, failure_classification="benchmark-failure"))
-
-            with patch.object(
-                    RUN_CAMPAIGN.subprocess,
-                    "Popen",
-                    side_effect=[accepted_process, failed_process]), \
-                    patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=receipt_path), \
-                    patch.object(RUN_CAMPAIGN, "validate_receipt_candidate"):
-                with self.assertRaises(SystemExit):
-                    RUN_CAMPAIGN.execute_jobs(
-                        self.arguments(root, maximum_concurrent=2),
-                        root,
-                        result_root,
-                        [accepted_job, failed_job])
-
-            accepted = RUN_CAMPAIGN.read_accepted_sessions(result_root / "accepted-engine-builds.json")
-            self.assertEqual([RUN_CAMPAIGN.receipt_logical_identity(row) for row in accepted], [
-                accepted_job.logical_identity])
-
-    def test_restart_skips_previously_accepted_job(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            result_root = root / "results"
-            result_root.mkdir()
-            receipt_path = root / "accepted-receipt.json"
-            receipt = self.receipt_for_job(job)
-            self.write_receipt(receipt_path, receipt)
-            RUN_CAMPAIGN.write_ledger(result_root / "accepted-engine-builds.json", [receipt])
-            arguments = self.arguments(root)
-            arguments.candidate_archive_sha256 = receipt["candidate_archive_sha256"]
-            arguments.engine_tree = receipt["engine_tree"]
-            arguments.heap_size = receipt["heap_size"]
-
-            with patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=receipt_path), \
-                    patch.object(RUN_CAMPAIGN, "check_output", return_value=receipt["candidate_commit"]), \
-                    patch.object(RUN_CAMPAIGN.subprocess, "Popen") as popen:
-                RUN_CAMPAIGN.execute_jobs(
-                    arguments, root, result_root, [job])
-
-            popen.assert_not_called()
-            self.assertEqual(
-                RUN_CAMPAIGN.read_accepted_sessions(result_root / "accepted-engine-builds.json"),
-                [receipt])
-
-    def test_restart_waits_for_detached_wrapper_cleanup(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result_root = Path(temporary_directory)
-            attempts = result_root / "job-attempts.tsv"
-            RUN_CAMPAIGN.write_attempt(attempts, job, "started", "wrapper_pid=123")
-
-            with patch.object(RUN_CAMPAIGN, "wrapper_process_id", return_value=123), \
-                    patch.object(
-                        RUN_CAMPAIGN.time,
-                        "sleep",
-                        side_effect=lambda _: self.write_cleanup_session(result_root, job)):
-                RUN_CAMPAIGN.settle_detached_attempts(result_root, [job], attempts)
-
-            RUN_CAMPAIGN.validate_cleanup_manifest(result_root, job)
-
-    def test_restart_rejects_detached_wrapper_without_cleanup(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result_root = Path(temporary_directory)
-            attempts = result_root / "job-attempts.tsv"
-            RUN_CAMPAIGN.write_attempt(attempts, job, "started", "wrapper_pid=123")
-
-            with patch.object(RUN_CAMPAIGN, "wrapper_process_id", return_value=None), \
-                    patch.object(RUN_CAMPAIGN.time, "sleep"):
-                with self.assertRaisesRegex(
-                        RUN_CAMPAIGN.UnsafeCampaignError,
-                        "exited without cleanup evidence"):
-                    RUN_CAMPAIGN.settle_detached_attempts(result_root, [job], attempts)
-
     def test_restart_preserves_original_campaign_start_time(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             state = Path(temporary_directory) / "campaign-state.tsv"
@@ -2141,22 +1790,14 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertEqual(first, 1000.0)
             self.assertEqual(second, first)
 
-    def test_restart_rejects_changed_heap_before_recovery_or_launch(self):
+    def test_restart_rejects_a_changed_heap(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": "8g"}):
-                original = self.arguments(root)
-                RUN_CAMPAIGN.campaign_started_at(root / "campaign-state.tsv", original)
-            with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": "2g"}):
-                resumed = self.arguments(root)
-                with patch.object(RUN_CAMPAIGN, "settle_detached_attempts") as settle, \
-                        patch.object(RUN_CAMPAIGN, "recover_accepted_sessions") as recover, \
-                        patch.object(RUN_CAMPAIGN.subprocess, "Popen") as launch:
-                    with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "heap_size"):
-                        RUN_CAMPAIGN.execute_jobs_locked(resumed, root, root, [])
-                settle.assert_not_called()
-                recover.assert_not_called()
-                launch.assert_not_called()
+                RUN_CAMPAIGN.campaign_started_at(root / "campaign-state.tsv", self.arguments(root))
+            with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": "2g"}), \
+                    self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "heap_size"):
+                RUN_CAMPAIGN.campaign_started_at(root / "campaign-state.tsv", self.arguments(root))
 
     def test_job_environment_uses_captured_heap_not_later_environment(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -2168,48 +1809,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             with patch.dict(os.environ, {"BENCHMARK_HEAP_SIZE": "2g"}):
                 environment = RUN_CAMPAIGN.job_environment(job, arguments, root, root)
             self.assertEqual("8g", environment["BENCHMARK_HEAP_SIZE"])
-
-    def test_starting_attempt_without_process_retries_on_fresh_epoch(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result_root = Path(temporary_directory)
-            attempts = result_root / "job-attempts.tsv"
-            RUN_CAMPAIGN.write_attempt(attempts, job, "starting")
-
-            with patch.object(RUN_CAMPAIGN, "wrapper_process_id", return_value=None), \
-                    patch.object(RUN_CAMPAIGN.time, "sleep"):
-                RUN_CAMPAIGN.settle_detached_attempts(result_root, [job], attempts)
-            pending, unresolved, next_epoch = RUN_CAMPAIGN.prepare_resumed_jobs(
-                result_root, [job], attempts, {})
-
-            self.assertEqual(unresolved, [])
-            self.assertEqual(len(pending), 1)
-            replacement, _ = pending[0]
-            self.assertEqual(replacement.host_epoch, 11)
-            self.assertEqual(replacement.attempt, 2)
-            self.assertEqual(next_epoch, 12)
-
-    def test_budget_recovery_releases_settled_prelaunch_reservation(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result_root = Path(temporary_directory)
-            attempts = result_root / "job-attempts.tsv"
-            RUN_CAMPAIGN.write_attempt(attempts, job, "starting")
-            budget = Mock()
-            budget.reservations.return_value = [{
-                "campaign_id": "baseline",
-                "logical_identity": job.logical_identity,
-                "host_epoch": job.host_epoch,
-                "attempt": job.attempt,
-            }]
-
-            with patch.object(RUN_CAMPAIGN, "wrapper_process_id", return_value=None), \
-                    patch.object(RUN_CAMPAIGN.time, "sleep"):
-                RUN_CAMPAIGN.settle_detached_attempts(result_root, [job], attempts)
-            RUN_CAMPAIGN.recover_budget_reservations(
-                budget, SimpleNamespace(campaign_id="baseline"), result_root, [job], attempts)
-
-            budget.release.assert_called_once_with("baseline", 10, cleanup_verified=True)
 
     def test_budget_recovery_requires_cleanup_after_launch(self):
         job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
@@ -2232,180 +1831,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     budget, SimpleNamespace(campaign_id="baseline"), result_root, [job], attempts)
 
             budget.release.assert_not_called()
-
-    def test_resume_epoch_accounts_for_accepted_replacement(self):
-        accepted_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 1, 1, "spot", "engine-build")
-        failed_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-compile", 1, 2, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            result_root = Path(temporary_directory)
-            attempts = result_root / "job-attempts.tsv"
-            accepted_epoch = RUN_CAMPAIGN.job_result_root(
-                result_root, RUN_CAMPAIGN.Job(
-                    self.platform, "like-dfa-single-use", 1, 3, 2, "spot", "engine-build"))
-            accepted_epoch.mkdir(parents=True)
-            self.write_cleanup_session(
-                result_root,
-                failed_job,
-                failure_classification="retryable-spot")
-            RUN_CAMPAIGN.write_attempt(attempts, failed_job, "retryable-spot", "interrupted")
-
-            pending, unresolved, next_epoch = RUN_CAMPAIGN.prepare_resumed_jobs(
-                result_root,
-                [accepted_job, failed_job],
-                attempts,
-                {accepted_job.logical_identity: self.receipt_for_job(accepted_job)})
-
-            self.assertEqual(unresolved, [])
-            replacement, _ = pending[0]
-            self.assertEqual(replacement.host_epoch, 4)
-            self.assertEqual(next_epoch, 5)
-
-    def test_refill_replaces_each_exhausted_job_once_on_demand(self):
-        accepted_job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 1, 1, "spot", "engine-build")
-        exhausted_job = RUN_CAMPAIGN.Job(self.platform, "like-compile", 1, 2, 3, "spot", "engine-build")
-        rejected_job = RUN_CAMPAIGN.Job(self.platform, "like-single-use", 1, 3, 1, "spot", "engine-build")
-        jobs = [accepted_job, RUN_CAMPAIGN.replace(exhausted_job, attempt=1), rejected_job]
-        accepted = {accepted_job.logical_identity: self.receipt_for_job(accepted_job)}
-        refill = RUN_CAMPAIGN.replace(exhausted_job, host_epoch=4, attempt=4, market="on-demand")
-        capacity_retry = RUN_CAMPAIGN.replace(refill, host_epoch=5, attempt=5)
-        # A failed refill attempt stays unresolved, even when its wrapper, or the wrapper of its
-        # capacity retry, could not start. A controller stopped before it started the wrapper used
-        # no attempt, so the grant remains.
-        for refill_end, expected_pending, expected_unresolved in (
-                ("host failure", [], [refill, rejected_job]),
-                ("other pre-start failure", [], [exhausted_job, rejected_job]),
-                ("capacity retry pre-start failure", [], [refill, rejected_job]),
-                (RUN_CAMPAIGN.WRAPPER_NOT_CREATED, [(RUN_CAMPAIGN.replace(refill, host_epoch=5), 0)], [rejected_job])):
-            with self.subTest(refill_end), tempfile.TemporaryDirectory() as temporary_directory:
-                result_root = Path(temporary_directory)
-                attempts = result_root / "job-attempts.tsv"
-                self.write_cleanup_session(result_root, exhausted_job, failure_classification="retryable-spot",
-                                           failure_detail="launch-capacity:InsufficientInstanceCapacity")
-                RUN_CAMPAIGN.write_attempt(attempts, exhausted_job, "unresolved", "exhausted")
-                self.write_cleanup_session(result_root, rejected_job, failure_classification="benchmark-failure")
-                RUN_CAMPAIGN.write_attempt(attempts, rejected_job, "rejected", "benchmark failure")
-
-                pending, unresolved, _ = RUN_CAMPAIGN.prepare_refill(result_root, jobs, attempts, accepted)
-
-                self.assertEqual(pending, [(refill, 0)])
-                self.assertEqual([job for job, _ in unresolved], [rejected_job])
-
-                RUN_CAMPAIGN.write_attempt(attempts, refill, "starting")
-                if refill_end == "host failure":
-                    self.write_cleanup_session(result_root, refill, failure_classification="retryable-infrastructure")
-                    RUN_CAMPAIGN.write_attempt(attempts, refill, "unresolved", "exhausted")
-                elif refill_end == "capacity retry pre-start failure":
-                    self.write_cleanup_session(result_root, refill, failure_classification="retryable-capacity")
-                    RUN_CAMPAIGN.write_attempt(attempts, refill, "retryable-capacity", "capacity")
-                    RUN_CAMPAIGN.write_attempt(attempts, capacity_retry, "starting")
-                    RUN_CAMPAIGN.write_attempt(attempts, capacity_retry, "retryable-infrastructure", refill_end)
-                else:
-                    RUN_CAMPAIGN.write_attempt(attempts, refill, "retryable-infrastructure", refill_end)
-                pending, unresolved, _ = RUN_CAMPAIGN.prepare_refill(result_root, jobs, attempts, accepted)
-
-                self.assertEqual(pending, expected_pending)
-                self.assertEqual([job for job, _ in unresolved], expected_unresolved)
-
-    def test_unexpected_controller_error_stops_sibling_jobs(self):
-        malformed_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        sibling_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-compile", 1, 11, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            result_root = root / "results"
-            result_root.mkdir()
-            malformed_receipt = root / "malformed.json"
-            malformed_receipt.write_text('{"schema_version": 2}')
-            malformed_process = FakeProcess(
-                110,
-                status=0,
-                poll_action=lambda: self.write_cleanup_session(result_root, malformed_job))
-            sibling_process = FakeProcess(
-                111,
-                wait_action=lambda: self.write_cleanup_session(result_root, sibling_job))
-
-            with patch.object(
-                    RUN_CAMPAIGN.subprocess,
-                    "Popen",
-                    side_effect=[malformed_process, sibling_process]), \
-                    patch.object(RUN_CAMPAIGN, "validate_job_artifacts", return_value=malformed_receipt):
-                with self.assertRaisesRegex(RuntimeError, "unexpected JSON receipt schema"):
-                    RUN_CAMPAIGN.execute_jobs(
-                        self.arguments(root, maximum_concurrent=2),
-                        root,
-                        result_root,
-                        [malformed_job, sibling_job])
-
-            self.assertEqual(sibling_process.signals, [RUN_CAMPAIGN.signal.SIGTERM])
-            self.assertEqual(sibling_process.wait_timeouts, [15 * 60])
-
-    def test_attempt_ledger_failure_stops_the_campaign_and_cleans_any_child(self):
-        # The starting record fails before the wrapper starts, the started record after it.
-        for failed_write, started in ((1, False), (2, True)):
-            with self.subTest(failed_write=failed_write), tempfile.TemporaryDirectory() as temporary_directory:
-                job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-                root = Path(temporary_directory)
-                result_root = root / "results"
-                result_root.mkdir()
-                process = FakeProcess(
-                    112,
-                    wait_action=lambda: self.write_cleanup_session(result_root, job))
-                real_write_attempt = RUN_CAMPAIGN.write_attempt
-                write_count = 0
-
-                def fail_one_attempt_write(*arguments, **keywords):
-                    nonlocal write_count
-                    write_count += 1
-                    if write_count == failed_write:
-                        raise OSError("simulated durable-ledger failure")
-                    return real_write_attempt(*arguments, **keywords)
-
-                # A one-job phase is all tail; keep this launch on Spot. A ledger failure mistaken for a failed
-                # start would be retried at once, starting a second wrapper.
-                wrappers = [process] if started else []
-                with patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=wrappers) as popen, \
-                        patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
-                        patch.object(RUN_CAMPAIGN, "CAPACITY_RETRY_SECONDS", 0), \
-                        patch.object(RUN_CAMPAIGN.time, "sleep"), \
-                        patch.object(
-                            RUN_CAMPAIGN,
-                            "write_attempt",
-                            side_effect=fail_one_attempt_write):
-                    with self.assertRaisesRegex(OSError, "simulated durable-ledger failure"):
-                        RUN_CAMPAIGN.execute_jobs(
-                            self.arguments(root), root, result_root, [job])
-
-                self.assertEqual(started, popen.called)
-                self.assertEqual([RUN_CAMPAIGN.signal.SIGTERM] if started else [], process.signals)
-                self.assertEqual([15 * 60] if started else [], process.wait_timeouts)
-
-    def test_wrapper_that_fails_to_start_is_retried_on_a_fresh_epoch(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            result_root = root / "results"
-            result_root.mkdir()
-            replacement = FakeProcess(
-                113, status=1, poll_action=lambda: self.write_cleanup_session(
-                    result_root, RUN_CAMPAIGN.replace(job, host_epoch=11, attempt=2),
-                    failure_classification="benchmark-failure"))
-            # A one-job phase is all tail; keep its retry on Spot.
-            with patch.object(RUN_CAMPAIGN.subprocess, "Popen",
-                              side_effect=[OSError("exec format error"), replacement]) as popen, \
-                    patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
-                    patch.object(RUN_CAMPAIGN, "CAPACITY_RETRY_SECONDS", 0), \
-                    patch.object(RUN_CAMPAIGN.time, "sleep"):
-                with self.assertRaisesRegex(SystemExit, "campaign completed with unresolved jobs"):
-                    RUN_CAMPAIGN.execute_jobs(self.arguments(root), root, result_root, [job])
-
-            self.assertEqual(2, popen.call_count)
-            attempts = RUN_CAMPAIGN.read_attempts(result_root / "job-attempts.tsv")
-            self.assertIn(("10", "retryable-infrastructure", "controller could not start wrapper: exec format error"),
-                          [(row["host_epoch"], row["outcome"], row["detail"]) for row in attempts])
-            self.assertIn(("11", "started"), [(row["host_epoch"], row["outcome"]) for row in attempts])
 
     def test_tooling_digest_covers_each_tracked_files_path_and_content(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -2459,23 +1884,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             self.assertTrue(fingerprint)
             self.assertFalse(any("status" in command for command in commands))
 
-    def test_conflicting_accepted_receipt_is_unsafe(self):
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            ledger = root / "accepted-engine-builds.json"
-            first_path = root / "first.json"
-            second_path = root / "second.json"
-            self.write_receipt(first_path, self.receipt_for_job(job))
-            self.write_receipt(second_path, {
-                **self.receipt_for_job(job),
-                "host_epoch": "11",
-            })
-
-            RUN_CAMPAIGN.persist_accepted_receipt(ledger, first_path)
-            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "conflicting"):
-                RUN_CAMPAIGN.persist_accepted_receipt(ledger, second_path)
-
     def test_unit_ledger_recovers_retained_attempts_and_confirms_on_new_instances(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory) / "results"
@@ -2484,7 +1892,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             receipt = campaign.receipts[0]
             arguments = SimpleNamespace(
                 campaign_id=receipt["campaign_id"], candidate_archive_sha256=receipt["candidate_archive_sha256"],
-                engine_tree=receipt["engine_tree"], heap_size=receipt["heap_size"])
+                engine_tree=receipt["engine_tree"], heap_size=receipt["heap_size"], phase="primary")
 
             def recover():
                 return RUN_CAMPAIGN.recover_accepted_units(SCRIPT.parents[3], arguments, result_root, ledger)
@@ -2630,22 +2038,9 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         })
 
     def test_spot_quota_shortage_changes_unlaunched_job_to_on_demand(self):
-        spot_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
+        spot_job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "spot", "unit-worker")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            result_root = root / "results"
-            result_root.mkdir()
-            process = FakeProcess(
-                110,
-                status=1,
-                poll_action=lambda: self.write_cleanup_session(
-                    result_root,
-                    RUN_CAMPAIGN.replace(spot_job, market="on-demand"),
-                    failure_classification="benchmark-failure"))
-
-            # A one-job phase is all tail; without the tail rule only the Spot quota shortage moves it to
-            # On-Demand.
             with patch.object(RUN_CAMPAIGN, "current_spot_capacity", return_value={
                         "quota": 352,
                         "used": 320,
@@ -2659,44 +2054,14 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                         "reserved": 0,
                         "safety_reserve": 32,
                         "available": 397,
-                    }), \
-                    patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
-                    patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process) as popen:
-                with self.assertRaises(SystemExit):
-                    RUN_CAMPAIGN.execute_jobs(
-                        self.arguments(root, maximum_concurrent=64), root, result_root, [spot_job])
-
-            self.assertEqual(
-                popen.call_args.kwargs["env"]["INSTANCE_MARKET_TYPE"],
-                "on-demand")
-
-    def test_on_demand_vcpu_limit_has_unbounded_capacity_retry(self):
-        job = RUN_CAMPAIGN.Job(
-            self.platform,
-            "like-dfa-single-use",
-            1,
-            100,
-            RUN_CAMPAIGN.MAX_REPLACEMENTS_PER_JOB + 1,
-            "on-demand", "engine-build")
-
-        replacement = RUN_CAMPAIGN.replacement_job(job, 101, "retryable-capacity")
-
-        self.assertEqual(replacement.market, "on-demand")
-        self.assertEqual(replacement.host_epoch, 101)
-        self.assertEqual(replacement.attempt, job.attempt + 1)
+                    }):
+                launched, admitted = self.admit(self.arguments(root, maximum_concurrent=64), root, spot_job)
+            self.assertEqual(("on-demand", True), (launched.market, admitted))
 
     def test_on_demand_capacity_wait_queues_instead_of_aborting(self):
-        job = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 10, 1, "on-demand", "engine-build")
+        job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "on-demand", "unit-worker")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            result_root = root / "results"
-            result_root.mkdir()
-            process = FakeProcess(
-                107,
-                status=1,
-                poll_action=lambda: self.write_cleanup_session(
-                    result_root, job, failure_classification="benchmark-failure"))
             no_capacity = {
                 "quota": 500,
                 "used": 468,
@@ -2706,148 +2071,10 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             }
             capacity = {**no_capacity, "used": 460, "available": 8}
 
-            with patch.object(
-                    RUN_CAMPAIGN,
-                    "current_on_demand_capacity",
-                    side_effect=[no_capacity, capacity]), \
-                    patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process), \
-                    patch.object(RUN_CAMPAIGN.time, "sleep"), \
-                    patch.object(RUN_CAMPAIGN, "CAPACITY_RETRY_SECONDS", 0):
-                with self.assertRaises(SystemExit):
-                    RUN_CAMPAIGN.execute_jobs(
-                        self.arguments(root), root, result_root, [job])
-
-            attempts = (result_root / "job-attempts.tsv").read_text()
-            self.assertIn("queued-capacity", attempts)
-            self.assertIn("started", attempts)
-            self.assertIn("rejected", attempts)
-
-    def test_spot_unavailability_falls_back_to_on_demand_on_fresh_epoch(self):
-        spot_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        on_demand_job = RUN_CAMPAIGN.Job(
-            self.platform, "like-dfa-single-use", 1, 11, 2, "on-demand", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            result_root = root / "results"
-            result_root.mkdir()
-            spot_process = FakeProcess(
-                108,
-                status=1,
-                poll_action=lambda: self.write_cleanup_session(
-                    result_root,
-                    spot_job,
-                    failure_classification="retryable-spot",
-                    failure_detail="launch-capacity:InsufficientInstanceCapacity",
-                    launched=False))
-            on_demand_process = FakeProcess(
-                109,
-                status=1,
-                poll_action=lambda: self.write_cleanup_session(
-                    result_root, on_demand_job, failure_classification="benchmark-failure"))
-
-            # A one-job phase is all tail; without the tail rule only Spot unavailability moves it to On-Demand.
-            with patch.object(
-                    RUN_CAMPAIGN.subprocess,
-                    "Popen",
-                    side_effect=[spot_process, on_demand_process]) as popen, \
-                    patch.object(RUN_CAMPAIGN, "current_on_demand_capacity", return_value={
-                        "quota": 500,
-                        "used": 0,
-                        "reserved": 0,
-                        "safety_reserve": 32,
-                        "available": 468,
-                    }), \
-                    patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
-                    patch.dict(os.environ, {"AWS_REGION": "us-east-2", "CAMPAIGN_PLACEMENT_SCORE": "9"}):
-                with self.assertRaises(SystemExit):
-                    RUN_CAMPAIGN.execute_jobs(
-                        self.arguments(root), root, result_root, [spot_job])
-
-            markets = [call.kwargs["env"]["INSTANCE_MARKET_TYPE"] for call in popen.call_args_list]
-            epochs = [call.kwargs["env"]["CAMPAIGN_HOST_EPOCH"] for call in popen.call_args_list]
-            self.assertEqual(markets, ["spot", "on-demand"])
-            self.assertEqual(epochs, ["10", "11"])
-            self.assertIn("starting\tregion=us-east-2;placement_score=9",
-                          (result_root / "job-attempts.tsv").read_text())
-            with (result_root / "campaign-events.tsv").open(newline="") as input_file:
-                failed_launch = next(csv.DictReader(input_file, delimiter="\t"))
-            self.assertEqual(
-                {field: failed_launch[field] for field in (
-                    "event_type", "instance_id", "reason", "region", "availability_zone",
-                    "placement_score", "failure_classification")},
-                {
-                    "event_type": "interruption",
-                    "instance_id": "",
-                    "reason": "launch-capacity:InsufficientInstanceCapacity",
-                    "region": "us-east-2",
-                    "availability_zone": "us-east-2b",
-                    "placement_score": "9",
-                    "failure_classification": "retryable-spot",
-                })
-
-    def test_spot_unavailability_tries_each_allowed_region_before_on_demand(self):
-        # Neither region has Spot capacity, and the controller restarts after the second fails.
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            result_root = root / "results"
-            result_root.mkdir()
-            arguments = self.arguments(root)
-            arguments.regions = ["us-east-2", "us-west-2"]
-            jobs = [RUN_CAMPAIGN.replace(job, host_epoch=epoch, attempt=epoch - 9) for epoch in (10, 11, 12)]
-            launch_failure = {"failure_classification": "retryable-spot",
-                              "failure_detail": "launch-capacity:InsufficientInstanceCapacity", "launched": False}
-
-            def interrupt_controller():
-                second.poll_action = None
-                self.write_cleanup_session(result_root, jobs[1], **launch_failure, region="us-west-2")
-                raise KeyboardInterrupt
-
-            first = FakeProcess(110, status=1, poll_action=lambda: self.write_cleanup_session(
-                result_root, jobs[0], **launch_failure))
-            second = FakeProcess(111, status=1, poll_action=interrupt_controller)
-            on_demand = FakeProcess(112, status=1, poll_action=lambda: self.write_cleanup_session(
-                result_root, jobs[2], failure_classification="benchmark-failure"))
-            launches = []
-            # A one-job phase is all tail; without the tail rule only Spot unavailability in every region moves
-            # it to On-Demand.
-            with patch.object(RUN_CAMPAIGN, "check_output",
-                              side_effect=subprocess.CalledProcessError(254, "get-spot-placement-scores")), \
-                    patch.object(RUN_CAMPAIGN, "current_on_demand_capacity", return_value={"available": 8}), \
-                    patch.object(RUN_CAMPAIGN, "ON_DEMAND_TAIL_PERCENT", 0), \
-                    patch.object(RUN_CAMPAIGN.time, "sleep"):
-                for processes, failure in (([first, second], KeyboardInterrupt), ([on_demand], SystemExit)):
-                    with patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=processes) as popen, \
-                            self.assertRaises(failure):
-                        RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, [job])
-                    launches += [(call.kwargs["env"]["INSTANCE_MARKET_TYPE"], call.kwargs["env"]["AWS_REGION"])
-                                 for call in popen.call_args_list]
-            self.assertEqual(launches, [("spot", "us-east-2"), ("spot", "us-west-2"), ("on-demand", "us-east-2")])
-
-    def test_phase_tail_launches_on_demand_unless_spot_only(self):
-        # Ten shard jobs leave a one-job tail.
-        jobs = [RUN_CAMPAIGN.Job(self.platform, f"language-bulk-{epoch:04d}", 1, epoch, 1, "spot", "engine-build")
-                for epoch in range(1, 11)]
-        for spot_only, expected in ((False, ["spot"] * 9 + ["on-demand"]), (True, ["spot"] * 10)):
-            with self.subTest(spot_only=spot_only), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                result_root = root / "results"
-                result_root.mkdir()
-                arguments = self.arguments(root)
-                arguments.spot_only, arguments.spot_vcpu_reserve = spot_only, 0
-                processes = [FakeProcess(100 + job.host_epoch, status=1, poll_action=lambda job=job:
-                                         self.write_cleanup_session(result_root, job,
-                                                                    failure_classification="benchmark-failure"))
-                             for job in jobs]
-                with patch.object(RUN_CAMPAIGN, "current_spot_capacity", return_value={"available": 8}), \
-                        patch.object(RUN_CAMPAIGN, "current_on_demand_capacity", return_value={"available": 8}), \
-                        patch.object(RUN_CAMPAIGN.time, "sleep"), \
-                        patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=processes) as popen:
-                    with self.assertRaises(SystemExit):
-                        RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, jobs)
-                self.assertEqual([call.kwargs["env"]["INSTANCE_MARKET_TYPE"] for call in popen.call_args_list],
-                                 expected)
+            with patch.object(RUN_CAMPAIGN, "current_on_demand_capacity", side_effect=[no_capacity, capacity]):
+                self.assertFalse(self.admit(self.arguments(root), root, job)[1])
+                self.assertTrue(self.admit(self.arguments(root), root, job)[1])
+            self.assertIn("queued-capacity", (root / "job-attempts.tsv").read_text())
 
     def test_shared_fleet_launches_on_demand_where_its_allowance_has_headroom(self):
         fixture = test_fleet_budget.TestFleetBudget()
@@ -2858,8 +2085,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         for rates in policy["hourly_rates"].values():
             rates["on_demand_total"] = 2 * rates["total"]
         fixture.path.write_text(json.dumps(policy))
-        # A one-job phase is all tail, so its only launch is On-Demand.
-        job = RUN_CAMPAIGN.Job(self.platform, "like-dfa-single-use", 1, 10, 1, "spot", "engine-build")
+        job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "on-demand", "unit-worker")
         queried = []
 
         def aws_result(command, **_):
@@ -2878,24 +2104,16 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            result_root = root / "results"
-            result_root.mkdir()
             arguments = self.arguments(root)
             arguments.shared_budget = RUN_CAMPAIGN.FleetBudget(fixture.path)
             arguments.spot_vcpu_reserve, arguments.regions = 0, ["us-west-2", "eu-west-1"]
-            process = FakeProcess(110, status=1, poll_action=lambda: self.write_cleanup_session(
-                result_root, job, failure_classification="benchmark-failure", region="eu-west-1"))
-            with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
-                    patch.object(RUN_CAMPAIGN.time, "sleep"), \
-                    patch.object(RUN_CAMPAIGN.subprocess, "Popen", return_value=process) as popen:
-                with self.assertRaises(SystemExit):
-                    RUN_CAMPAIGN.execute_jobs(arguments, root, result_root, [job])
+            with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
+                launched, admitted = self.admit(arguments, root, job)
         # Oregon has no allowance; Ireland's quota, less its reserve and other work, fits the host.
         self.assertEqual(set(queried), {"eu-west-1"})
-        environment = popen.call_args.kwargs["env"]
-        self.assertEqual((environment["AWS_REGION"], environment["INSTANCE_MARKET_TYPE"]), ("eu-west-1", "on-demand"))
-        completed = json.loads(arguments.shared_budget.state_path.read_text())["completed"]
-        self.assertEqual([(item["region"], item["market"], item["hourly_rate"]) for item in completed.values()],
+        self.assertEqual(("eu-west-1", "on-demand", True), (launched.region, launched.market, admitted))
+        reserved = json.loads(arguments.shared_budget.state_path.read_text())["reservations"]
+        self.assertEqual([(item["region"], item["market"], item["hourly_rate"]) for item in reserved.values()],
                          [("eu-west-1", "on-demand", 0.60)])
         with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
             snapshot = RUN_CAMPAIGN.shared_fleet_snapshot(arguments, "eu-west-1", "on-demand")
@@ -3692,7 +2910,7 @@ class TestUnitWorkers(unittest.TestCase):
     def test_worker_session_waits_for_a_whole_session_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             session = Path(temporary)
-            job = RUN_CAMPAIGN.Job(self.PLATFORMS[0], RUN_CAMPAIGN.UNIT_WORKER_SHARD, 1, 1, 1, "spot", "engine-build")
+            job = RUN_CAMPAIGN.Job(self.PLATFORMS[0], RUN_CAMPAIGN.UNIT_WORKER_SHARD, 1, 1, 1, "spot", "unit-worker")
             worker = RUN_CAMPAIGN.UnitWorker(job, None, None, session=session)
             # The worker already knows its session directory, so the dispatcher's result root goes unread.
             dispatcher = SimpleNamespace(result_root=session)

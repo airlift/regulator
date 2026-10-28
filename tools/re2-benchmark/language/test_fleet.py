@@ -74,9 +74,9 @@ class TestFleet(unittest.TestCase):
         manifest = collection.load(self.source / "manifest.json")
         manifest["smoke_required_pairs"] = [[manifest["cases"][-1]["id"], "trino"]]
         collection.save(self.source / "manifest.json", manifest)
-        fleet.prepare(self.source, self.directory)
+        plan = fleet.prepare(self.source, self.directory)
         units = fleet.work_units.load(self.directory)
-        smoke = fleet.smoke_units(self.directory)
+        smoke = fleet.smoke_units(self.directory, plan, units)
         measured = {fleet.row_atom(row)[:2] for unit_id in smoke for row in units[unit_id]["owned"]}
         self.assertEqual({language for _, language in measured}, set(collection.ENGINES))
         self.assertIn((manifest["cases"][-1]["id"], "trino"), measured)

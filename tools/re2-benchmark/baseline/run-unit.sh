@@ -216,6 +216,23 @@ if [[ "${PLAN_ONLY}" != true ]]; then
     done
 fi
 
+# The build phase's unit builds and packages the platform's engines for its measuring unit workers.
+if [[ "${UNIT_ID}" == engine-build ]]; then
+    if [[ "${PLAN_ONLY}" == true ]]; then
+        echo "The engine build unit has no plan-only run" >&2
+        exit 1
+    fi
+    "${SCRIPT_DIR}/build-engines.sh" "${RESULT_DIR}"
+    python3 "${SCRIPT_DIR}/engine_build.py" accept \
+        --unit-directory "${RESULT_DIR}" \
+        --replica "${REPLICA_ID}" \
+        --unit-attempt "${RE2_CAMPAIGN_HOST_SESSION}/${RE2_CAMPAIGN_LEASE_SEQUENCE}" \
+        --region "${BASELINE_REGION}" \
+        --engine-tree "${BASELINE_EXPECTED_ENGINE_TREE:?The engine build requires BASELINE_EXPECTED_ENGINE_TREE}"
+    echo "Completed engine build unit replica ${REPLICA_ID}"
+    exit 0
+fi
+
 # A unit of an installed language plan measures its comparisons with the language collector.
 language_plan=
 for units_file in "${LANGUAGE_PLANS}"/*/units.tsv; do

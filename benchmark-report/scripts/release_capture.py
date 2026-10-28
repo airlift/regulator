@@ -101,15 +101,15 @@ def normalize_language(data, manifest, expected_release, collector, receipts, un
             'comparisons': [identified(row) for row in data['comparisons']]}
 
 
-def validate_language_ledger(ledger, directories):
-    """Require the accepted units of one complete language campaign of the imported plans, none of whose attempts
-    was rejected for its semantics, and return its receipts."""
+def validate_language_ledger(ledger, plans):
+    """Require the accepted units of one complete language campaign of the imported plans, validated and by their
+    directories, none of whose attempts was rejected for its semantics, and return its receipts."""
     fields = unit_session.UNIT_RECEIPT_FIELDS
     receipts = unit_session.read_tsv(ledger, fields, fields)
     campaigns = {receipt['campaign_id'] for receipt in receipts}
     if len(campaigns) != 1:
         raise ValueError(f'language ledger must hold one campaign: {ledger}')
-    fleet.validate_unit_campaign(directories, receipts, campaigns.pop())
+    fleet.validate_unit_campaign(plans, receipts, campaigns.pop())
     unit_session.check_semantic_rejections(ledger.parent)
     return receipts
 
@@ -155,18 +155,20 @@ def validate_reduced_attempts(reduction, receipts):
         raise ValueError('baseline reduction changed the accepted unit attempts')
 
 
-def language_receipts(items):
+def language_receipts(items, plans):
     """Each imported plan's accepted unit attempts: its shard's receipts in the ledger beside its export, once that
-    ledger holds one complete campaign of the imported plans sharing it."""
+    ledger holds one complete campaign of the imported plans sharing it. plans holds each validated plan by its
+    directory."""
     def ledger(item):
         return Path(item['export']).resolve().parent / 'accepted-units.tsv'
 
     ledgers = {}
     for item in items:
-        ledgers.setdefault(ledger(item), []).append(Path(item['plan']))
-    accepted = {path: validate_language_ledger(path, directories) for path, directories in ledgers.items()}
+        directory = Path(item['plan'])
+        ledgers.setdefault(ledger(item), {})[directory] = plans[directory]
+    accepted = {path: validate_language_ledger(path, shared) for path, shared in ledgers.items()}
     return [[receipt for receipt in accepted[ledger(item)]
-             if receipt['shard_id'] == fleet.validate(Path(item['plan']))['shard_id']] for item in items]
+             if receipt['shard_id'] == plans[Path(item['plan'])]['shard_id']] for item in items]
 
 
 def build(plan_path):
@@ -175,9 +177,10 @@ def build(plan_path):
     collectors = {}
     combined = {'hosts': [], 'observations': [], 'comparisons': []}
     manifests, exports = [], []
-    for item, receipts in zip(plan['language'], language_receipts(plan['language'])):
+    plans = {Path(item['plan']): fleet.validate(Path(item['plan'])) for item in plan['language']}
+    for item, receipts in zip(plan['language'], language_receipts(plan['language'], plans)):
         directory = Path(item['plan'])
-        frozen = fleet.validate(directory)
+        frozen = plans[directory]
         data = load(item['export'])
         if data['plan'] != frozen:
             raise ValueError('language export changed the frozen plan')

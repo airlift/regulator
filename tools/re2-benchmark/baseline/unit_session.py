@@ -929,7 +929,7 @@ def protocol_digests(units, protocols):
 
 
 def platform_allocations(platforms, units):
-    """Each shard's instance type per platform: a baseline unit runs on its platform's frozen type."""
+    """Each shard's instance type per platform: a baseline unit or engine build runs on its platform's frozen type."""
     return {unit["shard_id"]: {name: platform["instance_type"] for name, platform in platforms.items()}
             for unit in units.values()}
 
