@@ -39,11 +39,8 @@ from unit_dispatch import (
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
-import batch_acceptance
-import collection as language_collection
 import fleet as language_fleet
 import released_artifact
-from campaign import LanguageCampaign
 
 PROACTIVE_SPOT_CAPACITY_THRESHOLD = 32
 DEFAULT_MAX_CONCURRENT = 64
@@ -147,7 +144,6 @@ PHASE_HOST_EPOCH_START = {
     "build": 300_001,
 }
 RECEIPT_NAMES = {
-    "language-batch": "language-acceptance.json",
     "engine-build": engine_build.RECEIPT,
 }
 
@@ -296,10 +292,6 @@ def shared_transfer_buckets(arguments):
     return {campaign_regions(arguments)[0]: bucket} if bucket else {}
 
 
-def language_campaign(arguments):
-    return getattr(arguments, "language_campaign", None)
-
-
 def execution_policy(arguments):
     return {"spot_only": getattr(arguments, "spot_only", False),
             "spot_vcpu_reserve": getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE),
@@ -346,25 +338,11 @@ def validate_execution_policy(arguments, result_root):
 def phase_timeout(arguments):
     if getattr(arguments, "topology_deadline_seconds", None) is not None:
         return arguments.topology_deadline_seconds
-    language = language_campaign(arguments)
-    if language:
-        return language.deadline_seconds(arguments.max_concurrent, JOB_TIMEOUT_SECONDS,
-                                         getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT))
     return PHASE_TIMEOUT_SECONDS[arguments.phase]
 
 
-def build_language_jobs(language, platforms):
-    by_name = {platform.name: platform for platform in platforms}
-    return [Job(allocated_platform(by_name[batch["platform"]], batch["instance_type"], batch["vcpus"]),
-                batch["shard"], batch["replica"], epoch, 1, "spot", "language-batch")
-            for epoch, (_, batch) in enumerate(language.batches.values(),
-                                               start=PHASE_HOST_EPOCH_START[language.phase])]
-
-
 def accepted_sessions_path(result_root, arguments):
-    if arguments.phase == "build":
-        return result_root / "accepted-engine-builds.json"
-    return result_root / "accepted-language-sessions.json"
+    return result_root / "accepted-engine-builds.json"
 
 
 def read_platforms(directory):
@@ -1761,12 +1739,6 @@ def validate_job_artifacts(result_root, job):
         environment = read_properties(receipt.parent / "environment-manifest.txt")
         if environment.get("logical_cpu_count") != str(job.platform.vcpus):
             raise UnsafeCampaignError("host logical CPU count differs from the frozen topology")
-    if job.workload == "language-batch":
-        try:
-            if batch_acceptance.validate(receipt.parent) != read_receipt(receipt):
-                raise ValueError("saved language receipt differs from raw evidence")
-        except (ValueError, KeyError, TypeError) as error:
-            raise RuntimeError(f"invalid language evidence for {job.identity}: {error}") from error
     if job.workload == "engine-build":
         try:
             if engine_build.validate(receipt.parent) != read_receipt(receipt):
@@ -2001,11 +1973,6 @@ def recover_accepted_units(root, arguments, result_root, accepted_units):
 
 
 def validate_receipt_candidate(root, arguments, result_root, job, receipt, receipt_path=None):
-    version = getattr(arguments, "release_version", "")
-    # Engine builds come from the candidate's tooling; the release is measured by the batches.
-    if version and job.workload == "language-batch":
-        if receipt.get("released_artifact") != released_artifact.manifest(root, version):
-            raise UnsafeCampaignError("language receipt does not identify the selected release")
     expected = {
         "campaign_id": arguments.campaign_id,
         "platform": job.platform.name,
@@ -2019,14 +1986,7 @@ def validate_receipt_candidate(root, arguments, result_root, job, receipt, recei
         "engine_tree": campaign_engine_tree(arguments),
         "heap_size": campaign_heap_size(arguments),
     }
-    if language_campaign(arguments):
-        del expected["engine_tree"]
-        expected["source_tree"] = check_output(
-            ["git", "rev-parse", f"{candidate_revision(arguments)}^{{tree}}"], cwd=root)
-        expected["comparators_sha256"] = hashlib.sha256(
-            (root / "tools/re2-benchmark/baseline/comparators.tsv").read_bytes()).hexdigest()
-        language_campaign(arguments).validate_receipt(job.logical_identity, receipt)
-    elif job.workload == "engine-build":
+    if job.workload == "engine-build":
         # The candidate commit and archive bind the tree; the build does not depend on the heap.
         del expected["engine_tree"], expected["heap_size"]
     mismatches = [field for field, value in expected.items() if receipt.get(field) != value]
@@ -2563,86 +2523,6 @@ def campaign_started_at(path, arguments):
     return started_at
 
 
-def validate_language_state(root, arguments, result_root):
-    language = language_campaign(arguments)
-    if not language:
-        return
-    expected = {
-        "schema_version": 1, "campaign_id": arguments.campaign_id, "phase": arguments.phase,
-        "plans": language.fingerprint(), "max_concurrent": arguments.max_concurrent,
-        "max_concurrent_per_platform": getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT),
-        "phase_timeout_seconds": phase_timeout(arguments), "job_timeout_seconds": JOB_TIMEOUT_SECONDS,
-        "heap_size": campaign_heap_size(arguments),
-        "candidate_commit": check_output(["git", "rev-parse", candidate_revision(arguments)], cwd=root),
-        "candidate_archive_sha256": arguments.candidate_archive_sha256,
-        "candidate_provenance_sha256": hashlib.sha256(arguments.candidate_provenance.read_bytes()).hexdigest(),
-        "batches": {identity: hashlib.sha256(language_collection.encode(
-            language.expected_package(identity))).hexdigest() for identity in language.batches},
-    }
-    # Canonicalize tuples before comparing to a JSON reload on restart.
-    expected = json.loads(json.dumps(expected))
-    path = result_root / "language-state.json"
-    refill = getattr(arguments, "refill_unresolved", False)
-    if refill and not path.exists():
-        raise UnsafeCampaignError("refill requires the campaign's recorded language state")
-    if path.exists():
-        recorded = json.loads(path.read_text())
-        if refill:
-            # The refill execution policy records the refill's own concurrency and deadline.
-            for key in ("max_concurrent", "max_concurrent_per_platform", "phase_timeout_seconds"):
-                recorded.pop(key, None)
-                expected.pop(key, None)
-        if recorded != expected:
-            raise UnsafeCampaignError("language candidate, plans, batches, or deadlines changed on restart")
-        return
-    temporary = path.with_name(path.name + ".new")
-    with temporary.open("w") as file:
-        json.dump(expected, file, sort_keys=True)
-        file.write("\n")
-        file.flush()
-        os.fsync(file.fileno())
-    os.replace(temporary, path)
-    fsync_directory(path.parent)
-
-
-def validate_language_coverage(arguments, jobs, accepted):
-    if set(accepted) != {job.logical_identity for job in jobs}:
-        raise UnsafeCampaignError("language campaign has missing or unexpected accepted batches")
-    instances = [receipt["instance_id"] for receipt in accepted.values()]
-    if any(not instance for instance in instances) or len(instances) != len(set(instances)):
-        raise UnsafeCampaignError("language batches must use independent hosts")
-    for identity, receipt in accepted.items():
-        language_campaign(arguments).validate_receipt(identity, receipt)
-
-
-def aggregate_language_results(arguments, result_root, jobs, accepted):
-    validate_language_coverage(arguments, jobs, accepted)
-    if arguments.phase == "smoke":
-        return
-    # Link accepted raw evidence only. Rejected attempts never enter the reducer.
-    with tempfile.TemporaryDirectory(prefix="language-aggregate-", dir=result_root) as temporary:
-        staging = Path(temporary)
-        by_identity = {job.logical_identity: job for job in jobs}
-        for identity, receipt in accepted.items():
-            job = replace(by_identity[identity], host_epoch=int(receipt["host_epoch"]))
-            artifact = validate_job_artifacts(result_root, job).parent
-            suite, batch = language_campaign(arguments).batches[identity]
-            for logical_job in batch["jobs"]:
-                link = staging / suite / logical_job
-                link.parent.mkdir(parents=True, exist_ok=True)
-                link.symlink_to((artifact / "language-worker/results" / logical_job).resolve(), target_is_directory=True)
-        for suite, (directory, _) in language_campaign(arguments).plans.items():
-            temporary_export = staging / (suite + ".json")
-            language_fleet.aggregate(directory, staging / suite, temporary_export)
-            output = result_root / (suite + "-results.json")
-            if output.exists():
-                if output.read_bytes() != temporary_export.read_bytes():
-                    raise UnsafeCampaignError("language aggregate changed on restart")
-            else:
-                os.replace(temporary_export, output)
-        fsync_directory(result_root)
-
-
 def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now, running_jobs):
     """Place a launch candidate and reserve its capacity.
 
@@ -2828,7 +2708,6 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
     expected_fingerprint = frozen_input_fingerprint(root, arguments, jobs_path)
     running = {}
     events_path = result_root / "campaign-events.tsv"
-    validate_language_state(root, arguments, result_root)
     # A refill's deadline runs from its own start, not the original campaign's.
     started_at = campaign_started_at(result_root / ("refill-state.tsv" if refill else "campaign-state.tsv"), arguments)
     budget = getattr(arguments, "shared_budget", None)
@@ -2994,8 +2873,6 @@ def execute_jobs_locked(arguments, root, result_root, jobs):
     if unresolved:
         details = ", ".join(f"{job.identity} {detail}" for job, detail in unresolved)
         raise SystemExit(f"campaign completed with unresolved jobs: {details}")
-    if language_campaign(arguments):
-        aggregate_language_results(arguments, result_root, jobs, accepted)
 
 
 def read_unit_workers(path, platforms):

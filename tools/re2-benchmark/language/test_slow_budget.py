@@ -4,7 +4,6 @@ import unittest
 from unittest.mock import patch
 
 import collection
-import transport
 
 
 class TestSlowBulkBudget(unittest.TestCase):
@@ -50,28 +49,6 @@ class TestSlowBulkBudget(unittest.TestCase):
     def test_verification_cannot_inherit_a_long_measurement_budget(self):
         with self.assertRaises(ValueError):
             collection.run_process([], Path('unused'), measurement_timeout_seconds=12600)
-
-    def test_transport_requires_matching_isolated_host_budget(self):
-        package = {'packages': [{'directory': 'comparison'}]}
-        ordinary = {'suite': 'language-bulk', 'protocol': collection.STEADY_PROTOCOLS['language-bulk']}
-        with patch.object(collection, 'load', return_value=ordinary):
-            transport.validate_host_budget(package, Path('inputs'), 5400)
-            with self.assertRaises(ValueError):
-                transport.validate_host_budget(package, Path('inputs'), 81000)
-        for language, expected in (('java', 81000), ('trino', 81000), ('re2', 68400), ('rust', 68400)):
-            manifest = {
-                'suite': 'language-bulk', 'protocol': collection.SLOW_BULK_PROTOCOL,
-                'selected_languages': [language], 'cases': [{'id': 'fixture', 'model': 'count'}],
-            }
-            with self.subTest(language=language), patch.object(collection, 'load', return_value=manifest):
-                transport.validate_host_budget(package, Path('inputs'), expected)
-                with self.assertRaises(ValueError):
-                    transport.validate_host_budget(package, Path('inputs'), 18000)
-                with self.assertRaises(ValueError):
-                    transport.validate_host_budget({'packages': package['packages'] * 2}, Path('inputs'), expected)
-                changed = {**manifest, 'diagnostic_profiles': {}}
-                with patch.object(collection, 'load', return_value=changed), self.assertRaises(ValueError):
-                    transport.validate_host_budget(package, Path('inputs'), expected)
 
 
 if __name__ == '__main__':

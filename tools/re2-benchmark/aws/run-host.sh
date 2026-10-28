@@ -18,9 +18,9 @@ fi
 
 BENCHMARK_MODE=${RE2_BENCHMARK_MODE:-}
 case "${BENCHMARK_MODE}" in
-    language-batch | engine-build | unit-worker) ;;
+    engine-build | unit-worker) ;;
     *)
-        echo "RE2_BENCHMARK_MODE must be language-batch, engine-build, or unit-worker" >&2
+        echo "RE2_BENCHMARK_MODE must be engine-build or unit-worker" >&2
         exit 1
         ;;
 esac
@@ -86,7 +86,7 @@ install_packages()
 {
     sudo dnf install -y "${CMAKE_PACKAGE}" "${NATIVE_COMPILER_PACKAGE}" "${GLIBC_PACKAGE}" \
         "${TIME_PACKAGE}" git jq make ninja-build perf tar gzip
-    if [[ "${BENCHMARK_MODE}" == language-batch || "${BENCHMARK_MODE}" == engine-build ]]; then
+    if [[ "${BENCHMARK_MODE}" == engine-build ]]; then
         # The Rust language comparator links the pinned regex crate.
         sudo dnf install -y "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
     fi
@@ -337,10 +337,7 @@ export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
         printf 'oom_kills_before=%s\n' "${oom_kills_before}"
         printf 'disk_available_before_bytes=%s\n' "${disk_available_before_bytes}"
     } > "${capacity_file}"
-    if [[ "${BENCHMARK_MODE}" == language-batch ]]; then
-        session_command=(bash "${REGULATOR_DIR}/tools/re2-benchmark/language/run-host-session.sh"
-            "${REGULATOR_DIR}" "${RESULT_DIR}")
-    elif [[ "${BENCHMARK_MODE}" == engine-build ]]; then
+    if [[ "${BENCHMARK_MODE}" == engine-build ]]; then
         session_command=("${REGULATOR_DIR}/tools/re2-benchmark/baseline/build-engines.sh" "${RESULT_DIR}")
     else
         # The worker keeps each unit outside the host evidence it leaves here.

@@ -22,17 +22,16 @@ class TestFleet(unittest.TestCase):
         collection.prepare(self.source)
         self.directory = self.root / "fleet"
 
-    def prepare_small_plan(self, replicas=1):
+    def prepare_small_plan(self):
         manifest = collection.load(self.source / "manifest.json")
         manifest["cases"] = manifest["cases"][:1]
         collection.save(self.source / "manifest.json", manifest)
-        return fleet.prepare(self.source, self.directory, replicas)
+        return fleet.prepare(self.source, self.directory)
 
     def test_complete_matrix_keeps_comparator_with_both_memory_modes(self):
         (self.source / "unrelated.txt").write_text("not part of the workload")
         plan = fleet.prepare(self.source, self.directory)
         self.assertEqual(len(plan["partitions"]), 52)
-        self.assertEqual(len(plan["jobs"]), 312)
         self.assertEqual(plan["platform_allocations"], {
             "r9g": {"instance_type": "r9g.2xlarge", "vcpus": 8},
             "r8i": {"instance_type": "r8i.large", "vcpus": 2},
@@ -86,52 +85,19 @@ class TestFleet(unittest.TestCase):
                                 if len(units[unit_id]["owned"]) > 3})
         self.assertLess(len(smoke), len(units))
 
-    def test_steady_profile_survives_partition_and_batch_transport(self):
-        import campaign
-        import transport
-        manifest = collection.load(self.source / "manifest.json")
-        manifest["protocol"] = collection.STEADY_PROTOCOLS["language-lifecycle"]
-        collection.save(self.source / "manifest.json", manifest)
-        plan = fleet.prepare(self.source, self.directory, selection=[("everyday/logLevel", "java")])
-        controller = campaign.LanguageCampaign([self.directory], "primary")
-        batch = plan["host_batches"][0]
-        archive = self.root / "batch.tar.gz"
-        checksum = controller.package(batch["id"], archive)
-        destination = self.root / "unpacked"
-        package = transport.unpack(archive, destination, checksum, batch["platform"], batch["shard"], batch["replica"])
-        for entry in package["packages"]:
-            actual = collection.load(destination / entry["directory"] / "manifest.json")
-            self.assertEqual(collection.protocol_for(actual), manifest["protocol"])
-
-    def test_operation_partition_keeps_full_comparison_on_one_host(self):
-        import campaign
-        import transport
+    def test_partition_keeps_the_steady_profile_and_its_full_comparison(self):
         manifest = collection.load(self.source / "manifest.json")
         manifest["protocol"] = collection.STEADY_PROTOCOLS["language-lifecycle"]
         manifest["selected_operations"] = ["reusedContains", "reusedCount"]
         collection.save(self.source / "manifest.json", manifest)
         plan = fleet.prepare(self.source, self.directory, selection=[("everyday/logLevel", "java")])
-        controller = campaign.LanguageCampaign([self.directory], "primary")
-        batch = plan["host_batches"][0]
-        archive = self.root / "batch.tar.gz"
-        checksum = controller.package(batch["id"], archive)
-        destination = self.root / "unpacked"
-        package = transport.unpack(archive, destination, checksum, batch["platform"], batch["shard"], batch["replica"])
-        self.assertEqual(len(package["packages"]), 1)
-        actual = collection.load(destination / package["packages"][0]["directory"] / "manifest.json")
+        [partition] = plan["partitions"]
+        actual = collection.load(self.directory / "partitions" / partition["id"] / "manifest.json")
+        self.assertEqual(collection.protocol_for(actual), manifest["protocol"])
         self.assertEqual(collection.case_operations(actual, actual["cases"][0]), ("reusedContains", "reusedCount"))
         observations = list(collection.observations(actual))
         self.assertEqual([(row[3], row[4]) for row in observations],
                          [("java", "native"), ("java", "safe"), ("jdk", "safe")])
-
-    def test_plan_concurrency_is_configurable(self):
-        with patch.object(sys, "argv", ["fleet.py", "prepare", "--manifest-directory", str(self.source),
-                                       "--output-directory", str(self.directory), "--max-concurrent-hosts", "512"]):
-            fleet.main()
-        self.assertEqual(fleet.validate(self.directory)["max_concurrent_hosts"], 512)
-        for value in (0, -1, True, 1.5):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "positive integer"):
-                fleet.prepare(self.source, self.root / "invalid", max_concurrent_hosts=value)
 
     def test_units_charge_verification_of_every_operation_under_a_narrow_selection(self):
         manifest = collection.load(self.source / "manifest.json")
@@ -150,9 +116,7 @@ class TestFleet(unittest.TestCase):
         original = self.prepare_small_plan()
         for mutation in (lambda plan: plan["partitions"].pop(),
                          lambda plan: plan["partitions"].append(plan["partitions"][0]),
-                         lambda plan: plan["jobs"].pop(),
-                         lambda plan: plan["jobs"][0].update(platform="r8i"),
-                         lambda plan: plan.update(replicas=True),
+                         lambda plan: plan["platform_allocations"]["r9g"].update(vcpus=2),
                          lambda plan: plan.update(parent_manifest_sha256="changed"),
                          lambda plan: plan["partitions"][0].update(id="../../escape")):
             plan = copy.deepcopy(original)
@@ -164,47 +128,49 @@ class TestFleet(unittest.TestCase):
     def test_scoped_collection_keeps_whole_comparisons_and_explicit_coverage(self):
         manifest = collection.load(self.source / 'manifest.json')
         selection = [(case['id'], 'trino') for case in manifest['cases'][:2]]
-        plan = fleet.prepare(self.source, self.directory, selection=selection, operation_budget=10)
+        plan = fleet.prepare(self.source, self.directory, selection=selection)
         self.assertEqual(len(plan['partitions']), 2)
-        self.assertEqual(len(plan['jobs']), 12)
-        self.assertEqual(len(plan['host_batches']), 6)
-        self.assertTrue(all(len(batch['jobs']) == 2 for batch in plan['host_batches']))
         self.assertEqual(fleet.validate(self.directory), plan)
         plan['selection'].pop()
         collection.save(self.directory / 'plan.json', plan)
         with self.assertRaisesRegex(ValueError, 'partition'):
             fleet.validate(self.directory)
 
-    def test_invalid_scope_or_budget_does_not_create_a_plan(self):
-        for selection, budget in [([('missing', 'trino')], 1), ([], 1), (None, 0), (None, True), (None, 17)]:
-            with self.subTest(selection=selection, budget=budget), self.assertRaises(ValueError):
-                fleet.prepare(self.source, self.directory, selection=selection, operation_budget=budget)
+    def test_invalid_scope_does_not_create_a_plan(self):
+        for selection in [[('missing', 'trino')], []]:
+            with self.subTest(selection=selection), self.assertRaises(ValueError):
+                fleet.prepare(self.source, self.directory, selection=selection)
             self.assertFalse(self.directory.exists())
 
-    def test_duration_plan_preserves_the_full_replica_matrix(self):
+    def test_duration_plan_isolates_slow_comparisons(self):
         manifest = collection.load(self.source / "manifest.json")
+        operations = len(collection.OPERATIONS)
         estimates = {case["id"] + "/" + language: 300 for case in manifest["cases"] for language in collection.ENGINES}
-        policy = {"schema_version": 1, "source_sha256": "a" * 64, "partition_seconds": estimates,
-                  "isolated_pairs": [[manifest["cases"][0]["id"], "java"]], "max_batch_seconds": 4800,
-                  "bootstrap_seconds": 600}
         # A comparison estimated past fifteen minutes per operation is a unit alone, as is an isolated one.
-        estimates[manifest["cases"][1]["id"] + "/trino"] = 5 * 950
-        plan = fleet.prepare(self.source, self.directory, operation_budget=10, duration_policy=policy)
-        self.assertEqual(len(plan["jobs"]), 312)
+        estimates[manifest["cases"][1]["id"] + "/trino"] = operations * 950
+        policy = {"schema_version": 1, "source_sha256": "a" * 64, "partition_seconds": estimates,
+                  "isolated_pairs": [[manifest["cases"][0]["id"], "java"]]}
+        plan = fleet.prepare(self.source, self.directory, duration_policy=policy)
         units = self.assert_units_keep_comparisons_whole(52)
         for case, language in ((manifest["cases"][0]["id"], "java"), (manifest["cases"][1]["id"], "trino")):
             alone = [unit for unit in units.values() if fleet.row_atom(unit["owned"][0])[:2] == (case, language)]
-            self.assertEqual([3] * 5, [len(unit["owned"]) for unit in alone])
-        self.assertEqual(5, sum(float(unit["estimated_seconds"]) == 950 for unit in units.values()))
+            self.assertEqual([3] * operations, [len(unit["owned"]) for unit in alone])
+        self.assertEqual(operations, sum(float(unit["estimated_seconds"]) == 950 for unit in units.values()))
         self.assertEqual(fleet.validate(self.directory), plan)
-        self.assertEqual(sorted(job for batch in plan["host_batches"] for job in batch["jobs"]),
-                         sorted(job["id"] for job in plan["jobs"]))
-        for batch in plan["host_batches"]:
-            if any("case-0000-java" in job for job in batch["jobs"]):
-                self.assertEqual(len(batch["jobs"]), 1)
-        plan["host_batches"][0]["jobs"].append(plan["host_batches"][1]["jobs"][0])
+        first = manifest["cases"][0]["id"] + "/java"
+        for change in ("missing", "unknown", "nan"):
+            changed = {**policy, "partition_seconds": dict(estimates), "isolated_pairs": list(policy["isolated_pairs"])}
+            if change == "missing":
+                changed["partition_seconds"].pop(first)
+            elif change == "unknown":
+                changed["isolated_pairs"].append(["missing", "java"])
+            else:
+                changed["partition_seconds"][first] = float("nan")
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                fleet.prepare(self.source, self.root / change, duration_policy=changed)
+        plan["duration_policy"]["partition_seconds"].pop(first)
         collection.save(self.directory / "plan.json", plan)
-        with self.assertRaisesRegex(ValueError, "batch assignments"):
+        with self.assertRaisesRegex(ValueError, "duration policy"):
             fleet.validate(self.directory)
 
     def test_reject_changed_partition_even_with_updated_checksum(self):
@@ -219,41 +185,12 @@ class TestFleet(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differs from its parent"):
             fleet.validate(self.directory)
 
-    def test_worker_rejects_wrong_host_before_running_and_passes_partition(self):
-        plan = self.prepare_small_plan()
-        job = plan["jobs"][0]
-        results = self.root / "results"
-        receipt = self.root / "build.json"
-        with patch.object(collection, "host_identity", side_effect=ValueError("wrong host")), \
-                patch.object(collection, "verify") as verify:
-            with self.assertRaisesRegex(ValueError, "wrong host"):
-                fleet.run_job(self.directory, job["id"], results, "java", "classpath", "native", receipt)
-            verify.assert_not_called()
-
-        def make_results(directory, output, *args):
-            output.mkdir(parents=True)
-
-        with patch.object(collection, "host_identity") as host, \
-                patch.object(collection, "verify", side_effect=make_results) as verify, \
-                patch.object(collection, "measure") as measure:
-            fleet.run_job(self.directory, job["id"], results, "java", "classpath", "native", receipt)
-            host.assert_called_once_with("r9g")
-            partition = self.directory / "partitions" / job["partition"]
-            output = results / job["id"]
-            verify.assert_called_once_with(partition, output, "java", "classpath", "native")
-            measure.assert_called_once_with(partition, output, "java", "classpath", "native", "r9g", receipt, None, None)
-            self.assertEqual(collection.load(output / "job.json")["job"], job)
-
     def write_results(self, plan):
         """Synthetic evidence exercises the real raw-data reducer, without any timing process."""
         results = self.root / "results"
-        for index, job in enumerate(plan["jobs"]):
-            result = results / job["id"]
-            # Schema 2 plans recorded no allocation; their hosts were each platform's standard size.
-            self.write_partition_results(self.directory / "partitions" / job["partition"], result, job["platform"],
-                                         job.get("instance_type", job["platform"] + ".large"), f"i-{index}")
-            collection.save(result / "job.json", {
-                "job": job, "plan_sha256": collection.digest((self.directory / "plan.json").read_bytes())})
+        for index, partition in enumerate(plan["partitions"]):
+            self.write_partition_results(self.directory / "partitions" / partition["id"], results / partition["id"],
+                                         "r9g", "r9g.2xlarge", f"i-{index}")
         return results
 
     @staticmethod
@@ -603,8 +540,8 @@ class TestFleet(unittest.TestCase):
     def test_local_preflight_checks_all_partitions_without_measurement(self):
         plan = self.prepare_small_plan()
         measured = self.write_results(plan)
-        evidence = {job["partition"]: collection.load(measured / job["id"] / "verification.json")
-                    for job in plan["jobs"]}
+        evidence = {partition["id"]: collection.load(measured / partition["id"] / "verification.json")
+                    for partition in plan["partitions"]}
 
         def verify_partition(partition, output, *args):
             return evidence[partition.name]
@@ -632,10 +569,9 @@ class TestFleet(unittest.TestCase):
 
     def test_scoped_preflight_does_not_require_unselected_languages(self):
         manifest = collection.load(self.source / 'manifest.json')
-        plan = fleet.prepare(self.source, self.directory, replicas=1,
-                             selection=[(manifest['cases'][0]['id'], 'trino')])
+        plan = fleet.prepare(self.source, self.directory, selection=[(manifest['cases'][0]['id'], 'trino')])
         measured = self.write_results(plan)
-        evidence = collection.load(measured / plan['jobs'][0]['id'] / 'verification.json')
+        evidence = collection.load(measured / plan['partitions'][0]['id'] / 'verification.json')
         with patch.object(collection, 'verify', return_value=evidence), patch.object(collection, 'measure') as measure:
             fleet.verify(self.directory, self.root / 'preflight', 'java', 'classpath', {'native-re2': 'native'})
             measure.assert_not_called()

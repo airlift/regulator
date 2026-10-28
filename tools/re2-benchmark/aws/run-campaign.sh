@@ -52,8 +52,6 @@ BASELINE_PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
 BASELINE_CANDIDATE_ARCHIVE=${BASELINE_CANDIDATE_ARCHIVE:-}
 BASELINE_CANDIDATE_ARCHIVE_SHA256=${BASELINE_CANDIDATE_ARCHIVE_SHA256:-}
 BASELINE_EXPECTED_ENGINE_TREE=${BASELINE_EXPECTED_ENGINE_TREE:-}
-LANGUAGE_BATCH_ARCHIVE=${LANGUAGE_BATCH_ARCHIVE:-}
-LANGUAGE_BATCH_ARCHIVE_SHA256=${LANGUAGE_BATCH_ARCHIVE_SHA256:-}
 LANGUAGE_CANDIDATE_PROVENANCE=${LANGUAGE_CANDIDATE_PROVENANCE:-}
 LANGUAGE_CANDIDATE_PROVENANCE_SHA256=${LANGUAGE_CANDIDATE_PROVENANCE_SHA256:-}
 ENGINE_BUILD_DIRECTORY=${ENGINE_BUILD_DIRECTORY:-}
@@ -124,9 +122,9 @@ benchmark_ami_name()
 }
 
 case "${CAMPAIGN_MODE}" in
-    language-batch | engine-build | unit-worker) ;;
+    engine-build | unit-worker) ;;
     *)
-        echo "RE2 benchmark campaign mode must be language-batch, engine-build, or unit-worker" >&2
+        echo "RE2 benchmark campaign mode must be engine-build or unit-worker" >&2
         exit 1
         ;;
 esac
@@ -146,10 +144,8 @@ if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
             "found ${CAMPAIGN_SHARD_ID} and ${TIMEOUT_SECONDS}" >&2
         exit 1
     fi
-elif [[ ( "${CAMPAIGN_MODE}" != language-batch && "${TIMEOUT_SECONDS}" != 5400 ) ||
-        ( "${CAMPAIGN_MODE}" == language-batch && "${TIMEOUT_SECONDS}" != 5400 &&
-          "${TIMEOUT_SECONDS}" != 68400 && "${TIMEOUT_SECONDS}" != 81000 ) ]]; then
-    echo "Formal baseline jobs require TIMEOUT_SECONDS=5400; isolated slow language jobs require their computed 68400- or 81000-second budget, found ${TIMEOUT_SECONDS}" >&2
+elif [[ "${TIMEOUT_SECONDS}" != 5400 ]]; then
+    echo "An engine build requires TIMEOUT_SECONDS=5400, found ${TIMEOUT_SECONDS}" >&2
     exit 1
 fi
 if [[ "${CAMPAIGN_PROVENANCE}" != qualification ]]; then
@@ -1099,17 +1095,6 @@ download_input 's3://${BUCKET}/${INPUT_PREFIX}/regulator.tar.gz' /tmp/regulator.
 printf '%s  %s\n' '${REGULATOR_SHA256}' /tmp/regulator.tar.gz | sha256sum --check -
 tar -xzf /tmp/regulator.tar.gz -C /opt/re2-work/regulator
 export PYTHONDONTWRITEBYTECODE=1
-if [[ '${CAMPAIGN_MODE}' == language-batch ]]; then
-    download_input 's3://${BUCKET}/${INPUT_PREFIX}/language-batch.tar.gz' /tmp/language-batch.tar.gz
-    download_input 's3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv' /tmp/candidate-provenance.tsv
-    printf '%s  %s\n' '${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}' /tmp/candidate-provenance.tsv | sha256sum --check -
-    python3 /opt/re2-work/regulator/tools/re2-benchmark/language/transport.py \\
-        /tmp/language-batch.tar.gz --sha256 '${LANGUAGE_BATCH_ARCHIVE_SHA256}' \\
-        --platform '${CAMPAIGN_PLATFORM}' --shard '${CAMPAIGN_SHARD_ID}' --replica '${CAMPAIGN_REPLICA_ID}' \\
-        --destination "\${RESULT_DIR}/language-inputs"
-    export LANGUAGE_SOURCE_ARCHIVE=/tmp/regulator.tar.gz
-    export LANGUAGE_CANDIDATE_PROVENANCE=/tmp/candidate-provenance.tsv
-fi
 if [[ '${LANGUAGE_PLAN_BUNDLE_SHA256S}' != '' ]]; then
     download_input 's3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv' /tmp/candidate-provenance.tsv
     printf '%s  %s\n' '${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}' /tmp/candidate-provenance.tsv | sha256sum --check -
@@ -1342,23 +1327,6 @@ fi
 if [[ $(git -C "${REGULATOR_DIR}" rev-parse "${REGULATOR_COMMIT}:src/main") != "${BASELINE_EXPECTED_ENGINE_TREE}" ]]; then
     reject_input "Selected Regulator production tree does not match BASELINE_EXPECTED_ENGINE_TREE"
 fi
-if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
-    if [[ ! -f "${LANGUAGE_BATCH_ARCHIVE}" || ! -f "${LANGUAGE_CANDIDATE_PROVENANCE}" ||
-            ! "${LANGUAGE_BATCH_ARCHIVE_SHA256}" =~ ^[0-9a-f]{64}$ ||
-            ! "${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-        reject_input "Language execution requires checksummed batch inputs and candidate provenance"
-    fi
-    cp "${LANGUAGE_BATCH_ARCHIVE}" "${SESSION_DIR}/language-batch.tar.gz"
-    cp "${LANGUAGE_CANDIDATE_PROVENANCE}" "${SESSION_DIR}/candidate-provenance.tsv"
-    if [[ $(sha256 "${SESSION_DIR}/candidate-provenance.tsv") != "${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}" ]]; then
-        reject_input "Language candidate provenance checksum mismatch"
-    fi
-    PYTHONDONTWRITEBYTECODE=1 python3 "${REGULATOR_DIR}/tools/re2-benchmark/language/transport.py" \
-        "${SESSION_DIR}/language-batch.tar.gz" --sha256 "${LANGUAGE_BATCH_ARCHIVE_SHA256}" \
-        --platform "${CAMPAIGN_PLATFORM}" --shard "${CAMPAIGN_SHARD_ID}" --replica "${CAMPAIGN_REPLICA_ID}" \
-        --host-timeout "${TIMEOUT_SECONDS}" ||
-        reject_input "Language batch archive fails its checks for this job"
-fi
 if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
     cp "${LANGUAGE_CANDIDATE_PROVENANCE}" "${SESSION_DIR}/candidate-provenance.tsv"
     if [[ $(sha256 "${SESSION_DIR}/candidate-provenance.tsv") != "${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}" ]]; then
@@ -1432,10 +1400,7 @@ else
 fi
 
 aws_cli s3 cp "${SESSION_DIR}/regulator.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/regulator.tar.gz" --only-show-errors
-if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
-    aws_cli s3 cp "${SESSION_DIR}/language-batch.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/language-batch.tar.gz" --only-show-errors
-fi
-if [[ "${CAMPAIGN_MODE}" == language-batch || -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
+if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
     aws_cli s3 cp "${SESSION_DIR}/candidate-provenance.tsv" "s3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv" --only-show-errors
 fi
 if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
@@ -1588,7 +1553,7 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                 expected_cargo_package=not-installed
                 expected_rust_package=not-installed
                 # An engine build compiles the native Rust runners.
-                if [[ "${CAMPAIGN_MODE}" == language-batch || "${CAMPAIGN_MODE}" == engine-build ]]; then
+                if [[ "${CAMPAIGN_MODE}" == engine-build ]]; then
                     expected_cargo_package=${CARGO_PACKAGE}
                     expected_rust_package=${RUST_PACKAGE}
                 fi

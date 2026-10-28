@@ -1,20 +1,19 @@
 # Benchmark mode inventory
 
-The AWS wrappers, `aws/run-campaign.sh` and `aws/run-host.sh`, accept three
+The AWS wrappers, `aws/run-campaign.sh` and `aws/run-host.sh`, accept two
 modes.
 
 ## Accepted modes
 
-- `language-batch` runs a public-language comparison batch selected by
-  `language/fleet.py`, with collection and acceptance managed by
-  `language/campaign.py`. See the [language guide](../language/README.md).
 - `engine-build` measures nothing. The build phase of `baseline/run-campaign.py`
   runs it once per platform to build the pinned Trino harness and the native
   RE2 and Rust comparison runners that later unit workers install. See
   [engine builds](SHARD_DISPATCH.md#engine-builds).
 - `unit-worker` runs no shard of its own. It leases the work units that
-  `baseline/run-campaign.py` dispatches and measures them one at a time. See
-  [work units](SHARD_DISPATCH.md#work-units).
+  `baseline/run-campaign.py` dispatches, from baseline shards or from the
+  public-language plans of `language/fleet.py`, and measures them one at a
+  time. See [work units](SHARD_DISPATCH.md#work-units) and the
+  [language guide](../language/README.md).
 
 The wrappers reject other modes.
 
@@ -29,6 +28,5 @@ listed in [`specialized-patterns.tsv`](specialized-patterns.tsv).
 
 ## Enforcement
 
-Both AWS wrappers accept only `language-batch`, `engine-build`, and
-`unit-worker`. Formal campaign orchestration and aggregation accept only rows
+Both AWS wrappers accept only `engine-build` and `unit-worker`. Formal campaign orchestration and aggregation accept only rows
 from the frozen manifests.

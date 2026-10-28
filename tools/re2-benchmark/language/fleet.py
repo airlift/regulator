@@ -10,6 +10,7 @@ import argparse
 import copy
 import csv
 import hashlib
+import math
 import os
 import re
 import shutil
@@ -19,7 +20,6 @@ import tempfile
 from pathlib import Path
 
 import collection
-import batching
 import jvm_build
 import released_artifact
 
@@ -37,9 +37,8 @@ from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS  # n
 
 PLATFORMS = ("r9g", "r8i")
 PARTITION_ID = rf"case-[0-9]{{4,}}-({'|'.join(collection.ENGINES)})"
-BATCH_OPERATION_BUDGET = 1
-DEFAULT_MAX_CONCURRENT_HOSTS = 64
-# A language unit measures its comparisons in plan order, each comparison's observations in collection order.
+# A language unit measures its comparisons in case-ID and language order, each comparison's observations in
+# collection order.
 UNIT_ORDER = "language-observation-order-v1"
 SHARD_ID = r"[a-z0-9][a-z0-9-]*"
 # The envelope files a language unit attempt binds in its evidence, beside its partitions' raw results.
@@ -60,33 +59,20 @@ def platform_allocations(suite, platforms=PLATFORMS):
     return {platform: platform_allocation(suite, platform) for platform in platforms}
 
 
-def host_batches(manifest, partitions, replicas, operation_budget=None, duration_policy=None, platforms=PLATFORMS):
-    """Group whole language partitions, never split a native/safe/comparator comparison."""
-    if operation_budget is None:
-        operation_budget = BATCH_OPERATION_BUDGET
-    cases = {case["id"]: case for case in manifest["cases"]}
-    groups = []
-    group = []
-    operations = 0
-    for partition in partitions:
-        count = len(collection.case_operations(manifest, cases[partition["case"]]))
-        if group and operations + count > operation_budget:
-            groups.append(group)
-            group, operations = [], 0
-        group.append(partition["id"])
-        operations += count
-    if group:
-        groups.append(group)
-    if collection.protocol_for(manifest) == collection.SLOW_BULK_PROTOCOL:
-        groups = [[partition["id"]] for partition in partitions]
-    elif duration_policy is not None:
-        counts = {part["id"]: len(collection.case_operations(manifest, cases[part["case"]])) for part in partitions}
-        groups = batching.groups(partitions, counts, operation_budget, duration_policy)
-    return [{"id": f"{platform}/{manifest['suite']}-{index:04d}/replica-{replica}",
-             "platform": platform, **platform_allocation(manifest["suite"], platform),
-             "shard": f"{manifest['suite']}-{index:04d}", "replica": replica,
-             "jobs": [f"{platform}/{partition}/replica-{replica}" for partition in group]}
-            for index, group in enumerate(groups) for replica in range(1, replicas + 1) for platform in platforms]
+def validate_duration_policy(policy, selected):
+    """A frozen duration policy names its evidence and estimates every selected comparison."""
+    keys = {f"{case}/{language}" for case, language in selected}
+    if (policy.get("schema_version") != 1 or
+            not re.fullmatch(r"[0-9a-f]{64}", policy.get("source_sha256", "")) or
+            set(policy.get("partition_seconds", {})) != keys):
+        raise ValueError("duration policy must identify evidence and every selected partition")
+    for value in policy["partition_seconds"].values():
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError("invalid partition duration estimate")
+    isolated = policy.get("isolated_pairs", [])
+    if (not all(is_pair(pair) for pair in isolated) or len({tuple(pair) for pair in isolated}) != len(isolated) or
+            not {"/".join(pair) for pair in isolated} <= keys):
+        raise ValueError("invalid isolated comparison selection")
 
 
 def row_atom(row_id):
@@ -460,15 +446,8 @@ def copy_inputs(manifest, source, destination):
         shutil.copyfile(source / name, target)
 
 
-def prepare(manifest_directory, destination, replicas=3, selection=None, operation_budget=None, duration_policy=None,
-            max_concurrent_hosts=DEFAULT_MAX_CONCURRENT_HOSTS, shard_id=None):
+def prepare(manifest_directory, destination, selection=None, duration_policy=None, shard_id=None):
     manifest_directory, destination = manifest_directory.resolve(), destination.resolve()
-    if operation_budget is None:
-        operation_budget = BATCH_OPERATION_BUDGET
-    if type(replicas) is not int or replicas < 1:
-        raise ValueError("replicas must be positive")
-    if type(max_concurrent_hosts) is not int or max_concurrent_hosts < 1:
-        raise ValueError("max concurrent hosts must be a positive integer")
     manifest = collection.load(manifest_directory / "manifest.json")
     collection.validate_manifest(manifest, manifest_directory)
     if "parent_manifest_sha256" in manifest or "selected_languages" in manifest:
@@ -481,10 +460,8 @@ def prepare(manifest_directory, destination, replicas=3, selection=None, operati
     selected = set(map(tuple, selection)) if selection is not None else complete
     if not selected or not selected <= complete or (selection is not None and len(selected) != len(selection)):
         raise ValueError('invalid or duplicate fleet selection')
-    if type(operation_budget) is not int or not 1 <= operation_budget <= 16:
-        raise ValueError('operation budget must be between 1 and 16')
     if duration_policy is not None:
-        batching.validate(duration_policy, [{"case": case, "language": language} for case, language in selected])
+        validate_duration_policy(duration_policy, selected)
     destination.mkdir(parents=True, exist_ok=False)
     source = destination / "source"
     source.mkdir()
@@ -506,17 +483,9 @@ def prepare(manifest_directory, destination, replicas=3, selection=None, operati
             collection.save(directory / "manifest.json", subset)
             partitions.append({"id": partition_id, "case": case["id"], "language": language,
                                "manifest_sha256": collection.digest((directory / "manifest.json").read_bytes())})
-    jobs = [{"id": f"{platform}/{partition['id']}/replica-{replica}", "platform": platform,
-             **platform_allocation(manifest["suite"], platform),
-             "partition": partition["id"], "replica": replica}
-            for partition in partitions for replica in range(1, replicas + 1) for platform in PLATFORMS]
-    plan = {"schema_version": 4, "shard_id": shard_id, "parent_manifest_sha256": parent_hash, "replicas": replicas,
-            "platforms": list(PLATFORMS), "max_concurrent_hosts": max_concurrent_hosts,
-            "platform_allocations": platform_allocations(manifest["suite"], PLATFORMS),
-            "capacity_policy": "up to the limit; continue with available hosts",
-            "partitions": partitions, "jobs": jobs,
-            "host_batches": host_batches(manifest, partitions, replicas, operation_budget, duration_policy, PLATFORMS),
-            "batch_operation_budget": operation_budget}
+    plan = {"schema_version": 4, "shard_id": shard_id, "parent_manifest_sha256": parent_hash,
+            "platforms": list(PLATFORMS), "platform_allocations": platform_allocations(manifest["suite"], PLATFORMS),
+            "partitions": partitions}
     if duration_policy is not None:
         plan["duration_policy"] = duration_policy
     if selection is not None:
@@ -536,12 +505,10 @@ def validate(directory):
     if "selected_languages" in manifest or "parent_manifest_sha256" in manifest:
         raise ValueError("fleet source must be unpartitioned")
     parent_hash = collection.digest((source / "manifest.json").read_bytes())
-    platforms = PLATFORMS
     if (plan.get("schema_version") != 4 or plan["parent_manifest_sha256"] != parent_hash or
-            not isinstance(plan.get("shard_id"), str) or not re.fullmatch(SHARD_ID, plan["shard_id"]) or
-            plan["platforms"] != list(platforms) or type(plan["replicas"]) is not int or plan["replicas"] < 1 or
-            type(plan["max_concurrent_hosts"]) is not int or plan["max_concurrent_hosts"] < 1 or
-            plan.get("platform_allocations") != platform_allocations(manifest["suite"], platforms)):
+            not is_shard_id(plan.get("shard_id")) or
+            plan["platforms"] != list(PLATFORMS) or
+            plan.get("platform_allocations") != platform_allocations(manifest["suite"], PLATFORMS)):
         raise ValueError("invalid fleet protocol or source identity")
     expected = {(case["id"], language) for case in manifest["cases"] for language in manifest["languages"]}
     if 'selection' in plan:
@@ -573,147 +540,12 @@ def validate(directory):
         collection.validate_manifest(actual, path)
     if found != expected:
         raise ValueError("incomplete fleet coverage")
-    expected_jobs = [{"id": f"{platform}/{partition['id']}/replica-{replica}", "platform": platform,
-                      **platform_allocation(manifest["suite"], platform),
-                      "partition": partition["id"], "replica": replica}
-                     for partition in plan["partitions"] for replica in range(1, plan["replicas"] + 1)
-                     for platform in platforms]
-    if plan["jobs"] != expected_jobs:
-        raise ValueError("incomplete or changed job matrix")
-    budget = plan.get('batch_operation_budget')
-    if type(budget) is not int or not 1 <= budget <= 16:
-        raise ValueError('invalid batch operation budget')
-    expected_batches = host_batches(
-        manifest, plan["partitions"], plan["replicas"], budget, plan.get("duration_policy"), platforms)
-    if plan.get("host_batches") != expected_batches:
-        raise ValueError("incomplete or changed host batch assignments")
+    if "duration_policy" in plan:
+        validate_duration_policy(plan["duration_policy"], expected)
     units = plan_units(manifest, plan["partitions"], plan["shard_id"], plan.get("duration_policy"))
     if tuple((directory / name).read_text() for name in ("units.tsv", "unit-rows.tsv")) != work_units.render(units):
         raise ValueError("work units differ from the plan's comparisons")
     return plan
-
-
-def run_job(directory, job_id, results, java, classpath, native_runners, receipt, archive=None, candidate_provenance=None):
-    plan = validate(directory)
-    job = next((job for job in plan["jobs"] if job["id"] == job_id), None)
-    if job is None:
-        raise ValueError("unknown job")
-    # Reject the wrong host before verification or any timing. measure repeats
-    # this admission alongside source, JDK, and build-receipt validation.
-    collection.host_identity(job["platform"])
-    partition = directory.resolve() / "partitions" / job["partition"]
-    output = results.resolve() / job["id"]
-    collection.verify(partition, output, java, classpath, native_runners)
-    collection.measure(partition, output, java, classpath, native_runners, job["platform"], receipt, archive, candidate_provenance)
-    collection.save(output / "job.json", {"job": job,
-                    "plan_sha256": collection.digest((directory / "plan.json").read_bytes())})
-
-
-def package_job(directory, job_id, destination):
-    """Copy only one partition; workers must not receive the entire bulk corpus."""
-    plan = validate(directory)
-    job = next((job for job in plan["jobs"] if job["id"] == job_id), None)
-    if job is None:
-        raise ValueError("unknown job")
-    return package_partition(directory, job, destination)
-
-
-def package_partition(directory, job, destination):
-    source = directory.resolve() / "partitions" / job["partition"]
-    manifest = collection.load(source / "manifest.json")
-    destination.mkdir(parents=True, exist_ok=False)
-    shutil.copyfile(source / "manifest.json", destination / "manifest.json")
-    copy_inputs(manifest, source, destination)
-    receipt = {"job": job, "plan_sha256": collection.digest((directory / "plan.json").read_bytes()),
-               "manifest_sha256": collection.digest((source / "manifest.json").read_bytes())}
-    collection.save(destination / "package.json", receipt)
-    validate_package(destination)
-    return receipt
-
-
-def package_batch(directory, batch_id, destination):
-    plan = validate(directory)
-    return package_validated_batch(directory, plan, batch_id, destination)
-
-
-def package_validated_batch(directory, plan, batch_id, destination):
-    """Package an already-validated plan; recheck each selected partition while copying."""
-    if collection.load(directory / "plan.json") != plan:
-        raise ValueError("fleet plan changed before packaging")
-    batch = next((batch for batch in plan["host_batches"] if batch["id"] == batch_id), None)
-    if batch is None:
-        raise ValueError("unknown host batch")
-    destination.mkdir(parents=True, exist_ok=False)
-    jobs = {job["id"]: job for job in plan["jobs"]}
-    packages = []
-    partitions = {partition["id"]: partition for partition in plan["partitions"]}
-    for identity in batch["jobs"]:
-        job = jobs[identity]
-        path = Path("partitions") / job["partition"]
-        receipt = package_partition(directory, job, destination / path)
-        if receipt["manifest_sha256"] != partitions[job["partition"]]["manifest_sha256"]:
-            raise ValueError("partition changed before packaging")
-        packages.append({"directory": str(path), "receipt": receipt})
-    receipt = {"batch": batch, "plan_sha256": collection.digest((directory / "plan.json").read_bytes()),
-               "packages": packages}
-    collection.save(destination / "batch.json", receipt)
-    validate_batch(destination)
-    return receipt
-
-
-def validate_batch(directory):
-    receipt = collection.load(directory / "batch.json")
-    batch = receipt["batch"]
-    suite = batch["shard"].rsplit("-", 1)[0]
-    if (batch["platform"] not in PLATFORMS or type(batch["replica"]) is not int or batch["replica"] < 1 or
-            not re.fullmatch(r"language-(bulk|lifecycle)-[0-9]{4,}", batch["shard"]) or
-            batch["id"] != f"{batch['platform']}/{batch['shard']}/replica-{batch['replica']}" or
-            {key: batch.get(key) for key in ("instance_type", "vcpus")} != platform_allocation(suite, batch["platform"])):
-        raise ValueError("invalid host batch identity")
-    found = []
-    for package in receipt["packages"]:
-        path = (directory / package["directory"]).resolve()
-        if not path.is_relative_to(directory.resolve()):
-            raise ValueError("batch package path escapes directory")
-        actual = validate_package(path)
-        job = actual["job"]
-        manifest = collection.load(path / "manifest.json")
-        if (actual != package["receipt"] or actual["plan_sha256"] != receipt["plan_sha256"] or
-                job["platform"] != batch["platform"] or job["replica"] != batch["replica"] or
-                not batch["shard"].startswith(manifest["suite"] + "-")):
-            raise ValueError("batch package differs from its assignment")
-        found.append(job["id"])
-    if not found or len(found) != len(set(found)) or found != batch["jobs"]:
-        raise ValueError("missing or duplicate batch jobs")
-    return receipt
-
-
-def validate_package(directory):
-    receipt = collection.load(directory / "package.json")
-    manifest = collection.load(directory / "manifest.json")
-    collection.validate_manifest(manifest, directory)
-    job = receipt["job"]
-    if (job["platform"] not in PLATFORMS or type(job["replica"]) is not int or job["replica"] < 1 or
-            not re.fullmatch(PARTITION_ID, job["partition"]) or
-            job["id"] != f"{job['platform']}/{job['partition']}/replica-{job['replica']}" or
-            {key: job.get(key) for key in ("instance_type", "vcpus")} != platform_allocation(manifest["suite"], job["platform"]) or
-            not re.fullmatch(r"[0-9a-f]{64}", receipt["plan_sha256"]) or
-            receipt["manifest_sha256"] != collection.digest((directory / "manifest.json").read_bytes()) or
-            len(manifest["cases"]) != 1 or manifest.get("selected_languages") != [job["partition"].rsplit("-", 1)[1]]):
-        raise ValueError("invalid packaged job identity")
-    return receipt
-
-
-def run_package(directory, results, java, classpath, native_runners, receipt, archive=None, candidate_provenance=None):
-    package = validate_package(directory)
-    job = package["job"]
-    collection.host_identity(job["platform"])
-    output = results.resolve() / job["id"]
-    collection.verify(directory, output, java, classpath, native_runners)
-    collection.measure(directory, output, java, classpath, native_runners, job["platform"], receipt, archive, candidate_provenance)
-    if validate_package(directory) != package:
-        raise ValueError("job package changed during execution")
-    collection.save(output / "job.json", {"job": job, "plan_sha256": package["plan_sha256"]})
 
 
 def verify(directory, results, java, classpath, native_runners):
@@ -837,29 +669,9 @@ def main():
     prepare_parser = commands.add_parser("prepare")
     prepare_parser.add_argument("--manifest-directory", type=Path, required=True)
     prepare_parser.add_argument("--output-directory", type=Path, required=True)
-    prepare_parser.add_argument("--replicas", type=int, default=3)
-    prepare_parser.add_argument("--max-concurrent-hosts", type=int, default=DEFAULT_MAX_CONCURRENT_HOSTS)
     prepare_parser.add_argument("--selection", type=Path, help="JSON array of [case ID, language] pairs")
-    prepare_parser.add_argument("--batch-operation-budget", type=int, default=BATCH_OPERATION_BUDGET)
     prepare_parser.add_argument("--duration-policy", type=Path, help="frozen partition duration estimates and isolated slow comparisons")
     prepare_parser.add_argument("--shard-id", help="the plan's shard of work units; defaults to the suite")
-    package_parser = commands.add_parser("package-job")
-    package_parser.add_argument("--plan-directory", type=Path, required=True)
-    package_parser.add_argument("--job", required=True)
-    package_parser.add_argument("--output-directory", type=Path, required=True)
-    batch_parser = commands.add_parser("package-batch")
-    batch_parser.add_argument("--plan-directory", type=Path, required=True)
-    batch_parser.add_argument("--batch", required=True)
-    batch_parser.add_argument("--output-directory", type=Path, required=True)
-    package_runner = commands.add_parser("run-package")
-    package_runner.add_argument("--package-directory", type=Path, required=True)
-    package_runner.add_argument("--results", type=Path, required=True)
-    package_runner.add_argument("--java", default="java")
-    package_runner.add_argument("--classpath", required=True)
-    collection.add_native_runner_arguments(package_runner, required=True)
-    package_runner.add_argument("--jvm-build-receipt", type=Path, required=True)
-    package_runner.add_argument("--source-archive", type=Path)
-    package_runner.add_argument("--candidate-provenance", type=Path)
     bundle_parser = commands.add_parser("bundle", help="write a plan's bundle for unit workers and print its SHA-256")
     bundle_parser.add_argument("--plan-directory", type=Path, required=True)
     bundle_parser.add_argument("--output", type=Path, required=True)
@@ -878,29 +690,22 @@ def main():
     unit_parser.add_argument("--region", required=True)
     unit_parser.add_argument("--source-archive", type=Path, required=True)
     unit_parser.add_argument("--candidate-provenance", type=Path, required=True)
-    for name in ("validate", "verify", "run-job", "aggregate"):
+    for name in ("validate", "verify", "aggregate"):
         command = commands.add_parser(name)
         command.add_argument("--plan-directory", type=Path, required=True)
         if name != "validate":
             command.add_argument("--results", type=Path, required=True)
         if name == "aggregate":
             command.add_argument("--output", type=Path, required=True)
-        if name in ("verify", "run-job"):
+        if name == "verify":
             command.add_argument("--java", default="java")
             command.add_argument("--classpath", required=True)
             collection.add_native_runner_arguments(command, required=True)
-        if name == "run-job":
-            command.add_argument("--job", required=True)
-            command.add_argument("--jvm-build-receipt", type=Path, required=True)
-            command.add_argument("--source-archive", type=Path)
-            command.add_argument("--candidate-provenance", type=Path)
     args = parser.parse_args()
     if args.command == "prepare":
         selection = collection.load(args.selection) if args.selection else None
-        plan = prepare(args.manifest_directory, args.output_directory, args.replicas,
-                       selection, args.batch_operation_budget, collection.load(args.duration_policy) if args.duration_policy else None,
-                       max_concurrent_hosts=args.max_concurrent_hosts, shard_id=args.shard_id)
-        print(f"Prepared {len(plan['jobs'])} same-host jobs; no hosts allocated")
+        prepare(args.manifest_directory, args.output_directory, selection,
+                collection.load(args.duration_policy) if args.duration_policy else None, shard_id=args.shard_id)
         print(work_units.summary([{**unit, "estimated_seconds": float(unit["estimated_seconds"])}
                                   for unit in work_units.load(args.output_directory).values()]))
     elif args.command == "bundle":
@@ -915,19 +720,9 @@ def main():
         except UnitRejection as rejection:
             print(f"unit {args.unit} rejected: {rejection}", file=sys.stderr)
             sys.exit(rejection.status)
-    elif args.command == "package-job":
-        package_job(args.plan_directory, args.job, args.output_directory)
-    elif args.command == "package-batch":
-        package_batch(args.plan_directory, args.batch, args.output_directory)
-    elif args.command == "run-package":
-        run_package(args.package_directory, args.results, args.java, args.classpath, collection.native_runner_arguments(args),
-                    args.jvm_build_receipt, args.source_archive, args.candidate_provenance)
     elif args.command == "validate":
-        plan = validate(args.plan_directory)
-        print(f"Validated {len(plan['jobs'])} same-host jobs")
-    elif args.command == "run-job":
-        run_job(args.plan_directory, args.job, args.results, args.java, args.classpath,
-                collection.native_runner_arguments(args), args.jvm_build_receipt, args.source_archive, args.candidate_provenance)
+        validate(args.plan_directory)
+        print(f"Validated {len(work_units.load(args.plan_directory))} work units")
     elif args.command == "verify":
         verify(args.plan_directory, args.results, args.java, args.classpath, collection.native_runner_arguments(args))
     else:
