@@ -13,6 +13,8 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.ScanKernelGenerator.Attempt;
+import io.airlift.regulator.ScanKernelGenerator.TrinoRoutes;
 import io.airlift.regulator.TestScanPlan.PatternWitness;
 import io.airlift.regulator.TestScanPlan.QuadraticSearch;
 import io.airlift.slice.Slice;
@@ -21,11 +23,13 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.lang.classfile.Attributes;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
 import java.lang.classfile.CodeElement;
 import java.lang.classfile.CodeModel;
 import java.lang.classfile.MethodModel;
+import java.lang.classfile.attribute.CodeAttribute;
 import java.lang.classfile.instruction.ConstantInstruction;
 import java.lang.classfile.instruction.InvokeInstruction;
 import java.lang.invoke.MethodHandle;
@@ -40,16 +44,20 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.function.Function;
+import java.util.function.IntFunction;
+import java.util.stream.IntStream;
 
 import static io.airlift.regulator.TestScanPlan.MALFORMED_SEQUENCES;
 import static io.airlift.regulator.TestScanPlan.QUADRATIC_SEARCHES;
 import static io.airlift.regulator.TestScanPlan.URL;
 import static io.airlift.regulator.TestScanPlan.generatedSequence;
 import static io.airlift.regulator.TestScanPlan.randomSources;
+import static io.airlift.regulator.TrinoLikeKernelGenerator.HUGE_METHOD_LIMIT;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class TestScanKernel
@@ -265,7 +273,7 @@ public class TestScanKernel
         for (String expression : expressions) {
             TrinoRegexp generated = generated(expression);
             assertThat(generated.usesGeneratedBytecode()).as(expression).isTrue();
-            invoked.addAll(invokedMethods(ScanKernelGenerator.trinoClassfileForDiagnostics(ScanKernelGenerator.TrinoRoutes.of(generated.pattern()))));
+            invoked.addAll(invokedMethods(ScanKernelGenerator.trinoClassfileForDiagnostics(TrinoRoutes.of(generated.pattern()))));
             kinds.addAll(List.of(generated.pattern().caseSensitiveScanPlan().operationsForDiagnostics().split(",")));
             List<String> symbols = new ArrayList<>(SYMBOLS);
             symbols.addAll(witnessParts(expression));
@@ -326,7 +334,7 @@ public class TestScanKernel
             TrinoRegexp compiled = TrinoRegexp.compile(utf8Slice(expression), TrinoRegexp.Options.defaults().setByteFrequencies(probeCase.frequencies()).setGenerateBytecode(true));
             assertThat(interpreted.pattern().caseSensitiveScanPlan().leadingLiteralProbeOffsetForDiagnostics()).as(expression).isEqualTo(probeCase.probe());
             assertThat(compiled.usesGeneratedBytecode()).as(expression).isTrue();
-            byte[] classfile = ScanKernelGenerator.trinoClassfileForDiagnostics(ScanKernelGenerator.TrinoRoutes.of(compiled.pattern()));
+            byte[] classfile = ScanKernelGenerator.trinoClassfileForDiagnostics(TrinoRoutes.of(compiled.pattern()));
             assertThat(probeOffsets(classfile)).as(expression).isNotEmpty().containsOnly(probeCase.probe());
             List<String> symbols = new ArrayList<>(SYMBOLS);
             symbols.addAll(witnessParts(expression));
@@ -366,7 +374,7 @@ public class TestScanKernel
                 for (String expression : expressions) {
                     TrinoRegexp interpreted = TrinoRegexp.compile(utf8Slice(expression));
                     TrinoRegexp compiled = generated(expression);
-                    boolean eligible = interpreted.getClass() == TrinoRegexp.class && ScanKernelGenerator.TrinoRoutes.of(interpreted.pattern()) != null;
+                    boolean eligible = interpreted.getClass() == TrinoRegexp.class && TrinoRoutes.of(interpreted.pattern()) != null;
                     assertThat(compiled.usesGeneratedBytecode()).as(expression).isEqualTo(eligible);
                     if (!eligible) {
                         continue;
@@ -429,6 +437,65 @@ public class TestScanKernel
         }
     }
 
+    /// The largest plans the analysis accepts in each family generate methods within HotSpot's
+    /// huge-method limit, so the scan kernel generator needs no fallback for huge methods. The
+    /// attempt is the only generated method that grows with the plan, linearly in its operations.
+    /// Each family repeats one operation kind up to the operation limit, so growth in any of them
+    /// shows: a chain of nullable runs behind a captured literal and four forks, where each run
+    /// outside an end-anchored attempt is a boolean tail with a path of its own; empty captures,
+    /// two operations each, nested in four forks that each clear every capture inside them before
+    /// retrying; and captured 16-byte literals in four such forks, each checked before it is
+    /// captured. One more run, capture, or literal leaves the pattern without a plan. Java is
+    /// measured because its `$` adds a final-terminator check to the end-anchored attempt; Rust
+    /// plans share RE2's executor class and ends.
+    @Test
+    public void testLargestPlansStayUnderHugeMethodLimit()
+    {
+        record Family(String name, String unanchoredLead, String anchoredLead, IntFunction<String> body, int repeats) {}
+
+        record Language(String name, Function<Slice, Re2> compile, boolean trinoClass) {}
+
+        IntFunction<String> runChain = runs -> "(abcdefghijklmnop)(?:Tbcdefghijklmnop){0,4}" +
+                IntStream.range(0, runs).mapToObj(run -> Character.forDigit(run, 36) + "*").collect(joining());
+        List<Family> families = List.of(
+                new Family("run chain", "", "^", runChain, 25),
+                new Family("empty captures", "xbcdefghijklmnop", "^x", captures -> "(?:()(?:()(?:()(?:" + "()".repeat(captures) + ")?)?)?)?-bcdefghijklmnop[a-z]+", 9),
+                new Family("captured literals", "xbcdefghijklmnop", "^x", literals ->
+                        "(?:0(?:1(?:2(?:3" + "(-bcdefghijklmnop)".repeat(literals) + ")?)?)?)?-bcdefghijklmnop[a-z]+", 7));
+        List<Language> languages = List.of(
+                new Language("RE2", Re2::compile, false),
+                new Language("Java", expression -> JavaRegexp.compile(expression).pattern(), false),
+                new Language("Trino", expression -> TrinoRegexp.compile(expression).pattern(), true));
+        for (Family family : families) {
+            for (Attempt attempt : Attempt.values()) {
+                String lead = attempt == Attempt.UNANCHORED ? family.unanchoredLead() : family.anchoredLead();
+                String end = attempt == Attempt.END_ANCHORED ? "$" : "";
+                for (Language language : languages) {
+                    IntFunction<Re2> compile = repeats -> language.compile().apply(utf8Slice(lead + family.body().apply(repeats) + end));
+                    Re2 pattern = compile.apply(family.repeats());
+                    ScanPlan plan = pattern.caseSensitiveScanPlan();
+                    String description = family.name() + " " + language.name() + " " + attempt;
+                    assertThat(plan).as(description).isNotNull();
+                    assertThat(Attempt.of(plan)).as(description).isEqualTo(attempt);
+                    assertThat(compile.apply(family.repeats() + 1).caseSensitiveScanPlan()).as(description).isNull();
+                    if (language.trinoClass()) {
+                        TrinoRoutes routes = TrinoRoutes.of(pattern);
+                        assertThat(routes).as(description).isNotNull();
+                        byte[] classfile = ScanKernelGenerator.trinoClassfileForDiagnostics(routes);
+                        assertThat(largestMethodBytes(classfile)).as(description).isPositive().isLessThanOrEqualTo(HUGE_METHOD_LIMIT);
+                        continue;
+                    }
+                    // Only an unanchored attempt has a handoff entry.
+                    for (boolean ordinaryHandoff : attempt == Attempt.UNANCHORED ? List.of(false, true) : List.of(false)) {
+                        byte[] classfile = ScanKernelGenerator.re2ClassfileForDiagnostics(plan, ordinaryHandoff);
+                        String handoffDescription = description + " ordinary handoff " + ordinaryHandoff;
+                        assertThat(largestMethodBytes(classfile)).as(handoffDescription).isPositive().isLessThanOrEqualTo(HUGE_METHOD_LIMIT);
+                    }
+                }
+            }
+        }
+    }
+
     static byte[] classfile(Class<?> type)
     {
         try (InputStream input = type.getResourceAsStream(type.getSimpleName() + ".class")) {
@@ -481,6 +548,16 @@ public class TestScanKernel
             }
         }
         return offsets;
+    }
+
+    /// Returns the bytecode length of the largest method in `classfile`.
+    private static int largestMethodBytes(byte[] classfile)
+    {
+        int largest = 0;
+        for (MethodModel method : ClassFile.of().parse(classfile).methods()) {
+            largest = Math.max(largest, method.findAttribute(Attributes.code()).map(CodeAttribute::codeLength).orElse(0));
+        }
+        return largest;
     }
 
     private static TrinoRegexp generated(String expression)
