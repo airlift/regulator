@@ -13,8 +13,6 @@
  */
 package io.airlift.regulator;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 
 import static java.util.Objects.requireNonNull;
@@ -102,7 +100,9 @@ final class RustUnicodeProperties
             return PROPERTY_VALUE_NOT_FOUND;
         }
         CharClass charClass = switch (property) {
-            case "Age" -> age(canonicalValue);
+            // The crate's Age is cumulative: a version, such as 6.0, holds every code point
+            // assigned in it or earlier. Unassigned, which names no version, has no class.
+            case "Age" -> UnicodeGroups.agesThrough(canonicalValue);
             case "Script_Extensions" -> UnicodeGroups.scriptExtension(canonicalValue);
             case "Grapheme_Cluster_Break" -> UnicodeGroups.graphemeClusterBreak(canonicalValue);
             case "Sentence_Break" -> UnicodeGroups.sentenceBreak(canonicalValue);
@@ -142,30 +142,6 @@ final class RustUnicodeProperties
     private static Resolution found(CharClass charClass, Resolution notFound)
     {
         return charClass == null ? notFound : Resolution.found(charClass);
-    }
-
-    // The crate's Age is cumulative: a version, such as 6.0, holds every code point assigned in it
-    // or earlier. Unassigned, which names no version, has no class.
-    private static CharClass age(String version)
-    {
-        if (UnicodeDatabase.ages().ranges(version) == null) {
-            return null;
-        }
-        int key = versionKey(version);
-        List<String> ages = new ArrayList<>();
-        for (String age : UnicodeDatabase.ages().names()) {
-            if (versionKey(age) <= key) {
-                ages.add(age);
-            }
-        }
-        return UnicodeGroups.ages(ages);
-    }
-
-    // Orders Age values, which are a major and a minor version, such as 15.1.
-    private static int versionKey(String version)
-    {
-        int dot = version.indexOf('.');
-        return Integer.parseInt(version.substring(0, dot)) * 1000 + Integer.parseInt(version.substring(dot + 1));
     }
 
     /// Normalizes a name as the crate normalizes a query (UAX44-LM3): drops an `is` prefix

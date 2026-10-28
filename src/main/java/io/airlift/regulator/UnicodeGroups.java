@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,10 +26,11 @@ import static java.util.Objects.requireNonNull;
 /// Builds Unicode property classes from the pinned [UnicodeDatabase] and caches them as
 /// immutable range sets. These are the Unicode lookups every language shares; each language
 /// resolves its own property names to them. RE2 reads the raw property values of the database,
-/// [JavaUnicodeProperties] resolves the Java and Trino property names other than Trino's
-/// POSIX names, which [TrinoRegexpParser] resolves itself, and
-/// [RustUnicodeProperties] resolves the Rust names to the raw values of the database's
-/// binary properties, Age, Script_Extensions, and break properties.
+/// [JavaUnicodeProperties] resolves the Java property names, [TrinoUnicodeProperties]
+/// resolves the Trino property names other than the POSIX names, which [TrinoRegexpParser]
+/// resolves itself, and [RustUnicodeProperties] resolves the Rust names to the raw values of
+/// the database's binary properties, Age, Script_Extensions, and break properties. Java and
+/// Trino share the blocks and the Unknown script built here.
 final class UnicodeGroups
 {
     private static final ConcurrentHashMap<String, CharClass> CACHE = new ConcurrentHashMap<>();
@@ -127,6 +129,28 @@ final class UnicodeGroups
         return propertyValue("sc", UnicodeDatabase.scripts(), longName);
     }
 
+    /// Returns the code points that Scripts.txt assigns no script, the Unknown script of Java and
+    /// Trino patterns. Scripts.txt does not name Unknown, so [#script] returns null for it, as
+    /// Rust patterns require.
+    static CharClass unknownScript()
+    {
+        return cached("sc:Unknown", () -> {
+            CharClassBuilder builder = new CharClassBuilder();
+            for (String script : UnicodeDatabase.scripts().names()) {
+                addRanges(builder, UnicodeDatabase.scripts().ranges(script));
+            }
+            builder.negate();
+            return builder.toCharClass();
+        });
+    }
+
+    /// Returns the code points that Blocks.txt assigns the block with the given name, such as
+    /// Basic Latin, or null if it assigns no such block.
+    static CharClass block(String name)
+    {
+        return propertyValue("blk", UnicodeDatabase.blocks(), name);
+    }
+
     /// Returns the code points that the database gives the binary property with the given name,
     /// such as Hex_Digit or Other_Alphabetic, or null if it holds no such property.
     static CharClass binaryPropertyValue(String property)
@@ -136,9 +160,34 @@ final class UnicodeGroups
 
     /// Returns the code points that DerivedAge.txt assigns any of the given Age values, versions
     /// such as 1.1, or null if one of them is not a value it assigns.
-    static CharClass ages(List<String> values)
+    private static CharClass ages(List<String> values)
     {
         return propertyValues("age", UnicodeDatabase.ages(), values);
+    }
+
+    /// Returns the code points that DerivedAge.txt assigns the given Age value, a version such as
+    /// 6.0, or an earlier one, or null if it assigns no such value. This is the cumulative Age of
+    /// Rust and Trino patterns.
+    static CharClass agesThrough(String version)
+    {
+        if (UnicodeDatabase.ages().ranges(version) == null) {
+            return null;
+        }
+        int key = versionKey(version);
+        List<String> ages = new ArrayList<>();
+        for (String age : UnicodeDatabase.ages().names()) {
+            if (versionKey(age) <= key) {
+                ages.add(age);
+            }
+        }
+        return ages(ages);
+    }
+
+    // Orders Age values, which are a major and a minor version, such as 15.1.
+    private static int versionKey(String version)
+    {
+        int dot = version.indexOf('.');
+        return Integer.parseInt(version.substring(0, dot)) * 1000 + Integer.parseInt(version.substring(dot + 1));
     }
 
     /// Returns the code points whose Script_Extensions include the script with the given long name,

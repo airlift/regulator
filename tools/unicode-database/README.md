@@ -36,15 +36,18 @@ documents the format. The database holds:
 - the Name of every code point `UnicodeData.txt` names, and the
   Unicode_1_Name of every control, which give Java's `\N{name}` its names
 - the Age of every assigned code point, from `DerivedAge.txt`, which gives Rust
-  patterns their Age property and tells the tests which code points the running
-  JDK's Unicode version assigns
+  and Trino patterns their Age property and tells the tests which code points
+  the running JDK's Unicode version assigns
 - every binary property of `PropList.txt` and `DerivedCoreProperties.txt`, the
-  Script_Extensions of `ScriptExtensions.txt`, the Grapheme_Cluster_Break,
-  Word_Break, and Sentence_Break of the `auxiliary/` break property files, the
   names of every property, from `PropertyAliases.txt`, and the names of the
-  General_Category, Script, Age, and break property values, from
-  `PropertyValueAliases.txt`, which give Rust patterns their Unicode properties
-  and the names they resolve them by
+  General_Category and Script values, from `PropertyValueAliases.txt`, which
+  give Rust and Trino patterns their Unicode properties and the names they
+  resolve them by
+- the Script_Extensions of `ScriptExtensions.txt`, the Grapheme_Cluster_Break,
+  Word_Break, and Sentence_Break of the `auxiliary/` break property files, and
+  the names of the Age and break property values, from
+  `PropertyValueAliases.txt`, which give Rust patterns their other Unicode
+  properties and the names they resolve them by
 
 ## Usage
 

@@ -1803,84 +1803,17 @@ final class TrinoRegexpParser
 
         private static CharClass lookupTrinoUnicodeGroup(String name)
         {
-            // Joni rejects these spellings, and any property name with a character outside ASCII.
-            if (name.indexOf('_') >= 0 ||
-                    name.indexOf('=') >= 0 ||
-                    name.startsWith("Is")) {
-                return null;
-            }
+            // Every property name is ASCII, and lowercasing a name that is not could make one: the
+            // Kelvin sign lowercases to k.
             for (int i = 0; i < name.length(); i++) {
                 if (name.charAt(i) >= 0x80) {
                     return null;
                 }
             }
-            String lowerCaseName = UnicodeCase.toLowerCase(name);
-            // Joni finds its POSIX names in any ASCII casing.
-            CharClass posixClass = posixProperty(lowerCaseName);
-            if (posixClass != null) {
-                return posixClass;
-            }
-            if (name.length() >= 2 && UnicodeCase.equalsIgnoreCase(name.substring(0, 2), "In")) {
-                CharClass block = JavaUnicodeProperties.lookup("In" + name.substring(2));
-                if (block != null) {
-                    return block;
-                }
-            }
-            String javaProperty = canonicalJavaProperty(lowerCaseName);
-            if (javaProperty != null) {
-                return JavaUnicodeProperties.lookup(javaProperty);
-            }
-            CharClass group = JavaUnicodeProperties.lookup(name);
-            if (group != null) {
-                return group;
-            }
-            if (name.length() == 1) {
-                group = JavaUnicodeProperties.lookup(UnicodeCase.toUpperCase(name));
-            }
-            else if (name.length() == 2) {
-                group = JavaUnicodeProperties.lookup(new StringBuilder()
-                        .appendCodePoint(UnicodeCase.toUpperCase(name.charAt(0)))
-                        .append(UnicodeCase.toLowerCase(name.substring(1)))
-                        .toString());
-            }
-            if (group != null) {
-                return group;
-            }
-            group = JavaUnicodeProperties.lookup("Is" + name);
-            if (group != null) {
-                return group;
-            }
-            for (String script : JavaUnicodeProperties.scriptNames()) {
-                if (UnicodeCase.equalsIgnoreCase(script.replace("_", ""), name)) {
-                    return JavaUnicodeProperties.lookup("sc=" + script);
-                }
-            }
-            return null;
-        }
-
-        private static String canonicalJavaProperty(String lowerCaseName)
-        {
-            return switch (lowerCaseName) {
-                case "javalowercase" -> "javaLowerCase";
-                case "javauppercase" -> "javaUpperCase";
-                case "javaalphabetic" -> "javaAlphabetic";
-                case "javaideographic" -> "javaIdeographic";
-                case "javatitlecase" -> "javaTitleCase";
-                case "javadigit" -> "javaDigit";
-                case "javadefined" -> "javaDefined";
-                case "javaletter" -> "javaLetter";
-                case "javaletterordigit" -> "javaLetterOrDigit";
-                case "javajavaidentifierstart" -> "javaJavaIdentifierStart";
-                case "javajavaidentifierpart" -> "javaJavaIdentifierPart";
-                case "javaunicodeidentifierstart" -> "javaUnicodeIdentifierStart";
-                case "javaunicodeidentifierpart" -> "javaUnicodeIdentifierPart";
-                case "javaidentifierignorable" -> "javaIdentifierIgnorable";
-                case "javaspacechar" -> "javaSpaceChar";
-                case "javawhitespace" -> "javaWhitespace";
-                case "javaisocontrol" -> "javaISOControl";
-                case "javamirrored" -> "javaMirrored";
-                default -> null;
-            };
+            String key = UnicodeCase.toLowerCase(name);
+            // Joni finds its POSIX names first, in any ASCII casing.
+            CharClass posixClass = posixProperty(key);
+            return posixClass != null ? posixClass : TrinoUnicodeProperties.lookup(key);
         }
 
         private int parseTrinoHexEscape(int flags, int sequenceStart)

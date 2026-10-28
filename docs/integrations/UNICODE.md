@@ -14,12 +14,16 @@ it:
 
 - RE2 property groups are the database's General_Category and Script values,
   named and grouped by the rule of upstream's generator.
-- Java and Trino properties follow `java.util.regex.Pattern` and
+- Java properties follow `java.util.regex.Pattern` and
   `java.lang.Character`. Their categories, scripts, blocks, binary properties,
   and `java...` properties are the database's values combined as the JDK's
   `Pattern` and `Character` code combines them, under the JDK's names and
-  aliases. Trino's POSIX names instead use the definitions of Trino's pinned
-  Joni, as Pinned Unicode Properties in `REGULATOR_DECISIONS.md` records.
+  aliases.
+- Trino properties are the database's values under pinned jcodings' names,
+  built from the database's names and aliases by the rule of jcodings' table
+  generator. Trino's `java...` names are Java's, and its POSIX names use the
+  definitions of Trino's pinned Joni, as Pinned Unicode Properties in
+  `REGULATOR_DECISIONS.md` records.
 - Java's `\N{name}` accepts the names of `Character.codePointOf`, built from
   the database's character names and blocks by the JDK's rule.
 - Rust properties use the regex crate's names and loose matching, built from
@@ -47,9 +51,9 @@ version.
 
 ## Differences from the JDK
 
-Java and Trino property membership, other than Trino's POSIX names, is the
-JDK's computation over the pinned database. Property membership, Java's
-character names, and the case conversions that normalize property and character
+Java property membership, and that of Trino's `java...` names, is the JDK's
+computation over the pinned database. That membership, Java's character
+names, and the case conversions that normalize Java property and character
 names therefore agree with `Character`, `String`, and `Pattern` on the JDK's
 own Unicode version, which the `Character` javadoc names: Unicode 16.0 for
 Java 25 and 17.0 for Java 26. They differ for:
@@ -108,8 +112,9 @@ The package-private `UnicodeGroups` registry in `io.airlift.regulator` exposes
 immutable `CharClass` values to the parser and character-class builder. It
 holds the Unicode lookups every language shares, such as General_Category
 values by their Unicode names; each language resolves its own property names
-to them in its own class, such as `JavaUnicodeProperties` for Java and Trino;
-Trino's POSIX names resolve in `TrinoRegexpParser`.
+to them in its own class, such as `JavaUnicodeProperties` for Java and
+`TrinoUnicodeProperties` for Trino; Trino's POSIX names resolve in
+`TrinoRegexpParser`.
 
 Property construction follows this flow:
 
@@ -149,14 +154,15 @@ with a comment citing the JDK.
 
 ### Property names and aliases
 
-Property-name parsing is language metadata rather than Unicode data. Java and
-Trino spellings resolve through `JavaUnicodeProperties.lookup`, except
-Trino's POSIX names, which follow Joni's definitions;
+Property-name parsing is language metadata rather than Unicode data. Java
+spellings resolve through `JavaUnicodeProperties.lookup`;
 `RegexpParser.lookupUnicodeGroup` applies RE2's exact category and long script
-name rules using the registry's raw values. Rust names come from
-`RustUnicodePropertyTables`, built from the database's property and value
-aliases by the naming rules of the crate's table generator, because the crate
-accepts hundreds of Unicode aliases.
+name rules using the registry's raw values. Trino names other than its POSIX
+names come from `TrinoUnicodeProperties`, and Rust names from
+`RustUnicodePropertyTables`. Each is built from the database's property and
+value aliases by the naming rules of its language's table generator, pinned
+jcodings' for Trino and the crate's for Rust, because both languages accept
+hundreds of Unicode aliases.
 
 The parser distinguishes:
 
@@ -164,7 +170,7 @@ The parser distinguishes:
 - script names, their ISO 15924 codes, and the `Is` form
 - block names and the `In` form
 - Java binary properties
-- Trino's documented name-normalization rules
+- Trino's names, built by pinned jcodings' rule
 
 Alias handling is tested independently from range membership and does not
 silently reinterpret a recognized Java spelling as a different RE2 construct.
@@ -293,20 +299,21 @@ folding from the pinned database:
 - required-match analysis
 - single-byte matcher optimizations
 - the Java, Trino, and Rust word boundaries of `EmptyOp`
-- the Java and Trino property-name normalization, Java's `\N{name}`, and
-  Trino's capture names
+- Java's property-name normalization and `\N{name}`, and Trino's capture
+  names
 - the canonicalization of `FilteredRe2` and `Prefilter`
 
 ## Correctness contract
 
-1. Java and Trino categories, scripts, every JDK block, supported binary
-   properties, Java properties, and the word classes of match-time boundaries
-   are checked against their corresponding `Character` APIs at every code
-   point that the running JDK's Unicode version assigns, allowing only the
-   cited differences above. Every script and block spelling the JDK accepts
-   must name the same class, and a name it rejects, such as a script Unicode
-   added since, must hold no character the JDK assigns. RE2's accepted group
-   names and syntax are checked against upstream's rule.
+1. Java categories, scripts, every JDK block, supported binary properties,
+   and Java properties, which Trino's `java...` names share, and the word
+   classes of Java and Trino match-time boundaries are checked against their
+   corresponding `Character` APIs at every code point that the running JDK's
+   Unicode version assigns, allowing only the cited differences above. Every
+   script and block spelling the JDK accepts must name the same class, and a
+   name it rejects, such as a script Unicode added since, must hold no
+   character the JDK assigns. RE2's accepted group names and syntax are
+   checked against upstream's rule.
 2. Canonical aliases are checked for identity, and unsupported names are
    rejected. Every character name is checked against `Character.getName` and
    `Character.codePointOf` at every code point the running JDK's Unicode
