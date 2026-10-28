@@ -24,6 +24,9 @@ from a Git archive into `target/`, builds it in isolation, and compiles the
 comparator against Trino's Joni operation classes. It neither modifies nor
 builds from a developer's Trino checkout.
 
+The [Trino LIKE golden generator](../../trino-like-golden/README.md) reads the
+same `pins.env`. After changing the Trino commit, run its `--check`.
+
 The preparation fails unless Trino has the expected source tree and resolves
 Airlift Joni `2.1.5.3` with SHA-256
 `521c1bcc51d5b1de83dcdf285f48c01afd5dbb434b34fdc61442e63b67562efe`.
