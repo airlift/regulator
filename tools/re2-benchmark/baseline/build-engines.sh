@@ -21,7 +21,7 @@ TRINO_COMPARATOR_WORK_DIR="${SHARED_WORK_DIR}/pinned-trino" \
 
 # Generic tuning runs on every host of the platform, not only the builder.
 RE2_NATIVE_TUNING=generic \
-RE2_BENCHMARK_TARGETS="language_benchmark language_rust_benchmark" \
+RE2_BENCHMARK_TARGETS="language_benchmark language_bulk_benchmark language_rust_benchmark language_rust_bulk_benchmark" \
 RE2_BENCHMARK_BUILD_DIR="${SHARED_WORK_DIR}/language-native" \
     "${ROOT}/tools/re2-benchmark/build.sh" \
     2>&1 | tee "${RESULT_DIR}/logs/native-build.log"

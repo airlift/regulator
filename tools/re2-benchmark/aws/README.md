@@ -426,18 +426,19 @@ aws s3api put-bucket-tagging --bucket <bucket> --region <region> \
 The `build` phase builds the pinned Trino harness once per platform, exactly as
 a baseline host would, and the native comparison runners from the candidate's
 sources: native RE2 (`language_benchmark`) and the Rust `regex` crate
-(`language_rust_benchmark`), with generic tuning, each beside its build
-receipt. It freezes them in `trino.tar.gz` and `native.tar.gz` under a
-manifest, `engine-build.json`. The manifest lists each archive's SHA-256 and
-per-file hashes, and its inputs: the candidate, the Trino commit, and the build
-scripts.
+(`language_rust_benchmark`), and their bulk runners for language units, with
+generic tuning, each beside its build receipt. It freezes them in
+`trino.tar.gz` and `native.tar.gz` under a manifest, `engine-build.json`. The
+manifest lists each archive's SHA-256 and per-file hashes, and its inputs: the
+candidate, the Trino commit, and the build scripts.
 Accepted builds go to `accepted-engine-builds.json`.
 
 Smoke, primary, and confirmation execution require `--engine-builds`, naming
 an accepted build root for every platform. Each platform's manifest SHA-256 is
 frozen in `execution-policy.json`, and primary and confirmation refuse a
 prerequisite that used different builds. Language batches do not use engine
-builds; their Rust comparator still builds on the host.
+builds; their Rust comparator still builds on the host. A language unit worker
+runs the native runners of its platform's engine build.
 
 Hosts check each downloaded archive with `sha256sum --check`, then verify the
 archive and each installed file against the manifest; a mismatch fails the
@@ -451,7 +452,11 @@ Preflight names each allowed region that lacks the shared transfer bucket
 `--engine-builds` requires. Before it launches any host,
 the controller puts each archive once in every region that may launch a host
 installing it, under `TRANSFER_PREFIX/engine-builds/<sha256>.tar.gz`, and skips
-an object with that key and checksum. An upload slower than 256 KiB/s counts as
+an object with that key and checksum. A language plan's bundle, which a
+language unit worker installs, travels the same way under
+`TRANSFER_PREFIX/language-plans/<sha256>.tar.gz`; the wrapper takes the bundles
+of a session in `LANGUAGE_PLAN_BUNDLE_SHA256S`, with the candidate provenance
+their units measure. An upload slower than 256 KiB/s counts as
 stalled and is stopped and retried; the campaign stops after three failed
 attempts. A session whose archive is missing from its bucket fails as
 `retryable-infrastructure` before it launches. Each session's instance role
@@ -461,6 +466,7 @@ cleanup leaves them in place. Remove them once the campaign is done:
 
 ```bash
 aws s3 rm "s3://<bucket>/<transfer-prefix>/engine-builds/" --recursive --region <region>
+aws s3 rm "s3://<bucket>/<transfer-prefix>/language-plans/" --recursive --region <region>
 ```
 
 ## Single-job wrapper
@@ -493,7 +499,8 @@ its controller leases to it, one at a time, instead of one shard. It requires
 setup and final uploads, plus the time its last unit may take: 900, or the
 pool's longest estimated unit when that is longer. The host
 bootstraps as a baseline host does: packages, the JDK, the environment record,
-and the platform's prebuilt engines. It then
+and the platform's prebuilt engines. A language unit worker also installs each
+language plan bundle under `target/language-plans/<shard>`. It then
 runs `run-unit-worker.sh`, which runs `../baseline/run-unit.sh` for each lease.
 The wrapper's `session.txt` records the host session (`session`), `bucket`,
 `input_prefix`, and `result_prefix`; every key below is under one of those
@@ -591,10 +598,11 @@ lease's outcome, status, calibrations, attempt ID, the attempt it chained from
 and after what gap, and the digest of its environment files),
 `worker-session.txt`, the shared semantic receipts, and the logs.
 
-Calibrations are host evidence. `run-unit.sh` stores each unit's calibrations
-once, as `calibrations/<sha256>.json`, and the unit's `unit-evidence.tsv`
-references them by digest. When the next lease starts within 60 seconds of
-the previous complete unit's after calibration, that calibration is the next
+Calibrations are host evidence of baseline units; a language unit or engine
+build runs none. `run-unit.sh` stores each baseline unit's calibrations once,
+as `calibrations/<sha256>.json`, and the unit's `unit-evidence.tsv` references
+them by digest. When the next baseline lease starts within 60 seconds of the
+previous complete unit's after calibration, that calibration is the next
 unit's before and the next unit runs no before of its own; otherwise it
 calibrates before afresh. A chained unit's `unit-chain.txt` names the attempt it
 chained from, that attempt's after calibration, the gap, and the previous
@@ -603,7 +611,7 @@ the same host, within 60 seconds, in the same environment. The controller
 checks that link against the previous lease's own completion marker, which must
 show it complete with the named after calibration, and retains that marker
 beside the accepted attempt as `lease-<n>-completion.json`. Accepting a
-worker's unit therefore needs its host's `calibrations/`, through
+worker's baseline unit therefore needs its host's `calibrations/`, through
 `validate-unit-results.py --host-evidence`; see
 [unit acceptance](../baseline/ACCEPTANCE.md).
 

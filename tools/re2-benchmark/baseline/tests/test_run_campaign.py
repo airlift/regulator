@@ -1778,7 +1778,8 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
     def test_semantic_failure_outranks_a_rejected_unit_capacity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            # The unit's own script, beside a stubbed planner and shard, on a host whose swap is in use.
+            # The unit's own script, beside a stubbed planner, shard and language collector, on a host whose swap
+            # is in use.
             baseline = root / "tools/re2-benchmark/baseline"
             baseline.mkdir(parents=True)
             proc = root / "proc"
@@ -1804,6 +1805,14 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 "(output / 'route-plan.tsv').write_text('route\\trows\\tsystems\\tcalibration\\n"
                 "native-access\\t1\\tregulator\\tbefore\\n')\nprint('trino-operations')\n")
             (baseline / "run-shard.sh").write_text('#!/bin/bash\nexit "${SHARD_STATUS}"\n')
+            language_plan = root / "target/language-plans/language-lifecycle"
+            language_plan.mkdir(parents=True)
+            (language_plan / "units.tsv").write_text("unit_id\nlanguage-unit\n")
+            (root / "tools/re2-benchmark/language").mkdir()
+            (root / "tools/re2-benchmark/language/fleet.py").write_text(
+                "import os\nimport sys\nfrom pathlib import Path\n"
+                "Path(sys.argv[sys.argv.index('--unit-directory') + 1], 'collected').touch()\n"
+                "sys.exit(int(os.environ['SHARD_STATUS']))\n")
             for script_path in (*binary.iterdir(), baseline / "run-unit.sh", baseline / "run-shard.sh"):
                 script_path.chmod(0o755)
             environment = {name: value for name, value in os.environ.items()
@@ -1813,22 +1822,26 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 "RE2_CAMPAIGN_PLATFORM": "r8i", "RE2_CAMPAIGN_HOST_EPOCH": "1",
                 "RE2_ENGINEERING_ARCHITECTURE": "intel", "BASELINE_INSTANCE_ID": "i-1",
                 "BASELINE_INSTANCE_TYPE": "r8i.large", "BASELINE_AVAILABILITY_ZONE": "us-west-2a",
-                "RE2_CAMPAIGN_HOST_SESSION": "host-session-1", "RE2_CAMPAIGN_LEASE_SEQUENCE": "1"})
+                "RE2_CAMPAIGN_HOST_SESSION": "host-session-1", "RE2_CAMPAIGN_LEASE_SEQUENCE": "1",
+                "LANGUAGE_SOURCE_ARCHIVE": str(root / "regulator.tar.gz"),
+                "LANGUAGE_CANDIDATE_PROVENANCE": str(root / "candidate-provenance.tsv")})
             # A semantic failure stays the unit's verdict; any other failure, a protocol rejection among them,
-            # is the capacity gate's.
-            for shard_status, expected in ((RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS,
-                                            RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS),
-                                           (RUN_CAMPAIGN.PROTOCOL_REJECTION_STATUS, 1)):
-                with self.subTest(shard_status=shard_status):
-                    unit = root / f"unit-{shard_status}"
-                    result = subprocess.run(
-                        [str(baseline / "run-unit.sh"), "unit", "qualification", "1", str(unit)],
-                        env={**environment, "SHARD_STATUS": str(shard_status)},
-                        capture_output=True, text=True, check=False)
-                    self.assertEqual(expected, result.returncode, result.stderr)
-                    capacity = (unit / "unit-capacity.txt").read_text()
-                    self.assertIn(f"exit_status={shard_status}\n", capacity)
-                    self.assertIn("capacity_status=rejected\n", capacity)
+            # is the capacity gate's, for a baseline unit and a language unit alike.
+            for unit_id in ("unit", "language-unit"):
+                for shard_status, expected in ((RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS,
+                                                RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS),
+                                               (RUN_CAMPAIGN.PROTOCOL_REJECTION_STATUS, 1)):
+                    with self.subTest(unit=unit_id, shard_status=shard_status):
+                        unit = root / f"{unit_id}-{shard_status}"
+                        result = subprocess.run(
+                            [str(baseline / "run-unit.sh"), unit_id, "qualification", "1", str(unit)],
+                            env={**environment, "SHARD_STATUS": str(shard_status)},
+                            capture_output=True, text=True, check=False)
+                        self.assertEqual(expected, result.returncode, result.stderr)
+                        self.assertEqual(unit_id == "language-unit", (unit / "collected").exists())
+                        capacity = (unit / "unit-capacity.txt").read_text()
+                        self.assertIn(f"exit_status={shard_status}\n", capacity)
+                        self.assertIn("capacity_status=rejected\n", capacity)
 
     def test_missing_package_version_is_one_property_value(self):
         source = (SCRIPT.parents[1] / "aws" / "run-host.sh").read_text()

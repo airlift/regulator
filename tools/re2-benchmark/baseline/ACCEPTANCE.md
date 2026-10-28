@@ -87,6 +87,13 @@ tools/re2-benchmark/baseline/validate-unit-results.py \
     --receipt unit-attempt/unit-receipt.tsv
 ```
 
+A language unit attempt has no routes or calibrations, so `language/fleet.py`
+accepts it instead, into the same receipt; the
+[language guide](../language/README.md#work-units) lists its checks. Its
+row-protocol digest covers the partition manifests and operations the unit
+measures, its manifest digest is the plan's, and its observed-row digest covers
+the exports of its partitions.
+
 ## Campaign acceptance
 
 The candidate archive, provenance, and result root must remain outside Maven's

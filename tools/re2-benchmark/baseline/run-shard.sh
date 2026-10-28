@@ -440,9 +440,9 @@ prepare_jmh_host_compiler_arguments()
 
 # Any failure of the correctness stage is final: a semantic test, the DFA probe,
 # a differential or lifecycle verifier, its count of verified cases, or the
-# pinned Trino comparator's verification. Its own
-# status tells a unit controller to reject the unit rather than retry it, even
-# where the check could not run at all.
+# pinned Trino comparator's verification. Its own status,
+# unit_session.SEMANTIC_FAILURE_STATUS, tells a unit controller to reject the
+# unit rather than retry it, even where the check could not run at all.
 SEMANTIC_FAILURE_STATUS=44
 semantic_failure()
 {

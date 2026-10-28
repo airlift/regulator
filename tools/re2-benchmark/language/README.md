@@ -317,6 +317,47 @@ the suite; `--shard-id` names another, so a separate manifest of the same
 suite, such as the literal probe, keeps distinct unit IDs. Validation rebuilds
 the units from the plan and rejects any table that differs.
 
+### Work units
+
+On a unit worker, `run-unit.sh` runs a unit of an installed plan with
+`fleet.py run-unit`. The worker installs each plan from its bundle
+(`fleet.py bundle`, checked and installed with `fleet.py install-bundle`) under
+`target/language-plans/<shard>`, which the clean-source check ignores. The
+unit checks that the host matches its platform allocation, with every vCPU
+visible and an 8g heap, and builds the candidate once per host from the source
+archive and candidate provenance. Its native runners come from the platform's
+engine build. Pinned to one CPU, it verifies and then measures each comparison
+it holds under `partitions/<partition>`; a lifecycle comparison of which it
+holds only some operations runs a copy of its partition selecting those
+operations.
+
+A semantic verdict ends the unit with status 44, which its controller never
+retries: engines or a result that disagree with the expected trace or result,
+or a timeout that does not reproduce or changes phase. A measurement process
+that outruns the protocol's budget ends it with status 42, which is not
+retried either. A runner that never starts or exits with a failure, and any
+other failure, is retried.
+
+`fleet.py` then accepts the attempt into a baseline `unit-receipt.tsv`, and
+its controller checks it again from the returned directory. It rejects the
+attempt unless:
+
+- `unit-evidence.tsv` binds exactly the attempt's envelope files and raw
+  results
+- its rows are exactly the frozen unit's, whose ID recomputes from the plan
+- the host is the unit session's host, on the platform's allocated instance
+  type and vCPU count, with the protocol heap
+- it ran pinned to one CPU
+- each partition's export regenerates from its raw results, including the
+  trace agreement and two-attempt timeout rules of verification
+- each export names the session's instance, the candidate commit, the
+  comparator pins, JDK 25.0.4+7, and, when a release is selected, the release's
+  frozen manifest
+- each native runner's build receipt names its verified binary, the pinned
+  source, and a release build (`-O3 -DNDEBUG`)
+- every partition ran the same candidate and binaries
+- its observations are exactly the unit's rows
+
 Verify the partitions on a developer machine, without timing:
 
 ```sh

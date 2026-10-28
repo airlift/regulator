@@ -147,7 +147,7 @@ class TestCollection(unittest.TestCase):
         broken = copy.deepcopy(receipts)
         trace = broken[first]["trace"].replace("61", "62")
         broken[first].update(trace=trace, trace_sha256=collection.digest(trace.encode()))
-        with self.assertRaisesRegex(ValueError, "engines disagree"):
+        with self.assertRaisesRegex(collection.SemanticFailure, "engines disagree"):
             collection.validate_receipts(self.manifest, broken)
         broken[first]["outcome"] = "verification-failed"
         with self.assertRaisesRegex(ValueError, "not publishable"):
@@ -402,7 +402,7 @@ class TestCollection(unittest.TestCase):
             collection.validate_receipts(self.manifest, receipts)
         receipts = copy.deepcopy(original)
         receipts[first]["operations"]["reusedContains"]["trace"] = "wrong\n"
-        with self.assertRaisesRegex(ValueError, "operation verification failed"):
+        with self.assertRaisesRegex(collection.SemanticFailure, "operation verification failed"):
             collection.validate_receipts(self.manifest, receipts)
         receipts = copy.deepcopy(original)
         attempt = {"outcome": "did-not-finish", "phase": "execution", "limit_seconds": 30}
@@ -496,6 +496,11 @@ class TestCollection(unittest.TestCase):
                 with self.subTest(error=error), self.assertRaisesRegex(ValueError, error):
                     measure()
             collection.save(rust_receipt, valid)
+            # A measurement process that outruns its budget refuses the input rather than judging its semantics.
+            with patch.object(collection, "run_process", return_value={"outcome": "did-not-finish"}), \
+                    self.assertRaisesRegex(collection.BudgetOverrun, "measurement process exceeded protocol budget"):
+                measure()
+            (results / "provenance.json").unlink()
             measure()
         exported = collection.load(results / "language-results.json")
         self.assertEqual(len(measured), 780 - 2)

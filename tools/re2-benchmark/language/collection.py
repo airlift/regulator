@@ -34,6 +34,8 @@ NATIVE_RUNNERS = {"native-re2": ("language_benchmark", "language_bulk_benchmark"
                   "native-rust": ("language_rust_benchmark", "language_rust_bulk_benchmark", "native_rust")}
 OPERATIONS = ("compile", "singleUseContains", "singleUseCount", "reusedContains", "reusedCount")
 MODES = ("native", "safe")
+# The JDK baseline/comparators.tsv pins for every JVM observation.
+JDK_VERSION = "25.0.4+7"
 PROTOCOL = {
     "forks": 5, "warmup_iterations": 10, "measurement_iterations": 10,
     "iteration_seconds": 1, "heap": "8g", "startup_timeout_seconds": 60,
@@ -58,6 +60,16 @@ SLOW_BULK_PROTOCOL = {
 }
 SEPARATE_ALLOCATION_PROFILES = {"steady-state-v1", "steady-lifecycle-v2", "steady-slow-bulk-v2"}
 CLASS = "io.airlift.regulator.BenchmarkLanguageComparison"
+
+
+class SemanticFailure(ValueError):
+    """A verdict on a comparison's regex semantics: engines or results that disagree, or a timeout that does
+    not reproduce. Repeating the attempt would repeat the verdict, so the controller treats it as final and
+    does not retry the unit."""
+
+
+class BudgetOverrun(ValueError):
+    """A measurement or allocation process outran the protocol's budget; the controller rejects the attempt."""
 
 
 def protocol_for(manifest):
@@ -386,7 +398,7 @@ def verify_command(command, prefix, engine, mode, *, hash_trace=False):
         attempts.append(receipt.copy())
         if receipt["outcome"] == "completed":
             if attempt != 0:
-                raise ValueError(f"nonreproducible timeout: {prefix}")
+                raise SemanticFailure(f"nonreproducible timeout: {prefix}")
             output = attempt_prefix.with_suffix(".stdout").read_bytes()
             receipt["trace"] = "sha256:" + digest(output) + "\n" if hash_trace else output.decode()
             receipt["trace_sha256"] = digest(receipt["trace"].encode())
@@ -398,7 +410,7 @@ def verify_command(command, prefix, engine, mode, *, hash_trace=False):
         if receipt["phase"] == "startup":
             raise ValueError(f"runner startup timed out; not regex evidence: {prefix}")
     if len(attempts) == 2 and attempts[0] != attempts[1]:
-        raise ValueError(f"timeout phase changed: {prefix}")
+        raise SemanticFailure(f"timeout phase changed: {prefix}")
     return {**receipt, "attempts": attempts}
 
 
@@ -466,7 +478,7 @@ def validate_receipts(manifest, receipts):
                     count_text, separator, matches = line.partition(":")
                     count = int(count_text)
                     if not separator or count != source["expected_count"]:
-                        raise ValueError("semantic trace disagrees with expected count")
+                        raise SemanticFailure(f"semantic trace disagrees with expected count: {case['id']}")
                     values = matches.split(",") if count else []
                     if len(values) != count or (not count and matches):
                         raise ValueError("semantic trace has wrong match count")
@@ -491,7 +503,7 @@ def validate_receipts(manifest, receipts):
             for operation, operation_receipt in receipt["operations"].items():
                 validate_operation_receipt(case, language, operation, operation_receipt)
         if len(set(traces)) > 1:
-            raise ValueError(f"verification-failed: engines disagree for {case['id']}")
+            raise SemanticFailure(f"verification-failed: engines disagree for {case['id']}")
 
 
 def expected_operation_trace(case, operation):
@@ -510,7 +522,7 @@ def validate_operation_receipt(case, language, operation, receipt):
     if outcome == "completed":
         expected = expected_operation_trace(case, operation)
         if receipt.get("trace") != expected or receipt.get("trace_sha256") != digest(expected.encode()):
-            raise ValueError(f"operation verification failed: {case['id']}/{operation}")
+            raise SemanticFailure(f"operation verification failed: {case['id']}/{operation}")
         return
     if outcome != "did-not-finish":
         raise ValueError("unpublishable operation verification outcome")
@@ -610,6 +622,16 @@ def work_contract(manifest, case, language, operation, version=3):
     return "public-pattern-lifecycle-v1"
 
 
+def validate_native_build(manifest, engine, build, binary_sha256):
+    """A native runner's build receipt: the verified binary, built from its pinned source as a release build."""
+    if build["binary_sha256"] != binary_sha256:
+        raise ValueError(f"{engine}: native binary does not match recorded build")
+    if build["source_sha256"] != native_build.source_digest(native_target(manifest, engine)):
+        raise ValueError(f"{engine}: native runner was built from a different source")
+    if any(flag not in build["runner_compile_commands"][0]["command"] for flag in ("-O3", "-DNDEBUG")):
+        raise ValueError(f"{engine}: native comparator requires a release build")
+
+
 def measure(directory, results, java, classpath, native_runners, platform_id, jvm_receipt, archive=None, candidate_provenance=None):
     directory, results = directory.resolve(), results.resolve()
     if (results / "provenance.json").exists() or (results / "observations.json").exists():
@@ -637,20 +659,15 @@ def measure(directory, results, java, classpath, native_runners, platform_id, jv
     build_receipt = load(jvm_receipt)
     jvm_build.validate_receipt(build_receipt, ROOT, java, classpath, archive, candidate_provenance)
     version = subprocess.check_output([java, "-version"], stderr=subprocess.STDOUT).decode()
-    if "25.0.4" not in version or "25.0.4+7" not in version:
-        raise ValueError("JDK differs from baseline/comparators.tsv")
+    if JDK_VERSION not in version:
+        raise ValueError(f"JDK differs from baseline/comparators.tsv's {JDK_VERSION}")
     require_native_runners(manifest, native_runners)
     native_evidence = {}
     for engine, (*_, key) in NATIVE_RUNNERS.items():
         if engine not in native_runners:
             continue
         build = load(Path(native_runners[engine]).with_suffix(".build.json"))
-        if build["binary_sha256"] != runners[f"{key}_binary_sha256"]:
-            raise ValueError(f"{engine}: native binary does not match recorded build")
-        if build["source_sha256"] != native_build.source_digest(native_target(manifest, engine)):
-            raise ValueError(f"{engine}: native runner was built from a different source")
-        if any(flag not in build["runner_compile_commands"][0]["command"] for flag in ("-O3", "-DNDEBUG")):
-            raise ValueError(f"{engine}: native comparator requires a release build")
+        validate_native_build(manifest, engine, build, runners[f"{key}_binary_sha256"])
         native_evidence[f"{key}_binary_sha256"] = digest(Path(native_runners[engine]).read_bytes())
         native_evidence[f"{key}_build"] = build
     provenance = {
@@ -699,7 +716,7 @@ def measure(directory, results, java, classpath, native_runners, platform_id, jv
             receipt = run_process(command, raw.parent / "measurement", measuring=True, **budget)
             if receipt["outcome"] != "completed":
                 # Aggregate fork timeout is a collection failure, not proof that one regex call timed out.
-                raise ValueError(f"measurement process exceeded protocol budget: {row_id}")
+                raise BudgetOverrun(f"measurement process exceeded protocol budget: {row_id}")
             allocation_raw = None
             allocation_evidence = {}
             if engine not in NATIVE_RUNNERS and protocol.get("measurement_profile") in SEPARATE_ALLOCATION_PROFILES:
@@ -711,7 +728,7 @@ def measure(directory, results, java, classpath, native_runners, platform_id, jv
                 allocation_command += ["-prof", "gc"]
                 allocated = run_process(allocation_command, raw.parent / "allocation", measuring=True, **budget)
                 if allocated["outcome"] != "completed":
-                    raise ValueError(f"allocation process exceeded protocol budget: {row_id}")
+                    raise BudgetOverrun(f"allocation process exceeded protocol budget: {row_id}")
                 allocation_evidence = {"allocation_raw_file": str(allocation_raw.relative_to(results)),
                                        "allocation_command": allocation_command}
             observations_data[row_id] = {"outcome": "compared", **raw_samples(raw, engine, operation, workload,

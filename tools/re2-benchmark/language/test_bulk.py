@@ -119,7 +119,18 @@ class TestBulkEvidence(unittest.TestCase):
     def test_raw_trace_and_reference_count_tampering_rejected(self):
         evidence = self.evidence()
         evidence["references"]["example"]["execution"]["trace"] = "3\n"
-        with self.assertRaisesRegex(ValueError, "original native"):
+        with self.assertRaisesRegex(collection.SemanticFailure, "original native"):
+            bulk.validate_evidence(self.manifest, evidence, self.root)
+        evidence = self.evidence()
+        evidence["receipts"]["example/java/jdk/safe"]["operations"]["execute"].update(
+            trace="3\n", trace_sha256=collection.digest(b"3\n"))
+        with self.assertRaisesRegex(collection.SemanticFailure, "differs from expected result"):
+            bulk.validate_evidence(self.manifest, evidence, self.root)
+        evidence = self.evidence()
+        trace = "sha256:" + "0" * 64 + "\n"
+        receipt = evidence["receipts"]["example/java/jdk/safe"]
+        receipt.update(trace=trace, trace_sha256=collection.digest(trace.encode()))
+        with self.assertRaisesRegex(collection.SemanticFailure, "disagree"):
             bulk.validate_evidence(self.manifest, evidence, self.root)
         evidence = self.evidence()
         (self.root / "matched.txt").write_bytes(b"changed")

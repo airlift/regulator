@@ -58,6 +58,8 @@ LANGUAGE_CANDIDATE_PROVENANCE=${LANGUAGE_CANDIDATE_PROVENANCE:-}
 LANGUAGE_CANDIDATE_PROVENANCE_SHA256=${LANGUAGE_CANDIDATE_PROVENANCE_SHA256:-}
 ENGINE_BUILD_DIRECTORY=${ENGINE_BUILD_DIRECTORY:-}
 ENGINE_BUILD_MANIFEST_SHA256=${ENGINE_BUILD_MANIFEST_SHA256:-}
+# A language unit worker installs each language plan's bundle, named by its SHA-256 in the shared transfer bucket.
+LANGUAGE_PLAN_BUNDLE_SHA256S=${LANGUAGE_PLAN_BUNDLE_SHA256S:-}
 TRINO_REVISION=${TRINO_REVISION:-}
 NATIVE_COMPILER_PACKAGE=${NATIVE_COMPILER_PACKAGE:-}
 CMAKE_PACKAGE=${CMAKE_PACKAGE:-}
@@ -203,8 +205,19 @@ if [[ "${CAMPAIGN_MODE}" == unit-worker ]]; then
         echo "A unit worker requires prebuilt engines: an engine build directory and its manifest SHA-256" >&2
         exit 1
     fi
-elif [[ -n "${ENGINE_BUILD_DIRECTORY}${ENGINE_BUILD_MANIFEST_SHA256}" ]]; then
-    echo "Only a unit worker installs prebuilt engines" >&2
+elif [[ -n "${ENGINE_BUILD_DIRECTORY}${ENGINE_BUILD_MANIFEST_SHA256}${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
+    echo "Only a unit worker installs prebuilt engines and language plans" >&2
+    exit 1
+fi
+for bundle_sha256 in ${LANGUAGE_PLAN_BUNDLE_SHA256S}; do
+    if [[ ! ${bundle_sha256} =~ ^[0-9a-f]{64}$ ]]; then
+        echo "LANGUAGE_PLAN_BUNDLE_SHA256S must list SHA-256 digests: ${bundle_sha256}" >&2
+        exit 1
+    fi
+done
+if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" && ( ! -f "${LANGUAGE_CANDIDATE_PROVENANCE}" ||
+        ! "${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}" =~ ^[0-9a-f]{64}$ ) ]]; then
+    echo "Language plans require checksummed candidate provenance" >&2
     exit 1
 fi
 if [[ -n "${ENGINE_BUILD_DIRECTORY}" && -z "${TRANSFER_BUCKET}" ]]; then
@@ -1097,6 +1110,12 @@ if [[ '${CAMPAIGN_MODE}' == language-batch ]]; then
     export LANGUAGE_SOURCE_ARCHIVE=/tmp/regulator.tar.gz
     export LANGUAGE_CANDIDATE_PROVENANCE=/tmp/candidate-provenance.tsv
 fi
+if [[ '${LANGUAGE_PLAN_BUNDLE_SHA256S}' != '' ]]; then
+    download_input 's3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv' /tmp/candidate-provenance.tsv
+    printf '%s  %s\n' '${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}' /tmp/candidate-provenance.tsv | sha256sum --check -
+    export LANGUAGE_SOURCE_ARCHIVE=/tmp/regulator.tar.gz
+    export LANGUAGE_CANDIDATE_PROVENANCE=/tmp/candidate-provenance.tsv
+fi
 if [[ '${CAMPAIGN_USES_TRINO}' == true ]]; then
     mkdir -p /opt/re2-work/trino
     download_input 's3://${BUCKET}/${INPUT_PREFIX}/trino.tar.gz' /tmp/trino.tar.gz
@@ -1340,6 +1359,12 @@ if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
         --host-timeout "${TIMEOUT_SECONDS}" ||
         reject_input "Language batch archive fails its checks for this job"
 fi
+if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
+    cp "${LANGUAGE_CANDIDATE_PROVENANCE}" "${SESSION_DIR}/candidate-provenance.tsv"
+    if [[ $(sha256 "${SESSION_DIR}/candidate-provenance.tsv") != "${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}" ]]; then
+        reject_input "Language candidate provenance checksum mismatch"
+    fi
+fi
 if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"
 fi
@@ -1356,6 +1381,9 @@ if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
         SHARED_ARCHIVES+="engine-build/${archive_file} ${archive_sha256} ${TRANSFER_PREFIX}/engine-builds/${archive_sha256}.tar.gz"$'\n'
     done <<<"${engine_archives}"
 fi
+for bundle_sha256 in ${LANGUAGE_PLAN_BUNDLE_SHA256S}; do
+    SHARED_ARCHIVES+="language-plans/${bundle_sha256}.tar.gz ${bundle_sha256} ${TRANSFER_PREFIX}/language-plans/${bundle_sha256}.tar.gz"$'\n'
+done
 
 REGULATOR_SHA256=$(sha256 "${SESSION_DIR}/regulator.tar.gz")
 REGULATOR_CONTENT_SHA256=$(archive_content_sha256 "${SESSION_DIR}/regulator.tar.gz")
@@ -1406,6 +1434,8 @@ fi
 aws_cli s3 cp "${SESSION_DIR}/regulator.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/regulator.tar.gz" --only-show-errors
 if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
     aws_cli s3 cp "${SESSION_DIR}/language-batch.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/language-batch.tar.gz" --only-show-errors
+fi
+if [[ "${CAMPAIGN_MODE}" == language-batch || -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
     aws_cli s3 cp "${SESSION_DIR}/candidate-provenance.tsv" "s3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv" --only-show-errors
 fi
 if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
@@ -1489,6 +1519,7 @@ baseline_protocol_qualification=${BASELINE_PROTOCOL_QUALIFICATION}
 trino_commit=${TRINO_COMMIT}
 trino_snapshot_sha256=${TRINO_SHA256}
 engine_build_manifest_sha256=${ENGINE_BUILD_MANIFEST_SHA256:-none}
+language_plan_bundle_sha256s=${LANGUAGE_PLAN_BUNDLE_SHA256S:-none}
 joni_evidence_scope=${JONI_EVIDENCE_SCOPE}
 campaign_mode=${CAMPAIGN_MODE}
 campaign_architectures=${CAMPAIGN_ARCHITECTURES}
@@ -1556,7 +1587,7 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                 fi
                 expected_cargo_package=not-installed
                 expected_rust_package=not-installed
-                # An engine build compiles the native Rust runner.
+                # An engine build compiles the native Rust runners.
                 if [[ "${CAMPAIGN_MODE}" == language-batch || "${CAMPAIGN_MODE}" == engine-build ]]; then
                     expected_cargo_package=${CARGO_PACKAGE}
                     expected_rust_package=${RUST_PACKAGE}
