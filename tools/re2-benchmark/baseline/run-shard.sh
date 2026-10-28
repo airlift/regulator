@@ -18,6 +18,7 @@ RESULT_TOOL="${SCRIPT_DIR}/shard_results.py"
 PROTOCOL_REPRESENTATIVES="${SCRIPT_DIR}/protocol-representatives.tsv"
 ROW_PROTOCOL="${SCRIPT_DIR}/row-protocol.tsv"
 UNIT_TOOL="${SCRIPT_DIR}/unit_session.py"
+SPECIALIZED_CATALOG="${SCRIPT_DIR}/specialized-patterns.tsv"
 # run-unit.sh names a planned work unit; the route measures only the unit's rows
 # and leaves acceptance to the unit.
 UNIT_DIRECTORY=${BASELINE_UNIT_DIRECTORY:?A route runs only inside a work unit; set BASELINE_UNIT_DIRECTORY}
@@ -371,8 +372,10 @@ manifest_sha256=$(sha256sum "${MANIFEST}" | awk '{print $1}')
     printf 'jmh_host_compiler_hints=jmh-generated-and-installed\n'
 } > "${RESULT_DIR}/run-metadata.txt"
 
-# Where the Trino harness this route used came from: prebuilt:<archive SHA-256>, local, or not-used.
+# Where the Trino harness and the native comparator runner this route used came from:
+# prebuilt:<archive SHA-256>, local, or not-used.
 trino_harness_build=not-used
+native_runner_build=not-used
 
 prebuilt_engine()
 {
@@ -383,7 +386,8 @@ prebuilt_engine()
 
 record_engine_builds()
 {
-    printf 'trino_harness_build=%s\n' "${trino_harness_build}" >> "${RESULT_DIR}/run-metadata.txt"
+    printf 'trino_harness_build=%s\nnative_runner_build=%s\n' "${trino_harness_build}" "${native_runner_build}" \
+        >> "${RESULT_DIR}/run-metadata.txt"
 }
 
 (cd "${ROOT}" && ./mvnw "${MAVEN_ARGS[@]}" -q -DskipTests test-compile) | tee "${RESULT_DIR}/logs/maven-test-compile.log"
@@ -633,6 +637,68 @@ prepare_trino_like()
     fi
 }
 
+# Prepares the native comparator's runner, then checks that it returns, for each source of each
+# workload, the values every Regulator variant returns.
+prepare_specialized_native()
+{
+    local runner_name
+    case "${specialized_comparator}" in
+        native-re2) runner_name=language_benchmark ;;
+        *) echo "No native runner for comparator ${specialized_comparator}" >&2; exit 1 ;;
+    esac
+    native_runner_build=$(prebuilt_engine native || echo local)
+    NATIVE_RUNNER="${SHARED_WORK_DIR}/language-native/${runner_name}"
+    if [[ "${native_runner_build}" == local ]]; then
+        local build_directory="${SHARED_WORK_DIR}/language-native-local"
+        RE2_NATIVE_TUNING=generic RE2_BENCHMARK_TARGETS="${runner_name}" RE2_BENCHMARK_BUILD_DIR="${build_directory}" \
+            "${ROOT}/tools/re2-benchmark/build.sh" 2>&1 | tee "${RESULT_DIR}/logs/native-build.log"
+        NATIVE_RUNNER="${build_directory}/${runner_name}"
+    fi
+    NATIVE_INPUT_DIR="${RESULT_DIR}/generated/specialized-native"
+    run_semantic_verifier "Specialized ${specialized_comparator} inputs" \
+        java "${route_jvm_arguments[@]}" -cp "${CLASSPATH}" \
+        io.airlift.regulator.SpecializedPatternNativeInputs "${specialized_comparator}" "${NATIVE_INPUT_DIR}"
+    # The inputs must list each of the comparator's catalog workloads exactly once.
+    local expected_workloads actual_workloads
+    expected_workloads=$(awk -F '\t' -v comparator="${specialized_comparator}" 'NR > 1 && $7 == comparator {print $2}' \
+        "${SPECIALIZED_CATALOG}" | sort)
+    actual_workloads=$(cut -f 1 "${NATIVE_INPUT_DIR}/workloads.tsv" | sort)
+    [[ -n "${expected_workloads}" && "${actual_workloads}" == "${expected_workloads}" ]] ||
+        semantic_failure "${specialized_comparator} inputs list workloads $(paste -sd , - <<<"${actual_workloads}"), not the catalog's $(paste -sd , - <<<"${expected_workloads}")"
+    local workload operation group verified=0
+    while IFS=$'\t' read -r workload operation group || [[ -n "${workload}" ]]; do
+        "${NATIVE_RUNNER}" --verify-specialized "${NATIVE_INPUT_DIR}/${workload}.input" "${operation}" "${group}" \
+            > "${NATIVE_INPUT_DIR}/${workload}.actual" 2>> "${semantic_log}" ||
+            semantic_failure "${specialized_comparator} could not verify ${workload}"
+        cmp -s "${NATIVE_INPUT_DIR}/${workload}.expected" "${NATIVE_INPUT_DIR}/${workload}.actual" ||
+            semantic_failure "${specialized_comparator} ${operation} values differ from Regulator's for ${workload}"
+        verified=$((verified + 1))
+    done < "${NATIVE_INPUT_DIR}/workloads.tsv"
+    printf 'Verified %s %s specialized workloads\n' "${verified}" "${specialized_comparator}" | tee -a "${semantic_log}"
+}
+
+# Chooses, from the planned selectors of the comparator's rows, how the specialized-pattern
+# comparator runs, and prepares a native runner. A specialized-pattern shard's rows all name the
+# comparator its native-access route measures.
+specialized_comparator_command=()
+prepare_specialized_comparator()
+{
+    specialized_comparator=$(awk -F '\t' 'NR == 2 {print $7}' "${RESULT_DIR}/expected-rows.tsv")
+    local kind
+    kind=$(awk -F '\t' -v comparator="${specialized_comparator}" 'NR > 1 && $2 == comparator {print $4; exit}' \
+        "${RESULT_DIR}/jmh-selectors.tsv")
+    case "${kind}" in
+        native)
+            prepare_specialized_native
+            specialized_comparator_command=(run_specialized_native)
+            ;;
+        *)
+            echo "Comparator ${specialized_comparator} has no native selector: ${kind}" >&2
+            exit 1
+            ;;
+    esac
+}
+
 case "${handler}" in
     trino-operations)
         if [[ "${ROUTE}" == native-access ]]; then
@@ -640,6 +706,12 @@ case "${handler}" in
         fi
         ;;
     trino-like) prepare_trino_like ;;
+    specialized-patterns)
+        # Only the native-access route measures the comparator.
+        if [[ "${ROUTE}" == native-access ]]; then
+            prepare_specialized_comparator
+        fi
+        ;;
 esac
 
 semantic_evidence_arguments=(
@@ -820,13 +892,18 @@ set_jmh_input_files()
     local selector kind processes process_index
     JMH_INPUT_FILES=()
     while IFS=$'\t' read -r selector _ _ kind processes _; do
-        if [[ "${kind}" == processes ]]; then
-            for ((process_index = 1; process_index <= processes; process_index++)); do
-                JMH_INPUT_FILES+=("${output_base}-selector-${selector}-process-${process_index}.json")
-            done
-        else
-            JMH_INPUT_FILES+=("${output_base}-selector-${selector}.json")
-        fi
+        case "${kind}" in
+            processes)
+                for ((process_index = 1; process_index <= processes; process_index++)); do
+                    JMH_INPUT_FILES+=("${output_base}-selector-${selector}-process-${process_index}.json")
+                done
+                ;;
+            forks) JMH_INPUT_FILES+=("${output_base}-selector-${selector}.json") ;;
+            *)
+                echo "JMH selector ${selector} of ${output_base} runs as ${kind}, not processes or forks" >&2
+                exit 1
+                ;;
+        esac
     done < <(tail -n +2 "${output_base}-selectors.tsv")
 }
 
@@ -943,24 +1020,31 @@ run_unit_jmh_selectors()
             done < "${output_base}-selector-${selector}-parameters.txt"
             parameter_arguments+=("${handler_arguments[@]}")
         fi
-        if [[ "${kind}" == processes ]]; then
-            JMH_UNIT_SELECTOR=true \
-                JMH_PROCESS_COUNT=${processes} \
-                JMH_PROCESS_WARMUP_ITERATIONS=${warmup_iterations} \
-                JMH_PROCESS_MEASUREMENT_ITERATIONS=${measurement_iterations} \
-                JMH_PROCESS_TIME=${measurement_time} \
-                JMH_PROCESS_WARMUP_TIME=${warmup_time} \
-                run_jmh_with_classpath "${classpath}" "${selector_filter}" \
-                "${output_base}-selector-${selector}.json" "${parameter_arguments[@]}"
-        else
-            JMH_UNIT_SELECTOR=true \
-                JONI_JMH_FORKS=${processes} \
-                JMH_PROCESS_WARMUP_ITERATIONS=${warmup_iterations} \
-                JMH_PROCESS_MEASUREMENT_ITERATIONS=${measurement_iterations} \
-                JONI_JMH_TIME=${measurement_time} \
-                run_joni_jmh_with_classpath "${classpath}" "${selector_filter}" \
-                "${output_base}-selector-${selector}.json" "${parameter_arguments[@]}"
-        fi
+        case "${kind}" in
+            processes)
+                JMH_UNIT_SELECTOR=true \
+                    JMH_PROCESS_COUNT=${processes} \
+                    JMH_PROCESS_WARMUP_ITERATIONS=${warmup_iterations} \
+                    JMH_PROCESS_MEASUREMENT_ITERATIONS=${measurement_iterations} \
+                    JMH_PROCESS_TIME=${measurement_time} \
+                    JMH_PROCESS_WARMUP_TIME=${warmup_time} \
+                    run_jmh_with_classpath "${classpath}" "${selector_filter}" \
+                    "${output_base}-selector-${selector}.json" "${parameter_arguments[@]}"
+                ;;
+            forks)
+                JMH_UNIT_SELECTOR=true \
+                    JONI_JMH_FORKS=${processes} \
+                    JMH_PROCESS_WARMUP_ITERATIONS=${warmup_iterations} \
+                    JMH_PROCESS_MEASUREMENT_ITERATIONS=${measurement_iterations} \
+                    JONI_JMH_TIME=${measurement_time} \
+                    run_joni_jmh_with_classpath "${classpath}" "${selector_filter}" \
+                    "${output_base}-selector-${selector}.json" "${parameter_arguments[@]}"
+                ;;
+            *)
+                echo "JMH selector ${selector} of ${output_base} runs as ${kind}, not processes or forks" >&2
+                exit 1
+                ;;
+        esac
     done 3< <(tail -n +2 "${output_base}-selectors.tsv")
 }
 
@@ -1060,21 +1144,22 @@ run_jmh_per_workload()
     JMH_INPUT_FILES=("${workload_input_files[@]}")
 }
 
-run_trino_operations_candidate()
+# Runs one Regulator variant's rows, named for the route's handler.
+run_regulator_candidate()
 {
     local system=$1
-    local normalized="${RESULT_DIR}/normalized/trino-operations-${system}.tsv"
+    local normalized="${RESULT_DIR}/normalized/${handler}-${system}.tsv"
     if [[ "${jmh_invocation_per_workload}" == true ]]; then
-        run_jmh_per_workload "${JMH_SUITE_ORDER}" in-process "${CLASSPATH}" trino-operations "${system}" -
+        run_jmh_per_workload "${JMH_SUITE_ORDER}" in-process "${CLASSPATH}" "${handler}" "${system}" -
     else
         local filter
-        local output="${RESULT_DIR}/raw/trino-operations-${system}.json"
+        local output="${RESULT_DIR}/raw/${handler}-${system}.json"
         filter=$(python3 "${RESULT_TOOL}" jmh-filter \
             --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
             --system "${system}")
         run_jmh "${filter}" "${output}" |
-            tee "${RESULT_DIR}/logs/trino-operations-${system}.log"
+            tee "${RESULT_DIR}/logs/${handler}-${system}.log"
         set_jmh_input_files "${output}"
     fi
     python3 "${RESULT_TOOL}" normalize-jmh \
@@ -1120,27 +1205,28 @@ run_trino_operations_joni()
     normalized_files+=("${normalized}")
 }
 
-run_ordered_joni_comparison()
+# Runs the Regulator variants and the comparator command in its arguments in the order
+# JONI_COMPARATOR_ORDER, named for Joni, gives every comparator: forward runs the variants first,
+# and reverse runs the comparator first.
+run_ordered_comparison()
 {
-    local regulator_function=$1
-    local joni_function=$2
     if [[ "${JONI_COMPARATOR_ORDER}" == forward ]]; then
-        "${regulator_function}"
-        "${joni_function}"
+        run_regulator_candidates
+        "$@"
     else
-        "${joni_function}"
-        "${regulator_function}"
+        "$@"
+        run_regulator_candidates
     fi
 }
 
-run_trino_operations_candidates()
+run_regulator_candidates()
 {
     # Each Regulator variant runs in its own JVMs, so one variant's classes cannot change how
     # C2 compiles another's. Even replicas run the variants in reverse order.
     local candidates=()
     local system
     while IFS= read -r system; do
-        if [[ "${system}" == joni ]]; then
+        if [[ "${system}" != regulator* ]]; then
             continue
         elif [[ "${JMH_SUITE_ORDER}" == reverse ]]; then
             candidates=("${system}" "${candidates[@]}")
@@ -1149,16 +1235,110 @@ run_trino_operations_candidates()
         fi
     done < <(tr ',' '\n' <<<"${systems}")
     for system in "${candidates[@]}"; do
-        run_trino_operations_candidate "${system}"
+        run_regulator_candidate "${system}"
     done
 }
 
 run_trino_operations_shard()
 {
     if [[ "${ROUTE}" == native-access ]]; then
-        run_ordered_joni_comparison run_trino_operations_candidates run_trino_operations_joni
+        run_ordered_comparison run_trino_operations_joni
     else
-        run_trino_operations_candidates
+        run_regulator_candidates
+    fi
+}
+
+# Prints a protocol window, such as 1s or 20ms, times a count, in seconds.
+window_seconds()
+{
+    awk -v window="$1" -v count="$2" 'BEGIN {
+        if (window ~ /ms$/) value = substr(window, 1, length(window) - 2) / 1000
+        else if (window ~ /s$/) value = substr(window, 1, length(window) - 1)
+        else exit 1
+        printf "%g", value * count
+    }'
+}
+
+# Runs each expected row of the native comparator in its own runner process at its planned
+# selector's protocol: one warmup as long as the warmup iterations together, then one repetition
+# per measurement iteration; SHARD_DISPATCH.md describes how Google Benchmark sizes them. The
+# protocol flags, dry run included, are explicit, because Google Benchmark reads a missing flag
+# from its environment. The comparator keeps its forward workload order, as Joni does.
+run_specialized_native()
+{
+    local system=${specialized_comparator}
+    local normalized="${RESULT_DIR}/normalized/specialized-patterns-${system}.tsv"
+    local input_files=()
+    local operation parameters workload native_operation group
+    local selector kind warmup_iterations warmup_time measurement_iterations measurement_time
+    local warmup_seconds measurement_seconds
+    local expected_repetitions=""
+    while IFS=$'\t' read -r -u 3 operation parameters; do
+        workload=${parameters#workload=}
+        IFS=$'\t' read -r _ native_operation group < <(
+            awk -F '\t' -v workload="${workload}" '$1 == workload' "${NATIVE_INPUT_DIR}/workloads.tsv") ||
+            semantic_failure "${system} inputs have no workload ${workload}"
+        if [[ "${native_operation}" != "${operation}" ]]; then
+            echo "${system} times ${workload} with ${native_operation}, not ${operation}" >&2
+            exit 1
+        fi
+        local label="specialized-patterns-${system}-${operation}-workload-${workload}"
+        local output_base="${RESULT_DIR}/raw/${label}"
+        python3 "${UNIT_TOOL}" select \
+            --selectors "${RESULT_DIR}/jmh-selectors.tsv" \
+            --filter "^${operation}$" \
+            --parameter "${parameters}" \
+            --output-base "${output_base}"
+        if [[ $(($(wc -l < "${output_base}-selectors.tsv") - 1)) -ne 1 ]]; then
+            echo "${system} ${operation} ${parameters} is not one planned selector" >&2
+            exit 1
+        fi
+        IFS=$'\t' read -r selector _ _ kind _ warmup_iterations warmup_time measurement_iterations measurement_time _ \
+            < <(tail -n +2 "${output_base}-selectors.tsv")
+        if [[ "${kind}" != native ]]; then
+            echo "${system} ${operation} ${parameters} is planned as ${kind}, not native" >&2
+            exit 1
+        fi
+        # One normalization checks every row's repetitions against a single count.
+        if [[ -z "${expected_repetitions}" ]]; then
+            expected_repetitions=${measurement_iterations}
+        elif [[ "${measurement_iterations}" != "${expected_repetitions}" ]]; then
+            echo "${system} ${operation} ${parameters} plans ${measurement_iterations} repetitions, not ${expected_repetitions}" >&2
+            exit 1
+        fi
+        local output="${output_base}-selector-${selector}.json"
+        warmup_seconds=$(window_seconds "${warmup_time}" "${warmup_iterations}")
+        measurement_seconds=$(window_seconds "${measurement_time}" 1)
+        taskset --cpu-list "${CPU_LIST}" \
+            "${NATIVE_RUNNER}" --specialized "${NATIVE_INPUT_DIR}/${workload}.input" "${operation}" "${group}" \
+            --benchmark_min_warmup_time="${warmup_seconds}" \
+            --benchmark_min_time="${measurement_seconds}s" \
+            --benchmark_repetitions="${measurement_iterations}" \
+            --benchmark_dry_run=false \
+            --benchmark_context="parameter.workload=${workload}" \
+            --benchmark_out_format=json \
+            --benchmark_out="${output}" |
+            tee "${RESULT_DIR}/logs/${label}.log"
+        input_files+=("${output}")
+    done 3< <(awk -F '\t' -v target_system="${system}" 'NR > 1 && $4 == target_system {print $5 "\t" $6}' \
+        "${RESULT_DIR}/expected-rows.tsv")
+    python3 "${RESULT_TOOL}" normalize-native \
+        --manifest "${SELECTION_MANIFEST}" \
+        --shard "${SHARD_ID}" \
+        --system "${system}" \
+        --input "${input_files[@]}" \
+        --expected-repetitions "${expected_repetitions}" \
+        --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
+        --output "${normalized}"
+    normalized_files+=("${normalized}")
+}
+
+run_specialized_patterns_shard()
+{
+    if [[ "${ROUTE}" == native-access ]]; then
+        run_ordered_comparison "${specialized_comparator_command[@]}"
+    else
+        run_regulator_candidates
     fi
 }
 
@@ -1244,6 +1424,7 @@ run_trino_like_shard()
 case "${handler}" in
     trino-operations) run_trino_operations_shard ;;
     trino-like) run_trino_like_shard ;;
+    specialized-patterns) run_specialized_patterns_shard ;;
     *)
         echo "Internal error: unsupported handler ${handler}" >&2
         exit 1

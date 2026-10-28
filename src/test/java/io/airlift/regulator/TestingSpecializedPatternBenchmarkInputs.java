@@ -22,9 +22,10 @@ import java.util.List;
 import java.util.Map;
 
 /// The specialized-pattern workloads: each applies one Trino operation to a rotation of inputs.
+/// Every language's specialized-pattern benchmark applies the same workloads.
 /// The URL workloads share a rotation in `specialized-trino-workloads.tsv`; the others
 /// reuse their everyday rotation.
-public final class TestingSpecializedTrinoRegexpBenchmarkInputs
+public final class TestingSpecializedPatternBenchmarkInputs
 {
     private static final String RESOURCE = "/io/airlift/regulator/specialized-trino-workloads.tsv";
     private static final Map<String, Input> URL_INPUTS = TestingEverydayTrinoRegexpBenchmarkInputs.loadInputs(RESOURCE);
@@ -37,7 +38,7 @@ public final class TestingSpecializedTrinoRegexpBenchmarkInputs
             new Workload(TestingEverydayTrinoRegexpBenchmarkInputs.create("keyValue"), Operation.EXTRACT_ALL, 2, null),
             new Workload(TestingEverydayTrinoRegexpBenchmarkInputs.create("quotedField"), Operation.EXTRACT, 1, null));
 
-    private TestingSpecializedTrinoRegexpBenchmarkInputs() {}
+    private TestingSpecializedPatternBenchmarkInputs() {}
 
     public static List<String> workloadIds()
     {
@@ -115,10 +116,24 @@ public final class TestingSpecializedTrinoRegexpBenchmarkInputs
             return input.sources();
         }
 
+        /// The group the operation returns, or for `replace` the one group its replacement
+        /// substitutes: the capture a language without a replacement call extracts instead.
+        public int capturedGroup()
+        {
+            if (operation != Operation.REPLACE) {
+                return group;
+            }
+            String replacement = this.replacement.toStringUtf8();
+            if (!replacement.matches("\\$[1-9][0-9]*")) {
+                throw new IllegalStateException("%s replacement is not a single `$N` reference: %s".formatted(workloadId(), replacement));
+            }
+            return Integer.parseInt(replacement.substring(1));
+        }
+
         public void requireOperation(Operation expected)
         {
             if (operation != expected) {
-                throw new IllegalStateException("%s is a %s workload, not %s".formatted(workloadId(), operation.benchmarkName(), expected.benchmarkName()));
+                throw new IllegalStateException("%s runs %s, not %s".formatted(workloadId(), operation.benchmarkName(), expected.benchmarkName()));
             }
         }
     }

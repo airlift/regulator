@@ -2,6 +2,8 @@ shard_id	native_access_handler	native_access_systems	object_row_handler	object_r
 trino-operations	trino-operations	regulator-native-access,joni	trino-operations	regulator-object-row	TestBenchmarkEverydayTrinoRegexp	-
 trino-specialized-patterns-a	trino-operations	regulator-native-access,regulator-regular-engine-native-access,regulator-generated-native-access,joni	trino-operations	regulator-object-row,regulator-regular-engine-object-row,regulator-generated-object-row	TestBenchmarkSpecializedTrinoRegexp,TestScanPlan	-
 trino-specialized-patterns-b	trino-operations	regulator-native-access,regulator-regular-engine-native-access,regulator-generated-native-access,joni	trino-operations	regulator-object-row,regulator-regular-engine-object-row,regulator-generated-object-row	TestBenchmarkSpecializedTrinoRegexp,TestScanPlan	-
+re2-specialized-patterns-a	specialized-patterns	regulator-native-access,regulator-regular-engine-native-access,regulator-generated-native-access,native-re2	specialized-patterns	regulator-object-row,regulator-regular-engine-object-row,regulator-generated-object-row	TestBenchmarkSpecializedRe2	-
+re2-specialized-patterns-b	specialized-patterns	regulator-native-access,regulator-regular-engine-native-access,regulator-generated-native-access,native-re2	specialized-patterns	regulator-object-row,regulator-regular-engine-object-row,regulator-generated-object-row	TestBenchmarkSpecializedRe2	-
 trino-like	trino-like	regulator,trino-optimized,trino-sql	-	-	TestTrinoLikeCorpus	-
 trino-like-specialized	trino-like	regulator,regulator-generated,trino-sql	-	-	TestTrinoLikeCorpus	-
 like-compile	trino-like	regulator,trino-sql	-	-	TestTrinoLikeCorpus	-

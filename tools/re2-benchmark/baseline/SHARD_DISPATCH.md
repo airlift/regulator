@@ -113,10 +113,9 @@ iteration counts while avoiding a new forked JVM for every row:
 - Every process writes a separate JSON file. Normalization requires identical
   row sets in every file, combines all five process groups before computing the
   row score, and obtains normalized allocation from the profiled process. The
-  shards that run each workload in its own JVMs, `trino-specialized-patterns-a`,
-  `-b`, and `trino-like-specialized`, hold one row per file, so their
-  normalization checks each row's process-group count instead of identical row
-  sets.
+  specialized-pattern shards run each workload in its own JVMs, so they hold
+  one row per file, and their normalization checks each row's process-group
+  count instead of identical row sets.
 - The semantic gate is derived from the actual successful Surefire test cases
   and differential-verifier receipts. It is not a declaration that tests were
   run.
@@ -146,9 +145,10 @@ in the calibration statistics.
 
 A host installs the pinned Trino harness from its platform's
 [engine build](../aws/README.md#engine-builds) instead of building it. Each
-route's `run-metadata.txt` records `trino_harness_build` as
+route's `run-metadata.txt` records `trino_harness_build` and, for a
+specialized shard's native comparator runner, `native_runner_build`. Each is
 `prebuilt:<archive-sha256>`, `local`, or `not-used`, and `engine-build.txt` in
-the route records the installed build. Engine builds change where the harness
+the route records the installed build. Engine builds change where an engine
 came from, not what a route measures or how it is accepted and reduced. The
 same build installs the native RE2 and Rust runners on every unit worker, at
 `language-native/<runner>` under the shared work directory, with
@@ -224,10 +224,9 @@ section covers baseline units.
   qualification runs each row at its own process count and windows, and smoke
   keeps the route's smoke windows. A method holding a value JMH cannot select
   runs whole with the handler's own arguments.
-- Odd replicas run native access, then object row, with forward Joni
-  comparator order; even replicas reverse both, as the unit ID's order
-  rule binds. A comparator order set in the environment that disagrees is an
-  error.
+- Odd replicas run native access, then object row, with forward comparator
+  order; even replicas reverse both, as the unit ID's order rule binds. A
+  comparator order set in the environment that disagrees is an error.
 - The first route calibrates before its rows and the last route after them,
   always in the native-access JVM so the two sides compare across routes. The
   unit's before/after calibration drift must be within 5%.
@@ -262,9 +261,11 @@ section covers baseline units.
 ## Comparator Ordering
 
 `JONI_COMPARATOR_ORDER=forward|reverse` controls the accepted measurement
-order for `trino-operations` and `trino-specialized-patterns-a` and `-b`.
-Forward runs Regulator before Joni; reverse runs Joni before Regulator. The
-JMH systems use separate exact invocations and JSON files.
+order for `trino-operations` and the specialized-pattern regex shards. It is
+named for Joni, the comparator it first ordered, and orders every comparator the
+same way: forward runs Regulator before the comparator; reverse runs the
+comparator before Regulator. Each system uses separate exact invocations and
+result files.
 
 The candidate and comparators always run on the same host and under the same
 smoke or qualification protocol.
@@ -284,6 +285,11 @@ smoke or qualification protocol.
   normalization. Even replicas reverse the Regulator variants and their
   workloads; Joni's workloads keep their forward order, and
   `JONI_COMPARATOR_ORDER` still places Joni before or after all the variants.
+- `specialized-patterns` runs `re2-specialized-patterns-a` and `-b` the same
+  way beside native RE2. Before measuring, it writes each workload's inputs and
+  the values every Regulator variant returns for each source, and the native
+  runner must print the same values. Each native row then runs in its own
+  runner process at its planned selector's protocol.
 - `trino-like` runs the Regulator, Trino optimized, and Trino SQL methods as
   separate exact filters. For `trino-like-specialized` it runs
   `BenchmarkTrinoLikeTpch`'s interpreted, generated, and Trino SQL methods over

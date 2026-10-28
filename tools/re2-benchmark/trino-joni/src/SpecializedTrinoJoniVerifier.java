@@ -14,11 +14,11 @@
 package io.trino.operator.scalar;
 
 import io.airlift.regulator.BenchmarkSpecializedTrinoRegexp;
-import io.airlift.regulator.BenchmarkSpecializedTrinoRegexp.Variant;
 import io.airlift.regulator.TestingEverydayTrinoRegexpBenchmarkInputs.Source;
-import io.airlift.regulator.TestingSpecializedTrinoRegexpBenchmarkInputs;
-import io.airlift.regulator.TestingSpecializedTrinoRegexpBenchmarkInputs.Operation;
-import io.airlift.regulator.TestingSpecializedTrinoRegexpBenchmarkInputs.Workload;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Operation;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Workload;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarks.Variant;
 import io.airlift.slice.Slice;
 import io.trino.type.JoniRegexp;
 import org.openjdk.jmh.annotations.Param;
@@ -50,8 +50,8 @@ public final class SpecializedTrinoJoniVerifier
         MessageDigest digest = sha256();
         int comparisonCount = 0;
 
-        for (String workloadId : TestingSpecializedTrinoRegexpBenchmarkInputs.workloadIds()) {
-            Workload workload = TestingSpecializedTrinoRegexpBenchmarkInputs.create(workloadId);
+        for (String workloadId : TestingSpecializedPatternBenchmarkInputs.workloadIds()) {
+            Workload workload = TestingSpecializedPatternBenchmarkInputs.create(workloadId);
             List<Variant> variants = BenchmarkSpecializedTrinoRegexp.variantsForTesting(workloadId);
             IntFunction<Object> expected = switch (workload.operation()) {
                 case REPLACE -> {
@@ -121,7 +121,7 @@ public final class SpecializedTrinoJoniVerifier
     private static void verifyWorkloadParameters(Operation operation, Class<?>... states)
             throws ReflectiveOperationException
     {
-        List<String> expected = TestingSpecializedTrinoRegexpBenchmarkInputs.workloadIds(operation);
+        List<String> expected = TestingSpecializedPatternBenchmarkInputs.workloadIds(operation);
         for (Class<?> state : states) {
             List<String> actual = parameters(state);
             if (!actual.equals(expected)) {

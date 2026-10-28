@@ -18,7 +18,7 @@ into a row-count-weighted overall score.
 | Population | Purpose | Comparators | Headline use |
 |---|---|---|---|
 | Application-shaped scalar operations | Compiled patterns applied to changing, short and medium inputs | Native RE2, JDK Pattern, Joni, or the `regex` crate for the selected language; Joni for additional Trino operations | Primary application view |
-| Specialized engine and compiler | Representative patterns on the regular engine, the specialized engine, and compiled, as warmed steady-state operations; Trino regex and LIKE today | The page comparator: Joni for Trino regex, Trino SQL LIKE for LIKE | Separate report section; excluded from headlines |
+| Specialized engine and compiler | Representative patterns on the regular engine, the specialized engine, and compiled, as warmed steady-state operations; Trino regex, RE2, and LIKE today | The page comparator: Joni for Trino regex, native RE2 for RE2, Trino SQL LIKE for LIKE | Separate report section; excluded from headlines |
 | Bulk text search | Whole files, books, source trees, dictionaries, and large logs | Native RE2, JDK Pattern, Joni, or the `regex` crate for the selected language, where supported | Separate throughput view |
 | Compilation | Cold and repeated pattern compilation | Comparator for the pattern language | Integrated lifecycle view; compile-only data in raw downloads |
 | Literal-probe distributions | One literal counted over a pinned corpus with Regulator's default and a corpus-matched byte-frequency distribution | Native RE2, JDK Pattern, Joni, or the `regex` crate for the selected regex language | Separate report section; excluded from headlines |
@@ -95,22 +95,52 @@ engine and the specialized engine make the public call; the compiled pattern is
 it, the best case such an engine sees. Each pattern runs in its own JVM, so no
 call site sees another pattern. LIKE has no regular-engine variant.
 
+The regex languages share the Trino workloads. Each language applies a
+workload's operation through its own public API, and its comparator applies it
+through the comparator's nearest public call, in its own process on the same
+host:
+
+- RE2's `replace` and `extract` are `replaceAll` and `extract` with the
+  rewrite `\N` of the workload's group, and its `extractAll` collects the group
+  of every match from one reused matcher. Native RE2 times `GlobalReplace`,
+  `Extract`, and a `Match` loop. `GlobalReplace` rewrites its string in place,
+  so native RE2 copies every source before the call, even one that does not
+  match; Regulator returns such a source unchanged. Native RE2 records no
+  allocation.
+
 Case `trino-specialized/<workload>` is the specialized engine for Trino regex,
-and `trino-like-specialized/<workload>` for LIKE. Appending `/generated` gives
-the compiled pattern, and `/regular-engine`, where measured, the regular
-engine.
+`re2-specialized/<workload>` for RE2, and `trino-like-specialized/<workload>`
+for LIKE. Appending `/generated` gives the compiled pattern, and
+`/regular-engine`, where measured, the regular engine.
 
 This population answers what a pattern gains from the specialized engine and
 from the opt-in compiler. It reports warmed steady-state operations only;
 compile and generation costs are not part of it. These rows carry their own
 `specialized-patterns` population and never enter a headline summary. Trino
-regex and LIKE have them today. Another language, against a comparator the
-baseline already reduces, needs no report change: it adds its catalog rows to
-`specialized-patterns.tsv`, with that comparator and case prefix, and the
-campaign code that measures them, which is a benchmark class, the branch of
-`generate-manifest.py` that writes its manifest rows, and its shard's handler in
-`run-shard.sh`. Its rows' protocols and work units are generated when the
-candidate is frozen.
+regex, RE2, and LIKE have them today. `COMPARATOR_LANGUAGES` in
+`benchmark-report/scripts/baseline_data.py` maps each comparator a catalog row
+can name to its language page, so another workload for these languages needs
+no report change: it adds its catalog rows to `specialized-patterns.tsv`, with
+the comparator and case prefix, and its inputs and benchmark methods. A
+language the report does not yet map needs its comparator added to
+`COMPARATOR_LANGUAGES` as well, and the campaign code that measures it: a
+benchmark class, its suite in `generate-manifest.py`, its shards in
+`shards.tsv` and `shard-dispatch.tsv`, and, for a comparator `run-shard.sh`
+does not yet run, a branch of the `specialized-patterns` handler. A new
+comparator also needs:
+
+- its system in `COMPARATOR_SYSTEMS` of
+  `tools/re2-benchmark/baseline/row_protocol.py`, and, if it is native, in
+  `NATIVE_SYSTEMS` there, which sets its rows' execution kind for both
+  `generate-manifest.py` and `run-shard.sh`;
+- if it is native, a case in the comparator switch of
+  `SpecializedPatternNativeInputs`, and the runner's operations.
+
+A new workload or language then reruns `generate-manifest.py`, which writes
+both `rows.tsv` and its `rows.sha256` checksum, and updates the row and shard
+counts in `validate-manifest.py` and the `--expected-manifest-rows` default of
+`aggregate_results.py` by hand. The rows' protocols and work units are
+generated when the candidate is frozen.
 
 ## Bulk text search
 

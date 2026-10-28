@@ -36,7 +36,10 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
     """Runs a route's measurement handler with its JMH calls and normalization intercepted.
 
     Returns each handler JMH call as (runner, filter, parameters, time unit, output), where the
-    runner is processes or forks, and each normalization call as its argument list.
+    runner is processes or forks, and each normalization call as its argument list. A native
+    comparator's call is (native, its operation as a filter, its parameters, its capture group and
+    protocol flags, output), at the frozen qualification protocol of its row; the nth native
+    workload of the shard captures group n.
     """
     source = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
 
@@ -53,10 +56,24 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
             (root / directory).mkdir()
         subprocess.run([str(SOURCE), "expected", "--manifest", str(MANIFEST), "--shard", shard, "--systems",
                         dispatch[f"{route_column}_systems"], "--output", str(root / "expected-rows.tsv")], check=True)
+        manifest = SHARD_RESULTS.load_manifest(MANIFEST)
+        shard_rows = [row for row in manifest if row["shard_id"] == shard]
+        expected = SHARD_RESULTS.load_manifest(root / "expected-rows.tsv")
+        SHARD_RESULTS.write_tsv(root / "jmh-selectors.tsv", UNIT_SESSION.SELECTOR_FIELDS, UNIT_SESSION.selectors(
+            expected, shard_rows, ROW_PROTOCOL.load(MANIFEST.with_name("row-protocol.tsv")), "qualification", {}))
+        (root / "native").mkdir()
+        native_rows = [row for row in shard_rows if row["system"] in ROW_PROTOCOL.NATIVE_SYSTEMS]
+        (root / "native" / "workloads.tsv").write_text("".join(
+            f"{row['parameters'].removeprefix('workload=')}\t{row['benchmark']}\t{group}\n"
+            for group, row in enumerate(native_rows, 1)))
         functions = [shell_function(source, name) for name in (
-            "run_jmh", "run_jmh_per_workload", "run_ordered_joni_comparison", "run_trino_operations_candidate",
-            "run_trino_operations_joni", "run_trino_operations_candidates", "run_trino_operations_shard",
-            "run_trino_like_system", "run_trino_like_shard")]
+            "run_jmh", "run_jmh_per_workload", "run_ordered_comparison", "run_regulator_candidate",
+            "run_trino_operations_joni", "run_regulator_candidates", "run_trino_operations_shard",
+            "prepare_specialized_comparator", "window_seconds", "run_specialized_native",
+            "run_specialized_patterns_shard", "run_trino_like_system", "run_trino_like_shard")]
+        # The comparator's runner and inputs are already in place.
+        preparation = (["prepare_specialized_native() { :; }", "prepare_specialized_comparator"]
+                       if handler == "specialized-patterns" and route == "native-access" else [])
         recorder = (
             "    local runner=$1 filter=$3 output=$4 parameters=() unit=-\n"
             "    shift 4\n"
@@ -69,18 +86,27 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
             "    done\n"
             "    printf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"${runner}\" \"${filter}\" \"${parameters[*]}\" \"${unit}\" \"${output##*/}\" \\\n"
             "        >> \"${RESULT_DIR}/launches.tsv\"\n")
+        native_recorder = (
+            "    shift 2\n"
+            "    local operation=$4 group=$5\n"
+            "    shift 5\n"
+            "    printf 'native\\t^%s$\\t%s\\t%s\\t%s\\n' \"${operation}\" \"${5#--benchmark_context=parameter.}\" \\\n"
+            "        \"group ${group} ${*:1:4}\" \"${7##*/}\" >> \"${RESULT_DIR}/launches.tsv\"\n")
         script = "\n".join([
             "set -euo pipefail",
             f"SHARD_ID={shard} ROUTE={route} CAMPAIGN_REPLICA_ID={replica} RESULT_DIR={shlex.quote(str(root))}",
             f"systems={dispatch[f'{route_column}_systems']} SELECTION_MANIFEST={shlex.quote(str(MANIFEST))}",
             f"RESULT_TOOL={shlex.quote(str(SOURCE))} JONI_COMPARATOR_ORDER={joni_order}",
             "CLASSPATH=regulator SPECIAL_CLASSPATH=special PINNED_TRINO_CLASSPATH=pinned",
+            f"UNIT_TOOL={shlex.quote(str(SOURCE.with_name('unit_session.py')))} CPU_LIST=0 handler={handler}",
+            f"NATIVE_RUNNER=runner NATIVE_INPUT_DIR={shlex.quote(str(root / 'native'))}",
             "secondary_metric_arguments=() mixed_process_arguments=() joni_process_arguments=()",
             "precision_arguments=() normalized_files=()",
             block("JMH_SUITE_ORDER=forward\n"), block("jmh_invocation_per_workload=false\n"),
             "record_jmh_call() {", recorder, "}",
             "run_jmh_with_classpath() { record_jmh_call processes \"$@\"; }",
             "run_joni_jmh_with_classpath() { record_jmh_call forks \"$@\"; }",
+            "taskset() {", native_recorder, "}",
             "set_jmh_input_files() { JMH_INPUT_FILES=(\"$1\"); }",
             "python3() {",
             "    if [[ $2 == normalize-* ]]; then",
@@ -91,6 +117,7 @@ def run_shard_handler(shard, route, replica, joni_order="forward"):
             "    fi",
             "}",
             *functions,
+            *preparation,
             f"run_{handler.replace('-', '_')}_shard",
         ])
         subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True)
@@ -120,21 +147,33 @@ class TestShardResults(unittest.TestCase):
             system = argument_values(arguments, "--system")[0]
             self.assertEqual(sorted(outputs[system]), sorted(Path(path).name for path in argument_values(arguments, "--input")))
 
-    def testSpecializedPatternsRunEachWorkloadInItsOwnJvms(self):
+    def testSpecializedPatternsRunEachWorkloadInItsOwnInvocation(self):
         candidates = ("regulator-native-access", "regulator-regular-engine-native-access", "regulator-generated-native-access")
         manifest = SHARD_RESULTS.load_manifest(MANIFEST)
 
         def launches_of(shard, system, reverse):
             rows = [row for row in manifest if row["shard_id"] == shard and row["system"] == system]
-            runner = "forks" if system == "joni" else "processes"
-            return [
+            if system in ROW_PROTOCOL.NATIVE_SYSTEMS:
+                # A native comparator runs each workload with its capture group and asks for a ten-second
+                # minimum warmup, a one-second minimum time, and ten repetitions, never as a dry run.
+                runner = "native"
+                units = [f"group {group} --benchmark_min_warmup_time=10 --benchmark_min_time=1s "
+                         "--benchmark_repetitions=10 --benchmark_dry_run=false" for group in range(1, len(rows) + 1)]
+            else:
+                runner = "forks" if system == "joni" else "processes"
+                units = ["-"] * len(rows)
+            launches = [
                 (system, (runner, "^" + row["benchmark"].replace(".", "\\.") + "$",
-                          row["parameters"].replace(";", " "), "-"))
-                for row in (rows[::-1] if reverse else rows)]
+                          row["parameters"].replace(";", " "), unit))
+                for row, unit in zip(rows, units)]
+            return launches[::-1] if reverse else launches
 
-        # Even replicas reverse the Regulator variants and their workloads. Joni keeps its workload
-        # order, and JONI_COMPARATOR_ORDER places it after or before every variant.
-        for shard in ("trino-specialized-patterns-a", "trino-specialized-patterns-b"):
+        # Even replicas reverse the Regulator variants and their workloads. The comparator keeps its
+        # workload order, and JONI_COMPARATOR_ORDER places it after or before every variant.
+        shards = [shard for shard in DISPATCH if "-specialized-patterns-" in shard]
+        self.assertIn("re2-specialized-patterns-a", shards)
+        for shard in shards:
+            comparator = next(row["comparator"] for row in manifest if row["shard_id"] == shard)
             for replica, joni_order in ((1, "forward"), (2, "forward"), (1, "reverse")):
                 with self.subTest(shard=shard, replica=replica, joni_order=joni_order):
                     launches, normalizations = run_shard_handler(shard, "native-access", replica, joni_order)
@@ -143,9 +182,12 @@ class TestShardResults(unittest.TestCase):
                     variants = [
                         launch for system in (candidates[::-1] if reverse else candidates)
                         for launch in launches_of(shard, system, reverse)]
-                    joni = launches_of(shard, "joni", False)
-                    expected = joni + variants if joni_order == "reverse" else variants + joni
+                    comparison = launches_of(shard, comparator, False)
+                    expected = comparison + variants if joni_order == "reverse" else variants + comparison
                     self.assertEachWorkloadLaunches(expected, launches, normalizations)
+                    for arguments in normalizations:
+                        if arguments[1] == "normalize-native":
+                            self.assertEqual(["10"], argument_values(arguments, "--expected-repetitions"))
 
     def testTrinoOperationsKeepsOneInvocationPerSystemOnEveryReplica(self):
         for replica in (1, 2):
@@ -222,7 +264,7 @@ class TestShardResults(unittest.TestCase):
                     for benchmark in selector["benchmarks"].split(","):
                         with self.subTest(unit=unit["unit_id"], route=route, benchmark=benchmark):
                             self.assertTrue(any(pattern.search(benchmark) for pattern in filters[key]))
-        self.assertEqual({"trino-like", "trino-operations"}, handlers)
+        self.assertEqual({"specialized-patterns", "trino-like", "trino-operations"}, handlers)
 
     def testUnitHandlerCallRunsEachSelectorAtItsProtocol(self):
         source = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
@@ -284,6 +326,61 @@ class TestShardResults(unittest.TestCase):
             workload_base = workload_output.with_suffix("")
             self.assertTrue(lines[8].endswith(f"-rff {workload_base}-selector-5-process-1.json -p workload=b -tu ns"))
             self.assertEqual([f"input {workload_base}-selector-5-process-1.json"], lines[9:])
+
+    def testNativeComparatorMustReturnRegulatorsValuesBeforeTiming(self):
+        source = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
+        catalog = SOURCE.with_name("specialized-patterns.tsv")
+        with catalog.open(newline="", encoding="utf-8") as catalog_file:
+            workloads = [(row["workload"], row["operation"]) for row in csv.DictReader(catalog_file, delimiter="\t")
+                         if row["comparator"] == "native-re2"]
+        semantic_functions = source[source.index("SEMANTIC_FAILURE_STATUS="):source.index(
+            "\n}\n", source.index("run_semantic_verifier()")) + 3]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "logs").mkdir()
+            (root / "shared/engine-build").mkdir(parents=True)
+            (root / "shared/engine-build/native.sha256").write_text("a" * 64)
+            # The prebuilt runner prints the values in its input, unless the case makes it fail or differ.
+            runner = root / "shared/language-native/language_benchmark"
+            runner.parent.mkdir()
+            runner.write_text(
+                '#!/bin/bash\n[[ ${FAIL} != runner ]] || exit 3\n[[ ${FAIL} != values ]] || echo other\ncat "$2"\n')
+            runner.chmod(0o755)
+            # Regulator's inputs for each listed workload hold its values, which are also the expected values.
+            java = (
+                "java() {\n"
+                "    local directory=${*: -1} workload operation\n"
+                "    mkdir -p \"${directory}\"\n"
+                "    : > \"${directory}/workloads.tsv\"\n"
+                "    while read -r workload operation; do\n"
+                "        printf '%s\\t%s\\t1\\n' \"${workload}\" \"${operation}\" >> \"${directory}/workloads.tsv\"\n"
+                "        printf '%s\\n' \"${workload}\" |\n"
+                "            tee \"${directory}/${workload}.input\" > \"${directory}/${workload}.expected\"\n"
+                "    done <<<\"${LISTED}\"\n"
+                "}\n")
+            # A failed check is a semantic failure, which a unit controller rejects rather than retries.
+            semantic_failure = 44
+            first, operation = workloads[0]
+            for failure, listed, status, message in (
+                    ("none", workloads, 0, f"Verified {len(workloads)} native-re2 specialized workloads"),
+                    ("none", workloads[1:], semantic_failure, "not the catalog's"),
+                    ("runner", workloads, semantic_failure, f"native-re2 could not verify {first}"),
+                    ("values", workloads, semantic_failure,
+                     f"native-re2 {operation} values differ from Regulator's for {first}")):
+                with self.subTest(failure=failure, listed=len(listed)):
+                    listing = "\n".join(f"{name} {kind}" for name, kind in listed)
+                    script = "\n".join([
+                        "set -euo pipefail",
+                        f"RESULT_DIR={shlex.quote(str(root))} ROOT={shlex.quote(str(root))}",
+                        f"SHARED_WORK_DIR={shlex.quote(str(root / 'shared'))} CLASSPATH=regulator",
+                        f"SPECIALIZED_CATALOG={shlex.quote(str(catalog))} specialized_comparator=native-re2",
+                        "route_jvm_arguments=()",
+                        semantic_functions, shell_function(source, "prebuilt_engine"),
+                        shell_function(source, "prepare_specialized_native"), java,
+                        f"FAIL={failure} LISTED={shlex.quote(listing)} prepare_specialized_native"])
+                    result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
+                    self.assertEqual(status, result.returncode, result.stderr)
+                    self.assertIn(message, result.stdout + result.stderr)
 
     def testReverseSuiteOrderingUsesPortableAwkVariable(self):
         script = SOURCE.with_name("run-shard.sh").read_text(encoding="utf-8")
@@ -766,27 +863,29 @@ class TestShardResults(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exceeded"):
                 SHARD_RESULTS.validate_drift(arguments)
 
-    def testCurrentManifestUsesExactTrinoSystemSets(self):
+    def testCurrentManifestUsesExactRegexSystemSets(self):
         rows = SHARD_RESULTS.load_manifest(MANIFEST)
-        shards = {"trino-operations", "trino-specialized-patterns-a", "trino-specialized-patterns-b"}
         counts = {}
         for row in rows:
-            if row["shard_id"] in shards:
+            if DISPATCH[row["shard_id"]]["native_access_handler"] != "trino-like":
                 key = (row["suite"], row["system"])
                 counts[key] = counts.get(key, 0) + 1
 
+        # Each language's specialized suite measures the three variants on both routes beside its comparator.
+        variants = (
+            "regulator-generated-native-access",
+            "regulator-generated-object-row",
+            "regulator-native-access",
+            "regulator-object-row",
+            "regulator-regular-engine-native-access",
+            "regulator-regular-engine-object-row")
         self.assertEqual({
             ("trino-everyday-operations", "joni"): 104,
             ("trino-everyday-operations", "regulator-native-access"): 104,
             ("trino-everyday-operations", "regulator-object-row"): 104,
-            **{("trino-specialized-patterns", system): 5 for system in (
-                "joni",
-                "regulator-generated-native-access",
-                "regulator-generated-object-row",
-                "regulator-native-access",
-                "regulator-object-row",
-                "regulator-regular-engine-native-access",
-                "regulator-regular-engine-object-row")},
+            **{(suite, system): 5
+               for suite, comparator in (("trino-specialized-patterns", "joni"), ("re2-specialized-patterns", "native-re2"))
+               for system in (comparator, *variants)},
         }, counts)
 
     def testCurrentManifestUsesAccurateAllocationContracts(self):
@@ -797,6 +896,9 @@ class TestShardResults(unittest.TestCase):
         self.assertNotIn(
             "not-measured",
             {row["allocation_contract"] for row in measured_regulator_rows})
+        # A native runner records no allocation.
+        self.assertEqual({"not-measured"}, {row["allocation_contract"] for row in rows
+                                            if row["system"] in ROW_PROTOCOL.NATIVE_SYSTEMS})
 
     def testNormalizeJmhUsesManifestIdentifier(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

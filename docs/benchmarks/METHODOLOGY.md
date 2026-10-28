@@ -151,6 +151,7 @@ Representative JMH classes include:
 | `BenchmarkExpressionPlans` | Direct expression plans and general controls |
 | `BenchmarkEverydayTrinoRegexp` | Application-shaped Trino operations over rotating Slice values |
 | `BenchmarkSpecializedTrinoRegexp` | [Specialized-pattern workloads](SCAN_PLAN.md#benchmarks): one Trino operation per workload with the regular engine, the specialized engine, and the compiled pattern const-bound the way an engine like Trino binds it, each pattern in its own JVM |
+| `BenchmarkSpecializedRe2` | The specialized-pattern workloads through public RE2 operations, in the same three variants, beside native RE2 |
 | `BenchmarkTrinoRegexp` | Fixed-haystack Trino operation diagnostics |
 | `BenchmarkTrinoRows` | [Normative Trino rows](#normative-trino-rows): one Trino function per real corpus row, for literals, ordered pairs, and `.*literal.*` |
 | `BenchmarkTrinoLikeRows` | [Normative Trino rows](#normative-trino-rows): one Trino LIKE contains or ordered match per real corpus row, interpreted or generated |

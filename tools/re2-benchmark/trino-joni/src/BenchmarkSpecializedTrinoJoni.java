@@ -14,9 +14,9 @@
 package io.trino.operator.scalar;
 
 import io.airlift.regulator.TestingEverydayTrinoRegexpBenchmarkInputs.Source;
-import io.airlift.regulator.TestingSpecializedTrinoRegexpBenchmarkInputs;
-import io.airlift.regulator.TestingSpecializedTrinoRegexpBenchmarkInputs.Operation;
-import io.airlift.regulator.TestingSpecializedTrinoRegexpBenchmarkInputs.Workload;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Operation;
+import io.airlift.regulator.TestingSpecializedPatternBenchmarkInputs.Workload;
 import io.airlift.slice.Slice;
 import io.trino.type.JoniRegexp;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -114,7 +114,7 @@ public class BenchmarkSpecializedTrinoJoni
 
         void load(String workloadId, Operation operation)
         {
-            definition = TestingSpecializedTrinoRegexpBenchmarkInputs.create(workloadId);
+            definition = TestingSpecializedPatternBenchmarkInputs.create(workloadId);
             definition.requireOperation(operation);
             regexp = joniRegexp(definition.pattern());
             sources = definition.sources();
