@@ -89,7 +89,7 @@ public class BenchmarkSingleByteRepeatMatcher
     @Benchmark
     public long regularMatcher(BenchmarkData data)
     {
-        Re2Matcher matcher = data.re2.matcher(data.source);
+        RegexpMatcher matcher = data.re2.matcher(data.source);
         long count = 0;
         while (matcher.find()) {
             count++;
@@ -106,7 +106,7 @@ public class BenchmarkSingleByteRepeatMatcher
     @Benchmark
     public long regularMatcherBoundaries(BenchmarkData data)
     {
-        Re2Matcher matcher = data.re2.matcher(data.source);
+        RegexpMatcher matcher = data.re2.matcher(data.source);
         long boundaries = 0;
         while (matcher.find()) {
             boundaries += ((long) matcher.start() << 32) | matcher.end();

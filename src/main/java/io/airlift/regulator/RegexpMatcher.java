@@ -25,11 +25,12 @@ import static io.airlift.regulator.Re2.Anchor.ANCHOR_START;
 import static io.airlift.regulator.Re2.Anchor.UNANCHORED;
 import static java.util.Objects.requireNonNull;
 
-/// A reusable matcher for one compiled pattern.
+/// A reusable matcher for one compiled RE2, Java, or Rust pattern, and the matcher that
+/// [TrinoRegexpMatcher] wraps.
 ///
 /// The matcher owns one capture buffer and reuses it across operations. It is mutable and not
 /// thread-safe. Group values are zero-copy views of the current input.
-public final class Re2Matcher
+public final class RegexpMatcher
         implements Re2.MatchWorkspaces
 {
     private final Re2 pattern;
@@ -68,22 +69,22 @@ public final class Re2Matcher
     private boolean regionStartsAfterCarriageReturn;
     private Dfa.GroupZeroForwardCursor groupZeroForwardCursor;
 
-    Re2Matcher(Re2 pattern, Slice input)
+    RegexpMatcher(Re2 pattern, Slice input)
     {
         this(pattern, input, null);
     }
 
-    Re2Matcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher)
+    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher)
     {
         this(pattern, input, singleByteMatcher, pattern.capturingGroupCount());
     }
 
-    Re2Matcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount)
+    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount)
     {
         this(pattern, input, singleByteMatcher, capturingGroupCount, true);
     }
 
-    Re2Matcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableGroupZeroForwardCursor)
+    RegexpMatcher(Re2 pattern, Slice input, SingleByteMatcher singleByteMatcher, int capturingGroupCount, boolean enableGroupZeroForwardCursor)
     {
         this.pattern = requireNonNull(pattern, "pattern is null");
         if (capturingGroupCount < 0 || capturingGroupCount > pattern.capturingGroupCount()) {
@@ -128,7 +129,7 @@ public final class Re2Matcher
     }
 
     /// Resets this matcher to the complete logical input Slice.
-    public Re2Matcher reset(Slice input)
+    public RegexpMatcher reset(Slice input)
     {
         requireNonNull(input, "input is null");
         return reset(input, 0, input.length());
@@ -137,7 +138,7 @@ public final class Re2Matcher
     /// Resets this matcher to a logical input region without constructing a Slice view. Match and
     /// group offsets remain relative to the logical input Slice.
     @SuppressFBWarnings(value = "EI_EXPOSE_REP2", justification = "The matcher intentionally retains the caller's Slice for zero-copy matching")
-    public Re2Matcher reset(Slice input, int start, int end)
+    public RegexpMatcher reset(Slice input, int start, int end)
     {
         requireNonNull(input, "input is null");
         if (start < 0 || end < start || end > input.length()) {

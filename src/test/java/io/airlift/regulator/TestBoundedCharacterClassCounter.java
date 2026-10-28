@@ -175,7 +175,7 @@ public class TestBoundedCharacterClassCounter
         assertThat(re2.findInto(twoMatches, groups)).isTrue();
         assertThat(groups).containsExactly(1, 513);
 
-        Re2Matcher matcher = re2.matcher(twoMatches, 0);
+        RegexpMatcher matcher = re2.matcher(twoMatches, 0);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(1);
         assertThat(matcher.end()).isEqualTo(513);
@@ -211,7 +211,7 @@ public class TestBoundedCharacterClassCounter
         assertThat(re2.matches(input)).isFalse();
         assertThat(re2.matches(input, 1, 5)).isTrue();
 
-        Re2Matcher matcher = re2.matcher(input, 0);
+        RegexpMatcher matcher = re2.matcher(input, 0);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(1);
         assertThat(matcher.end()).isEqualTo(5);
@@ -387,7 +387,7 @@ public class TestBoundedCharacterClassCounter
 
     private static long countWithGeneralMatcher(Re2 re2, Slice input)
     {
-        Re2Matcher matcher = re2.groupZeroMatcher(input, null);
+        RegexpMatcher matcher = re2.groupZeroMatcher(input, null);
         long count = 0;
         while (matcher.find()) {
             count++;

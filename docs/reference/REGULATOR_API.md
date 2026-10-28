@@ -254,11 +254,11 @@ if (result != null) {
 }
 ```
 
-Use `Re2Matcher` to iterate over non-overlapping matches while reusing its
+Use `RegexpMatcher` to iterate over non-overlapping matches while reusing its
 capture storage and execution workspaces:
 
 ```java
-Re2Matcher matcher = pattern.matcher(input);
+RegexpMatcher matcher = pattern.matcher(input);
 while (matcher.find()) {
     Slice key = matcher.group("key");
     Slice value = matcher.group("value");
@@ -297,7 +297,7 @@ is the context, except that, as in the JDK, `$` and `\Z` do not match at the
 start of a nonempty region that splits a CR LF (without `(?d)`); see
 [Java regexp](languages/JAVA_REGEXP.md#matching).
 
-`Re2Matcher` is mutable and not thread-safe. Its capture buffer and execution
+`RegexpMatcher` is mutable and not thread-safe. Its capture buffer and execution
 workspaces are reused across `find`, `matches`, `lookingAt`, and `reset` calls.
 `reset(input, start, end)` restricts matching without constructing a Slice view.
 As the JDK's `Matcher.find(int)` does, `find(int)` resets the region to the
@@ -325,7 +325,7 @@ throws `NumberFormatException` for unmatched, malformed, or out-of-range values.
 Like `java.util.regex`, Regulator separates the compiled pattern from mutable
 matcher state. `find`, `lookingAt`, and `matches` have the same high-level
 meanings. Share a compiled `Re2` across threads, but keep a separate
-`Re2Matcher` for each thread.
+`RegexpMatcher` for each thread.
 
 The APIs are familiar, but their representations and capabilities differ:
 
@@ -335,7 +335,7 @@ The APIs are familiar, but their representations and capabilities differ:
 | Position unit | UTF-16 code-unit offset | Byte offset relative to the logical Slice |
 | Captures | `String` values from a mutable `Matcher` or `MatchResult` | Zero-copy Slice views, mutable matcher state, immutable result, or caller-owned `int[]` bounds |
 | One-shot matching | Create a matcher, then call `find`, `lookingAt`, or `matches` | The same matcher form plus direct methods on the compiled `Re2` |
-| Repeated matching | Mutable `Matcher` | Mutable `Re2Matcher` with reusable captures and execution workspaces |
+| Repeated matching | Mutable `Matcher` | Mutable `RegexpMatcher` with reusable captures and execution workspaces |
 | Replacement grammar | `$1`, `${name}`, and backslash escaping | Native RE2 grammar in `Re2`; Trino's Java-style grammar in `TrinoRegexp`; no replacement API in `JavaRegexp` or `RustRegexp` |
 | Convenience adapters | Splits, streams, predicates, and `CharSequence` regions | Allocation-conscious Slice matching, caller-owned capture buffers, multi-pattern matching, and Trino operations |
 | Worst-case execution | Ordered backtracking can take exponential time | RE2 execution uses bounded memory and linear-time algorithms |
@@ -374,7 +374,7 @@ mode for the complete pattern or a scoped group.
 
 `RustRegexp.Options` exposes the crate's `RegexBuilder` settings the same way,
 with the Java names where the concept is the same, such as `setMultiline` and
-`setComments`. `RustRegexp` returns the same `Re2Matcher`, which applies the
+`setComments`. `RustRegexp` returns the same `RegexpMatcher`, which applies the
 crate's empty-match and assertion-context rules to Rust patterns.
 
 ## Rewrites

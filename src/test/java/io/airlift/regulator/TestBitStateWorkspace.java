@@ -80,8 +80,8 @@ public class TestBitStateWorkspace
             throws ReflectiveOperationException
     {
         Slice input = Slices.utf8Slice("650-253-" + "0".repeat(100_000));
-        Re2Matcher matcher = Re2.compile(Slices.utf8Slice("[0-9]+.(.*)")).matcher(input);
-        Field workspaceField = Re2Matcher.class.getDeclaredField("bitStateWorkspace");
+        RegexpMatcher matcher = Re2.compile(Slices.utf8Slice("[0-9]+.(.*)")).matcher(input);
+        Field workspaceField = RegexpMatcher.class.getDeclaredField("bitStateWorkspace");
         workspaceField.setAccessible(true);
         assertThat(workspaceField.get(matcher)).isNull();
 
@@ -147,7 +147,7 @@ public class TestBitStateWorkspace
     private static Field matcherWorkspace(String name)
             throws NoSuchFieldException
     {
-        Field field = Re2Matcher.class.getDeclaredField(name);
+        Field field = RegexpMatcher.class.getDeclaredField(name);
         field.setAccessible(true);
         return field;
     }

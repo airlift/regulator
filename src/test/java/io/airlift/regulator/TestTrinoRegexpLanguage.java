@@ -340,7 +340,7 @@ public class TestTrinoRegexpLanguage
         assertThat(pattern.findLoweredGroupZeroBoundary(input, 0, input.length(), 0))
                 .isEqualTo(input.length() - 1L);
 
-        Re2Matcher matcher = pattern.matcher(input, 0);
+        RegexpMatcher matcher = pattern.matcher(input, 0);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isZero();
         assertThat(matcher.end()).isEqualTo(input.length() - 1);
@@ -1373,7 +1373,7 @@ public class TestTrinoRegexpLanguage
                 _ -> {});
     }
 
-    private static List<MatchBoundary> matchBoundaries(Re2Matcher matcher)
+    private static List<MatchBoundary> matchBoundaries(RegexpMatcher matcher)
     {
         List<MatchBoundary> boundaries = new ArrayList<>();
         while (matcher.find()) {

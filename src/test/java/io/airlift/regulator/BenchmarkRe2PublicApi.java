@@ -55,7 +55,7 @@ public class BenchmarkRe2PublicApi
         private Slice rewrite;
         private Slice source;
         private int[] groups;
-        private Re2Matcher matcher;
+        private RegexpMatcher matcher;
 
         @Setup
         public void setup()
@@ -158,7 +158,7 @@ public class BenchmarkRe2PublicApi
     }
 
     @Benchmark
-    public Re2Matcher createMatcher(BenchmarkData data)
+    public RegexpMatcher createMatcher(BenchmarkData data)
     {
         return data.pattern.matcher(data.source);
     }
@@ -187,7 +187,7 @@ public class BenchmarkRe2PublicApi
         return findAll(data.matcher.reset(data.source));
     }
 
-    private static long findAll(Re2Matcher matcher)
+    private static long findAll(RegexpMatcher matcher)
     {
         long checksum = 0;
         while (matcher.find()) {

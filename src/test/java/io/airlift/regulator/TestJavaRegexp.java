@@ -127,7 +127,7 @@ public class TestJavaRegexp
         assertThat(regexp.lookingAtResult(input, 2, 3)).isNotNull();
         assertThat(regexp.matchesResult(input, 2, 3)).isNotNull();
 
-        Re2Matcher matcher = regexp.matcher(input);
+        RegexpMatcher matcher = regexp.matcher(input);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.group("value").toStringUtf8()).isEqualTo("a");
 

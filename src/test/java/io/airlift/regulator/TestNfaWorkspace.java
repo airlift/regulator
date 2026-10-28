@@ -95,8 +95,8 @@ public class TestNfaWorkspace
         assertThat(pattern.forwardProgramForDiagnostics().isOnePass()).isFalse();
         assertThat(pattern.forwardProgramForDiagnostics().canBitState()).isFalse();
 
-        Re2Matcher matcher = pattern.matcher(input);
-        Field workspaceField = Re2Matcher.class.getDeclaredField("nfaWorkspace");
+        RegexpMatcher matcher = pattern.matcher(input);
+        Field workspaceField = RegexpMatcher.class.getDeclaredField("nfaWorkspace");
         workspaceField.setAccessible(true);
         assertThat(workspaceField.get(matcher)).isNull();
 
@@ -175,7 +175,7 @@ public class TestNfaWorkspace
     private static Field matcherWorkspace(String name)
             throws NoSuchFieldException
     {
-        Field field = Re2Matcher.class.getDeclaredField(name);
+        Field field = RegexpMatcher.class.getDeclaredField(name);
         field.setAccessible(true);
         return field;
     }

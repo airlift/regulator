@@ -517,7 +517,7 @@ public class TestRe2Allocations
 
         Re2 pattern = Re2.compile(Slices.utf8Slice("(a)(b)(c)(d)(e)"));
         Slice source = Slices.utf8Slice("abcde");
-        Re2Matcher matcher = pattern.matcher(source);
+        RegexpMatcher matcher = pattern.matcher(source);
 
         for (int iteration = 0; iteration < 20_000; iteration++) {
             matcher.reset(source);
@@ -554,7 +554,7 @@ public class TestRe2Allocations
                         "d".repeat(100) +
                         "e".repeat(100) +
                         "f".repeat(100));
-        Re2Matcher matcher = pattern.matcher(source);
+        RegexpMatcher matcher = pattern.matcher(source);
 
         for (int iteration = 0; iteration < 20_000; iteration++) {
             matcher.reset(source);

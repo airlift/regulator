@@ -258,7 +258,7 @@ public final class JavaRegexp
     }
 
     /// Returns the number of non-overlapping matches, including empty matches.
-    /// Empty matches advance by one UTF-8 code point as in [Re2Matcher#find()].
+    /// Empty matches advance by one UTF-8 code point as in [RegexpMatcher#find()].
     /// No capture values are returned.
     public long count(Slice input)
     {
@@ -294,13 +294,13 @@ public final class JavaRegexp
     }
 
     /// Creates a mutable matcher retaining every capturing group.
-    public Re2Matcher matcher(Slice input)
+    public RegexpMatcher matcher(Slice input)
     {
         return pattern.matcher(requireNonNull(input, "input is null"));
     }
 
     /// Creates a reusable matcher retaining group zero and the requested prefix of capturing groups.
-    public Re2Matcher matcher(Slice input, int retainedCapturingGroupCount)
+    public RegexpMatcher matcher(Slice input, int retainedCapturingGroupCount)
     {
         return pattern.matcher(requireNonNull(input, "input is null"), retainedCapturingGroupCount);
     }

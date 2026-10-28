@@ -17,7 +17,7 @@ invalid byte.
 JavaRegexp regexp = JavaRegexp.compile(
         Slices.utf8Slice("error: ([a-z]+)"),
         JavaRegexp.Options.defaults().setCaseInsensitive(true));
-Re2Matcher matcher = regexp.matcher(Slices.utf8Slice("ERROR: timeout"));
+RegexpMatcher matcher = regexp.matcher(Slices.utf8Slice("ERROR: timeout"));
 if (matcher.find()) {
     Slice reason = matcher.group(1);
 }

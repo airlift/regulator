@@ -161,7 +161,7 @@ public class BenchmarkJavaScanPlan
         private JavaRegexp.Options options;
         private MethodHandle compiler;
         JavaRegexp[] patterns;
-        private Re2Matcher[] matchers;
+        private RegexpMatcher[] matchers;
         private int[] bounds;
         private int[] extractionGroups;
         Slice[] inputs;
@@ -182,7 +182,7 @@ public class BenchmarkJavaScanPlan
             int count = source.expressions.length;
             expressions = new Slice[count];
             patterns = new JavaRegexp[count];
-            matchers = new Re2Matcher[count];
+            matchers = new RegexpMatcher[count];
             bounds = new int[2];
             extractionGroups = new int[count];
             for (int index = 0; index < count; index++) {
@@ -231,7 +231,7 @@ public class BenchmarkJavaScanPlan
     public Slice extract(BenchmarkData data)
     {
         Slice input = data.next();
-        Re2Matcher matcher = data.matchers[data.patternIndex];
+        RegexpMatcher matcher = data.matchers[data.patternIndex];
         return matcher.reset(input).find() ? matcher.group(data.extractionGroups[data.patternIndex]) : null;
     }
 
@@ -239,7 +239,7 @@ public class BenchmarkJavaScanPlan
     public List<Slice> extractAll(BenchmarkData data)
     {
         Slice input = data.next();
-        Re2Matcher matcher = data.matchers[data.patternIndex].reset(input);
+        RegexpMatcher matcher = data.matchers[data.patternIndex].reset(input);
         int group = data.extractionGroups[data.patternIndex];
         List<Slice> matches = new ArrayList<>();
         while (matcher.find()) {

@@ -88,7 +88,7 @@ public final class ScanKernelProbe
                     pattern.findResult(source);
                     pattern.count(source);
                     pattern.replaceAll(source, utf8Slice("<\\1>"));
-                    Re2Matcher matcher = pattern.matcher(source);
+                    RegexpMatcher matcher = pattern.matcher(source);
                     while (matcher.find()) {
                         matcher.group(1);
                     }
@@ -108,7 +108,7 @@ public final class ScanKernelProbe
                     regexp.findResult(source);
                     regexp.matchesResult(source);
                     regexp.count(source);
-                    Re2Matcher matcher = regexp.matcher(source);
+                    RegexpMatcher matcher = regexp.matcher(source);
                     while (matcher.find()) {
                         matcher.group(1);
                     }
@@ -126,7 +126,7 @@ public final class ScanKernelProbe
                     regexp.findResult(source);
                     regexp.matchesResult(source);
                     regexp.count(source);
-                    Re2Matcher matcher = regexp.matcher(source);
+                    RegexpMatcher matcher = regexp.matcher(source);
                     while (matcher.find()) {
                         matcher.group(1);
                     }

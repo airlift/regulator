@@ -56,7 +56,7 @@ public class TestSingleByteMatcher
             SingleByteMatcher singleByteMatcher = re2.createSingleByteMatcher();
             assertThat(singleByteMatcher).as(patternCase.pattern()).isNotNull();
 
-            Re2Matcher regularMatcher = re2.genericGroupZeroMatcherForDiagnostics(input);
+            RegexpMatcher regularMatcher = re2.genericGroupZeroMatcherForDiagnostics(input);
             int nextStart = 0;
             long count = 0;
             while (regularMatcher.find()) {
@@ -212,7 +212,7 @@ public class TestSingleByteMatcher
 
     private static long countRegularMatches(Re2 re2, Slice input)
     {
-        Re2Matcher matcher = re2.matcher(input);
+        RegexpMatcher matcher = re2.matcher(input);
         long count = 0;
         while (matcher.find()) {
             count++;
@@ -222,7 +222,7 @@ public class TestSingleByteMatcher
 
     private static void assertSameBoundaries(String pattern, Re2 re2, SingleByteRepeatMatcher repeatMatcher, Slice input, int start)
     {
-        Re2Matcher regularMatcher = re2.matcher(input);
+        RegexpMatcher regularMatcher = re2.matcher(input);
         SingleByteRepeatMatcher.Cursor repeatCursor = repeatMatcher.matcher(input);
 
         boolean regularFound = regularMatcher.find(start);

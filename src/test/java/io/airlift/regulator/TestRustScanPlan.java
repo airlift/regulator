@@ -183,7 +183,7 @@ public class TestRustScanPlan
             assertThat(anchored.lookingAtResult(source).groupUtf8(1)).as(name).isEqualTo("höst");
             assertThat(anchored.matches(utf8Slice("https://höst"))).as(name).isTrue();
             assertThat(anchored.count(source)).as(name).isEqualTo(1);
-            Re2Matcher matcher = anchored.matcher(source);
+            RegexpMatcher matcher = anchored.matcher(source);
             assertThat(matcher.find()).as(name).isTrue();
             assertThat(matcher.group(1)).as(name).isEqualTo(utf8Slice("höst"));
 
@@ -438,7 +438,7 @@ public class TestRustScanPlan
                     matches(regexp.matcher(source).reset(source, 0, length - 1)) +
                     matches(regexp.matcher(source).reset(source, 1, length - 1)));
         }
-        Re2Matcher matcher = regexp.matcher(source);
+        RegexpMatcher matcher = regexp.matcher(source);
         results.add(matcher.lookingAt() + " " + matcher.matches());
         return results;
     }

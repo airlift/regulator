@@ -63,16 +63,16 @@ authority's Unicode data, as Pinned Unicode Properties describes.
   `[start,end,...]` capture storage for the allocation-sensitive API.
   `MatchResult` provides the ordinary Java result API, including named captures
   and numeric conversion.
-- `Re2Matcher` owns one reusable capture buffer for repeated matching. Callers
-  may retain only group zero and a requested prefix of explicit captures when
-  complete capture extraction is unnecessary. It advances empty UTF-8 matches by
-  one code point, permits one terminal empty match, and exposes zero-copy Slice
-  group views. A Rust pattern follows the crate instead and skips only an empty
-  match that ends where the previous match ended or, outside byte mode, inside
-  a character; see [Rust Frontend](#rust-frontend). All public offsets are relative to the
-  complete logical input Slice, including matchers restricted to a region.
-  Matchers are mutable and not thread-safe; compiled `Re2` instances remain
-  thread-safe.
+- `RegexpMatcher` owns one reusable capture buffer for repeated matching.
+  Callers may retain only group zero and a requested prefix of explicit captures
+  when complete capture extraction is unnecessary. It advances empty UTF-8
+  matches by one code point, permits one terminal empty match, and exposes
+  zero-copy Slice group views. A Rust pattern follows the crate instead and
+  skips only an empty match that ends where the previous match ended or, outside
+  byte mode, inside a character; see [Rust Frontend](#rust-frontend). All public
+  offsets are relative to the complete logical input Slice, including matchers
+  restricted to a region. Matchers are mutable and not thread-safe; compiled
+  `Re2` instances remain thread-safe.
 - No-match is represented by `false` or `null`, depending on the method. Numeric
   conversion failures use `NumberFormatException`.
 
@@ -256,11 +256,11 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   final-terminator rule for `$` and `\Z`. In the ordinary engine, programs
   containing those text-dependent assertions use BitState or NFA; protected DFA
   transition loops do not contain Java-language branches.
-- Java patterns use the shared `Re2Matcher`. A matcher region is the assertion
-  context, as a JDK region with default bounds is, except that, as in the JDK,
-  `$` and `\Z` do not match at the start of a nonempty region that splits a
-  CR LF (without `(?d)`). A range overload behaves like a JDK region with
-  transparent, non-anchoring bounds. As in the JDK, `find(int)` resets the
+- Java patterns use the shared `RegexpMatcher`. A matcher region is the
+  assertion context, as a JDK region with default bounds is, except that, as in
+  the JDK, `$` and `\Z` do not match at the start of a nonempty region that
+  splits a CR LF (without `(?d)`). A range overload behaves like a JDK region
+  with transparent, non-anchoring bounds. As in the JDK, `find(int)` resets the
   region to the whole input before it searches. After a failed `find`,
   `matches`, or `lookingAt`, the next `find()` searches again from the end of
   the last match, or from the region start when nothing has matched since the
@@ -309,10 +309,10 @@ UTF-16 code-unit offsets.
   checks the nest limit before translating, so the crate's error precedence is
   preserved. Each crate error kind maps to a `RegexpParseErrorCode`, and the
   message names the kind.
-- Rust patterns use the shared `Re2Matcher`. A pattern-level search flag makes
-  it skip empty matches that end where the previous match ended and, outside
-  byte mode, empty matches that split a UTF-8 character. It also makes ranges
-  and regions keep the whole Slice as assertion context, as the crate's
+- Rust patterns use the shared `RegexpMatcher`. A pattern-level search flag
+  makes it skip empty matches that end where the previous match ended and,
+  outside byte mode, empty matches that split a UTF-8 character. It also makes
+  ranges and regions keep the whole Slice as assertion context, as the crate's
   `Input::range` does. There is no Rust-specific matcher type.
 - Byte mode, the crate's `regex::bytes::Regex`, is an option on
   `RustRegexp.Options` rather than a separate compiled type, following the
@@ -1161,11 +1161,11 @@ boundary and capture passes.
 
 ## Matcher-Owned Capture Workspaces
 
-`Re2Matcher` owns reusable BitState and NFA scratch storage. BitState reuses its
-visited bitmap, capture scratch, and bounded initial traversal jobs. NFA reuses
-its sparse queues, traversal stacks, best-match storage, and primitive capture
-thread arena. These workspaces are private to the non-thread-safe matcher and
-never retain input bytes or caller group arrays.
+`RegexpMatcher` owns reusable BitState and NFA scratch storage. BitState reuses
+its visited bitmap, capture scratch, and bounded initial traversal jobs. NFA
+reuses its sparse queues, traversal stacks, best-match storage, and primitive
+capture thread arena. These workspaces are private to the non-thread-safe
+matcher and never retain input bytes or caller group arrays.
 
 An exceptional NFA exit invalidates its workspace before propagating the
 failure. This prevents a later search from observing partially live capture
@@ -1178,7 +1178,7 @@ caller-managed low-level contract.
 
 ## Allocation-Free Matcher Regions
 
-`Re2Matcher.reset(input, start, end)` binds a logical region of an existing
+`RegexpMatcher.reset(input, start, end)` binds a logical region of an existing
 Slice without constructing a Slice view. Public matcher and snapshot offsets
 remain relative to the complete logical Slice, consistent with Java Matcher and
 the one-shot APIs. DFA start-state analysis treats the region boundaries exactly

@@ -113,7 +113,7 @@ public class TestWordRunMatcher
                 }
                 String text = value.toString();
                 Slice padded = utf8Slice("!!" + text + "??");
-                Re2Matcher actual = pattern.matcher(padded).reset(padded, 2, padded.length() - 2);
+                RegexpMatcher actual = pattern.matcher(padded).reset(padded, 2, padded.length() - 2);
                 Matcher expected = comparator.matcher(text);
                 while (expected.find()) {
                     assertThat(actual.find()).isTrue();

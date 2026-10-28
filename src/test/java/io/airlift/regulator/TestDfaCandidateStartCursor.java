@@ -33,7 +33,7 @@ public class TestDfaCandidateStartCursor
     public void testCandidateCursorReturnsBoundariesWithoutReverseProgram()
     {
         Re2 pattern = compile("a+z|b+");
-        Re2Matcher matcher = pattern.groupZeroMatcher(utf8("xxaaazyybbb"), null);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(utf8("xxaaazyybbb"), null);
 
         assertThat(matcher.candidateStartCursorEnabledForDiagnostics()).isTrue();
         assertThat(boundaries(matcher)).containsExactly(new Boundary(2, 6), new Boundary(8, 11));
@@ -60,7 +60,7 @@ public class TestDfaCandidateStartCursor
         assertThat(boundaries(pattern.groupZeroMatcher(utf8("xxxxb"), null)))
                 .containsExactly(new Boundary(4, 5));
 
-        Re2Matcher matcher = pattern.groupZeroMatcher(utf8("xxxxxxxxxxxxxxb"), null);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(utf8("xxxxxxxxxxxxxxb"), null);
         assertThat(matcher.find(14)).isTrue();
         assertThat(matcher.start()).isEqualTo(14);
         assertThat(matcher.end()).isEqualTo(15);
@@ -71,7 +71,7 @@ public class TestDfaCandidateStartCursor
     {
         TestingTrinoRegexpBenchmarkInputs.Input input = TestingTrinoRegexpBenchmarkInputs.create("captureSparse", 32_768);
         Re2 pattern = Re2.compile(input.pattern());
-        Re2Matcher matcher = pattern.groupZeroMatcher(input.source(), null);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(input.source(), null);
 
         assertThat(boundaries(matcher)).containsExactly(
                 new Boundary(8_192, 8_199),
@@ -87,7 +87,7 @@ public class TestDfaCandidateStartCursor
     {
         Re2 pattern = compile("\\w+@\\w+");
         Slice input = utf8("identifier ".repeat(8_192) + "a@b");
-        Re2Matcher matcher = pattern.groupZeroMatcher(input, null);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
 
         assertThat(boundaries(matcher)).containsExactly(new Boundary(input.length() - 3, input.length()));
         assertThat(matcher.candidateStartProductivityRejectionCountForDiagnostics()).isEqualTo(1);
@@ -110,8 +110,8 @@ public class TestDfaCandidateStartCursor
     {
         Slice input = utf8("padding-x💰💰y-padding");
         Re2 pattern = compile("(💰+|y)");
-        Re2Matcher candidate = pattern.groupZeroMatcher(input, null).reset(input, 9, 18);
-        Re2Matcher control = pattern.matcher(input.slice(9, 9));
+        RegexpMatcher candidate = pattern.groupZeroMatcher(input, null).reset(input, 9, 18);
+        RegexpMatcher control = pattern.matcher(input.slice(9, 9));
 
         assertThat(candidate.candidateStartCursorEnabledForDiagnostics()).isTrue();
         assertThat(boundaries(candidate)).isEqualTo(
@@ -124,8 +124,8 @@ public class TestDfaCandidateStartCursor
 
         Slice multibyteStart = utf8("x💰a");
         Re2 insideCodePoint = compile("(a+|💰+)");
-        Re2Matcher insideCodePointCandidate = insideCodePoint.groupZeroMatcher(multibyteStart, null);
-        Re2Matcher insideCodePointControl = insideCodePoint.matcher(multibyteStart);
+        RegexpMatcher insideCodePointCandidate = insideCodePoint.groupZeroMatcher(multibyteStart, null);
+        RegexpMatcher insideCodePointControl = insideCodePoint.matcher(multibyteStart);
         assertThat(insideCodePointCandidate.find(2)).isEqualTo(insideCodePointControl.find(2));
         assertThat(insideCodePointCandidate.start()).isEqualTo(insideCodePointControl.start());
         assertThat(insideCodePointCandidate.end()).isEqualTo(insideCodePointControl.end());
@@ -136,7 +136,7 @@ public class TestDfaCandidateStartCursor
     {
         Re2 pattern = compile("(a.*z|b)");
         Slice input = utf8("a" + "x".repeat(1_000) + "b");
-        Re2Matcher matcher = pattern.groupZeroMatcher(input, null);
+        RegexpMatcher matcher = pattern.groupZeroMatcher(input, null);
 
         assertThat(boundaries(matcher)).containsExactly(new Boundary(1_001, 1_002));
         assertThat(matcher.candidateStartFallbackCountForDiagnostics()).isEqualTo(1);
@@ -196,14 +196,14 @@ public class TestDfaCandidateStartCursor
     private static void assertCandidateAgrees(String expression, Slice input)
     {
         Re2 pattern = compile("(" + expression + ")");
-        Re2Matcher candidate = pattern.groupZeroMatcher(input, null);
-        Re2Matcher control = pattern.matcher(input);
+        RegexpMatcher candidate = pattern.groupZeroMatcher(input, null);
+        RegexpMatcher control = pattern.matcher(input);
 
         assertThat(candidate.candidateStartCursorEnabledForDiagnostics()).isTrue();
         assertThat(boundaries(candidate)).isEqualTo(boundaries(control));
     }
 
-    private static List<Boundary> boundaries(Re2Matcher matcher)
+    private static List<Boundary> boundaries(RegexpMatcher matcher)
     {
         List<Boundary> boundaries = new ArrayList<>();
         while (matcher.find()) {

@@ -442,7 +442,7 @@ public class TestScanPlan
     public void testAnchoredPartialMatchModes()
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("^https?://([^/]+)/"));
-        Re2Matcher matcher = regexp.pattern().matcher(utf8Slice("https://host/path"));
+        RegexpMatcher matcher = regexp.pattern().matcher(utf8Slice("https://host/path"));
         // The matcher and capture extraction run the start-anchored plan directly; group zero
         // and an unanchored pattern keep the ordinary search.
         assertThat(matcher.startAnchoredScanPlanEnabledForDiagnostics()).isTrue();
@@ -476,7 +476,7 @@ public class TestScanPlan
 
         TrinoRegexp optionalRegexp = TrinoRegexp.compile(utf8Slice("^(a)?a"));
         assertThat(optionalRegexp.pattern().usesPartialScanPlanForDiagnostics()).isTrue();
-        Re2Matcher optionalMatcher = optionalRegexp.pattern().matcher(utf8Slice("a"));
+        RegexpMatcher optionalMatcher = optionalRegexp.pattern().matcher(utf8Slice("a"));
         assertThat(optionalMatcher.matches()).isTrue();
         assertThat(optionalMatcher.start(1)).isEqualTo(-1);
         assertThat(optionalMatcher.end(1)).isEqualTo(-1);
@@ -486,12 +486,12 @@ public class TestScanPlan
 
         TrinoRegexp lineRegexp = TrinoRegexp.compile(utf8Slice("^x.*"));
         assertThat(lineRegexp.pattern().usesPartialScanPlanForDiagnostics()).isTrue();
-        Re2Matcher lineMatcher = lineRegexp.pattern().matcher(utf8Slice("xabc\nrest"));
+        RegexpMatcher lineMatcher = lineRegexp.pattern().matcher(utf8Slice("xabc\nrest"));
         assertThat(lineMatcher.find()).isTrue();
         assertThat(lineMatcher.end()).isEqualTo(4);
         assertThat(lineMatcher.reset(utf8Slice("xabc\nrest")).matches()).isFalse();
 
-        Re2Matcher dotAllMatcher = TrinoRegexp.compile(utf8Slice("(?s)^x.*"))
+        RegexpMatcher dotAllMatcher = TrinoRegexp.compile(utf8Slice("(?s)^x.*"))
                 .pattern()
                 .matcher(utf8Slice("xabc\nrest"));
         assertThat(dotAllMatcher.find()).isTrue();
@@ -528,7 +528,7 @@ public class TestScanPlan
 
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice("https?://([^/]+)/"));
         assertThat(regexp.pattern().usesScanPlanForDiagnostics()).isTrue();
-        Re2Matcher matcher = regexp.pattern().matcher(utf8Slice("x https://one/ y http://two/ z"));
+        RegexpMatcher matcher = regexp.pattern().matcher(utf8Slice("x https://one/ y http://two/ z"));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(2);
         assertThat(matcher.group(1)).isEqualTo(utf8Slice("one"));
@@ -794,7 +794,7 @@ public class TestScanPlan
         assertThat(regexp.extractAll(text, 1)).containsExactly(utf8Slice("a"), utf8Slice("b"), utf8Slice("c"));
         // The search range starts after the first literal's first byte, which puts its
         // probe byte inside the range.
-        Re2Matcher matcher = regexp.pattern().matcher(text);
+        RegexpMatcher matcher = regexp.pattern().matcher(text);
         matcher.reset(text, 1, text.length());
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(9);
@@ -888,7 +888,7 @@ public class TestScanPlan
         return requireNonNull(analyze(expression, frequencies), expression).leadingLiteralProbeOffsetForDiagnostics();
     }
 
-    /// Compares [Re2Matcher#find()] over every region of `source` that starts and ends
+    /// Compares [RegexpMatcher#find()] over every region of `source` that starts and ends
     /// on a character boundary with Joni over the same bytes. Each region is also searched with
     /// a plan that continues every unanchored search on the ordinary engine, whose context must
     /// be the region.
@@ -900,8 +900,8 @@ public class TestScanPlan
     private static void verifyRegionsAgainstJoni(String expression, TrinoRegexp.Options options, Slice source)
     {
         Slice pattern = utf8Slice(expression);
-        Re2Matcher planMatcher = TrinoRegexp.compile(pattern, options).pattern().matcher(EMPTY_SLICE);
-        Re2Matcher handoffMatcher = TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, options).pattern().matcher(EMPTY_SLICE);
+        RegexpMatcher planMatcher = TrinoRegexp.compile(pattern, options).pattern().matcher(EMPTY_SLICE);
+        RegexpMatcher handoffMatcher = TrinoRegexp.compileForcingScanPlanHandoffForTesting(pattern, options).pattern().matcher(EMPTY_SLICE);
         Regex oracle = joniPattern(expression);
         for (int start = 0; start <= source.length(); start++) {
             for (int end = start; end <= source.length(); end++) {
@@ -915,7 +915,7 @@ public class TestScanPlan
         }
     }
 
-    /// Compares [Re2Matcher#find()] over `[start, end)` of `input` with Joni over
+    /// Compares [RegexpMatcher#find()] over `[start, end)` of `input` with Joni over
     /// the same bytes, on the plan and on a plan that continues every unanchored search on the
     /// ordinary engine.
     private static void verifyRegionAgainstJoni(String expression, Slice input, int start, int end)
@@ -929,7 +929,7 @@ public class TestScanPlan
 
     /// Compares every match `matcher` finds in `[start, end)` of `input`, with
     /// the bounds of every group, to Joni's matches over the same bytes.
-    private static void verifyRegionAgainstJoni(Regex oracle, Re2Matcher matcher, Slice input, int start, int end, String description)
+    private static void verifyRegionAgainstJoni(Regex oracle, RegexpMatcher matcher, Slice input, int start, int end, String description)
     {
         matcher.reset(input, start, end);
         for (int[] match : joniMatches(oracle, input.slice(start, end - start))) {
@@ -1310,7 +1310,7 @@ public class TestScanPlan
         String expression = "^([a-z]{2,4}):([^/:]{2,4})/$";
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
         Slice input = utf8Slice("!abc:é😀/\n?");
-        Re2Matcher matcher = regexp.pattern().matcher(input).reset(input, 1, input.length() - 1);
+        RegexpMatcher matcher = regexp.pattern().matcher(input).reset(input, 1, input.length() - 1);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.group(2)).isEqualTo(utf8Slice("é😀"));
         assertThat(matcher.find()).isFalse();
@@ -1499,7 +1499,7 @@ public class TestScanPlan
         String expression = "^https?://(www\\.)?([^/:]+)(?::([0-9]{1,5}))?/.*$";
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(expression));
         Slice input = utf8Slice("!https://www.host:42/path\n?");
-        Re2Matcher region = regexp.pattern().matcher(input).reset(input, 1, input.length() - 1);
+        RegexpMatcher region = regexp.pattern().matcher(input).reset(input, 1, input.length() - 1);
         assertThat(region.find()).isTrue();
         assertThat(region.group(1)).isEqualTo(utf8Slice("www."));
         assertThat(region.group(2)).isEqualTo(utf8Slice("host"));
@@ -1565,7 +1565,7 @@ public class TestScanPlan
     {
         TrinoRegexp regexp = TrinoRegexp.compile(utf8Slice(URL));
         Slice input = utf8Slice("!https://www.host/path\n?");
-        Re2Matcher matcher = regexp.pattern().matcher(input).reset(input, 1, input.length() - 1);
+        RegexpMatcher matcher = regexp.pattern().matcher(input).reset(input, 1, input.length() - 1);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.group(1)).isEqualTo(utf8Slice("host"));
         assertThat(matcher.find()).isFalse();
@@ -1715,7 +1715,7 @@ public class TestScanPlan
             assertThat(matcher.group(1)).as(expression).isEqualTo(utf8Slice(shape.group()));
             assertThat(pattern.find(source, 0, source.length())).as(expression).isTrue();
             assertThat(pattern.lookingAt(source, matchStart, source.length())).as(expression).isTrue();
-            Re2Matcher region = pattern.matcher(source).reset(source, matchStart, source.length());
+            RegexpMatcher region = pattern.matcher(source).reset(source, matchStart, source.length());
             assertThat(region.lookingAt()).as(expression).isTrue();
             assertThat(region.start(1)).as(expression).isEqualTo(shape.text().indexOf(shape.group()));
         }
@@ -1816,11 +1816,11 @@ public class TestScanPlan
                 int regionEnd = regionStart + utf8Slice(text).length();
                 Slice region = input.slice(regionStart, regionEnd - regionStart);
                 String description = route.expression() + " on " + text;
-                Re2Matcher matcher = regexp.matcher(input);
+                RegexpMatcher matcher = regexp.matcher(input);
                 verifyRegionAgainstJoni(oracle, matcher, input, regionStart, regionEnd, description);
 
                 // Compare anchored modes with the same text as a complete Slice.
-                Re2Matcher control = regexp.matcher(region);
+                RegexpMatcher control = regexp.matcher(region);
                 boolean lookingAt = control.lookingAt();
                 assertThat(matcher.reset(input, regionStart, regionEnd).lookingAt()).as(description).isEqualTo(lookingAt);
                 if (lookingAt) {
@@ -1871,7 +1871,7 @@ public class TestScanPlan
                 assertThat(regexp.pattern().usesScanPlanForDiagnostics()).isTrue();
                 disableOrdinaryEngine(regexp);
                 Slice source = utf8Slice("padding!" + text + "\n?outside").slice(7, text.length() + 3);
-                Re2Matcher matcher = regexp.pattern().matcher(source);
+                RegexpMatcher matcher = regexp.pattern().matcher(source);
                 assertThat(matcher.reset(source, 1, source.length() - 1).lookingAt()).isEqualTo(!absoluteEnd);
                 if (!absoluteEnd) {
                     assertThat(matcher.end()).isEqualTo(1 + text.length());
@@ -2502,7 +2502,7 @@ public class TestScanPlan
         assertThat(planOnly.find()).isFalse();
 
         // Regions are the context of the plan and of its continuation.
-        Re2Matcher matcher = re2.matcher(input);
+        RegexpMatcher matcher = re2.matcher(input);
         for (int[] range : new int[][] {{2, input.length()}, {6, input.length() - 5}, {7, input.length() - 6}, {0, input.length() - 6}}) {
             verifyRegionAgainstJoni(oracle, matcher, input, range[0], range[1], expression + " on [" + range[0] + ", " + range[1] + ")");
         }
@@ -2916,7 +2916,7 @@ public class TestScanPlan
             assertThat(regexp.find(source)).as(description).isEqualTo(oracle.matcher(source.byteArray(), base, end).search(base, end, Option.DEFAULT) >= 0);
             assertThat(regexp.lookingAt(source)).as(description).isEqualTo(oracle.matcher(source.byteArray(), base, end).match(base, end, Option.DEFAULT) >= 0);
             assertThat(regexp.matches(source)).as(description).isEqualTo(wholeOracle.matcher(source.byteArray(), base, end).match(base, end, Option.DEFAULT) >= 0);
-            Re2Matcher matcher = regexp.matcher(source);
+            RegexpMatcher matcher = regexp.matcher(source);
             int lastStart = source.length() > 64 ? 1 : source.length();
             for (int start = 0; start <= lastStart; start++) {
                 if (start < source.length() && (source.getByte(start) & 0xC0) == 0x80) {

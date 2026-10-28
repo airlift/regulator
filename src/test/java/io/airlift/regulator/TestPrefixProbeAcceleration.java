@@ -285,7 +285,7 @@ public class TestPrefixProbeAcceleration
 
     private static void assertMatches(Re2 pattern, String text, String... expected)
     {
-        Re2Matcher matcher = pattern.matcher(Slices.utf8Slice(text));
+        RegexpMatcher matcher = pattern.matcher(Slices.utf8Slice(text));
         List<String> actual = new ArrayList<>();
         while (matcher.find()) {
             actual.add(matcher.group().toStringUtf8());
@@ -295,7 +295,7 @@ public class TestPrefixProbeAcceleration
 
     private static void assertMatches(Re2 pattern, Slice input, List<int[]> expected)
     {
-        Re2Matcher matcher = pattern.matcher(input);
+        RegexpMatcher matcher = pattern.matcher(input);
         for (int[] match : expected) {
             assertThat(matcher.find()).isTrue();
             assertThat(new int[] {matcher.start(), matcher.end()}).containsExactly(match);

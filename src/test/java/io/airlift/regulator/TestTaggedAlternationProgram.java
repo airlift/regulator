@@ -39,7 +39,7 @@ public class TestTaggedAlternationProgram
     {
         Slice expression = utf8Slice(largeAlternation("\\bfoo\\b", "foo", "."));
         Slice input = utf8Slice("foo foo");
-        for (Re2Matcher matcher : List.of(
+        for (RegexpMatcher matcher : List.of(
                 JavaRegexp.compile(expression).matcher(input),
                 TrinoRegexp.compile(expression).pattern().matcher(input))) {
             assertThat(matcher.find()).isTrue();
@@ -59,7 +59,7 @@ public class TestTaggedAlternationProgram
     {
         // Pinned re2_golden reports 0:1,0:1,-1:-1,-1:-1 for the first match.
         Re2 pattern = Re2.compile(utf8Slice(largeAlternation("a", "ab", ".")));
-        Re2Matcher matcher = pattern.matcher(utf8Slice("ab"));
+        RegexpMatcher matcher = pattern.matcher(utf8Slice("ab"));
 
         assertThat(pattern.usesTaggedAlternationForDiagnostics()).isTrue();
         assertThat(matcher.find()).isTrue();
@@ -76,12 +76,12 @@ public class TestTaggedAlternationProgram
     {
         // Pinned re2_golden chooses the first duplicate branch and the first empty branch.
         Re2 duplicatePattern = Re2.compile(utf8Slice(largeAlternation("a", "a")));
-        Re2Matcher duplicateMatcher = duplicatePattern.matcher(utf8Slice("a"));
+        RegexpMatcher duplicateMatcher = duplicatePattern.matcher(utf8Slice("a"));
         assertThat(duplicateMatcher.find()).isTrue();
         assertMatch(duplicateMatcher, 0, 1, 1);
 
         Re2 emptyPattern = Re2.compile(utf8Slice(largeAlternation("", "a")));
-        Re2Matcher emptyMatcher = emptyPattern.matcher(utf8Slice("a"));
+        RegexpMatcher emptyMatcher = emptyPattern.matcher(utf8Slice("a"));
         assertThat(emptyMatcher.find()).isTrue();
         assertMatch(emptyMatcher, 0, 0, 1);
     }
@@ -91,7 +91,7 @@ public class TestTaggedAlternationProgram
     {
         // Pinned re2_golden reports group 1 at 0:4 for the two UTF-8 delta code points.
         Re2 utf8Pattern = Re2.compile(utf8Slice(largeAlternation("δ+", ".")));
-        Re2Matcher utf8Matcher = utf8Pattern.matcher(utf8Slice("δδ!"));
+        RegexpMatcher utf8Matcher = utf8Pattern.matcher(utf8Slice("δδ!"));
         assertThat(utf8Matcher.find()).isTrue();
         assertMatch(utf8Matcher, 0, 4, 1);
 
@@ -99,7 +99,7 @@ public class TestTaggedAlternationProgram
         Re2 latin1Pattern = Re2.compile(
                 utf8Slice(largeAlternation("\\xFF", ".")),
                 Re2.Options.latin1());
-        Re2Matcher latin1Matcher = latin1Pattern.matcher(wrappedBuffer(new byte[] {(byte) 0xFF}));
+        RegexpMatcher latin1Matcher = latin1Pattern.matcher(wrappedBuffer(new byte[] {(byte) 0xFF}));
         assertThat(latin1Matcher.find()).isTrue();
         assertMatch(latin1Matcher, 0, 1, 1);
     }
@@ -109,7 +109,7 @@ public class TestTaggedAlternationProgram
     {
         // Pinned re2_golden reports group 1 at 1:2 for this exact region.
         Re2 pattern = Re2.compile(utf8Slice(largeAlternation("a", ".")));
-        Re2Matcher matcher = pattern.matcher(utf8Slice("!a?"), 1)
+        RegexpMatcher matcher = pattern.matcher(utf8Slice("!a?"), 1)
                 .reset(utf8Slice("!a?"), 1, 2);
 
         assertThat(matcher.find()).isTrue();
@@ -127,7 +127,7 @@ public class TestTaggedAlternationProgram
 
         // Pinned re2_golden selects the first branch in this region because both adjacent
         // context bytes are non-word bytes.
-        Re2Matcher accepted = pattern.matcher(utf8Slice("!foo?"))
+        RegexpMatcher accepted = pattern.matcher(utf8Slice("!foo?"))
                 .reset(utf8Slice("!foo?"), 1, 4);
         assertThat(accepted.find()).isTrue();
         assertMatch(accepted, 1, 4, 1);
@@ -135,7 +135,7 @@ public class TestTaggedAlternationProgram
 
         // Pinned re2_golden selects the second branch for the same search region when the
         // byte after the region is a word byte.
-        Re2Matcher rejected = pattern.matcher(utf8Slice("!fooa?"))
+        RegexpMatcher rejected = pattern.matcher(utf8Slice("!fooa?"))
                 .reset(utf8Slice("!fooa?"), 1, 4);
         assertThat(rejected.find()).isTrue();
         assertMatch(rejected, 1, 4, 2);
@@ -152,7 +152,7 @@ public class TestTaggedAlternationProgram
                 utf8Slice(largeAlternation("a", "ab", ".")),
                 Re2.Options.defaults().setLongestMatch(true));
         assertThat(longestPattern.usesTaggedAlternationForDiagnostics()).isFalse();
-        Re2Matcher longestMatcher = longestPattern.matcher(utf8Slice("ab"));
+        RegexpMatcher longestMatcher = longestPattern.matcher(utf8Slice("ab"));
         assertThat(longestMatcher.find()).isTrue();
         assertThat(longestMatcher.nfaWorkspaceInitializedForDiagnostics()).isTrue();
     }
@@ -193,7 +193,7 @@ public class TestTaggedAlternationProgram
 
         assertThat(memoryFallback).isNotNull();
         assertThat(memoryAccepted).isNotNull();
-        Re2Matcher fallbackMatcher = memoryFallback.matcher(utf8Slice("ab"));
+        RegexpMatcher fallbackMatcher = memoryFallback.matcher(utf8Slice("ab"));
         assertThat(fallbackMatcher.find()).isTrue();
         assertMatch(fallbackMatcher, 0, 1, 1);
         assertThat(fallbackMatcher.nfaWorkspaceInitializedForDiagnostics()).isTrue();
@@ -211,7 +211,7 @@ public class TestTaggedAlternationProgram
             for (int task = 0; task < 5; task++) {
                 tasks.add(() -> {
                     int result = 0;
-                    Re2Matcher matcher = pattern.matcher(utf8Slice("ab"));
+                    RegexpMatcher matcher = pattern.matcher(utf8Slice("ab"));
                     for (int iteration = 0; iteration < 200; iteration++) {
                         matcher.reset(utf8Slice("ab"));
                         while (matcher.find()) {
@@ -244,12 +244,12 @@ public class TestTaggedAlternationProgram
         Re2 pattern = Re2.compile(utf8Slice(patternText));
         assertThat(pattern.usesTaggedAlternationForDiagnostics()).isFalse();
 
-        Re2Matcher matcher = pattern.matcher(input);
+        RegexpMatcher matcher = pattern.matcher(input);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.nfaWorkspaceInitializedForDiagnostics()).isTrue();
     }
 
-    private static void assertMatch(Re2Matcher matcher, int start, int end, int winningGroup)
+    private static void assertMatch(RegexpMatcher matcher, int start, int end, int winningGroup)
     {
         assertThat(matcher.start()).isEqualTo(start);
         assertThat(matcher.end()).isEqualTo(end);

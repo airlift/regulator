@@ -192,7 +192,7 @@ public class TestDfaStartStateFailure
         dfa.failStateAllocationsForTesting(2);
 
         assertThat(Dfa.searchManyFull(taggedProgram, utf8Slice("a"), 0, 1)).isEqualTo(-1);
-        Re2Matcher matcher = pattern.matcher(utf8Slice("a"));
+        RegexpMatcher matcher = pattern.matcher(utf8Slice("a"));
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isZero();
         assertThat(matcher.end()).isEqualTo(1);

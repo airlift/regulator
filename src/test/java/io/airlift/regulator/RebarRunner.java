@@ -178,7 +178,7 @@ public final class RebarRunner
     private static Samples benchmarkMatches(Benchmark benchmark, MatchMeasurement measurement)
     {
         Re2 pattern = benchmark.compile();
-        Re2Matcher matcher = measurement.createMatcher(pattern, benchmark.haystack());
+        RegexpMatcher matcher = measurement.createMatcher(pattern, benchmark.haystack());
         return benchmarkOperation(benchmark, () -> matchResult(benchmark.haystack(), matcher, measurement));
     }
 
@@ -195,7 +195,7 @@ public final class RebarRunner
     private static Samples benchmarkGrepCaptures(Benchmark benchmark)
     {
         Re2 pattern = benchmark.compile();
-        Re2Matcher matcher = pattern.matcher(benchmark.haystack());
+        RegexpMatcher matcher = pattern.matcher(benchmark.haystack());
         Slice haystack = benchmark.haystack();
         byte[] bytes = haystack.byteArray();
         int byteArrayOffset = haystack.byteArrayOffset();
@@ -227,7 +227,7 @@ public final class RebarRunner
         };
     }
 
-    static long matchResult(Slice haystack, Re2Matcher matcher, MatchMeasurement measurement)
+    static long matchResult(Slice haystack, RegexpMatcher matcher, MatchMeasurement measurement)
     {
         matcher.reset(haystack);
         long count = 0;
@@ -256,7 +256,7 @@ public final class RebarRunner
         return count;
     }
 
-    static long grepCapturesResult(Re2Matcher matcher, Slice haystack, byte[] bytes, int byteArrayOffset)
+    static long grepCapturesResult(RegexpMatcher matcher, Slice haystack, byte[] bytes, int byteArrayOffset)
     {
         long count = 0;
         int lineStart = 0;
@@ -296,7 +296,7 @@ public final class RebarRunner
             return count;
         }
 
-        Re2Matcher matcher = pattern.matcher(haystack, 0);
+        RegexpMatcher matcher = pattern.matcher(haystack, 0);
         count = 0;
         while (matcher.find()) {
             count++;
@@ -304,7 +304,7 @@ public final class RebarRunner
         return count;
     }
 
-    private static int countParticipatingGroups(Re2Matcher matcher)
+    private static int countParticipatingGroups(RegexpMatcher matcher)
     {
         int count = 0;
         for (int group = 0; group <= matcher.groupCount(); group++) {
@@ -385,7 +385,7 @@ public final class RebarRunner
             this.includesCaptures = includesCaptures;
         }
 
-        Re2Matcher createMatcher(Re2 pattern, Slice input)
+        RegexpMatcher createMatcher(Re2 pattern, Slice input)
         {
             return includesCaptures ? pattern.matcher(input) : pattern.matcher(input, 0);
         }

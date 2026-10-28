@@ -35,7 +35,7 @@ public class TestPublicMatchCount
             Slice input = utf8Slice("!a;💰,b?").slice(1, 8);
             Re2 pattern = Re2.compile(utf8Slice(expression));
             Re2 oracle = Re2.compile(utf8Slice(expression));
-            Re2Matcher generic = oracle.genericGroupZeroMatcherForDiagnostics(input);
+            RegexpMatcher generic = oracle.genericGroupZeroMatcherForDiagnostics(input);
             long expected = 0;
             while (generic.find()) {
                 expected++;
@@ -45,7 +45,7 @@ public class TestPublicMatchCount
             assertThat(pattern.find(input)).isTrue();
             assertThat(pattern.count(input)).isEqualTo(expected);
             assertThat(pattern.forwardProgramForDiagnostics().cachedDfaIfPresent(Dfa.DfaInstance.Kind.FIRST_MATCH)).isNull();
-            Re2Matcher matcher = pattern.matcher(input, 0);
+            RegexpMatcher matcher = pattern.matcher(input, 0);
             long actual = 0;
             while (matcher.find()) {
                 actual++;
@@ -109,7 +109,7 @@ public class TestPublicMatchCount
         assertThat(latin1.count(wrappedBuffer(new byte[] {(byte) 0xE9, '\n', (byte) 0xFF}))).isEqualTo(2);
 
         Slice input = utf8Slice("!;a,b;c,?").slice(1, 7);
-        Re2Matcher matcher = Re2.compile(utf8Slice("[,;]")).matcher(input, 0).reset(input, 1, 6);
+        RegexpMatcher matcher = Re2.compile(utf8Slice("[,;]")).matcher(input, 0).reset(input, 1, 6);
         assertThat(matcher.find()).isTrue();
         assertThat(matcher.start()).isEqualTo(2);
         assertThat(matcher.end()).isEqualTo(3);
@@ -217,7 +217,7 @@ public class TestPublicMatchCount
         var input = wrappedBuffer(new byte[] {'a', (byte) 0xFF, (byte) 0xC3, 'b'});
         for (String expression : List.of("", ".", "[a-z]+")) {
             Re2 re2 = Re2.compile(utf8Slice(expression));
-            Re2Matcher matcher = re2.matcher(input, 0);
+            RegexpMatcher matcher = re2.matcher(input, 0);
             long expected = 0;
             while (matcher.find()) {
                 expected++;
