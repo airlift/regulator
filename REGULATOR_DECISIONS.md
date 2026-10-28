@@ -398,11 +398,11 @@ UTF-16 code-unit offsets.
   is deducted from the forward-DFA budget; compilation keeps the ordinary RE2
   route when that optional allocation does not fit.
 - A pattern that is not valid UTF-8 throws a `BAD_UTF8` parse error at its
-  first invalid byte, as in the RE2 and Java frontends. This deliberately
-  differs from Trino, whose non-strict Joni path accepts such a pattern and
-  compares its malformed bytes byte-for-byte; that reading is unspecified, so
-  Regulator treats the pattern as a syntax error. Inputs are not validated as
-  UTF-8, matching Trino's garbage-in/garbage-out contract.
+  first invalid byte, as `JavaRegexp`, `RustRegexp`, and UTF-8 `Re2` patterns
+  do. This deliberately differs from Trino, whose non-strict Joni path accepts
+  such a pattern and compares its malformed bytes byte-for-byte; that reading
+  is unspecified, so Regulator treats the pattern as a syntax error. Inputs are
+  not validated as UTF-8, matching Trino's garbage-in/garbage-out contract.
 - Where Trino's pinned Joni, `io.airlift:joni:2.1.5.3`, and modern Joni
   disagree, the behavior is judged a bug or intended Trino behavior, as
   [Language Authorities](#language-authorities) describes. A bug is not copied;
@@ -714,8 +714,8 @@ compile-time plans for exact literal, nullable-start, contains, equality,
 prefix, and suffix expressions. `Re2.find` caches its strategy in a primitive
 field to avoid a dependent metadata load in tiny direct calls. The direct
 strategy uses one byte. The shared single-byte matcher cache adds one reference,
-bringing the `Re2` layout to 96 bytes with compressed references. A Trino scan
-plan dispatches on a second strategy byte that fits in the same 96-byte layout.
+bringing the `Re2` layout to 96 bytes with compressed references. A scan plan
+dispatches on a second strategy byte that fits in the same 96-byte layout.
 When a pattern also has a scan plan, full-Slice `find` keeps the literal
 contains, prefix, equality, and final-line equality kernels, which answer
 without reading past the literal; other boolean strategies yield to the plan.
@@ -725,11 +725,12 @@ the [scan-plan guide](docs/benchmarks/SCAN_PLAN.md#integration).
 These plans apply only when normalized expression analysis proves equivalent
 existence semantics. APIs that accept a range, return boundaries or captures,
 or produce a `MatchResult` retain the ordinary DFA, OnePass, BitState, and NFA
-cascade when no Trino scan plan applies. Trino's explicit single-byte matcher
-also shares the byte scanner; RE2 and Java matcher construction retain their
-existing routes. Unsupported shapes, position-dependent assertions, and other
-unproven forms retain the ordinary path. The single-byte table is initialized
-lazily; subsequent direct boolean calls allocate no matching storage.
+cascade when no scan plan applies. Trino's explicit single-byte matcher also
+shares the byte scanner; RE2, Java, and Rust matchers keep their existing
+construction routes. Unsupported shapes, position-dependent assertions, and
+other unproven forms retain the ordinary path. The single-byte table is
+initialized lazily; subsequent direct boolean calls allocate no matching
+storage.
 
 Nonempty exact-literal counting directly reuses `Prog.prefixAccel`, the existing
 whole-literal prefix scanner, and advances by the matched literal length.
@@ -779,10 +780,11 @@ Malformed input and supplementary literals deliberately differ, as described
 below.
 
 A pattern that is not valid UTF-8 throws `TrinoLikePatternSyntaxException` at
-its first invalid byte, as RE2 and Java regex patterns do. This deliberately
-differs from Trino, which decodes such a pattern with the JVM's replacement
-behavior; a malformed pattern has no specified meaning, so it is a syntax
-error. Syntax-error byte offsets are relative to the pattern Slice.
+its first invalid byte, as `TrinoRegexp`, `JavaRegexp`, `RustRegexp`, and UTF-8
+`Re2` patterns do. This deliberately differs from Trino, which decodes such a
+pattern with the JVM's replacement behavior; a malformed pattern has no
+specified meaning, so it is a syntax error. Syntax-error byte offsets are
+relative to the pattern Slice.
 
 Wildcard runs are normalized during parsing. Exact, prefix, and suffix forms
 use direct byte operations. Ordered literals use the shared

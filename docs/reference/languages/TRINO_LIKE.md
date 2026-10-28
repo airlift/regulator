@@ -38,9 +38,9 @@ and any other escaped code point throw `TrinoLikePatternSyntaxException`; its
 `byteOffset()` is relative to the logical pattern Slice.
 
 A pattern must be valid UTF-8. One that is not throws
-`TrinoLikePatternSyntaxException` at its first invalid byte, as invalid regular
-expressions do in the other frontends. This differs from Trino, which accepts
-such a pattern and replaces its malformed bytes.
+`TrinoLikePatternSyntaxException` at its first invalid byte, as `TrinoRegexp`,
+`JavaRegexp`, `RustRegexp`, and UTF-8 `Re2` patterns do. This differs from
+Trino, which accepts such a pattern and replaces its malformed bytes.
 
 The compiled pattern is immutable and safe to share across threads.
 
@@ -77,4 +77,5 @@ LIKE has no regular-expression operators. Character classes, groups,
 alternation, anchors, quantifiers, and regular-expression escapes are literal
 text unless they contain `%`, `_`, or the configured escape character.
 
-For regular expressions, use `TrinoRegexp`, `JavaRegexp`, or `Re2` instead.
+For regular expressions, use `Re2`, `TrinoRegexp`, `JavaRegexp`, or `RustRegexp`
+instead.

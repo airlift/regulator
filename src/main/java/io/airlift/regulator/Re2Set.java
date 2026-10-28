@@ -46,7 +46,8 @@ public final class Re2Set
     }
 
     /// Creates a single-use builder. The supplied options are copied immediately. A set has no
-    /// literal prefix scan, so it does not use the options' byte frequencies.
+    /// literal prefix scan or scan plan, so it ignores the options' byte frequencies and
+    /// bytecode generation.
     public static Builder builder(Re2.Options options, MatchMode matchMode)
     {
         return new Builder(options, matchMode);

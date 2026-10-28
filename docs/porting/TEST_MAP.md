@@ -1,8 +1,28 @@
-# Upstream RE2 test map
+# Test map
 
-This map connects Regulator's tests to pinned upstream RE2 coverage. A test
-derived from an upstream file does not necessarily cover every case or
-parameter in that file; the table records those distinctions.
+Each language's tests check Regulator against that language's authority:
+
+| Language | Oracle | Fixtures | Tests |
+|---|---|---|---|
+| RE2 | Pinned C++ RE2 goldens from `tools/re2-golden` | `upstream_public_match.jsonl`, `upstream_public_options.jsonl`, `testing/native_longest_boundary.jsonl`, `testing/random_agreement_*.tsv.gzip` | `TestUpstreamPublicMatch`, `TestUpstreamPublicOptions`, `TestNativeLongestBoundaryAgreement`, `TestRandomAgreement`, and the upstream tests below |
+| Trino regexp | Trino's Joni, `io.airlift:joni:2.1.5.3`, as a live test dependency, and checked-in Trino function results | `trino-function-cases.tsv` | `TestTrinoRegexpLanguage`, `TestTrinoRegexpMatcher`, `TestTrinoRegexpFunctions` |
+| Java | The running JDK's `java.util.regex`, `Character`, and `String` | None | `TestJavaRegexpDifferential`, `TestJdkUnicodeAgreement` |
+| Rust | Pinned `regex` crate goldens from `tools/rust-regex-golden` | `rust-regex-*.jsonl` | `TestRustRegexpGolden` |
+| Trino LIKE | Pinned Trino `LikeMatcher` results with optimization disabled; the corpus also records optimized results | `trino-like-corpus.tsv` | `TestTrinoLikeCorpus` |
+
+Fixtures are under `src/test/resources/io/airlift/regulator`.
+`TestTrinoRegexpSyntax` and `TestJavaRegexpSyntax` check
+`trino-syntax-cases.tsv` and `java-syntax-cases.tsv`, which record the
+constructs Regulator supports rather than authority results; constructs
+Regulator rejects, such as lookahead, are valid in Joni and the JDK. Where
+pinned and modern Joni disagree, the
+[Trino reference](../reference/languages/TRINO_REGEXP.md) records which rule
+Regulator follows.
+
+The rest of this map connects Regulator's tests to pinned upstream RE2
+coverage. A test derived from an upstream file does not necessarily cover every
+case or parameter in that file; the upstream coverage table records those
+distinctions.
 
 Pinned upstream commit: `972a15cedd008d846f1a39b2e88ce48d7f166cbd`
 
