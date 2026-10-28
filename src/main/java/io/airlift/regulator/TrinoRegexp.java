@@ -187,7 +187,7 @@ public sealed class TrinoRegexp
                 parsed.capturingGroupCount());
         long forwardMemory = Math.max(1, options.maxMemory() - Math.max(1, options.maxMemory() / 3));
         if (literalAlternationMatcher != null && literalAlternationMatcher.estimatedRetainedSize() <= forwardMemory) {
-            return new LiteralAlternationTrinoRegexp(literalAlternationMatcher);
+            return new LiteralAlternationTrinoRegexp(patternCopy, literalAlternationMatcher);
         }
         Re2 compiledPattern = Re2.compileParsedForTrino(patternCopy, parsed, PARSE_FLAGS, options.maxMemory(), options.byteFrequencies(), scanPlanMode);
         if (parsed.regexp().op() == RegexpOp.BEGIN_LINE &&
@@ -385,6 +385,12 @@ public sealed class TrinoRegexp
         return re2 != null && re2.isSingleByteMatcherComputed();
     }
 
+    /// Returns a copy of the compiled pattern bytes.
+    public Slice pattern()
+    {
+        return re2.pattern();
+    }
+
     /// Returns the number of capturing groups.
     public int capturingGroupCount()
     {
@@ -395,6 +401,12 @@ public sealed class TrinoRegexp
     public Map<String, Integer> namedCapturingGroups()
     {
         return re2.namedCapturingGroups();
+    }
+
+    /// Returns an immutable mapping from one-based group indexes to capture names.
+    public Map<Integer, String> capturingGroupNames()
+    {
+        return re2.capturingGroupNames();
     }
 
     /// Returns whether the source contains a match.
@@ -1171,11 +1183,14 @@ public sealed class TrinoRegexp
     private static final class LiteralAlternationTrinoRegexp
             extends TrinoRegexp
     {
+        // This subtype has no compiled RE2 pattern to hold the source bytes, so it keeps them.
+        private final Slice patternBytes;
         private final LiteralAlternationSpanMatcher spanMatcher;
 
-        private LiteralAlternationTrinoRegexp(LiteralAlternationSpanMatcher spanMatcher)
+        private LiteralAlternationTrinoRegexp(Slice patternBytes, LiteralAlternationSpanMatcher spanMatcher)
         {
             super();
+            this.patternBytes = requireNonNull(patternBytes, "patternBytes is null");
             this.spanMatcher = requireNonNull(spanMatcher, "spanMatcher is null");
         }
 
@@ -1186,6 +1201,12 @@ public sealed class TrinoRegexp
         }
 
         @Override
+        public Slice pattern()
+        {
+            return patternBytes.copy();
+        }
+
+        @Override
         public int capturingGroupCount()
         {
             return 0;
@@ -1193,6 +1214,12 @@ public sealed class TrinoRegexp
 
         @Override
         public Map<String, Integer> namedCapturingGroups()
+        {
+            return Map.of();
+        }
+
+        @Override
+        public Map<Integer, String> capturingGroupNames()
         {
             return Map.of();
         }

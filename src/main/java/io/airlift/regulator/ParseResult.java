@@ -35,7 +35,7 @@ record ParseResult(Regexp regexp, int capturingGroupCount, Map<Integer, String> 
     /// Returns the capture metadata the public `parse` methods report for this pattern.
     PatternInfo patternInfo()
     {
-        return new PatternInfo(capturingGroupCount, namedCapturingGroups(capturingGroupNames));
+        return new PatternInfo(capturingGroupCount, capturingGroupNames);
     }
 
     /// Inverts group-to-name mappings into an immutable mapping from capture names to group

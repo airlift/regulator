@@ -526,6 +526,9 @@ public class TestTrinoLikeCorpus
 
         assertThat(pattern.matches(Slices.utf8Slice("needle-value"))).isTrue();
         assertThat(pattern.matches(Slices.utf8Slice("xxxxxx-value"))).isFalse();
+        assertThat(pattern.pattern()).isEqualTo(Slices.utf8Slice("needle%"));
+        pattern.pattern().setByte(0, 'x');
+        assertThat(pattern.pattern()).isEqualTo(Slices.utf8Slice("needle%"));
     }
 
     @Test
@@ -565,6 +568,7 @@ public class TestTrinoLikeCorpus
         assertThat(compiled.matches(Slices.utf8Slice("a%b\u00E9c"))).isTrue();
         assertThat(compiled.matches(Slices.utf8Slice("aXbxc"))).isFalse();
         assertThat(compiled.matches(Slices.utf8Slice("zzzzz"))).isFalse();
+        assertThat(compiled.pattern()).isEqualTo(Slices.utf8Slice("a\\%b_c"));
     }
 
     @Test

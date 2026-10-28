@@ -69,7 +69,12 @@ that language's `compile` and returns immutable metadata:
 PatternInfo info = Re2.parse(Slices.utf8Slice("(?<word>\\w+)([0-9]+)"));
 int groups = info.capturingGroupCount(); // 2, excluding the whole-match group 0
 Map<String, Integer> names = info.namedCapturingGroups(); // {word=1}
+Map<Integer, String> groupNames = info.capturingGroupNames(); // {1=word}
 ```
+
+A compiled pattern of each of these languages reports the same metadata
+through the same three methods, and its `pattern()` returns a copy of the
+pattern bytes given to `compile`. `TrinoLikePattern` has `pattern()` too.
 
 The overload `parse(pattern, options)` takes the language's own options and
 applies the same pattern-syntax settings as `compile`. Settings that affect only
@@ -447,9 +452,10 @@ normalized during compilation. Invalid escape syntax and a pattern that is not
 valid UTF-8 throw `TrinoLikePatternSyntaxException`, whose `byteOffset()` is
 relative to the logical pattern Slice.
 
-The compiled pattern is immutable and safe to share across threads. This API
-has no captures, partial-input matching, match-result object, replacement
-grammar, or conversion to the RE2 language.
+The compiled pattern is immutable and safe to share across threads, and its
+`pattern()` returns a copy of the pattern bytes given to `compile`. This API has
+no captures, partial-input matching, match-result object, replacement grammar,
+or conversion to the RE2 language.
 
 `TrinoLikePattern.Options.setGenerateBytecode(true)`, passed to
 `compile(pattern, options)`, is an experimental option, off by default, that

@@ -61,10 +61,12 @@ public class TestJavaRegexp
         PatternInfo info = JavaRegexp.parse(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(3);
         assertThat(info.namedCapturingGroups()).isEqualTo(Map.of("word", 1, "never", 3));
+        assertThat(info.capturingGroupNames()).isEqualTo(Map.of(1, "word", 3, "never"));
 
         JavaRegexp compiled = JavaRegexp.compile(pattern);
         assertThat(info.capturingGroupCount()).isEqualTo(compiled.capturingGroupCount());
         assertThat(info.namedCapturingGroups()).isEqualTo(compiled.namedCapturingGroups());
+        assertThat(info.capturingGroupNames()).isEqualTo(compiled.capturingGroupNames());
 
         PatternInfo comments = JavaRegexp.parse(utf8Slice("#(ignored)\n(a)"), JavaRegexp.Options.defaults().setComments(true));
         assertThat(comments.capturingGroupCount()).isEqualTo(1);
@@ -80,6 +82,7 @@ public class TestJavaRegexp
         pattern.setByte(3, 'X');
 
         assertThat(regexp.namedCapturingGroups()).containsOnlyKeys("name");
+        assertThat(regexp.pattern()).isEqualTo(utf8Slice("(?<name>a)"));
     }
 
     @Test
