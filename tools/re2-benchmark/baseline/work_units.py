@@ -1,11 +1,11 @@
 """Deterministic partition of every shard's rows into self-contained work units.
 
-A unit is the rows one host measures between two chained calibrations. Atoms
-are the row sets a comparison or a scaling fit needs measured together; atoms
-are packed greedily, largest first, adding a unit until every unit holding
-several atoms fits the unit budget. run-unit.sh measures one unit. The
-generator checks every unit against the measurement requirements before it
-writes the tables.
+A unit is the rows one host measures as one work item; a baseline unit's rows
+lie between two chained calibrations. Atoms are the row sets a comparison or a
+scaling fit needs measured together; atoms are packed greedily, largest first,
+adding a unit until every unit holding several atoms fits the unit budget.
+run-unit.sh measures one unit. The generator checks every unit against the
+measurement requirements before it writes the tables.
 
 The tables are not checked in: freeze-candidate.sh generates them into the
 candidate archive and beside these modules, where hosts and the controller read
@@ -36,8 +36,8 @@ UNIT_ROW_FIELDS = ("unit_id", "row_id", "role", "replica_id")
 # The generated tables, written together by generate-units.py.
 TABLES = ("row-protocol.tsv", "units.tsv", "unit-rows.tsv")
 ROLES = ("owner", "representative")
-# A unit is a 15-minute work item. Chained units share their boundary calibrations, so each unit is
-# charged one calibration invocation.
+# A unit is a 15-minute work item. Chained baseline units share their boundary calibrations, so each
+# baseline unit is charged one calibration invocation.
 UNIT_SECONDS = 900
 UNIT_CALIBRATION_INVOCATIONS = 1
 UNIT_BUDGET_SECONDS = UNIT_SECONDS - unit_cost.calibration_seconds(UNIT_CALIBRATION_INVOCATIONS)
@@ -176,24 +176,25 @@ def merge(atoms):
     return Atom([row_id for atom in atoms for row_id in atom.owned])
 
 
-def pack(atoms, by_id, protocols, bindings):
+def pack(atoms, cost, budget=UNIT_BUDGET_SECONDS):
     """Largest atom first into the lightest unit, adding a unit until only lone atoms exceed the budget.
 
-    Packing is greedy, so it can use more units than an optimal packing would. `check` refuses any unit
-    over the 15-minute budget, a lone atom included.
+    cost gives the seconds to measure an atom or a merged unit. Packing is greedy, so it can use more
+    units than an optimal packing would. Each unit returned keeps the count of atoms it holds.
     """
-    costs = {id(atom): estimate(atom, by_id, protocols, bindings) for atom in atoms}
+    costs = {id(atom): cost(atom) for atom in atoms}
     ordered = sorted(atoms, key=lambda atom: (-costs[id(atom)], atom.owned[0]))
-    count = max(1, math.ceil(estimate(merge(atoms), by_id, protocols, bindings) / UNIT_BUDGET_SECONDS))
+    count = max(1, math.ceil(cost(merge(atoms)) / budget))
     while True:
         bins = [[] for _ in range(count)]
         seconds = [0.0] * count
         for atom in ordered:
             index = min(range(count), key=lambda candidate: (seconds[candidate], candidate))
             bins[index].append(atom)
-            seconds[index] = estimate(merge(bins[index]), by_id, protocols, bindings)
-        if all(seconds[index] <= UNIT_BUDGET_SECONDS or len(bins[index]) == 1 for index in range(count)):
-            return sorted((merge(atom_bin) for atom_bin in bins if atom_bin), key=lambda unit: unit.owned[0])
+            seconds[index] = cost(merge(bins[index]))
+        if all(seconds[index] <= budget or len(bins[index]) == 1 for index in range(count)):
+            return sorted(((merge(atom_bin), len(atom_bin)) for atom_bin in bins if atom_bin),
+                          key=lambda packed: packed[0].owned[0])
         count += 1
 
 
@@ -202,13 +203,15 @@ def protocol_digest(row_ids, protocols):
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 
-def unit_id(shard_id, owned, representatives, protocols):
+def unit_id(shard_id, owned, representatives, row_protocol_sha256, order=ORDER_RULE):
+    """A unit's identity: its shard, rows and representatives, the digest of its rows' protocols, and
+    the order its rows run in."""
     identity = {
         "shard_id": shard_id,
         "rows": sorted(owned),
-        "row_protocol": protocol_digest(owned, protocols),
+        "row_protocol": row_protocol_sha256,
         "representatives": sorted(representatives),
-        "order": ORDER_RULE,
+        "order": order,
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -224,14 +227,16 @@ def generate(manifest_rows, representatives, protocols):
     for shard_id, rows in shard_rows.items():
         shard_scaling = {group_id: group for group_id, group in scaling_groups.items() if group[0][0] == shard_id}
         atoms = shard_atoms(rows, protocols, shard_scaling)
-        for index, unit in enumerate(pack(atoms, by_id, protocols, bindings), 1):
+        packed = pack(atoms, lambda atom: estimate(atom, by_id, protocols, bindings))
+        for index, (unit, _) in enumerate(packed, 1):
             unit_representatives = sorted(
                 (replica_id, row_id) for row_id in unit.owned for replica_id in bindings.get(row_id, ()))
             seconds = estimate(unit, by_id, protocols, bindings, UNIT_CALIBRATION_INVOCATIONS)
             units.append({
                 "unit_id": unit_id(
                     shard_id, unit.owned,
-                    [f"{replica_id}:{row_id}" for replica_id, row_id in unit_representatives], protocols),
+                    [f"{replica_id}:{row_id}" for replica_id, row_id in unit_representatives],
+                    protocol_digest(unit.owned, protocols)),
                 "shard_id": shard_id,
                 "unit_index": index,
                 "owned": unit.owned,
@@ -310,8 +315,13 @@ def check(units, manifest_rows, protocols):
     owner = check_ownership(units, manifest_rows)
     check_requirements(manifest_rows, owner)
     check_selectors(manifest_rows, protocols, owner)
+    check_budget(units)
+
+
+def check_budget(units, allow_lone_oversize=False):
+    """Every unit fits the 15-minute budget; with allow_lone_oversize, a unit of one atom may exceed it."""
     for unit in units:
-        if unit["estimated_seconds"] > UNIT_SECONDS:
+        if unit["estimated_seconds"] > UNIT_SECONDS and not (allow_lone_oversize and unit["atoms"] == 1):
             raise ValueError(f"unit {unit['unit_id']} exceeds {UNIT_SECONDS} seconds")
 
 

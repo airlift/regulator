@@ -244,9 +244,11 @@ def verify_unit_receipt_coverage(primary, confirmation, platforms, shards, manif
         if unit["shard_id"] in shards}
     try:
         unit_session.campaign_shards(manifest_rows, shards)
+        protocols = unit_session.row_protocol.load(unit_session.DIRECTORY / "row-protocol.tsv")
         unit_session.check_unit_campaign(
-            primary, platforms, units, unit_session.row_protocol.load(unit_session.DIRECTORY / "row-protocol.tsv"),
-            manifest_digest, next(iter(campaign_ids)), confirmations=confirmation)
+            primary, platforms, units, unit_session.protocol_digests(units, protocols),
+            unit_session.platform_allocations(platforms, units), dict.fromkeys(shards, manifest_digest),
+            next(iter(campaign_ids)), confirmations=confirmation)
     except ValidationError as error:
         raise ReductionError(str(error)) from error
     return units
