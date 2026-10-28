@@ -644,11 +644,17 @@ prepare_specialized_native()
     local runner_name
     case "${specialized_comparator}" in
         native-re2) runner_name=language_benchmark ;;
+        rust-regex) runner_name=language_rust_benchmark ;;
         *) echo "No native runner for comparator ${specialized_comparator}" >&2; exit 1 ;;
     esac
     native_runner_build=$(prebuilt_engine native || echo local)
     NATIVE_RUNNER="${SHARED_WORK_DIR}/language-native/${runner_name}"
     if [[ "${native_runner_build}" == local ]]; then
+        # Unit hosts install no Rust toolchain; the engine build's runner serves them.
+        if [[ "${runner_name}" == language_rust_benchmark ]] && ! command -v cargo >/dev/null; then
+            echo "${specialized_comparator} needs the engine build's runner or a local cargo" >&2
+            exit 1
+        fi
         local build_directory="${SHARED_WORK_DIR}/language-native-local"
         RE2_NATIVE_TUNING=generic RE2_BENCHMARK_TARGETS="${runner_name}" RE2_BENCHMARK_BUILD_DIR="${build_directory}" \
             "${ROOT}/tools/re2-benchmark/build.sh" 2>&1 | tee "${RESULT_DIR}/logs/native-build.log"

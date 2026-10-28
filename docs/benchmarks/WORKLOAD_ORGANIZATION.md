@@ -18,7 +18,7 @@ into a row-count-weighted overall score.
 | Population | Purpose | Comparators | Headline use |
 |---|---|---|---|
 | Application-shaped scalar operations | Compiled patterns applied to changing, short and medium inputs | Native RE2, JDK `Pattern`, Joni, or the `regex` crate for the selected language; Joni for additional Trino operations | Primary application view |
-| Specialized engine and compiler | Representative patterns on the regular engine, the specialized engine, and compiled, as warmed steady-state operations; Trino regex, RE2, Java, and LIKE today | The page comparator: Joni for Trino regex, native RE2 for RE2, JDK `Pattern` for Java, Trino SQL LIKE for LIKE | Separate report section; excluded from headlines |
+| Specialized engine and compiler | Representative patterns on the regular engine, the specialized engine, and compiled, as warmed steady-state operations; Trino regex, RE2, Java, Rust, and LIKE today | The page comparator: Joni for Trino regex, native RE2 for RE2, JDK `Pattern` for Java, the `regex` crate for Rust, Trino SQL LIKE for LIKE | Separate report section; excluded from headlines |
 | Bulk text search | Whole files, books, source trees, dictionaries, and large logs | Native RE2, JDK `Pattern`, Joni, or the `regex` crate for the selected language, where supported | Separate throughput view |
 | Compilation | Cold and repeated pattern compilation | Comparator for the pattern language | Integrated lifecycle view; compile-only data in raw downloads |
 | Literal-probe distributions | One literal counted over a pinned corpus with Regulator's default and a corpus-matched byte-frequency distribution | Native RE2, JDK `Pattern`, Joni, or the `regex` crate for the selected regex language | Separate report section; excluded from headlines |
@@ -113,18 +113,21 @@ host:
   to strings before timing. Regulator's values are views of the source, while
   the JDK's are new strings, so the JDK rows' recorded allocation includes
   those copies.
+- Rust runs the same matcher operations as Java. The `regex` crate times
+  `captures_read` and `get` for `extract`, and a `captures_read_at` loop with
+  reused locations for `extractAll`. It records no allocation.
 
 Case `trino-specialized/<workload>` is the specialized engine for Trino regex,
 `re2-specialized/<workload>` for RE2, `java-specialized/<workload>` for Java,
-and `trino-like-specialized/<workload>` for LIKE. Appending `/generated` gives
-the compiled pattern, and `/regular-engine`, where measured, the regular
-engine.
+`rust-specialized/<workload>` for Rust, and `trino-like-specialized/<workload>`
+for LIKE. Appending `/generated` gives the compiled pattern, and
+`/regular-engine`, where measured, the regular engine.
 
 This population answers what a pattern gains from the specialized engine and
 from the opt-in compiler. It reports warmed steady-state operations only;
 compile and generation costs are not part of it. These rows carry their own
 `specialized-patterns` population and never enter a headline summary. Trino
-regex, RE2, Java, and LIKE have them today. `COMPARATOR_LANGUAGES` in
+regex, RE2, Java, Rust, and LIKE have them today. `COMPARATOR_LANGUAGES` in
 `benchmark-report/scripts/baseline_data.py` maps each comparator a catalog row
 can name to its language page, so another workload for these languages needs
 no report change: it adds its catalog rows to `specialized-patterns.tsv`, with

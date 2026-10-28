@@ -885,7 +885,7 @@ class TestShardResults(unittest.TestCase):
             ("trino-everyday-operations", "regulator-object-row"): 104,
             **{(suite, system): 5
                for suite, comparator in (("trino-specialized-patterns", "joni"), ("re2-specialized-patterns", "native-re2"),
-                                         ("java-specialized-patterns", "jdk"))
+                                         ("java-specialized-patterns", "jdk"), ("rust-specialized-patterns", "rust-regex"))
                for system in (comparator, *variants)},
         }, counts)
 

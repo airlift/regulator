@@ -17,10 +17,11 @@ mode, `unit-worker`, and reject any other.
 The specialized-pattern shards are in the formal campaign to answer what a
 pattern gains from the specialized engine and from the opt-in compiler:
 `trino-specialized-patterns-a` and `-b`, `re2-specialized-patterns-a` and
-`-b`, `java-specialized-patterns-a` and `-b`, and `trino-like-specialized`.
-The report sets the regular engine, the specialized engine, and compiled beside
-each other and beside their comparator: Joni for Trino regex, native RE2 for
-RE2, JDK `Pattern` for Java, and Trino SQL LIKE for the TPC-H LIKE workloads,
+`-b`, `java-specialized-patterns-a` and `-b`, `rust-specialized-patterns-a`
+and `-b`, and `trino-like-specialized`. The report sets the regular engine, the
+specialized engine, and compiled beside each other and beside their
+comparator: Joni for Trino regex, native RE2 for RE2, JDK `Pattern` for Java,
+the `regex` crate for Rust, and Trino SQL LIKE for the TPC-H LIKE workloads,
 which have no regular-engine variant. They measure warmed steady-state
 operations only, not compilation cost. The workloads are listed in
 [`specialized-patterns.tsv`](specialized-patterns.tsv).
