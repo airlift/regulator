@@ -340,6 +340,17 @@ record_failure_classification()
     } > "${SESSION_DIR}/failure-classification.txt"
 }
 
+# A frozen input that fails its check before launch fails it again on any retry, so the session is
+# refused for good rather than left to cleanup's retryable pre-launch classification.
+reject_input()
+{
+    local message=$1
+
+    echo "${message}" >&2
+    record_failure_classification input-rejection "${message}" || true
+    exit 1
+}
+
 spot_request_status()
 {
     local instance_id=$1
@@ -869,8 +880,7 @@ require_clean_worktree()
     local label=$2
 
     if [[ -n $(git -C "${worktree}" status --porcelain) ]]; then
-        echo "Qualification requires a clean ${label} worktree: ${worktree}" >&2
-        exit 1
+        reject_input "Qualification requires a clean ${label} worktree: ${worktree}"
     fi
 }
 
@@ -1283,44 +1293,42 @@ launch_instance()
     return 1
 }
 
-REGULATOR_COMMIT=$(candidate_commit)
+REGULATOR_COMMIT=$(candidate_commit) ||
+    reject_input "Frozen candidate archive does not identify a local Regulator commit"
 TRINO_COMMIT=none
 if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
-    TRINO_COMMIT=$(git -C "${TRINO_DIR}" rev-parse "${TRINO_REVISION:-HEAD}^{commit}")
+    TRINO_COMMIT=$(git -C "${TRINO_DIR}" rev-parse "${TRINO_REVISION:-HEAD}^{commit}") ||
+        reject_input "Trino revision is not a commit of the Trino checkout"
 fi
 
 require_clean_worktree "${REGULATOR_DIR}" Regulator
 if [[ ! -f "${BASELINE_CANDIDATE_ARCHIVE}" ||
         ! "${BASELINE_CANDIDATE_ARCHIVE_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "Formal baseline execution requires the frozen candidate archive and SHA-256" >&2
-    exit 1
+    reject_input "Formal baseline execution requires the frozen candidate archive and SHA-256"
 fi
 cp "${BASELINE_CANDIDATE_ARCHIVE}" "${SESSION_DIR}/regulator.tar.gz"
 if [[ $(sha256 "${SESSION_DIR}/regulator.tar.gz") != "${BASELINE_CANDIDATE_ARCHIVE_SHA256}" ]]; then
-    echo "Frozen candidate archive SHA-256 mismatch" >&2
-    exit 1
+    reject_input "Frozen candidate archive SHA-256 mismatch"
 fi
 if [[ $(git -C "${REGULATOR_DIR}" rev-parse "${REGULATOR_COMMIT}:src/main") != "${BASELINE_EXPECTED_ENGINE_TREE}" ]]; then
-    echo "Selected Regulator production tree does not match BASELINE_EXPECTED_ENGINE_TREE" >&2
-    exit 1
+    reject_input "Selected Regulator production tree does not match BASELINE_EXPECTED_ENGINE_TREE"
 fi
 if [[ "${CAMPAIGN_MODE}" == language-batch ]]; then
     if [[ ! -f "${LANGUAGE_BATCH_ARCHIVE}" || ! -f "${LANGUAGE_CANDIDATE_PROVENANCE}" ||
             ! "${LANGUAGE_BATCH_ARCHIVE_SHA256}" =~ ^[0-9a-f]{64}$ ||
             ! "${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-        echo "Language execution requires checksummed batch inputs and candidate provenance" >&2
-        exit 1
+        reject_input "Language execution requires checksummed batch inputs and candidate provenance"
     fi
     cp "${LANGUAGE_BATCH_ARCHIVE}" "${SESSION_DIR}/language-batch.tar.gz"
     cp "${LANGUAGE_CANDIDATE_PROVENANCE}" "${SESSION_DIR}/candidate-provenance.tsv"
     if [[ $(sha256 "${SESSION_DIR}/candidate-provenance.tsv") != "${LANGUAGE_CANDIDATE_PROVENANCE_SHA256}" ]]; then
-        echo "Language candidate provenance checksum mismatch" >&2
-        exit 1
+        reject_input "Language candidate provenance checksum mismatch"
     fi
     PYTHONDONTWRITEBYTECODE=1 python3 "${REGULATOR_DIR}/tools/re2-benchmark/language/transport.py" \
         "${SESSION_DIR}/language-batch.tar.gz" --sha256 "${LANGUAGE_BATCH_ARCHIVE_SHA256}" \
         --platform "${CAMPAIGN_PLATFORM}" --shard "${CAMPAIGN_SHARD_ID}" --replica "${CAMPAIGN_REPLICA_ID}" \
-        --host-timeout "${TIMEOUT_SECONDS}"
+        --host-timeout "${TIMEOUT_SECONDS}" ||
+        reject_input "Language batch archive fails its checks for this job"
 fi
 if [[ "${CAMPAIGN_USES_TRINO}" == true ]]; then
     package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"
@@ -1330,10 +1338,9 @@ ENGINE_BUILD_TRINO_SHA256=
 if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
     ENGINE_BUILD_TRINO_SHA256=$(
         PYTHONDONTWRITEBYTECODE=1 python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" checksum \
-            --build "${ENGINE_BUILD_DIRECTORY}" --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256}")
+            --build "${ENGINE_BUILD_DIRECTORY}" --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256}") || true
     if [[ ! "${ENGINE_BUILD_TRINO_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-        echo "Engine build archive does not match its manifest" >&2
-        exit 1
+        reject_input "Engine build archive does not match its manifest"
     fi
 fi
 
