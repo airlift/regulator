@@ -1694,7 +1694,9 @@ measurements specific to each language.
   `OPTIONAL_FALLBACK` with dotAll is within noise, and without dotAll it takes
   1.08 times, 44.7 ns against 41.4 ns. That row is accepted as a known
   exception: each losing row retries the optional `www.`, which the DFA never
-  does, and removing that retry would change Trino plans too.
+  does, and removing that retry would change Trino plans too. A failed `www.`
+  retry occurs on 0.07% of Apache access-log referrers and 0.02% of GH Archive
+  URL strings.
 - A run scan with less than a vector of input left scans by byte, as Trino's
   run scan finishes its tail, and reads the member table only when the run
   excludes an ASCII byte. On R8i this takes ClickBench `NEWLINE_PATH` without
