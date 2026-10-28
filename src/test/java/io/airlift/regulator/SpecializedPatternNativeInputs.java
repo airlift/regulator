@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.util.HexFormat;
 import java.util.List;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.stream.Collectors.joining;
 
 /// Writes what a native comparator's semantic gate checks for each specialized-pattern
@@ -107,6 +108,7 @@ public final class SpecializedPatternNativeInputs
                 .map(value -> switch (value) {
                     case null -> "-";
                     case Slice slice -> HEX.formatHex(slice.getBytes());
+                    case String string -> HEX.formatHex(string.getBytes(UTF_8));
                     default -> throw new IllegalArgumentException("not a captured value: " + value.getClass().getName());
                 })
                 .collect(joining(","));

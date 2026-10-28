@@ -329,10 +329,10 @@ def parameter_block(rows):
     return block
 
 
-def execution_settings(system, protocol, protocol_name, smoke):
+def execution_settings(protocol, protocol_name, smoke):
     """How a selector runs: qualification keeps its frozen protocol; smoke keeps the route's smoke windows."""
+    kind = EXECUTION_KINDS.get(protocol["execution"], "processes")
     if protocol_name == "qualification":
-        kind = EXECUTION_KINDS.get(protocol["execution"], "processes")
         if kind == "forks" and protocol["warmup_time"] != protocol["measurement_time"]:
             raise ValueError(f"Forked protocol {protocol['row_id']} has distinct warmup and measurement windows")
         return {
@@ -340,10 +340,9 @@ def execution_settings(system, protocol, protocol_name, smoke):
             **{field: protocol[field] for field in (
                 "processes", "warmup_iterations", "warmup_time", "measurement_iterations", "measurement_time")},
         }
-    # Smoke forks only Joni, as many times as its frozen protocol, runs a native
-    # comparator in its one process, and runs every candidate row in the route's
-    # smoke processes.
-    kind = "forks" if system == "joni" else EXECUTION_KINDS.get(protocol["execution"], "processes")
+    # Smoke forks only a forked comparator, as many times as its frozen protocol,
+    # runs a native comparator in its one process, and runs every candidate row in
+    # the route's smoke processes.
     return {
         "kind": kind,
         "processes": smoke["processes"] if kind == "processes" else protocol["processes"],
@@ -395,7 +394,7 @@ def selectors(rows, shard_rows, protocols, protocol_name, smoke):
             "selector": str(index),
             "system": system,
             "execution": protocol["execution"],
-            **execution_settings(system, protocol, protocol_name, smoke),
+            **execution_settings(protocol, protocol_name, smoke),
             "benchmarks": ",".join(selector["benchmarks"]),
             "parameters": parameters,
             "rows": str(selector["rows"]),

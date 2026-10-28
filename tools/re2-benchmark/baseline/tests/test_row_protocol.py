@@ -25,6 +25,15 @@ class TestRowProtocol(unittest.TestCase):
                 protocol = protocols[row_id]
                 self.assertEqual(expected, " ".join(protocol[field] for field in row_protocol.FIELDS[1:]))
 
+    def test_each_comparator_runs_in_its_execution(self):
+        # The JDK runs in JMH forks, as Joni does; native RE2 times its repetitions in one runner process.
+        for system, expected in (
+                ("jdk", "jmh-forks 1 10 1s 10 1s -"),
+                ("native-re2", "native-repetitions 1 10 1s 10 1s -")):
+            with self.subTest(system=system):
+                protocol = row_protocol.row_protocol({"row_id": f"row/{system}", "system": system}, "1s", "-")
+                self.assertEqual(expected, " ".join(protocol[field] for field in row_protocol.FIELDS[1:]))
+
 
 if __name__ == "__main__":
     unittest.main()

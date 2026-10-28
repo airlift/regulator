@@ -4,6 +4,8 @@ trino-specialized-patterns-a	Trino operations for the specialized engine and com
 trino-specialized-patterns-b	Trino operations for the specialized engine and compiler section against Joni, workload partition B
 re2-specialized-patterns-a	RE2 operations for the specialized engine and compiler section against native RE2, workload partition A
 re2-specialized-patterns-b	RE2 operations for the specialized engine and compiler section against native RE2, workload partition B
+java-specialized-patterns-a	Java operations for the specialized engine and compiler section against the JDK, workload partition A
+java-specialized-patterns-b	Java operations for the specialized engine and compiler section against the JDK, workload partition B
 trino-like	Trino LIKE against current Trino implementations
 trino-like-specialized	TPC-H LIKE predicates for the specialized engine and compiler section against Trino SQL
 like-compile	Trino LIKE pattern construction against Trino SQL

@@ -35,7 +35,7 @@ CPU_LIST=${BASELINE_CPU_LIST:-0}
 HEAP_SIZE=${BASELINE_HEAP_SIZE:-8g}
 MAVEN_ARGS=(-Dmaven.gitcommitid.skip=true)
 PROTOCOL_QUALIFICATION_PROCESS_COUNT=5
-JONI_JMH_FORKS=1
+JMH_FORK_COUNT=1
 
 case "${PROTOCOL}" in
     smoke)
@@ -198,9 +198,9 @@ if [[ -n "${frozen_process_protocol}" ]]; then
         bounded_jmh_protocol=true
     fi
 fi
-frozen_joni_protocol=$(frozen_route_value joni)
-if [[ -n "${frozen_joni_protocol}" ]]; then
-    IFS=$'\t' read -r JONI_JMH_FORKS _ <<<"${frozen_joni_protocol}"
+frozen_fork_protocol=$(frozen_route_value forks)
+if [[ -n "${frozen_fork_protocol}" ]]; then
+    IFS=$'\t' read -r JMH_FORK_COUNT _ <<<"${frozen_fork_protocol}"
 fi
 protocol_qualification_required=false
 protocol_representative_count=0
@@ -677,9 +677,9 @@ prepare_specialized_native()
     printf 'Verified %s %s specialized workloads\n' "${verified}" "${specialized_comparator}" | tee -a "${semantic_log}"
 }
 
-# Chooses, from the planned selectors of the comparator's rows, how the specialized-pattern
-# comparator runs, and prepares a native runner. A specialized-pattern shard's rows all name the
-# comparator its native-access route measures.
+# Chooses, from the planned selectors of the comparator's rows, whether the specialized-pattern
+# comparator runs in its native runner or in JMH forks, and prepares a native runner. A
+# specialized-pattern shard's rows all name the comparator its native-access route measures.
 specialized_comparator_command=()
 prepare_specialized_comparator()
 {
@@ -692,8 +692,13 @@ prepare_specialized_comparator()
             prepare_specialized_native
             specialized_comparator_command=(run_specialized_native)
             ;;
+        forks)
+            # A forked comparator, the JDK, runs from Regulator's classpath, and the semantic tests
+            # check its values.
+            specialized_comparator_command=(run_forked_comparator "${CLASSPATH}" "${specialized_comparator}")
+            ;;
         *)
-            echo "Comparator ${specialized_comparator} has no native selector: ${kind}" >&2
+            echo "Comparator ${specialized_comparator} has no native or forked selector: ${kind}" >&2
             exit 1
             ;;
     esac
@@ -951,7 +956,7 @@ run_jmh()
 }
 
 # Runs a handler call's selectors or, from run_unit_jmh_selectors, one forked selector.
-run_joni_jmh_with_classpath()
+run_forked_jmh_with_classpath()
 {
     local classpath=$1
     local filter=$2
@@ -965,11 +970,11 @@ run_joni_jmh_with_classpath()
         java "${jmh_launcher_jvm_arguments[@]}" \
         -cp "${classpath}" \
         org.openjdk.jmh.Main "${filter}" \
-        -f "${JONI_JMH_FORKS}" \
+        -f "${JMH_FORK_COUNT}" \
         -wi "${JMH_PROCESS_WARMUP_ITERATIONS}" \
         -i "${JMH_PROCESS_MEASUREMENT_ITERATIONS}" \
-        -w "${JONI_JMH_TIME}" \
-        -r "${JONI_JMH_TIME}" \
+        -w "${JMH_FORK_TIME}" \
+        -r "${JMH_FORK_TIME}" \
         -foe true \
         -prof gc \
         -jvmArgs "${jmh_fork_arguments}" \
@@ -1033,11 +1038,11 @@ run_unit_jmh_selectors()
                 ;;
             forks)
                 JMH_UNIT_SELECTOR=true \
-                    JONI_JMH_FORKS=${processes} \
+                    JMH_FORK_COUNT=${processes} \
                     JMH_PROCESS_WARMUP_ITERATIONS=${warmup_iterations} \
                     JMH_PROCESS_MEASUREMENT_ITERATIONS=${measurement_iterations} \
-                    JONI_JMH_TIME=${measurement_time} \
-                    run_joni_jmh_with_classpath "${classpath}" "${selector_filter}" \
+                    JMH_FORK_TIME=${measurement_time} \
+                    run_forked_jmh_with_classpath "${classpath}" "${selector_filter}" \
                     "${output_base}-selector-${selector}.json" "${parameter_arguments[@]}"
                 ;;
             *)
@@ -1056,9 +1061,9 @@ fi
 mixed_process_arguments=(
     --allow-mixed-process-sets
     --expected-process-groups "${JMH_PROCESS_COUNT}")
-joni_process_arguments=(
+forked_process_arguments=(
     --allow-mixed-process-sets
-    --expected-process-groups "${JONI_JMH_FORKS}")
+    --expected-process-groups "${JMH_FORK_COUNT}")
 
 calibration_filter='^io\.airlift\.regulator\.BenchmarkExpressionPlans\.findLiteral$'
 calibration_parameters=(-p workload=KIB_LATE)
@@ -1081,7 +1086,7 @@ run_jmh_per_workload()
 {
     # Runs each expected row of one system in its own JMH invocation, so each benchmark call site
     # sees one pattern. The arguments are the row order (forward or reverse); the launch mode,
-    # in-process for Regulator's host JVM processes or forked for Joni's proper forks; the
+    # in-process for Regulator's host JVM processes or forked for a JVM comparator's proper forks; the
     # classpath; the result prefix; the system; and jmh_benchmark, the JMH method to filter on or
     # - for the manifest benchmark. Any remaining arguments go to every invocation. Each
     # invocation's raw results and log are named for the system, the manifest benchmark and its
@@ -1096,7 +1101,7 @@ run_jmh_per_workload()
     local launcher
     case "${mode}" in
         in-process) launcher=run_jmh_with_classpath ;;
-        forked) launcher=run_joni_jmh_with_classpath ;;
+        forked) launcher=run_forked_jmh_with_classpath ;;
         *) echo "Unknown per-workload launch mode: ${mode}" >&2; exit 1 ;;
     esac
     # Each parameter value becomes part of a file name and of one JMH -p value.
@@ -1175,30 +1180,33 @@ run_regulator_candidate()
     normalized_files+=("${normalized}")
 }
 
-run_trino_operations_joni()
+# Runs a JVM comparator's rows, Joni's or the JDK's, in JMH forks of one launcher, named for the
+# route's handler. The comparator keeps its forward workload order; only the Regulator variants reverse.
+run_forked_comparator()
 {
-    local normalized="${RESULT_DIR}/normalized/trino-operations-joni.tsv"
+    local classpath=$1
+    local system=$2
+    local normalized="${RESULT_DIR}/normalized/${handler}-${system}.tsv"
     if [[ "${jmh_invocation_per_workload}" == true ]]; then
-        # Joni keeps its forward workload order; only the Regulator variants reverse.
-        run_jmh_per_workload forward forked "${PINNED_TRINO_CLASSPATH}" trino-operations joni -
+        run_jmh_per_workload forward forked "${classpath}" "${handler}" "${system}" -
     else
         local filter
-        local output="${RESULT_DIR}/raw/trino-operations-joni.json"
+        local output="${RESULT_DIR}/raw/${handler}-${system}.json"
         filter=$(python3 "${RESULT_TOOL}" jmh-filter \
             --manifest "${SELECTION_MANIFEST}" \
             --shard "${SHARD_ID}" \
-            --system joni)
-        run_joni_jmh_with_classpath "${PINNED_TRINO_CLASSPATH}" "${filter}" "${output}" |
-            tee "${RESULT_DIR}/logs/trino-operations-joni.log"
+            --system "${system}")
+        run_forked_jmh_with_classpath "${classpath}" "${filter}" "${output}" |
+            tee "${RESULT_DIR}/logs/${handler}-${system}.log"
         set_jmh_input_files "${output}"
     fi
     python3 "${RESULT_TOOL}" normalize-jmh \
         --manifest "${SELECTION_MANIFEST}" \
         --shard "${SHARD_ID}" \
-        --system joni \
+        --system "${system}" \
         --input "${JMH_INPUT_FILES[@]}" \
         "${secondary_metric_arguments[@]}" \
-        "${joni_process_arguments[@]}" \
+        "${forked_process_arguments[@]}" \
         --semantic-receipt "${RESULT_DIR}/semantic-gate.tsv" \
         "${precision_arguments[@]}" \
         --output "${normalized}"
@@ -1242,7 +1250,7 @@ run_regulator_candidates()
 run_trino_operations_shard()
 {
     if [[ "${ROUTE}" == native-access ]]; then
-        run_ordered_comparison run_trino_operations_joni
+        run_ordered_comparison run_forked_comparator "${PINNED_TRINO_CLASSPATH}" joni
     else
         run_regulator_candidates
     fi
