@@ -357,6 +357,91 @@ def normalize_mapped_jmh(arguments):
     write_tsv(arguments.output, OBSERVED_FIELDS, rows)
 
 
+# The runner records a row's parameters in its context as parameter.<name>=<value>.
+NATIVE_PARAMETER_PREFIX = "parameter."
+
+
+def native_results(paths, expected_repetitions):
+    """Each Google Benchmark result file's median repetition, keyed by operation and row parameters.
+
+    Every file must hold the planned selector's repetitions, so a dry run or a runner flag read
+    from the environment cannot stand in for the frozen protocol.
+    """
+    results = {}
+    for path in paths:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        context = document.get("context") if isinstance(document, dict) else None
+        benchmarks = document.get("benchmarks") if isinstance(document, dict) else None
+        if not isinstance(context, dict) or not isinstance(benchmarks, list) or not benchmarks:
+            raise ValueError(f"Native result is empty or malformed: {path}")
+        if context.get("dry_run", "false") != "false":
+            raise ValueError(f"Native result is a dry run: {path}")
+        parameters = canonical_parameters({
+            name[len(NATIVE_PARAMETER_PREFIX):]: value for name, value in context.items()
+            if name.startswith(NATIVE_PARAMETER_PREFIX)})
+        repetitions = {}
+        for result in benchmarks:
+            if result.get("error_occurred") or result.get("skipped"):
+                raise ValueError(f"Native benchmark {result.get('name')} failed or was skipped in {path}")
+            if result.get("run_type") != "iteration":
+                continue
+            if result.get("time_unit") != "ns":
+                raise ValueError(
+                    f"Unexpected native unit for {result.get('name')} in {path}: {result.get('time_unit')}")
+            if int(result["repetitions"]) != expected_repetitions:
+                raise ValueError(f"Native benchmark {result.get('name')} in {path} declares "
+                                 f"{result['repetitions']} repetitions, not {expected_repetitions}")
+            if int(result["iterations"]) < 1:
+                raise ValueError(f"Native benchmark {result.get('name')} in {path} ran no iterations")
+            repetitions.setdefault((result["run_name"], parameters), []).append(result)
+        for key, samples in repetitions.items():
+            if key in results:
+                raise ValueError(f"Duplicate native result {key} in {path}")
+            if len(samples) != expected_repetitions:
+                raise ValueError(f"Native result {key} in {path} has {len(samples)} of "
+                                 f"{expected_repetitions} repetitions")
+            indices = sorted(int(sample["repetition_index"]) for sample in samples)
+            if indices != list(range(expected_repetitions)):
+                raise ValueError(f"Native result {key} in {path} has repetition indices {indices}, "
+                                 f"not 0 to {expected_repetitions - 1}")
+            real_times = [float(sample["real_time"]) for sample in samples]
+            invalid = [value for value in real_times if not math.isfinite(value) or value <= 0]
+            if invalid:
+                raise ValueError(f"Native result {key} in {path} has non-finite or non-positive times {invalid}")
+            results[key] = statistics.median(real_times)
+    return results
+
+
+def normalize_native(arguments):
+    expected = selected_rows(load_manifest(arguments.manifest), arguments.shard, arguments.system)
+    expected_by_key = {}
+    for row in expected:
+        key = (row["benchmark"], row["parameters"])
+        if key in expected_by_key:
+            raise ValueError(f"Expected native rows {expected_by_key[key]['row_id']} and {row['row_id']} "
+                             f"share operation and parameters {key}")
+        expected_by_key[key] = row
+    actual = native_results(arguments.input, arguments.expected_repetitions)
+    missing = set(expected_by_key) - set(actual)
+    unexpected = set(actual) - set(expected_by_key)
+    if missing or unexpected:
+        raise ValueError(
+            f"Native rows differ from the manifest; missing={sorted(missing)[:20]}, "
+            f"unexpected={sorted(unexpected)[:20]}")
+    semantic_receipt(arguments.semantic_receipt)
+    rows = [{
+        "row_id": expected_by_key[key]["row_id"],
+        "shard_id": expected_by_key[key]["shard_id"],
+        "system": expected_by_key[key]["system"],
+        "score": format_number(actual[key]),
+        "score_unit": "ns/op",
+        "allocation_bytes": "not-measured",
+        "result_checksum": result_checksum(expected_by_key[key]),
+        "outcome": "accepted",
+    } for key in sorted(expected_by_key)]
+    write_tsv(arguments.output, OBSERVED_FIELDS, rows)
+
+
 def exact_filter(values):
     return "^(" + "|".join(re.escape(value) for value in sorted(set(values))) + ")$"
 
@@ -655,6 +740,16 @@ def parser():
     mapped_jmh_parser.add_argument("--expected-process-groups", type=int)
     mapped_jmh_parser.add_argument("--maximum-relative-standard-error", type=float)
     mapped_jmh_parser.set_defaults(function=normalize_mapped_jmh)
+
+    native_parser = subparsers.add_parser("normalize-native")
+    native_parser.add_argument("--manifest", type=Path, required=True)
+    native_parser.add_argument("--shard", required=True)
+    native_parser.add_argument("--system", required=True)
+    native_parser.add_argument("--input", type=Path, nargs="+", required=True)
+    native_parser.add_argument("--expected-repetitions", type=int, required=True)
+    native_parser.add_argument("--output", type=Path, required=True)
+    native_parser.add_argument("--semantic-receipt", type=Path, required=True)
+    native_parser.set_defaults(function=normalize_native)
 
     combine_parser = subparsers.add_parser("combine")
     combine_parser.add_argument("--expected", type=Path, required=True)

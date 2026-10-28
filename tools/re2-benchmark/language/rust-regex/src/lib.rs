@@ -15,7 +15,8 @@
 //! Every call that borrows its input as `&str` takes text the runner already
 //! validated as UTF-8 before timing, so the shim does not check it again. Each
 //! search runs inside one call per input, with the crate's own iteration except
-//! for capture counting, whose shim-managed loop reuses one set of locations.
+//! for capture counting and extract-all, whose shim-managed loop reuses one set of
+//! locations.
 //!
 //! The `language_rust_bytes_regex_*` entry points do the same work through the
 //! crate's bytes API, which takes any haystack. Each API has its own compiled
@@ -129,6 +130,68 @@ pub unsafe extern "C" fn language_rust_regex_count_captures(
         result += (0..groups.len()).filter(|&index| groups.get(index).is_some()).count() as u64;
     });
     result
+}
+
+/// Receives one extracted value: the group's text, or null for a group that did not participate.
+pub type ValueCallback = unsafe extern "C" fn(context: *mut c_void, data: *const u8, length: usize);
+
+/// Finds group `group` of the first match with reused locations and returns it as the
+/// crate's `&str` through `value` and `value_length`. Returns false when nothing matches
+/// or the group does not participate.
+#[no_mangle]
+pub unsafe extern "C" fn language_rust_regex_extract(
+    regex: *const Regex,
+    locations: *mut CaptureLocations,
+    data: *const u8,
+    length: usize,
+    group: usize,
+    value: *mut *const u8,
+    value_length: *mut usize,
+) -> bool {
+    let haystack = text(data, length);
+    let locations = &mut *locations;
+    if (*regex).captures_read(locations, haystack).is_none() {
+        return false;
+    }
+    match locations.get(group) {
+        Some((start, end)) => {
+            let found: &str = &haystack[start..end];
+            *value = found.as_ptr();
+            *value_length = found.len();
+            true
+        }
+        None => false,
+    }
+}
+
+/// Collects group `group` of every match into a new `Vec<Option<&str>>`, `None` for a group
+/// that did not participate, with `each_capture`'s reused locations, and returns how many it
+/// holds. A non-null `callback` then receives each value.
+#[no_mangle]
+pub unsafe extern "C" fn language_rust_regex_extract_all(
+    regex: *const Regex,
+    locations: *mut CaptureLocations,
+    data: *const u8,
+    length: usize,
+    group: usize,
+    callback: Option<ValueCallback>,
+    context: *mut c_void,
+) -> u64 {
+    let haystack = text(data, length);
+    let mut values: Vec<Option<&str>> = Vec::new();
+    each_capture(&*regex, &mut *locations, haystack, |groups| {
+        values.push(groups.get(group).map(|(start, end)| &haystack[start..end]));
+    });
+    if let Some(callback) = callback {
+        for found in &values {
+            match found {
+                Some(found) => callback(context, found.as_ptr(), found.len()),
+                None => callback(context, ptr::null(), 0),
+            }
+        }
+    }
+    std::hint::black_box(&values);
+    values.len() as u64
 }
 
 /// Reports each match from the crate's own iterator, all groups when `captures`

@@ -14,7 +14,19 @@
 
 #include <re2/re2.h>
 
+#include <optional>
+
 namespace {
+// Where the search after `match` starts: its end, or one UTF-8 scalar later after an empty
+// match, matching the public Slice iterator. Past the input end when nothing remains.
+size_t next_search(absl::string_view input, absl::string_view match) {
+    size_t next = static_cast<size_t>(match.data() - input.data()) + match.size();
+    if (!match.empty()) return next;
+    if (next == input.size()) return next + 1;
+    unsigned char c = input[next];
+    return next + (c < 0x80 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4);
+}
+
 struct Re2Engine {
     static RE2 compile(const std::string& pattern) { return RE2(pattern); }
 
@@ -31,15 +43,60 @@ struct Re2Engine {
         while (next <= input.size() && pattern.Match(input, next, input.size(), RE2::UNANCHORED, &match, 1)) {
             ++count;
             if (matches != nullptr) matches->push_back(encode_hex(match));
-            next = static_cast<size_t>(match.data() - input.data()) + match.size();
-            // Advance by one UTF-8 scalar after an empty match, matching the public Slice iterator.
-            if (match.empty()) {
-                if (next == input.size()) break;
-                unsigned char c = input[next];
-                next += c < 0x80 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
-            }
+            next = next_search(input, match);
         }
         return count;
+    }
+
+    // The rewrite `\N` of the operation's group, and room for the groups up to it.
+    struct Scratch {
+        std::string rewrite;
+        std::vector<absl::string_view> groups;
+    };
+
+    static constexpr bool replaces = true;
+
+    // A rewrite takes one digit after the backslash, so `\10` would name group 1 and a literal 0.
+    static void check_specialized(Specialized operation, int group) {
+        if (operation != Specialized::ExtractAll && group > 9) {
+            throw std::runtime_error("RE2 rewrites cannot name capture group " + std::to_string(group));
+        }
+    }
+
+    static Scratch scratch(const RE2&, int group) {
+        return {"\\" + std::to_string(group), std::vector<absl::string_view>(group + 1)};
+    }
+
+    // GlobalReplace rewrites a string in place, so each call copies the input first.
+    static std::string replace(const RE2& pattern, Scratch& scratch, absl::string_view input,
+            std::vector<std::string>* trace) {
+        std::string text(input);
+        RE2::GlobalReplace(&text, pattern, scratch.rewrite);
+        if (trace != nullptr) trace->push_back(encode_hex(text));
+        return text;
+    }
+
+    static std::optional<std::string> extract(const RE2& pattern, Scratch& scratch, absl::string_view input, int,
+            std::vector<std::string>* trace) {
+        std::string value;
+        if (!RE2::Extract(input, pattern, scratch.rewrite, &value)) return std::nullopt;
+        if (trace != nullptr) trace->push_back(encode_hex(value));
+        return value;
+    }
+
+    static std::vector<absl::string_view> extract_all(const RE2& pattern, Scratch& scratch, absl::string_view input,
+            int group, std::vector<std::string>* trace) {
+        std::vector<absl::string_view> values;
+        size_t next = 0;
+        while (next <= input.size() &&
+                pattern.Match(input, next, input.size(), RE2::UNANCHORED, scratch.groups.data(), group + 1)) {
+            values.push_back(scratch.groups[group]);
+            next = next_search(input, scratch.groups[0]);
+        }
+        if (trace != nullptr) {
+            for (absl::string_view value : values) trace->push_back(value.data() == nullptr ? "-" : encode_hex(value));
+        }
+        return values;
     }
 };
 } // namespace

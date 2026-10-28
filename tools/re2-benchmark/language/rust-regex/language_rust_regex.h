@@ -39,6 +39,13 @@ uint64_t language_rust_regex_count_captures(const LanguageRustRegex* regex, Lang
                                             const char* data, size_t length);
 bool language_rust_regex_trace(const LanguageRustRegex* regex, const char* data, size_t length, bool captures,
                                LanguageRustMatchCallback callback, void* context);
+typedef void (*LanguageRustValueCallback)(void* context, const char* data, size_t length);
+bool language_rust_regex_extract(const LanguageRustRegex* regex, LanguageRustCaptureLocations* locations,
+                                 const char* data, size_t length, size_t group, const char** value,
+                                 size_t* value_length);
+uint64_t language_rust_regex_extract_all(const LanguageRustRegex* regex, LanguageRustCaptureLocations* locations,
+                                         const char* data, size_t length, size_t group,
+                                         LanguageRustValueCallback callback, void* context);
 
 struct LanguageRustBytesRegex;
 struct LanguageRustBytesCaptureLocations;

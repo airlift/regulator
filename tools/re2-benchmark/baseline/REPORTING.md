@@ -147,8 +147,9 @@ Ratios are emitted only when the manifest identifies a same-host comparator
 relationship. The reducer does not infer relationships from similar benchmark
 names or descriptive labels:
 
-- A family whose comparator is Joni compares each Regulator row with its
-  same-host `joni` row.
+- A family whose comparator is Joni, native RE2, JDK `Pattern`, or the `regex`
+  crate compares each Regulator row with its same-host `joni`, `native-re2`,
+  `jdk`, or `rust-regex` row.
 - A Trino LIKE family compares `regulator`, and `regulator-generated` where
   it is measured, separately with each `trino-optimized` and `trino-sql` row
   present.

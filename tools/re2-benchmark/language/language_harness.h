@@ -15,6 +15,14 @@
 // Lifecycle harness shared by the native comparators. An engine adapter supplies
 // compile (returning a pattern with ok() and error()), contains, count with an
 // optional match trace, and check, which rejects inputs the engine cannot accept.
+//
+// For the baseline's specialized-pattern comparators an adapter also supplies the
+// nearest public form of each specialized operation: extract, the given group of
+// the first match, and extract_all, that group of every match, over per-pattern
+// scratch state from scratch(pattern, group), and check_specialized(operation,
+// group), which rejects a group the operation cannot name. An adapter whose library
+// has a global replacement also supplies replace, which substitutes the group for
+// every match, and sets replaces. Each takes an optional trace of the values it returns.
 
 #include <benchmark/benchmark.h>
 
@@ -181,6 +189,98 @@ void register_operation(const std::string& name, const Inputs& inputs) {
     });
 }
 
+enum class Specialized { Replace, Extract, ExtractAll };
+
+int capture_group(const std::string& text) {
+    try {
+        size_t length = 0;
+        int group = std::stoi(text, &length);
+        if (length == text.size() && group >= 1) return group;
+    }
+    catch (const std::logic_error&) {
+        // Not a number, or out of range for int; reported below.
+    }
+    throw std::runtime_error("invalid capture group: " + text);
+}
+
+template <typename Engine, Specialized operation, typename Pattern, typename Scratch>
+void run_specialized(const Pattern& pattern, Scratch& scratch, std::string_view source, int group,
+        std::vector<std::string>* trace) {
+    if constexpr (operation == Specialized::Replace) {
+        benchmark::DoNotOptimize(Engine::replace(pattern, scratch, source, trace));
+    }
+    else if constexpr (operation == Specialized::Extract) {
+        benchmark::DoNotOptimize(Engine::extract(pattern, scratch, source, group, trace));
+    }
+    else {
+        benchmark::DoNotOptimize(Engine::extract_all(pattern, scratch, source, group, trace));
+    }
+}
+
+// Prints, for each input, the number of values the operation returned and each value
+// in hex, or - for a group that did not participate, as the Regulator rows' verifier does.
+template <typename Engine, Specialized operation>
+void verify_specialized(const Inputs& inputs, int group) {
+    auto pattern = Engine::compile(inputs.pattern);
+    if (!pattern.ok()) throw std::runtime_error(pattern.error());
+    auto scratch = Engine::scratch(pattern, group);
+    for (const Source& source : inputs.sources) {
+        std::vector<std::string> values;
+        run_specialized<Engine, operation>(pattern, scratch, source.bytes(), group, &values);
+        std::cout << values.size() << ':';
+        for (size_t i = 0; i < values.size(); ++i) {
+            if (i != 0) std::cout << ',';
+            std::cout << values[i];
+        }
+        std::cout << '\n';
+    }
+}
+
+template <typename Engine, Specialized operation>
+void measure_specialized(benchmark::State& state, const Inputs& inputs, int group) {
+    auto pattern = Engine::compile(inputs.pattern);
+    if (!pattern.ok()) { state.SkipWithError(pattern.error().c_str()); return; }
+    auto scratch = Engine::scratch(pattern, group);
+    size_t index = 0;
+    for (auto _ : state) {
+        std::string_view source = inputs.sources[index].bytes();
+        index = (index + 1) % inputs.sources.size();
+        run_specialized<Engine, operation>(pattern, scratch, source, group, nullptr);
+    }
+}
+
+// Verifies the operation's values, or registers it to be timed under its name.
+template <typename Engine, Specialized operation>
+void specialized_operation(const Inputs& inputs, const std::string& name, int group, bool verify) {
+    Engine::check_specialized(operation, group);
+    if (verify) {
+        verify_specialized<Engine, operation>(inputs, group);
+        return;
+    }
+    benchmark::RegisterBenchmark(name.c_str(), [&inputs, group](benchmark::State& state) {
+        measure_specialized<Engine, operation>(state, inputs, group);
+    });
+}
+
+template <typename Engine>
+void specialized(const Inputs& inputs, const std::string& name, int group, bool verify) {
+    if (name == "extract") {
+        specialized_operation<Engine, Specialized::Extract>(inputs, name, group, verify);
+        return;
+    }
+    if (name == "extractAll") {
+        specialized_operation<Engine, Specialized::ExtractAll>(inputs, name, group, verify);
+        return;
+    }
+    if constexpr (Engine::replaces) {
+        if (name == "replace") {
+            specialized_operation<Engine, Specialized::Replace>(inputs, name, group, verify);
+            return;
+        }
+    }
+    throw std::runtime_error("unknown specialized operation: " + name);
+}
+
 template <typename Engine>
 int run(int argc, char** argv, const std::string& program) {
     try {
@@ -196,7 +296,29 @@ int run(int argc, char** argv, const std::string& program) {
             verify_operation<Engine>(inputs, argv[3]);
             return 0;
         }
-        if (argc < 3) throw std::runtime_error("usage: " + program + " <workload> <operation> [benchmark flags]");
+        if (argc == 5 && std::string(argv[1]) == "--verify-specialized") {
+            Inputs inputs = read_inputs(argv[2]);
+            Engine::check(inputs);
+            specialized<Engine>(inputs, argv[3], capture_group(argv[4]), true);
+            return 0;
+        }
+        if (argc >= 5 && std::string(argv[1]) == "--specialized") {
+            Inputs inputs = read_inputs(argv[2]);
+            Engine::check(inputs);
+            specialized<Engine>(inputs, argv[3], capture_group(argv[4]), false);
+            for (int i = 5; i < argc; ++i) argv[i - 4] = argv[i];
+            argc -= 4;
+            benchmark::Initialize(&argc, argv);
+            if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
+            benchmark::RunSpecifiedBenchmarks();
+            benchmark::Shutdown();
+            return 0;
+        }
+        if (argc < 3) {
+            throw std::runtime_error("usage: " + program + " <workload> <operation> [benchmark flags]"
+                    " | --specialized <workload> <operation> <group> [benchmark flags]"
+                    " | --verify-specialized <workload> <operation> <group>");
+        }
         Inputs inputs = read_inputs(argv[1]);
         Engine::check(inputs);
         std::string operation = argv[2];

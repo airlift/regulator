@@ -13,7 +13,15 @@
 #include "language_harness.h"
 #include "rust-regex/language_rust_regex.h"
 
+#include <memory>
+
 namespace {
+struct FreeCaptureLocations {
+    void operator()(LanguageRustCaptureLocations* locations) const {
+        language_rust_regex_free_capture_locations(locations);
+    }
+};
+
 struct RustEngine {
     static RustRegex compile(const std::string& pattern) { return RustRegex(pattern, true, false); }
 
@@ -43,6 +51,41 @@ struct RustEngine {
             throw std::runtime_error("timed iteration differs from the crate's iteration");
         }
         return matches->size();
+    }
+
+    // Capture locations the crate reuses across searches, allocated before timing.
+    using Scratch = std::unique_ptr<LanguageRustCaptureLocations, FreeCaptureLocations>;
+
+    // Regulator's Rust language has no replacement call, so its rows time extract, the capture
+    // that the Trino replacement computes, and the runner registers no replace.
+    static constexpr bool replaces = false;
+
+    static Scratch scratch(const RustRegex& pattern, int) {
+        return Scratch(language_rust_regex_capture_locations(pattern.get()));
+    }
+
+    // The crate's calls take the group as a number, so a group the pattern lacks reads as not participating.
+    static void check_specialized(Specialized, int) {}
+
+    static std::string_view extract(const RustRegex& pattern, Scratch& scratch, std::string_view input, int group,
+            std::vector<std::string>* trace) {
+        const char* value = nullptr;
+        size_t length = 0;
+        if (language_rust_regex_extract(pattern.get(), scratch.get(), input.data(), input.size(), group, &value,
+                    &length) && trace != nullptr) {
+            trace->push_back(encode_hex(std::string_view(value, length)));
+        }
+        return std::string_view(value, length);
+    }
+
+    static uint64_t extract_all(const RustRegex& pattern, Scratch& scratch, std::string_view input, int group,
+            std::vector<std::string>* trace) {
+        auto record = [](void* context, const char* data, size_t length) {
+            static_cast<std::vector<std::string>*>(context)->push_back(
+                    data == nullptr ? "-" : encode_hex(std::string_view(data, length)));
+        };
+        return language_rust_regex_extract_all(pattern.get(), scratch.get(), input.data(), input.size(), group,
+                trace == nullptr ? nullptr : +record, trace);
     }
 };
 } // namespace

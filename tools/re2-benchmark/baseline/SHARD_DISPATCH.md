@@ -6,8 +6,9 @@ route a [work unit](#work-units) needs, keeping route artifacts under
 `routes/<route>`. Odd replicas run `native-access` first, while even replicas
 run `object-row` first, so route startup and thermal effects do not
 systematically favor one implementation. Expensive pinned Trino/Joni
-preparation is shared through `BASELINE_SHARED_WORK_DIR`; measurements and
-semantic receipts are never shared between routes.
+preparation and the installed native comparator runners are shared through
+`BASELINE_SHARED_WORK_DIR`; measurements and semantic receipts are never shared
+between routes.
 
 `freeze-candidate.sh` creates an immutable benchmark ref and records that
 candidate's commit, complete tree, production tree, deterministic source
@@ -45,10 +46,21 @@ iteration counts while avoiding a new forked JVM for every row:
   the bounded Regulator process set. Rows over the 5% relative standard-error
   ceiling remain explicitly precision-rejected and are candidates for a
   targeted longer-protocol rerun.
+- Native comparators, `native-re2` and `rust-regex`, run under
+  `native-repetitions`: one runner process measures one row with Google
+  Benchmark, warming it for the total of its ten warmup windows and then timing
+  ten repetitions of one measurement window. Google Benchmark sizes the warmup
+  and the first repetition with trial runs of growing iteration counts, each
+  count aimed 1.4 times past the minimum CPU time, so the final run lasts about
+  1.4 times that minimum after trials that together last up to one minimum
+  more. Every later repetition reuses the first one's iteration count, so it
+  too lasts about 1.4 windows. A native row thus has ten samples per host, as a
+  Joni row does, and its score is the median repetition in ns/op. The runner
+  records no allocation, so a native row's allocation is `not-measured`.
 - Each row's qualification protocol is frozen in `row-protocol.tsv`: how it
-  executes (`jmh-processes` or `jmh-forks`), its process or fork count, warmup
-  and measurement iteration counts and windows, and its relative standard-error
-  ceiling.
+  executes (`jmh-processes`, `jmh-forks`, or `native-repetitions`), its process
+  or fork count, warmup and measurement iteration counts and windows, and its
+  relative standard-error ceiling.
   `run-shard.sh` reads these fields instead of deriving them, so a row keeps
   its protocol however its route is divided. `generate-units.py` derives the
   file from the rules hosts applied when each host measured whole routes. A
@@ -120,9 +132,10 @@ counterbalancing that did not occur.
 `unit_cost.py` estimates the measurement seconds of any set of rows from their
 frozen protocols: every warmup and measurement window, a two-second startup
 allowance for each JVM a selector or Joni fork starts, the calibration
-invocations, and every representative comparison. It leaves out the pinned
-Trino preparation and host bootstrap, which do not grow with the rows a host
-measures.
+invocations, and every representative comparison. For Google Benchmark's sizing
+runs, it charges a native row 2.5 times its warmup windows and 1.5 times its
+measurement windows. It leaves out the pinned Trino preparation and host
+bootstrap, which do not grow with the rows a host measures.
 
 Measured-shard normalization requires exactly one process sample group in each
 top-level JMH JSON file. Calibration retains JMH's ordinary forked shape: one
@@ -166,7 +179,7 @@ worker host leases units one at a time (see
 [Unit workers](../aws/README.md#unit-workers)).
 
 - Atoms are the rows that must share a unit: every system of one logical row,
-  which keeps both routes, Joni, and Trino beside their candidates, and every
+  which keeps both routes and the comparator beside their candidates, and every
   point of a scaling group.
 - A unit's share of a JMH method must stay one exact selector, the method and
   one Cartesian `-p` block for each system and frozen protocol. A method is

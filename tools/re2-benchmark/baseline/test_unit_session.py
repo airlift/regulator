@@ -292,14 +292,15 @@ def check_protocol(label, selector, protocol, protocol_name):
     if selector["execution"] != protocol["execution"]:
         raise AssertionError(f"{label} selector {selector['selector']} mixes executions")
     fields = ("processes", "warmup_iterations", "warmup_time", "measurement_iterations", "measurement_time")
+    kind = {"jmh-forks": "forks", "native-repetitions": "native"}.get(protocol["execution"], "processes")
     if protocol_name == "qualification":
         expected = {field: protocol[field] for field in fields}
-        expected["kind"] = "forks" if protocol["execution"] == "jmh-forks" else "processes"
+        expected["kind"] = kind
     else:
-        kind = "forks" if selector["system"] == "joni" else "processes"
+        # Smoke keeps a comparator's frozen forks or native process and runs candidates in the smoke processes.
         expected = {
             "kind": kind,
-            "processes": protocol["processes"] if kind == "forks" else SMOKE_WINDOWS["processes"],
+            "processes": SMOKE_WINDOWS["processes"] if kind == "processes" else protocol["processes"],
             "warmup_iterations": SMOKE_WINDOWS["warmup_iterations"],
             "warmup_time": SMOKE_WINDOWS["time"],
             "measurement_iterations": SMOKE_WINDOWS["measurement_iterations"],
