@@ -50,10 +50,16 @@ public class TestRegexpParser
 
     @Test
     public void testDeeplyNestedGroupsAreStackSafe()
+            throws InterruptedException
     {
-        String pattern = "(?:".repeat(10_000) + "a" + ")".repeat(10_000);
-        assertThatCode(() -> RegexpParser.parse(Slices.wrappedBuffer(pattern.getBytes(StandardCharsets.UTF_8)), Regexp.PERL_EXTENSIONS))
-                .doesNotThrowAnyException();
+        // Trino flattens noncapturing groups while parsing, so capturing groups alternate with
+        // them to make every front end nest. Each is parsed once first, which loads and initializes
+        // the classes parsing uses, so that only the parse itself runs on the small stack.
+        Slice pattern = Slices.utf8Slice("((?:".repeat(5_000) + "a" + "))".repeat(5_000));
+        for (Frontend frontend : Frontend.values()) {
+            assertThat(frontend.parse(pattern)).as(frontend.name()).isNotNull();
+            assertThat(onSmallStack(() -> frontend.parse(pattern))).as(frontend.name()).isNotNull();
+        }
     }
 
     @Test
@@ -200,10 +206,8 @@ public class TestRegexpParser
         int[] expected = literal.codePoints().toArray();
         Slice pattern = Slices.wrappedBuffer(literal.getBytes(StandardCharsets.UTF_8));
 
-        for (Regexp regexp : List.of(
-                RegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp(),
-                JavaRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp(),
-                TrinoRegexpParser.parse(pattern, Regexp.LIKE_PERL).regexp())) {
+        for (Frontend frontend : Frontend.values()) {
+            Regexp regexp = frontend.parse(pattern);
             assertThat(regexp.op()).isEqualTo(RegexpOp.LITERAL_STRING);
             assertThat(regexp.runes()).containsExactly(expected);
         }
@@ -211,10 +215,8 @@ public class TestRegexpParser
         // A literal that is interrupted ends with exactly the runes seen so far, and the literal
         // that follows starts a new string.
         Slice interrupted = Slices.wrappedBuffer("abc(d)ef".getBytes(StandardCharsets.UTF_8));
-        for (Regexp regexp : List.of(
-                RegexpParser.parse(interrupted, Regexp.LIKE_PERL).regexp(),
-                JavaRegexpParser.parse(interrupted, Regexp.LIKE_PERL).regexp(),
-                TrinoRegexpParser.parse(interrupted, Regexp.LIKE_PERL).regexp())) {
+        for (Frontend frontend : Frontend.values()) {
+            Regexp regexp = frontend.parse(interrupted);
             assertThat(regexp.op()).isEqualTo(RegexpOp.CONCAT);
             assertThat(regexp.childCount()).isEqualTo(3);
             assertThat(regexp.child(0).op()).isEqualTo(RegexpOp.LITERAL_STRING);
