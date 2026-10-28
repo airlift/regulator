@@ -37,7 +37,7 @@ and intermediate benchmark reports are not kept here.
 | Document | Purpose |
 |---|---|
 | [`porting/WORKFLOW.md`](porting/WORKFLOW.md) | Upstream-grounded implementation workflow |
-| [`porting/TEST_MAP.md`](porting/TEST_MAP.md) | Upstream C++ test coverage map |
+| [`porting/TEST_MAP.md`](porting/TEST_MAP.md) | Each language's test oracle and the upstream C++ test coverage map |
 | [`coding-standards.md`](coding-standards.md) | Implementation, naming, and comment conventions |
 | [`testing.md`](testing.md) | Test conventions |
 | [`git.md`](git.md) | Commit and history conventions |

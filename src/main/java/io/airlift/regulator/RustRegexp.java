@@ -197,7 +197,8 @@ public final class RustRegexp
         /// Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
         /// so each operation that would run its specialized scan runs dedicated bytecode instead.
         /// Operations that take another route keep it. Patterns that are not eligible, or whose
-        /// class cannot be generated, compile as they do without this option. Disabled by default.
+        /// class cannot be generated, compile as they do without this option. Byte-mode patterns
+        /// have no specialized scan, so they are never eligible. Disabled by default.
         ///
         /// @see RustRegexp#usesGeneratedBytecode()
         public Options setGenerateBytecode(boolean generateBytecode)
@@ -269,7 +270,9 @@ public final class RustRegexp
         return parse(pattern, Options.defaults());
     }
 
-    /// Parses with the current syntax options without retaining the pattern or options.
+    /// Parses as [#parse(Slice)] does, using the syntax settings in `options` at the time of the
+    /// call. Settings that apply only to compilation or matching, such as the memory budget, have
+    /// no effect. Neither the pattern nor `options` is retained.
     public static PatternInfo parse(Slice pattern, Options options)
     {
         requireNonNull(pattern, "pattern is null");

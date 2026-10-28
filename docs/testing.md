@@ -30,8 +30,8 @@ and [git.md](git.md) for commit structure.
 
 ## Regulator verification
 
-The [test map](porting/TEST_MAP.md) lists behavioral coverage and its upstream
-RE2 counterparts. Run the complete Regulator suite with:
+The [test map](porting/TEST_MAP.md) names each language's oracle and maps RE2
+coverage to the upstream RE2 tests. Run the complete Regulator suite with:
 
 ```bash
 ./mvnw "-Dtest=**/regulator/**/Test*" test

@@ -35,9 +35,10 @@ Each compiler handles its own language's syntax and semantics. `Re2`,
 `TrinoRegexp`, `JavaRegexp`, and `RustRegexp` produce shared Regulator programs
 that run on the same bounded DFA, NFA, OnePass, and BitState engines.
 `TrinoRegexp` can also choose a specialized matcher for an operation when
-pattern analysis proves it will produce the same result. `Re2`, `JavaRegexp`,
-and `RustRegexp` patterns of a few common extraction shapes also select a
-[scan plan](../benchmarks/SCAN_PLAN.md).
+pattern analysis proves it will produce the same result. In all four
+languages, patterns of a few common extraction shapes also select a
+[scan plan](../benchmarks/SCAN_PLAN.md), except Latin-1 or longest-match RE2
+patterns and Rust byte-mode patterns.
 
 `TrinoLikePattern` parses LIKE directly and has its own general wildcard
 matcher. It does not translate LIKE into regex text. LIKE and regex plans can

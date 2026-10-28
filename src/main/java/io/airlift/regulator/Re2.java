@@ -262,7 +262,9 @@ public sealed class Re2
         /// Experimental. When enabled, compilation generates a hidden class for an eligible pattern,
         /// so each operation that would run its specialized scan runs dedicated bytecode instead.
         /// Operations that take another route keep it. Patterns that are not eligible, or whose
-        /// class cannot be generated, compile as they do without this option. Disabled by default.
+        /// class cannot be generated, compile as they do without this option. Latin-1 and
+        /// longest-match patterns have no specialized scan, so they are never eligible. Disabled
+        /// by default.
         ///
         /// @see Re2#usesGeneratedBytecode()
         public Options setGenerateBytecode(boolean generateBytecode)
@@ -566,7 +568,9 @@ public sealed class Re2
         return parse(pattern, Options.defaults());
     }
 
-    /// Parses with the current syntax options without retaining the pattern or options.
+    /// Parses as [#parse(Slice)] does, using the syntax settings in `options` at the time of the
+    /// call. Settings that apply only to compilation or matching, such as the memory budget, have
+    /// no effect. Neither the pattern nor `options` is retained.
     public static PatternInfo parse(Slice pattern, Options options)
     {
         requireNonNull(pattern, "pattern is null");
@@ -1534,10 +1538,10 @@ public sealed class Re2
         requireNonNull(input, "input is null");
         byte strategy = booleanFindStrategy;
         if (strategy != BOOLEAN_FIND_GENERAL) {
-            // The single-byte strategy and the scan strategies are the highest values, so one
-            // comparison keeps them off the established literal dispatch. A scan strategy appears
-            // here only when it equals scanPlanStrategy; a retained literal kernel or ordinary
-            // strategy keeps its own value.
+            // The single-byte strategy and the scan-plan strategies are the highest values, so one
+            // comparison keeps them off the established literal dispatch. A scan-plan strategy
+            // appears here only when it equals scanPlanStrategy; a retained literal kernel or
+            // ordinary strategy keeps its own value.
             if (strategy >= BOOLEAN_FIND_SINGLE_BYTE) {
                 if (strategy != BOOLEAN_FIND_SINGLE_BYTE) {
                     return findWithScanPlan(input, strategy);
@@ -1579,7 +1583,7 @@ public sealed class Re2
             case BOOLEAN_FIND_UNANCHORED_ASCII_FOLDED_SCAN_PLAN -> ordinaryUnanchoredBooleanSearch
                     ? findWithOrdinaryHandoff(input, true)
                     : finishScanSearch(input, 0, length, plan.searchAsciiFolded(input, 0, length, 0, false, false, null), Anchor.UNANCHORED, null, NO_MATCH_WORKSPACES);
-            default -> throw new IllegalStateException("not a scan strategy: " + strategy);
+            default -> throw new IllegalStateException("not a scan-plan strategy: " + strategy);
         };
     }
 
@@ -1808,12 +1812,12 @@ public sealed class Re2
             case BOOLEAN_FIND_PARTIAL_SCAN_PLAN -> plan.matchPartial(text, contextStart, contextEnd, false, groups);
             case BOOLEAN_FIND_ASCII_FOLDED_SCAN_PLAN -> plan.matchAsciiFoldedEndAnchored(text, contextStart, contextEnd, false, groups);
             case BOOLEAN_FIND_PARTIAL_ASCII_FOLDED_SCAN_PLAN -> plan.matchAsciiFoldedPartial(text, contextStart, contextEnd, false, groups);
-            default -> throw new IllegalStateException("not a start-anchored scan strategy: " + scanPlanStrategy);
+            default -> throw new IllegalStateException("not a start-anchored scan-plan strategy: " + scanPlanStrategy);
         };
     }
 
     /// Returns the case-sensitive scan plan that every capture search of this pattern runs, or
-    /// `null`. As for [#startAnchoredScanPlan()], the compile-time scan strategy
+    /// `null`. As for [#startAnchoredScanPlan()], the compile-time scan-plan strategy
     /// is the whole decision, so no [#matchRegionInto] check runs ahead of the plan route of
     /// [#matchInternal] either. Only a caller's single-byte matcher can still answer first,
     /// and a Java matcher region whose $ reads a CR before it runs on the NFA instead.

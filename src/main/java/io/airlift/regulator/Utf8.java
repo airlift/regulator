@@ -16,8 +16,8 @@ package io.airlift.regulator;
 import io.airlift.slice.Slice;
 import io.airlift.slice.SliceOutput;
 
-/// Minimal UTF-8 decoding utilities. The core engine assumes valid UTF-8 inputs (garbage in, garbage out),
-/// except where a method states a rule for malformed input, as [#re2CharacterWidth] does.
+/// Minimal UTF-8 utilities. Each decoder states how it reads malformed bytes; the matching contract
+/// for malformed input belongs to each language frontend.
 final class Utf8
 {
     static final int RUNE_ERROR = 0xFFFD;

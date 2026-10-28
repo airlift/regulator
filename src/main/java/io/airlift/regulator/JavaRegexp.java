@@ -193,7 +193,9 @@ public final class JavaRegexp
         return parse(pattern, Options.defaults());
     }
 
-    /// Parses with the current syntax options without retaining the pattern or options.
+    /// Parses as [#parse(Slice)] does, using the syntax settings in `options` at the time of the
+    /// call. Settings that apply only to compilation or matching, such as the memory budget, have
+    /// no effect. Neither the pattern nor `options` is retained.
     public static PatternInfo parse(Slice pattern, Options options)
     {
         requireNonNull(pattern, "pattern is null");

@@ -12,6 +12,9 @@
  * limitations under the License.
  */
 
-/// A byte-oriented Java port of RE2 with [io.airlift.slice.Slice] inputs and outputs.
+/// Regular-expression and SQL LIKE matching over [io.airlift.slice.Slice] inputs and outputs.
+/// [Re2], [TrinoRegexp], [JavaRegexp], and [RustRegexp] compile their languages' patterns into
+/// programs for a shared, byte-oriented Java port of RE2, and [TrinoLikePattern] compiles Trino
+/// SQL LIKE patterns for its own wildcard matcher.
 /// Compiled patterns are thread-safe; matchers are mutable and must not be shared between threads.
 package io.airlift.regulator;

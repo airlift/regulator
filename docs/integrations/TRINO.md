@@ -93,8 +93,8 @@ Trino's non-strict path assumes UTF-8 data is valid but does not validate it.
 Regulator likewise treats malformed input as garbage in, garbage out rather
 than validating it. Patterns differ: Trino accepts a pattern that is not valid
 UTF-8 and compares its malformed bytes byte-for-byte, while Regulator rejects
-it as a syntax error, as it does for `TrinoLikePattern`, `JavaRegexp`, and
-`Re2`.
+it as a syntax error, as it does for `TrinoLikePattern`, `JavaRegexp`,
+`RustRegexp`, and UTF-8 `Re2` patterns.
 
 Backreferences, lookaround, atomic groups, possessive quantifiers, and other
 backtracking-dependent constructs are rejected during compilation with a
@@ -135,14 +135,14 @@ single-byte, repeated-byte, or literal counting paths. The compiled RE2 program
 remains available as the fallback; specialization is specific to each operation.
 
 `TrinoLikePattern.Options.setGenerateBytecode(true)` is the same experimental
-option for LIKE: each pattern compiled with it defines its own hidden class,
-whatever its plan, and `usesGeneratedBytecode()` reports whether it has one.
-For a constant pattern, `generatedMatches()` returns the generated code as an
+option for LIKE. It tries to generate a class for every pattern, whatever its
+plan, and `usesGeneratedBytecode()` reports whether a pattern has one. For a
+constant pattern, `generatedMatches()` returns the generated code as an
 `Optional<MethodHandle>` of type `(Slice)boolean`, which a generated
 expression can bind as a constant instead of calling `matches`; it is empty
-only when the pattern stays interpreted. Variable patterns use `matches`.
-Each successful generation defines a new hidden class, so compile patterns that
-are not cached, such as a different pattern on every row, without this option.
+only when the pattern stays interpreted. Variable patterns use `matches`. Each
+successful generation defines a new hidden class, so compile patterns that are
+not cached, such as a different pattern on every row, without this option.
 
 See [`reference/languages/TRINO_LIKE.md`](../reference/languages/TRINO_LIKE.md).
 
