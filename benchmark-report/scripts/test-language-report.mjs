@@ -596,9 +596,11 @@ if (capture.schemaVersion === 2) {
     assert.equal(capture.rows.filter(entry => comparisonIssue(entry)).length, 0,
       'Qualified comparisons must not still await API alignment');
   }
-  for (const language of ['re2', 'java', 'trino', 'like']) {
+  let views = 0;
+  for (const language of exports.languageOrder(capture)) {
     for (const cpu of exports.cpuOrder(capture)) {
-      for (const memory of ['native', 'safe']) {
+      for (const memory of Object.keys(capture.memoryModes)) {
+        views++;
         const selected = capture.rows.filter(entry => entry.language === language && entry.platform === cpu && entry.memoryMode === memory);
         assert.ok(selected.length > 0, `Missing view ${language}/${cpu}/${memory}`);
         context.window = { location: { hash: `#language=${language}&cpu=${cpu}&memory=${memory}` } };
@@ -644,10 +646,12 @@ if (capture.schemaVersion === 2) {
     }
   }
   delete context.window;
+  assert.equal(views, Object.keys(capture.languages).length * Object.keys(capture.platforms).length
+    * Object.keys(capture.memoryModes).length, 'Every declared language/CPU/memory view is checked');
   const downloadable = downloadData(capture);
   assert.equal(downloadable.rows.length, capture.rows.length);
   assert.ok(downloadable.rows.every((entry, index) => entry.result === capture.rows[index].result));
-  console.log('All 24 current-data language/CPU/memory views and raw download contents passed');
+  console.log(`All ${views} current-data language/CPU/memory views and raw download contents passed`);
 }
 console.log("Language report rendering, contract isolation, unit sorting, lifecycle and display tests passed");
 
