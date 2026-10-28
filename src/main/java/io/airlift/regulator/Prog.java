@@ -346,6 +346,10 @@ final class Prog
     // Only programs exceeding upstream's capture-bit capacity allocate these parallel masks.
     private long[] onePassMatchCapture;
     private long[] onePassActionCapture;
+    // Only programs with Rust assertions allocate these parallel EmptyOp masks; see
+    // ONEPASS_EXTENDED_ASSERTIONS.
+    private int[] onePassMatchAssertions;
+    private int[] onePassActionAssertions;
 
     // Prepared by flatten() for BitState execution.
     private int listCount;
@@ -621,6 +625,9 @@ final class Prog
         if (onePassActionCapture != null) {
             stateSize += Long.BYTES + ((long) bytemapRange() * Long.BYTES);
         }
+        if (onePassActionAssertions != null) {
+            stateSize += Integer.BYTES + ((long) bytemapRange() * Integer.BYTES);
+        }
         return onePassStateCount * stateSize;
     }
 
@@ -638,6 +645,16 @@ final class Prog
     public long[] onePassActionCapture()
     {
         return onePassActionCapture;
+    }
+
+    int[] onePassMatchAssertions()
+    {
+        return onePassMatchAssertions;
+    }
+
+    int[] onePassActionAssertions()
+    {
+        return onePassActionAssertions;
     }
 
     public boolean canBitState()
@@ -2675,6 +2692,13 @@ final class Prog
 
     private static final int ONEPASS_MATCH_WINS = 1 << ONEPASS_EMPTY_SHIFT;
     private static final int ONEPASS_IMPOSSIBLE = EmptyOp.EMPTY_WORD_BOUNDARY | EmptyOp.EMPTY_NO_WORD_BOUNDARY;
+    // Rust assertions do not fit in a condition's six empty-width bits. A condition that needs one
+    // carries this bit instead, which sends the search to OnePass.satisfyAction or
+    // OnePass.satisfyMatch, and those evaluate the full EmptyOp mask from the parallel assertion
+    // arrays. In a program with Rust assertions, every match condition also carries its node
+    // index above ONEPASS_INDEX_SHIFT, where an action keeps its next node. The bit is never part
+    // of ONEPASS_IMPOSSIBLE, so a marked condition never reads as ONEPASS_IMPOSSIBLE.
+    private static final int ONEPASS_EXTENDED_ASSERTIONS = EmptyOp.EMPTY_BEGIN_TEXT;
     // Action entries allocated before one-pass analysis starts growing node storage.
     private static final int ONEPASS_INITIAL_ACTIONS = 8192;
 
@@ -2686,9 +2710,12 @@ final class Prog
 
     private boolean computeOnePass()
     {
-        if (hasTextDependentAssertions()) {
+        // OnePass evaluates Rust's assertions from parallel masks; other text-dependent ones keep
+        // it off.
+        if ((textDependentAssertions & ~EmptyOp.RUST_ASSERTIONS) != 0) {
             return false;
         }
+        boolean hasExtendedAssertions = textDependentAssertions != 0;
 
         // This computation assumes the program is in flattened list form.
         flatten();
@@ -2728,6 +2755,9 @@ final class Prog
         if (hasExtendedCaptures) {
             stateSize += Long.BYTES + ((long) bytemapRange() * Long.BYTES);
         }
+        if (hasExtendedAssertions) {
+            stateSize += Integer.BYTES + ((long) bytemapRange() * Integer.BYTES);
+        }
         if (maximumNodeCount >= 65000 || dfaMemory / 4 / stateSize < maximumNodeCount) {
             return false;
         }
@@ -2736,6 +2766,7 @@ final class Prog
         int[] stackInstructionIds = new int[Math.max(8, maximumStackSize)];
         int[] stackConditions = new int[Math.max(8, maximumStackSize)];
         long[] stackCaptureMasks = hasExtendedCaptures ? new long[Math.max(8, maximumStackSize)] : null;
+        int[] stackAssertions = hasExtendedAssertions ? new int[Math.max(8, maximumStackSize)] : null;
 
         int[] nodeById = new int[size()];
         Arrays.fill(nodeById, -1);
@@ -2749,6 +2780,8 @@ final class Prog
         int[] nodeAction = new int[nodeCapacity * byteClassCount];
         long[] nodeMatchCapture = hasExtendedCaptures ? new long[nodeCapacity] : null;
         long[] nodeActionCapture = hasExtendedCaptures ? new long[nodeCapacity * byteClassCount] : null;
+        int[] nodeMatchAssertions = hasExtendedAssertions ? new int[nodeCapacity] : null;
+        int[] nodeActionAssertions = hasExtendedAssertions ? new int[nodeCapacity * byteClassCount] : null;
 
         SparseSet toVisit = new SparseSet(size());
         SparseSet workQueue = new SparseSet(size());
@@ -2767,6 +2800,10 @@ final class Prog
             int actionBase = nodeIndex * byteClassCount;
             Arrays.fill(nodeAction, actionBase, actionBase + byteClassCount, ONEPASS_IMPOSSIBLE);
             nodeMatchCondition[nodeIndex] = ONEPASS_IMPOSSIBLE;
+            if (hasExtendedAssertions) {
+                Arrays.fill(nodeActionAssertions, actionBase, actionBase + byteClassCount, ONEPASS_IMPOSSIBLE);
+                nodeMatchAssertions[nodeIndex] = ONEPASS_IMPOSSIBLE;
+            }
 
             workQueue.clear();
             boolean foundMatch = false;
@@ -2776,6 +2813,9 @@ final class Prog
             if (hasExtendedCaptures) {
                 stackCaptureMasks[stackSize] = 0;
             }
+            if (hasExtendedAssertions) {
+                stackAssertions[stackSize] = 0;
+            }
             stackSize++;
 
             while (stackSize > 0) {
@@ -2783,6 +2823,7 @@ final class Prog
                 int id = stackInstructionIds[stackSize];
                 int condition = stackConditions[stackSize];
                 long captureMask = hasExtendedCaptures ? stackCaptureMasks[stackSize] : 0;
+                int assertions = hasExtendedAssertions ? stackAssertions[stackSize] : 0;
 
                 while (id != 0) {
                     Inst instruction = inst(id);
@@ -2813,6 +2854,10 @@ final class Prog
                                         nodeMatchCapture = Arrays.copyOf(nodeMatchCapture, nodeCapacity);
                                         nodeActionCapture = Arrays.copyOf(nodeActionCapture, nodeCapacity * byteClassCount);
                                     }
+                                    if (hasExtendedAssertions) {
+                                        nodeMatchAssertions = Arrays.copyOf(nodeMatchAssertions, nodeCapacity);
+                                        nodeActionAssertions = Arrays.copyOf(nodeActionAssertions, nodeCapacity * byteClassCount);
+                                    }
                                 }
                                 nextIndex = allocatedNodeCount++;
                                 addOnePassQueue(toVisit, nextInstructionId);
@@ -2837,9 +2882,13 @@ final class Prog
                                     if (hasExtendedCaptures) {
                                         nodeActionCapture[actionBase + byteClass] = captureMask;
                                     }
+                                    if (hasExtendedAssertions) {
+                                        nodeActionAssertions[actionBase + byteClass] = assertions;
+                                    }
                                 }
                                 else if (action != newAction ||
-                                        (hasExtendedCaptures && nodeActionCapture[actionBase + byteClass] != captureMask)) {
+                                        (hasExtendedCaptures && nodeActionCapture[actionBase + byteClass] != captureMask) ||
+                                        (hasExtendedAssertions && nodeActionAssertions[actionBase + byteClass] != assertions)) {
                                     return false;
                                 }
                             }
@@ -2862,9 +2911,13 @@ final class Prog
                                         if (hasExtendedCaptures) {
                                             nodeActionCapture[actionBase + byteClass] = captureMask;
                                         }
+                                        if (hasExtendedAssertions) {
+                                            nodeActionAssertions[actionBase + byteClass] = assertions;
+                                        }
                                     }
                                     else if (action != newAction ||
-                                            (hasExtendedCaptures && nodeActionCapture[actionBase + byteClass] != captureMask)) {
+                                            (hasExtendedCaptures && nodeActionCapture[actionBase + byteClass] != captureMask) ||
+                                            (hasExtendedAssertions && nodeActionAssertions[actionBase + byteClass] != assertions)) {
                                         return false;
                                     }
                                 }
@@ -2890,6 +2943,9 @@ final class Prog
                                 if (hasExtendedCaptures) {
                                     stackCaptureMasks[stackSize] = captureMask;
                                 }
+                                if (hasExtendedAssertions) {
+                                    stackAssertions[stackSize] = assertions;
+                                }
                                 stackSize++;
                             }
 
@@ -2900,7 +2956,14 @@ final class Prog
                                 captureMask |= 1L << instruction.cap();
                             }
                             if (instruction.opcode() == InstOp.EMPTY_WIDTH) {
-                                condition |= instruction.empty();
+                                int empty = instruction.empty();
+                                if ((empty & EmptyOp.RUST_ASSERTIONS) == 0) {
+                                    condition |= empty;
+                                }
+                                else {
+                                    condition |= (empty & ~EmptyOp.RUST_ASSERTIONS) | ONEPASS_EXTENDED_ASSERTIONS;
+                                }
+                                assertions |= empty;
                             }
 
                             if (!addOnePassQueue(workQueue, instruction.out())) {
@@ -2917,6 +2980,10 @@ final class Prog
                             nodeMatchCondition[nodeIndex] = condition;
                             if (hasExtendedCaptures) {
                                 nodeMatchCapture[nodeIndex] = captureMask;
+                            }
+                            if (hasExtendedAssertions) {
+                                nodeMatchCondition[nodeIndex] |= nodeIndex << ONEPASS_INDEX_SHIFT;
+                                nodeMatchAssertions[nodeIndex] = assertions;
                             }
 
                             if (instruction.last()) {
@@ -2946,6 +3013,10 @@ final class Prog
         if (hasExtendedCaptures) {
             onePassMatchCapture = Arrays.copyOf(nodeMatchCapture, allocatedNodeCount);
             onePassActionCapture = Arrays.copyOf(nodeActionCapture, allocatedNodeCount * byteClassCount);
+        }
+        if (hasExtendedAssertions) {
+            onePassMatchAssertions = Arrays.copyOf(nodeMatchAssertions, allocatedNodeCount);
+            onePassActionAssertions = Arrays.copyOf(nodeActionAssertions, allocatedNodeCount * byteClassCount);
         }
         dfaMemory -= allocatedNodeCount * stateSize;
         return true;

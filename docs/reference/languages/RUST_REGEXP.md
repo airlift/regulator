@@ -234,7 +234,8 @@ language.
 
 Unicode `\b` and `\B`, every start, end, and half word boundary, and CRLF
 multi-line `^` and `$` read the text around a position. Patterns that use them
-run on the DFA but not on OnePass. The DFA evaluates a Unicode word assertion
-only between ASCII bytes, as the crate's lazy DFA does; a search that reaches
-an assertion next to a byte outside ASCII reruns on the NFA or BitState engine.
-ASCII `\b` and `\B` and `\n` multi-line anchors keep every engine.
+still run on the DFA and OnePass engines, as patterns with ASCII `\b` and `\B`
+and `\n` multi-line anchors do. The DFA evaluates a Unicode word assertion only
+between ASCII bytes, as the crate's lazy DFA does. In a pattern with a Unicode
+word assertion, a DFA search that reaches an assertion next to a byte outside
+ASCII reruns on the OnePass, BitState, or NFA engine.
