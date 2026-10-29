@@ -688,6 +688,13 @@ const meanRow = { id: "mean-test", caseId: "mean-test", name: "mean-test", opera
   memoryMode: "native", inputBytes: 100, source: "language", result: meanEstimate };
 const meanHtml = detailsHtml(meanRow);
 assert.doesNotMatch(meanHtml, /Measurement notes|Approximate 95% intervals|Observed process means|Ratio of mean costs|independent hosts|EC2 allocation/);
+// A candidate build's preliminary report is titled with its release and shows its note in place of the engine.
+const candidateHtml = renderToStaticMarkup(React.createElement(LanguageReport, { data: { ...currentData,
+  sources: { ...currentData.sources, releaseVersion: '2.0' }, rows: currentData.rows.map(row => ({ ...row, result: meanEstimate })),
+  publication: { status: 'preliminary', sourcePolicy: 'candidate-build', note: 'Preliminary results from candidate build abcdef123456, measured before the 2.0 release.' } } }));
+assert.match(candidateHtml, /Regulator 2\.0 benchmarks/);
+assert.match(candidateHtml, /Preliminary results from candidate build abcdef123456, measured before the 2\.0 release\./);
+assert.doesNotMatch(candidateHtml, /Engine abcdef/);
 
 // Quality annotations describe each engine, not the uncertainty of their ratio.
 const qualityResult = { ...result, estimator: 'mean', uncertainty: {

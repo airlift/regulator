@@ -2,6 +2,7 @@ import argparse
 import copy
 import csv
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ import release_capture
 import aggregate_results
 import collection
 import test_fleet
-from test_unit_session import UnitCampaign
+from test_unit_session import UnitCampaign, UnitFixture
 
 
 class TestReleaseCapture(unittest.TestCase):
@@ -54,9 +55,10 @@ class TestReleaseCapture(unittest.TestCase):
             self.data['hosts'].append({'receipt': dict(receipt), 'partitions': [
                 {'id': part['id'], 'export_sha256': 'f' * 64, 'provenance': provenance}]})
 
-    def normalize(self):
-        return release_capture.normalize_language(self.data, self.manifest, self.release, self.collector, self.receipts,
-                                                  self.units)
+    def normalize(self, released=True):
+        # A candidate-build campaign measures the release's tree without its JAR.
+        return release_capture.normalize_language(self.data, self.manifest, self.release if released else None,
+                                                  self.release['engine_tree'], self.collector, self.receipts, self.units)
 
     def test_released_artifact_and_collector_remain_separate(self):
         data = self.normalize()
@@ -99,19 +101,20 @@ class TestReleaseCapture(unittest.TestCase):
                     writer.writeheader()
                     writer.writerow(identity)
             plan = {'candidate_provenance': str(paths[0])}
-            self.assertEqual(identities[0], release_capture.load_collector({}, plan, self.release))
+            tree = self.release['engine_tree']
+            self.assertEqual(identities[0], release_capture.load_collector({}, plan, tree))
             self.assertEqual(identities[1], release_capture.load_collector(
-                {'candidate_provenance': str(paths[1])}, plan, self.release))
+                {'candidate_provenance': str(paths[1])}, plan, tree))
             with self.assertRaisesRegex(ValueError, 'changed the collector identity'):
-                release_capture.normalize_language(self.data, self.manifest, self.release,
+                release_capture.normalize_language(self.data, self.manifest, self.release, tree,
                                                    identities[1], self.receipts, self.units)
             with self.assertRaisesRegex(ValueError, 'production tree'):
-                release_capture.load_collector({}, plan, {**self.release, 'engine_tree': '0' * 40})
+                release_capture.load_collector({}, plan, '0' * 40)
             with self.assertRaisesRegex(ValueError, 'pinned collector'):
-                release_capture.load_collector({}, {}, self.release)
+                release_capture.load_collector({}, {}, tree)
             with self.assertRaises(FileNotFoundError):
                 release_capture.load_collector({'candidate_provenance': str(paths[0]) + '.missing'},
-                                               plan, self.release)
+                                               plan, tree)
 
     def test_baseline_accepts_only_a_complete_unit_campaign_of_its_collector(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -139,7 +142,7 @@ class TestReleaseCapture(unittest.TestCase):
 
             primary = phase('primary', receipts)
 
-            def reduce(name, release_version='', confirmations=()):
+            def reduce(name, release_version='', confirmations=(), primary=primary, campaign=campaign):
                 aggregate_results.aggregate(argparse.Namespace(
                     manifest=release_capture.BASELINE / 'rows.tsv', platforms=release_capture.BASELINE / 'platforms.tsv',
                     shards=release_capture.BASELINE / 'shards.tsv', primary_receipts=[primary],
@@ -169,13 +172,29 @@ class TestReleaseCapture(unittest.TestCase):
             with patch.object(release_capture.released_artifact, 'validate_baseline'):
                 reduction = reduce('reduction', '1.0', [confirmation])
             unproven = reduce('unproven', confirmations=[confirmation])
+            # A release campaign's routes record the release they loaded, as run-shard.sh does, but reduced without
+            # its release the summary names none.
+            write_metadata = UnitFixture.write_metadata
+
+            def write_release_metadata(fixture, directory, representative_count):
+                write_metadata(fixture, directory, representative_count)
+                with (directory / 'run-metadata.txt').open('a') as metadata:
+                    metadata.write(f"release_version=1.0\nrelease_artifact_sha256={'0' * 64}\n")
+
+            with patch.object(UnitFixture, 'write_metadata', write_release_metadata):
+                released = UnitCampaign(root / 'released-results', *shards)
+            released_reduction = reduce('released-reduction', primary=phase('released', released.receipts),
+                                        campaign=released)
             baseline = {'primary': str(root / 'primary'), 'confirmation': str(root / 'confirmation'),
                         'reduction': reduction, 'campaign_id': 'campaign'}
-            release = {'version': '1.0', 'engine_tree': confirmed[0]['engine_tree']}
+            tree = confirmed[0]['engine_tree']
+            release = {'version': '1.0', 'engine_tree': tree}
             collector = {'candidate_commit': confirmed[0]['candidate_commit'],
                          'archive_sha256': confirmed[0]['candidate_archive_sha256'],
                          'platform_manifest_sha256': release_capture.digest(release_capture.BASELINE / 'platforms.tsv')}
-            release_capture.validate_baseline(baseline, release, collector)
+            release_capture.validate_baseline(baseline, release, tree, collector)
+            # A candidate-build campaign's reduction proves no release.
+            release_capture.validate_baseline({**baseline, 'reduction': unproven}, None, tree, collector)
             lifecycle = collection.prepare(root / 'lifecycle')
             rows = release_capture.baseline_rows(reduction, lifecycle)
             # Every population imports on both platforms, though each worker ran several units of a shard.
@@ -194,22 +213,48 @@ class TestReleaseCapture(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"fewer than three hosts in r8i/.*; each needs its unit's confirmation"):
                 release_capture.baseline_rows(unconfirmed, lifecycle)
             cases = (
-                ({}, {'engine_tree': '0' * 40}, {}, 'changed release source or collector'),
-                ({}, {}, {'candidate_commit': '0' * 40}, 'changed release source or collector'),
-                ({}, {}, {'archive_sha256': '0' * 64}, 'changed release source or collector'),
-                ({'primary': str(root / 'partial')}, {}, {}, 'unit coverage failed'),
-                ({'primary': str(root / 'absent')}, {}, {}, 'cannot read'),
-                ({'confirmation': str(root / 'absent')}, {}, {}, 'cannot read'),
-                ({'confirmation': str(root / 'stale')}, {}, {}, 'columns must be'),
-                ({'primary': str(root / 'rejected')}, {}, {}, 'semantic failure'),
-                ({'reduction': unproven}, {}, {}, 'did not prove'),
+                ({}, '0' * 40, release, {}, 'changed the measured build or collector'),
+                ({}, tree, release, {'candidate_commit': '0' * 40}, 'changed the measured build or collector'),
+                ({}, tree, release, {'archive_sha256': '0' * 64}, 'changed the measured build or collector'),
+                ({'primary': str(root / 'partial')}, tree, release, {}, 'unit coverage failed'),
+                ({'primary': str(root / 'absent')}, tree, release, {}, 'cannot read'),
+                ({'confirmation': str(root / 'absent')}, tree, release, {}, 'cannot read'),
+                ({'confirmation': str(root / 'stale')}, tree, release, {}, 'columns must be'),
+                ({'primary': str(root / 'rejected')}, tree, release, {}, 'semantic failure'),
+                ({'reduction': unproven}, tree, release, {}, 'did not prove'),
+                ({}, tree, None, {}, 'candidate baseline summary requires release_version to be an empty string'),
+                ({'primary': str(root / 'released'), 'confirmation': None, 'reduction': released_reduction}, tree, None,
+                 {}, 'candidate baseline attempts contain recorded release metadata'),
                 # Receipts relabelled to another candidate, against the reduction of this one.
-                ({'primary': str(root / 'relabelled'), 'confirmation': str(root / 'relabelled-confirmation')}, {},
-                 {'candidate_commit': 'f' * 40}, 'changed the accepted unit attempts'),
+                ({'primary': str(root / 'relabelled'), 'confirmation': str(root / 'relabelled-confirmation')}, tree,
+                 release, {'candidate_commit': 'f' * 40}, 'changed the accepted unit attempts'),
             )
-            for paths, source, pin, message in cases:
-                with self.subTest(paths=paths, source=source, pin=pin), self.assertRaisesRegex(ValueError, message):
-                    release_capture.validate_baseline({**baseline, **paths}, {**release, **source}, {**collector, **pin})
+            for paths, engine_tree, measured_release, pin, message in cases:
+                with self.subTest(paths=paths, engine_tree=engine_tree, release=measured_release, pin=pin), \
+                        self.assertRaisesRegex(ValueError, message):
+                    release_capture.validate_baseline({**baseline, **paths}, measured_release, engine_tree,
+                                                      {**collector, **pin})
+
+    def test_build_refuses_a_campaign_it_cannot_attribute(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = (
+                # Refused before reading the campaign's reduction, which this one lacks.
+                ('v2.0', None, 'not a release version'),
+                ('1.0', '', 'only its released-artifact report'),
+                # A candidate build without a pinned baseline collector.
+                ('2.0', '', 'pinned collector'),
+                ('2.1', '2.0', 'different release'),
+            )
+            for version, proven, message in cases:
+                reduction = root / f'reduction-{proven}'
+                if proven is not None:
+                    reduction.mkdir(exist_ok=True)
+                    (reduction / 'summary.json').write_text(json.dumps({'release_version': proven}))
+                plan = root / 'plan.json'
+                plan.write_text(json.dumps({'release_version': version, 'baseline': {'reduction': str(reduction)}}))
+                with self.subTest(version=version, proven=proven), self.assertRaisesRegex(ValueError, message):
+                    release_capture.build(plan)
 
     def test_language_imports_exactly_each_plans_share_of_one_accepted_campaign(self):
         fixture = test_fleet.TestFleet()
@@ -255,7 +300,8 @@ class TestReleaseCapture(unittest.TestCase):
                         part['provenance']['jvm_build']['released_artifact'] = {'manifest': release}
                 change(data)
                 units = release_capture.work_units.load(Path(item['plan']))
-                normalized = release_capture.normalize_language(data, manifest, release, collector, accepted, units)
+                normalized = release_capture.normalize_language(data, manifest, release, release['engine_tree'],
+                                                                collector, accepted, units)
                 results.append((Path(item['plan']).name, accepted, units, normalized['observations']))
             return results
 
@@ -309,7 +355,7 @@ class TestReleaseCapture(unittest.TestCase):
 
     def test_rejects_changed_collector_archive(self):
         self.receipts[0]['candidate_archive_sha256'] = '0' * 64
-        with self.assertRaisesRegex(ValueError, 'artifact or collector'):
+        with self.assertRaisesRegex(ValueError, 'measured build or collector'):
             self.normalize()
 
     def test_rejects_mixed_jars_and_source_only_measurements(self):
@@ -320,6 +366,14 @@ class TestReleaseCapture(unittest.TestCase):
         del jvm_build['released_artifact']
         with self.assertRaisesRegex(ValueError, 'published release'):
             self.normalize()
+
+    def test_candidate_build_hosts_carry_no_released_artifact(self):
+        for host in self.data['hosts'][:-1]:
+            del host['partitions'][0]['provenance']['jvm_build']['released_artifact']
+        with self.assertRaisesRegex(ValueError, 'released-artifact host'):
+            self.normalize(released=False)
+        del self.data['hosts'][-1]['partitions'][0]['provenance']['jvm_build']['released_artifact']
+        self.assertEqual(len(self.normalize(released=False)['hosts']), 3)
 
     def test_rejects_changed_export_or_scoped_plan(self):
         self.data['hosts'][0]['partitions'][0]['export_sha256'] = '0' * 64

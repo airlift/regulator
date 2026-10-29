@@ -42,8 +42,9 @@ remain in the indexed private archive and are not additional release benchmarks.
 
 Intermediate measurements, rejected experiments, raw profiles, and campaign
 notebooks are local working data and are not committed. The preliminary 1.0
-publication snapshot is an explicit exception: it preserves each row's actual
-source revision, host coverage, and uncertainty. Commit the final public
+publication snapshot is one explicit exception: it preserves each row's actual
+source revision, host coverage, and uncertainty. Candidate-build preliminary
+reports, measured before their release, are the second. Commit the final public
 machine-readable release data with the provenance required to reproduce its
 conclusions, and index the separate private evidence needed to audit the wider
 campaign.

@@ -33,8 +33,9 @@ With `--release-version`, for a campaign that measured a published release,
 every route of every attempt must also attest that it measured that release's
 pinned JAR: its `release-artifact.json`, the `release_version` and
 `release_artifact_sha256` in its `run-metadata.txt`, and the JAR under
-`release/`. The report importer accepts only a reduction that proved the
-release it publishes.
+`release/`. The report importer accepts a reduction that proved the release it
+publishes, or, as a candidate build, one reduced without `--release-version`
+whose attempts recorded no release metadata.
 
 The ledgers must pass campaign unit acceptance: every group of every platform
 and frozen unit of the selected shards, accepted once for each of replicas 1,

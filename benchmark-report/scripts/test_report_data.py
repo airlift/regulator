@@ -317,7 +317,7 @@ class TestReportData(unittest.TestCase):
                                            operation='singleUse', caseId='trino-like/ANY_ASCII/optimized')
                 report_data.validate_publication_scope(migrated, releases)
 
-    def test_later_release_publishes_every_row_except_hidden_ones(self):
+    def test_later_release_validates_final_and_candidate_reports(self):
         release = {
             'schema_version': 1, 'group_id': 'io.airlift', 'artifact_id': 'regulator',
             'version': '2.0', 'source_commit': 'a' * 40, 'engine_tree': 'b' * 40,
@@ -331,41 +331,75 @@ class TestReportData(unittest.TestCase):
         final['sources'].update(currentLabel='Regulator 2.0 results', currentCandidate=release['source_commit'],
                                 engineTree=release['engine_tree'], releaseVersion='2.0')
         final['provenance'] = {'releasedArtifact': release,
-                               'collectors': {'baseline': {'engine_tree': release['engine_tree']}}}
+                               'collectors': {'baseline': {'candidate_commit': release['source_commit'],
+                                                           'engine_tree': release['engine_tree']}}}
         final['publicationScope'] = {
             'policy': 'user-facing-release-v2', 'completeCampaignRows': len(final['rows']) + 20,
             'publishedRows': len(final['rows']), 'excludedCampaignRows': 20,
             'internalEvidence': 'docs/benchmarks/results-2.0/raw-archives.json',
         }
-        publication = {'status': 'preliminary', 'sourcePolicy': 'mixed-development-revisions',
-                       'note': 'Development builds.'}
+        # A campaign of a candidate build before the release.
+        preliminary = copy.deepcopy(final)
+        del preliminary['provenance']['releasedArtifact']
+        preliminary['sources']['currentLabel'] = 'Regulator 2.0 preliminary results'
+        preliminary['publication'] = {'status': 'preliminary', 'sourcePolicy': 'candidate-build',
+                                      'note': 'Candidate build.'}
 
         def unreleased(report):
             del report['sources']['releaseVersion'], report['publicationScope']
 
         cases = (
-            ('final publication', final, lambda report: report.update(publication=publication),
+            ('final publication', final, lambda report: report.update(publication=preliminary['publication']),
              'must not carry publication metadata'),
             ('final 1.0 scope', final,
              lambda report: report['publicationScope'].update(policy='user-facing-release-v1'), 'publication scope'),
             ('final label', final,
              lambda report: report['sources'].update(currentLabel='Regulator 2.0 final results'), 'currentLabel'),
             ('final unreleased', final, unreleased, 'requires a release version'),
-            ('final without artifact', final, lambda report: report['provenance'].pop('releasedArtifact'),
-             'requires released-artifact provenance'),
+            ('candidate without publication', preliminary, lambda report: report.pop('publication'),
+             'report without released-artifact provenance requires candidate-build publication metadata'),
+            ('candidate mixed revisions', preliminary,
+             lambda report: report['publication'].update(sourcePolicy='mixed-development-revisions'),
+             'report without released-artifact provenance requires candidate-build publication metadata'),
+            ('candidate label', preliminary,
+             lambda report: report['sources'].update(currentLabel='Regulator 9.0 preliminary results'), 'currentLabel'),
+            ('candidate without collectors', preliminary, lambda report: report['provenance'].pop('collectors'),
+             'requires collector provenance'),
+            ('candidate collector tree', preliminary,
+             lambda report: report['provenance']['collectors']['baseline'].update(engine_tree='d' * 40),
+             'collector engine tree'),
+            # The report names a commit no collector built.
+            ('candidate commit', preliminary, lambda report: report['sources'].update(currentCandidate='d' * 40),
+             'collector commit'),
+            ('candidate unreleased', preliminary, unreleased, 'requires a release version'),
         )
         with patch.object(report_data.released_artifact, 'manifest', return_value=release):
             report_data.validate_publication_scope(final, [])
+            report_data.validate_publication_scope(preliminary, [])
             for name, report, change, message in cases:
                 changed = copy.deepcopy(report)
                 change(changed)
                 with self.subTest(name), self.assertRaisesRegex(ValueError, message):
                     report_data.validate_publication_scope(changed, [])
+            # The final report supersedes its preliminary one, which cannot then displace it.
             with tempfile.TemporaryDirectory() as directory, self.use_data_directory(Path(directory) / 'published'):
                 root = Path(directory)
-                (root / 'final.json').write_text(report_data.encode_json(final))
+                for name, report in (('preliminary', preliminary), ('final', final)):
+                    (root / f'{name}.json').write_text(report_data.encode_json(report))
+                report_data.import_data(root / 'preliminary.json')
                 report_data.import_data(root / 'final.json')
                 manifest = report_data.MANIFEST_FILE.read_bytes()
+                self.assertEqual(['Regulator 2.0 results'],
+                                 [entry['label'] for entry in json.loads(manifest)['releases']])
+                # Nor can a preliminary report of another candidate build of the same release.
+                other = copy.deepcopy(preliminary)
+                other['sources']['currentCandidate'] = 'e' * 40
+                other['provenance']['collectors']['baseline']['candidate_commit'] = 'e' * 40
+                (root / 'other.json').write_text(report_data.encode_json(other))
+                for name in ('preliminary', 'other'):
+                    with self.subTest(name), self.assertRaisesRegex(ValueError, 'released-artifact report'):
+                        report_data.import_data(root / f'{name}.json')
+                    self.assertEqual(manifest, report_data.MANIFEST_FILE.read_bytes())
                 # Import refuses a publication that carries a hidden row.
                 probe = copy.deepcopy(final)
                 probe['rows'][0]['family'] = 'optimizer-probe'
@@ -419,7 +453,7 @@ class TestReportData(unittest.TestCase):
                 self.assertIn('| Compared with | Everyday expressions | Text processing |', summary)
                 self.assertIn('| Trino LIKE | 2.0× faster | — |', summary)
 
-    def test_preliminary_summary_does_not_claim_one_measured_commit(self):
+    def test_preliminary_summary_names_one_measured_commit_only_for_a_candidate_build(self):
         report = report_fixture()
         report['sources']['currentLabel'] = '1.0 preliminary results'
         report['publication'] = {'status': 'preliminary', 'sourcePolicy': 'mixed-development-revisions',
@@ -428,6 +462,11 @@ class TestReportData(unittest.TestCase):
         self.assertIn('1.0 preliminary results', summary)
         self.assertIn('per-row sources', summary)
         self.assertNotIn('`candidate`', summary)
+        # A candidate build's preliminary results name the one commit they measured.
+        report['sources']['currentLabel'] = 'Regulator 2.0 preliminary results'
+        report['publication']['sourcePolicy'] = 'candidate-build'
+        summary = report_data.summary_markdown(report)
+        self.assertIn('_Source: Regulator 2.0 preliminary results `candidate`.', summary)
 
     def test_import_preserves_javascript_integer_boundary(self):
         with tempfile.TemporaryDirectory() as directory:

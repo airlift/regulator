@@ -71,7 +71,8 @@ def validate_reduction(directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--released-campaign', type=Path, required=True,
-                        help='complete release campaign paths and pinned artifact version')
+                        help='complete campaign paths and release version, of the released artifact or a '
+                             'candidate build')
     parser.add_argument('--complete-output', type=Path, required=True,
                         help='complete campaign capture for the private evidence archive')
     parser.add_argument('--output', type=Path, required=True)

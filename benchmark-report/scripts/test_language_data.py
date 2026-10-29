@@ -56,7 +56,7 @@ def bulk_capture(mappings):
 class TestLanguageData(unittest.TestCase):
     def test_release_report_supports_r_family_and_integrated_like_lifecycle(self):
         data = report_fixture()
-        data['provenance']['releasedArtifact'] = {'version': '1.0'}
+        data['sources']['releaseVersion'] = '1.0'
         data['platforms'] = RELEASE_1_0_PLATFORMS
         for row in data['rows']:
             row['platform'] = 'r' + row['platform'][1:]
@@ -76,7 +76,7 @@ class TestLanguageData(unittest.TestCase):
             validate_language_report(historical)
 
         released = report_fixture()
-        released['provenance']['releasedArtifact'] = {'version': '1.0'}
+        released['sources']['releaseVersion'] = '1.0'
         for row in released['rows']:
             if row['language'] == 'like':
                 row['source'] = 'baseline'
@@ -142,9 +142,16 @@ class TestLanguageData(unittest.TestCase):
         row['result'] = reduce_hosts([host(1, 10, 20)])
         row['measurementSource'] = {'cohort': 'targeted', 'candidate': 'candidate'}
         validate_language_report(data)
-        del data['publication']
-        with self.assertRaisesRegex(ValueError, 'independent hosts'):
-            validate_language_report(data)
+        candidate = deepcopy(data)
+        candidate['publication']['sourcePolicy'] = 'candidate-build'
+        final = deepcopy(data)
+        del final['publication']
+        # A candidate build's preliminary results meet the final gate.
+        for name, changed in (('candidate', candidate), ('final', final)):
+            with self.subTest(name), self.assertRaisesRegex(ValueError, 'independent hosts'):
+                validate_language_report(changed)
+        candidate['rows'][0]['result'] = reduce_hosts([host(replica, 10, 20) for replica in (1, 2, 3)])
+        validate_language_report(candidate)
 
     def test_preliminary_rejects_missing_hosts_sources_labels_and_private_preview(self):
         data = report_fixture()
@@ -154,7 +161,7 @@ class TestLanguageData(unittest.TestCase):
         data['rows'][0]['result'] = reduce_hosts([host(1, 10, 20)])
         data['rows'][0]['measurementSource'] = {'cohort': 'targeted'}
         for mutate, message in (
-                (lambda d: d['rows'][0]['result'].update(hosts=[]), 'independent hosts'),
+                (lambda d: d['rows'][0]['result'].update(hosts=[]), 'one independent host per row'),
                 (lambda d: d['rows'][0].pop('measurementSource'), 'source provenance'),
                 (lambda d: d['sources'].update(currentLabel='Final results'), 'publication metadata'),
                 (lambda d: d['publication'].update(status='final'), 'publication metadata'),

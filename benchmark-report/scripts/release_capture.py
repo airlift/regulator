@@ -1,17 +1,23 @@
-"""Import complete release campaigns while retaining artifact and collector identities."""
+"""Import complete release campaigns, of the released artifact or a candidate build, while retaining artifact and
+collector identities."""
 
 import csv
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 
 from baseline_data import baseline_rows, read_rows
 from language_data import CURRENT_PLATFORMS, LANGUAGES, MEMORY_MODES, digest, language_rows
+from publication_data import RELEASE_VERSION
 from report_data import validate_report
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = ROOT / 'tools/re2-benchmark/baseline'
+# Run and environment metadata keys in which a host records the release it loaded: baseline/run-shard.sh writes the
+# first two and aws/run-host.sh the third.
+RELEASE_METADATA = {'release_version', 'release_artifact_sha256', 'regulator_release_version'}
 sys.path.insert(0, str(BASELINE))
 sys.path.insert(0, str(ROOT / 'tools/re2-benchmark/language'))
 import fleet
@@ -24,20 +30,23 @@ def load(path):
     return json.loads(Path(path).read_text())
 
 
-def load_collector(item, plan, release):
+def load_collector(item, plan, engine_tree):
+    """The collector a suite names, or the campaign's; unless engine_tree is None, it must build that production
+    tree."""
     path = item.get('candidate_provenance', plan.get('candidate_provenance'))
     if not path:
         raise ValueError('each release capture requires a pinned collector')
     with Path(path).open() as source:
         collectors = list(csv.DictReader(source, delimiter='\t'))
-    if len(collectors) != 1 or collectors[0]['engine_tree'] != release['engine_tree']:
-        raise ValueError('collector source does not match the released production tree')
+    if len(collectors) != 1 or (engine_tree is not None and collectors[0]['engine_tree'] != engine_tree):
+        raise ValueError('collector pin must contain exactly one row matching the expected production tree')
     return collectors[0]
 
 
-def normalize_language(data, manifest, expected_release, collector, receipts, units):
+def normalize_language(data, manifest, release, engine_tree, collector, receipts, units):
     """Import a plan's export. Its hosts must be exactly the accepted unit groups in receipts, and each must hold
-    exactly its group's rows of the plan's units."""
+    exactly its group's rows of the plan's units. Each host must measure engine_tree, using release's JAR when given
+    and a candidate build otherwise."""
     plan = data['plan']
     if 'selection' in plan:
         raise ValueError('release language capture requires the complete matrix')
@@ -48,10 +57,10 @@ def normalize_language(data, manifest, expected_release, collector, receipts, un
     if any(data['candidate'][key] != value for key, value in expected_candidate.items()):
         raise ValueError('language capture changed the collector identity')
     for receipt in receipts:
-        if (receipt['engine_tree'] != expected_release['engine_tree'] or
+        if (receipt['engine_tree'] != engine_tree or
                 receipt['candidate_commit'] != collector['candidate_commit'] or
                 receipt['candidate_archive_sha256'] != collector['archive_sha256']):
-            raise ValueError('accepted language unit changed the released artifact or collector')
+            raise ValueError('accepted language unit changed the measured build or collector')
     def attempt_group(row):
         return row['unit_attempt_id'], row['group_id']
 
@@ -80,10 +89,14 @@ def normalize_language(data, manifest, expected_release, collector, receipts, un
             raise ValueError("language host differs from its shard's frozen allocation")
         for part in host['partitions']:
             provenance = part['provenance']
-            release = provenance['jvm_build'].get('released_artifact')
-            if release is None or release['manifest'] != expected_release:
+            artifact = provenance['jvm_build'].get('released_artifact')
+            if release is None:
+                if artifact is not None:
+                    raise ValueError('candidate-build capture contains a released-artifact host')
+            elif artifact is None or artifact['manifest'] != release:
                 raise ValueError('language host did not measure the published release')
-            released_artifact.validate_saved(release, provenance['jvm_build']['jvm'])
+            else:
+                released_artifact.validate_saved(artifact, provenance['jvm_build']['jvm'])
             if any(provenance[key] != value for key, value in expected_candidate.items()):
                 raise ValueError('language host changed the collector identity')
             instance = provenance['instance_identity']
@@ -118,8 +131,9 @@ def validate_language_ledger(ledger, plans):
     return receipts
 
 
-def validate_baseline(baseline, release, collector):
-    """Require a complete unit campaign of the collector, reduced from exactly its accepted unit attempts."""
+def validate_baseline(baseline, release, engine_tree, collector):
+    """Require a complete unit campaign of the collector measuring engine_tree, reduced from exactly its accepted
+    unit attempts. Require it to measure release's JAR when given and a candidate build otherwise."""
     from build_capture_data import validate_reduction
     platforms = BASELINE / 'platforms.tsv'
     if digest(platforms) != collector['platform_manifest_sha256']:
@@ -138,14 +152,20 @@ def validate_baseline(baseline, release, collector):
             unit_session.check_semantic_rejections(ledger.parent)
     receipts = read_rows(primary) + confirmations
     for receipt in receipts:
-        if (receipt['engine_tree'] != release['engine_tree'] or receipt['candidate_commit'] != collector['candidate_commit'] or
+        if (receipt['engine_tree'] != engine_tree or receipt['candidate_commit'] != collector['candidate_commit'] or
                 receipt['candidate_archive_sha256'] != collector['archive_sha256']):
-            raise ValueError('baseline receipt changed release source or collector')
+            raise ValueError('baseline receipt changed the measured build or collector')
     reduction = Path(baseline['reduction'])
     validate_reduction(reduction)
-    # The reducer owns the proof that each attempt measured the release JAR; its summary names the release it proved.
-    if load(reduction / 'summary.json').get('release_version') != release['version']:
-        raise ValueError('baseline reduction did not prove its attempts measured the release JAR')
+    # The reducer owns the proof that each attempt measured the release JAR; its summary's `release_version` names
+    # the release it proved and is empty for a candidate build.
+    if load(reduction / 'summary.json').get('release_version') != (release['version'] if release is not None else ''):
+        raise ValueError('baseline reduction did not prove its attempts measured the release JAR' if release is not None
+                         else 'candidate baseline summary requires release_version to be an empty string')
+    # An empty release summary does not prove that attempts recorded no release; check their metadata too.
+    if release is None and any(row['key'] in RELEASE_METADATA and row['value']
+                               for row in read_rows(reduction / 'metadata.tsv')):
+        raise ValueError('candidate baseline attempts contain recorded release metadata')
     validate_reduced_attempts(reduction, receipts)
 
 
@@ -176,8 +196,25 @@ def language_receipts(items, plans):
 
 
 def build(plan_path):
+    """Import a campaign of the plan's release JAR, or, when its baseline reduction proved no release, of the
+    candidate build its baseline collector names."""
     plan = load(plan_path)
-    release = released_artifact.manifest(ROOT, plan['release_version'])
+    version = plan['release_version']
+    if not isinstance(version, str) or re.fullmatch(RELEASE_VERSION, version) is None:
+        raise ValueError('campaign plan release_version is not a release version')
+    proven = load(Path(plan['baseline']['reduction']) / 'summary.json').get('release_version')
+    if proven:
+        if proven != version:
+            raise ValueError('baseline reduction measured a different release')
+        release = released_artifact.manifest(ROOT, version)
+        source_commit, engine_tree = release['source_commit'], release['engine_tree']
+    else:
+        release = None
+        # The 1.0 publication scope requires released-artifact provenance.
+        if version == '1.0':
+            raise ValueError('release 1.0 publishes only its released-artifact report')
+        candidate = load_collector(plan['baseline'], plan, None)
+        source_commit, engine_tree = candidate['candidate_commit'], candidate['engine_tree']
     collectors = {}
     combined = {'hosts': [], 'observations': [], 'comparisons': []}
     manifests, exports = [], []
@@ -189,11 +226,12 @@ def build(plan_path):
         if data['plan'] != frozen:
             raise ValueError('language export changed the frozen plan')
         manifest = load(directory / 'source/manifest.json')
-        collector = load_collector(item, plan, release)
+        collector = load_collector(item, plan, engine_tree)
         if manifest['suite'] in collectors:
             raise ValueError('release capture repeats a language suite')
         collectors[manifest['suite']] = collector
-        normalized = normalize_language(data, manifest, release, collector, receipts, work_units.load(directory))
+        normalized = normalize_language(data, manifest, release, engine_tree, collector, receipts,
+                                        work_units.load(directory))
         for key in combined:
             combined[key].extend(normalized[key])
         manifests.append(manifest)
@@ -201,28 +239,34 @@ def build(plan_path):
     if sorted((manifest['suite'], len(manifest['cases'])) for manifest in manifests) != [('language-bulk', 238), ('language-lifecycle', 13)]:
         raise ValueError('release import requires all 238 bulk and 13 lifecycle cases')
     baseline = plan['baseline']
-    collector = load_collector(baseline, plan, release)
+    # A candidate build's measured tree is its baseline collector's own.
+    collector = candidate if release is None else load_collector(baseline, plan, engine_tree)
     collectors['baseline'] = collector
-    validate_baseline(baseline, release, collector)
+    validate_baseline(baseline, release, engine_tree, collector)
     reduction = Path(baseline['reduction'])
     rows = language_rows(combined, manifests, platforms=CURRENT_PLATFORMS)
     lifecycle = next(manifest for manifest in manifests if manifest['suite'] == 'language-lifecycle')
     # The current baseline already includes all LIKE lifecycle shards.
     rows.extend(baseline_rows(reduction, lifecycle))
     report = {'schemaVersion': 2,
-              'sources': {'currentLabel': 'Regulator ' + release['version'] + ' final results',
-                          'currentCandidate': release['source_commit'], 'engineTree': release['engine_tree'],
-                          'jdk': 'Temurin 25.0.4+7', 'releaseVersion': release['version']},
+              'sources': {'currentLabel':
+                              f"Regulator {version} {'final' if release is not None else 'candidate'} results",
+                          'currentCandidate': source_commit, 'engineTree': engine_tree,
+                          'jdk': 'Temurin 25.0.4+7', 'releaseVersion': version},
               'languages': LANGUAGES, 'platforms': CURRENT_PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
-              'methodology': ['Public measurements load the checksummed published release JAR. Collector source is recorded separately.',
+              'methodology': ['Public measurements load the checksummed published release JAR. Collector source is recorded separately.'
+                              if release is not None else
+                              'Candidate-build measurements use builds of the recorded production tree, made before the release. Collector commits are recorded separately.',
                               'Comparisons use three independent hosts, with same-host ratios and all original samples retained. Baseline confirmations use a fourth host where required.',
                               'Ordinary R-family workers have 2 vCPUs and 16 GiB RAM. Measured JVMs retain an 8 GiB heap; JMH launchers use at most 256 MiB.',
                               'JVM language timings use five forks and ten one-second warmup and measurement iterations. Native RE2 uses five repetitions.',
                               'Observed host ranges are not confidence intervals. Incompatibility, reproduced timeouts, and timing variability remain explicit.'],
-              'provenance': {'releasedArtifact': release, 'collectors': collectors,
+              'provenance': {'collectors': collectors,
                              'languageExportSha256': exports, 'logicalLanguageJobs': len(combined['hosts']),
                              'baselineReductionChecksumsSha256': digest(reduction / 'output-checksums.tsv'),
                              'baselineReducerSha256': digest(ROOT / 'tools/re2-benchmark/baseline/aggregate_results.py'),
                              'campaignPlanSha256': digest(plan_path)}}
+    if release is not None:
+        report['provenance']['releasedArtifact'] = release
     validate_report(report)
     return report

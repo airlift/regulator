@@ -36,7 +36,7 @@ class TestPublicationData(unittest.TestCase):
         self.campaign = {
             'sources': {'currentLabel': 'Complete campaign', 'currentCandidate': '0123456789abcdef' * 2 + 'a' * 8,
                         'releaseVersion': '2.0'},
-            'provenance': {'collectors': {}, 'releasedArtifact': {'version': '2.0'}},
+            'provenance': {'collectors': {}},
             # Hidden rows interleave with public ones.
             'rows': [row for pair in zip(public, hidden) for row in pair] + public[len(hidden):],
         }
@@ -52,14 +52,17 @@ class TestPublicationData(unittest.TestCase):
             'internalEvidence': 'docs/benchmarks/results-2.0/raw-archives.json',
         }, result['publicationScope'])
 
-    def test_publication_requires_a_released_artifact_and_labels_final_results(self):
-        final = publication_data.publication_data(self.campaign)
+    def test_publication_requires_a_release_version_and_labels_final_and_preliminary_results(self):
+        preliminary = publication_data.publication_data(self.campaign)
+        self.assertEqual('Regulator 2.0 preliminary results', preliminary['sources']['currentLabel'])
+        self.assertEqual({'status': 'preliminary', 'sourcePolicy': 'candidate-build',
+                          'note': 'Preliminary results from candidate build 0123456789ab, '
+                                  'measured before the 2.0 release.'}, preliminary['publication'])
+        released = copy.deepcopy(self.campaign)
+        released['provenance']['releasedArtifact'] = {'version': '2.0'}
+        final = publication_data.publication_data(released)
         self.assertEqual('Regulator 2.0 results', final['sources']['currentLabel'])
         self.assertNotIn('publication', final)
-        unreleased = copy.deepcopy(self.campaign)
-        del unreleased['provenance']['releasedArtifact']
-        with self.assertRaisesRegex(ValueError, 'released-artifact provenance'):
-            publication_data.publication_data(unreleased)
         for version in (None, '', '2.0-rc1'):
             changed = copy.deepcopy(self.campaign)
             changed['sources']['releaseVersion'] = version
