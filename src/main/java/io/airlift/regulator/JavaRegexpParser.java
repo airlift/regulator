@@ -1069,21 +1069,30 @@ final class JavaRegexpParser
             }
 
             int low = parseLiteralRune(nodeFlags);
-            int high = low;
             if (tryConsumeRangeOperator()) {
-                high = parseLiteralRune(nodeFlags);
+                int high = parseLiteralRune(nodeFlags);
                 if (high < low) {
                     throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, null);
                 }
+                // For explicit ranges, do not implicitly filter '\n' out. Under Unicode case
+                // folding, a range matches by Pattern's range rule, not by the whole case classes
+                // that a single character matches.
+                CharClassBuilder member = new CharClassBuilder();
+                member.addRangeFlags(low, high, (nodeFlags | Regexp.CLASS_NEWLINE) & ~Regexp.FOLD_CASE, caseFolding);
+                if ((nodeFlags & Regexp.FOLD_CASE) != 0) {
+                    CaseFolding.addJavaRangeCaseMembers(member, low, high);
+                }
+                frame.addMember(ClassExpression.constant(RuneRangeSet.of(member)));
+                return;
             }
-            else if (low < 0x100 && !((nodeFlags & Regexp.FOLD_CASE) != 0 && isUnicodeCaseSingle(low))) {
+            if (low < 0x100 && !((nodeFlags & Regexp.FOLD_CASE) != 0 && isUnicodeCaseSingle(low))) {
                 frame.addBit(low, nodeFlags, caseFolding);
                 return;
             }
 
-            // For explicit singletons/ranges, do not implicitly filter '\n' out.
+            // For explicit singletons, do not implicitly filter '\n' out.
             CharClassBuilder member = new CharClassBuilder();
-            member.addRangeFlags(low, high, nodeFlags | Regexp.CLASS_NEWLINE, caseFolding);
+            member.addRangeFlags(low, low, nodeFlags | Regexp.CLASS_NEWLINE, caseFolding);
             frame.addMember(ClassExpression.constant(RuneRangeSet.of(member)));
         }
 

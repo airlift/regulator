@@ -122,11 +122,13 @@ On a JVM with an older Unicode version, characters that Unicode added since
 then, and the case partners they joined, have properties, folds, and word
 boundaries in Regulator but not in `Pattern`, and names that Unicode added
 since then, such as the script `Seal` and the names of new characters in
-`\N{name}`, are accepted only by Regulator. On Java 25 three more results
-differ from `Pattern`. Unicode 17.0 changed two for older characters: U+0295 is
-`Lo` rather than lowercase, and 689 code points that are not emoji, such as
-U+2605 BLACK STAR, are not `\p{IsExtended_Pictographic}`. And JDK 25's
-`Pattern` does not match `ß` against `ẞ` case-insensitively, which JDK 26 does.
+`\N{name}`, are accepted only by Regulator. On Java 25 more results differ
+from `Pattern`. Unicode 17.0 changed two for older characters: U+0295 is `Lo`
+rather than lowercase, and 689 code points that are not emoji, such as U+2605
+BLACK STAR, are not `\p{IsExtended_Pictographic}`. And JDK 25's `Pattern`
+lacks case-insensitive matches that JDK 26 added: it does not match `ß`
+against `ẞ`, and its ranges lack the closing characters described below, so
+`(?iu)[ς-ς]` matches `σ` only on JDK 26.
 
 Property names are resolved by `Pattern`'s rules. A name may take one of the
 prefixes `In`, `Is`, `gc=`, `general_category=`, `sc=`, `script=`, `blk=`, or
@@ -136,12 +138,21 @@ or `script=`, as in `\p{IsLatin}`, and `\p{Latn}` and `\p{Uppercase_Letter}`
 are errors. Under Unicode character classes, a POSIX name without a prefix may
 be written in any case, such as `\p{lower}`.
 
-Case-insensitive matching can differ from `Pattern` independently of Unicode
-version, as
-[`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) says.
-Case-insensitive matching never folds a predefined class, such as `\w`, or a
-property, so `(?iu)\w` does not match the Kelvin sign; `Pattern` itself defines
-a few properties, such as `\p{Lower}`, to match more case-insensitively.
+Case-insensitive matching folds each construct as JDK 26's `Pattern` does.
+Under Unicode case folding, a literal character, alone or in a class, matches
+its whole case class, so `(?iu)[K]` matches the Kelvin sign. A range matches a
+character when the character, its upper case, or the lower case of its upper
+case is in the range, so `(?iu)[A-Z]` matches neither the Kelvin sign nor `İ`.
+A range also matches a character when its upper case, or the lower case of its
+upper case, is one of the range's closing characters. A closing character is
+Unicode's simple case fold of a character in the range that lies outside the
+range and does not map back to that character by upper or lower case, such as
+`σ` for final sigma `ς`, so `(?iu)[ς-ς]` matches `σ` and `Σ`. `Pattern` also
+takes `i` as the fold of `İ`, and `I` as that of `ı`, so `(?iu)[ı-ı]` matches
+`I` and `i` but not `İ`. Case-insensitive matching never folds a predefined
+class, such as `\w`, or a property, so `(?iu)\w` does not match the Kelvin
+sign; `Pattern` itself defines a few properties, such as `\p{Lower}`, to match
+more case-insensitively.
 
 `find`, `lookingAt`, and `matches` have the same high-level meaning as their JDK
 counterparts. Captures are returned as zero-copy Slice views.

@@ -217,11 +217,15 @@ rule equals the JVM's case classes wherever the JVM assigns every member of a
 class. Java case classes therefore differ from the JVM's only for characters
 Unicode added after the JVM's version, and their case partners. Trino case
 classes differ for the same characters, and also keep dotted capital I and
-dotless small i out of the class of I, as Joni does.
-Case-insensitive matching built on those classes can still differ from
-`Pattern` independently of Unicode version. Moving to
-another Unicode version follows the generator's
+dotless small i out of the class of I, as Joni does. Moving to another Unicode
+version follows the Unicode database generator's
 [version procedure](tools/unicode-database/README.md#moving-to-a-new-unicode-version).
+
+Java case-insensitive ranges also match their closing characters, as the
+[Java reference](docs/reference/languages/JAVA_REGEXP.md) describes. They come
+from the database's simple case folding by the rule of the JDK's
+`GenerateCaseFolding`, and the generator's two entries that the database cannot
+supply, dotted capital I to i and dotless small i to I, are constants citing it.
 
 An ASCII letter pair, such as `[Kk]` or a Java letter folded without
 `UNICODE_CASE`, matches only its two letters, and every language merges it as
