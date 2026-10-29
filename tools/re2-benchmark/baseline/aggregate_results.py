@@ -10,6 +10,7 @@ import topology
 import hashlib
 import json
 import math
+import os
 import re
 import statistics
 import sys
@@ -1272,7 +1273,10 @@ def write_output_checksums(output_dir, names):
     for name in sorted(names):
         path = output_dir / name
         rows.append({"file": name, "size_bytes": str(path.stat().st_size), "sha256": sha256_file(path)})
-    write_tsv(output_dir / "output-checksums.tsv", fields, rows)
+    # The campaign driver reads this manifest as the reduction's completion marker, so it appears only whole.
+    temporary = output_dir / "output-checksums.tsv.tmp"
+    write_tsv(temporary, fields, rows)
+    os.replace(temporary, output_dir / "output-checksums.tsv")
 
 
 def aggregate(arguments):
