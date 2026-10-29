@@ -266,10 +266,11 @@ section covers baseline units.
 - Outside planning, `run-unit.sh` requires the attempt's host session,
   `RE2_CAMPAIGN_HOST_SESSION`, and lease sequence,
   `RE2_CAMPAIGN_LEASE_SEQUENCE`; the region defaults to the availability
-  zone's. It runs itself under GNU `time` into `unit-capacity.txt` with the
-  host session's capacity gate, combines the routes, and writes
-  `unit-session.tsv`, `unit-evidence.tsv`, and, once `validate-unit-results.py`
-  accepts the attempt, `unit-receipt.tsv`; see `ACCEPTANCE.md`.
+  zone's, and the market is the host's `instance_market_type`. It runs itself
+  under GNU `time` into `unit-capacity.txt` with the host session's capacity
+  gate, combines the routes, and writes `unit-session.tsv`,
+  `unit-evidence.tsv`, and, once `validate-unit-results.py` accepts the
+  attempt, `unit-receipt.tsv`; see `ACCEPTANCE.md`.
 - `test_unit_session.py` plans every group of every unit for both protocols
   and replicas 1 to 4 in process, and checks that the selectors expand to
   exactly the group's rows under their frozen protocols, in replica route

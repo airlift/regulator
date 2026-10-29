@@ -81,8 +81,9 @@ class TestUnitSession(unittest.TestCase):
             receipt = UNIT_SESSION.validate_unit_results(fixture.root)
 
             group = work_units.unit_group(fixture.unit, "2")
-            self.assertEqual((fixture.unit["unit_id"], "2", "host-session-1/3", "us-west-2"),
-                             (receipt["unit_id"], receipt["group_id"], receipt["unit_attempt_id"], receipt["region"]))
+            self.assertEqual((fixture.unit["unit_id"], "2", "host-session-1/3", "us-west-2", "spot"),
+                             (receipt["unit_id"], receipt["group_id"], receipt["unit_attempt_id"], receipt["region"],
+                              receipt["market"]))
             self.assertEqual(str(len(group["owned"])), receipt["owned_row_count"])
             self.assertEqual(
                 UNIT_SESSION.work_units.protocol_digest(group["owned"], fixture.protocols),
@@ -429,9 +430,11 @@ class UnitFixture:
     SMOKE_METADATA = ("jmh_process_count", "jmh_process_warmup_iterations", "jmh_process_measurement_iterations",
                       "jmh_iteration_time")
 
-    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row: 1, steal=0, group="1"):
-        """steal is the CPU steal ticks each route records in its 1,000 ticks."""
+    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row: 1, steal=0, group="1",
+                 market="spot"):
+        """steal is the CPU steal ticks each route records in its 1,000 ticks, and market how the host was bought."""
         self.root = root
+        self.market = market
         self.steal = steal
         units = UNIT_SESSION.work_units.load(BASELINE)
         self.unit = next(unit for unit in units.values()
@@ -547,7 +550,7 @@ class UnitFixture:
         with contextlib.redirect_stdout(io.StringIO()):
             UNIT_SESSION.combine(type("Arguments", (), {
                 "unit_directory": self.root, "unit_attempt": attempt, "group": self.group["group_id"],
-                "region": self.host["availability_zone"][:-1]})())
+                "region": self.host["availability_zone"][:-1], "market": self.market})())
 
     def accept(self, attempt):
         """Accept the attempt as run-unit.sh does, then finalize its capacity and status."""
@@ -588,9 +591,9 @@ class UnitCampaign:
     def directory(self, receipt):
         return unit_dispatch.unit_attempt_directory(self.root, receipt)
 
-    def add(self, platform, unit, replica, host, groups=None):
-        """Run the unit's groups, all by default, as the next lease of the platform's host number host; returns
-        the lease's receipts, one per group."""
+    def add(self, platform, unit, replica, host, groups=None, market="spot"):
+        """Run the unit's groups, all by default, as the next lease of the platform's host number host, bought
+        in market; returns the lease's receipts, one per group."""
         host_session = f"{platform}-session-{host}"
         lease = self.leases[host_session] = self.leases.get(host_session, 0) + 1
         architecture, instance_type = self.PLATFORMS[platform]
@@ -604,7 +607,7 @@ class UnitCampaign:
                     "campaign_id": "campaign", "platform": platform, "instance_id": f"i-{platform}-{host}",
                     "host_epoch": f"{platform}-epoch-{host}", "architecture": architecture,
                     "instance_type": instance_type, "availability_zone": "us-west-2a",
-                }, lambda row: self.score(row, platform, replica), self.steal(platform, host), group)
+                }, lambda row: self.score(row, platform, replica), self.steal(platform, host), group, market)
             receipts.append(fixture.accept(f"{host_session}/{lease}"))
         return receipts
 

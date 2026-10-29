@@ -79,7 +79,7 @@ EXECUTION_KINDS = {"jmh-forks": "forks", "native-repetitions": "native"}
 # A selector whose values JMH cannot express runs a whole method with its handler's arguments.
 ROUTE_ARGUMENTS = "route"
 SMOKE_SETTINGS = ("processes", "warmup_iterations", "measurement_iterations", "time")
-UNIT_SCHEMA_VERSION = "2"
+UNIT_SCHEMA_VERSION = "3"
 UNIT_SESSION_FIELDS = (
     "schema_version",
     "campaign_id",
@@ -94,7 +94,11 @@ UNIT_SESSION_FIELDS = (
     "instance_type",
     "availability_zone",
     "region",
+    # How the host was bought, spot or on-demand, as it read from instance metadata.
+    "market",
 )
+# The purchase types a unit's host may record.
+MARKETS = ("spot", "on-demand")
 UNIT_RECEIPT_FIELDS = UNIT_SESSION_FIELDS + (
     "shard_id",
     "owned_row_count",
@@ -118,7 +122,7 @@ ROUTE_IDENTITY_FIELDS = (
 WORKER_SESSION_FIELDS = (
     ("campaign_id", "baseline_campaign"), ("platform", "platform"), ("instance_id", "instance_id"),
     ("host_epoch", "host_epoch"), ("architecture", "campaign_architecture"), ("instance_type", "instance_type"),
-    ("availability_zone", "availability_zone"))
+    ("availability_zone", "availability_zone"), ("market", "instance_market_type"))
 UNIT_HOST_ARTIFACTS = (
     "environment-manifest.txt",
     "environment.txt",
@@ -446,6 +450,7 @@ def combine(arguments):
         "group_id": arguments.group,
         "unit_attempt_id": arguments.unit_attempt,
         "region": arguments.region,
+        "market": arguments.market,
     }])
     write_unit_evidence(root, route_plan)
     print(f"Combined {len(rows)} unit rows")
@@ -706,6 +711,8 @@ def read_unit_session(root):
         reject(f"{root / 'unit-session.tsv'} unit_attempt_id must be <host_session>/<lease_seq>")
     if not session["availability_zone"].startswith(session["region"]):
         reject(f"{root / 'unit-session.tsv'} availability zone is outside region {session['region']}")
+    if session["market"] not in MARKETS:
+        reject(f"{root / 'unit-session.tsv'} market must be one of {format_values(MARKETS)}")
     return session
 
 
@@ -951,6 +958,7 @@ def parser():
     combine_parser.add_argument("--unit-attempt", required=True)
     combine_parser.add_argument("--group", required=True)
     combine_parser.add_argument("--region", required=True)
+    combine_parser.add_argument("--market", required=True)
     combine_parser.set_defaults(function=combine)
 
     environment_parser = subparsers.add_parser("environment-sha256")

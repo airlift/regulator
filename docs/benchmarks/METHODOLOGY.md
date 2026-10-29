@@ -292,12 +292,14 @@ also run on R8i and R9g. Do not use local timings to accept or reject a
 candidate, or to decide whether it deserves a target-host run.
 
 No two of a unit's three replicas share an instance, even when an interrupted
-replica finishes its groups on another; different units may share a host. A
-campaign may allow several AWS regions. Each Spot launch goes to the allowed
-region with the best Spot placement score, when scores are available, that has
-quota headroom; an On-Demand launch takes the first allowed region with
-headroom. Every region runs the same pinned image, identified by the name of its
-Oregon pin.
+replica finishes its groups on another; different units may share a host. Each
+platform has its own ordered list of AWS regions and its own purchase policy:
+Spot with an On-Demand fallback, Spot only, or On-Demand only. Each Spot launch
+goes to the region of its list with the best Spot placement score, when scores
+are available, that has quota headroom; an On-Demand launch takes the first
+region of its list with headroom. Every region runs the same pinned image,
+identified by the name of its Oregon pin, and every result records its host's
+region and market.
 
 See the [AWS guide](../../tools/re2-benchmark/aws/README.md) for commands,
 environment variables, machine-hour planning, and Spot/On-Demand costs.

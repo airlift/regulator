@@ -224,6 +224,7 @@ record_environment()
     local actual_instance_id
     local availability_zone
     local identity_document
+    local instance_life_cycle
     local instance_type
     local pending_time
     local row_manifest_sha256=not-used
@@ -247,6 +248,10 @@ record_environment()
     availability_zone=$(curl --silent --fail --max-time 2 \
         --header "X-aws-ec2-metadata-token: ${metadata_token}" \
         http://169.254.169.254/latest/meta-data/placement/availability-zone || true)
+    # How the instance was bought: spot or on-demand.
+    instance_life_cycle=$(curl --silent --fail --max-time 2 \
+        --header "X-aws-ec2-metadata-token: ${metadata_token}" \
+        http://169.254.169.254/latest/meta-data/instance-life-cycle || true)
     identity_document=$(curl --silent --fail --max-time 2 \
         --header "X-aws-ec2-metadata-token: ${metadata_token}" \
         http://169.254.169.254/latest/dynamic/instance-identity/document || true)
@@ -267,6 +272,11 @@ record_environment()
         fi
         if [[ -z ${EXPECTED_AMI_ID:-} || "${actual_ami_id}" != "${EXPECTED_AMI_ID}" ]]; then
             echo "Qualification AMI mismatch: expected ${EXPECTED_AMI_ID:-unset}, found ${actual_ami_id:-unknown}" >&2
+            exit 1
+        fi
+        if [[ -z ${INSTANCE_MARKET_TYPE:-} || "${instance_life_cycle}" != "${INSTANCE_MARKET_TYPE}" ]]; then
+            echo "Qualification market mismatch: launched as ${INSTANCE_MARKET_TYPE:-unset}," \
+                "instance metadata reports ${instance_life_cycle:-unknown}" >&2
             exit 1
         fi
         if [[ ! ${BENCHMARK_JAVA_ARCHIVE_SHA256:-} =~ ^[0-9a-f]{64}$ ||
@@ -320,6 +330,7 @@ record_environment()
         printf 'instance_id=%s\n' "${actual_instance_id:-unknown}"
         printf 'instance_type=%s\n' "${instance_type:-unknown}"
         printf 'availability_zone=%s\n' "${availability_zone:-unknown}"
+        printf 'instance_market_type=%s\n' "${instance_life_cycle:-unknown}"
         printf 'instance_pending_time=%s\n' "${pending_time:-unknown}"
         printf 'machine_architecture=%s\n' "$(uname -m)"
         printf 'jdk_archive_url=%s\n' "${BENCHMARK_JAVA_ARCHIVE_URL:-unverified-latest}"

@@ -558,8 +558,8 @@ def read_properties(path):
 def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_indexes, campaign_artifact):
     rows = []
     host_fields = (
-        "campaign_id", "platform", "architecture", "instance_type", "availability_zone", "shard_id",
-        "replica_id", "instance_id", "host_epoch", "confirmation", "candidate_commit",
+        "campaign_id", "platform", "architecture", "instance_type", "availability_zone", "region", "market",
+        "shard_id", "replica_id", "instance_id", "host_epoch", "confirmation", "candidate_commit",
         "engine_tree", "evidence_manifest_sha256", "row_id", "suite",
         "system", "benchmark", "parameters", "comparator", "expected_result",
         "allocation_contract", "workload_checksum", "score", "score_unit",
@@ -576,9 +576,9 @@ def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_inde
             manifest = manifest_by_id[observed["row_id"]]
             row = {
                 **{field: receipt[field] for field in (
-                    "campaign_id", "platform", "architecture", "instance_type", "availability_zone", "shard_id",
-                    "replica_id", "instance_id", "host_epoch", "candidate_commit", "engine_tree",
-                    "evidence_manifest_sha256")},
+                    "campaign_id", "platform", "architecture", "instance_type", "availability_zone", "region",
+                    "market", "shard_id", "replica_id", "instance_id", "host_epoch", "candidate_commit",
+                    "engine_tree", "evidence_manifest_sha256")},
                 "confirmation": "true" if session.confirmation else "false",
                 **{field: manifest[field] for field in (
                     "row_id", "suite", "system", "benchmark", "parameters", "comparator",
@@ -649,8 +649,8 @@ def build_host_checks(host_rows, sessions):
         ticks[key][0] += session.steal_ticks
         ticks[key][1] += session.total_ticks
     fields = (
-        "platform", "instance_id", "host_epoch", "region", "rows", "slow", "noise", "steal_share", "flagged",
-        "reason")
+        "platform", "instance_id", "host_epoch", "region", "market", "rows", "slow", "noise", "steal_share",
+        "flagged", "reason")
     rows = []
     for key, receipt in hosts.items():
         values = deviations.get(key, [])
@@ -667,7 +667,8 @@ def build_host_checks(host_rows, sessions):
             reasons.append("steal-above-1-percent")
         rows.append({
             "platform": receipt["platform"], "instance_id": receipt["instance_id"],
-            "host_epoch": receipt["host_epoch"], "region": receipt["region"], "rows": str(len(values)),
+            "host_epoch": receipt["host_epoch"], "region": receipt["region"], "market": receipt["market"],
+            "rows": str(len(values)),
             "slow": format_number(slow), "noise": format_number(noise), "steal_share": format_number(steal),
             "flagged": str(bool(reasons)).lower(), "reason": ",".join(reasons),
         })

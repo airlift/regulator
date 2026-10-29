@@ -51,7 +51,7 @@ CAPACITY_RETRY_SECONDS = 30
 MAX_REPLACEMENTS_PER_JOB = 2
 # Once this share of a pool's estimated work is all that remains unaccepted, the pool's new
 # launches use On-Demand so the phase's tail does not wait on Spot capacity or a reclaim,
-# unless the campaign is Spot-only.
+# unless the pool's platform buys only Spot.
 ON_DEMAND_TAIL_PERCENT = 10
 WRAPPER_NOT_CREATED = "wrapper process was not created"
 UNIT_WORKER_SHARD = "unit-worker"
@@ -65,9 +65,18 @@ UNIT_WORKER_LAST_UNIT_SECONDS = work_units.UNIT_SECONDS
 UNIT_HEARTBEAT_STALE_SECONDS = 10 * 60
 UNIT_HEARTBEAT_LOST_SECONDS = 30 * 60
 UNIT_POLL_SECONDS = 15
-# A unit pool's new Spot workers skip a region this long after it found no Spot capacity, and
-# while every region cools they launch On-Demand.
+# A unit pool's new Spot workers skip a region this long after it found no Spot capacity.
 SPOT_REGION_COOL_DOWN_SECONDS = 15 * 60
+# How a platform's workers buy capacity: Spot only, waiting for it however long; Spot, turning to On-Demand once
+# Spot has fallen short for SPOT_SHORTAGE_WAIT_SECONDS; or On-Demand only.
+PURCHASE_POLICIES = ("spot", "spot-then-on-demand", "on-demand")
+DEFAULT_PURCHASE = "spot-then-on-demand"
+# A spot-then-on-demand pool keeps trying Spot this long after its first launch that found no Spot capacity, and
+# then launches On-Demand while every one of its platform's configured regions cools, until one of its Spot
+# workers starts. One cool-down lets every region be tried again, so a brief shortage buys no On-Demand hours,
+# while a platform whose Spot ran dry for the day, as r8i's did in every US region on October 28, 2026, loses
+# only this long.
+SPOT_SHORTAGE_WAIT_SECONDS = 15 * 60
 # A new unit worker is expected to start its first lease this long after launch. Recent workers took
 # 2.4 to 2.9 minutes from boot to their first unit. A pool launches a worker only for work its workers
 # would start later than this.
@@ -211,8 +220,6 @@ def parse_args():
     parser.add_argument("--result-root", type=Path)
     parser.add_argument("--max-concurrent", type=int, default=DEFAULT_MAX_CONCURRENT)
     parser.add_argument("--max-concurrent-per-platform", type=int, default=DEFAULT_MAX_CONCURRENT)
-    parser.add_argument("--spot-only", action="store_true",
-                        help="wait and retry on Spot; prohibit On-Demand launches and fallback")
     parser.add_argument("--spot-vcpu-reserve", type=int, default=SPOT_VCPU_SAFETY_RESERVE)
     parser.add_argument("--release-version", default="",
                         help="measure the pinned published JAR for this version instead of source-built classes")
@@ -230,9 +237,15 @@ def parse_args():
     parser.add_argument("--language-plan", action="append", type=Path, default=[],
                         help="language plan prepared by fleet.py, whose units the campaign measures instead of the "
                              "baseline's; repeat for lifecycle and bulk")
-    parser.add_argument("--region", action="append", dest="regions",
-                        help="AWS region a host may launch in; repeat to let Spot placement scores choose, "
-                             "ties going to the earlier region (default: AWS_REGION or us-west-2)")
+    parser.add_argument("--platform-regions", action="append", default=[], dest="platform_region_values",
+                        metavar="PLATFORM=REGION[,REGION...]",
+                        help="AWS regions the platform's hosts may launch in; with several, Spot placement scores "
+                             "choose, ties going to the earlier region (default: AWS_REGION or us-west-2)")
+    parser.add_argument("--purchase", action="append", default=[], dest="purchase_values",
+                        metavar="PLATFORM=POLICY",
+                        help="how the platform's hosts buy capacity: spot never launches On-Demand, on-demand "
+                             f"never launches Spot, and {DEFAULT_PURCHASE}, the default, turns to On-Demand where "
+                             "Spot falls short")
     parser.add_argument("--engine-builds", type=Path,
                         help="accepted build-phase result root whose per-platform Trino harness and native "
                              "runners every measuring unit worker installs")
@@ -252,8 +265,53 @@ def parse_transfer_buckets(values):
     return buckets
 
 
+def parse_platform_settings(values, option, platforms):
+    """Each named platform's setting from repeated PLATFORM=SETTING values."""
+    settings = {}
+    for value in values:
+        platform, separator, setting = value.partition("=")
+        if not separator or not setting or platform in settings:
+            raise SystemExit(f"{option} takes one PLATFORM=VALUE per platform: {value}")
+        if platform not in platforms:
+            raise SystemExit(f"{option} names a platform not in platforms.tsv: {value}")
+        settings[platform] = setting
+    return settings
+
+
+def parse_launch_options(arguments, platforms):
+    names = {platform.name for platform in platforms}
+    arguments.platform_regions = {
+        platform: regions.split(",") for platform, regions in parse_platform_settings(
+            arguments.platform_region_values, "--platform-regions", names).items()}
+    arguments.purchases = parse_platform_settings(arguments.purchase_values, "--purchase", names)
+    invalid = sorted(set(arguments.purchases.values()) - set(PURCHASE_POLICIES))
+    if invalid:
+        raise SystemExit(f"--purchase policies are {', '.join(PURCHASE_POLICIES)}, not {', '.join(invalid)}")
+
+
+def default_regions():
+    return [os.environ.get("AWS_REGION", "us-west-2")]
+
+
+def platform_regions(arguments, platform):
+    """The regions the platform's hosts may launch in, in the order its ties go."""
+    return getattr(arguments, "platform_regions", {}).get(platform) or default_regions()
+
+
+def purchase_policy(arguments, platform):
+    return getattr(arguments, "purchases", {}).get(platform, DEFAULT_PURCHASE)
+
+
+def campaign_platforms(arguments):
+    """The platforms whose workers the phase launches, or before its work is planned, those given regions."""
+    return sorted({platform.name for platform in getattr(arguments, "unit_platforms", {}).values()} or
+                  set(getattr(arguments, "platform_regions", {})))
+
+
 def campaign_regions(arguments):
-    return getattr(arguments, "regions", None) or [os.environ.get("AWS_REGION", "us-west-2")]
+    """Every region a platform of the campaign may launch in."""
+    return list(dict.fromkeys(region for platform in campaign_platforms(arguments)
+                              for region in platform_regions(arguments, platform))) or default_regions()
 
 
 def shared_transfer_buckets(arguments):
@@ -266,8 +324,9 @@ def shared_transfer_buckets(arguments):
 
 
 def execution_policy(arguments):
-    return {"spot_only": getattr(arguments, "spot_only", False),
-            "spot_vcpu_reserve": getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE),
+    """What a restart must repeat. Launch regions and purchase are not part of it: each result records its host's
+    region and market, so a restarted phase may move to other regions or buy differently."""
+    return {"spot_vcpu_reserve": getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE),
             "release_version": getattr(arguments, "release_version", ""),
             "smoke_protocol": getattr(arguments, "smoke_protocol", "smoke"),
             "max_concurrent": getattr(arguments, "max_concurrent", DEFAULT_MAX_CONCURRENT),
@@ -517,13 +576,15 @@ def validate_configuration(arguments, items):
     if getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) < 0:
         raise SystemExit("Spot vCPU reserve must not be negative")
     regions = campaign_regions(arguments)
-    if len(regions) != len(set(regions)) or not all(re.fullmatch(REGION_PATTERN, region) for region in regions):
-        raise SystemExit(f"allowed regions must be distinct AWS region names: {regions}")
     amis = getattr(arguments, "regional_amis", None)
-    if amis is not None:
-        missing = [region for region in regions if not any(row_region == region for _, row_region in amis)]
+    for platform in campaign_platforms(arguments):
+        listed = platform_regions(arguments, platform)
+        if len(listed) != len(set(listed)) or not all(re.fullmatch(REGION_PATTERN, region) for region in listed):
+            raise SystemExit(f"{platform} regions must be distinct AWS region names: {listed}")
+        # A platform launches only in regions holding its image.
+        missing = [region for region in listed if amis is not None and (platform, region) not in amis]
         if missing:
-            raise SystemExit(f"platform-regions.tsv has no AMIs for allowed regions: {missing}")
+            raise SystemExit(f"platform-regions.tsv has no {platform} AMI for its regions: {missing}")
     buckets = getattr(arguments, "transfer_buckets", None) or {}
     if not set(buckets) <= set(regions):
         raise SystemExit(
@@ -535,23 +596,24 @@ def validate_configuration(arguments, items):
     if shared_transfer_buckets(arguments) and not os.environ.get("TRANSFER_PREFIX"):
         raise SystemExit("--transfer-bucket and TRANSFER_BUCKET require TRANSFER_PREFIX")
     budget = getattr(arguments, "shared_budget", None)
-    # Each worker type launches only in the allowed regions that hold its image.
     unit_platforms = getattr(arguments, "unit_platforms", {})
     workers = [unit_platforms[pool] for pool in sorted({item.pool for item in items}) if pool in unit_platforms]
-    launchable = {platform.name: [region for region in regions if amis is None or (platform.name, region) in amis]
-                  for platform in workers}
+    launchable = {platform.name: platform_regions(arguments, platform.name) for platform in workers}
     fleet_limits, fleet_vcpus = {}, None
     if budget:
         limits = region_limits(budget.policy)
         fleet_limits = {region: limits[region] for region in regions if region in limits}
         # A wave fills every allowed region's limit at once.
         fleet_vcpus = max(1, sum(fleet_limits[region]["max_vcpus"] for region in fleet_limits))
+    if budget and getattr(arguments, "spot_vcpu_reserve", None) != budget.policy["spot_vcpu_reserve"]:
+        raise SystemExit("shared fleet requires a reserve matching its policy")
     on_demand = set(on_demand_regions(budget.policy)) if budget else set()
-    if budget and (getattr(arguments, "spot_vcpu_reserve", None) != budget.policy["spot_vcpu_reserve"] or
-                   not (getattr(arguments, "spot_only", False) or all(
-                       on_demand & set(launchable[platform.name]) for platform in workers))):
-        raise SystemExit("shared fleet requires a reserve matching its policy, and --spot-only unless "
-                         "the policy allows On-Demand in an allowed region holding each worker type's image")
+    refused = sorted({platform.name for platform in workers
+                      if purchase_policy(arguments, platform.name) != "spot" and
+                      not on_demand & set(launchable[platform.name])})
+    if budget and refused:
+        raise SystemExit(f"shared fleet allows no On-Demand in a region of {', '.join(refused)}; give the "
+                         "policy an On-Demand allowance in one of its regions, or buy with --purchase PLATFORM=spot")
     if getattr(arguments, "execute", False) and arguments.max_concurrent > DEFAULT_MAX_CONCURRENT and budget is None:
         raise SystemExit("more than 64 workers requires a shared fleet budget")
     worker_timeout = unit_worker_timeout(max(longest_units(items).values(), default=0))
@@ -960,22 +1022,20 @@ def describe_image(arguments, region, ami_id):
 
 
 def validate_aws(arguments, platforms, jobs=None):
-    regions = campaign_regions(arguments)
-    account = check_output(aws_output(arguments, regions[0]) + [
-        "sts", "get-caller-identity", "--query", "Account", "--output", "text"])
-    budget = getattr(arguments, "shared_budget", None)
-    if budget and (account != budget.policy["account"] or
-                   not set(regions) <= set(region_limits(budget.policy))):
-        raise SystemExit("AWS account or region differs from the shared fleet policy")
     required_platforms = list({
         (platform.name, platform.instance_type): platform
         for platform in ([job.platform for job in jobs] if jobs is not None else platforms)
     }.values())
     if not required_platforms:
         required_platforms = platforms
-    maximum_vcpus = max(platform.vcpus for platform in required_platforms)
-    has_spot_capacity = has_on_demand_capacity = False
-    quotas = []
+    regions = list(dict.fromkeys(campaign_regions(arguments) + [
+        region for platform in required_platforms for region in platform_regions(arguments, platform.name)]))
+    account = check_output(aws_output(arguments, regions[0]) + [
+        "sts", "get-caller-identity", "--query", "Account", "--output", "text"])
+    budget = getattr(arguments, "shared_budget", None)
+    if budget and (account != budget.policy["account"] or not set(regions) <= set(region_limits(budget.policy))):
+        raise SystemExit("AWS account or region differs from the shared fleet policy")
+    spot_quotas, on_demand_quotas = {}, {}
     # The wrapper launches into a public subnet of each region's default VPC.
     public_zones = {}
     for region in regions:
@@ -1005,16 +1065,25 @@ def validate_aws(arguments, platforms, jobs=None):
                     limits["on_demand_max_vcpus"] > on_demand_quota - ON_DEMAND_VCPU_SAFETY_RESERVE):
                 raise SystemExit(
                     f"shared fleet on_demand_max_vcpus exceeds the Standard On-Demand quota after its reserve in {region}")
-        has_spot_capacity |= spot_quota >= getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) + maximum_vcpus
-        has_on_demand_capacity |= on_demand_quota >= ON_DEMAND_VCPU_SAFETY_RESERVE + maximum_vcpus
-        quotas.append(("" if len(regions) == 1 else region + ": ") +
-                      f"spot={spot_quota:g}, on-demand={on_demand_quota:g}")
-    if getattr(arguments, "spot_only", False) and not has_spot_capacity:
-        raise SystemExit("Standard Spot quota cannot admit one host after the configured reserve")
-    if not has_spot_capacity and not has_on_demand_capacity:
-        raise SystemExit(
-            f"Neither Standard Spot nor On-Demand quota can admit one host after safety reserves: "
-            + "; ".join(quotas))
+        spot_quotas[region], on_demand_quotas[region] = spot_quota, on_demand_quota
+    # Each platform needs room for one host, after the safety reserves, in a region of its list in a market it buys.
+    for platform in required_platforms:
+        listed = platform_regions(arguments, platform.name)
+        spot = any(spot_quotas[region] >= getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) +
+                   platform.vcpus for region in listed)
+        on_demand = any(on_demand_quotas[region] >= ON_DEMAND_VCPU_SAFETY_RESERVE + platform.vcpus for region in listed)
+        purchase = purchase_policy(arguments, platform.name)
+        quotas = "; ".join(f"{region}: spot={spot_quotas[region]:g}, on-demand={on_demand_quotas[region]:g}"
+                           for region in listed)
+        if purchase == "spot" and not spot:
+            raise SystemExit(f"Standard Spot quota cannot admit one host of {platform.name} after the configured "
+                             f"reserve: {quotas}")
+        if purchase == "on-demand" and not on_demand:
+            raise SystemExit(f"Standard On-Demand quota cannot admit one host of {platform.name} after its safety "
+                             f"reserve: {quotas}")
+        if not spot and not on_demand:
+            raise SystemExit(f"Neither Standard Spot nor On-Demand quota can admit one host of {platform.name} "
+                             f"after safety reserves: {quotas}")
     # The Oregon pin names the image; every other region must run an image of that name.
     amis = getattr(arguments, "regional_amis", None)
     names = {}
@@ -1029,7 +1098,7 @@ def validate_aws(arguments, platforms, jobs=None):
                 raise SystemExit(f"unexpected AMI identity for {platform.name}: {image}")
             names[platform.name] = image[3]
         offered = []
-        for region in regions:
+        for region in platform_regions(arguments, platform.name):
             zones = check_output(aws_output(arguments, region) + [
                 "ec2", "describe-instance-type-offerings", "--location-type", "availability-zone",
                 "--filters", f"Name=instance-type,Values={platform.instance_type}",
@@ -1047,7 +1116,7 @@ def validate_aws(arguments, platforms, jobs=None):
             verified.add((platform.name, region))
             offered.append(region)
         if not offered:
-            raise SystemExit(f"{platform.instance_type} is not offered in any allowed region")
+            raise SystemExit(f"{platform.instance_type} is not offered in any region of {platform.name}'s list")
         offerings[platform.instance_type] = offered
     for region, bucket in shared_transfer_buckets(arguments).items():
         prefix = aws_output(arguments, region)
@@ -1195,18 +1264,19 @@ def spot_placement_scores(arguments, instance_type, regions):
 
 
 def launch_regions(arguments, job):
-    """Return the allowed regions that offer the job's instance type and image."""
+    """Return the regions of the job's platform's list that offer its instance type and image."""
     offered = getattr(arguments, "region_offerings", {}).get(job.platform.instance_type)
     amis = getattr(arguments, "regional_amis", None)
-    regions = [region for region in campaign_regions(arguments)
+    regions = [region for region in platform_regions(arguments, job.platform.name)
                if (offered is None or region in offered) and (amis is None or (job.platform.name, region) in amis)]
     if not regions:
-        raise UnsafeCampaignError(f"no allowed region can launch {job.platform.name} {job.platform.instance_type}")
+        raise UnsafeCampaignError(
+            f"no region of {job.platform.name}'s list can launch {job.platform.name} {job.platform.instance_type}")
     return regions
 
 
 def launch_placements(arguments, job):
-    """Order the allowed regions that can launch the job, best Spot placement score first."""
+    """Order the regions of the job's platform's list that can launch it, best Spot placement score first."""
     regions = launch_regions(arguments, job)
     if job.market != "spot":
         return [(region, "") for region in regions]
@@ -1216,10 +1286,10 @@ def launch_placements(arguments, job):
         return [(region, "") for region in eligible]
     scores = spot_placement_scores(arguments, job.platform.instance_type, regions)
     if scores is None:
-        # Without scores, keep the allowed-region order; launch admission picks the first region
-        # with headroom only where it queries quota.
+        # Without scores, keep the list's order; launch admission picks the first region with headroom
+        # only where it queries quota.
         return [(region, "") for region in eligible]
-    # The sort is stable, so equal scores keep the allowed-region order.
+    # The sort is stable, so equal scores keep the list's order.
     return [(region, str(scores.get(region, ""))) for region in
             sorted(eligible, key=lambda region: -scores.get(region, 0))]
 
@@ -1297,8 +1367,7 @@ def region_jobs(arguments, running_jobs, region):
     """Keep the running jobs placed in the region whose capacity is being counted."""
     if region is None:
         return running_jobs
-    default = campaign_regions(arguments)[0]
-    return [job for job in running_jobs if (job.region or default) == region]
+    return [job for job in running_jobs if (job.region or platform_regions(arguments, job.platform.name)[0]) == region]
 
 
 def current_on_demand_capacity(arguments, campaign_id, running_jobs, region=None):
@@ -1530,14 +1599,18 @@ def phase_protocol(arguments):
 
 
 def job_environment(job, arguments, root, result_root):
-    if getattr(arguments, "spot_only", False) and job.market != "spot":
-        raise UnsafeCampaignError("Spot-only policy prohibits launching an On-Demand job")
+    purchase = purchase_policy(arguments, job.platform.name)
+    if purchase == "spot" and job.market != "spot":
+        raise UnsafeCampaignError(f"{job.platform.name} buys only Spot, so it may not launch an On-Demand job")
+    if purchase == "on-demand" and job.market != "on-demand":
+        raise UnsafeCampaignError(f"{job.platform.name} buys only On-Demand, so it may not launch a Spot job")
     environment = os.environ.copy()
     if getattr(arguments, "shared_budget", None):
         environment["CAMPAIGN_SPOT_MAX_PRICE"] = str(arguments.shared_budget.policy["hourly_rates"][job.platform.instance_type]["spot"])
     architecture = job.platform.architecture
     benchmark_protocol = phase_protocol(arguments)
-    region = job.region or campaign_regions(arguments)[0]
+    regions = platform_regions(arguments, job.platform.name)
+    region = job.region or regions[0]
     amis = getattr(arguments, "regional_amis", None)
     ami_id = job.platform.ami_id if amis is None else amis.get((job.platform.name, region))
     if ami_id is None:
@@ -1548,7 +1621,7 @@ def job_environment(job, arguments, root, result_root):
         environment.pop("TRANSFER_BUCKET", None)
         if region in buckets:
             environment["TRANSFER_BUCKET"] = buckets[region]
-    if len(campaign_regions(arguments)) > 1:
+    if len(regions) > 1:
         # The controller chose the region, so it alone reports the score it chose by.
         environment["CAMPAIGN_PLACEMENT_SCORE"] = job.placement_score
     environment.update({
@@ -1564,7 +1637,7 @@ def job_environment(job, arguments, root, result_root):
         "CAMPAIGN_ATTEMPT": str(job.attempt),
         "CAMPAIGN_ARCHITECTURES": architecture,
         "INSTANCE_MARKET_TYPE": job.market,
-        "CAMPAIGN_SPOT_ONLY": "1" if getattr(arguments, "spot_only", False) else "0",
+        "CAMPAIGN_SPOT_ONLY": "1" if purchase == "spot" else "0",
         "REGULATOR_RELEASE_VERSION": getattr(arguments, "release_version", ""),
         "BENCHMARK_CPU_LIST": "0",
         "BENCHMARK_EXPECTED_VCPUS": str(job.platform.vcpus),
@@ -2070,21 +2143,25 @@ def campaign_started_at(path, arguments):
     return started_at
 
 
-def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now, running_jobs):
+def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidate, ready_at, now, running_jobs,
+                 spot_fallback=False):
     """Place a launch candidate and reserve its capacity.
+
+    An unbudgeted Spot candidate that finds no Spot quota headroom launches On-Demand instead only with
+    spot_fallback, once its pool has waited out a Spot shortage; otherwise it waits for Spot.
 
     Returns the candidate as placed, when it may next be tried, whether it was admitted, whether
     the launch scan may continue to later candidates, and the vCPU count a full fleet quota now
     blocks, if any.
     """
     budget = getattr(arguments, "shared_budget", None)
-    spot_only = getattr(arguments, "spot_only", False)
+    purchase = purchase_policy(arguments, candidate.platform.name)
     placements = launch_placements(arguments, candidate)
     candidate = place(candidate, placements[0])
-    # An unbudgeted Spot launch queries quota headroom only when Spot-only or above the proactive
-    # threshold; otherwise it takes the first placement and learns of a full region from EC2.
+    # An unbudgeted Spot launch queries quota headroom only when its platform buys only Spot or above
+    # the proactive threshold; otherwise it takes the first placement and learns of a full region from EC2.
     if candidate.market == "spot" and (
-            spot_only or arguments.max_concurrent > PROACTIVE_SPOT_CAPACITY_THRESHOLD) and budget is None:
+            purchase == "spot" or arguments.max_concurrent > PROACTIVE_SPOT_CAPACITY_THRESHOLD) and budget is None:
         placed, spot_capacities, error = place_with_headroom(
             candidate, placements,
             lambda region: current_spot_capacity(arguments, arguments.campaign_id, running_jobs, region))
@@ -2096,12 +2173,12 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
             return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
         if placed is not None:
             candidate = placed
-        elif spot_only:
+        elif purchase == "spot" or not spot_fallback:
             wait_key = (candidate.identity, "spot-capacity")
             if wait_key not in capacity_waits:
                 capacity_waits.add(wait_key)
                 write_attempt(attempts_path, candidate, "queued-capacity",
-                              "Spot-only policy waiting for quota; " + capacity_detail(spot_capacities))
+                              f"{purchase} purchase waiting for Spot quota; " + capacity_detail(spot_capacities))
             return candidate, now + CAPACITY_RETRY_SECONDS, False, True, None
         else:
             candidate = replace(candidate, market="on-demand")
@@ -2361,7 +2438,7 @@ class UnitDispatcher:
         self.pools = sorted({item.pool for item in items})
         self.platforms = pool_platforms(platforms, items)
         self.budget = getattr(arguments, "shared_budget", None)
-        self.spot_only = getattr(arguments, "spot_only", False)
+        self.purchases = {pool: purchase_policy(arguments, platform.name) for pool, platform in self.platforms.items()}
         self.attempts_path = result_root / "job-attempts.tsv"
         self.leases_path = result_root / "unit-attempts.tsv"
         self.workers_path = result_root / "unit-workers.tsv"
@@ -2392,6 +2469,8 @@ class UnitDispatcher:
                               [job.host_epoch for job in self.planned]) + 1
         self.candidates = {}
         self.pool_regions = {}
+        # When each pool's Spot launches first found no capacity since one of its Spot workers last started.
+        self.spot_shortages = {}
         # Each pool's free launch slots, as (slot, consecutive failures), and the pools a slot gave up on.
         self.free_slots = {}
         self.exhausted = {}
@@ -2424,14 +2503,15 @@ class UnitDispatcher:
                 and not self.done(identity)]
 
     def on_demand_only(self, item):
-        """Whether only On-Demand hosts may take the item: a Spot interruption stopped it before any group of
-        the lease was accepted, or its longest remaining group outlasts the 15-minute budget, which would risk
-        more Spot interruptions than it can absorb."""
-        return not self.spot_only and (item.identity in self.interrupted or max(
+        """Whether only On-Demand hosts may take the item, unless its pool's platform buys only Spot: a Spot
+        interruption stopped it before any group of the lease was accepted, or its longest remaining group outlasts
+        the 15-minute budget, which would risk more Spot interruptions than it can absorb."""
+        return self.purchases[item.pool] != "spot" and (item.identity in self.interrupted or max(
             (seconds for _, seconds in self.remaining(item)), default=0) > work_units.UNIT_SECONDS)
 
     def on_demand(self, item):
-        return self.on_demand_only(item) or (not self.spot_only and item.pool in self.tail)
+        purchase = self.purchases[item.pool]
+        return purchase == "on-demand" or self.on_demand_only(item) or (purchase != "spot" and item.pool in self.tail)
 
     def pool_workers(self, pool):
         return [worker for worker in self.workers.values() if worker.pool == pool]
@@ -2635,7 +2715,7 @@ class UnitDispatcher:
     def interrupt(self, worker, sequence):
         """Settle a lease a Spot interruption stopped. Once a group of the lease was accepted, the item keeps
         it and requeues its remaining groups on any market, without spending an attempt; with none, the whole
-        item spends one and runs On-Demand."""
+        item spends one and runs On-Demand, unless its pool's platform buys only Spot."""
         item = self.items[worker.leases[sequence]]
         worker.stopping = True
         if None in worker.finished.get(sequence, {}).values():
@@ -2745,6 +2825,11 @@ class UnitDispatcher:
                 raise RuntimeError(f"unit receipt names {group_identity(receipt)} attempt "
                                    f"{receipt['unit_attempt_id']}, expected {item.identity}/group-{group} attempt "
                                    f"{attempt}")
+            # The host's receipt names the region and market it ran in, which must be those the worker launched in.
+            launched = (worker.metadata.get("aws_region"), worker.job.market)
+            if (receipt["region"], receipt["market"]) != launched:
+                raise RuntimeError(f"unit receipt names a {receipt['market']} host in {receipt['region']}, but the "
+                                   f"worker launched as {launched[1]} in {launched[0]}")
             validate_unit_artifacts(self.validation, self.result_root, receipt, directory)
         except (OSError, RuntimeError) as error:
             self.reject(worker, sequence, f"artifact gate: {error}")
@@ -2815,6 +2900,9 @@ class UnitDispatcher:
             # runs from then.
             if not worker.started and shows_worker_start(keys):
                 worker.started, worker.running_since = True, time.monotonic()
+                if worker.job.market == "spot":
+                    # Spot capacity has returned for the pool.
+                    self.spot_shortages.pop(worker.pool, None)
 
             def fetch(key, path):
                 get_unit_worker_result(self.arguments, worker, key, path)
@@ -2890,6 +2978,12 @@ class UnitDispatcher:
     def cool_down(self, pool, region):
         """Keep the pool's new Spot workers out of the region for its cool-down."""
         self.pool_regions.setdefault(pool, {})[region] = time.monotonic()
+        self.spot_shortages.setdefault(pool, time.monotonic())
+
+    def spot_waited(self, pool, now):
+        """Whether a spot-then-on-demand pool has been short of Spot capacity for its whole bounded wait."""
+        return (self.purchases[pool] == "spot-then-on-demand" and pool in self.spot_shortages and
+                now - self.spot_shortages[pool] >= SPOT_SHORTAGE_WAIT_SECONDS)
 
     def release_slot(self, job, slot, failures, started, status, classification, detail, terminated=False):
         """Free the launch slot of an exited worker, from its exit as the attempts ledger records it.
@@ -2986,7 +3080,8 @@ class UnitDispatcher:
         """Keep the worker's next lease written one ahead of its current one, or stop it."""
         if worker.metadata is None:
             return
-        if (worker.open() and worker.job.market == "spot" and not self.spot_only and worker.pool in self.tail and
+        if (worker.open() and worker.job.market == "spot" and self.purchases[worker.pool] != "spot" and
+                worker.pool in self.tail and
                 self.retired.get(worker.pool, 0) < self.tail_on_demand.get(worker.pool, 0)):
             # A tail Spot worker retires once an On-Demand worker admitted in the tail replaces it.
             self.retired[worker.pool] = self.retired.get(worker.pool, 0) + 1
@@ -3026,9 +3121,9 @@ class UnitDispatcher:
 
         Its Spot workers keep taking tail items until an On-Demand worker admitted in the tail replaces them.
         """
-        if self.spot_only:
-            return
         for pool in self.pools:
+            if self.purchases[pool] != "spot-then-on-demand":
+                continue
             items = [item for item in self.items.values() if item.pool == pool]
             remaining = sum(self.remaining_seconds(item) for item in items if item.identity not in self.unresolved)
             if remaining <= sum(seconds for item in items for _, seconds in item.groups) * ON_DEMAND_TAIL_PERCENT / 100:
@@ -3084,7 +3179,8 @@ class UnitDispatcher:
                 return "on-demand"
             return "spot" if late else None
         # While On-Demand admission is refused, Spot workers take every item Spot may still run.
-        return "spot" if any(not self.on_demand_only(item) for item in late) else None
+        return "spot" if self.purchases[pool] != "on-demand" and any(
+            not self.on_demand_only(item) for item in late) else None
 
     def candidate(self, pool, market):
         candidate = self.candidates.get(pool)
@@ -3103,12 +3199,13 @@ class UnitDispatcher:
             if now - failed_at < SPOT_REGION_COOL_DOWN_SECONDS}
         candidate = replace(candidate, market=market, spot_capacity_failures=tuple(cooling))
         if market == "spot" and not launch_placements(self.arguments, candidate):
-            # Each allowed region has found no Spot capacity for this pool within its cool-down.
-            if self.spot_only:
+            # Each region of the platform's list has found no Spot capacity for this pool within its cool-down.
+            # Once the pool's bounded wait is over it launches On-Demand; until then it tries every region again.
+            if self.spot_waited(pool, now):
+                candidate = replace(candidate, market="on-demand")
+            else:
                 self.pool_regions.pop(pool, None)
                 candidate = replace(candidate, spot_capacity_failures=())
-            else:
-                candidate = replace(candidate, market="on-demand")
         return candidate
 
     def launch(self, now):
@@ -3128,8 +3225,12 @@ class UnitDispatcher:
                     break
                 candidate, ready_at, admitted, scan, blocked = admit_launch(
                     self.arguments, self.result_root, self.attempts_path, self.capacity_waits, candidate, now, now,
-                    [record[1] for record in running.values()])
+                    [record[1] for record in running.values()], self.spot_waited(pool, now))
                 self.candidates[pool] = candidate
+                if not admitted and candidate.market == "spot" and not self.budget:
+                    # Without a shared budget, a Spot launch is refused only when no region has Spot quota
+                    # headroom, or the query for it failed.
+                    self.spot_shortages.setdefault(pool, now)
                 if not admitted and candidate.market == "on-demand" and market == "on-demand":
                     # The pool's Spot-eligible items need not wait for On-Demand admission.
                     self.on_demand_ready[pool] = ready_at
@@ -3289,7 +3390,7 @@ def main():
             raise SystemExit("production source differs from the selected release")
     result_root = arguments.result_root or root / "benchmark-results" / "pre-review-baseline" / arguments.campaign_id / arguments.phase
     platforms = read_platforms(directory)
-    arguments.regions = campaign_regions(arguments)
+    parse_launch_options(arguments, platforms)
     arguments.transfer_buckets = parse_transfer_buckets(arguments.transfer_bucket)
     arguments.regional_amis = read_platform_regions(directory)
     shards = read_shards(directory)

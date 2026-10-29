@@ -85,19 +85,18 @@ class TestRunCampaign(unittest.TestCase):
         del running[0]
         self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
 
-    def test_spot_only_policy_and_reserve_are_frozen_on_resume(self):
+    def test_reserve_is_frozen_on_resume_but_launch_regions_and_purchase_are_not(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            arguments = SimpleNamespace(spot_only=True, spot_vcpu_reserve=0)
+            arguments = SimpleNamespace(platform_regions={"r8i": ["eu-west-1", "ap-south-1"]},
+                                        purchases={"r8i": "spot"}, spot_vcpu_reserve=0)
             RUN_CAMPAIGN.validate_execution_policy(arguments, root)
-            RUN_CAMPAIGN.validate_execution_policy(arguments, root)
-            arguments.spot_only = False
+            # A restart may move to other regions or buy differently; each result records its region and market.
+            for change in ({"purchases": {}}, {"platform_regions": {"r8i": ["ap-south-1", "eu-west-1"]}}):
+                RUN_CAMPAIGN.validate_execution_policy(SimpleNamespace(**{**vars(arguments), **change}), root)
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
-                RUN_CAMPAIGN.validate_execution_policy(arguments, root)
-            arguments.spot_only, arguments.spot_vcpu_reserve = True, 32
-            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
-                RUN_CAMPAIGN.validate_execution_policy(arguments, root)
-            arguments.spot_vcpu_reserve = 0
+                RUN_CAMPAIGN.validate_execution_policy(SimpleNamespace(**{**vars(arguments), "spot_vcpu_reserve": 32}),
+                                                       root)
             arguments.smoke_protocol = 'qualification'
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
                 RUN_CAMPAIGN.validate_execution_policy(arguments, root)
@@ -119,7 +118,8 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "apply only to measuring phases"):
             RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments)
         arguments = SimpleNamespace(phase="smoke", engine_builds=Path("builds"),
-                                    regions=["us-west-2", "us-east-2"], transfer_buckets={"us-west-2": "bucket"})
+                                    platform_regions={"r8i": ["us-west-2", "us-east-2"]},
+                                    transfer_buckets={"us-west-2": "bucket"})
         with self.assertRaisesRegex(SystemExit, r"bucket in every allowed region; name one for \['us-east-2'\]"):
             RUN_CAMPAIGN.resolve_engine_builds(SCRIPT.parents[3], arguments)
 
@@ -184,7 +184,7 @@ class TestRunCampaign(unittest.TestCase):
                     change(builds)
                 arguments = SimpleNamespace(
                     phase="smoke", campaign_id="language", heap_size="16g", engine_builds=builds,
-                    regions=["us-west-2"], transfer_buckets={"us-west-2": "bucket"},
+                    platform_regions={"r8i": ["us-west-2"]}, transfer_buckets={"us-west-2": "bucket"},
                     candidate_archive_sha256="5" * 64)
                 if error is None:
                     RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments)
@@ -210,7 +210,8 @@ class TestRunCampaign(unittest.TestCase):
             archives, manifest = self.engine_build(build)
             trino, classes, native = (archives[name]["sha256"] for name in ("trino", "classes", "native"))
             arguments = SimpleNamespace(
-                regions=["us-west-2", "us-east-2"], transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
+                platform_regions={"r8i": ["us-west-2", "us-east-2"]},
+                transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
                 engine_build_directories={"r8i": build}, engine_build_policy={"r8i": manifest})
             jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
             present = {("east", f"prefix/engine-builds/{sha256}.tar.zst"):
@@ -253,28 +254,33 @@ class TestRunCampaign(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Spot-only policy prohibits On-Demand", result.stderr)
 
-    def admit(self, arguments, result_root, job):
+    def admit(self, arguments, result_root, job, spot_fallback=False):
         """Place and admit one launch as the unit dispatcher does: the job as placed, and whether it was admitted."""
         candidate, _, admitted, _, _ = RUN_CAMPAIGN.admit_launch(
-            arguments, result_root, result_root / "job-attempts.tsv", set(), job, 0, 0, [])
+            arguments, result_root, result_root / "job-attempts.tsv", set(), job, 0, 0, [], spot_fallback)
         return candidate, admitted
 
-    def test_spot_only_quota_shortage_waits_without_on_demand(self):
+    def test_spot_platform_waits_out_a_quota_shortage_and_an_on_demand_platform_refuses_spot(self):
         job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "spot", "unit-worker")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             arguments = self.arguments(root)
-            arguments.spot_only, arguments.spot_vcpu_reserve = True, 0
+            arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 0
             with patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=[
                         {"available": 0}, {"available": 8}]), \
                     patch.object(RUN_CAMPAIGN, "current_on_demand_capacity") as on_demand:
-                waiting, admitted = self.admit(arguments, root, job)
+                # A Spot platform never falls back, however long its pool has been short.
+                waiting, admitted = self.admit(arguments, root, job, spot_fallback=True)
                 self.assertEqual(("spot", False), (waiting.market, admitted))
-                launched, admitted = self.admit(arguments, root, job)
+                launched, admitted = self.admit(arguments, root, job, spot_fallback=True)
                 self.assertEqual(("spot", True), (launched.market, admitted))
             on_demand.assert_not_called()
             self.assertEqual("1", RUN_CAMPAIGN.job_environment(launched, arguments, root, root)["CAMPAIGN_SPOT_ONLY"])
-            self.assertIn("Spot-only policy waiting", (root / "job-attempts.tsv").read_text())
+            self.assertIn("spot purchase waiting for Spot quota", (root / "job-attempts.tsv").read_text())
+            # An On-Demand platform launches no Spot host.
+            arguments.purchases["r8i"] = "on-demand"
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "buys only On-Demand"):
+                RUN_CAMPAIGN.job_environment(launched, arguments, root, root)
 
     def freeze_archive(self, repository, archive):
         """Archive HEAD with generated tables beside the baseline tooling, as freeze-candidate.sh does."""
@@ -806,7 +812,7 @@ class TestRunCampaign(unittest.TestCase):
         for account, region, regions in (("234567890123", "us-east-2", None),
                                          ("123456789012", "us-west-2", None),
                                          ("123456789012", "us-east-2", ["us-east-2", "eu-west-1"])):
-            arguments.regions = regions
+            arguments.platform_regions = {"r8i": regions} if regions else {}
             with self.subTest(account=account, region=region, regions=regions), \
                     patch.dict(os.environ, {"AWS_REGION": region}), \
                     patch.object(RUN_CAMPAIGN, "check_output", return_value=account), \
@@ -815,8 +821,8 @@ class TestRunCampaign(unittest.TestCase):
 
     def test_aws_preflight_requires_each_region_to_run_the_pinned_image(self):
         arguments = SimpleNamespace(
-            shared_budget=None, spot_only=True, spot_vcpu_reserve=0,
-            regions=["eu-west-1", "us-west-2", "ap-south-1"],
+            shared_budget=None, purchases={"r8i": "spot"}, spot_vcpu_reserve=0,
+            platform_regions={"r8i": ["eu-west-1", "us-west-2", "ap-south-1"]},
             regional_amis={("r8i", "us-west-2"): "ami-test", ("r8i", "eu-west-1"): "ami-ireland"},
             transfer_buckets={"eu-west-1": "bucket-ireland"})
         names = {"ami-test": "al2023-pinned", "ami-ireland": "al2023-pinned"}
@@ -883,8 +889,8 @@ class TestRunCampaign(unittest.TestCase):
                 result_root = root / "results"
                 result_root.mkdir()
                 arguments = self.arguments(root)
-                arguments.spot_only, arguments.spot_vcpu_reserve = True, 0
-                arguments.regions = regions
+                arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 0
+                arguments.platform_regions = {"r8i": regions}
                 arguments.regional_amis = {("r8i", region): "ami-" + region for region in regions}
                 arguments.transfer_buckets = {"ap-south-1": "bucket-mumbai"}
                 queried = []
@@ -910,15 +916,37 @@ class TestRunCampaign(unittest.TestCase):
                 self.assertEqual(environment.get("TRANSFER_BUCKET"), "bucket-mumbai" if scored else None)
 
     def test_spot_placement_leaves_out_regions_that_found_no_capacity(self):
-        # With no region left, a unit pool turns to On-Demand; with one left, no score is asked for.
+        # With no region left, the pool has no Spot placement; with one left, no score is asked for.
         for regions, failures, expected in ((["us-west-2"], ("us-west-2",), []),
                                             (["us-west-2", "eu-west-1", "ap-south-1"], ("us-west-2", "ap-south-1"),
                                              [("eu-west-1", "")])):
             with self.subTest(regions=regions):
-                arguments = SimpleNamespace(regions=regions)
+                arguments = SimpleNamespace(platform_regions={"r8i": regions})
                 job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot", spot_capacity_failures=failures)
                 with patch.object(RUN_CAMPAIGN, "check_output", side_effect=AssertionError("scores queried")):
                     self.assertEqual(expected, RUN_CAMPAIGN.launch_placements(arguments, job))
+
+    def test_each_platform_launches_in_its_own_regions_order(self):
+        # The October 28, 2026 scores: r8i's three regions tie, so its list order stands, while r9g's best-scored
+        # regions come first. On-Demand takes each list as given.
+        platforms = {platform.name: platform for platform in RUN_CAMPAIGN.read_platforms(SCRIPT.parent)}
+        arguments = SimpleNamespace(max_concurrent=64,
+                                    platform_regions={"r8i": ["eu-west-1", "eu-central-1", "ap-south-1"],
+                                                      "r9g": ["us-west-2", "us-east-2", "eu-central-1"]})
+
+        def placement_scores(command, **_):
+            self.assertIn("get-spot-placement-scores", command)
+            return "\n".join(f"{region}\t{score}" for region, score in (
+                ("eu-west-1", 3), ("eu-central-1", 3), ("ap-south-1", 3), ("us-west-2", 1), ("us-east-2", 3))) + "\n"
+
+        for name, market, expected in (
+                ("r8i", "spot", ["eu-west-1", "eu-central-1", "ap-south-1"]),
+                ("r9g", "spot", ["us-east-2", "eu-central-1", "us-west-2"]),
+                ("r9g", "on-demand", ["us-west-2", "us-east-2", "eu-central-1"])):
+            with self.subTest(platform=name, market=market), \
+                    patch.object(RUN_CAMPAIGN, "check_output", side_effect=placement_scores):
+                job = RUN_CAMPAIGN.unit_worker_job(platforms[name], 1, 10, market)
+                self.assertEqual(expected, [region for region, _ in RUN_CAMPAIGN.launch_placements(arguments, job)])
 
     def test_aws_preflight_uses_routed_worker_topologies(self):
         platform = RUN_CAMPAIGN.replace(
@@ -930,7 +958,7 @@ class TestRunCampaign(unittest.TestCase):
         # A unit worker runs on the instance its plan allocates, here the platform's multicore worker.
         jobs = [RUN_CAMPAIGN.unit_worker_job(
             RUN_CAMPAIGN.replace(platform, instance_type="r8i.2xlarge", vcpus=8), 1, 1, "spot")]
-        arguments = SimpleNamespace(shared_budget=None, spot_only=True, spot_vcpu_reserve=4)
+        arguments = SimpleNamespace(shared_budget=None, purchases={"r8i": "spot"}, spot_vcpu_reserve=4)
         spot_quota = 11
 
         def aws_result(command, **_):
@@ -963,7 +991,7 @@ class TestRunCampaign(unittest.TestCase):
         policy = {"account": "123456789012", "region": "us-west-2",
                   "max_vcpus": 64, "spot_vcpu_reserve": 16}
         arguments = SimpleNamespace(
-            shared_budget=SimpleNamespace(policy=policy), spot_only=True, spot_vcpu_reserve=16)
+            shared_budget=SimpleNamespace(policy=policy), purchases={"r8i": "spot"}, spot_vcpu_reserve=16)
 
         def aws_result(command, **_):
             if "get-caller-identity" in command:
@@ -1000,7 +1028,8 @@ class TestRunCampaign(unittest.TestCase):
         return items
 
     def test_campaign_concurrency_uses_configuration(self):
-        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary", regions=["us-west-2"])
+        arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary",
+                                    platform_regions={"r8i": ["us-west-2"]})
         items = self.replica_items(arguments, [self.platform], ["unit-0001"], 900)
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.execute = True
@@ -1008,23 +1037,23 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.shared_budget = SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512, "max_vcpus": 1024,
                                                           "spot_vcpu_reserve": 16, "max_attempt_seconds": 86400})
-        arguments.spot_only, arguments.spot_vcpu_reserve = True, 16
+        arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 16
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.spot_vcpu_reserve = 0
         with self.assertRaisesRegex(SystemExit, "reserve matching its policy"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.spot_vcpu_reserve = 16
         # A shared fleet runs On-Demand only where its policy allows it.
-        arguments.spot_only = False
+        arguments.purchases = {}
         arguments.shared_budget.policy.update(regions={
             "eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 0, "on_demand_max_vcpus": 64}})
-        with self.assertRaisesRegex(SystemExit, "--spot-only unless the policy allows On-Demand"):
+        with self.assertRaisesRegex(SystemExit, "allows no On-Demand in a region of r8i"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
-        arguments.regions.append("eu-west-1")
+        arguments.platform_regions["r8i"].append("eu-west-1")
         RUN_CAMPAIGN.validate_configuration(arguments, items)
-        # An allowance in a region without the worker type's image cannot launch it.
+        # A platform launches only in regions holding its image.
         arguments.regional_amis = {("r8i", "us-west-2"): "ami", ("r9g", "eu-west-1"): "ami"}
-        with self.assertRaisesRegex(SystemExit, "--spot-only unless the policy allows On-Demand"):
+        with self.assertRaisesRegex(SystemExit, "no r8i AMI for its regions"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.regional_amis[("r8i", "eu-west-1")] = "ami"
         RUN_CAMPAIGN.validate_configuration(arguments, items)
@@ -1043,7 +1072,8 @@ class TestRunCampaign(unittest.TestCase):
 
     def test_deadline_uses_shared_fleet_host_and_vcpu_limits(self):
         arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=512, phase="primary",
-                                    spot_only=True, spot_vcpu_reserve=0, regions=["us-west-2"],
+                                    purchases={"r8i": "spot"}, spot_vcpu_reserve=0,
+                                    platform_regions={"r8i": ["us-west-2"]},
                                     shared_budget=SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512,
                                                                          "max_vcpus": 8, "spot_vcpu_reserve": 0,
                                                                          "max_attempt_seconds": 86400}),
@@ -1062,7 +1092,7 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         # Another allowed region's limit admits the workers, and a wave fills every region's limit at once:
         # the three 8-vCPU workers need Oregon's one vCPU beside Ireland's 23.
-        arguments.regions.append("eu-west-1")
+        arguments.platform_regions["r8i"].append("eu-west-1")
         arguments.shared_budget.policy["regions"] = {"eu-west-1": {"max_vcpus": 23, "spot_vcpu_reserve": 0}}
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         # A unit campaign's limits apply to its pools' worker hosts.
@@ -1071,6 +1101,7 @@ class TestRunCampaign(unittest.TestCase):
         items = RUN_CAMPAIGN.build_work_items("primary", platforms, RUN_CAMPAIGN.work_units.load(SCRIPT.parent),
                                               ["trino-operations"])
         arguments.unit_platforms = RUN_CAMPAIGN.pool_platforms(platforms, items)
+        arguments.purchases = {platform.name: "spot" for platform in platforms}
         arguments.phase_timeout_seconds = None
         with self.assertRaisesRegex(SystemExit, "cannot admit every worker type"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
@@ -1225,11 +1256,12 @@ class TestRunCampaign(unittest.TestCase):
             with self.subTest(error=error), self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, error):
                 RUN_CAMPAIGN.validate_unit_artifacts(refused, result_root, receipts[0])
 
-    def test_a_lone_unit_past_the_unit_budget_runs_on_demand_unless_spot_only(self):
+    def test_a_lone_unit_past_the_unit_budget_runs_on_demand_unless_its_platform_buys_spot(self):
         items = [RUN_CAMPAIGN.WorkItem("r8i", "r8i.large", "language-bulk", unit_id, 1, seconds, (("1", seconds),))
                  for unit_id, seconds in (("lone", 950.0), ("packed", 900.0))]
-        for spot_only, expected in ((False, ["r8i/lone/replica-1"]), (True, [])):
-            dispatcher = RUN_CAMPAIGN.UnitDispatcher(SimpleNamespace(phase="primary", spot_only=spot_only),
+        for purchase, expected in (("spot-then-on-demand", ["r8i/lone/replica-1"]), ("spot", []),
+                                   ("on-demand", ["r8i/lone/replica-1", "r8i/packed/replica-1"])):
+            dispatcher = RUN_CAMPAIGN.UnitDispatcher(SimpleNamespace(phase="primary", purchases={"r8i": purchase}),
                                                      SCRIPT.parents[3], Path("/nonexistent"), items,
                                                      RUN_CAMPAIGN.read_platforms(SCRIPT.parent), None)
             self.assertEqual([item.identity for item in items if dispatcher.on_demand(item)], expected)
@@ -1990,6 +2022,10 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                                                (RUN_CAMPAIGN.PROTOCOL_REJECTION_STATUS, 1)):
                     with self.subTest(unit=unit_id, shard_status=shard_status):
                         unit = root / f"{unit_id}-{shard_status}"
+                        # The host's market comes from its environment files, which both name it.
+                        unit.mkdir()
+                        for name in ("environment-manifest.txt", "environment.txt"):
+                            (unit / name).write_text("instance_market_type=spot\n")
                         result = subprocess.run(
                             [str(baseline / "run-unit.sh"), unit_id, "qualification", "1", "1", str(unit)],
                             env={**environment, "SHARD_STATUS": str(shard_status)},
@@ -2318,7 +2354,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             "available": 294,
         })
 
-    def test_spot_quota_shortage_changes_unlaunched_job_to_on_demand(self):
+    def test_quota_short_spot_launch_turns_on_demand_only_once_its_pool_may_fall_back(self):
         spot_job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "spot", "unit-worker")
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -2336,7 +2372,10 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                         "safety_reserve": 32,
                         "available": 397,
                     }):
-                launched, admitted = self.admit(self.arguments(root, maximum_concurrent=64), root, spot_job)
+                arguments = self.arguments(root, maximum_concurrent=64)
+                waiting, admitted = self.admit(arguments, root, spot_job)
+                self.assertEqual(("spot", False), (waiting.market, admitted))
+                launched, admitted = self.admit(arguments, root, spot_job, spot_fallback=True)
             self.assertEqual(("on-demand", True), (launched.market, admitted))
 
     def test_on_demand_capacity_wait_queues_instead_of_aborting(self):
@@ -2387,7 +2426,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             root = Path(temporary)
             arguments = self.arguments(root)
             arguments.shared_budget = RUN_CAMPAIGN.FleetBudget(fixture.path)
-            arguments.spot_vcpu_reserve, arguments.regions = 0, ["us-west-2", "eu-west-1"]
+            arguments.spot_vcpu_reserve, arguments.platform_regions = 0, {"r8i": ["us-west-2", "eu-west-1"]}
             with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
                 launched, admitted = self.admit(arguments, root, job)
         # Oregon has no allowance; Ireland's quota, less its reserve and other work, fits the host.
@@ -2616,7 +2655,7 @@ class FakeUnitHost:
             "campaign_id": lease["campaign_id"], "platform": self.platform, "instance_id": self.instance_id,
             "host_epoch": self.epoch, "architecture": self.architecture, "instance_type": self.instance_type,
             "availability_zone": f"{self.region}b",
-        }, group=group)
+        }, group=group, market=self.market)
         if self.release_version and behavior != "unreleased":
             measure_release(directory)
         fixture.accept(f"{self.session}/{sequence + 100 if behavior == 'foreign-receipt' else sequence}")
@@ -2790,8 +2829,8 @@ class FakeUnitFleet:
 class TestUnitWorkers(unittest.TestCase):
     PLATFORMS = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
 
-    def run_phase(self, root, fleet, phase, shards, max_concurrent, per_platform, regions=None, on_demand=True,
-                  deadline=None, confirmations=(), primary_results=None, release_version=""):
+    def run_phase(self, root, fleet, phase, shards, max_concurrent, per_platform, platform_regions=None, purchases=None,
+                  on_demand=True, deadline=None, confirmations=(), primary_results=None, release_version=""):
         """Drain the phase's work items through the fleet; return the result directory.
 
         The unit attempt ledger is left in self.ledger."""
@@ -2806,8 +2845,9 @@ class TestUnitWorkers(unittest.TestCase):
             phase=phase, campaign_id="campaign", campaign_root=root, max_concurrent=max_concurrent,
             max_concurrent_per_platform=per_platform, candidate_archive=root / "candidate.tar.gz",
             candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
-            shared_budget=budget, selected_shards=shards, regions=regions, topology_deadline_seconds=deadline,
-            primary_results=primary_results, release_version=release_version)
+            shared_budget=budget, selected_shards=shards, platform_regions=platform_regions or {},
+            purchases=purchases or {}, topology_deadline_seconds=deadline, primary_results=primary_results,
+            release_version=release_version)
         self.arguments = arguments
         items = RUN_CAMPAIGN.build_work_items(phase, self.PLATFORMS, fleet.units, shards, confirmations)
         result_root = root / "results"
@@ -3022,23 +3062,38 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertEqual({"1": f"{interrupted.session}/1", "2": f"{replacement.session}/{lease['sequence']}"},
                              accepted)
 
-    def test_spot_returns_to_a_full_region_after_its_cool_down(self):
+    def test_pool_short_of_spot_capacity_retries_its_regions_and_turns_on_demand_only_after_its_wait(self):
         with tempfile.TemporaryDirectory() as temporary:
+            # Both regions refuse the pool's first Spot launches, so each cools; before the wait is over the pool
+            # tries Spot in every region again rather than asking for On-Demand.
             fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 2})
             result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 2, 1,
-                                         regions=["us-east-2", "us-west-2"], on_demand=False)
+                                         platform_regions={"r8i": ["us-east-2", "us-west-2"]})
             first, second, third = [host for host in fleet.hosts if host.platform == "r8i"][:3]
             self.assertEqual([("spot", "us-east-2"), ("spot", "us-west-2"), ("spot", "us-east-2")],
                              [(host.market, host.region) for host in (first, second, third)])
+            self.assertLess(third.launched_at - first.launched_at, RUN_CAMPAIGN.SPOT_SHORTAGE_WAIT_SECONDS)
+            self.assertNotIn("on-demand", [call.args[1].market for call in self.budget.reserve.call_args_list])
             # Each failed launch is in the event history with its region.
             with (result_root / "campaign-events.tsv").open(newline="") as events:
                 self.assertEqual(
                     [("interruption", "launch-capacity:InsufficientInstanceCapacity", region)
                      for region in ("us-east-2", "us-west-2")],
                     [(row["event_type"], row["reason"], row["region"]) for row in csv.DictReader(events, delimiter="\t")])
-            # While both regions cooled, the pool asked for On-Demand, which this budget refuses.
-            self.assertIn("on-demand", [call.args[1].market for call in self.budget.reserve.call_args_list])
-            self.assertGreaterEqual(third.launched_at - first.launched_at, RUN_CAMPAIGN.SPOT_REGION_COOL_DOWN_SECONDS)
+        with tempfile.TemporaryDirectory() as temporary:
+            # Spot stays short; once the wait is over the pool launches On-Demand in its list's first region.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 1000})
+            result_root = self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 2, 1,
+                                         platform_regions={"r8i": ["us-east-2", "us-west-2"]})
+            hosts = [host for host in fleet.hosts if host.platform == "r8i"]
+            on_demand = next(host for host in hosts if host.market == "on-demand")
+            self.assertEqual("us-east-2", on_demand.region)
+            self.assertTrue(all(host.market == "spot" for host in hosts[:hosts.index(on_demand)]))
+            self.assertGreaterEqual(on_demand.launched_at - hosts[0].launched_at,
+                                    RUN_CAMPAIGN.SPOT_SHORTAGE_WAIT_SECONDS)
+            self.assertIn(("on-demand", "us-east-2"),
+                          {(receipt["market"], receipt["region"])
+                           for receipt in RUN_CAMPAIGN.read_accepted_units(result_root / "accepted-units.tsv")})
 
     def test_pool_launches_only_for_work_its_workers_would_start_after_a_boot(self):
         work = sum(float(unit["estimated_seconds"]) for unit in RUN_CAMPAIGN.work_units.load(SCRIPT.parent).values()
@@ -3294,19 +3349,22 @@ class TestUnitWorkers(unittest.TestCase):
 
     def test_restart_releases_a_reservation_made_while_its_worker_waited_for_capacity(self):
         with tempfile.TemporaryDirectory() as temporary:
-            # The only region has no Spot capacity, and On-Demand waits for the fleet's allowance.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", full_spot={"r8i": 1}, abort_after=3)
+            # The pool buys On-Demand, which waits for the fleet's allowance.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", abort_after=3)
             with self.assertRaisesRegex(SystemExit, "controller stopped"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
-                               on_demand=False)
+                               purchases={"r8i": "on-demand"}, on_demand=False)
             waiting = self.budget.reserve.call_args_list[-1].args[1]
             self.assertEqual(("r8i", "on-demand"), (waiting.platform.name, waiting.market))
             # The controller stopped after the reservation, before the wrapper started.
             fleet.reservations = [{"campaign_id": "campaign", "logical_identity": waiting.logical_identity,
                                    "host_epoch": waiting.host_epoch, "attempt": waiting.attempt}]
             fleet.abort_after = None
-            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
+                           purchases={"r8i": "on-demand"})
             self.budget.release.assert_any_call("campaign", waiting.host_epoch, cleanup_verified=True)
+            # The On-Demand platform's every host was On-Demand.
+            self.assertEqual({"on-demand"}, {host.market for host in fleet.hosts if host.platform == "r8i"})
 
     def test_completion_that_fails_its_checks_is_rejected_without_a_retry(self):
         # The campaign measures a release, so every other completion proves it measured the release's JAR.

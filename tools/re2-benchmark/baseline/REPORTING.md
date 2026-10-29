@@ -251,9 +251,10 @@ stays unresolved.
 The reducer writes:
 
 - `host-rows.tsv`: every row of each accepted group, with `unit_id`,
-  `unit_attempt_id`, `group_id`, and its group's CPU `steal_share`
-- `host-checks.tsv`: each host's rows, slowness, noise, steal share, and
-  whether and why it was flagged
+  `unit_attempt_id`, `group_id`, its host's `region` and `market`, and its
+  group's CPU `steal_share`
+- `host-checks.tsv`: each host's region, market, rows, slowness, noise, steal
+  share, and whether and why it was flagged
 - `row-aggregates.tsv`: per-platform row statistics and unresolved state
 - `host-comparator-ratios.tsv`: every same-host ratio
 - `comparison-aggregates.tsv`: per-platform comparison statistics
