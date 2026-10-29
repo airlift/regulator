@@ -489,7 +489,8 @@ final class JavaRegexpParser
             }
         }
 
-        // repeat := atom (('*' | '+' | '?' | '{m,n}') '?'?)*
+        // repeat := atom (('*' | '+' | '?' | '{m,n}') '?'?)*, where the atom is empty when a count
+        // stands in atom position, including right after another repetition.
         private Regexp parseRepeat()
         {
             // Only a group can hold a capture.
@@ -506,9 +507,13 @@ final class JavaRegexpParser
                     break;
                 }
                 int nextByte = peekByte();
+                if (nextByte == '{' && appliedRepeat) {
+                    // As in the JDK, a count after a repetition repeats an empty atom of its own.
+                    break;
+                }
                 if (nextByte == '*' || nextByte == '+' || nextByte == '?' || nextByte == '{') {
-                    // Stacked repetition operators are a syntax error in Perl extensions mode.
-                    // In non-Perl extensions mode, they are allowed and will be simplified later.
+                    // A '*', '+', or '?' after a repetition is a syntax error in Perl extensions mode.
+                    // In non-Perl extensions mode, it is allowed and will be simplified later.
                     if (appliedRepeat && (flags & Regexp.PERL_EXTENSIONS) != 0) {
                         throw error(RegexpParseErrorCode.BAD_REPEAT_OP, errorArgAtCurrent());
                     }
@@ -707,7 +712,7 @@ final class JavaRegexpParser
             return new int[] {minRepetitions, maxRepetitions};
         }
 
-        // atom := '(' ... ')' | '[' ... ']' | '.' | '^' | '$' | '\' escape | literal
+        // atom := '(' ... ')' | '[' ... ']' | '.' | '^' | '$' | '\' escape | literal | empty before '{'
         private Regexp parseAtom()
         {
             skipIgnoredPatternCharacters();
@@ -717,9 +722,12 @@ final class JavaRegexpParser
 
             int nextByte = peekByte();
 
-            // Repetition operators are not valid in atom position.
-            // See upstream re2/parse.cc PushRepeatOp()/PushRepetition().
-            if (nextByte == '*' || nextByte == '+' || nextByte == '?' || nextByte == '{') {
+            // As in the JDK's atom(), a count with no atom before it gets the empty atom, which the
+            // caller then repeats; '*', '+', and '?' with no atom before them are errors.
+            if (nextByte == '{') {
+                return Regexp.emptyMatch(flags);
+            }
+            if (nextByte == '*' || nextByte == '+' || nextByte == '?') {
                 throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, patternSegment(index, 1));
             }
 
