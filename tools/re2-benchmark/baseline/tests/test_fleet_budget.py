@@ -19,7 +19,7 @@ class TestFleetBudget(unittest.TestCase):
         self.policy = {"schema_version": 1, "account": "123456789012", "region": "us-west-2",
                        "market": "spot", "spot_vcpu_reserve": 0, "max_vcpus": 736, "max_hosts": 368,
                        "max_pending_launches": 32, "max_machine_hours": 1500, "max_usd": 150,
-                       "max_attempt_seconds": 7200, "ancillary_reserve_usd": 15,
+                       "ancillary_reserve_usd": 15,
                        "minimum_launch_interval_seconds": 0,
                        "hourly_rates": {"r8i.large": {"spot": 0.065, "total": 0.075},
                                         "r8i.2xlarge": {"spot": 0.28, "total": 0.30}}}
@@ -33,15 +33,16 @@ class TestFleetBudget(unittest.TestCase):
                                platform=SimpleNamespace(instance_type="r8i.2xlarge" if large else "r8i.large",
                                                         vcpus=8 if large else 2))
 
-    def reserve(self, epoch, large=False, campaign="baseline", now=1000):
+    def reserve(self, epoch, large=False, campaign="baseline", now=1000, seconds=7200):
         return self.budget.reserve(campaign, self.job(epoch, large), self.root / campaign,
-                                   lambda: self.snapshot, now)
+                                   lambda: self.snapshot, now, until=now + seconds)
 
     def test_two_controllers_cannot_reserve_the_same_remaining_vcpus(self):
         self.snapshot["quota"] = 2
         def reserve(campaign):
             independent = fleet_budget.FleetBudget(self.path)
-            return independent.reserve(campaign, self.job(1), self.root / campaign, lambda: self.snapshot, 1000)[0]
+            return independent.reserve(campaign, self.job(1), self.root / campaign, lambda: self.snapshot, 1000,
+                                       until=8200)[0]
         with ThreadPoolExecutor(max_workers=2) as pool:
             outcomes = list(pool.map(reserve, ("baseline", "language")))
         self.assertEqual(sorted(outcomes), [False, True])
@@ -178,6 +179,37 @@ class TestFleetBudget(unittest.TestCase):
                 self.assertTrue(self.reserve(1)[0])
                 self.assertEqual(self.reserve(2), (False, "fleet spending or machine-hour ceiling"))
 
+    def test_reservations_hold_issued_work_and_extend_within_the_ceilings(self):
+        # A $10 fleet with a $2 ancillary reserve, at $0.10 an r8i.large hour.
+        self.policy.update(max_usd=10, ancillary_reserve_usd=2, max_pending_launches=368)
+        self.policy["hourly_rates"]["r8i.large"] = {"spot": 0.08, "total": 0.10}
+        self.path.write_text(json.dumps(self.policy))
+
+        def admitted(seconds):
+            self.budget.state_path.unlink(missing_ok=True)
+            self.budget = fleet_budget.FleetBudget(self.path)
+            for count in range(self.policy["max_hosts"] + 1):
+                if not self.reserve(count + 1, seconds=seconds)[0]:
+                    return count
+            self.fail("the fleet admitted more hosts than its limit")
+
+        # Reserving each worker's whole wrapper lifetime and cleanup, 7.75 hours, admitted 10 workers; reserving a
+        # launch's boot and first lease, as the controller does, 1.5 hours, admits 53.
+        self.assertEqual(10, admitted(27900))
+        self.assertEqual(53, admitted(5400))
+        # The fleet has $0.05 left, so it extends a host's reservation by a quarter hour but not by an hour, and a
+        # host already covered needs nothing more.
+        self.assertEqual((False, "fleet spending or machine-hour ceiling"),
+                         self.budget.extend("baseline", 1, now=2000, until=6400 + 3600))
+        self.assertEqual((True, "reserved"), self.budget.extend("baseline", 1, now=2000, until=6400 + 900))
+        self.assertEqual((True, "reserved"), self.budget.extend("baseline", 2, now=2000, until=6000))
+        reservations = json.loads(self.budget.state_path.read_text())["reservations"]
+        self.assertEqual((7300, 6400), (reservations["baseline/1"]["reserved_until"],
+                                        reservations["baseline/2"]["reserved_until"]))
+        # Cleanup charges a host's actual hours, which returns the rest of its reservation.
+        self.budget.release("baseline", 3, cleanup_verified=True, now=1000 + 1800)
+        self.assertEqual((True, "reserved"), self.budget.extend("baseline", 1, now=1000 + 1800, until=7300 + 3600))
+
     def test_policy_and_used_host_epochs_are_immutable_on_resume(self):
         self.reserve(1)
         with self.assertRaisesRegex(RuntimeError, "already used"):
@@ -189,13 +221,13 @@ class TestFleetBudget(unittest.TestCase):
         self.path.write_text(json.dumps(self.policy))
         restarted = fleet_budget.FleetBudget(self.path)
         with self.assertRaisesRegex(RuntimeError, "changed on restart"):
-            restarted.reserve("language", self.job(2), self.root, lambda: self.snapshot, 1002)
+            restarted.reserve("language", self.job(2), self.root, lambda: self.snapshot, 1002, until=8200)
 
     def test_forbids_on_demand(self):
         job = self.job(1)
         job.market = "on-demand"
         with self.assertRaisesRegex(RuntimeError, "On-Demand"):
-            self.budget.reserve("baseline", job, self.root, lambda: self.snapshot)
+            self.budget.reserve("baseline", job, self.root, lambda: self.snapshot, until=8200)
         self.policy["market"] = "on-demand"
         with self.assertRaises(fleet_budget.BudgetError):
             fleet_budget.validate_policy(self.policy)
@@ -218,7 +250,7 @@ class TestFleetBudget(unittest.TestCase):
             job = self.job(epoch, large=True)
             job.market, job.region = market, region
             return self.budget.reserve("baseline", job, self.root / "baseline",
-                                       lambda: snapshots[(region, market)], 1000)[0]
+                                       lambda: snapshots[(region, market)], 1000, until=8200)[0]
 
         # Spot reservations take no On-Demand headroom.
         self.assertTrue(reserve(1, "us-west-2", "spot"))
@@ -266,7 +298,8 @@ class TestFleetBudget(unittest.TestCase):
         def reserve(epoch, region):
             job = self.job(epoch)
             job.region = region
-            return self.budget.reserve("baseline", job, self.root / "baseline", lambda: snapshots[region], 1000)[0]
+            return self.budget.reserve("baseline", job, self.root / "baseline", lambda: snapshots[region], 1000,
+                                       until=8200)[0]
 
         self.assertTrue(reserve(1, "eu-west-1"))
         self.assertTrue(reserve(2, "eu-west-1"))
@@ -294,7 +327,6 @@ class TestFleetBudget(unittest.TestCase):
                    "max_vcpus": [0, -1, True, 1.5],
                    "max_hosts": [0, True, 1.5],
                    "max_pending_launches": [0, True, 1.5],
-                   "max_attempt_seconds": [0, True, 1.5],
                    "max_machine_hours": [0, -1, True, float("inf"), float("nan")],
                    "max_usd": [0, -1, True, float("inf"), float("nan")],
                    "regions": [[], {}, {"us-west-2": {"max_vcpus": 8, "spot_vcpu_reserve": 0}},
@@ -310,15 +342,26 @@ class TestFleetBudget(unittest.TestCase):
                     with self.assertRaises(fleet_budget.BudgetError):
                         fleet_budget.validate_policy(policy)
 
-    def test_fatal_failure_stops_other_controllers_and_bounds_attempt_lifetimes(self):
+    def test_reservation_past_its_end_halts_nothing_and_counts_as_spent_until_released(self):
+        # A controller that slept, or died, leaves its host's reservation past its end; the host stopped by then.
         self.reserve(1)
-        self.budget.check(now=1001)
-        with self.assertRaisesRegex(RuntimeError, "lifetime allowance"):
-            self.budget.check(now=8201)
+        self.budget.check()
+        # Charged to now, the 1,500 machine-hour ceiling holds no more.
+        self.assertEqual((False, "fleet spending or machine-hour ceiling"),
+                         self.reserve(2, campaign="language", now=1000 + 1500 * 3600))
+        # Released a thousand hours in, the same reservation is charged those hours and no more, so the fleet admits
+        # the launch then.
+        self.budget.state_path.unlink()
+        self.reserve(1)
+        self.budget.release("baseline", 1, cleanup_verified=True, now=1000 + 1000 * 3600)
+        self.assertTrue(self.reserve(2, campaign="language", now=1000 + 1500 * 3600)[0])
+
+    def test_fatal_failure_stops_other_controllers(self):
+        self.reserve(1)
         self.budget.halt("semantic disagreement")
         other = fleet_budget.FleetBudget(self.path)
         with self.assertRaisesRegex(RuntimeError, "semantic disagreement"):
-            other.reserve("language", self.job(2), self.root, lambda: self.snapshot, 1002)
+            other.reserve("language", self.job(2), self.root, lambda: self.snapshot, 1002, until=8200)
         # The stop marker must not prevent verified cleanup from returning capacity.
         other.release("baseline", 1, cleanup_verified=True, now=1003)
         self.assertEqual(other.reservations(self.root / "baseline"), [])
@@ -331,9 +374,9 @@ class TestFleetBudget(unittest.TestCase):
         other = fleet_budget.FleetBudget(self.path)
         other.halt("secondary controller failure")
         with self.assertRaisesRegex(RuntimeError, "semantic disagreement after resume"):
-            other.check(now=1001)
+            other.check()
         with self.assertRaisesRegex(RuntimeError, "semantic disagreement after resume"):
-            other.reserve("language", self.job(2), self.root, lambda: self.snapshot, 1002)
+            other.reserve("language", self.job(2), self.root, lambda: self.snapshot, 1002, until=8200)
         other.release("baseline", 1, cleanup_verified=True, now=1003)
         self.assertEqual(other.reservations(self.root / "baseline"), [])
 

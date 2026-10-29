@@ -140,7 +140,6 @@ For example, a policy for at most 16 ordinary workers could contain:
   "max_pending_launches": 4,
   "max_machine_hours": 100,
   "max_usd": 20,
-  "max_attempt_seconds": 28800,
   "ancillary_reserve_usd": 5,
   "minimum_launch_interval_seconds": 1,
   "hourly_rates": {
@@ -154,14 +153,44 @@ Replace the example account, limits, and rates with the selected campaign
 values. Include the R9g `.2xlarge` price ceiling when running the language
 lifecycle suite. `spot` is the maximum Spot bid; `total` includes storage and
 other hourly costs, and `on_demand_total` is that hourly total for an
-On-Demand host. `max_attempt_seconds` must cover a unit worker's wrapper timeout
-and its cleanup, at least 27900 seconds. The controller validates the policy
-when loading it. Freeze it with the job inventory; changing it requires a new
-campaign rather than a resume.
+On-Demand host. The controller validates the policy when loading it. Freeze it
+with the job inventory; changing it requires a new campaign rather than a
+resume.
 
 The neighboring `fleet-state.json` coordinates both collectors with `flock`. It
 counts instances, outstanding requests, and launches not yet visible to EC2.
-Reservations remain until verified cleanup; crashes never expire them. A
+Each host's reservation holds its hours and cost only until a stop time that
+covers the work it was issued, so a fleet admits as many hosts as the work
+they hold, not their whole lifetimes, can pay for:
+
+- A launch reserves the host's boot allowance of 20 minutes, a first lease of
+  its pool's longest queued item, the worker's 10-minute idle stop, a 15-minute
+  wind-down for its final uploads, and 15 minutes of teardown until verified
+  cleanup.
+- The controller budgets a lease at twice its groups' estimate, or twice the
+  15-minute unit budget when that is longer. Before issuing one, it extends
+  the reservation to cover each lease the host would hold at that allowance,
+  run one after another from now, or from the end of its boot allowance, then
+  its idle stop, wind-down, and teardown. A lease the budget refuses is not
+  issued; a worker holding no other lease gets a stop lease instead.
+- Admission and every extension must keep the completed hosts' actual hours,
+  plus each reservation's hours to its stop time, or to now once a host ran
+  longer, within `max_machine_hours`, and their cost plus the ancillary reserve
+  within `max_usd`.
+
+At $0.10 an `r8i.large` hour, a launch's 90 minutes reserve $0.15, and each
+lease of a 15-minute unit is budgeted at $0.05 more. These are estimates: a
+lease that outruns its allowance leaves the next extension, counted from now,
+to cover the extra time. The earlier reservation of a worker's whole
+7.75-hour wrapper lifetime held $0.78. A $10 policy with a $2 ancillary
+reserve admits 53 such launches where it admitted 10.
+
+The host enforces the same stop time: it powers off at the time its launch or
+its latest lease names, whatever it is doing, as [unit workers](#unit-workers)
+describes. So a host whose controller died stops within its reservation.
+Reservations remain until verified cleanup, which charges the host's actual
+hours; crashes never expire them, and one past its stop time counts as spent
+to now until then. A
 rejected work unit follows the [unit dispatch](#unit-dispatch) retry rules.
 Unproven cleanup, changed frozen inputs, conflicting accepted identities and
 shared resource-policy failures halt both collectors. See the
@@ -411,10 +440,7 @@ workers](#unit-workers). The plan writes `work-items.tsv`: replica 1 of every
 unit of the selected shards in smoke, replicas 1 to 3 in primary, and replica 4
 of each `--confirmation-jobs` row, which names `platform`, `shard_id`, and
 `unit_id`. A primary requires an accepted smoke, and a confirmation requires an
-accepted primary. A shared fleet budget must allow `max_attempt_seconds` of at
-least the longest pool's worker timeout plus 15 minutes: 27,900 seconds for
-baseline units, and 102,600 for a pool holding a Java or Trino slow-bulk
-comparison's 75,600-second unit.
+accepted primary.
 
 Set `AWS_PROFILE` before any execution command when selecting a named profile;
 otherwise the AWS CLI uses its standard credential chain.
@@ -648,11 +674,17 @@ the Trino harness. A measuring host records those packages as `not-installed`.
 A `CAMPAIGN_MODE=unit-worker` job launches a host that measures the work units
 its controller leases to it, one at a time, instead of one shard. It requires
 `CAMPAIGN_SHARD_ID=unit-worker` and `TIMEOUT_SECONDS` of the worker lifetime,
-`UNIT_WORKER_LIFETIME_SECONDS` (default 21600), plus 4500 seconds for host
-setup and final uploads, plus the time its last unit may take: 900, or the
-pool's longest estimated unit when that is longer. The host
-bootstraps with packages, the JDK, its pool's prebuilt engine archives unless
-it is a build phase's worker, and the environment record. A language unit
+`UNIT_WORKER_LIFETIME_SECONDS` (default 21600), plus 4500 seconds for host setup
+and final uploads, plus the time its last unit may take: 900, or the pool's
+longest estimated unit when that is longer. It also requires
+`CAMPAIGN_HOST_STOP_BY`, the epoch second its
+[fleet reservation](#shared-fleet-budget) covers the host until, and passes
+`UNIT_WORKER_IDLE_SECONDS` (default 600) to the worker. The user data keeps the
+host's stop time in `/var/tmp/re2-stop-by` and starts a watchdog before anything
+else, which powers the host off once that time passes, whether it is installing,
+measuring, or uploading. Only a work lease moves the stop time, and only later.
+The host bootstraps with packages, the JDK, its pool's prebuilt engine archives
+unless it is a build phase's worker, and the environment record. A language unit
 worker also installs the plan bundle of each of its pool's shards under
 `target/language-plans/<shard>`. The engine archives, plan bundles, and JDK
 install in the same [streaming pass](#engine-builds), the JDK through gzip. The
@@ -704,18 +736,21 @@ A lease is a JSON object:
 {"schema_version": 2, "campaign_id": "primary-20261024", "phase": "primary",
  "platform": "r8i", "host_session": "20261024T120000Z-4242", "sequence": 3,
  "unit_id": "<64 hex digits>", "replica_id": 2, "groups": ["2", "1"],
- "protocol": "qualification"}
+ "protocol": "qualification", "stop_by": 1793102400}
 ```
 
 A measuring phase's `unit_id` is 64 hex digits; the build phase's one unit is
 `engine-build`, at replica 1. `groups` lists the unit's
 [measured groups](../baseline/SHARD_DISPATCH.md#work-units) the lease runs, in
 order: those of the replica not yet accepted, in the replica's run order. A
-stop lease replaces `phase`, `unit_id`, `replica_id`, `groups`, and `protocol`
-with `"stop": true`. The host reads lease `seq` only after lease `seq - 1` is
-done, so the controller may write one lease ahead. The host requires schema
-version 2 and its own sequence, host session, campaign, and platform, and a
-work lease's unit ID, replica 1 to 4, phase, distinct group IDs, and protocol;
+stop lease replaces `phase`, `unit_id`, `replica_id`, `groups`, `protocol`, and
+`stop_by` with `"stop": true`. `stop_by` is the host's shutdown time, in epoch
+seconds, that the controller's fleet reservation covers once the host holds
+this lease; the worker moves the host's stop time to it when that is later.
+The host reads lease `seq` only after lease `seq - 1` is done, so the
+controller may write one lease ahead. The host requires schema version 2 and
+its own sequence, host session, campaign, and platform, and a work lease's
+unit ID, replica 1 to 4, phase, distinct group IDs, protocol, and stop time;
 any other lease stops it. Each lease read is kept in the host evidence under
 `leases/`.
 

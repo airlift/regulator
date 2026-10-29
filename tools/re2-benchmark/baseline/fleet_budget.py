@@ -1,5 +1,9 @@
 """Durable admission reservations shared by controllers on one coordinator.
 
+A reservation holds a host's hours and cost until the stop time its controller
+reserved for it. That time covers only the work the host was issued: the
+controller extends the reservation before issuing more, and the host stops by
+then on its own.
 Never expire a reservation just because its controller disappeared. The caller
 must prove resource cleanup before releasing it, including during recovery.
 """
@@ -43,7 +47,7 @@ def validate_policy(policy):
         value = policy.get(name)
         if not isinstance(value, str) or not re.fullmatch(pattern, value):
             raise BudgetError("invalid fleet " + name)
-    for name in ("max_hosts", "max_pending_launches", "max_attempt_seconds"):
+    for name in ("max_hosts", "max_pending_launches"):
         value = policy.get(name)
         if type(value) is not int or value <= 0:
             raise BudgetError("invalid fleet budget: " + name)
@@ -97,6 +101,16 @@ def on_demand_regions(policy):
 
 def reservation_key(campaign_id, host_epoch):
     return f"{campaign_id}/{host_epoch}"
+
+
+def affordable(policy, state, reservations, now):
+    """Whether completed usage plus active reservations fits both of the fleet's ceilings, machine hours and
+    spending: each completed attempt at its actual hours, and each reservation's hours to its reserved end, or to
+    now once it ran past it."""
+    hours = [(max(item["reserved_until"], now) - item["started_at"]) / 3600 for item in reservations.values()]
+    cost = state["cost_usd"] + policy["ancillary_reserve_usd"] + sum(
+        duration * item["hourly_rate"] for duration, item in zip(hours, reservations.values()))
+    return state["machine_hours"] + sum(hours) <= policy["max_machine_hours"] and cost <= policy["max_usd"]
 
 
 def capacity(snapshot, reservations, policy, *, region=None, market="spot", remember=False):
@@ -160,6 +174,12 @@ def capacity(snapshot, reservations, policy, *, region=None, market="spot", reme
             "pending_launches": pending}
 
 
+def refuse_halted(state):
+    """Refuse to go on while the fleet is halted."""
+    if state.get("halted"):
+        raise BudgetError("shared fleet is halted: " + state["halted"])
+
+
 class FleetBudget:
     def __init__(self, policy_path):
         self.policy_path = Path(policy_path).resolve()
@@ -195,7 +215,8 @@ class FleetBudget:
             finally:
                 os.close(descriptor)
 
-    def reserve(self, campaign_id, job, owner, snapshot_reader, now=None):
+    def reserve(self, campaign_id, job, owner, snapshot_reader, now=None, *, until):
+        """Admit a launch whose host stops by until, in epoch seconds, unless a later extension covers more."""
         if job.market != "spot" and not on_demand_regions(self.policy):
             raise BudgetError("shared fleet forbids On-Demand")
         now = time.time() if now is None else now
@@ -204,8 +225,7 @@ class FleetBudget:
         if region not in region_limits(self.policy):
             raise BudgetError("shared fleet policy does not cover region " + region)
         with self.locked() as state:
-            if state.get("halted"):
-                raise BudgetError("shared fleet is halted: " + state["halted"])
+            refuse_halted(state)
             if key in state["reservations"] or key in state["completed"]:
                 raise BudgetError("host epoch already used by the shared fleet")
             active = state["reservations"]
@@ -216,26 +236,37 @@ class FleetBudget:
             if rate is None:
                 raise BudgetError("instance type has no frozen price ceiling")
             hourly_rate = rate["total"] if job.market == "spot" else rate["on_demand_total"]
-            # Outstanding attempts reserve their whole remaining allowance. If
-            # cleanup is delayed, charge the longer elapsed lifetime instead.
-            hours = policy["max_attempt_seconds"] / 3600
-            active_hours = [max(hours, (now - item["started_at"]) / 3600) for item in active.values()]
-            committed_hours = state["machine_hours"] + sum(active_hours) + hours
-            committed_cost = state["cost_usd"] + policy["ancillary_reserve_usd"] + hours * hourly_rate + sum(
-                duration * item["hourly_rate"] for duration, item in zip(active_hours, active.values()))
-            if committed_hours > policy["max_machine_hours"] or committed_cost > policy["max_usd"]:
+            item = {"campaign_id": campaign_id, "host_epoch": job.host_epoch, "owner": str(Path(owner).resolve()),
+                    "attempt": getattr(job, "attempt", 1),
+                    "logical_identity": job.logical_identity, "region": region, "market": job.market,
+                    "instance_type": job.platform.instance_type,
+                    "vcpus": job.platform.vcpus, "started_at": now, "reserved_until": until, "hourly_rate": hourly_rate}
+            if not affordable(policy, state, {**active, key: item}, now):
                 return False, "fleet spending or machine-hour ceiling"
             if job.market != "spot" and region not in on_demand_regions(policy):
                 return False, "fleet quota or pending-launch limit"
             available = capacity(snapshot_reader(), active, policy, region=region, market=job.market, remember=True)
             if available["available"] < job.platform.vcpus or available["pending_launches"] >= policy["max_pending_launches"]:
                 return False, "fleet quota or pending-launch limit"
-            active[key] = {"campaign_id": campaign_id, "host_epoch": job.host_epoch, "owner": str(Path(owner).resolve()),
-                           "attempt": getattr(job, "attempt", 1),
-                           "logical_identity": job.logical_identity, "region": region, "market": job.market,
-                           "instance_type": job.platform.instance_type,
-                           "vcpus": job.platform.vcpus, "started_at": now, "hourly_rate": hourly_rate}
+            active[key] = item
             state["last_launch_at"] = now
+            return True, "reserved"
+
+    def extend(self, campaign_id, host_epoch, now=None, *, until):
+        """Extend a host's reservation to until, in epoch seconds, if the fleet's ceilings admit it."""
+        now = time.time() if now is None else now
+        key = reservation_key(campaign_id, host_epoch)
+        with self.locked() as state:
+            refuse_halted(state)
+            item = state["reservations"].get(key)
+            if item is None:
+                raise BudgetError("host epoch holds no shared fleet reservation")
+            if until <= item["reserved_until"]:
+                return True, "reserved"
+            if not affordable(self.policy, state, {**state["reservations"], key: {**item, "reserved_until": until}},
+                              now):
+                return False, "fleet spending or machine-hour ceiling"
+            item["reserved_until"] = until
             return True, "reserved"
 
     def release(self, campaign_id, host_epoch, *, cleanup_verified, now=None):
@@ -261,10 +292,8 @@ class FleetBudget:
             if not state.get("halted"):
                 state["halted"] = reason
 
-    def check(self, now=None):
-        now = time.time() if now is None else now
+    def check(self):
+        """Refuse to go on while the fleet is halted. A host past its reservation's end is no halt: it stops at its
+        stop time, and its reservation counts as spent until its owner releases it."""
         with self.locked() as state:
-            if state.get("halted"):
-                raise BudgetError("shared fleet is halted: " + state["halted"])
-            if any(now - item["started_at"] > self.policy["max_attempt_seconds"] for item in state["reservations"].values()):
-                raise BudgetError("shared fleet attempt exceeded its lifetime allowance")
+            refuse_halted(state)
