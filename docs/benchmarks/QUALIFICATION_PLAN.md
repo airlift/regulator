@@ -179,7 +179,7 @@ uses its sibling thread. Disable unrelated agents and scheduled work. Use a
 fixed CPU power policy where the platform permits it.
 
 Measure three independent replicas of every work unit on each of R8i and R9g,
-each replica on a distinct instance; see the
+with no instance measuring two replicas of one unit; see the
 [unit-campaign definition](METHODOLOGY.md#statistics) of an independent
 sample.
 
@@ -286,10 +286,10 @@ match ranges or output checksums.
 ### Statistics
 
 The [reducer's statistics policy](../../tools/re2-benchmark/baseline/REPORTING.md#aggregation)
-defines what each baseline row reports. Unit attempts on distinct instances
-are the independent samples; iterations are not. Compare scaling across input
-sizes as well as ratios. Leave a result unresolved when host-to-host variation
-overlaps the claimed difference.
+defines what each baseline row reports. A row's unit replicas, no two
+measured on one instance, are the independent samples; iterations are not.
+Compare scaling across input sizes as well as ratios. Leave a result unresolved
+when host-to-host variation overlaps the claimed difference.
 
 Investigate any of these before accepting a number:
 

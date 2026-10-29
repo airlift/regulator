@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 4 ]]; then
-    echo "Usage: $0 <unit-id> <smoke|qualification> <replica-id> <result-directory>" >&2
+if [[ $# -ne 5 ]]; then
+    echo "Usage: $0 <unit-id> <smoke|qualification> <replica-id> <group-id> <result-directory>" >&2
     exit 1
 fi
 
@@ -11,7 +11,9 @@ ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 UNIT_ID=$1
 PROTOCOL=$2
 REPLICA_ID=$3
-RESULT_DIR=$4
+# A call measures one of the unit's measured groups, which work_units.py records with the unit.
+GROUP_ID=$4
+RESULT_DIR=$5
 RUN_SHARD="${SCRIPT_DIR}/run-shard.sh"
 UNIT_TOOL="${SCRIPT_DIR}/unit_session.py"
 SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${ROOT}/target/baseline-shared}
@@ -36,6 +38,10 @@ if [[ ! ${REPLICA_ID} =~ ^[1-4]$ ]]; then
     echo "Replica must be 1, 2, 3, or 4: ${REPLICA_ID}" >&2
     exit 1
 fi
+if [[ ! ${GROUP_ID} =~ ^[1-9][0-9]*$ ]]; then
+    echo "Group must be a positive integer: ${GROUP_ID}" >&2
+    exit 1
+fi
 case "${PLAN_ONLY}" in
     true | false) ;;
     *)
@@ -51,8 +57,9 @@ case "${PROTOCOL_QUALIFICATION}" in
         ;;
 esac
 
-# The unit ID binds route-handler-order-v1: odd replicas run native access and
-# the candidate first, even replicas reverse both, so the order is not a knob.
+# The unit ID binds group-route-handler-order-v2: within a group, odd replicas
+# run native access and the candidate first, even replicas reverse both, so the
+# order is not a knob. The worker runs the groups themselves in replica order.
 unit_order=forward
 if ((REPLICA_ID % 2 == 0)); then
     unit_order=reverse
@@ -124,7 +131,7 @@ if [[ "${PLAN_ONLY}" != true && "${UNIT_STAGE}" == unit ]]; then
         printf 'capacity_status=%s\n' "${capacity_status}"
     } >> "${capacity_file}"
     if [[ "${capacity_status}" != accepted ]]; then
-        echo "Unit capacity gate rejected unit ${UNIT_ID}; see ${capacity_file}" >&2
+        echo "Unit capacity gate rejected unit ${UNIT_ID} group ${GROUP_ID}; see ${capacity_file}" >&2
         # A semantic failure is final whatever the unit's capacity, so its own status reaches the controller.
         if ((unit_status == SEMANTIC_FAILURE_STATUS)); then
             exit "${unit_status}"
@@ -207,6 +214,7 @@ if [[ "${UNIT_ID}" == engine-build ]]; then
     python3 "${SCRIPT_DIR}/engine_build.py" accept \
         --unit-directory "${RESULT_DIR}" \
         --replica "${REPLICA_ID}" \
+        --group "${GROUP_ID}" \
         --unit-attempt "${RE2_CAMPAIGN_HOST_SESSION}/${RE2_CAMPAIGN_LEASE_SEQUENCE}" \
         --region "${BASELINE_REGION}" \
         --engine-tree "${BASELINE_EXPECTED_ENGINE_TREE:?The engine build requires BASELINE_EXPECTED_ENGINE_TREE}"
@@ -232,6 +240,7 @@ if [[ -n "${language_plan}" ]]; then
         --plan-directory "${language_plan}" \
         --unit "${UNIT_ID}" \
         --replica "${REPLICA_ID}" \
+        --group "${GROUP_ID}" \
         --unit-directory "${RESULT_DIR}" \
         --native-directory "${SHARED_WORK_DIR}/language-native" \
         --jvm-directory "${SHARED_WORK_DIR}/language-jvm" \
@@ -239,13 +248,14 @@ if [[ -n "${language_plan}" ]]; then
         --region "${BASELINE_REGION}" \
         --source-archive "${LANGUAGE_SOURCE_ARCHIVE:?A language unit requires LANGUAGE_SOURCE_ARCHIVE}" \
         --candidate-provenance "${LANGUAGE_CANDIDATE_PROVENANCE:?A language unit requires LANGUAGE_CANDIDATE_PROVENANCE}"
-    echo "Completed language unit ${UNIT_ID} replica ${REPLICA_ID}"
+    echo "Completed language unit ${UNIT_ID} replica ${REPLICA_ID} group ${GROUP_ID}"
     exit 0
 fi
 
 SHARD_ID=$(python3 "${UNIT_TOOL}" plan \
     --unit "${UNIT_ID}" \
     --replica "${REPLICA_ID}" \
+    --group "${GROUP_ID}" \
     --output-directory "${RESULT_DIR}")
 
 export RE2_CAMPAIGN_SHARD_ID=${SHARD_ID}
@@ -265,23 +275,24 @@ while IFS=$'\t' read -r -u 3 route _ systems; do
         "${RUN_SHARD}" "${SHARD_ID}" "${PROTOCOL}" "${route}" "${route_directory}"
 done 3< <(tail -n +2 "${RESULT_DIR}/route-plan.tsv")
 if ((route_count == 0)); then
-    echo "Unit ${UNIT_ID} plans no routes" >&2
+    echo "Unit ${UNIT_ID} group ${GROUP_ID} plans no routes" >&2
     exit 1
 fi
 
 if [[ "${PLAN_ONLY}" == true ]]; then
     printf 'status=planned\n' > "${status_file}"
     trap - EXIT
-    echo "Planned unit ${UNIT_ID} ${PROTOCOL} replica ${REPLICA_ID}"
+    echo "Planned unit ${UNIT_ID} ${PROTOCOL} replica ${REPLICA_ID} group ${GROUP_ID}"
     exit 0
 fi
 
 python3 "${UNIT_TOOL}" combine \
     --unit-directory "${RESULT_DIR}" \
     --unit-attempt "${RE2_CAMPAIGN_HOST_SESSION}/${RE2_CAMPAIGN_LEASE_SEQUENCE}" \
+    --group "${GROUP_ID}" \
     --region "${BASELINE_REGION}"
 python3 "${SCRIPT_DIR}/validate-unit-results.py" \
     --unit-directory "${RESULT_DIR}" \
     --receipt "${RESULT_DIR}/unit-receipt.tsv"
 
-echo "Completed unit ${UNIT_ID} ${PROTOCOL} replica ${REPLICA_ID}"
+echo "Completed unit ${UNIT_ID} ${PROTOCOL} replica ${REPLICA_ID} group ${GROUP_ID}"

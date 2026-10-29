@@ -19,7 +19,7 @@ PROTOCOL_REPRESENTATIVES="${SCRIPT_DIR}/protocol-representatives.tsv"
 ROW_PROTOCOL="${SCRIPT_DIR}/row-protocol.tsv"
 UNIT_TOOL="${SCRIPT_DIR}/unit_session.py"
 SPECIALIZED_CATALOG="${SCRIPT_DIR}/specialized-patterns.tsv"
-# run-unit.sh names a planned work unit; the route measures only the unit's rows
+# run-unit.sh names a planned work unit; the route measures only the rows of its measured group
 # and leaves acceptance to the unit.
 UNIT_DIRECTORY=${BASELINE_UNIT_DIRECTORY:?A route runs only inside a work unit; set BASELINE_UNIT_DIRECTORY}
 PLAN_ONLY=${BASELINE_PLAN_ONLY:-false}
@@ -176,12 +176,15 @@ if [[ -n "${frozen_fork_protocol}" ]]; then
 fi
 protocol_qualification_required=false
 protocol_representative_count=0
-# A unit runs only the representatives attached to its rows for this replica.
+# A unit runs only the representatives attached to its rows for this replica,
+# each in the measured group that holds its row.
 unit_holds_representative()
 {
     awk -F '\t' -v replica="$1" -v row_id="$2" \
         'NR > 1 && $3 == "representative" && $4 == replica && $2 == row_id {found=1} END {exit !found}' \
-        "${UNIT_DIRECTORY}/unit-rows.tsv"
+        "${UNIT_DIRECTORY}/unit-rows.tsv" &&
+        awk -F '\t' -v row_id="$2" 'NR > 1 && $1 == row_id {found=1} END {exit !found}' \
+            "${UNIT_DIRECTORY}/expected-rows.tsv"
 }
 if [[ "${bounded_jmh_protocol}" == true && "${PROTOCOL_QUALIFICATION}" == true ]]; then
     protocol_replica_id=${CAMPAIGN_REPLICA_ID}

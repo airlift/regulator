@@ -1,8 +1,8 @@
 """The campaign controller's unit ledgers, its S3 exchange with unit workers, and accepted attempts' layout.
 
-A unit campaign's controller leases work units to worker hosts through S3, retains each accepted attempt
-under units/<platform>/<unit>/replica-<n>/<host session>/lease-<n>, and records it in accepted-units.tsv.
-Recovery and the reducer find retained attempts by the same layout.
+A unit campaign's controller leases work units to worker hosts through S3, retains each accepted measured
+group of an attempt under units/<platform>/<unit>/replica-<n>/<host session>/lease-<n>/group-<g>, and records
+it in accepted-units.tsv. Recovery and the reducer find retained attempts by the same layout.
 """
 
 import csv
@@ -19,14 +19,22 @@ from pathlib import Path
 import unit_session
 from campaign_io import UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger
 
+# A lease row's groups are those it leased, in run order; an outcome row's are those whose markers it processed.
 UNIT_ATTEMPT_FIELDS = (
-    "platform", "unit_id", "replica", "host_epoch", "host_session", "sequence", "market", "outcome", "detail")
-# The uploads only a running worker makes: a heartbeat, a lease's interruption bundle, and a unit completion.
-WORKER_EVIDENCE_PATTERN = r"heartbeat/[0-9]+\.json|events/[0-9]+-interrupted\.tar\.gz|units/[0-9]+/completion\.json"
+    "platform", "unit_id", "replica", "groups", "host_epoch", "host_session", "sequence", "market", "outcome",
+    "detail")
+# The uploads only a running worker makes: a heartbeat, a lease's interruption bundle, and a group completion.
+WORKER_EVIDENCE_PATTERN = (r"heartbeat/[0-9]+\.json|events/[0-9]+-interrupted\.tar\.gz|"
+                           r"units/[0-9]+/groups/[0-9]+/completion\.json")
 # The completion marker fields the controller reads; a unit worker writes each of them.
 UNIT_COMPLETION_FIELDS = (
     "schema_version", "host_session", "sequence", "campaign_id", "phase", "platform", "unit_id", "replica_id",
-    "unit_attempt_id", "exit_status", "unit_status", "result_sha256")
+    "group_id", "unit_attempt_id", "exit_status", "unit_status", "result_sha256", "result_bytes", "pack_seconds",
+    "upload_seconds", "upload_attempts")
+# How long each group's result took to pack and upload, as its completion marker reports it, one row per marker.
+UNIT_UPLOADS = "unit-uploads.tsv"
+UPLOAD_TIMING_FIELDS = ("result_bytes", "pack_seconds", "upload_seconds", "upload_attempts")
+UNIT_UPLOAD_FIELDS = ("platform", "unit_id", "replica", "group_id", "host_session", "sequence", *UPLOAD_TIMING_FIELDS)
 
 
 def accepted_row(rows, receipt, identity, attempt_field, attempts):
@@ -44,14 +52,25 @@ def accepted_row(rows, receipt, identity, attempt_field, attempts):
 
 
 def unit_logical_identity(receipt):
+    """The unit replica a receipt measured part of: its work item's identity."""
     return f"{receipt['platform']}/{receipt['unit_id']}/replica-{receipt['replica_id']}"
 
 
+def group_identity(receipt):
+    """The one measured group of a unit replica a receipt accepts."""
+    return f"{unit_logical_identity(receipt)}/group-{receipt['group_id']}"
+
+
+def group_attempt(receipt):
+    return f"{receipt['unit_attempt_id']} group {receipt['group_id']}"
+
+
 def unit_attempt_directory(result_root, receipt):
-    """A unit attempt's retained directory, named by its platform, unit, replica, host session and lease."""
+    """An accepted group's retained directory, named by its platform, unit, replica, host session, lease and
+    group."""
     host_session, lease = unit_session.split_unit_attempt(receipt["unit_attempt_id"])
     return (result_root / "units" / receipt["platform"] / receipt["unit_id"] / f"replica-{receipt['replica_id']}" /
-            host_session / f"lease-{lease}")
+            host_session / f"lease-{lease}" / f"group-{receipt['group_id']}")
 
 
 def read_unit_receipt(path):
@@ -73,23 +92,46 @@ def read_accepted_units(path):
         if tuple(reader.fieldnames or ()) != unit_session.UNIT_RECEIPT_FIELDS:
             raise UnsafeCampaignError(f"unexpected unit receipt schema in {path}")
         rows = list(reader)
-    for identities in ([unit_logical_identity(row) for row in rows], [row["unit_attempt_id"] for row in rows]):
+    for identities in ([group_identity(row) for row in rows], [group_attempt(row) for row in rows]):
         if len(identities) != len(set(identities)):
-            raise UnsafeCampaignError(f"accepted-unit ledger contains duplicate units or attempts: {path}")
+            raise UnsafeCampaignError(f"accepted-unit ledger contains duplicate groups or attempts: {path}")
     return rows
 
 
 def persist_accepted_unit(path, receipt_path):
-    """Append one unit attempt's receipt to accepted-units.tsv atomically."""
+    """Append one accepted group's receipt to accepted-units.tsv atomically."""
     receipt = read_unit_receipt(receipt_path)
     rows = read_accepted_units(path)
-    if accepted_row(rows, receipt, unit_logical_identity, "unit_attempt_id", "attempts") is not None:
+    if accepted_row(rows, receipt, group_identity, "unit_attempt_id", "attempts") is not None:
         return receipt
-    if any(row["unit_attempt_id"] == receipt["unit_attempt_id"] for row in rows):
-        raise UnsafeCampaignError(f"unit attempt {receipt['unit_attempt_id']} is accepted for another unit")
+    if any(group_attempt(row) == group_attempt(receipt) for row in rows):
+        raise UnsafeCampaignError(f"unit attempt {group_attempt(receipt)} is accepted for another unit")
     write_ledger(path, [*rows, receipt], unit_session.UNIT_RECEIPT_FIELDS, lambda row: (
-        row["platform"], row["shard_id"], row["unit_id"], int(row["replica_id"])))
+        row["platform"], row["shard_id"], row["unit_id"], int(row["replica_id"]), int(row["group_id"])))
     return receipt
+
+
+def read_unit_uploads(path):
+    if not path.exists():
+        return []
+    with path.open(newline="") as input_file:
+        reader = csv.DictReader(input_file, delimiter="\t")
+        if tuple(reader.fieldnames or ()) != UNIT_UPLOAD_FIELDS:
+            raise UnsafeCampaignError(f"unexpected unit upload schema in {path}")
+        return list(reader)
+
+
+def persist_unit_upload(path, item, host_session, sequence, marker):
+    """Record a group's upload timings from its completion marker, once per marker."""
+    rows = read_unit_uploads(path)
+    row = {"platform": item.platform, "unit_id": item.unit_id, "replica": str(item.replica),
+           "group_id": marker["group_id"], "host_session": host_session, "sequence": str(sequence),
+           **{field: str(marker[field]) for field in UPLOAD_TIMING_FIELDS}}
+    if any((existing["host_session"], existing["sequence"], existing["group_id"]) ==
+           (host_session, str(sequence), marker["group_id"]) for existing in rows):
+        return
+    write_ledger(path, [*rows, row], UNIT_UPLOAD_FIELDS,
+                 lambda row: (row["host_session"], int(row["sequence"]), int(row["group_id"])))
 
 
 def read_unit_attempts(path):
@@ -102,7 +144,7 @@ def read_unit_attempts(path):
         return list(reader)
 
 
-def write_unit_attempt(path, worker, sequence, item, outcome, detail="-"):
+def write_unit_attempt(path, worker, sequence, item, outcome, detail="-", groups=()):
     """Append one lease or lease outcome to unit-attempts.tsv. A stop lease names no unit, and a lease to a
     worker that has not yet published its host session names no session."""
     write_header = not path.exists()
@@ -111,7 +153,8 @@ def write_unit_attempt(path, worker, sequence, item, outcome, detail="-"):
         if write_header:
             writer.writerow(UNIT_ATTEMPT_FIELDS)
         writer.writerow((worker.job.platform.name, item.unit_id if item else "-", item.replica if item else "-",
-                         worker.job.host_epoch, worker.host_session if worker.metadata else "-", sequence,
+                         ",".join(groups) or "-", worker.job.host_epoch,
+                         worker.host_session if worker.metadata else "-", sequence,
                          worker.job.market, outcome, detail.replace("\t", " ").replace("\n", " ")))
         output_file.flush()
         os.fsync(output_file.fileno())
@@ -183,12 +226,12 @@ def interruption_key(sequence):
     return f"events/{sequence}-interrupted.tar.gz"
 
 
-def completion_key(sequence):
-    return f"units/{sequence}/completion.json"
+def completion_key(sequence, group):
+    return f"units/{sequence}/groups/{group}/completion.json"
 
 
-def result_key(sequence):
-    return f"units/{sequence}/result.tar.gz"
+def result_key(sequence, group):
+    return f"units/{sequence}/groups/{group}/result.tar.gz"
 
 
 def recovered_keys(objects):

@@ -50,7 +50,7 @@ class TestEngineBuild(unittest.TestCase):
             f"instance_type={instance_type}\ncampaign_architecture={architecture}\navailability_zone=us-west-2a\n"
             f"benchmark_heap_size=8g\nregulator_commit={candidate}\nregulator_archive_sha256=" + "5" * 64 + "\n")
         ENGINE_BUILD.package(shared, checkout, result)
-        ENGINE_BUILD.accept(result, "1", f"session-{name}/1", "us-west-2", "e" * 40)
+        ENGINE_BUILD.accept(result, "1", ENGINE_BUILD.GROUP_ID, f"session-{name}/1", "us-west-2", "e" * 40)
         with (result / "unit-capacity.txt").open("a") as capacity:
             capacity.write("wall_seconds=600\nmaximum_resident_kibibytes=1048576\nexit_status=0\n"
                            "memory_available_after_bytes=29000000000\nminimum_available_memory_bytes=3435973837\n"

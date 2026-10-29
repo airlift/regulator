@@ -52,8 +52,8 @@ HOST_SLOW_LIMIT = 0.02
 HOST_NOISE_LIMIT = 0.03
 # The share of a host's CPU time while it measured that a ready vCPU spent waiting for the hypervisor.
 HOST_STEAL_LIMIT = 0.01
-# Each sample names its unit attempt beside its host.
-UNIT_ATTEMPT_FIELDS = ("unit_id", "unit_attempt_id")
+# Each sample names its unit attempt and measured group beside its host.
+UNIT_ATTEMPT_FIELDS = ("unit_id", "unit_attempt_id", "group_id")
 RECEIPT_NAME = "unit-receipt.tsv"
 CAPACITY_NAME = "unit-capacity.txt"
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -65,7 +65,7 @@ class ReductionError(ValueError):
 
 @dataclass(frozen=True)
 class Session:
-    """One accepted unit attempt; attempts are independent samples only across the replicas of one row."""
+    """One accepted group of a unit attempt; attempts are independent samples only across the replicas of one row."""
     receipt: dict[str, str]
     directory: Path
     confirmation: bool
@@ -93,7 +93,8 @@ def stable_digest(values) -> str:
 
 
 def session_key(row):
-    return tuple(row[field] for field in ("campaign_id", "platform", "unit_id", "replica_id", "unit_attempt_id"))
+    return tuple(row[field] for field in (
+        "campaign_id", "platform", "unit_id", "replica_id", "group_id", "unit_attempt_id"))
 
 
 def attempt_key(row):
@@ -268,14 +269,14 @@ def verify_unit_receipt_coverage(primary, confirmation, platforms, shards, manif
 
 
 def retained_unit_attempt(directory):
-    """Whether a unit attempt sits where the controller retains it, the directory its own receipt names:
-    units/<platform>/<unit>/replica-<n>/<host session>/lease-<n>."""
+    """Whether a unit attempt's group sits where the controller retains it, the directory its own receipt names:
+    units/<platform>/<unit>/replica-<n>/<host session>/lease-<n>/group-<g>."""
     parents = directory.resolve().parents
-    if len(parents) <= 5 or parents[4].name != "units":
+    if len(parents) <= 6 or parents[5].name != "units":
         return False
     fields = unit_session.UNIT_RECEIPT_FIELDS
     receipt = read_one(directory / RECEIPT_NAME, fields, fields)
-    return unit_dispatch.unit_attempt_directory(parents[5], receipt) == directory.resolve()
+    return unit_dispatch.unit_attempt_directory(parents[6], receipt) == directory.resolve()
 
 
 def discover_session_directories(artifact_roots, session_directories):
@@ -344,7 +345,7 @@ def read_final_capacity(path):
 
 
 def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_path, manifest_by_id, release=None):
-    """Reverify a unit attempt as unit acceptance does; its owned rows are its measurements.
+    """Reverify a unit attempt's group as unit acceptance does; the group's rows are its measurements.
 
     A release campaign's attempt must also prove each route measured the release's JAR.
     """
@@ -368,10 +369,11 @@ def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_
     evidence_rows = read_tsv(directory / "unit-evidence.tsv", EVIDENCE_FIELDS, EVIDENCE_FIELDS)
     observed_path = directory / "observed-rows.tsv"
     observed = read_observed_rows(observed_path)
-    expected = {row_id: manifest_by_id[row_id] for row_id in unit["owned"]}
+    expected = {row_id: manifest_by_id[row_id]
+                for row_id in unit_session.work_units.unit_group(unit, ledger_receipt["group_id"])["owned"]}
     identifiers = [row["row_id"] for row in observed]
     if len(identifiers) != len(set(identifiers)) or set(identifiers) != set(expected):
-        raise ReductionError(f"artifact does not contain the exact unit rows: {directory}")
+        raise ReductionError(f"artifact does not contain the exact rows of its group: {directory}")
     return verify_measurements(
         directory, artifact_receipt, confirmation, evidence_rows, observed_path, observed, expected,
         cpu_ticks, directory / CAPACITY_NAME)
@@ -400,7 +402,7 @@ def verify_measurements(directory, artifact_receipt, confirmation, evidence_rows
 
 def load_sessions(primary_receipts, confirmation_receipts, artifact_roots, session_directories,
                   manifest_rows, campaign_units, manifest_path, release=None):
-    """Load and reverify every accepted unit attempt of the campaign's units."""
+    """Load and reverify every accepted group of the campaign's units."""
     manifest_by_id = {row["row_id"]: row for row in manifest_rows}
     receipt_fields = unit_session.UNIT_RECEIPT_FIELDS
     ledgers = {session_key(row): (row, False) for row in primary_receipts}
@@ -805,7 +807,7 @@ def build_scaling(host_rows, manifest_rows, excluded):
     fields = unit_columns(fields)
     rows = []
     membership = defaultdict(list)
-    for group_id, (identity, points) in identify_scaling_groups(manifest_rows).items():
+    for scaling_group_id, (identity, points) in identify_scaling_groups(manifest_rows).items():
         shard, suite, system, benchmark, size_parameter, other_parameters = identity
         point_ids = [row["row_id"] for row, _ in points]
         for platform, attempt in sorted(host_identity):
@@ -814,7 +816,7 @@ def build_scaling(host_rows, manifest_rows, excluded):
                 continue
             if any(row is None for row in host_points):
                 raise ReductionError(
-                    f"unit attempt {attempt} has incomplete scaling group {group_id}")
+                    f"unit attempt {attempt} has incomplete scaling group {scaling_group_id}")
             if any(row.get("outcome", "accepted") != "accepted" for row in host_points):
                 continue
             size_scores = [(size, float(host_row["score"])) for (_, size), host_row in zip(points, host_points)]
@@ -822,7 +824,7 @@ def build_scaling(host_rows, manifest_rows, excluded):
             host = host_points[0]
             row = {
                 "platform": platform, "shard_id": shard, "suite": suite, "system": system,
-                "benchmark": benchmark, "scaling_group": group_id, "size_parameter": size_parameter,
+                "benchmark": benchmark, "scaling_group": scaling_group_id, "size_parameter": size_parameter,
                 "other_parameters": other_parameters, "replica_id": host["replica_id"],
                 "host_epoch": host["host_epoch"], **unit_identity(host), "confirmation": host["confirmation"],
                 "point_count": str(len(points)),
@@ -833,17 +835,17 @@ def build_scaling(host_rows, manifest_rows, excluded):
             }
             rows.append(row)
             for row_id in point_ids:
-                membership[(platform, row_id)].append((group_id, row["classification"]))
+                membership[(platform, row_id)].append((scaling_group_id, row["classification"]))
     rows.sort(key=lambda row: (
         row["platform"], row["scaling_group"], int(row["replica_id"]), row["host_epoch"], attempt_key(row)))
     mismatches = set()
     aggregate_classes = {}
-    for (platform, group_id), group_rows in _group(rows, "platform", "scaling_group"):
+    for (platform, scaling_group_id), group_rows in _group(rows, "platform", "scaling_group"):
         classes = {row["classification"] for row in group_rows
                    if row["classification"] != "unclassified" and host_key(row) not in excluded}
-        aggregate_classes[(platform, group_id)] = next(iter(classes)) if len(classes) == 1 else "mixed"
+        aggregate_classes[(platform, scaling_group_id)] = next(iter(classes)) if len(classes) == 1 else "mixed"
         if len(classes) > 1:
-            mismatches.add((platform, group_id))
+            mismatches.add((platform, scaling_group_id))
     return fields, rows, membership, mismatches, aggregate_classes
 
 

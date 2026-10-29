@@ -18,7 +18,7 @@ import aggregate_results
 class TestOutputContract(unittest.TestCase):
     def setUp(self):
         self.pairs = [dict(platform='c9g', shard_id='operations', replica_id=str(replica),
-                           host_epoch=f'host-{replica}', unit_id='unit', unit_attempt_id=f'host-{replica}/1',
+                           host_epoch=f'host-{replica}', unit_id='unit', unit_attempt_id=f'host-{replica}/1', group_id='1',
                            candidate_system='regulator-native-access', comparator_system='joni')
                       for replica in range(1, 4)]
         self.metadata = []
@@ -47,11 +47,15 @@ class TestOutputContract(unittest.TestCase):
             output_contract(self.pairs, changed)
 
     def test_other_attempt_metadata_cannot_supply_missing_evidence(self):
-        # The host's next lease measured another unit of the same shard and replica.
-        changed = deepcopy(self.metadata)
-        for row in changed:
-            row['unit_attempt_id'] = row['unit_attempt_id'].replace('/1', '/2')
-        self.assertEqual(output_contract(self.pairs, changed), {})
+        # The host's next lease measured another unit of the same shard and replica, or the lease measured another
+        # group of the unit.
+        for field, value in [('unit_attempt_id', lambda row: row['unit_attempt_id'].replace('/1', '/2')),
+                             ('group_id', lambda row: '2')]:
+            changed = deepcopy(self.metadata)
+            for row in changed:
+                row[field] = value(row)
+            with self.subTest(field=field):
+                self.assertEqual(output_contract(self.pairs, changed), {})
 
     def test_duplicate_metadata_fails(self):
         with self.assertRaisesRegex(ValueError, 'duplicate'):
@@ -80,7 +84,7 @@ class TestSpecializedPatternRows(unittest.TestCase):
             for replica in (1, 2, 3):
                 tables['host-rows'].append({
                     'platform': 'c9g', 'shard_id': row['shard_id'], 'suite': row['suite'], 'replica_id': str(replica),
-                    'host_epoch': f'epoch-{replica}', 'unit_id': 'unit', 'unit_attempt_id': f'session-{replica}/1',
+                    'host_epoch': f'epoch-{replica}', 'unit_id': 'unit', 'unit_attempt_id': f'session-{replica}/1', 'group_id': '1',
                     'confirmation': 'false', 'row_id': row['row_id'], 'instance_id': f'i-{replica}',
                     'score': str(score(row, replica) if row['system'].startswith('regulator') else 100), 'score_unit': 'ns/op',
                     'outcome': 'accepted'})
