@@ -224,7 +224,7 @@ final class ScanPlanRun
                 for (int index = 0; index < set.rangeCount(); index++) {
                     RuneRange range = set.range(index);
                     if (range.high() >= 128) {
-                        if (range.low() <= 128 && range.high() == Regexp.RUNEMAX) {
+                        if (Compiler.holdsAllNonAscii(range)) {
                             matchesNonAscii = true;
                         }
                         else {

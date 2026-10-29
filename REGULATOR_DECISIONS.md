@@ -1192,8 +1192,12 @@ single-writer and the table is retained by the compiled pattern. This fixed
 bound is independent of `maxMemory`, which remains the upstream-compatible
 program and DFA planning budget, and it does not scale with the expression or
 configured budget. Unsupported shapes continue through the ordinary DFA or
-matcher path. Invalid UTF-8 bytes never match a Unicode class, while a valid
-encoded U+FFFD remains an ordinary code point; a byte class reads bytes
+matcher path. A Unicode class reads malformed UTF-8 as the ordinary engine's
+byte ranges for that class do, under the rule in
+[RE2 Scan Plans](#re2-scan-plans). A class of every non-ASCII character reads
+leniently. Any other class accepts only the encodings of its members, including
+any encoded surrogates it holds. Any other invalid byte matches nothing.
+A valid encoded U+FFFD remains an ordinary code point; a byte class reads bytes
 undecoded, so it counts malformed bytes like any others.
 
 `Re2.count`, `JavaRegexp.count`, and `RustRegexp.count` expose this counter

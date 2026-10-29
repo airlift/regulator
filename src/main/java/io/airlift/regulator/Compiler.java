@@ -545,6 +545,15 @@ final class Compiler
         pieces.addEncodedRange(encodedLow, encodedHigh);
     }
 
+    /// Returns whether `range` holds every non-ASCII rune, U+0080 through U+10FFFF. [#splitUtf8Range]
+    /// gives such a range the lenient [Utf8RangePieces#addAllNonAscii] piece, so its byte ranges
+    /// also accept the malformed sequences that piece describes; any other range accepts exactly the
+    /// encodings of its non-ASCII runes.
+    static boolean holdsAllNonAscii(RuneRange range)
+    {
+        return range.low() <= 0x80 && range.high() == Regexp.RUNEMAX;
+    }
+
     private static int maxRune(int length)
     {
         // Maximum rune encoded by a UTF-8 sequence of the specified length.
