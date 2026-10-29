@@ -82,7 +82,7 @@ def main():
             if len(actual[field]) != 64:
                 raise SystemExit(f"{platform} has invalid {field}")
         for field in ("native_compiler_package", "cmake_package", "glibc_package", "cargo_package", "rust_package",
-                      "time_package"):
+                      "time_package", "zstd_package"):
             if not actual[field]:
                 raise SystemExit(f"{platform} has no pinned {field}")
 

@@ -346,7 +346,7 @@ native_runner_build=not-used
 
 prebuilt_engine()
 {
-    # The host installs an archive, and writes its marker, only after verifying it against the manifest.
+    # The host installs an archive, and writes its marker, only after checking its controller-pinned SHA-256.
     local marker="${SHARED_WORK_DIR}/engine-build/$1.sha256"
     [[ -f "${marker}" ]] && printf 'prebuilt:%s\n' "$(cat "${marker}")"
 }

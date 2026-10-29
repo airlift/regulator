@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Package one platform's pinned Trino harness, native comparison runners, and compiled candidate, and install them on
+"""Package one platform's pinned Trino harness, native comparison runners, and compiled candidate, and unpack them on
 its unit workers."""
 
 import argparse
-import gzip
 import hashlib
 import json
 import shutil
+import subprocess
+import sys
 import tarfile
 from pathlib import Path, PurePosixPath
 
@@ -42,6 +43,13 @@ CONSOLE_LAUNCHER = "lib/junit-platform-console-standalone.jar"
 # build-engines.sh writes the builder's absolute dependency classpath here, beside the directory.
 CLASSES_DEPENDENCIES = "regulator-dependencies.txt"
 ARCHIVES = ("trino", "native", "classes")
+# A measuring worker installs only the archives its phase's units run: a baseline unit runs the candidate classes,
+# the Trino harness, and the native runners its specialized-pattern comparators need, and a language unit the
+# candidate classes and the native runners.
+UNIT_ARCHIVES = {"baseline": ("classes", "trino", "native"), "language": ("classes", "native")}
+# Archives are mostly jars, binaries, and plans that compress little further, and hosts read them from S3 in their
+# own region, where a higher level saves less download time than it costs a 2-vCPU builder to compress.
+ZSTD_LEVEL = 9
 # Beyond the candidate commit, these choose what the harness is built from and how.
 BUILD_INPUTS = (
     "tools/re2-benchmark/trino-joni/pins.env",
@@ -59,16 +67,12 @@ class EngineBuildError(ValueError):
     """An engine build is not the frozen campaign input it claims to be."""
 
 
-def stream_sha256(file):
-    digest = hashlib.sha256()
-    while chunk := file.read(1024 * 1024):
-        digest.update(chunk)
-    return digest.hexdigest()
-
-
 def sha256_file(path):
+    digest = hashlib.sha256()
     with path.open("rb") as file:
-        return stream_sha256(file)
+        while chunk := file.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def properties(path):
@@ -133,33 +137,44 @@ def language_native_files():
                   for target in LANGUAGE_NATIVE_TARGETS for suffix in ("", ".build.json"))
 
 
-def write_archive(shared, names, path):
-    # The gzip header names no file, so an archive's checksum does not depend on where it is written.
-    with path.open("wb") as output, gzip.GzipFile("", "wb", fileobj=output, mtime=0) as compressed, \
-            tarfile.open(fileobj=compressed, mode="w") as archive:
-        for name in names:
-            member = archive.gettarinfo(shared / name, arcname=name)
-            member.mtime = 0
-            member.uid = member.gid = 0
-            member.uname = member.gname = ""
-            with (shared / name).open("rb") as file:
-                archive.addfile(member, file)
-    return {"file": path.name, "sha256": sha256_file(path),
-            "files": {name: sha256_file(shared / name) for name in names}}
+def write_archive(shared, names, path, prefix=""):
+    """Write the named files, each under the prefix, as a tar compressed by the zstd CLI, and return its file name
+    and SHA-256. Members carry no times or owners, and zstd's output does not depend on its thread count, so the
+    checksum depends only on the member names, modes, and contents, the compression level, and the zstd version."""
+    try:
+        with subprocess.Popen(["zstd", f"-{ZSTD_LEVEL}", "-T0", "-q", "-f", "-o", str(path)],
+                              stdin=subprocess.PIPE) as compressor:
+            with tarfile.open(fileobj=compressor.stdin, mode="w|") as archive:
+                for name in names:
+                    member = archive.gettarinfo(shared / name, arcname=prefix + name)
+                    member.mtime = 0
+                    member.uid = member.gid = 0
+                    member.uname = member.gname = ""
+                    with (shared / name).open("rb") as file:
+                        archive.addfile(member, file)
+    except BrokenPipeError as error:
+        # zstd exited before it read the whole tar.
+        raise EngineBuildError(f"zstd could not write {path}") from error
+    if compressor.returncode != 0:
+        raise EngineBuildError(f"zstd could not write {path}")
+    return {"file": path.name, "sha256": sha256_file(path)}
 
 
-def archive_contents(path):
-    files = {}
-    with tarfile.open(path, "r:gz") as archive:
+def unpack(source, destination):
+    """Extract a tar stream into a directory, refusing any entry that is not a plain file or directory beneath it."""
+    names = set()
+    with tarfile.open(fileobj=source, mode="r|") as archive:
         for member in archive:
             name = PurePosixPath(member.name)
+            # Two spellings of one path, such as a and ./a, would extract over each other.
             if (not name.parts or name.is_absolute() or ".." in name.parts or
-                    member.name in files or not (member.isfile() or member.isdir())):
-                raise EngineBuildError(f"unsafe engine build archive entry in {path}: {member.name!r}")
-            if member.isfile():
-                with archive.extractfile(member) as content:
-                    files[member.name] = stream_sha256(content)
-    return files
+                    name.parts in names or not (member.isfile() or member.isdir())):
+                raise EngineBuildError(f"unsafe archive entry: {member.name!r}")
+            names.add(name.parts)
+            archive.extract(member, destination, filter="data")
+    # Read to the end, so the decompressor feeding the stream never writes to a closed pipe.
+    while source.read(1024 * 1024):
+        pass
 
 
 def package(shared, root, directory):
@@ -170,18 +185,16 @@ def package(shared, root, directory):
     classes = sorted(path.relative_to(shared).as_posix() for path in (shared / CLASSES_DIRECTORY).rglob("*")
                      if path.is_file())
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         **{field: environment[key] for field, key in BUILDER_FIELDS.items()},
         "inputs": {
             "trino_commit": properties(shared / TRINO_DIRECTORY / "provenance.properties")["trino_commit"],
             "build_scripts": {path: sha256_file(root / path) for path in BUILD_INPUTS},
         },
         "archives": {
-            "trino": write_archive(shared, trino_files(shared), output / "trino.tar.gz"),
-            "native": write_archive(shared, language_native_files(), output / "native.tar.gz"),
-            "classes": write_archive(shared, sorted(path.relative_to(shared).as_posix() for path in
-                                                    (shared / CLASSES_DIRECTORY).rglob("*") if path.is_file()),
-                                     output / "classes.tar.gz"),
+            "trino": write_archive(shared, trino_files(shared), output / "trino.tar.zst"),
+            "native": write_archive(shared, language_native_files(), output / "native.tar.zst"),
+            "classes": write_archive(shared, classes, output / "classes.tar.zst"),
         },
     }
     (output / MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -234,15 +247,13 @@ def validate_unit_attempt(root):
         raise EngineBuildError("engine build lacks a verified unit worker that built its own engines")
     manifest_path = root / DIRECTORY / MANIFEST
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("schema_version") != 1 or any(
+    if manifest.get("schema_version") != 2 or any(
             manifest[field] != environment[key] for field, key in BUILDER_FIELDS.items()):
         raise EngineBuildError("engine build manifest differs from its builder host")
     if set(manifest["archives"]) != set(ARCHIVES):
         raise EngineBuildError("engine build has missing or unexpected archives")
     for archive in manifest["archives"].values():
-        path = check_archive(root / DIRECTORY, archive)
-        if archive_contents(path) != archive["files"]:
-            raise EngineBuildError(f"engine build archive differs from its manifest: {archive['file']}")
+        check_archive(root / DIRECTORY, archive)
     metadata = properties(root / "run-metadata.txt")
     if metadata["unit_id"] != UNIT_ID:
         raise EngineBuildError("build metadata differs from its unit")
@@ -290,27 +301,9 @@ def load_manifest(build, manifest_sha256):
 
 
 def check_archive(build, archive):
-    """The path of a build's archive, after checking it against its manifest checksum."""
-    path = build / archive["file"]
-    if sha256_file(path) != archive["sha256"]:
+    """Check a build's archive against its manifest checksum."""
+    if sha256_file(build / archive["file"]) != archive["sha256"]:
         raise EngineBuildError(f"engine build archive checksum mismatch: {archive['file']}")
-    return path
-
-
-def unpack(build, archive, shared):
-    path = check_archive(build, archive)
-    if archive_contents(path) != archive["files"]:
-        raise EngineBuildError(f"engine build archive differs from its manifest: {archive['file']}")
-    shared.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(path, "r:gz") as files:
-        files.extractall(shared, filter="data")
-    for name, checksum in archive["files"].items():
-        if sha256_file(shared / name) != checksum:
-            raise EngineBuildError(f"installed engine file differs from its manifest: {name}")
-    # A route reads this marker to record that an engine came prebuilt, and from which archive.
-    marker = shared / DIRECTORY / (archive["file"].removesuffix(".tar.gz") + ".sha256")
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(archive["sha256"] + "\n")
 
 
 def installed_classes(shared):
@@ -321,34 +314,6 @@ def installed_classes(shared):
         raise EngineBuildError(f"no prebuilt candidate classes are installed in {shared}")
     entries = (directory / CLASSES_CLASSPATH).read_text().strip().split(":")
     return ":".join(str(directory / entry) for entry in entries), marker.read_text().strip()
-
-
-def install(build, manifest_sha256, shared, environment_path, output):
-    manifest = load_manifest(build, manifest_sha256)
-    environment = properties(environment_path)
-    if (manifest["platform"] != environment["platform"] or
-            manifest["candidate_commit"] != environment["regulator_commit"] or
-            manifest["candidate_archive_sha256"] != environment["regulator_archive_sha256"]):
-        raise EngineBuildError("engine build was made for a different platform or candidate")
-    for name in ARCHIVES:
-        unpack(build, manifest["archives"][name], shared)
-    record = {"engine_build_manifest_sha256": manifest_sha256, "trino_harness": "prebuilt",
-              "trino_archive_sha256": manifest["archives"]["trino"]["sha256"],
-              "native_archive_sha256": manifest["archives"]["native"]["sha256"],
-              "classes_archive_sha256": manifest["archives"]["classes"]["sha256"]}
-    output.write_text("".join(f"{key}={value}\n" for key, value in record.items()))
-    return record
-
-
-def checksums(build, manifest_sha256):
-    """Each verified archive's file name and SHA-256, one line each."""
-    manifest = load_manifest(build, manifest_sha256)
-    lines = []
-    for name in ARCHIVES:
-        archive = manifest["archives"][name]
-        check_archive(build, archive)
-        lines.append(f"{archive['file']} {archive['sha256']}\n")
-    return "".join(lines)
 
 
 def main():
@@ -366,27 +331,20 @@ def main():
     accept_command.add_argument("--unit-attempt", required=True)
     accept_command.add_argument("--region", required=True)
     accept_command.add_argument("--engine-tree", required=True)
-    install_command = commands.add_parser(
-        "install", help="install the prebuilt Trino harness, native runners, and candidate classes")
-    install_command.add_argument("--shared", type=Path, required=True)
-    install_command.add_argument("--environment", type=Path, required=True)
-    install_command.add_argument("--output", type=Path, required=True)
-    install_command.add_argument("--build", type=Path, required=True)
-    install_command.add_argument("--manifest-sha256", required=True)
-    checksum_command = commands.add_parser("checksum", help="print each verified archive's file and SHA-256")
-    checksum_command.add_argument("--build", type=Path, required=True)
-    checksum_command.add_argument("--manifest-sha256", required=True)
+    unpack_command = commands.add_parser(
+        "unpack", help="extract a tar stream from standard input into a directory, refusing unsafe entries")
+    unpack_command.add_argument("--destination", type=Path, required=True)
     arguments = parser.parse_args()
     if arguments.command == "package":
         package(arguments.shared, arguments.root, arguments.result_directory)
     elif arguments.command == "accept":
         accept(arguments.unit_directory, arguments.replica, arguments.group, arguments.unit_attempt, arguments.region,
                arguments.engine_tree)
-    elif arguments.command == "install":
-        install(arguments.build, arguments.manifest_sha256, arguments.shared, arguments.environment,
-                arguments.output)
     else:
-        print(checksums(arguments.build, arguments.manifest_sha256), end="")
+        try:
+            unpack(sys.stdin.buffer, arguments.destination)
+        except (EngineBuildError, tarfile.TarError) as error:
+            raise SystemExit(f"cannot unpack into {arguments.destination}: {error}") from error
 
 
 if __name__ == "__main__":

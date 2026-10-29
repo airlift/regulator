@@ -142,6 +142,7 @@ class Platform:
     cargo_package: str
     rust_package: str
     time_package: str
+    zstd_package: str
     concurrency_instance_type: str = ""
     concurrency_vcpus: int = 0
 
@@ -322,6 +323,7 @@ def read_platforms(directory):
             row["cargo_package"],
             row["rust_package"],
             row["time_package"],
+            row["zstd_package"],
             row.get("concurrency_instance_type", ""),
             int(row.get("concurrency_vcpus", 0)))
             for row in csv.DictReader(input_file, delimiter="\t")]
@@ -429,7 +431,7 @@ def write_language_bundles(arguments, result_root):
     directory.mkdir(parents=True, exist_ok=True)
     arguments.language_bundles = {}
     for shard, plan in sorted(arguments.language_plans.items()):
-        bundle = directory / f"{shard}.tar.gz"
+        bundle = directory / f"{shard}.tar.zst"
         arguments.language_bundles[shard] = (bundle, language_fleet.write_bundle(plan, bundle))
 
 
@@ -495,6 +497,14 @@ def longest_units(items):
     for item in items:
         longest[item.pool] = max(longest.get(item.pool, 0), item.estimated_seconds)
     return longest
+
+
+def pool_shards(items):
+    """Each pool's shards, whose language plan bundles its workers install."""
+    shards = {}
+    for item in items:
+        shards.setdefault(item.pool, set()).add(item.shard)
+    return {pool: sorted(names) for pool, names in shards.items()}
 
 
 def platform_has_capacity(candidate, running, arguments):
@@ -941,15 +951,6 @@ def validate_dependencies(root, arguments):
             language_fleet.validate(directory)
     else:
         subprocess.run([str(root / "tools/re2-benchmark/baseline/validate-manifest.py")], check=True)
-    # Every unit worker's wrapper ships the pinned Trino checkout, whatever its units measure.
-    trino_directory = os.environ.get("TRINO_DIR")
-    if not trino_directory:
-        raise SystemExit("campaign execution requires TRINO_DIR to name the pinned Trino checkout")
-    trino_root = Path(trino_directory)
-    expected_trino = "c7503d170344c4e266f03fdb39e53c82aa7e3594"
-    actual_trino = check_output(["git", "rev-parse", f"{expected_trino}^{{commit}}"], cwd=trino_root)
-    if actual_trino != expected_trino:
-        raise SystemExit(f"Trino checkout does not contain {expected_trino}")
 
 
 def describe_image(arguments, region, ami_id):
@@ -1065,29 +1066,78 @@ def validate_aws(arguments, platforms, jobs=None):
     arguments.region_offerings = offerings
 
 
+def engine_archives(arguments, platform):
+    """The archives of a platform's engine build that its measuring workers install, by name, for the phase's
+    units: a baseline unit runs the candidate's classes, the Trino harness, and the native runners, and a language
+    unit the classes and the native runners."""
+    manifest = engine_build.load_manifest(arguments.engine_build_directories[platform],
+                                          arguments.engine_build_policy[platform])
+    kind = "language" if getattr(arguments, "language_plans", None) else "baseline"
+    return {name: manifest["archives"][name] for name in engine_build.UNIT_ARCHIVES[kind]}
+
+
 def upload_engine_builds(arguments, jobs):
-    """Put each engine archive once in every region that may launch a host installing it."""
+    """Put each engine archive its workers install once in every region that may launch one of them."""
     directories = getattr(arguments, "engine_build_directories", None)
     if not directories:
         return
     uploads = {}
     for job in jobs:
-        build = directories[job.platform.name]
-        manifest = engine_build.load_manifest(build, arguments.engine_build_policy[job.platform.name])
-        for name, archive in manifest["archives"].items():
+        for name, archive in engine_archives(arguments, job.platform.name).items():
             for region in launch_regions(arguments, job):
-                uploads[region, f"{os.environ['TRANSFER_PREFIX']}/engine-builds/{archive['sha256']}.tar.gz"] = (
-                    build / archive["file"], archive["sha256"], f"{job.platform.name} {name} archive")
+                uploads[region, f"{os.environ['TRANSFER_PREFIX']}/engine-builds/{archive['sha256']}.tar.zst"] = (
+                    directories[job.platform.name] / archive["file"], archive["sha256"],
+                    f"{job.platform.name} {name} archive")
     upload_shared_archives(arguments, uploads)
 
 
 def upload_language_bundles(arguments, jobs):
-    """Put each language plan's bundle once in every region that may launch a worker installing it."""
+    """Put each language plan's bundle once in every region that may launch a worker of a pool that measures it."""
+    bundles = arguments.language_bundles
     upload_shared_archives(arguments, {
-        (region, f"{os.environ['TRANSFER_PREFIX']}/language-plans/{sha256}.tar.gz"): (
-            bundle, sha256, f"{shard} language plan bundle")
-        for shard, (bundle, sha256) in getattr(arguments, "language_bundles", {}).items()
-        for job in jobs for region in launch_regions(arguments, job)})
+        (region, f"{os.environ['TRANSFER_PREFIX']}/language-plans/{bundles[shard][1]}.tar.zst"): (
+            bundles[shard][0], bundles[shard][1], f"{shard} language plan bundle")
+        for job in jobs for shard in arguments.pool_shards[unit_worker_pool(job)]
+        for region in launch_regions(arguments, job)})
+
+
+def jdk_archive(campaign_root, platform):
+    return campaign_root / "jdks" / f"{platform.jdk_sha256}.tar.gz"
+
+
+def stage_jdks(arguments, jobs):
+    """Download each pinned JDK once for the campaign, verified against its pin, into the campaign root, where
+    every phase's workers take it from, and put it in the shared transfer bucket of every region that may launch a
+    worker installing it. A worker launched elsewhere carries the verified copy in its own session's bucket."""
+    buckets = shared_transfer_buckets(arguments)
+    uploads = {}
+    directory = arguments.campaign_root / "jdks"
+    directory.mkdir(parents=True, exist_ok=True)
+    # Phases running side by side download one at a time. A copy appears only once verified, so a later phase or
+    # a restart reuses it.
+    with (directory / "download.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for job in jobs:
+            path = jdk_archive(arguments.campaign_root, job.platform)
+            if path.exists():
+                continue
+            download = path.with_name(path.name + ".download")
+            print(f"downloading the {job.platform.name} JDK", flush=True)
+            # A download slower than the uploads' minimum rate for a minute fails, as a stalled upload times out.
+            subprocess.run(["curl", "--fail", "--silent", "--show-error", "--location", "--retry", "5",
+                            "--connect-timeout", "60", "--speed-limit", str(SHARED_ARCHIVE_UPLOAD_MINIMUM_RATE),
+                            "--speed-time", "60", "--output", str(download), job.platform.jdk_url], check=True)
+            if engine_build.sha256_file(download) != job.platform.jdk_sha256:
+                download.unlink()
+                raise SystemExit(f"the {job.platform.name} JDK at {job.platform.jdk_url} differs from its pin")
+            os.replace(download, path)
+    for job in jobs:
+        path = jdk_archive(arguments.campaign_root, job.platform)
+        for region in launch_regions(arguments, job):
+            if region in buckets:
+                uploads[region, f"{os.environ['TRANSFER_PREFIX']}/jdks/{job.platform.jdk_sha256}.tar.gz"] = (
+                    path, job.platform.jdk_sha256, f"{job.platform.name} JDK")
+    upload_shared_archives(arguments, uploads)
 
 
 def upload_shared_archives(arguments, uploads):
@@ -1530,6 +1580,8 @@ def job_environment(job, arguments, root, result_root):
         "CARGO_PACKAGE": job.platform.cargo_package,
         "RUST_PACKAGE": job.platform.rust_package,
         "TIME_PACKAGE": job.platform.time_package,
+        "ZSTD_PACKAGE": job.platform.zstd_package,
+        "BENCHMARK_JAVA_ARCHIVE": str(jdk_archive(arguments.campaign_root, job.platform).resolve()),
         "BASELINE_CANDIDATE_ARCHIVE": str(arguments.candidate_archive.resolve()),
         "BASELINE_CANDIDATE_ARCHIVE_SHA256": arguments.candidate_archive_sha256,
         "BASELINE_EXPECTED_ENGINE_TREE": campaign_engine_tree(arguments),
@@ -1537,19 +1589,20 @@ def job_environment(job, arguments, root, result_root):
     })
     environment["UNIT_WORKER_LIFETIME_SECONDS"] = str(UNIT_WORKER_LIFETIME_SECONDS)
     # Only a measuring phase's workers install engine builds; never pass the controller's own environment through.
-    environment.pop("ENGINE_BUILD_DIRECTORY", None)
+    environment.pop("ENGINE_BUILD_ARCHIVES", None)
     environment.pop("ENGINE_BUILD_MANIFEST_SHA256", None)
-    directories = getattr(arguments, "engine_build_directories", None)
-    if directories:
-        environment["ENGINE_BUILD_DIRECTORY"] = str(directories[job.platform.name].resolve())
+    if getattr(arguments, "engine_build_directories", None):
         environment["ENGINE_BUILD_MANIFEST_SHA256"] = arguments.engine_build_policy[job.platform.name]
+        environment["ENGINE_BUILD_ARCHIVES"] = " ".join(
+            f"{name}={archive['sha256']}" for name, archive in engine_archives(arguments, job.platform.name).items())
     for name in ("LANGUAGE_PLAN_BUNDLE_SHA256S", "LANGUAGE_CANDIDATE_PROVENANCE", "LANGUAGE_CANDIDATE_PROVENANCE_SHA256"):
         environment.pop(name, None)
     bundles = getattr(arguments, "language_bundles", None)
     if bundles:
-        # A language worker installs each plan's bundle and builds the candidate its provenance names.
+        # A language worker installs the bundles of its pool's plans and the candidate provenance their units measure.
         environment.update({
-            "LANGUAGE_PLAN_BUNDLE_SHA256S": " ".join(sha256 for _, sha256 in sorted(bundles.values())),
+            "LANGUAGE_PLAN_BUNDLE_SHA256S": " ".join(
+                bundles[shard][1] for shard in arguments.pool_shards[unit_worker_pool(job)]),
             "LANGUAGE_CANDIDATE_PROVENANCE": str(arguments.candidate_provenance.resolve()),
             "LANGUAGE_CANDIDATE_PROVENANCE_SHA256": hashlib.sha256(arguments.candidate_provenance.read_bytes()).hexdigest(),
         })
@@ -1760,6 +1813,18 @@ def single_session(result_root, job):
     if len(sessions) != 1:
         raise RuntimeError(f"{job.identity} produced {len(sessions)} session directories")
     return sessions[0]
+
+
+def boot_to_first_unit(session, job):
+    """Seconds from a worker's boot to the start of its first unit, by the startup timeline its host uploaded, or
+    None when the host uploaded none or never began a unit."""
+    path = session / job.platform.architecture / "re2-results" / "startup-timeline.tsv"
+    try:
+        with path.open(newline="") as input_file:
+            steps = {row["step"]: row for row in csv.DictReader(input_file, delimiter="\t")}
+        return float(steps["worker"]["finished"]) - float(steps["boot"]["started"])
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
 
 
 def write_attempt(path, job, outcome, detail="-"):
@@ -2799,8 +2864,13 @@ class UnitDispatcher:
 
             self.reconcile(worker, keys, fetch, classification if status != 0 else "none")
         worker.started |= shows_worker_start(keys)
+        # The attempt's record reports how long its host took from boot to its first unit.
+        startup = boot_to_first_unit(session, worker.job)
+        details = [] if status == 0 else [detail]
+        if startup is not None:
+            details.append(f"boot_to_first_unit_seconds={startup:.1f}")
         write_attempt(self.attempts_path, worker.job, "stopped" if status == 0 else classification,
-                      "-" if status == 0 else detail)
+                      "; ".join(details) or "-")
         pool = worker.pool
         self.release_slot(worker.job, worker.slot, worker.slot_failures, worker.started, status,
                           classification, detail, worker.job.host_epoch in self.terminated)
@@ -3255,6 +3325,7 @@ def main():
                              mirror=kind == "baseline")
     arguments.unit_platforms = pool_platforms(platforms, items)
     arguments.longest_units = longest_units(items)
+    arguments.pool_shards = pool_shards(items)
     validate_configuration(arguments, items)
     validate_durable_paths(root, arguments, result_root)
     items_path = result_root / "work-items.tsv"
@@ -3270,6 +3341,7 @@ def main():
         workers = [unit_worker_job(arguments.unit_platforms[pool], 0, 0, "spot")
                    for pool in sorted({item.pool for item in items})]
         validate_aws(arguments, platforms, workers)
+        stage_jdks(arguments, workers)
         upload_engine_builds(arguments, workers)
         if arguments.language_plan:
             write_language_bundles(arguments, result_root)

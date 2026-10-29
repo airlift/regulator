@@ -3,6 +3,7 @@ import copy
 import io
 import itertools
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -494,14 +495,14 @@ class TestFleet(unittest.TestCase):
                         fleet.main()
                     self.assertEqual(exited.exception.code, status)
 
-    def test_worker_installs_the_plan_bundle_by_shard(self):
+    def test_plan_bundle_unpacks_as_its_shard(self):
         self.prepare_small_plan()
-        bundle = self.root / "plan.tar.gz"
+        bundle = self.root / "plan.tar.zst"
         sha256 = fleet.write_bundle(self.directory, bundle)
-        self.assertEqual(sha256, fleet.write_bundle(self.directory, self.root / "renamed.tar.gz"))
-        with self.assertRaisesRegex(ValueError, "checksum"):
-            fleet.install_bundle(bundle, "0" * 64, self.root / "plans")
-        fleet.install_bundle(bundle, sha256, self.root / "plans")
+        self.assertEqual(sha256, fleet.write_bundle(self.directory, self.root / "renamed.tar.zst"))
+        # A worker unpacks the bundle into its plans directory, as run-host.sh streams it.
+        stream = subprocess.run(["zstd", "-dcq", str(bundle)], capture_output=True, check=True).stdout
+        fleet.engine_build.unpack(io.BytesIO(stream), self.root / "plans")
         self.assertEqual(fleet.validate(self.root / "plans/language-lifecycle"), fleet.validate(self.directory))
 
     def run_campaign(self, measured=lambda platform, partition: {}, directories=None,

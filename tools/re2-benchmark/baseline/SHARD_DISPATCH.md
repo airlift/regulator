@@ -139,9 +139,10 @@ top-level JMH JSON file.
 
 ### Engine Builds
 
-A host installs the candidate's compiled classes and the pinned Trino harness
-from its platform's [engine build](../aws/README.md#engine-builds) instead of
-building them, and runs no Maven. Each route builds its classpath from the
+A baseline unit worker installs the candidate's compiled classes and the
+pinned Trino harness from its platform's
+[engine build](../aws/README.md#engine-builds) instead of building them, and
+runs no Maven. Each route builds its classpath from the
 installed `regulator-classes/classpath.txt` and runs its semantic tests on it
 with the JUnit console launcher, from the source root, selecting the test
 classes `shard-dispatch.tsv` names as Surefire's `-Dtest` would. Each route's
@@ -152,12 +153,12 @@ shard's native comparator runner, `native_runner_build` as
 records the installed build. A route fails, and is retried, when an engine it
 needs is missing or the harness fails its identity check. Engine builds change
 where the classes and engines came from, not what a route measures or how it
-is accepted and reduced. The same build installs the native RE2 and Rust
-runners on every unit worker, at `language-native/<runner>` under the shared
-work directory, with `engine-build/native.sha256` naming their archive; a
+is accepted and reduced. A baseline unit worker also installs the native RE2
+and Rust runners, at `language-native/<runner>` under the shared work
+directory, with `engine-build/native.sha256` naming their archive; a
 specialized shard's native-access route runs its comparator's runner from
-there.
-A language unit runs the same runners.
+there. A language unit worker installs the same classes and runners, without
+the harness.
 
 ## Work Units
 

@@ -1,8 +1,10 @@
 import importlib.util
-import json
+import io
 import re
 import shutil
+import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +22,13 @@ NATIVE_BUILD_SPEC.loader.exec_module(NATIVE_BUILD)
 ROOT = SCRIPT.parents[3]
 PLATFORMS = tuple((name, row["architecture"], row["instance_type"])
                   for name, row in ENGINE_BUILD.load_platforms(SCRIPT.parent / "platforms.tsv").items())
+
+
+def members(path):
+    """An archive's member names, as a host's zstd reads them."""
+    stream = subprocess.run(["zstd", "-dcq", str(path)], capture_output=True, check=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(stream)) as archive:
+        return sorted(archive.getnames())
 
 
 class TestEngineBuild(unittest.TestCase):
@@ -78,12 +87,15 @@ class TestEngineBuild(unittest.TestCase):
         self.assertEqual(ENGINE_BUILD.validate_unit_attempt(result), receipt)
         self.assertEqual(ENGINE_BUILD.sha256_file(result / "engine-build/engine-build.json"),
                          receipt["observed_rows_sha256"])
-        archives = json.loads((result / "engine-build/engine-build.json").read_text())["archives"]
-        self.assertEqual(sorted(archives["trino"]["files"]),
+        self.assertEqual(members(result / "engine-build/trino.tar.zst"),
                          ["pinned-trino/classes/io/trino/Benchmark.class", "pinned-trino/classpath.txt",
                           "pinned-trino/joni-jar.path", "pinned-trino/provenance.properties"])
+        # The archive carries exactly the runners the language build produces, each beside its build receipt.
+        self.assertEqual(members(result / "engine-build/native.tar.zst"),
+                         sorted(f"{ENGINE_BUILD.LANGUAGE_NATIVE_DIRECTORY}/{runner}{suffix}"
+                                for runner in NATIVE_BUILD.SOURCES for suffix in ("", ".build.json")))
         classes = shared / ENGINE_BUILD.CLASSES_DIRECTORY
-        self.assertEqual(sorted(archives["classes"]["files"]), [
+        self.assertEqual(members(result / "engine-build/classes.tar.zst"), [
             "regulator-classes/classes/io/airlift/Fixture.class", "regulator-classes/classpath.txt",
             "regulator-classes/lib/jmh-core-1.37.jar", "regulator-classes/lib/junit-platform-console-standalone.jar",
             "regulator-classes/lib/slice-2.8.jar", "regulator-classes/test-classes/io/airlift/Fixture.class"])
@@ -92,10 +104,7 @@ class TestEngineBuild(unittest.TestCase):
         # The harness runs the packaged candidate classes, not the builder's.
         self.assertEqual(f"{trino / 'classes'}:{classes / 'classes'}:{classes / 'lib/slice-2.8.jar'}",
                          (trino / "classpath.txt").read_text())
-        environment = root / "host-environment.txt"
-        environment.write_text(f"platform={name}\nregulator_commit={candidate}\n"
-                               "regulator_archive_sha256=" + "5" * 64 + "\n")
-        return result / ENGINE_BUILD.DIRECTORY, receipt, environment
+        return result / ENGINE_BUILD.DIRECTORY, receipt
 
     def test_build_phase_accepts_one_build_per_platform_from_the_checkout_scripts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -109,49 +118,33 @@ class TestEngineBuild(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.package(root)
-            (root / "r8i/engine-build.txt").write_text("trino_harness=prebuilt\n")
+            (root / "r8i/engine-build.txt").write_text("engine_build_manifest_sha256=" + "a" * 64 + "\n")
             with self.assertRaisesRegex(ENGINE_BUILD.EngineBuildError, "built its own engines"):
                 ENGINE_BUILD.validate_unit_attempt(root / "r8i")
 
-    def test_host_installs_the_prebuilt_trino_harness_native_runners_and_candidate_classes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            build, receipt, environment = self.package(root)
-            manifest_sha256 = receipt["observed_rows_sha256"]
-            shared = root / "host-shared"
-            record = ENGINE_BUILD.install(build, manifest_sha256, shared, environment, root / "engine-build.txt")
+    def test_unpack_refuses_a_second_spelling_of_a_path_and_links(self):
+        def entry(name, kind=tarfile.REGTYPE):
+            member = tarfile.TarInfo(name)
+            member.type = kind
+            member.linkname = "" if kind == tarfile.REGTYPE else "classes/a"
+            return member
 
-            self.assertEqual("prebuilt", record["trino_harness"])
-            self.assertTrue((shared / "pinned-trino/classes/io/trino/Benchmark.class").is_file())
-            self.assertTrue((shared / "engine-build/trino.sha256").is_file())
-            for runner in NATIVE_BUILD.SOURCES:
-                self.assertTrue((shared / "language-native" / runner).is_file())
-                self.assertTrue((shared / "language-native" / f"{runner}.build.json").is_file())
-            self.assertTrue((shared / "engine-build/native.sha256").is_file())
-            classes = shared / "regulator-classes"
-            self.assertEqual(
-                (f"{classes}/test-classes:{classes}/classes:{classes}/lib/slice-2.8.jar:{classes}/lib/jmh-core-1.37.jar",
-                 record["classes_archive_sha256"]),
-                ENGINE_BUILD.installed_classes(shared))
-            self.assertIn(f"engine_build_manifest_sha256={manifest_sha256}\n",
-                          (root / "engine-build.txt").read_text())
+        for refused in (entry("./classes/a"), entry("classes//a"), entry("classes/b", tarfile.SYMTYPE),
+                        entry("classes/b", tarfile.LNKTYPE)):
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w") as archive:
+                for member in (entry("classes/a"), refused):
+                    archive.addfile(member)
+            stream.seek(0)
+            with self.subTest(name=refused.name, type=refused.type), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(ENGINE_BUILD.EngineBuildError,
+                                            f"unsafe archive entry: '{re.escape(refused.name)}'"):
+                    ENGINE_BUILD.unpack(stream, Path(directory))
 
     def test_build_script_builds_every_native_runner(self):
         script = (SCRIPT.parent / "build-engines.sh").read_text()
         targets = re.search(r'RE2_BENCHMARK_TARGETS="([^"]*)"', script)[1].split()
         self.assertEqual(sorted(NATIVE_BUILD.SOURCES), sorted(targets))
-
-    def test_host_refuses_archive_that_differs_from_its_checksum(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            build, receipt, environment = self.package(root)
-            manifest_sha256 = receipt["observed_rows_sha256"]
-            with (build / "trino.tar.gz").open("ab") as archive:
-                archive.write(b"tampered")
-            with self.assertRaisesRegex(ENGINE_BUILD.EngineBuildError, "checksum mismatch"):
-                ENGINE_BUILD.install(build, manifest_sha256, root / "host-shared", environment,
-                                     root / "engine-build.txt")
-            self.assertFalse((root / "host-shared/engine-build/trino.sha256").exists())
 
 
 if __name__ == "__main__":

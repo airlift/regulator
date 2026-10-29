@@ -62,12 +62,14 @@ class TestRunCampaign(unittest.TestCase):
             "glibc",
             "cargo",
             "rust",
-            "time")
+            "time",
+            "zstd")
 
     def arguments(self, root, maximum_concurrent=1):
         return SimpleNamespace(
             phase="smoke",
             campaign_id="baseline",
+            campaign_root=root / "campaign",
             max_concurrent=maximum_concurrent,
             candidate_archive=root / "candidate.tar.gz",
             candidate_archive_sha256="0" * 64,
@@ -167,7 +169,7 @@ class TestRunCampaign(unittest.TestCase):
                 receipts = []
                 for platform in test_engine_build.PLATFORMS:
                     package = {"candidate": candidate, "trino_commit": pin, **options}
-                    _, receipt, _ = test_engine_build.TestEngineBuild().package(root, platform, **package)
+                    _, receipt = test_engine_build.TestEngineBuild().package(root, platform, **package)
                     directory = RUN_CAMPAIGN.unit_attempt_directory(builds, receipt)
                     directory.parent.mkdir(parents=True)
                     (root / platform[0]).rename(directory)
@@ -192,20 +194,28 @@ class TestRunCampaign(unittest.TestCase):
                     with self.assertRaisesRegex(SystemExit, "engine builds are not accepted: .*" + error):
                         RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments)
 
+    def engine_build(self, directory):
+        """Write a platform's three engine archives, each holding its own name, and their engine build manifest;
+        returns the archives' metadata and the manifest's SHA-256."""
+        archives = {}
+        for name in RUN_CAMPAIGN.engine_build.ARCHIVES:
+            (directory / f"{name}.tar.zst").write_bytes(name.encode())
+            archives[name] = {"file": f"{name}.tar.zst", "sha256": hashlib.sha256(name.encode()).hexdigest()}
+        (directory / "engine-build.json").write_text(json.dumps({"archives": archives}))
+        return archives, hashlib.sha256((directory / "engine-build.json").read_bytes()).hexdigest()
+
     def test_engine_archives_upload_once_per_region(self):
         with tempfile.TemporaryDirectory() as temporary:
             build = Path(temporary)
-            (build / "trino.tar.gz").write_bytes(b"trino")
-            trino = hashlib.sha256(b"trino").hexdigest()
-            (build / "engine-build.json").write_text(
-                json.dumps({"archives": {"trino": {"file": "trino.tar.gz", "sha256": trino}}}))
+            archives, manifest = self.engine_build(build)
+            trino, classes, native = (archives[name]["sha256"] for name in ("trino", "classes", "native"))
             arguments = SimpleNamespace(
                 regions=["us-west-2", "us-east-2"], transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
-                engine_build_directories={"r8i": build},
-                engine_build_policy={"r8i": hashlib.sha256((build / "engine-build.json").read_bytes()).hexdigest()})
+                engine_build_directories={"r8i": build}, engine_build_policy={"r8i": manifest})
             jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
-            present = {("east", f"prefix/engine-builds/{trino}.tar.gz"): base64.b64encode(bytes.fromhex(trino)).decode()}
-            for stalls, expected_puts in ((1, 2), (RUN_CAMPAIGN.SHARED_ARCHIVE_UPLOAD_ATTEMPTS, None)):
+            present = {("east", f"prefix/engine-builds/{sha256}.tar.zst"):
+                       base64.b64encode(bytes.fromhex(sha256)).decode() for sha256 in (trino, classes, native)}
+            for stalls, expected_puts in ((1, 4), (RUN_CAMPAIGN.SHARED_ARCHIVE_UPLOAD_ATTEMPTS, None)):
                 with self.subTest(stalls=stalls):
                     puts = []
 
@@ -225,13 +235,16 @@ class TestRunCampaign(unittest.TestCase):
                             patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws), \
                             contextlib.redirect_stdout(io.StringIO()):
                         if expected_puts is None:
-                            with self.assertRaisesRegex(SystemExit, "could not upload the r8i trino archive to s3://west/"):
+                            with self.assertRaisesRegex(SystemExit, "could not upload the r8i (classes|trino|native) "
+                                                                    "archive to s3://west/"):
                                 RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
                             continue
                         RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
-                    # Each region gets the archive once; Ohio already holds it, and the stalled first
-                    # upload is retried.
-                    self.assertEqual([("west", f"prefix/engine-builds/{trino}.tar.gz")], sorted(set(puts)))
+                    # Every region but Ohio, which already holds them, gets one copy of each archive a baseline unit
+                    # runs, and the stalled first upload is retried.
+                    self.assertEqual(sorted([("west", f"prefix/engine-builds/{trino}.tar.zst"),
+                                             ("west", f"prefix/engine-builds/{classes}.tar.zst"),
+                                             ("west", f"prefix/engine-builds/{native}.tar.zst")]), sorted(set(puts)))
                     self.assertEqual(expected_puts, len(puts))
 
     def test_spot_only_launcher_rejects_on_demand_before_aws(self):
@@ -508,18 +521,25 @@ class TestRunCampaign(unittest.TestCase):
         # A language campaign's worker also fetches the candidate provenance its plan bundles name.
         provenance_check = f"'{'2' * 64}' /tmp/candidate-provenance.tsv | sha256sum --check -"
         language = f"LANGUAGE_PLAN_BUNDLE_SHA256S={'1' * 64} LANGUAGE_CANDIDATE_PROVENANCE_SHA256={'2' * 64}"
+        # The host installs exactly the archives the wrapper staged for it, one per line.
+        archives = (f"jdk {'3' * 64} s3://transfer/jdks/{'3' * 64}.tar.gz\n"
+                    f"classes {'4' * 64} s3://transfer/classes.tar.zst\n")
         for settings in ("", language):
             with self.subTest(language=bool(settings)), tempfile.TemporaryDirectory() as temporary_directory:
                 user_data = Path(temporary_directory) / "user-data.sh"
                 script = (
                     f"{function}\n"
-                    f"{settings} create_user_data test x86_64 result.tar.gz {user_data} ami url sha\n"
+                    f"HOST_ARCHIVES={shlex.quote(archives)} {settings} "
+                    f"create_user_data test x86_64 result.tar.gz {user_data} ami url sha\n"
                     f"bash -n {user_data}\n")
 
                 result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
 
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(bool(settings), provenance_check in user_data.read_text())
+                text = user_data.read_text()
+                self.assertEqual(bool(settings), provenance_check in text)
+                self.assertIn(f"export HOST_ARCHIVES='{archives}'\n", text)
+                self.assertIn("printf 'step\\tstarted\\tfinished\\n' > \"${RESULT_DIR}/startup-timeline.tsv\"", text)
 
     def test_a_unit_worker_lists_only_its_leases(self):
         source = AWS_RUNNER.read_text()
@@ -546,21 +566,144 @@ class TestRunCampaign(unittest.TestCase):
             listing = next(statement for statement in policy["Statement"] if statement["Action"] == "s3:ListBucket")
             self.assertEqual({"StringLike": {"s3:prefix": "campaign/session/input/leases/*"}}, listing["Condition"])
 
-    def test_host_installs_rust_exactly_when_the_controller_expects_it(self):
+    def test_host_installs_the_build_toolchain_exactly_when_the_controller_expects_it(self):
         host = (AWS_RUNNER.parent / "run-host.sh").read_text()
-        install = host[host.index("install_packages()\n{"):host.index("\n}\n\ninstall_java()") + 2]
         controller = AWS_RUNNER.read_text()
-        expected = controller[controller.index("expected_cargo_package=${CARGO_PACKAGE}"):
+        expected = controller[controller.index("expected_native_compiler_package=${NATIVE_COMPILER_PACKAGE}"):
                               controller.index("if [[ ! -f \"${environment_manifest}\" ]]")]
-        # A build phase's worker, with no prebuilt engines, builds the native Rust runners.
+        pins = {"NATIVE_COMPILER_PACKAGE": "gcc-pin", "CMAKE_PACKAGE": "cmake-pin", "CARGO_PACKAGE": "cargo-pin",
+                "RUST_PACKAGE": "rust-pin"}
+        # A build phase's worker, with no prebuilt engines, builds them; a measuring worker runs them prebuilt.
         for manifest in ("", "a" * 64):
-            script = (f"sudo() {{ echo \"$*\"; }}\nCARGO_PACKAGE=cargo-pin\nRUST_PACKAGE=rust-pin\n{install}\n"
-                      f"ENGINE_BUILD_MANIFEST_SHA256={manifest}\ninstall_packages\n{expected}\n"
-                      "echo \"expected=${expected_cargo_package}\"\n")
+            script = ("sudo() { echo \"installed $*\"; }\n"
+                      + "".join(f"{name}={pin}\n" for name, pin in pins.items())
+                      + f"{shell_function(host, 'install_packages')}ENGINE_BUILD_MANIFEST_SHA256={manifest}\n"
+                      f"install_packages\n{expected}\n"
+                      "echo \"expected ${expected_native_compiler_package} ${expected_cmake_package}"
+                      " ${expected_cargo_package} ${expected_rust_package}\"\n")
             output = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=True).stdout
+            installed = " ".join(line for line in output.splitlines() if line.startswith("installed"))
+            expected_packages = output.splitlines()[-1].split()[1:]
             with self.subTest(manifest=manifest):
-                self.assertEqual("cargo-pin rust-pin" in output, "expected=cargo-pin" in output)
-                self.assertEqual("cargo-pin rust-pin" in output, not manifest)
+                for pin in pins.values():
+                    self.assertEqual(pin in installed, not manifest)
+                self.assertEqual(expected_packages, ["not-installed"] * 4 if manifest else list(pins.values()))
+                # No worker installs perf.
+                self.assertNotIn("perf", installed.split())
+
+    def install_host_archives(self, root, archives, manifest="a" * 64):
+        """Run run-host.sh's archive install for (name, SHA-256, path) archives, with S3 a local directory."""
+        host = (AWS_RUNNER.parent / "run-host.sh").read_text()
+        script = ('aws() { echo "$*" >> "${AWS_CALLS}"; cat "${3#s3://bucket}"; }\nsleep() { :; }\nset -euo pipefail\n'
+                  + shell_functions(host, "timeline", "unpack", "install_archive", "install_archives")
+                  + 'TRINO_ARCHIVE_SHA256=none\ninstall_archives\necho "trino=${TRINO_ARCHIVE_SHA256}"\n')
+        (root / "results").mkdir(exist_ok=True)
+        environment = {
+            **os.environ, "REGULATOR_DIR": str(SCRIPT.parents[3]), "RESULT_DIR": str(root / "results"),
+            "STARTUP_TIMELINE": str(root / "results/startup-timeline.tsv"), "BASELINE_REGION": "us-west-2",
+            "BASELINE_SHARED_WORK_DIR": str(root / "shared"), "ENGINE_BUILD_MANIFEST_SHA256": manifest,
+            "AWS_CALLS": str(root / "aws-calls.txt"),
+            "HOST_ARCHIVES": "".join(f"{name} {sha256} s3://bucket{path}\n" for name, sha256, path in archives)}
+        return subprocess.run(["bash"], input=script, env=environment, text=True, capture_output=True)
+
+    def test_host_streams_the_engine_archives_its_units_run_into_place(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build, receipt = test_engine_build.TestEngineBuild().package(root)
+            archives = json.loads((build / "engine-build.json").read_text())["archives"]
+            sources = [build / archives[name]["file"] for name in ("classes", "trino")]
+            result = self.install_host_archives(
+                root, [(name, archives[name]["sha256"], source) for name, source in zip(("classes", "trino"), sources)],
+                receipt["observed_rows_sha256"])
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            # Each archive is downloaded once.
+            self.assertEqual(
+                [f"s3 cp s3://bucket{source} - --region us-west-2 --only-show-errors" for source in sources],
+                (root / "aws-calls.txt").read_text().splitlines())
+            shared = root / "shared"
+            self.assertTrue((shared / "pinned-trino/classes/io/trino/Benchmark.class").is_file())
+            self.assertFalse((shared / "language-native").exists())
+            classes = shared / "regulator-classes"
+            self.assertEqual("test-classes\n", (classes / "test-classes/io/airlift/Fixture.class").read_text())
+            self.assertEqual(
+                (f"{classes}/test-classes:{classes}/classes:{classes}/lib/slice-2.8.jar:"
+                 f"{classes}/lib/jmh-core-1.37.jar", archives["classes"]["sha256"]),
+                RUN_CAMPAIGN.engine_build.installed_classes(shared))
+            self.assertEqual(archives["trino"]["sha256"] + "\n", (shared / "engine-build/trino.sha256").read_text())
+            self.assertEqual([f"engine_build_manifest_sha256={receipt['observed_rows_sha256']}",
+                              f"classes_archive_sha256={archives['classes']['sha256']}",
+                              f"trino_archive_sha256={archives['trino']['sha256']}"],
+                             (root / "results/engine-build.txt").read_text().splitlines())
+            self.assertIn(f"trino={archives['trino']['sha256']}", result.stdout)
+            # Each archive adds its step to the startup timeline.
+            steps = [line.split("\t") for line in (root / "results/startup-timeline.tsv").read_text().splitlines()]
+            self.assertEqual(["classes", "trino"], [step[0] for step in steps])
+            self.assertTrue(all(float(started) <= float(finished) for _, started, finished in steps))
+            self.assertEqual([], list(shared.glob(".install.*")))
+
+    def test_host_refuses_an_archive_that_fails_its_pin_or_holds_an_unsafe_entry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            build, _ = test_engine_build.TestEngineBuild().package(root)
+            classes = json.loads((build / "engine-build.json").read_text())["archives"]["classes"]
+            unsafe = root / "unsafe.tar.zst"
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode="w") as archive:
+                for name in ("regulator-classes/classpath.txt", "../escaped.txt"):
+                    member = tarfile.TarInfo(name)
+                    member.size = len(name)
+                    archive.addfile(member, io.BytesIO(name.encode()))
+            subprocess.run(["zstd", "-q", "-o", str(unsafe)], input=stream.getvalue(), check=True)
+            unsafe_sha256 = hashlib.sha256(unsafe.read_bytes()).hexdigest()
+            for case, archive, error in (
+                    ("pin mismatch", ("classes", "0" * 64, build / classes["file"]),
+                     f"Archive s3://bucket{build / classes['file']} has SHA-256 {classes['sha256']}, not its pinned "
+                     f"{'0' * 64}"),
+                    ("unsafe entry", ("classes", unsafe_sha256, unsafe), "unsafe archive entry: '../escaped.txt'")):
+                with self.subTest(case=case):
+                    shutil.rmtree(root / "shared", ignore_errors=True)
+                    result = self.install_host_archives(root, [archive])
+
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn(error, result.stderr)
+                    # A refused archive leaves nothing installed, staged, or written outside its destination.
+                    self.assertEqual([], list((root / "shared").iterdir()))
+                    self.assertFalse((root / "escaped.txt").exists())
+
+    def test_worker_installs_only_the_archives_its_pool_runs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archives, manifest = self.engine_build(root)
+            language_platform = RUN_CAMPAIGN.replace(self.platform, instance_type="r8i.large", vcpus=2)
+            bundles = {"language-bulk": (root / "bulk.tar.zst", "1" * 64),
+                       "language-lifecycle": (root / "lifecycle.tar.zst", "2" * 64)}
+            (root / "provenance.tsv").write_text("provenance\n")
+            for kind, platform, language, expected, expected_bundles in (
+                    # A baseline pool also runs the native runners its specialized-pattern comparators need.
+                    ("baseline", self.platform, {}, ("classes", "trino", "native"), ""),
+                    # A language pool runs the native runners and the plans of its own shards.
+                    ("language", language_platform, {"language_plans": {"language-lifecycle": root},
+                                                     "language_bundles": bundles,
+                                                     "candidate_provenance": root / "provenance.tsv"},
+                     ("classes", "native"), "2" * 64)):
+                with self.subTest(kind=kind):
+                    arguments = self.arguments(root)
+                    arguments.engine_build_directories = {"r8i": root}
+                    arguments.engine_build_policy = {"r8i": manifest}
+                    # The other pool's shard has a bundle too, which the language pool's worker leaves alone.
+                    arguments.pool_shards = {("r8i", "r8i.2xlarge"): ["language-bulk"],
+                                             ("r8i", "r8i.large"): ["language-lifecycle"]}
+                    for name, value in language.items():
+                        setattr(arguments, name, value)
+                    job = RUN_CAMPAIGN.unit_worker_job(platform, 1, 10, "spot")
+                    environment = RUN_CAMPAIGN.job_environment(job, arguments, root, root)
+                    self.assertEqual(" ".join(f"{name}={archives[name]['sha256']}" for name in expected),
+                                     environment["ENGINE_BUILD_ARCHIVES"])
+                    self.assertEqual(expected_bundles, environment.get("LANGUAGE_PLAN_BUNDLE_SHA256S", ""))
+                    # Every phase's workers carry the one copy of the JDK staged under the campaign root.
+                    self.assertEqual(str(root.resolve() / "campaign" / "jdks" / f"{self.platform.jdk_sha256}.tar.gz"),
+                                     environment["BENCHMARK_JAVA_ARCHIVE"])
 
     def test_shared_transfer_bucket_requires_prefix(self):
         result = subprocess.run(
@@ -937,10 +1080,10 @@ class TestRunCampaign(unittest.TestCase):
             self.platform,
             RUN_CAMPAIGN.Platform(
                 "r8g", "arm", "r8g.2xlarge", 8, "ami", "jdk", "0" * 64,
-                "gcc", "cmake", "glibc", "cargo", "rust", "time"),
+                "gcc", "cmake", "glibc", "cargo", "rust", "time", "zstd"),
             RUN_CAMPAIGN.Platform(
                 "r9g", "arm", "r9g.2xlarge", 8, "ami", "jdk", "0" * 64,
-                "gcc", "cmake", "glibc", "cargo", "rust", "time"),
+                "gcc", "cmake", "glibc", "cargo", "rust", "time", "zstd"),
         ]
         arguments = SimpleNamespace(campaign_id="baseline", max_concurrent=64, phase="primary")
         items = self.replica_items(arguments, platforms, [f"unit-{index}" for index in range(33)], 2700)
@@ -957,6 +1100,7 @@ class TestRunCampaign(unittest.TestCase):
             candidate_archive = root / "candidate.tar.gz"
             arguments = SimpleNamespace(
                 campaign_id="baseline",
+                campaign_root=root,
                 candidate_archive=candidate_archive,
                 candidate_archive_sha256="0" * 64,
                 engine_tree="d" * 40,
@@ -1233,7 +1377,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                 "--profile benchmark --region us-east-1 sts get-caller-identity",
             ])
 
-    def test_job_environment_does_not_invent_aws_profile_or_trino_checkout(self):
+    def test_job_environment_does_not_invent_an_aws_profile(self):
         with tempfile.TemporaryDirectory() as temporary_directory, \
                 patch.dict(os.environ, {}, clear=True):
             root = Path(temporary_directory)
@@ -1245,18 +1389,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                     RUN_CAMPAIGN.place(job, RUN_CAMPAIGN.launch_placements(arguments, job)[0]), arguments, root, root)
 
             self.assertNotIn("AWS_PROFILE", environment)
-            self.assertNotIn("TRINO_DIR", environment)
-
-    def test_every_campaign_requires_the_trino_checkout_its_workers_ship(self):
-        # The wrapper ships the pinned Trino checkout to every unit worker, so preflight refuses a baseline
-        # campaign, whatever its shards, and a language campaign without it.
-        for name, arguments in (("baseline", SimpleNamespace()),
-                                ("language", SimpleNamespace(language_plans={"language-bulk": Path("plan")}))):
-            with self.subTest(campaign=name), tempfile.TemporaryDirectory() as temporary_directory, \
-                    patch.dict(os.environ, {}, clear=True), patch.object(RUN_CAMPAIGN.subprocess, "run"), \
-                    patch.object(RUN_CAMPAIGN.language_fleet, "validate"), \
-                    self.assertRaisesRegex(SystemExit, "requires TRINO_DIR"):
-                RUN_CAMPAIGN.validate_dependencies(Path(temporary_directory), arguments)
 
     def test_termination_signal_marks_campaign_failed(self):
         source = AWS_RUNNER.read_text()
@@ -2528,6 +2660,13 @@ class FakeUnitHost:
             f"failure_detail={detail}\naws_region={self.region}\n")
         if status == 0:
             (self.session_directory / "campaign-success").touch()
+            if self.leases:
+                # The host archive the wrapper unpacks carries the startup timeline of a host that began a unit.
+                results = self.session_directory / self.architecture / "re2-results"
+                results.mkdir(parents=True, exist_ok=True)
+                (results / "startup-timeline.tsv").write_text(
+                    "step\tstarted\tfinished\nboot\t1000.000\t1000.000\npackages\t1010.000\t1100.000\n"
+                    "worker\t1200.000\t1250.500\n")
         self.status = status
         self.fleet.log.append(("exit", self.session))
 
@@ -2664,7 +2803,7 @@ class TestUnitWorkers(unittest.TestCase):
             on_demand or job.market == "spot", "fleet quota or pending-launch limit")
         budget.reservations.return_value = fleet.reservations or []
         arguments = SimpleNamespace(
-            phase=phase, campaign_id="campaign", max_concurrent=max_concurrent,
+            phase=phase, campaign_id="campaign", campaign_root=root, max_concurrent=max_concurrent,
             max_concurrent_per_platform=per_platform, candidate_archive=root / "candidate.tar.gz",
             candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
             shared_budget=budget, selected_shards=shards, regions=regions, topology_deadline_seconds=deadline,
@@ -2782,6 +2921,11 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual(sorted(estimates, reverse=True), estimates)
                 self.assertEqual(True, host.leases[3].get("stop"))
                 self.assertEqual(0, host.status)
+            # Each stopped worker's attempt reports how long its host took from boot to its first unit.
+            with (result_root / "job-attempts.tsv").open(newline="") as attempts:
+                stopped = [row for row in csv.DictReader(attempts, delimiter="\t") if row["outcome"] == "stopped"]
+            self.assertEqual(2, len(stopped))
+            self.assertEqual({"boot_to_first_unit_seconds=250.5"}, {row["detail"] for row in stopped})
             # Each group's upload timings, as its marker reports them, are kept beside the accepted groups.
             with (result_root / unit_dispatch.UNIT_UPLOADS).open(newline="") as uploads:
                 self.assertEqual(

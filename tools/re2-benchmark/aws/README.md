@@ -190,7 +190,8 @@ Execution requires:
 - a candidate ref under `refs/benchmarks/`
 - the deterministic candidate archive and provenance produced by
   `baseline/freeze-candidate.sh`
-- the pinned Trino checkout, which every unit worker receives
+- `zstd` and `curl` on the controller, which compresses language plan bundles
+  and stages each platform's pinned JDK
 - working AWS credentials from the standard AWS credential chain, or an
   explicitly selected profile, and the configured region
 
@@ -261,7 +262,6 @@ one `engine-build` unit per platform to a unit worker of its pinned instance
 type and AMI; see [engine builds](#engine-builds):
 
 ```bash
-TRINO_DIR=/path/to/trino \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   build <campaign-id> --execute \
   --candidate-ref refs/benchmarks/<candidate-name> \
@@ -278,7 +278,7 @@ below run in one region with one shared bucket.
 Execute the smoke after inspecting the smoke plan above:
 
 ```bash
-TRINO_DIR=/path/to/trino TRANSFER_PREFIX=<transfer-prefix> \
+TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   smoke <campaign-id> --execute \
   --candidate-ref refs/benchmarks/<candidate-name> \
@@ -295,7 +295,7 @@ The primary phase requires the accepted smoke root and measures three
 independent replicas of every work unit of every platform and shard:
 
 ```bash
-TRINO_DIR=/path/to/trino TRANSFER_PREFIX=<transfer-prefix> \
+TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   primary <campaign-id> --execute \
   --candidate-ref refs/benchmarks/<candidate-name> \
@@ -312,7 +312,7 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
 Use confirmation only for the bounded list emitted by preliminary reduction:
 
 ```bash
-TRINO_DIR=/path/to/trino TRANSFER_PREFIX=<transfer-prefix> \
+TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   confirmation <campaign-id> --execute \
   --candidate-ref refs/benchmarks/<candidate-name> \
@@ -344,9 +344,7 @@ comparison's 75,600-second unit. Each phase is still its own controller run;
 pipelining a shard's primary behind its accepted smoke is future work.
 
 Set `AWS_PROFILE` before any execution command when selecting a named profile;
-otherwise the AWS CLI uses its standard credential chain. `TRINO_DIR` is
-required for every campaign, language campaigns included, because every unit
-worker receives the pinned Trino checkout.
+otherwise the AWS CLI uses its standard credential chain.
 
 ### Launch regions
 
@@ -411,9 +409,13 @@ pinned Trino harness, and the native comparison runners from the candidate's
 sources: native RE2 (`language_benchmark`) and the Rust `regex` crate
 (`language_rust_benchmark`), and their bulk runners for language units, with
 generic tuning, each beside its build receipt. It freezes them in
-`classes.tar.gz`, `trino.tar.gz`, and `native.tar.gz` under a manifest,
-`engine-build.json`. The manifest lists each archive's SHA-256 and per-file
-hashes, and its inputs: the candidate, the Trino commit, and the build scripts.
+`classes.tar.zst`, `trino.tar.zst`, and `native.tar.zst` under a manifest,
+`engine-build.json`. Each archive is a deterministic tar compressed with zstd
+at level 9 on every core; decompression speed does not depend on the level,
+and the contents are mostly jars and binaries that compress little further.
+The manifest lists each archive's SHA-256 and its inputs: the candidate, the
+Trino commit, and the build scripts. A builder fetches the pinned Trino commit
+itself, so no host receives a Trino checkout.
 The build checks only the harness's identity and provenance; the semantic
 verifiers run in every measuring route, where a failure is final rather than
 retried.
@@ -445,38 +447,55 @@ rejection. Against the measuring checkout, its builds must be of the same
 candidate and archive, made by the same build scripts from the pinned Trino
 commit, on each platform's pinned architecture and instance type. Each
 platform's manifest SHA-256 is frozen in `execution-policy.json`, and primary
-and confirmation refuse a prerequisite that used different builds. A language
-unit worker runs the candidate classes and native runners of its platform's
-engine build.
+and confirmation refuse a prerequisite that used different builds. Baseline and
+language unit workers run the candidate classes and native runners of their
+platform's engine build.
 
-Hosts check each downloaded archive with `sha256sum --check`, then verify the
-archive and each installed file against the manifest; a mismatch fails the
-session. Every measuring unit worker installs all three archives, while a
-build phase's worker installs none and builds its own: the candidate classes
-land in `regulator-classes/` and the runners in `language-native/` under the
-shared work directory, and `engine-build/<archive>.sha256` marks each installed
-archive. `engine-build.txt` records the installed build beside the host
-evidence and in each route.
+A host installs each archive in one streaming pass: the S3 download feeds
+both a SHA-256 digest of the whole archive and `zstd -d`, whose tar stream is
+extracted into a staging directory inside the destination. The extraction
+refuses absolute, parent-relative, and duplicate entries, and any entry other
+than a regular file or directory. Only once the stream ends with the archive's
+pinned SHA-256 does the host move the staged tree into place; a mismatch
+removes the staging directory and fails the session. A failed download or
+extraction is tried again, three attempts in all, and a complete stream that
+fails its pin is not.
+
+A host installs only the archives its pool's units run: a baseline unit worker
+installs the classes, Trino, and native archives, since its specialized-pattern
+shards run native comparators, a language unit worker the classes and native
+archives, and a build phase's worker none, since it builds its own. The
+candidate classes land in `regulator-classes/`, the harness in `pinned-trino/`,
+and the runners in `language-native/` under the shared work directory, and
+`engine-build/<archive>.sha256` marks each installed archive. `engine-build.txt`
+records the manifest and installed archives beside the host evidence and in
+each route.
 
 Preflight names each allowed region that lacks the shared transfer bucket
 `--engine-builds` requires. Before it launches any host,
 the controller puts each archive once in every region that may launch a host
-installing it, under `TRANSFER_PREFIX/engine-builds/<sha256>.tar.gz`, and skips
+installing it, under `TRANSFER_PREFIX/engine-builds/<sha256>.tar.zst`, and skips
 an object with that key and checksum. A language plan's bundle, which a
 language unit worker installs, travels the same way under
-`TRANSFER_PREFIX/language-plans/<sha256>.tar.gz`; the wrapper takes the bundles
-of a session in `LANGUAGE_PLAN_BUNDLE_SHA256S`, with the candidate provenance
-their units measure. An upload slower than 256 KiB/s counts as
-stalled and is stopped and retried; the campaign stops after three failed
-attempts. A session whose archive is missing from its bucket fails as
-`retryable-infrastructure` before it launches. Each session's instance role
-may read exactly those archive keys, in addition to its own session prefix.
-These archives are campaign inputs rather than session resources, so session
-cleanup leaves them in place. Remove them once the campaign is done:
+`TRANSFER_PREFIX/language-plans/<sha256>.tar.zst`; the wrapper takes the bundles
+of a session's own pool shards in `LANGUAGE_PLAN_BUNDLE_SHA256S`, with the
+candidate provenance their units measure. The platform's pinned JDK travels the
+same way under `TRANSFER_PREFIX/jdks/<sha256>.tar.gz`: the controller downloads
+it once per campaign from its pinned URL into the campaign root's `jdks/`,
+checks it against the pinned SHA-256, and puts it in each region, so hosts never
+fetch it from its publisher. A session without a shared bucket uploads it with its own inputs.
+Each upload attempt times out after 60 seconds plus a second per 256 KiB of the
+archive and is retried; the campaign stops after three failed attempts. A
+session whose archive is missing from its bucket fails as
+`retryable-infrastructure` before it launches. Each session's instance role may
+read exactly those archive keys, in addition to its own session prefix. These
+archives are campaign inputs rather than session resources, so session cleanup
+leaves them in place. Remove them once the campaign is done:
 
 ```bash
 aws s3 rm "s3://<bucket>/<transfer-prefix>/engine-builds/" --recursive --region <region>
 aws s3 rm "s3://<bucket>/<transfer-prefix>/language-plans/" --recursive --region <region>
+aws s3 rm "s3://<bucket>/<transfer-prefix>/jdks/" --recursive --region <region>
 ```
 
 ## Single-job wrapper
@@ -493,9 +512,11 @@ pinned identity variables.
 
 `run-host.sh` runs on the instance. It verifies the AMI, JDK, package,
 candidate, comparator, and manifest identities, and runs `run-unit-worker.sh`.
-Only a worker without prebuilt engines, which builds them, installs the pinned
-Cargo and Rust packages, because the Rust comparator builds the pinned `regex`
-crate.
+Every host installs the pinned glibc, GNU `time`, and zstd packages. Only a
+worker without prebuilt engines, which builds them, installs the build
+toolchain: the pinned compiler, CMake, Cargo, and Rust packages with git, make,
+and ninja, because it builds the native runners, the pinned `regex` crate, and
+the Trino harness. A measuring host records those packages as `not-installed`.
 
 ## Unit workers
 
@@ -505,13 +526,23 @@ its controller leases to it, one at a time, instead of one shard. It requires
 `UNIT_WORKER_LIFETIME_SECONDS` (default 21600), plus 4500 seconds for host
 setup and final uploads, plus the time its last unit may take: 900, or the
 pool's longest estimated unit when that is longer. The host
-bootstraps with packages, the JDK, the environment record, and, unless it is a
-build phase's worker, the platform's prebuilt engines. A language unit worker
-also installs each language plan bundle under `target/language-plans/<shard>`.
-It then runs `run-unit-worker.sh`, which runs `../baseline/run-unit.sh` for each
-measured group of each lease. The wrapper's `session.txt` records the host
-session (`session`), `bucket`, `input_prefix`, and `result_prefix`; every key
-below is under one of those prefixes.
+bootstraps with packages, the JDK, its pool's prebuilt engine archives unless
+it is a build phase's worker, and the environment record. A language unit
+worker also installs the plan bundle of each of its pool's shards under
+`target/language-plans/<shard>`. The engine archives, plan bundles, and JDK
+install in the same [streaming pass](#engine-builds), the JDK through gzip. The
+candidate archive does not: the host downloads it, checks its SHA-256, and only
+then extracts it. The host writes `startup-timeline.tsv` beside its evidence:
+one row per startup step, with columns `step`, `started`, and `finished` in
+epoch seconds. Its steps are `boot`, from the kernel's boot to the start of user
+data, then `credentials`, `candidate`, `packages`, each archive by name,
+`environment`, and `worker`, which ends when the worker begins its first unit.
+The controller reports the time from boot to that first unit as
+`boot_to_first_unit_seconds=` in the detail of the attempt's `job-attempts.tsv`
+row. The host runs `run-unit-worker.sh`, which runs `../baseline/run-unit.sh`
+for each measured group of each lease. The wrapper's `session.txt` records the
+host session (`session`), `bucket`, `input_prefix`, and `result_prefix`; every
+key below is under one of those prefixes.
 
 | Key | Writer | Holds |
 |---|---|---|
