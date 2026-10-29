@@ -302,7 +302,13 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   compile-time rejections because their observable semantics do not map to the
   current bounded linear-time execution contract.
 - Escapes that name a lone surrogate, which the JDK accepts, are rejected as
-  unsupported, because no UTF-8 text contains a lone surrogate.
+  unsupported, because no UTF-8 text contains a lone surrogate. The rule is
+  about how a pattern spells a character, not what a set contains:
+  `[\x{D800}-\x{DFFF}]` is rejected because its endpoints are such escapes,
+  while `\p{Cs}`, the same set, compiles as in the JDK, as does a range such as
+  `[\x{D7FF}-\x{E000}]` whose endpoints are not surrogates. A set's surrogate
+  members match no valid UTF-8 text, and on malformed input they may match an
+  encoded surrogate, which the garbage-in/garbage-out contract allows.
 
 Java match positions remain UTF-8 byte offsets over `Slice`, not the JDK's
 UTF-16 code-unit offsets.
@@ -448,6 +454,11 @@ UTF-16 code-unit offsets.
   such a pattern and compares its malformed bytes byte-for-byte; that reading
   is unspecified, so Regulator treats the pattern as a syntax error. Inputs are
   not validated as UTF-8, matching Trino's garbage-in/garbage-out contract.
+  So a range, property, or complement that includes surrogates, such as
+  `[\x{D7FF}-\x{E000}]` or `\p{Cs}`, compiles as in Joni, and its surrogate
+  members match no valid UTF-8 text. On malformed input such a class may match
+  an encoded surrogate as one character, where Joni reads its three bytes
+  separately and does not match them.
 - Behavior of pinned Joni that depends on how it compiles or searches a
   pattern, rather than on what the pattern says, is an engine defect and is not
   copied, whether or not modern Joni or Oniguruma fixed it. The seeded
