@@ -18,9 +18,13 @@ const inputRoot = process.env.REPORT_DATA_DIRECTORY
 const inputManifest = JSON.parse(await readFile(new URL("manifest.json", inputRoot), "utf8"));
 const original = JSON.parse((await readData(new URL(inputManifest.current, inputRoot))).toString("utf8"));
 const scope = original.publicationScope;
-assert.equal(scope?.policy, "user-facing-release-v1");
-const workloadEntry = inputManifest.releases.find(entry => entry.candidate === scope?.workloadSourceCandidate);
-assert.ok(workloadEntry, "Publication workload source remains versioned");
+assert.ok(["user-facing-release-v1", "user-facing-release-v2"].includes(scope?.policy),
+  `Unsupported publication scope policy ${scope?.policy}`);
+// The 1.0 publication kept the rows of a frozen workload source; later releases publish every row not hidden.
+const frozen = scope.policy === "user-facing-release-v1";
+const workloadEntry = frozen
+  ? inputManifest.releases.find(entry => entry.candidate === scope.workloadSourceCandidate) : undefined;
+assert.ok(!frozen || workloadEntry, "Publication workload source remains versioned");
 const published = workloadEntry
   ? JSON.parse(await readData(new URL(workloadEntry.file, inputRoot))) : null;
 const download = JSON.parse(gunzipSync(await readFile(new URL(manifest.fullResultsUrl, site))));
@@ -28,6 +32,7 @@ const digest = value => createHash("sha256").update(JSON.stringify(value)).diges
 assert.equal(digest(download), digest(report.downloadData(original)), "Public download is the annotated publication dataset");
 assert.equal(original.rows.length, scope.publishedRows);
 assert.equal(scope.completeCampaignRows - scope.excludedCampaignRows, scope.publishedRows);
+assert.equal(download.rows.length, original.rows.length, "The public download contains only publication rows");
 assert.ok(original.rows.every(row => !("reportVisible" in row)));
 assert.doesNotMatch(JSON.stringify(original), /[†‡]/, "Public data uses only measurement-level uncertainty markers");
 // One page for every language, CPU and memory setting the capture declares.
@@ -98,7 +103,6 @@ if (published) {
   // These counts belong to the frozen 1.0 preliminary workload source; the R8g metadata case below follows the release label.
   const preliminaryOneZeroWorkloads = workloadEntry.candidate === "b227617cdb717fecce2ed4750bb00b874a8c01b7";
   if (preliminaryOneZeroWorkloads) assert.equal(download.rows.length, 5004, "The public download contains the frozen publication inventory");
-  assert.equal(download.rows.length, original.rows.length, "The public download contains only publication rows");
   const workloadDetails = workload => Object.fromEntries(
     Object.entries(workload ?? {}).filter(([field]) => field !== "performanceContext"));
   for (const [index, row] of original.rows.entries()) {

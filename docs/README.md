@@ -63,8 +63,8 @@ and intermediate benchmark reports are not kept here.
 - Describe current behavior in language and API docs, not the history of its implementation.
 - Do not commit intermediate benchmark results, campaign notebooks, raw profiles, or rejected experiments.
 - Commit one reproducible user-facing benchmark data set for a frozen review or
-  release candidate. Its public download must contain the same frozen
-  publication inventory, not internal campaign diagnostics.
+  release candidate. Its public download must contain the same published rows,
+  not the hidden campaign rows or internal diagnostics.
 - Keep targeted measurement-quality evidence separate and store route probes,
   scaling investigations, failed attempts, and complete raw campaign evidence
   in the indexed private archive.

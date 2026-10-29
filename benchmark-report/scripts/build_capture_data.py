@@ -1,8 +1,6 @@
 """Build report data from complete verified captures, never from prior HTML."""
 
 import argparse
-import gzip
-import hashlib
 import json
 from pathlib import Path
 
@@ -25,10 +23,7 @@ def write_report(report, path):
 
 
 def validate_released_campaign_paths(arguments):
-    inputs = {
-        '--released-campaign': arguments.released_campaign,
-        '--publication-workloads': arguments.publication_workloads,
-    }
+    inputs = {'--released-campaign': arguments.released_campaign}
     if arguments.released_campaign.exists():
         plan = load(arguments.released_campaign)
         if plan.get('candidate_provenance'):
@@ -77,8 +72,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--released-campaign', type=Path, required=True,
                         help='complete release campaign paths and pinned artifact version')
-    parser.add_argument('--publication-workloads', type=Path, required=True,
-                        help='frozen user-facing workload report')
     parser.add_argument('--complete-output', type=Path, required=True,
                         help='complete campaign capture for the private evidence archive')
     parser.add_argument('--output', type=Path, required=True)
@@ -90,9 +83,7 @@ def main():
     from release_capture import build as build_release
     complete = build_release(arguments.released_campaign)
     write_report(complete, arguments.complete_output)
-    content = arguments.publication_workloads.read_bytes()
-    published = json.loads(gzip.decompress(content) if arguments.publication_workloads.suffix == '.gz' else content)
-    report = publication_data(complete, published, hashlib.sha256(content).hexdigest())
+    report = publication_data(complete)
     write_report(report, arguments.output)
     print(f"Built {len(report['rows'])} report rows from verified captures: {arguments.output}")
 

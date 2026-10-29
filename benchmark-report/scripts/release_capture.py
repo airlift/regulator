@@ -212,7 +212,7 @@ def build(plan_path):
     report = {'schemaVersion': 2,
               'sources': {'currentLabel': 'Regulator ' + release['version'] + ' final results',
                           'currentCandidate': release['source_commit'], 'engineTree': release['engine_tree'],
-                          'jdk': 'Temurin 25.0.4+7'},
+                          'jdk': 'Temurin 25.0.4+7', 'releaseVersion': release['version']},
               'languages': LANGUAGES, 'platforms': CURRENT_PLATFORMS, 'memoryModes': MEMORY_MODES, 'rows': rows,
               'methodology': ['Public measurements load the checksummed published release JAR. Collector source is recorded separately.',
                               'Comparisons use three independent hosts, with same-host ratios and all original samples retained. Baseline confirmations use a fourth host where required.',

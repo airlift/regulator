@@ -33,7 +33,9 @@ loads the committed versioned result data and supports platform, memory-mode,
 and sortable workload comparisons. Its source and update instructions are in
 [`../../benchmark-report/`](../../benchmark-report/).
 
-The report and its download use one frozen user-facing workload inventory.
+The 1.0 report and its download used one frozen user-facing workload
+inventory; later reports publish every campaign row except those the
+[publication boundary](METHODOLOGY.md#publication-boundary) hides.
 Measurement-quality studies are separate supporting evidence. Internal route
 probes, scaling diagnostics, failed attempts, and the complete captured campaign
 remain in the indexed private archive and are not additional release benchmarks.

@@ -198,7 +198,8 @@ public API.
 The internal diagnostic inventory includes:
 
 - optimizer and engine-route probes
-- synthetic RSC and Folly cases
+- synthetic RSC and Folly cases, apart from the public ReDoS-shaped
+  `imported/rsc/no-exponential`
 - fixed-size and parameterized scaling sweeps
 - compiler, cache, memory, concurrency, and fallback probes
 - generated-code investigations
@@ -208,11 +209,12 @@ Internal diagnostics stay in the private evidence archive and are absent from
 the public report and its download. Neither population's count, median, nor
 direction changes an application or bulk-text summary.
 
-Classify by purpose before collection. A diagnostic result does not become a
-release benchmark because it is favorable, complete, or useful to a later
-analysis. Promote a workload only through a reviewed change to the frozen
-publication inventory, based on a user-facing question and independently of
-its measured outcome.
+Classify by purpose. The public report publishes every campaign row except a
+short hide list in `benchmark-report/scripts/publication_data.py`. Hide
+optimizer, engine, and synthetic-scaling probes, except
+`imported/rsc/no-exponential`. Also hide LIKE controls that duplicate public
+rows. A reviewed change to that list publishes or hides a workload, based on
+whether it represents user work.
 
 ## Reporting and weighting
 
@@ -233,8 +235,7 @@ Within each regex language page, report in this order:
 LIKE has its own integrated lifecycle table, preceded by the specialized engine
 and compiler where measured. Put ordinary prefix, suffix, exact, and contains
 shapes first and dense-false stress last, keeping DFA variants adjacent.
-Compile-only rows retained by the frozen publication inventory remain in the
-public download rather than a separate table.
+Compile-only rows remain in the public download rather than a separate table.
 
 Each literal-probe row pairs the default and tuned measurements of one
 workload. It shows both ratios against the comparator and the
@@ -296,9 +297,10 @@ is not retained or used for decisions.
 
 A release keeps three deliberately separate artifacts:
 
-1. The public report and public download use one frozen publication inventory.
-   The download has the same rows as that inventory, including rows intentionally
-   hidden from the page layout; it does not contain campaign-only diagnostics.
+1. The public report and public download publish every campaign row except
+   the rows on the hide list. The download has the same rows as the report
+   data, including rows the page layout omits; it does not contain the hidden
+   campaign rows.
 2. Measurement-quality evidence supports statements about uncertainty,
    repeatability, and platform controls. Keep it narrowly scoped to the claims
    it tests and link the resulting assessment from the report.
@@ -306,8 +308,7 @@ A release keeps three deliberately separate artifacts:
    superseded attempts, raw process data, profiles, receipts, and the complete
    capture needed for later audit.
 
-The publication generator projects final measurements onto the frozen public
-inventory before import. Validation rejects extra rows, missing rows, reordered
-identities, or changed workload content. This makes the public download a
-reproducible user-facing data product while the private archive preserves the
-broader investigation record.
+The publication generator drops the hidden rows from the complete capture
+before import, and validation rejects a publication that contains one. The
+public download is a reproducible user-facing data product while the private
+archive preserves the complete campaign and the broader investigation record.

@@ -48,27 +48,33 @@ or generated-code level. "JVM overhead" is not an explanation.
 
 ## Publication boundary
 
-Freeze the user-facing publication inventory before the release campaign. It
-contains public API workloads that help users make a performance decision,
-including a limited set of relevant adversarial cases. Select and order those
-workloads without using their measured results.
+The public report contains public API workloads that help users make a
+performance decision, including relevant adversarial cases. It publishes every
+row of the release campaign except a short hide list in
+`benchmark-report/scripts/publication_data.py`: optimizer, engine, and
+synthetic-scaling probes that do not represent user work, and LIKE controls
+that duplicate a public row. The list is an editorial choice. A reviewed change
+to it shows or hides rows once the publication is regenerated with
+`publication_data.py --campaign … --output …`, imported, and the README
+regenerated.
 
 Keep these evidence tiers separate:
 
-- The public report and its download contain exactly the frozen publication
-  inventory with final measurements and provenance.
+- The public report and its download contain the published rows with their
+  measurements and provenance.
 - Measurement-quality studies test specific claims about uncertainty,
   repeatability, process state, or platform controls. They may use targeted
   diagnostics, but those rows do not become release workloads.
-- The private archive retains the complete captured campaign, raw observations,
-  route and scaling probes, profiles, failed attempts, and superseded cohorts.
+- The private archive retains the complete captured campaign, including its
+  hidden rows, raw observations, route and scaling probes, profiles, failed
+  attempts, and superseded cohorts.
 
 Do not routinely collect internal diagnostics during a release run. Add a
 separate diagnostic campaign only when a qualification gate fails or a stated
 measurement-quality question requires it. Freeze its inventory and budget
-separately. The report generator projects the complete accepted measurements
-onto the publication inventory and rejects missing, extra, reordered, or
-changed public workloads before import.
+separately. The report generator drops the hidden rows from the complete
+accepted campaign, and import validation rejects a publication that contains
+one.
 
 ## Comparison contracts
 

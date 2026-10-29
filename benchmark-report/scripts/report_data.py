@@ -16,6 +16,7 @@ from pathlib import Path
 REPORT_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = REPORT_ROOT.parent
 sys.path.insert(0, str(REPOSITORY_ROOT / 'tools/re2-benchmark/language'))
+import publication_data
 import released_artifact
 from language_data import CURRENT_PLATFORMS, RELEASE_1_0_PLATFORMS
 DATA_DIRECTORY = REPORT_ROOT / "data"
@@ -180,6 +181,7 @@ def validate_data_filename(path: Path) -> None:
         raise ValueError(f"data filename does not contain its content hash {digest}")
 
 
+# Frozen 1.0 workload identities.
 def publication_key(row: dict) -> tuple:
     platform = row['platform']
     if platform.startswith('c'):
@@ -204,32 +206,26 @@ def released_publication_id(previous: dict) -> str:
 
 
 def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict]]) -> None:
-    artifact = data.get('provenance', {}).get('releasedArtifact')
+    sources = data['sources']
+    version = sources.get('releaseVersion')
     scope = data.get('publicationScope')
-    if artifact is None:
+    if version is None:
         if scope is not None:
-            raise ValueError('publication scope requires released-artifact provenance')
+            raise ValueError('publication scope requires a release version')
+        if 'releasedArtifact' in data.get('provenance', {}):
+            raise ValueError('released-artifact report requires a release version')
         return
+    if not isinstance(version, str) or re.fullmatch(publication_data.RELEASE_VERSION, version) is None:
+        raise ValueError('report sources.releaseVersion is not a release version')
     scope = require_object(scope, 'report.publicationScope')
-    if scope.get('policy') != 'user-facing-release-v1':
-        raise ValueError('released report requires user-facing publication scope')
-    version = artifact.get('version')
-    if not isinstance(version, str) or not version:
-        raise ValueError('released report artifact version is missing')
-    expected_artifact = released_artifact.manifest(REPOSITORY_ROOT, version)
-    if artifact != expected_artifact:
-        raise ValueError('released report artifact identity does not match the frozen release manifest')
+    # The 1.0 publication kept a frozen workload source's rows; later releases publish every row not hidden.
+    frozen = version == '1.0'
+    policy = 'user-facing-release-v1' if frozen else publication_data.POLICY
+    if scope.get('policy') != policy:
+        raise ValueError(f'release {version} report requires publication scope {policy}')
     # The 1.0 release also measured R8g; later releases measure the current platforms.
-    if set(data.get('platforms', {})) != set(RELEASE_1_0_PLATFORMS if version == '1.0' else CURRENT_PLATFORMS):
-        raise ValueError('released report platform set does not match the release platforms')
-    expected_sources = {
-        'currentCandidate': expected_artifact['source_commit'],
-        'engineTree': expected_artifact['engine_tree'],
-        'releaseVersion': expected_artifact['version'],
-    }
-    for field, expected in expected_sources.items():
-        if data['sources'].get(field) != expected:
-            raise ValueError(f'released report sources.{field} does not match artifact provenance')
+    if set(data.get('platforms', {})) != set(RELEASE_1_0_PLATFORMS if frozen else CURRENT_PLATFORMS):
+        raise ValueError('publication platform set does not match the release platforms')
     if any('reportVisible' in row for row in data['rows']):
         raise ValueError('publication rows must not contain internal visibility flags')
     for index, row in enumerate(data['rows']):
@@ -242,9 +238,32 @@ def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict
                      or interval.get('level') != .95)):
             raise ValueError(f'published comparison must use mean with uncertainty at row {index}')
     if (scope.get('publishedRows') != len(data['rows'])
-            or scope.get('workloadSourceRows') != len(data['rows'])
             or scope.get('completeCampaignRows', -1) < len(data['rows'])
             or scope.get('excludedCampaignRows') != scope['completeCampaignRows'] - len(data['rows'])):
+        raise ValueError('publication scope row counts do not reconcile')
+    artifact = data.get('provenance', {}).get('releasedArtifact')
+    if artifact is None:
+        raise ValueError(f'release {version} report requires released-artifact provenance')
+    expected_artifact = released_artifact.manifest(REPOSITORY_ROOT, version)
+    if artifact != expected_artifact:
+        raise ValueError('released-artifact report artifact identity does not match the frozen release manifest')
+    expected_sources = {
+        'currentCandidate': expected_artifact['source_commit'],
+        'engineTree': expected_artifact['engine_tree'],
+    }
+    for field, expected in expected_sources.items():
+        if sources.get(field) != expected:
+            raise ValueError(f'released-artifact report sources.{field} does not match artifact provenance')
+    if sources.get('currentLabel') != f'Regulator {version} results':
+        raise ValueError(f'released-artifact report sources.currentLabel must be Regulator {version} results')
+    if 'publication' in data:
+        raise ValueError('released-artifact report must not carry publication metadata')
+    if frozen:
+        validate_frozen_workloads(data, scope, releases)
+
+
+def validate_frozen_workloads(data: dict, scope: dict, releases: list[tuple[dict, Path, dict]]) -> None:
+    if scope.get('workloadSourceRows') != len(data['rows']):
         raise ValueError('publication scope row counts do not reconcile')
     candidates = [(entry, path, report) for entry, path, report in releases
                   if entry.get('candidate') == scope.get('workloadSourceCandidate')
@@ -274,7 +293,7 @@ def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict
                 raise ValueError(f'publication pattern mapping changed at row {index}')
 
 
-def validate_published_data() -> tuple[dict, Path, dict]:
+def validate_published_data() -> tuple[dict, Path, dict, list[tuple[dict, Path, dict]]]:
     manifest = load_manifest()
     for path in DATA_DIRECTORY.iterdir():
         if path.is_file() and path.stat().st_size >= MAX_STORED_DATA_BYTES:
@@ -294,7 +313,7 @@ def validate_published_data() -> tuple[dict, Path, dict]:
             reports[release["file"]] = (release_path, report)
     releases = [(release, *reports[release['file']]) for release in manifest['releases']]
     validate_publication_scope(current_data, releases)
-    return manifest, current_path, current_data
+    return manifest, current_path, current_data, releases
 
 
 def ratio_text(ratio: float) -> str:
@@ -342,7 +361,7 @@ def replace_summary(readme: str, replacement: str) -> str:
 
 
 def check() -> None:
-    _, _, data = validate_published_data()
+    _, _, data, _ = validate_published_data()
     expected = replace_summary(README_FILE.read_text(), summary_markdown(data))
     actual = README_FILE.read_text()
     if actual != expected:
@@ -353,6 +372,11 @@ def check() -> None:
 def import_data(source: Path) -> None:
     data = load_json(source)
     validate_report(data)
+    stored = []
+    if MANIFEST_FILE.exists():
+        _, _, _, stored = validate_published_data()
+    elif DATA_DIRECTORY.exists() and any(DATA_DIRECTORY.iterdir()):
+        raise ValueError("report data directory contains files but no valid manifest")
     schema_version = data["schemaVersion"]
     # Preserve the JSON encoding and its content hash independently of compression.
     indent = None if data.get('publication', {}).get('status') == 'preliminary' else 2
@@ -366,22 +390,18 @@ def import_data(source: Path) -> None:
     if len(compressed) >= MAX_STORED_DATA_BYTES:
         raise ValueError("report data exceeds stored-file size limit")
 
-    releases = []
-    if MANIFEST_FILE.exists():
-        previous_manifest, _, _ = validate_published_data()
-        releases = [
-            release
-            for release in previous_manifest["releases"]
-            if (release["candidate"] != candidate
-                and release["file"].removesuffix(".gz") != filename.removesuffix(".gz"))
-        ]
-    elif DATA_DIRECTORY.exists() and any(DATA_DIRECTORY.iterdir()):
-        raise ValueError("report data directory contains files but no valid manifest")
-    publication_sources = []
-    for release in releases:
-        path = report_file(release['file'])
-        publication_sources.append((release, path, load_json(path)))
+    publication_sources = [
+        (release, path, report)
+        for release, path, report in stored
+        if (release["candidate"] != candidate
+            and release["file"].removesuffix(".gz") != filename.removesuffix(".gz"))
+    ]
     validate_publication_scope(data, publication_sources)
+    # The hide list gates what is published next; stored reports predate later edits to it.
+    if (data['sources'].get('releaseVersion') not in (None, '1.0')
+            and any(publication_data.hidden(row) for row in data['rows'])):
+        raise ValueError('publication contains a hidden row')
+    releases = [release for release, _, _ in publication_sources]
     releases.insert(0, {
         "schemaVersion": schema_version,
         "candidate": candidate,

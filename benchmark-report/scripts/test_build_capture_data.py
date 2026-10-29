@@ -10,7 +10,7 @@ from build_capture_data import validate_released_campaign_paths
 
 class TestBuildCaptureData(unittest.TestCase):
     def arguments(self, root):
-        names = ('released_campaign', 'publication_workloads', 'output', 'complete_output')
+        names = ('released_campaign', 'output', 'complete_output')
         return SimpleNamespace(**{name: root / name for name in names})
 
     def test_released_campaign_outputs_are_isolated_from_every_input_and_output(self):
@@ -19,7 +19,7 @@ class TestBuildCaptureData(unittest.TestCase):
             arguments = self.arguments(root)
             validate_released_campaign_paths(arguments)
             outputs = ('output', 'complete_output')
-            inputs = ('released_campaign', 'publication_workloads')
+            inputs = ('released_campaign',)
             for output in outputs:
                 for other in (*outputs, *inputs):
                     if output == other:
@@ -35,12 +35,12 @@ class TestBuildCaptureData(unittest.TestCase):
             root = Path(directory)
             for alias in ('symlink', 'hardlink'):
                 arguments = self.arguments(root)
-                arguments.publication_workloads.write_text('evidence')
+                arguments.released_campaign.write_text('{}')
                 path = root / alias
                 if alias == 'symlink':
-                    path.symlink_to(arguments.publication_workloads)
+                    path.symlink_to(arguments.released_campaign)
                 else:
-                    os.link(arguments.publication_workloads, path)
+                    os.link(arguments.released_campaign, path)
                 arguments.output = path
                 with self.subTest(alias=alias), self.assertRaisesRegex(ValueError, 'must differ'):
                     validate_released_campaign_paths(arguments)
