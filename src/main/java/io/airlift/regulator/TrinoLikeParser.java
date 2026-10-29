@@ -27,7 +27,7 @@ final class TrinoLikeParser
 {
     private TrinoLikeParser() {}
 
-    // The escape, when present, must be a valid code point; `TrinoLikePattern.Options.setEscape`
+    // The escape, when present, must be a Unicode scalar value; `TrinoLikePattern.Options.setEscape`
     // checks it for public callers.
     static List<Element> parse(Slice pattern, OptionalInt escapeCodePoint)
     {

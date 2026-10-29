@@ -89,13 +89,14 @@ public sealed class TrinoLikePattern
         }
 
         /// Sets the escape character, which makes the `%`, `_`, or escape character after it
-        /// literal. The escape must be a valid Unicode code point. Only `%`, `_`, or the escape
-        /// itself may follow the escape in a pattern; otherwise compile throws a
+        /// literal. The escape must be a Unicode scalar value, a code point other than a
+        /// surrogate, because no valid UTF-8 pattern can contain a surrogate. Only `%`, `_`, or
+        /// the escape itself may follow the escape in a pattern; otherwise compile throws a
         /// [TrinoLikePatternSyntaxException]. A pattern has no escape character by default.
         public Options setEscape(int escapeCodePoint)
         {
-            if (!Character.isValidCodePoint(escapeCodePoint)) {
-                throw new IllegalArgumentException("escapeCodePoint must be a valid code point: " + escapeCodePoint);
+            if (!Character.isValidCodePoint(escapeCodePoint) || (escapeCodePoint >= Character.MIN_SURROGATE && escapeCodePoint <= Character.MAX_SURROGATE)) {
+                throw new IllegalArgumentException("escapeCodePoint must be a Unicode scalar value: " + escapeCodePoint);
             }
             escape = OptionalInt.of(escapeCodePoint);
             return this;
