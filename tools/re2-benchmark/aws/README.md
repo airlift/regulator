@@ -281,7 +281,7 @@ primary on its build.
 ```bash
 TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
-  campaign <campaign> --execute \
+  campaign <campaign> --execute --detach \
   --candidate before=main --candidate after=user/me/faster-scan \
   --campaign-root /durable/path/<campaign> \
   --transfer-bucket us-west-2=<bucket> \
@@ -305,10 +305,21 @@ hosts its phase froze. A restart whose limits are smaller than a share some
 running or unfinished phase froze stops at once, naming the smallest limits
 that hold it. The other options pass to each phase that takes them.
 
-Each phase runs as a child process in its own session, logging to
-`driver-child.log` in its root. Stopping the campaign leaves its children
-running; a restart adopts each live child, a process running its step's
-command for this campaign root, skips every completed phase, whose root holds
+With `--detach`, the command checks its options, starts the campaign driver
+in its own session, and returns. The driver logs to `campaign-driver.log` in
+the campaign root and, once it holds the root's `controller.lock`, records its
+process ID and start time in `campaign-driver.txt` there. Without
+`--detach` the driver runs in the foreground. Each phase runs as a child
+process in its own session, logging to `driver-child.log` in its root; a
+phase's controller takes its root's lock before its setup and records its
+process ID and start time in `driver-child.txt`. A controller that finds the
+lock held exits with status 75, and the driver then adopts the controller that
+holds it. Stopping the driver leaves its children running. Run the same
+command again to resume: while a driver holds the campaign root's
+`controller.lock`, the command with `--detach` reports it and exits
+successfully, and without it exits with status 75; otherwise it starts a
+driver that adopts each live child, the process with the ID and start time its phase's
+record names, skips every completed phase, whose root holds
 `phase-complete.txt`, and restarts the others, which resume from their
 ledgers. Stop a phase by sending its child SIGTERM. The driver records the
 options that decide what its phases measure, the selected shards, smoke
@@ -318,7 +329,10 @@ refuses a restart that changes them.
 ## Run a phase
 
 Each phase can also run alone. Without `--execute`, the controller writes the
-phase's work items to `work-items.tsv` without allocating AWS resources:
+phase's work items to `work-items.tsv` without allocating AWS resources. With
+`--execute --detach`, the command plans the phase, starts its controller in its
+own session, logging to `driver-child.log` in the phase's root, and returns;
+running it again reports a live controller or resumes a stopped one:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
