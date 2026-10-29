@@ -99,6 +99,10 @@ public class TestRegexpParser
         }
         // Rust's symmetric difference, again and again with [^a], a nearly full set.
         assertParseAllocationPerByte("[" + runes + "~~[^a]".repeat(14_000) + "]", 500, Frontend.RUST);
+        // About 40 KB: a Java class that intersects a and \D again and again before a large class,
+        // which no intersection may copy.
+        int intersections = 4_000;
+        assertParseAllocationPerByte("[" + "a\\D&&".repeat(intersections) + "[a" + separateRunes(0x10000, 2, intersections) + "]]", 500, Frontend.JAVA);
     }
 
     @Test

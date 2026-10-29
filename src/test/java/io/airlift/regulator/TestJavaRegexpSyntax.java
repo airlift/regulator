@@ -51,6 +51,8 @@ public class TestJavaRegexpSyntax
         assertError(Slices.utf8Slice("\\b{gé}"), RegexpParseErrorCode.BAD_ESCAPE, 4, "\\b{gé");
         // An unfinished grapheme boundary is reported where the JDK reports it, after the g.
         assertError(Slices.utf8Slice("\\b{g"), RegexpParseErrorCode.BAD_ESCAPE, 4, "\\b{g");
+        // An empty intersection operand with nothing to keep is reported at the ']' that ends the class.
+        assertError(Slices.utf8Slice("[\\db&&]"), RegexpParseErrorCode.BAD_CHAR_CLASS, 6, "[\\db&&]");
     }
 
     @ParameterizedTest(name = "{0}")

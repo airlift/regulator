@@ -35,7 +35,7 @@ public class TestRuneRangeSet
             List<CharClassBuilder> expected = new ArrayList<>();
             // Once the random steps run out, the remaining sets combine into one.
             for (int step = random.nextInt(200); step >= 0 || sets.size() > 1; step--) {
-                int choice = (step < 0) ? 9 : random.nextInt(10);
+                int choice = (step < 0) ? 10 : random.nextInt(11);
                 if (sets.isEmpty() || choice < 3) {
                     CharClassBuilder builder = randomBuilder(random, random.nextInt(4) == 0 ? random.nextInt(400) : random.nextInt(4));
                     sets.add(RuneRangeSet.of(builder.copy()));
@@ -52,6 +52,16 @@ public class TestRuneRangeSet
                     int runeLimit = random.nextBoolean() ? 0xFF : RUNEMAX;
                     sets.get(index).removeAbove(runeLimit);
                     expected.get(index).removeAbove(runeLimit);
+                    continue;
+                }
+                if (choice < 7) {
+                    // A bounded copy joins the sets beside the original, which must be left
+                    // unchanged, and each stays paired with its expected set.
+                    int runeLimit = random.nextBoolean() ? 0xFF : RUNEMAX;
+                    sets.add(sets.get(index).copyAtOrBelow(runeLimit));
+                    CharClassBuilder copy = expected.get(index).copy();
+                    copy.removeAbove(runeLimit);
+                    expected.add(copy);
                     continue;
                 }
                 if (sets.size() < 2) {

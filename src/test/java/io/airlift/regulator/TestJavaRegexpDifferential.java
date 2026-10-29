@@ -424,6 +424,29 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
+    public void testCharacterClassIntersectionsMatchJava25()
+    {
+        // The JDK collects single characters below U+0100 separately from the other members and reads
+        // them when the class closes. An empty operand after '&&' keeps those characters when they are
+        // all the class has, keeps only the last member when that member was stored separately, and is
+        // otherwise an error. Under Unicode case folding, 'k' is stored separately because its case
+        // partners include U+212A.
+        List<String> inputs = List.of("a", "b", "c", "&", " ", "0", "5", "ā", "Ā", "k", "K", "\u212A");
+        for (String pattern : List.of("[a&&&b]", "[a&&[b]&c]", "[c\\d&&]", "[bā&&]", "(?x)[a& &&b]", "(?iu)[āk&&]", "[\\d&&[0-5]&&]")) {
+            assertMatchesJava25(pattern, OptionProfile.DEFAULT, inputs);
+        }
+        for (String pattern : List.of("[&&&a]", "[\\db&&]", "(?i)[āk&&]")) {
+            assertRejectsJava25(pattern, OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_CHAR_CLASS);
+        }
+        // Every other character with case partners outside Latin-1 is stored separately too. 'ß' is
+        // left out, because only JDK 26 matches it against U+1E9E, so JDK 25 stores it with the others.
+        List<String> casePartners = List.of("ā", "ÿ", "\u0178", "µ", "\u039C", "\u03BC", "I", "i", "\u0130", "\u0131", "S", "s", "\u017F", "K", "k", "\u212A", "Å", "å", "\u212B");
+        for (String member : List.of("ÿ", "µ", "I", "i", "S", "s", "K", "Å", "å")) {
+            assertMatchesJava25("(?iu)[ā" + member + "&&]", OptionProfile.DEFAULT, casePartners);
+        }
+    }
+
+    @Test
     public void testQuotesRewrittenBeforeParsingMatchJava25()
     {
         // The JDK rewrites each quote into escapes before parsing. An escape before the quote
@@ -453,6 +476,14 @@ public class TestJavaRegexpDifferential
                 .isEqualTo(Pattern.compile("(?x)( ?< n a>a)").namedGroups())
                 .isEqualTo(Map.of("na", 1));
         assertRejectsJava25("(?x)(? <n>a)", OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_PERL_OP);
+        // A class drops an '&' that whitespace separates from a next character other than '&', which is then an atom.
+        assertMatchesJava25("(?x)[& ]x]", OptionProfile.DEFAULT, List.of("&", "]", "x", " ", "]x"));
+        assertRejectsJava25("(?x)[a& ]", OptionProfile.DEFAULT, RegexpParseErrorCode.MISSING_BRACKET);
+        // The class resumes one character back, so when a comment ends at a terminator other than LF or CR, the
+        // terminator is a member, and so is the comment's last character if it has text after '#'.
+        for (String pattern : List.of("(?x)[a&#c\u2028x]", "(?x)[a&#c\u2029x]", "(?x)[a&#c\u0085x]", "(?dx)[a&#c\0x]", "(?x)[&#&\u2028]", "(?x)[a&#\u2028x]")) {
+            assertMatchesJava25(pattern, OptionProfile.DEFAULT, List.of("a", "c", "x", "&", "#", "\u2028", "\u2029", "\u0085", "\0"));
+        }
     }
 
     @Test
