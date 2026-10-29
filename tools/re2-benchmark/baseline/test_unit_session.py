@@ -34,10 +34,12 @@ def load_module(name, path):
 
 SHARD_RESULTS = load_module("host_session_shard_results", BASELINE / "shard_results.py")
 UNIT_SESSION = load_module("unit_session", BASELINE / "unit_session.py")
-# A unit whose rows span both memory routes.
+# A unit whose rows span both memory routes, measured in two groups.
 UNIT = ("trino-operations", "1")
-# A unit owning protocol representatives.
+# A unit owning protocol representatives, all in its first group.
 REPRESENTATIVE_UNIT = ("trino-operations", "3")
+# A shard of two units, each measured in two groups.
+GROUPED_SHARD = "trino-like-specialized"
 
 
 class TestUnitSession(unittest.TestCase):
@@ -52,35 +54,38 @@ class TestUnitSession(unittest.TestCase):
             manifest_systems = {row["system"] for row in manifest if row["shard_id"] == shard}
             self.assertEqual(manifest_systems, route_systems, shard)
 
-    def testEveryUnitPlansExactlyItsRowsUnderItsFrozenProtocolsInRouteOrder(self):
-        # Every unit is planned in process for both protocols and replicas 1 to 4. One unit per handler
-        # pairing, and any whole-method unit, is also planned through run-unit.sh to pin the shell wiring.
+    def testEveryGroupPlansExactlyItsRowsUnderItsFrozenProtocolsInRouteOrder(self):
+        # Every group of every unit is planned in process for both protocols and replicas 1 to 4. One group per
+        # handler pairing, and any whole-method group, is also planned through run-unit.sh to pin the shell wiring.
         units = work_units.load(BASELINE)
         manifest = SHARD_RESULTS.load_manifest(BASELINE / "rows.tsv")
         protocols = row_protocol.load(BASELINE / "row-protocol.tsv")
         representatives = row_protocol.read_tsv(BASELINE / "protocol-representatives.tsv")
-        plans = {unit_id: plan_unit(unit, manifest, protocols, representatives) for unit_id, unit in units.items()}
-        runs = [(unit_id, protocol_name, replica)
-                for unit_id in sample(units, plans) for protocol_name, replica in SHELL_RUNS]
+        plans = {
+            (unit_id, group["group_id"]): plan_unit(
+                UNIT_SESSION.measured_group(unit, group["group_id"]), manifest, protocols, representatives)
+            for unit_id, unit in units.items() for group in unit["groups"]}
+        runs = [(unit_id, group_id, protocol_name, replica)
+                for unit_id, group_id in sample(units, plans) for protocol_name, replica in SHELL_RUNS]
         with tempfile.TemporaryDirectory() as temporary_directory, ThreadPoolExecutor(os.cpu_count()) as executor:
             root = Path(temporary_directory)
             directories = list(executor.map(lambda run: run_shell(root, *run), runs))
-            for (unit_id, protocol_name, replica), result_directory in zip(runs, directories):
-                check_shell(result_directory, unit_id, plans[unit_id][(protocol_name, replica)])
+            for (unit_id, group_id, protocol_name, replica), result_directory in zip(runs, directories):
+                check_shell(result_directory, unit_id, plans[(unit_id, group_id)][(protocol_name, replica)])
 
-    def testUnitAttemptIsAccepted(self):
+    def testGroupAttemptIsAccepted(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
-            fixture = UnitFixture(Path(temporary_directory), *UNIT)
+            fixture = UnitFixture(Path(temporary_directory), *UNIT, group="2")
             fixture.combine()
 
             receipt = UNIT_SESSION.validate_unit_results(fixture.root)
 
-            unit = fixture.unit
-            self.assertEqual((unit["unit_id"], "host-session-1/3", "us-west-2"),
-                             (receipt["unit_id"], receipt["unit_attempt_id"], receipt["region"]))
-            self.assertEqual(str(len(unit["owned"])), receipt["owned_row_count"])
+            group = work_units.unit_group(fixture.unit, "2")
+            self.assertEqual((fixture.unit["unit_id"], "2", "host-session-1/3", "us-west-2"),
+                             (receipt["unit_id"], receipt["group_id"], receipt["unit_attempt_id"], receipt["region"]))
+            self.assertEqual(str(len(group["owned"])), receipt["owned_row_count"])
             self.assertEqual(
-                UNIT_SESSION.work_units.protocol_digest(unit["owned"], fixture.protocols),
+                UNIT_SESSION.work_units.protocol_digest(group["owned"], fixture.protocols),
                 receipt["row_protocol_sha256"])
             evidence = {row["artifact"]: row for row in fixture.read("unit-evidence.tsv")}
             self.assertEqual("capacity-prefix-sha256", evidence["unit-capacity.txt"]["verification"])
@@ -135,7 +140,7 @@ class TestUnitSession(unittest.TestCase):
             (UNIT, None, tamper_route_artifact, "checksum mismatch"),
             (UNIT, None, tamper_raw_log, "raw artifact checksum mismatch"),
             (UNIT, None, add_unlisted_route_artifact, "evidence is incomplete"),
-            (UNIT, None, empty_route_plan, "route-plan.tsv is not the unit's plan for replica"),
+            (UNIT, None, empty_route_plan, "route-plan.tsv is not the plan of group 1 for replica"),
             (UNIT, None, misname_attempt, "unit-session.tsv unit_attempt_id must be <host_session>/<lease_seq>"),
             (UNIT, lambda fixture: fixture.replace_semantic_report(), None,
              "are not the files of its semantic receipt"),
@@ -178,7 +183,7 @@ class TestUnitSession(unittest.TestCase):
             summary = validate(campaign, campaign.receipts)
             self.assertEqual(
                 (1, 6, 36), (summary["unit_count"], summary["accepted_attempts"], summary["accepted_rows"]))
-            missing = f"missing=[('r8i', '{campaign.units[0]['unit_id']}', '2')]"
+            missing = f"missing=[('r8i', '{campaign.units[0]['unit_id']}', '2', '1')]"
             with self.assertRaisesRegex(ValueError, re.escape(missing)):
                 validate(campaign, [receipt for receipt in campaign.receipts
                                     if (receipt["platform"], receipt["replica_id"]) != ("r8i", "2")])
@@ -186,8 +191,37 @@ class TestUnitSession(unittest.TestCase):
             repeated = campaign.add("r8i", campaign.units[0], 2, host=1)
             with self.assertRaisesRegex(ValueError, "replicas of a unit share an EC2 instance"):
                 validate(campaign, [
-                    repeated if (receipt["platform"], receipt["replica_id"]) == ("r8i", "2") else receipt
-                    for receipt in campaign.receipts[:-1]])
+                    *repeated, *(receipt for receipt in campaign.receipts
+                                 if (receipt["platform"], receipt["replica_id"]) != ("r8i", "2"))])
+
+    def testCampaignAcceptsAReplicaSplitAcrossInstancesNoOtherReplicaUsed(self):
+        def validate(campaign, receipts):
+            return UNIT_SESSION.validate_unit_campaign(
+                BASELINE / "rows.tsv", BASELINE / "platforms.tsv", BASELINE / "shards.tsv",
+                campaign.write_ledger(campaign.root / "accepted-units.tsv", receipts), "campaign", (1, 2, 3),
+                list(campaign.shard_ids))
+
+        def without(campaign, platform, unit, replica):
+            return [receipt for receipt in campaign.receipts
+                    if (receipt["platform"], receipt["unit_id"], receipt["replica_id"]) !=
+                    (platform, unit["unit_id"], str(replica))]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            campaign = UnitCampaign(Path(temporary_directory), GROUPED_SHARD)
+            unit = campaign.units[0]
+            # Replica 3 measured its first group before an interruption and its second on a fresh host.
+            split = [*campaign.add("r8i", unit, 3, host=3, groups=("1",)),
+                     *campaign.add("r8i", unit, 3, host=4, groups=("2",))]
+            summary = validate(campaign, [*without(campaign, "r8i", unit, 3), *split])
+            self.assertEqual((2, 24), (summary["unit_count"], summary["accepted_attempts"]))
+
+            missing = f"missing=[('r8i', '{unit['unit_id']}', '3', '2')]"
+            with self.assertRaisesRegex(ValueError, re.escape(missing)):
+                validate(campaign, [*without(campaign, "r8i", unit, 3), split[0]])
+            # The second part ran on the host that measured replica 1.
+            reused = campaign.add("r8i", unit, 3, host=1, groups=("2",))
+            with self.assertRaisesRegex(ValueError, "replicas of a unit share an EC2 instance"):
+                validate(campaign, [*without(campaign, "r8i", unit, 3), split[0], *reused])
 
 
 PROTOCOLS = ("smoke", "qualification")
@@ -287,7 +321,7 @@ def check_precision(label, share, protocols, protocol_name):
 
 
 def plan_unit(unit, manifest, protocols, representatives):
-    """Every protocol and replica's route plans of one unit, checked; returns them by run."""
+    """Every protocol and replica's route plans of one measured group, checked; returns them by run."""
     shard = unit["shard_id"]
     held = sorted(unit["owned"])
     dispatch = UNIT_SESSION.load_dispatch(BASELINE / "shard-dispatch.tsv", shard)
@@ -296,13 +330,13 @@ def plan_unit(unit, manifest, protocols, representatives):
     plans = {}
     for replica in REPLICAS:
         planned = UNIT_SESSION.plan_routes(BASELINE, unit, replica)
-        label = f"unit {unit['unit_id']} replica {replica}"
+        label = f"unit {unit['unit_id']} group {unit['group_id']} replica {replica}"
         order = [route for route, *_ in planned]
         dispatch_order = [route for route in routes if route in order]
         if order != (dispatch_order[::-1] if int(replica) % 2 == 0 else dispatch_order):
             raise AssertionError(f"{label} runs routes {order} out of replica order")
         if sorted(row["row_id"] for *_, share in planned for row in share) != held:
-            raise AssertionError(f"{label} routes do not hold exactly the unit's rows")
+            raise AssertionError(f"{label} routes do not hold exactly the group's rows")
         target = "1" if replica == "4" else replica
         expected_representatives = sorted(
             row_id for representative_replica, row_id in unit["representatives"] if representative_replica == target)
@@ -325,22 +359,26 @@ def plan_unit(unit, manifest, protocols, representatives):
 
 
 def sample(units, plans):
-    """One unit per handler pairing, and a whole-method unit if any unit has one."""
+    """One group per handler pairing, a later group of a unit, and a whole-method group if any group has one."""
     chosen = {}
-    for unit in sorted(units.values(), key=lambda unit: (unit["shard_id"], int(unit["unit_index"]))):
+    for unit_id, group_id in sorted(plans, key=lambda key: (
+            units[key[0]]["shard_id"], int(units[key[0]]["unit_index"]), int(key[1]))):
+        unit = units[unit_id]
         dispatch = UNIT_SESSION.load_dispatch(BASELINE / "shard-dispatch.tsv", unit["shard_id"])
-        chosen.setdefault((dispatch["native_access_handler"], dispatch["object_row_handler"]), unit["unit_id"])
+        chosen.setdefault((dispatch["native_access_handler"], dispatch["object_row_handler"]), (unit_id, group_id))
+        if group_id != "1":
+            chosen.setdefault("later-group", (unit_id, group_id))
         if any(selector["parameters"] == UNIT_SESSION.ROUTE_ARGUMENTS
-               for _, _, selectors, _, _ in plans[unit["unit_id"]][("qualification", "1")]
+               for _, _, selectors, _, _ in plans[(unit_id, group_id)][("qualification", "1")]
                for selector in selectors):
-            chosen.setdefault("whole-method", unit["unit_id"])
+            chosen.setdefault("whole-method", (unit_id, group_id))
     return sorted(set(chosen.values()))
 
 
-def run_shell(root, unit_id, protocol_name, replica):
-    result_directory = root / unit_id[:12] / f"{protocol_name}-{replica}"
+def run_shell(root, unit_id, group_id, protocol_name, replica):
+    result_directory = root / unit_id[:12] / f"group-{group_id}" / f"{protocol_name}-{replica}"
     subprocess.run(
-        [str(BASELINE / "run-unit.sh"), unit_id, protocol_name, replica, str(result_directory)],
+        [str(BASELINE / "run-unit.sh"), unit_id, protocol_name, replica, group_id, str(result_directory)],
         check=True,
         capture_output=True,
         text=True,
@@ -391,28 +429,29 @@ class UnitFixture:
     SMOKE_METADATA = ("jmh_process_count", "jmh_process_warmup_iterations", "jmh_process_measurement_iterations",
                       "jmh_iteration_time")
 
-    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row: 1, steal=0):
+    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row: 1, steal=0, group="1"):
         """steal is the CPU steal ticks each route records in its 1,000 ticks."""
         self.root = root
         self.steal = steal
         units = UNIT_SESSION.work_units.load(BASELINE)
         self.unit = next(unit for unit in units.values()
                          if (unit["shard_id"], unit["unit_index"]) == (shard_id, unit_index))
+        self.group = UNIT_SESSION.measured_group(self.unit, group)
         self.protocols = UNIT_SESSION.row_protocol.load(BASELINE / "row-protocol.tsv")
-        self.replica = replica or min([replica for replica, _ in self.unit["representatives"]] or ["1"])
+        self.replica = replica or min([replica for replica, _ in self.group["representatives"]] or ["1"])
         self.host = host or self.HOST
         self.score = score
         with contextlib.redirect_stdout(io.StringIO()):
             UNIT_SESSION.plan(type("Arguments", (), {
-                "unit": self.unit["unit_id"], "replica": self.replica, "output_directory": root})())
+                "unit": self.unit["unit_id"], "replica": self.replica, "group": group, "output_directory": root})())
         representatives = UNIT_SESSION.row_protocol.read_tsv(BASELINE / "protocol-representatives.tsv")
-        held = UNIT_SESSION.unit_representatives(self.unit, self.replica)
+        held = UNIT_SESSION.unit_representatives(self.group, self.replica)
         (root / "unit-capacity.txt").write_text(
             "memory_total_bytes=34359738368\nmemory_available_before_bytes=30000000000\n"
             "swap_total_bytes=0\nswap_free_before_bytes=0\noom_kills_before=0\n")
         # A confirmation replica runs replica 1's representatives.
         target = UNIT_SESSION.protocol_replica(self.replica)
-        for route, _, systems, share in UNIT_SESSION.plan_routes(BASELINE, self.unit, self.replica):
+        for route, _, systems, share in UNIT_SESSION.plan_routes(BASELINE, self.group, self.replica):
             route_representatives = [
                 row for row in representatives
                 if (row["shard_id"], row["replica_id"], row["route"]) == (shard_id, target, route)
@@ -507,7 +546,7 @@ class UnitFixture:
     def combine(self, attempt="host-session-1/3"):
         with contextlib.redirect_stdout(io.StringIO()):
             UNIT_SESSION.combine(type("Arguments", (), {
-                "unit_directory": self.root, "unit_attempt": attempt,
+                "unit_directory": self.root, "unit_attempt": attempt, "group": self.group["group_id"],
                 "region": self.host["availability_zone"][:-1]})())
 
     def accept(self, attempt):
@@ -524,7 +563,8 @@ class UnitFixture:
 
 
 class UnitCampaign:
-    """A unit campaign's retained attempts: one host per platform and replica runs each unit of its shards."""
+    """A unit campaign's retained attempts: one host per platform and replica runs each unit of its shards,
+    each unit in one lease that measures all its groups."""
 
     PLATFORMS = {"r8i": ("intel", "r8i.large"), "r9g": ("arm", "r9g.large")}
 
@@ -543,30 +583,30 @@ class UnitCampaign:
         for platform in self.PLATFORMS:
             for replica in replicas:
                 for unit in self.units:
-                    self.add(platform, unit, replica, host=replica)
+                    self.receipts.extend(self.add(platform, unit, replica, host=replica))
 
     def directory(self, receipt):
         return unit_dispatch.unit_attempt_directory(self.root, receipt)
 
-    def add(self, platform, unit, replica, host):
-        """Run one unit attempt as the next lease of the platform's host number host."""
+    def add(self, platform, unit, replica, host, groups=None):
+        """Run the unit's groups, all by default, as the next lease of the platform's host number host; returns
+        the lease's receipts, one per group."""
         host_session = f"{platform}-session-{host}"
         lease = self.leases[host_session] = self.leases.get(host_session, 0) + 1
-        directory = (self.root / "units" / platform / unit["unit_id"] / f"replica-{replica}" / host_session /
-                     f"lease-{lease}")
-        directory.mkdir(parents=True)
         architecture, instance_type = self.PLATFORMS[platform]
-        fixture = UnitFixture(
-            directory, unit["shard_id"], unit["unit_index"], str(replica), {
-                "campaign_id": "campaign", "platform": platform, "instance_id": f"i-{platform}-{host}",
-                "host_epoch": f"{platform}-epoch-{host}", "architecture": architecture,
-                "instance_type": instance_type, "availability_zone": "us-west-2a",
-            }, lambda row: self.score(row, platform, replica), self.steal(platform, host))
-        receipt = fixture.accept(f"{host_session}/{lease}")
-        # A confirmation replica's receipt stays out of the campaign's primary receipts.
-        if replica != 4:
-            self.receipts.append(receipt)
-        return receipt
+        receipts = []
+        for group in groups or [group["group_id"] for group in unit["groups"]]:
+            directory = (self.root / "units" / platform / unit["unit_id"] / f"replica-{replica}" / host_session /
+                         f"lease-{lease}" / f"group-{group}")
+            directory.mkdir(parents=True)
+            fixture = UnitFixture(
+                directory, unit["shard_id"], unit["unit_index"], str(replica), {
+                    "campaign_id": "campaign", "platform": platform, "instance_id": f"i-{platform}-{host}",
+                    "host_epoch": f"{platform}-epoch-{host}", "architecture": architecture,
+                    "instance_type": instance_type, "availability_zone": "us-west-2a",
+                }, lambda row: self.score(row, platform, replica), self.steal(platform, host), group)
+            receipts.append(fixture.accept(f"{host_session}/{lease}"))
+        return receipts
 
     def write_ledger(self, path, receipts):
         SHARD_RESULTS.write_tsv(path, UNIT_SESSION.UNIT_RECEIPT_FIELDS, receipts)

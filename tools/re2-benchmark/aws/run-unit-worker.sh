@@ -3,7 +3,10 @@ set -euo pipefail
 
 # A unit worker measures the work units its controller leases to this host, one
 # at a time, until a stop lease, an idle wait, its lifetime, or a Spot notice.
-# aws/README.md "Unit workers" specifies the S3 keys, schemas, and stop rules.
+# A lease names the unit's measured groups to run, in order; the worker uploads
+# each group's result as soon as the group finishes, so a Spot notice loses only
+# the group it interrupts. aws/README.md "Unit workers" specifies the S3 keys,
+# schemas, and stop rules.
 
 if [[ $# -ne 2 ]]; then
     echo "Usage: $0 <host-evidence-directory> <unit-directory>" >&2
@@ -65,9 +68,8 @@ fi
 INSTANCE_ID=$(awk -F= '$1 == "instance_id" {print substr($0, length($1) + 2); exit}' \
     "${HOST_DIR}/environment-manifest.txt" 2>/dev/null || true)
 LEDGER="${HOST_DIR}/worker-leases.tsv"
-{
-    printf 'sequence\tunit_id\treplica_id\toutcome\texit_status\tunit_attempt_id\tenvironment_sha256\n'
-} > "${LEDGER}"
+printf 'sequence\tunit_id\treplica_id\tgroup_id\toutcome\texit_status\tunit_attempt_id\tenvironment_sha256\n' \
+    > "${LEDGER}"
 mkdir -p "${HOST_DIR}/leases"
 
 started_at=$(date +%s)
@@ -75,6 +77,12 @@ sequence=1
 state=waiting
 unit_id=
 replica_id=
+# The lease's groups in run order, the one running, and those whose completion markers landed.
+lease_groups=
+group_id=
+finished_groups=()
+# The exit status of the group run_group last ran.
+group_status=0
 unit_pid=
 unit_directory=
 next_heartbeat=0
@@ -83,6 +91,8 @@ imds_token=
 imds_token_time=0
 # When the current upload budget ends, while one runs.
 upload_deadline=
+# The attempts the last put_once made.
+put_attempts=0
 # The last S3 call's output and errors.
 S3_OUTPUT="${UNIT_ROOT}/s3-output"
 S3_ERRORS="${UNIT_ROOT}/s3-errors"
@@ -148,7 +158,6 @@ put_once()
     local attempt_seconds=$((UPLOAD_ATTEMPT_SECONDS + stretch))
     local budget=$((UPLOAD_SECONDS + stretch))
     local encoded
-    local attempt=0
     local errors
     local retry_at
     if ((stretch > 0 && budget < 2 * attempt_seconds + UPLOAD_RETRY_SECONDS)); then
@@ -158,12 +167,13 @@ put_once()
     local upload_deadline=${upload_deadline:-$(($(now) + budget))}
     encoded=$(python3 -c 'import base64, sys; print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode())' \
         "$(sha256_of "${file}")")
+    put_attempts=0
     while true; do
         if (($(now) + attempt_seconds > upload_deadline)); then
             echo "Upload of s3://${BUCKET}/${key} has no time left for an attempt" >&2
             return 1
         fi
-        attempt=$((attempt + 1))
+        put_attempts=$((put_attempts + 1))
         # The CLI makes one attempt, so only this loop's earlier attempts can have landed.
         if AWS_MAX_ATTEMPTS=1 aws_cli_within "${attempt_seconds}" s3api put-object --bucket "${BUCKET}" \
                 --key "${key}" --body "${file}" --if-none-match '*' --checksum-algorithm SHA256 \
@@ -172,7 +182,7 @@ put_once()
         fi
         errors=$(<"${S3_ERRORS}")
         if [[ "${errors}" == *PreconditionFailed* ]]; then
-            if ((attempt > 1)); then
+            if ((put_attempts > 1)); then
                 # An earlier attempt landed before its response was lost.
                 return 0
             fi
@@ -260,12 +270,12 @@ check_notices()
 
 kill_unit()
 {
-    local attempt
+    local _
     if [[ -z "${unit_pid}" ]]; then
         return
     fi
     kill -TERM -- "-${unit_pid}" 2>/dev/null || kill -TERM "${unit_pid}" 2>/dev/null || true
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 "${unit_pid}" 2>/dev/null || break
         sleep 0.5
     done
@@ -297,29 +307,36 @@ interrupt()
     local bundle="${UNIT_ROOT}/interrupted-${sequence}"
     local archive="${UNIT_ROOT}/interrupted-${sequence}.tar.gz"
     local contents=()
+    local finished
     action=$(jq -r '.action // "unknown"' <<<"${notice}" 2>/dev/null || printf 'unknown')
     action_time=$(jq -r '.time // ""' <<<"${notice}" 2>/dev/null || true)
     echo "Spot instance action ${action} at ${action_time:-unknown}; interrupting lease ${sequence}" >&2
     kill_unit
     state=interrupted
     mkdir -p "${bundle}"
+    finished=$(IFS=,; printf '%s' "${finished_groups[*]}")
     jq -n \
         --arg host_session "${HOST_SESSION}" \
         --argjson sequence "${sequence}" \
         --arg unit_id "${unit_id}" \
         --arg replica_id "${replica_id}" \
+        --arg finished_groups "${finished}" \
+        --arg running_group "${group_id}" \
         --arg notice_time "$(timestamp)" \
         --arg action "${action}" \
         --arg action_time "${action_time}" \
-        '{schema_version: 1, host_session: $host_session, sequence: $sequence,
+        '{schema_version: 2, host_session: $host_session, sequence: $sequence,
           unit_id: (if $unit_id == "" then null else $unit_id end),
           replica_id: (if $replica_id == "" then null else ($replica_id | tonumber) end),
+          finished_groups: (if $finished_groups == "" then [] else ($finished_groups | split(",")) end),
+          running_group: (if $running_group == "" then null else $running_group end),
           notice_time: $notice_time, action: $action, action_time: $action_time}' \
         > "${bundle}/interruption.json"
     cp "${bundle}/interruption.json" "${HOST_DIR}/worker-interruption.json"
     contents=(-C "${bundle}" interruption.json)
-    if [[ -n "${unit_directory}" && -d "${unit_directory}" ]]; then
-        contents+=(-C "${UNIT_ROOT}" "$(basename "${unit_directory}")")
+    # Finished groups are already uploaded; the bundle carries only the running group's log.
+    if [[ -n "${unit_directory}" && -f "${unit_directory}/worker-unit.log" ]]; then
+        contents+=(-C "${UNIT_ROOT}" "lease-${sequence}/group-${group_id}/worker-unit.log")
     fi
     # The bundle and the final heartbeat share one upload budget.
     local upload_deadline=$(($(now) + UPLOAD_SECONDS))
@@ -391,21 +408,23 @@ fetch_lease()
 
 read_lease()
 {
-    # Prints stop, or the unit, replica, and phase of a work lease; rejects any
-    # lease that is not this host's next one.
+    # Prints stop, or the unit, replica, phase, and comma-separated groups of a
+    # work lease; rejects any lease that is not this host's next one.
     local file="${HOST_DIR}/leases/${sequence}.json"
     local fields
     local lease_schema lease_sequence lease_host lease_campaign lease_platform lease_stop
-    local lease_phase lease_unit lease_replica lease_protocol
+    local lease_phase lease_unit lease_replica lease_protocol lease_groups
     if ! fields=$(jq -r '[.schema_version, .sequence, .host_session, .campaign_id, .platform,
-            (.stop // false), .phase, .unit_id, .replica_id, .protocol]
+            (.stop // false), .phase, .unit_id, .replica_id, .protocol,
+            (if (.groups | type) == "array" and (.groups | all(type == "string" and test("^[1-9][0-9]*$")))
+             then .groups | join(",") else "-" end)]
             | map(tostring | if . == "" or . == "null" then "-" else . end) | @tsv' "${file}"); then
         echo "Lease ${sequence} is not JSON" >&2
         return 1
     fi
     IFS=$'\t' read -r lease_schema lease_sequence lease_host lease_campaign lease_platform lease_stop \
-        lease_phase lease_unit lease_replica lease_protocol <<<"${fields}"
-    if [[ "${lease_schema}" != 1 || "${lease_sequence}" != "${sequence}" || "${lease_host}" != "${HOST_SESSION}" ||
+        lease_phase lease_unit lease_replica lease_protocol lease_groups <<<"${fields}"
+    if [[ "${lease_schema}" != 2 || "${lease_sequence}" != "${sequence}" || "${lease_host}" != "${HOST_SESSION}" ||
             "${lease_campaign}" != "${CAMPAIGN_ID}" || "${lease_platform}" != "${PLATFORM}" ]]; then
         echo "Lease ${sequence} is not this host's lease ${sequence}: schema ${lease_schema}," \
             "sequence ${lease_sequence}, host ${lease_host}, campaign ${lease_campaign}," \
@@ -421,16 +440,27 @@ read_lease()
     if [[ ! ( ( ${lease_unit} =~ ^[0-9a-f]{64}$ && ${lease_phase} != build ) ||
                 ( ${lease_unit} == engine-build && ${lease_phase} == build && ${lease_replica} == 1 ) ) ||
             ! ${lease_replica} =~ ^[1-4]$ ||
-            "${lease_protocol}" != "${PROTOCOL}" || ! ${lease_phase} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-        echo "Lease ${sequence} does not name a unit, replica, phase, and protocol ${PROTOCOL}:" \
-            "unit ${lease_unit}, replica ${lease_replica}, phase ${lease_phase}, protocol ${lease_protocol}" >&2
+            "${lease_protocol}" != "${PROTOCOL}" || ! ${lease_phase} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ||
+            ! ${lease_groups} =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ||
+            $(tr , '\n' <<<"${lease_groups}" | sort | uniq -d) != "" ]]; then
+        echo "Lease ${sequence} does not name a unit, replica, phase, distinct groups, and protocol ${PROTOCOL}:" \
+            "unit ${lease_unit}, replica ${lease_replica}, phase ${lease_phase}, groups ${lease_groups}," \
+            "protocol ${lease_protocol}" >&2
         return 1
     fi
-    printf 'unit\t%s\t%s\t%s\n' "${lease_unit}" "${lease_replica}" "${lease_phase}"
+    printf 'unit\t%s\t%s\t%s\t%s\n' "${lease_unit}" "${lease_replica}" "${lease_phase}" "${lease_groups}"
 }
 
-run_lease()
+elapsed_since()
 {
+    # Seconds from an $EPOCHREALTIME reading until now, to the millisecond.
+    awk -v start="$1" -v end="${EPOCHREALTIME}" 'BEGIN {printf "%.3f", end - start}'
+}
+
+run_group()
+{
+    # Runs one measured group of the lease, uploads its result, then puts its
+    # completion marker once. Sets group_status to the group's exit status.
     local phase=$1
     local unit_started
     local unit_finished
@@ -438,13 +468,20 @@ run_lease()
     local outcome
     local archive
     local result_sha256
+    local result_bytes
+    local pack_started
+    local pack_seconds
+    local upload_started
+    local upload_seconds
+    local upload_attempts
     local completion
     local environment
     local unit_attempt="${HOST_SESSION}/${sequence}"
+    local prefix="${RESULT_PREFIX}/units/${sequence}/groups/${group_id}"
 
-    unit_directory="${UNIT_ROOT}/lease-${sequence}"
+    unit_directory="${UNIT_ROOT}/lease-${sequence}/group-${group_id}"
     mkdir -p "${unit_directory}"
-    # One digest of a lease's environment files: the host, its JVM, and its engines.
+    # One digest of a group's environment files: the host, its JVM, and its engines.
     python3 "${UNIT_TOOL}" copy-environment --source "${HOST_DIR}" --target "${unit_directory}"
     environment=$(python3 "${UNIT_TOOL}" environment-sha256 --directory "${unit_directory}")
 
@@ -459,7 +496,7 @@ run_lease()
         export RE2_CAMPAIGN_REPLICA_ID=${replica_id}
         export RE2_CAMPAIGN_LEASE_SEQUENCE=${sequence}
         exec python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
-            "${RUN_UNIT}" "${unit_id}" "${PROTOCOL}" "${replica_id}" "${unit_directory}"
+            "${RUN_UNIT}" "${unit_id}" "${PROTOCOL}" "${replica_id}" "${group_id}" "${unit_directory}"
     ) > "${unit_directory}/worker-unit.log" 2>&1 &
     unit_pid=$!
     while kill -0 "${unit_pid}" 2>/dev/null; do
@@ -472,17 +509,24 @@ run_lease()
     if ((unit_status != 0)); then
         outcome=failed
     fi
-    echo "Lease ${sequence} unit ${unit_id} replica ${replica_id} ${outcome} with status ${unit_status}"
+    echo "Lease ${sequence} unit ${unit_id} replica ${replica_id} group ${group_id} ${outcome}" \
+        "with status ${unit_status}"
 
     state=uploading
     heartbeat
-    archive="${UNIT_ROOT}/lease-${sequence}.tar.gz"
+    archive="${UNIT_ROOT}/lease-${sequence}-group-${group_id}.tar.gz"
+    pack_started=${EPOCHREALTIME}
     tar -czf "${archive}" -C "${unit_directory}" .
     result_sha256=$(sha256_of "${archive}")
-    # A notice while the unit was packed interrupts it before its upload.
+    pack_seconds=$(elapsed_since "${pack_started}")
+    result_bytes=$(wc -c < "${archive}")
+    # A notice while the group was packed interrupts it before its upload.
     check_notices
-    put_result "${archive}" "${RESULT_PREFIX}/units/${sequence}/result.tar.gz" || stop upload-failure 1
-    completion="${UNIT_ROOT}/completion-${sequence}.json"
+    upload_started=${EPOCHREALTIME}
+    put_result "${archive}" "${prefix}/result.tar.gz" || stop upload-failure 1
+    upload_seconds=$(elapsed_since "${upload_started}")
+    upload_attempts=${put_attempts}
+    completion="${UNIT_ROOT}/completion-${sequence}-${group_id}.json"
     jq -n \
         --arg host_session "${HOST_SESSION}" \
         --argjson sequence "${sequence}" \
@@ -491,24 +535,50 @@ run_lease()
         --arg platform "${PLATFORM}" \
         --arg unit_id "${unit_id}" \
         --argjson replica_id "${replica_id}" \
+        --arg group_id "${group_id}" \
         --arg unit_attempt_id "${unit_attempt}" \
         --argjson exit_status "${unit_status}" \
         --arg unit_status "${outcome}" \
         --arg result_sha256 "${result_sha256}" \
+        --argjson result_bytes "${result_bytes}" \
+        --argjson pack_seconds "${pack_seconds}" \
+        --argjson upload_seconds "${upload_seconds}" \
+        --argjson upload_attempts "${upload_attempts}" \
         --arg started_at "${unit_started}" \
         --arg finished_at "${unit_finished}" \
-        '{schema_version: 1, host_session: $host_session, sequence: $sequence, campaign_id: $campaign_id,
-          phase: $phase, platform: $platform, unit_id: $unit_id, replica_id: $replica_id,
+        '{schema_version: 2, host_session: $host_session, sequence: $sequence, campaign_id: $campaign_id,
+          phase: $phase, platform: $platform, unit_id: $unit_id, replica_id: $replica_id, group_id: $group_id,
           unit_attempt_id: $unit_attempt_id, exit_status: $exit_status, unit_status: $unit_status,
-          result_sha256: $result_sha256, started_at: $started_at, finished_at: $finished_at}' \
+          result_sha256: $result_sha256, result_bytes: $result_bytes, pack_seconds: $pack_seconds,
+          upload_seconds: $upload_seconds, upload_attempts: $upload_attempts, started_at: $started_at,
+          finished_at: $finished_at}' \
         > "${completion}"
-    # A notice before the marker lands leaves the unit incomplete.
+    # A notice before the marker lands leaves the group unfinished.
     check_notices
-    put_once "${completion}" "${RESULT_PREFIX}/units/${sequence}/completion.json" || stop upload-failure 1
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${sequence}" "${unit_id}" "${replica_id}" \
+    put_once "${completion}" "${prefix}/completion.json" || stop upload-failure 1
+    finished_groups+=("${group_id}")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${sequence}" "${unit_id}" "${replica_id}" "${group_id}" \
         "${outcome}" "${unit_status}" "${unit_attempt}" "${environment}" >> "${LEDGER}"
-    rm -rf "${unit_directory}" "${archive}"
+    rm -rf "${unit_directory}" "${archive}" "${completion}"
     unit_directory=
+    group_status=${unit_status}
+}
+
+run_lease()
+{
+    # Runs the lease's groups in order; a group that fails ends the lease, whose
+    # last marker then reports the failure.
+    local phase=$1
+    local groups=()
+    IFS=, read -r -a groups <<<"${lease_groups}"
+    for group_id in "${groups[@]}"; do
+        run_group "${phase}"
+        if ((group_status != 0)); then
+            break
+        fi
+    done
+    group_id=
+    rm -rf "${UNIT_ROOT}/lease-${sequence}"
 }
 
 idle_since=$(now)
@@ -541,10 +611,12 @@ while true; do
     fi
     # The lease read's S3 calls may have outlasted the lifetime.
     stop_if_winding_down
-    IFS=$'\t' read -r _ unit_id replica_id phase <<<"${lease}"
+    IFS=$'\t' read -r _ unit_id replica_id phase lease_groups <<<"${lease}"
     run_lease "${phase}"
     unit_id=
     replica_id=
+    lease_groups=
+    finished_groups=()
     state=waiting
     sequence=$((sequence + 1))
     idle_since=$(now)

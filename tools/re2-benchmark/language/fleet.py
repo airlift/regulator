@@ -38,7 +38,7 @@ from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS  # n
 PLATFORMS = ("r9g", "r8i")
 PARTITION_ID = rf"case-[0-9]{{4,}}-({'|'.join(collection.ENGINES)})"
 # A language unit measures its comparisons in case-ID and language order, each comparison's observations in
-# collection order.
+# collection order. Each comparison is one of the unit's measured groups, which every replica runs in this order.
 UNIT_ORDER = "language-observation-order-v1"
 SHARD_ID = r"[a-z0-9][a-z0-9-]*"
 # The envelope files a language unit attempt binds in its evidence, beside its partitions' raw results.
@@ -133,6 +133,14 @@ def comparison_seconds(manifest, case, language, duration_policy=None):
     return seconds
 
 
+def comparison_rows(rows):
+    """A unit's rows by (case, language) comparison, in the order the unit measures them; each is a group."""
+    result = {}
+    for row in rows:
+        result.setdefault(row_atom(row)[:2], []).append(row)
+    return dict(sorted(result.items()))
+
+
 def plan_units(manifest, partitions, shard_id, duration_policy=None):
     """Pack the plan's comparisons, one atom per (case, language, operation), into work units.
 
@@ -166,6 +174,8 @@ def plan_units(manifest, partitions, shard_id, duration_policy=None):
         "representatives": [],
         "estimated_seconds": cost(unit),
         "atoms": count,
+        "groups": [work_units.measured_group(group_id, rows, [], cost(work_units.Atom(rows)))
+                   for group_id, rows in enumerate(comparison_rows(unit.owned).values(), 1)],
     } for index, (unit, count) in enumerate(sorted(
         [(atom, 1) for atom in lone] + packed, key=lambda packed_unit: packed_unit[0].owned[0]), 1)]
     work_units.check_budget(units, allow_lone_oversize=True)
@@ -270,7 +280,7 @@ def frozen_unit_rows(directory, unit_id):
 
 
 def unit_partitions(plan, unit):
-    """Each partition the unit measures, with the operations it measures there."""
+    """Each partition a measured group measures, with the operations it measures there."""
     partitions = {(partition["case"], partition["language"]): partition for partition in plan["partitions"]}
     return [(partitions[key], operations) for key, operations in unit_slices(unit["owned"]).items()]
 
@@ -294,12 +304,13 @@ def cpu_ticks():
     raise ValueError("/proc/stat has no aggregate cpu line")
 
 
-def run_unit(directory, unit_id, replica, root, native_directory, jvm_directory, unit_attempt, region, archive,
-             provenance, java="java"):
-    """Verify and measure one unit's comparisons on this host, pinned to one CPU, and accept the attempt."""
+def run_unit(directory, unit_id, replica, group_id, root, native_directory, jvm_directory, unit_attempt, region,
+             archive, provenance, java="java"):
+    """Verify and measure one measured group of a unit, its one comparison, on this host, pinned to one CPU, and
+    accept the attempt's group."""
     directory, root = directory.resolve(), root.resolve()
     plan = collection.load(directory / "plan.json")
-    unit = work_units.load(directory)[unit_id]
+    group = work_units.unit_group(work_units.load(directory)[unit_id], group_id)
     suite = collection.load(directory / "source/manifest.json")["suite"]
     environment = read_properties(root / "environment-manifest.txt")
     check_host(environment, suite)
@@ -309,7 +320,7 @@ def run_unit(directory, unit_id, replica, root, native_directory, jvm_directory,
     with provenance.open() as file:
         [candidate] = csv.DictReader(file, delimiter="\t")
     write_tsv(root / "unit-rows.tsv", work_units.UNIT_ROW_FIELDS, frozen_unit_rows(directory, unit_id))
-    unit_session.write_worker_unit_session(root, environment, unit_id, replica, unit_attempt, region)
+    unit_session.write_worker_unit_session(root, environment, unit_id, replica, group["group_id"], unit_attempt, region)
     (root / "run-metadata.txt").write_text("".join(f"{key}={value}\n" for key, value in (
         ("unit_id", unit_id), ("candidate_commit", candidate["candidate_commit"]),
         ("engine_tree", candidate["engine_tree"]), ("heap_size", environment["benchmark_heap_size"]),
@@ -330,7 +341,7 @@ def run_unit(directory, unit_id, replica, root, native_directory, jvm_directory,
             raise ValueError("worker CPU affinity was not applied")
         collection.save(root / "cpu-affinity.json", sorted(os.sched_getaffinity(0)))
         with tempfile.TemporaryDirectory() as work:
-            for partition, operations in unit_partitions(plan, unit):
+            for partition, operations in unit_partitions(plan, group):
                 path = slice_directory(directory, partition, operations, Path(work))
                 results = root / "partitions" / partition["id"]
                 try:
@@ -373,7 +384,7 @@ def exports_digest(exports):
 
 
 def validate_unit_attempt(root, directory):
-    """Regenerate a language unit attempt's receipt from its raw results, host, and frozen plan."""
+    """Regenerate the receipt of a language unit attempt's group from its raw results, host, and frozen plan."""
     root, directory = root.resolve(), directory.resolve()
     session = unit_session.read_unit_session(root)
     if unit_evidence(root) != row_protocol.read_tsv(root / "unit-evidence.tsv"):
@@ -387,6 +398,7 @@ def validate_unit_attempt(root, directory):
     if (row_protocol.read_tsv(root / "unit-rows.tsv") != frozen or
             work_units.unit_id(plan["shard_id"], unit["owned"], [], digest, UNIT_ORDER) != unit["unit_id"]):
         raise ValueError("unit rows differ from the frozen unit")
+    group = work_units.unit_group(unit, session["group_id"])
     environment = read_properties(root / "environment-manifest.txt")
     check_host(environment, collection.load(directory / "source/manifest.json")["suite"])
     unit_session.check_worker_unit_session(session, environment)
@@ -397,7 +409,7 @@ def validate_unit_attempt(root, directory):
     affinity = collection.load(root / "cpu-affinity.json")
     if len(affinity) != 1 or type(affinity[0]) is not int or affinity[0] < 0:
         raise ValueError("language unit lacks single-CPU affinity evidence")
-    partitions = unit_partitions(plan, unit)
+    partitions = unit_partitions(plan, group)
     if sorted(path.name for path in (root / "partitions").iterdir()) != sorted(partition["id"] for partition, _ in partitions):
         raise ValueError("language unit has missing or unexpected partitions")
     version = environment["regulator_release_version"]
@@ -436,13 +448,13 @@ def validate_unit_attempt(root, directory):
             candidate, runners = current, data["runners"]
             observed.update(data["observations"])
             exports.append((partition["id"], sha256_file(results / "language-results.json")))
-    if observed != set(unit["owned"]):
-        raise ValueError("language unit observations differ from its rows")
+    if observed != set(group["owned"]):
+        raise ValueError("language unit observations differ from its group's rows")
     return {
         **session,
         "shard_id": unit["shard_id"],
-        "owned_row_count": str(len(unit["owned"])),
-        "row_protocol_sha256": digest,
+        "owned_row_count": str(len(group["owned"])),
+        "row_protocol_sha256": unit_digest(plan["partitions"], group["owned"]),
         "manifest_sha256": sha256_file(directory / "plan.json"),
         "observed_rows_sha256": exports_digest(exports),
         "evidence_manifest_sha256": sha256_file(root / "unit-evidence.tsv"),
@@ -610,8 +622,8 @@ def verify(directory, results, java, classpath, native_runners):
 
 def campaign_units(plans, phase):
     """The units a language campaign phase measures across its validated plans, each by its directory: the smoke
-    units in smoke, every unit otherwise. Returns them by unit ID with each unit's protocol digest, and each
-    plan's allocation and plan digest by its shard."""
+    units in smoke, every unit otherwise. Returns them by unit ID with each group's protocol digest by (unit, group),
+    and each plan's allocation and plan digest by its shard."""
     campaign = {"units": {}, "digests": {}, "allocations": {}, "manifests": {}}
     for directory, plan in plans.items():
         if plan["shard_id"] in campaign["manifests"]:
@@ -621,7 +633,9 @@ def campaign_units(plans, phase):
         for unit_id, unit in units.items():
             if selected is None or unit_id in selected:
                 campaign["units"][unit_id] = unit
-                campaign["digests"][unit_id] = unit_digest(plan["partitions"], unit["owned"])
+                campaign["digests"].update(
+                    ((unit_id, group["group_id"]), unit_digest(plan["partitions"], group["owned"]))
+                    for group in unit["groups"])
         campaign["allocations"][plan["shard_id"]] = {
             platform: allocation["instance_type"] for platform, allocation in plan["platform_allocations"].items()}
         campaign["manifests"][plan["shard_id"]] = sha256_file(directory / "plan.json")
@@ -673,11 +687,12 @@ def aggregate(directory, result_root, output):
             candidate = identity
             partitions.append({"id": results.name, "provenance": provenance,
                                "export_sha256": sha256_file(results / "language-results.json")})
+            attempt_group = {"unit_attempt_id": receipt["unit_attempt_id"], "group_id": receipt["group_id"],
+                             "partition": results.name}
             for row_id, row in data["observations"].items():
-                observations.append({**row, "unit_attempt_id": receipt["unit_attempt_id"], "partition": results.name,
-                                     "id": row_id})
+                observations.append({**row, **attempt_group, "id": row_id})
             for row in data["comparisons"]:
-                comparisons.append({**row, "unit_attempt_id": receipt["unit_attempt_id"], "partition": results.name})
+                comparisons.append({**row, **attempt_group})
         hosts.append({"receipt": receipt, "partitions": partitions})
     collection.save(output, {"schema_version": 2, "plan": plan, "candidate": candidate,
                              "hosts": hosts, "observations": observations, "comparisons": comparisons})
@@ -703,6 +718,7 @@ def main():
     unit_parser.add_argument("--plan-directory", type=Path, required=True)
     unit_parser.add_argument("--unit", required=True)
     unit_parser.add_argument("--replica", required=True)
+    unit_parser.add_argument("--group", required=True)
     unit_parser.add_argument("--unit-directory", type=Path, required=True)
     unit_parser.add_argument("--native-directory", type=Path, required=True)
     unit_parser.add_argument("--jvm-directory", type=Path, required=True)
@@ -734,9 +750,9 @@ def main():
         install_bundle(args.bundle, args.sha256, args.plans)
     elif args.command == "run-unit":
         try:
-            run_unit(args.plan_directory, args.unit, args.replica, args.unit_directory, args.native_directory,
-                     args.jvm_directory, args.unit_attempt, args.region, archive=args.source_archive,
-                     provenance=args.candidate_provenance)
+            run_unit(args.plan_directory, args.unit, args.replica, args.group, args.unit_directory,
+                     args.native_directory, args.jvm_directory, args.unit_attempt, args.region,
+                     archive=args.source_archive, provenance=args.candidate_provenance)
         except UnitRejection as rejection:
             print(f"unit {args.unit} rejected: {rejection}", file=sys.stderr)
             sys.exit(rejection.status)

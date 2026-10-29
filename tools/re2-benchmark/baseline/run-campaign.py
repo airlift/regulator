@@ -29,11 +29,11 @@ from fleet_budget import (
 from campaign_io import (
     UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
 from unit_dispatch import (
-    UNIT_COMPLETION_FIELDS, completion_key, extract_unit_result,
-    get_unit_worker_result, heartbeat_key, heartbeat_sequence, interruption_key, list_unit_worker_results,
-    persist_accepted_unit, persist_semantic_rejection, put_unit_lease, read_accepted_units, read_semantic_rejections,
-    read_unit_attempts, read_unit_receipt, recovered_keys, result_key, retain_unit_attempt, shows_worker_start,
-    unit_attempt_directory, unit_logical_identity, unit_worker_instance_state, write_unit_attempt,
+    UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, completion_key, extract_unit_result, get_unit_worker_result,
+    group_identity, heartbeat_key, heartbeat_sequence, interruption_key, list_unit_worker_results,
+    persist_accepted_unit, persist_semantic_rejection, persist_unit_upload, put_unit_lease, read_accepted_units,
+    read_semantic_rejections, read_unit_attempts, read_unit_receipt, recovered_keys, result_key, retain_unit_attempt,
+    shows_worker_start, unit_attempt_directory, unit_logical_identity, unit_worker_instance_state, write_unit_attempt,
     write_unresolved_units)
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
@@ -81,12 +81,14 @@ TOOLING_DIGEST = "tooling-digest.txt"
 # Written once a unit phase's controller has verified every worker's cleanup and its phase gate has passed;
 # a later phase consumes the result root only beside it.
 PHASE_COMPLETE = "phase-complete.txt"
-WORK_ITEM_FIELDS = ("platform", "instance_type", "shard_id", "unit_id", "replica", "estimated_seconds",
+WORK_ITEM_FIELDS = ("platform", "instance_type", "shard_id", "unit_id", "replica", "estimated_seconds", "groups",
                     "excluded_instances")
-# Lease outcomes that spend one of the item's attempts.
+# Lease outcomes that spend one of the item's attempts. An interruption after the lease's first accepted group,
+# interrupted-progress, spends none: the item kept that progress.
 COUNTED_UNIT_OUTCOMES = frozenset(("failed", "interrupted", "lost"))
 # Lease outcomes after which the lease's host can no longer change what it became.
-SETTLED_UNIT_OUTCOMES = frozenset(("stop", "accepted", "superseded", "failed", "rejected", "interrupted"))
+SETTLED_UNIT_OUTCOMES = frozenset(
+    ("stop", "accepted", "superseded", "failed", "rejected", "interrupted", "interrupted-progress"))
 # platforms.tsv pins each AMI by its ID in this region; other regions run the image of the same name.
 PINNED_AMI_REGION = "us-west-2"
 AMAZON_AMI_OWNER = "137112412989"
@@ -155,6 +157,8 @@ class WorkItem:
     unit_id: str
     replica: int
     estimated_seconds: float
+    # The unit's measured groups in this replica's run order, each as (group ID, estimated seconds).
+    groups: tuple
     # Instances a confirmation must avoid: those that measured the unit's primary replicas.
     excluded_instances: frozenset = frozenset()
 
@@ -343,14 +347,17 @@ def read_shards(directory):
 
 
 def read_confirmation_units(path, platforms, units, primary_receipts):
-    """Replica 4 of each unstable unit, excluding the instances that measured its replicas 1 to 3.
+    """Replica 4 of each unstable unit, excluding every instance that measured a group of its replicas 1 to 3.
 
     Each platform and unit has one confirmation allowance, so a unit is listed at most once.
     """
     platform_names = {platform.name for platform in platforms}
     used = {}
+    covered = {}
     for receipt in primary_receipts:
         used.setdefault((receipt["platform"], receipt["unit_id"]), set()).add(receipt["instance_id"])
+        covered.setdefault((receipt["platform"], receipt["unit_id"]), set()).add(
+            (receipt["replica_id"], receipt["group_id"]))
     selected = []
     with path.open(newline="") as input_file:
         for row in csv.DictReader(input_file, delimiter="\t"):
@@ -361,17 +368,19 @@ def read_confirmation_units(path, platforms, units, primary_receipts):
                 raise SystemExit(f"unknown confirmation platform: {row['platform']}")
             if units.get(row["unit_id"], {}).get("shard_id") != row["shard_id"]:
                 raise SystemExit(f"unknown confirmation unit: {row['shard_id']}/{row['unit_id']}")
-            if len(used.get(key, ())) != 3:
-                raise SystemExit(f"confirmation unit needs accepted primary replicas on three instances, "
-                                 f"found {len(used.get(key, ()))}: {key}")
+            groups = {(str(replica), group["group_id"]) for replica in (1, 2, 3)
+                      for group in units[row["unit_id"]]["groups"]}
+            if covered.get(key, set()) != groups:
+                raise SystemExit(f"confirmation unit needs every group of its primary replicas accepted: {key}")
             selected.append((row["platform"], row["unit_id"], 4, frozenset(used[key])))
     return selected
 
 
-def build_work_items(phase, platforms, units, shards, confirmation_units=(), allocations=None):
+def build_work_items(phase, platforms, units, shards, confirmation_units=(), allocations=None, mirror=False):
     """Each platform's replicas of the phase's units: replica 1 in build and smoke, 1 to 3 in primary,
     and the listed replica 4 confirmations. allocations names each shard's {platform: instance type};
-    a baseline unit or engine build runs on its platform's frozen type."""
+    a baseline unit or engine build runs on its platform's frozen type. With mirror, as a baseline unit's
+    order rule requires, an even replica runs its unit's groups in reverse."""
     if phase == "confirmation":
         selected = confirmation_units
     else:
@@ -384,8 +393,13 @@ def build_work_items(phase, platforms, units, shards, confirmation_units=(), all
                     for replica in replicas]
     allocations = allocations or {shard: {platform.name: platform.instance_type for platform in platforms}
                                   for shard in shards}
+
+    def groups(unit_id, replica):
+        ordered = tuple((group["group_id"], float(group["estimated_seconds"])) for group in units[unit_id]["groups"])
+        return ordered[::-1] if mirror and replica % 2 == 0 else ordered
+
     return [WorkItem(platform, allocations[units[unit_id]["shard_id"]][platform], units[unit_id]["shard_id"], unit_id,
-                     replica, float(units[unit_id]["estimated_seconds"]), instances)
+                     replica, float(units[unit_id]["estimated_seconds"]), groups(unit_id, replica), instances)
             for platform, unit_id, replica, instances in selected]
 
 
@@ -1420,6 +1434,7 @@ def write_jobs(path, jobs, *, extend=False):
 def write_work_items(path, items):
     write_manifest(path, WORK_ITEM_FIELDS, [
         (item.platform, item.instance_type, item.shard, item.unit_id, item.replica, f"{item.estimated_seconds:g}",
+         ",".join(f"{group}:{seconds:g}" for group, seconds in item.groups),
          ",".join(sorted(item.excluded_instances)) or "-") for item in items])
 
 
@@ -1805,7 +1820,7 @@ def validate_unit_artifacts(validation, result_root, receipt, directory=None):
     exactly and match the frozen campaign. The attempt is the retained one unless directory names another copy.
     """
     directory = directory or unit_attempt_directory(result_root, receipt)
-    identity = f"{unit_logical_identity(receipt)} attempt {receipt['unit_attempt_id']}"
+    identity = f"{group_identity(receipt)} attempt {receipt['unit_attempt_id']}"
     try:
         if (directory / "status.txt").read_text() != "status=complete\n":
             raise RuntimeError("unit attempt did not complete")
@@ -1828,26 +1843,27 @@ def validate_unit_artifacts(validation, result_root, receipt, directory=None):
 
 
 def recover_accepted_units(validation, result_root, accepted_units):
-    """Revalidate accepted-units.tsv against retained attempts and add a completed attempt it lacks.
+    """Revalidate accepted-units.tsv against retained attempts and add a completed group it lacks; returns each
+    unit replica's accepted receipts by group.
 
-    The first accepted attempt of a unit replica wins; a later completed one is superseded.
+    The first accepted attempt of a unit replica's group wins; a later completed one is superseded.
     """
     accepted = {}
     for receipt in read_accepted_units(accepted_units):
         validate_unit_artifacts(validation, result_root, receipt)
-        accepted[unit_logical_identity(receipt)] = receipt
-    for receipt_path in sorted((result_root / "units").glob("*/*/replica-*/*/lease-*/unit-receipt.tsv")):
+        accepted.setdefault(unit_logical_identity(receipt), {})[receipt["group_id"]] = receipt
+    for receipt_path in sorted((result_root / "units").glob("*/*/replica-*/*/lease-*/group-*/unit-receipt.tsv")):
         try:
             receipt = read_unit_receipt(receipt_path)
         except (OSError, RuntimeError) as error:
             raise UnsafeCampaignError(f"invalid retained unit receipt {receipt_path}: {error}") from error
         if unit_attempt_directory(result_root, receipt) != receipt_path.parent:
             raise UnsafeCampaignError(f"unit receipt is not in its attempt's directory: {receipt_path}")
-        identity = unit_logical_identity(receipt)
-        if identity in accepted:
+        groups = accepted.setdefault(unit_logical_identity(receipt), {})
+        if receipt["group_id"] in groups:
             continue
         validate_unit_artifacts(validation, result_root, receipt)
-        accepted[identity] = persist_accepted_unit(accepted_units, receipt_path)
+        groups[receipt["group_id"]] = persist_accepted_unit(accepted_units, receipt_path)
     return accepted
 
 
@@ -2200,8 +2216,12 @@ class UnitWorker:
     log: object
     session: Path = None
     metadata: dict = None
-    # Each lease's work item identity, or None for a stop lease.
+    # Each lease's work item identity, or None for a stop lease, and each work lease's groups in run order.
     leases: dict = field(default_factory=dict)
+    lease_groups: dict = field(default_factory=dict)
+    # Each lease's groups whose completion markers this controller processed, in run order, each with None when
+    # this lease's attempt was accepted for it, or why it was superseded.
+    finished: dict = field(default_factory=dict)
     # Leases with a final outcome, and leases requeued, lost with their host or released before they
     # started, whose completion may still land.
     settled: set = field(default_factory=set)
@@ -2270,13 +2290,14 @@ class UnitDispatcher:
         self.runner = root / "tools/re2-benchmark/aws/run-campaign.sh"
         # The frozen inputs' fingerprint, taken when the phase runs; each launch checks it.
         self.fingerprint = None
+        self.uploads_path = result_root / UNIT_UPLOADS
+        # Each work item's accepted receipts, by group.
         self.accepted = {}
         # Each leased item's live lease, as its worker's host epoch and lease sequence.
         self.held = {}
         self.failures = {}
-        # A lone language unit past the 15-minute budget would risk more Spot interruptions than it can absorb.
-        self.on_demand_only = set() if self.spot_only else {
-            item.identity for item in items if item.estimated_seconds > work_units.UNIT_SECONDS}
+        # Items a Spot interruption stopped before any group of the lease was accepted.
+        self.interrupted = set()
         self.unresolved = {}
         # Each item an attempt found semantically wrong, by that attempt, as semantic-rejections.tsv lists it;
         # no other attempt clears it.
@@ -2304,13 +2325,31 @@ class UnitDispatcher:
         self.capacity_waits = set()
         self.terminated = set()
 
+    def remaining(self, item):
+        """The item's groups not yet accepted, in its run order, each as (group ID, estimated seconds)."""
+        accepted = self.accepted.get(item.identity, {})
+        return [(group, seconds) for group, seconds in item.groups if group not in accepted]
+
+    def remaining_seconds(self, item):
+        return sum(seconds for _, seconds in self.remaining(item))
+
+    def done(self, identity):
+        return not self.remaining(self.items[identity])
+
     def queued(self, pool=None):
         return [item for identity, item in self.items.items()
-                if identity not in self.accepted and identity not in self.unresolved and identity not in self.held
-                and (pool is None or item.pool == pool)]
+                if (pool is None or item.pool == pool) and identity not in self.unresolved and identity not in self.held
+                and not self.done(identity)]
+
+    def on_demand_only(self, item):
+        """Whether only On-Demand hosts may take the item: a Spot interruption stopped it before any group of
+        the lease was accepted, or its longest remaining group outlasts the 15-minute budget, which would risk
+        more Spot interruptions than it can absorb."""
+        return not self.spot_only and (item.identity in self.interrupted or max(
+            (seconds for _, seconds in self.remaining(item)), default=0) > work_units.UNIT_SECONDS)
 
     def on_demand(self, item):
-        return not self.spot_only and (item.identity in self.on_demand_only or item.pool in self.tail)
+        return self.on_demand_only(item) or (not self.spot_only and item.pool in self.tail)
 
     def pool_workers(self, pool):
         return [worker for worker in self.workers.values() if worker.pool == pool]
@@ -2420,8 +2459,8 @@ class UnitDispatcher:
             outcomes.setdefault((epoch, sequence), (identity, set()))[1].add(row["outcome"])
             if row["outcome"] == "rejected":
                 self.unresolved[identity] = row["detail"]
-            if row["outcome"] == "interrupted" and not self.spot_only:
-                self.on_demand_only.add(identity)
+            if row["outcome"] == "interrupted":
+                self.interrupted.add(identity)
             worker = workers.get(epoch)
             if worker is None:
                 continue
@@ -2430,6 +2469,7 @@ class UnitDispatcher:
                 worker.leases[sequence] = identity
                 worker.unsent.add(sequence)
                 if identity is not None:
+                    worker.lease_groups[sequence] = tuple(row["groups"].split(","))
                     worker.units.add(self.items[identity].unit_id)
             if row["outcome"] == "stop":
                 worker.stopping = True
@@ -2443,7 +2483,8 @@ class UnitDispatcher:
             if identity is not None and seen & COUNTED_UNIT_OUTCOMES:
                 self.count(self.items[identity], "earlier attempts", lease)
         for identity in self.accepted:
-            self.unresolved.pop(identity, None)
+            if identity in self.items and self.done(identity):
+                self.unresolved.pop(identity, None)
         for epoch, worker in self.workers.items():
             for sequence in worker.outstanding():
                 if worker.leases[sequence] is not None:
@@ -2465,12 +2506,13 @@ class UnitDispatcher:
             return
         self.counted.add(lease)
         self.failures[item.identity] = self.failures.get(item.identity, 0) + 1
-        if self.failures[item.identity] >= MAX_UNIT_ATTEMPTS and item.identity not in self.accepted:
+        if self.failures[item.identity] >= MAX_UNIT_ATTEMPTS and not self.done(item.identity):
             self.unresolved[item.identity] = f"{detail}; spent its {MAX_UNIT_ATTEMPTS} attempts"
 
     def settle(self, worker, sequence, outcome, detail="-"):
         identity = worker.leases[sequence]
-        write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail)
+        write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail,
+                           worker.finished.get(sequence, {}))
         worker.settled.add(sequence)
         # The worker goes on to its next lease.
         worker.running_since = time.monotonic()
@@ -2480,7 +2522,8 @@ class UnitDispatcher:
     def abandon(self, worker, sequence, outcome, detail):
         """Requeue a lease whose host was lost or exited; a completion that still lands is processed."""
         identity = worker.leases[sequence]
-        write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail)
+        write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail,
+                           worker.finished.get(sequence, {}))
         worker.abandoned.add(sequence)
         if self.held.get(identity) == (worker.job.host_epoch, sequence):
             del self.held[identity]
@@ -2502,100 +2545,141 @@ class UnitDispatcher:
         """Leave the item unresolved without retrying it, and let other work go on."""
         item = self.items[worker.leases[sequence]]
         self.settle(worker, sequence, "rejected", detail)
-        if item.identity not in self.accepted:
+        if not self.done(item.identity):
             self.unresolved[item.identity] = detail
         write_event(self.events_path, "rejected-session", self.arguments.campaign_id, self.event_job(worker, item),
                     worker.session, "unit-rejected", detail, **self.event_unit(worker, sequence))
 
     def interrupt(self, worker, sequence):
+        """Settle a lease a Spot interruption stopped. Once a group of the lease was accepted, the item keeps
+        it and requeues its remaining groups on any market, without spending an attempt; with none, the whole
+        item spends one and runs On-Demand."""
         item = self.items[worker.leases[sequence]]
-        self.settle(worker, sequence, "interrupted", "spot-interruption-notice")
         worker.stopping = True
-        if not self.spot_only:
-            self.on_demand_only.add(item.identity)
-        self.count(item, "Spot interruption", (worker.job.host_epoch, sequence))
+        if None in worker.finished.get(sequence, {}).values():
+            self.settle(worker, sequence, "interrupted-progress", "spot-interruption-notice")
+        else:
+            self.settle(worker, sequence, "interrupted", "spot-interruption-notice")
+            self.interrupted.add(item.identity)
+            self.count(item, "Spot interruption", (worker.job.host_epoch, sequence))
         write_event(self.events_path, "interruption", self.arguments.campaign_id, self.event_job(worker, item),
                     worker.session, "spot-interruption-notice",
-                    f"replacement_market={'spot' if self.spot_only else 'on-demand'}",
+                    f"replacement_market={'on-demand' if self.on_demand_only(item) else 'any'}",
                     **self.event_unit(worker, sequence))
 
-    def complete(self, worker, sequence, keys, fetch):
-        """Accept, supersede, retry or reject one lease from its completion marker and result."""
+    def complete_groups(self, worker, sequence, keys, fetch):
+        """Process the completion markers of the lease's groups in run order; returns whether the lease settled.
+
+        The lease is done once its last group's marker is processed, or once a marker ends it: a group that
+        failed, or failed its checks, settles the lease, and a semantic failure rejects the unit.
+        """
+        finished = worker.finished.setdefault(sequence, {})
+        for group in worker.lease_groups[sequence]:
+            if group in finished:
+                continue
+            if completion_key(sequence, group) not in keys or not self.complete(worker, sequence, group, fetch):
+                return sequence in worker.settled
+        superseded = "; ".join(f"group {group}: {detail}" for group, detail in finished.items() if detail)
+        if None in finished.values():
+            self.settle(worker, sequence, "accepted", superseded or "-")
+        else:
+            self.settle(worker, sequence, "superseded", superseded)
+        return True
+
+    def complete(self, worker, sequence, group, fetch):
+        """Accept or supersede one group of a lease from its completion marker and result, or settle the lease;
+        returns whether the group finished and the lease goes on."""
         item = self.items[worker.leases[sequence]]
         attempt = unit_session.format_unit_attempt(worker.host_session, sequence)
+        context = f"{attempt} group {group}"
         staging = self.result_root / "unit-results" / worker.host_session
-        marker_path = staging / f"lease-{sequence}-completion.json"
-        fetch(completion_key(sequence), marker_path)
+        marker_path = staging / f"lease-{sequence}-group-{group}-completion.json"
+        fetch(completion_key(sequence, group), marker_path)
         try:
             marker = json.loads(marker_path.read_text())
         except ValueError as error:
-            raise UnsafeCampaignError(f"unit completion marker {attempt} is not JSON") from error
+            raise UnsafeCampaignError(f"unit completion marker {context} is not JSON") from error
         absent = [key for key in UNIT_COMPLETION_FIELDS if key not in marker]
         if absent:
-            raise UnsafeCampaignError(f"unit completion marker {attempt} lacks {absent}")
+            raise UnsafeCampaignError(f"unit completion marker {context} lacks {absent}")
         expected = {
-            "schema_version": 1, "host_session": worker.host_session, "sequence": sequence,
+            "schema_version": 2, "host_session": worker.host_session, "sequence": sequence,
             "campaign_id": self.arguments.campaign_id, "phase": self.arguments.phase, "platform": item.platform,
-            "unit_id": item.unit_id, "replica_id": item.replica, "unit_attempt_id": attempt,
+            "unit_id": item.unit_id, "replica_id": item.replica, "group_id": group, "unit_attempt_id": attempt,
         }
         mismatches = [key for key, value in expected.items() if marker.get(key) != value]
         if mismatches:
-            raise UnsafeCampaignError(f"unit completion marker {attempt} does not match its lease: {mismatches}")
+            raise UnsafeCampaignError(f"unit completion marker {context} does not match its lease: {mismatches}")
+        persist_unit_upload(self.uploads_path, item, worker.host_session, sequence, marker)
+        finished = worker.finished[sequence]
         if marker.get("exit_status") == SEMANTIC_FAILURE_STATUS:
             # A verdict that the semantics are wrong rejects the unit for good, before or after another attempt.
             # Its ledger row is durable before the lease's outcome is.
             persist_semantic_rejection(self.rejections_path, item, attempt)
             self.semantic.setdefault(item.identity, attempt)
-            return self.reject(worker, sequence, SEMANTIC_FAILURE_DETAIL)
-        # A unit already settled needs none of this lease's evidence.
-        accepted = self.accepted.get(item.identity)
+            self.reject(worker, sequence, SEMANTIC_FAILURE_DETAIL)
+            return False
+        # A group already settled needs none of this lease's evidence.
+        accepted = self.accepted.get(item.identity, {}).get(group)
         if accepted is not None:
-            if accepted["unit_attempt_id"] == attempt:
-                # The controller stopped after accepting this attempt, before recording its outcome.
-                self.settle(worker, sequence, "accepted")
-            else:
-                self.settle(worker, sequence, "superseded", f"{accepted['unit_attempt_id']} was accepted first")
-            return
+            # Another attempt was accepted first, or this one was and the controller stopped before recording the
+            # lease's outcome.
+            finished[group] = (None if accepted["unit_attempt_id"] == attempt else
+                               f"{accepted['unit_attempt_id']} was accepted first")
+            return True
         if item.identity in self.semantic:
-            return self.settle(worker, sequence, "superseded",
-                               f"{self.semantic[item.identity]} was rejected for a semantic failure")
-        archive = staging / f"lease-{sequence}.tar.gz"
-        fetch(result_key(sequence), archive)
+            finished[group] = f"{self.semantic[item.identity]} was rejected for a semantic failure"
+            return True
+        archive = staging / f"lease-{sequence}-group-{group}.tar.gz"
+        fetch(result_key(sequence, group), archive)
         if engine_build.sha256_file(archive) != marker.get("result_sha256"):
-            return self.reject(worker, sequence, "result archive does not match its completion marker")
-        directory = staging / f"lease-{sequence}"
+            self.reject(worker, sequence, "result archive does not match its completion marker")
+            return False
+        directory = staging / f"lease-{sequence}-group-{group}"
         try:
             extract_unit_result(archive, directory)
         except (OSError, tarfile.TarError) as error:
-            return self.reject(worker, sequence, f"result archive is unreadable: {error}")
+            self.reject(worker, sequence, f"result archive is unreadable: {error}")
+            return False
         if marker.get("unit_status") != "complete" or marker.get("exit_status") != 0:
             if marker.get("exit_status") == PROTOCOL_REJECTION_STATUS:
-                return self.reject(worker, sequence, f"numerical protocol rejection: status {PROTOCOL_REJECTION_STATUS}")
+                self.reject(worker, sequence, f"numerical protocol rejection: status {PROTOCOL_REJECTION_STATUS}")
+                return False
             try:
                 capacity = read_properties(directory / "unit-capacity.txt")
             except (OSError, RuntimeError):
                 capacity = {}
             if capacity.get("capacity_status") == "rejected":
-                return self.reject(worker, sequence, "unit capacity gate rejected the host's resources")
+                self.reject(worker, sequence, "unit capacity gate rejected the host's resources")
+                return False
             detail = f"unit failed with status {marker.get('exit_status')}"
             self.settle(worker, sequence, "failed", detail)
-            return self.count(item, detail, (worker.job.host_epoch, sequence))
+            self.count(item, detail, (worker.job.host_epoch, sequence))
+            return False
         try:
             receipt = read_unit_receipt(directory / "unit-receipt.tsv")
-            if unit_logical_identity(receipt) != item.identity or receipt["unit_attempt_id"] != attempt:
-                raise RuntimeError(f"unit receipt names {unit_logical_identity(receipt)} attempt "
-                                   f"{receipt['unit_attempt_id']}, expected {item.identity} attempt {attempt}")
+            if (unit_logical_identity(receipt), receipt["group_id"], receipt["unit_attempt_id"]) != (
+                    item.identity, group, attempt):
+                raise RuntimeError(f"unit receipt names {group_identity(receipt)} attempt "
+                                   f"{receipt['unit_attempt_id']}, expected {item.identity}/group-{group} attempt "
+                                   f"{attempt}")
             validate_unit_artifacts(self.validation, self.result_root, receipt, directory)
         except (OSError, RuntimeError) as error:
-            return self.reject(worker, sequence, f"artifact gate: {error}")
+            self.reject(worker, sequence, f"artifact gate: {error}")
+            return False
         final = unit_attempt_directory(self.result_root, receipt)
         retain_unit_attempt(directory, final)
-        self.accepted[item.identity] = persist_accepted_unit(self.accepted_path, final / "unit-receipt.tsv")
-        self.unresolved.pop(item.identity, None)
-        self.settle(worker, sequence, "accepted")
+        self.accepted.setdefault(item.identity, {})[group] = persist_accepted_unit(
+            self.accepted_path, final / "unit-receipt.tsv")
+        if self.done(item.identity):
+            self.unresolved.pop(item.identity, None)
+        finished[group] = None
+        return True
 
     def lease_started(self, worker, sequence, keys, fetch):
-        """Whether the host began the lease, from its heartbeats."""
+        """Whether the host began the lease: a group of it finished, or its heartbeats show it began."""
+        if worker.finished.get(sequence):
+            return True
         beats = {heartbeat_sequence(key) for key in keys} - {None}
         if any(beat > sequence for beat in beats):
             return True
@@ -2622,9 +2706,9 @@ class UnitDispatcher:
         for sequence in sorted(worker.leases):
             if sequence in worker.settled or worker.leases[sequence] is None:
                 continue
-            if completion_key(sequence) in keys:
-                self.complete(worker, sequence, keys, fetch)
-            elif interruption_key(sequence) in keys:
+            if self.complete_groups(worker, sequence, keys, fetch):
+                continue
+            if interruption_key(sequence) in keys:
                 if self.interruption_names_unit(worker, sequence, fetch):
                     self.interrupt(worker, sequence)
                 elif sequence not in worker.abandoned:
@@ -2755,27 +2839,30 @@ class UnitDispatcher:
                 self.unresolved[item.identity] = self.exhausted[item.pool]
 
     def lease_document(self, worker, sequence):
-        document = {"schema_version": 1, "campaign_id": self.arguments.campaign_id,
+        document = {"schema_version": 2, "campaign_id": self.arguments.campaign_id,
                     "platform": worker.job.platform.name, "host_session": worker.host_session, "sequence": sequence}
         identity = worker.leases[sequence]
         if identity is None:
             return {**document, "stop": True}
         item = self.items[identity]
         return {**document, "phase": self.arguments.phase, "unit_id": item.unit_id, "replica_id": item.replica,
-                "protocol": phase_protocol(self.arguments)}
+                "groups": list(worker.lease_groups[sequence]), "protocol": phase_protocol(self.arguments)}
 
     def issue(self, worker, item):
-        """Record a lease, or a stop lease without an item, before it is written."""
+        """Record a lease, or a stop lease without an item, before it is written; a lease runs the item's
+        remaining groups."""
         sequence = max(worker.leases, default=0) + 1
         if not worker.outstanding():
             worker.running_since = time.monotonic()
-        write_unit_attempt(self.leases_path, worker, sequence, item, "leased" if item else "stop")
+        groups = tuple(group for group, _ in self.remaining(item)) if item else ()
+        write_unit_attempt(self.leases_path, worker, sequence, item, "leased" if item else "stop", groups=groups)
         worker.leases[sequence] = item.identity if item else None
         worker.unsent.add(sequence)
         if item is None:
             worker.settled.add(sequence)
             worker.stopping = True
         else:
+            worker.lease_groups[sequence] = groups
             worker.units.add(item.unit_id)
             self.held[item.identity] = (worker.job.host_epoch, sequence)
 
@@ -2788,13 +2875,15 @@ class UnitDispatcher:
             worker.unsent.discard(sequence)
 
     def next_item(self, worker, queued=None, units=None):
-        """The eligible queued item to lease next: On-Demand work first, then the longest. An item is
-        never a unit this host already held, nor one on an instance its replicas or confirmation
-        exclude, and On-Demand-only items go to On-Demand hosts; On-Demand hosts also take the rest.
-        A projection passes the items still queued in it and the units the worker would hold by then."""
+        """The eligible queued item to lease next: On-Demand work first, then the longest remaining. An item
+        is never a unit this host already held, nor one on an instance that measured any group of any replica
+        of its unit or that its confirmation excludes, and On-Demand-only items go to On-Demand hosts;
+        On-Demand hosts also take the rest. A projection passes the items still queued in it and the units the
+        worker would hold by then."""
         used = {}
-        for receipt in self.accepted.values():
-            used.setdefault((receipt["platform"], receipt["unit_id"]), set()).add(receipt["instance_id"])
+        for groups in self.accepted.values():
+            for receipt in groups.values():
+                used.setdefault((receipt["platform"], receipt["unit_id"]), set()).add(receipt["instance_id"])
         on_demand_worker = worker.job.market == "on-demand"
         units = worker.units if units is None else units
         # A Spot worker keeps taking its pool's tail items until an On-Demand worker replaces it.
@@ -2802,9 +2891,9 @@ class UnitDispatcher:
             item for item in (self.queued(worker.pool) if queued is None else queued)
             if item.unit_id not in units and worker.instance_id not in item.excluded_instances and
             worker.instance_id not in used.get((item.platform, item.unit_id), ()) and
-            (on_demand_worker or self.spot_only or item.identity not in self.on_demand_only)]
-        return min(candidates, key=lambda item: (not self.on_demand(item), -item.estimated_seconds, item.identity),
-                   default=None)
+            (on_demand_worker or not self.on_demand_only(item))]
+        return min(candidates, key=lambda item: (not self.on_demand(item), -self.remaining_seconds(item),
+                                                 item.identity), default=None)
 
     def lease(self, worker):
         """Keep the worker's next lease written one ahead of its current one, or stop it."""
@@ -2835,7 +2924,7 @@ class UnitDispatcher:
     def unneeded(self, worker):
         """Whether a worker that has not started holds no lease of an open item and could take no queued one."""
         return not worker.started and self.next_item(worker) is None and all(
-            identity is None or identity in self.accepted or identity in self.unresolved
+            identity is None or self.done(identity) or identity in self.unresolved
             for identity in map(worker.leases.get, worker.outstanding()))
 
     def final(self, worker):
@@ -2845,7 +2934,8 @@ class UnitDispatcher:
             self.workers[epoch].pool == worker.pool for epoch in others if epoch in self.workers)
 
     def update_tail(self):
-        """Mark a pool for On-Demand replacement once its remaining estimated work falls to its tail share.
+        """Mark a pool for On-Demand replacement once its remaining estimated work, the groups not yet accepted,
+        falls to its tail share.
 
         Its Spot workers keep taking tail items until an On-Demand worker admitted in the tail replaces them.
         """
@@ -2853,17 +2943,20 @@ class UnitDispatcher:
             return
         for pool in self.pools:
             items = [item for item in self.items.values() if item.pool == pool]
-            remaining = sum(item.estimated_seconds for item in items
-                            if item.identity not in self.accepted and item.identity not in self.unresolved)
-            if remaining <= sum(item.estimated_seconds for item in items) * ON_DEMAND_TAIL_PERCENT / 100:
+            remaining = sum(self.remaining_seconds(item) for item in items if item.identity not in self.unresolved)
+            if remaining <= sum(seconds for item in items for _, seconds in item.groups) * ON_DEMAND_TAIL_PERCENT / 100:
                 self.tail.add(pool)
 
     def free_at(self, worker, now):
         """When the worker is projected to take new work: once it boots, and once the leases it holds have run
-        for their estimates, the running one counted from when it began."""
+        their groups' estimates, the running one counted from when it began."""
         start = worker.running_since if worker.started else max(now, worker.launched_at + UNIT_WORKER_BOOT_SECONDS)
-        held = [self.items[identity].estimated_seconds
-                for identity in map(worker.leases.get, worker.outstanding()) if identity is not None]
+        held = []
+        for sequence in worker.outstanding():
+            identity = worker.leases[sequence]
+            if identity is not None:
+                seconds = dict(self.items[identity].groups)
+                held.append(sum(seconds[group] for group in worker.lease_groups[sequence]))
         if not held:
             return max(now, start)
         return max(now, start + held[0]) + sum(held[1:])
@@ -2891,7 +2984,7 @@ class UnitDispatcher:
                 return queued
             queued.remove(item)
             units[epoch].add(item.unit_id)
-            free[epoch] += item.estimated_seconds
+            free[epoch] += self.remaining_seconds(item)
         return []
 
     def pool_demand(self, pool, now):
@@ -2904,7 +2997,7 @@ class UnitDispatcher:
                 return "on-demand"
             return "spot" if late else None
         # While On-Demand admission is refused, Spot workers take every item Spot may still run.
-        return "spot" if any(item.identity not in self.on_demand_only for item in late) else None
+        return "spot" if any(not self.on_demand_only(item) for item in late) else None
 
     def candidate(self, pool, market):
         candidate = self.candidates.get(pool)
@@ -3067,7 +3160,7 @@ class UnitDispatcher:
         unresolved = [(item, SEMANTIC_FAILURE_DETAIL if identity in self.semantic else
                        self.unresolved.get(identity, "not accepted"))
                       for identity, item in sorted(self.items.items())
-                      if identity not in self.accepted or identity in self.semantic]
+                      if not self.done(identity) or identity in self.semantic]
         write_unresolved_units(self.result_root / "unresolved-units.tsv", unresolved)
         if unresolved:
             details = ", ".join(f"{item.identity} {detail}" for item, detail in unresolved)
@@ -3140,7 +3233,8 @@ def main():
         confirmation_units = read_confirmation_units(
             arguments.confirmation_jobs, platforms, units,
             read_accepted_units(arguments.primary_results / "accepted-units.tsv"))
-    items = build_work_items(arguments.phase, platforms, units, shards, confirmation_units, allocations)
+    items = build_work_items(arguments.phase, platforms, units, shards, confirmation_units, allocations,
+                             mirror=kind == "baseline")
     arguments.unit_platforms = pool_platforms(platforms, items)
     arguments.longest_units = longest_units(items)
     validate_configuration(arguments, items)

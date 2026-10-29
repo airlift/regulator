@@ -36,8 +36,8 @@ def load_collector(item, plan, release):
 
 
 def normalize_language(data, manifest, expected_release, collector, receipts, units):
-    """Import a plan's export, whose hosts must be exactly its accepted unit attempts, receipts, each holding
-    exactly its unit's rows of the plan's units."""
+    """Import a plan's export. Its hosts must be exactly the accepted unit groups in receipts, and each must hold
+    exactly its group's rows of the plan's units."""
     plan = data['plan']
     if 'selection' in plan:
         raise ValueError('release language capture requires the complete matrix')
@@ -52,16 +52,20 @@ def normalize_language(data, manifest, expected_release, collector, receipts, un
                 receipt['candidate_commit'] != collector['candidate_commit'] or
                 receipt['candidate_archive_sha256'] != collector['archive_sha256']):
             raise ValueError('accepted language unit changed the released artifact or collector')
-    accepted = {receipt['unit_attempt_id']: receipt for receipt in receipts}
+    def attempt_group(row):
+        return row['unit_attempt_id'], row['group_id']
+
+    accepted = {attempt_group(receipt): receipt for receipt in receipts}
     if (len(accepted) != len(receipts) or len(data['hosts']) != len(receipts) or
-            any(accepted.get(host['receipt']['unit_attempt_id']) != host['receipt'] for host in data['hosts'])):
+            any(accepted.get(attempt_group(host['receipt'])) != host['receipt'] for host in data['hosts'])):
         raise ValueError('language capture has missing, duplicate, or changed hosts')
-    owned = {host['receipt']['unit_attempt_id']: set() for host in data['hosts']}
+    owned = {attempt_group(host['receipt']): set() for host in data['hosts']}
     for row in data['observations']:
-        owned.setdefault(row['unit_attempt_id'], set()).add(row['id'])
-    if owned != {host['receipt']['unit_attempt_id']: set(units[host['receipt']['unit_id']]['owned'])
-                 for host in data['hosts']}:
-        raise ValueError("language capture's observations differ from their accepted units' rows")
+        owned.setdefault(attempt_group(row), set()).add(row['id'])
+    expected = {attempt_group(host['receipt']): set(work_units.unit_group(
+        units[host['receipt']['unit_id']], host['receipt']['group_id'])['owned']) for host in data['hosts']}
+    if owned != expected:
+        raise ValueError("language capture's observations differ from their accepted groups' rows")
     by_partition = {part['id']: part for part in plan['partitions']}
     cases = {case['id']: case for case in manifest['cases']}
     identities, hosts = {}, []
@@ -146,9 +150,9 @@ def validate_baseline(baseline, release, collector):
 
 
 def validate_reduced_attempts(reduction, receipts):
-    """Require the reduction's host rows to come from exactly the accepted unit attempts, as their receipts name them."""
-    fields = ('campaign_id', 'platform', 'unit_id', 'replica_id', 'unit_attempt_id', 'shard_id', 'instance_id',
-              'host_epoch', 'candidate_commit', 'engine_tree', 'evidence_manifest_sha256')
+    """Require the reduction's host rows to come from exactly the accepted unit attempt groups that receipts name."""
+    fields = ('campaign_id', 'platform', 'unit_id', 'replica_id', 'unit_attempt_id', 'group_id', 'shard_id',
+              'instance_id', 'host_epoch', 'candidate_commit', 'engine_tree', 'evidence_manifest_sha256')
     expected = {tuple(row[key] for key in fields) for row in receipts}
     actual = {tuple(row[key] for key in fields) for row in read_rows(reduction / 'host-rows.tsv')}
     if actual != expected:

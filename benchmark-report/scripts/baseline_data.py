@@ -107,8 +107,8 @@ def output_contract(pairs, metadata):
     for pair in pairs:
         routes = defaultdict(dict)
         for row in metadata:
-            # A worker runs several units of a shard and replica, so only the attempt names one unit's routes.
-            if (all(row[field] == pair[field] for field in ('platform', 'unit_attempt_id'))
+            # A worker runs several units of a shard and replica, so only the attempt and group name one group's routes.
+            if (all(row[field] == pair[field] for field in ('platform', 'unit_attempt_id', 'group_id'))
                     and row['source'].endswith('/run-metadata.txt')):
                 if row['key'] in routes[row['source']]:
                     raise ValueError('duplicate captured route metadata')

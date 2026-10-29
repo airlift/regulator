@@ -249,9 +249,10 @@ class TestFleet(unittest.TestCase):
         collection.export(partition, result)
 
     def run_unit(self, unit_id, root, verify=None, environment=None, replica="1", unit_attempt="host-1/1",
-                 measured=lambda partition: {}, directory=None):
-        """Run one unit attempt of the plan, by default this test's, through fleet.run_unit, with synthetic
-        verification and measurements; measured names each partition's changes to its synthetic results."""
+                 measured=lambda partition: {}, directory=None, group="1"):
+        """Run one group of a unit attempt of the plan, by default this test's, through fleet.run_unit, with
+        synthetic verification and measurements; measured names each partition's changes to its synthetic
+        results."""
         root.mkdir(parents=True)
         self.unit_environment = {
             "verification_status": "verified", "benchmark_mode": "unit-worker", "baseline_campaign": "language",
@@ -299,7 +300,7 @@ class TestFleet(unittest.TestCase):
                 patch.object(collection, "verify", side_effect=verify or (lambda path, results, *args: results.mkdir(parents=True))), \
                 patch.object(collection, "measure", side_effect=measure):
             try:
-                fleet.run_unit(directory or self.directory, unit_id, replica, root, self.root / "native",
+                fleet.run_unit(directory or self.directory, unit_id, replica, group, root, self.root / "native",
                                self.root / "jvm", unit_attempt, "us-west-2", archive=self.root / "regulator.tar.gz",
                                provenance=provenance)
             finally:
@@ -312,21 +313,24 @@ class TestFleet(unittest.TestCase):
         if (root / "unit-evidence.tsv").exists():
             fleet.write_unit_evidence(root)
 
-    def test_unit_attempt_measures_its_operations_and_regenerates_its_receipt(self):
+    def test_group_attempt_measures_its_partition_and_regenerates_its_receipt(self):
         plan = self.prepare_small_plan()
         units = fleet.work_units.load(self.directory)
         unit_id = next(unit_id for unit_id, unit in units.items()
                        if any(len(operations) < len(collection.OPERATIONS)
                               for operations in fleet.unit_slices(unit["owned"]).values()))
+        group = fleet.work_units.unit_group(units[unit_id], "2")
         root = self.root / "attempt"
-        self.run_unit(unit_id, root)
+        self.run_unit(unit_id, root, group="2")
         receipt = fleet.row_protocol.read_tsv(root / "unit-receipt.tsv")[0]
         self.assertEqual(receipt, fleet.validate_unit_attempt(root, self.directory))
-        self.assertEqual((receipt["owned_row_count"], receipt["candidate_commit"], receipt["engine_tree"]),
-                         (str(len(units[unit_id]["owned"])), "a" * 40, "b" * 40))
+        self.assertEqual(
+            (receipt["group_id"], receipt["owned_row_count"], receipt["candidate_commit"], receipt["engine_tree"]),
+            ("2", str(len(group["owned"])), "a" * 40, "b" * 40))
         self.assertEqual(collection.load(root / "cpu-affinity.json"), [0])
-        self.assertEqual(sorted(path.name for path in (root / "partitions").iterdir()),
-                         sorted(partition["id"] for partition, _ in fleet.unit_partitions(plan, units[unit_id])))
+        # The group is one comparison, measured in its own partition.
+        [(partition, _)] = fleet.unit_partitions(plan, group)
+        self.assertEqual([partition["id"]], [path.name for path in (root / "partitions").iterdir()])
         # The host's CPU steal and total ticks span only the partition's measurement.
         metadata = fleet.read_properties(root / "run-metadata.txt")
         self.assertEqual((metadata["cpu_steal_ticks"], metadata["cpu_total_ticks"]), ("1", "100"))
@@ -460,8 +464,8 @@ class TestFleet(unittest.TestCase):
                     with self.assertRaisesRegex(fleet.UnitRejection, message) as rejection:
                         self.run_unit(unit_id, self.root / f"attempt-{index}", **unit)
                     # The run-unit command exits with the rejection's status for the controller.
-                    arguments = ["fleet.py", "run-unit", "--unit", unit_id, "--replica", "1", "--unit-attempt", "1",
-                                 "--region", "us-west-2"]
+                    arguments = ["fleet.py", "run-unit", "--unit", unit_id, "--replica", "1", "--group", "1",
+                                 "--unit-attempt", "1", "--region", "us-west-2"]
                     for name in ("plan-directory", "unit-directory", "native-directory", "jvm-directory",
                                  "source-archive", "candidate-provenance"):
                         arguments += [f"--{name}", str(self.root / name)]
@@ -484,7 +488,8 @@ class TestFleet(unittest.TestCase):
     def run_campaign(self, measured=lambda platform, partition: {}, directories=None):
         """Accept every unit of the plans of one suite, by default a two-language plan, at replicas 1 to 3 on both
         platforms, as a primary campaign does, with one synthetic worker per replica and platform running all
-        its units."""
+        its units, each unit's groups in one lease. classes names the SHA-256 of the classes archive each host
+        installed, by default one per platform."""
         if directories is None:
             manifest = collection.load(self.source / "manifest.json")
             fleet.prepare(self.source, self.directory, selection=[(manifest["cases"][0]["id"], "java"),
@@ -504,13 +509,15 @@ class TestFleet(unittest.TestCase):
                                "logical_cpu_count": str(allocation["vcpus"]), "instance_id": f"i-{host}",
                                "host_epoch": str(len(receipts) + 1)}
                 for sequence, (unit_id, directory) in enumerate(units, 1):
-                    session = {"platform": platform, "unit_id": unit_id, "replica_id": replica,
-                               "unit_attempt_id": f"{host}/{sequence}"}
-                    attempt = fleet.unit_dispatch.unit_attempt_directory(result_root, session)
-                    self.run_unit(unit_id, attempt, environment=environment, replica=replica,
-                                  unit_attempt=session["unit_attempt_id"],
-                                  measured=lambda partition: measured(platform, partition), directory=directory)
-                    receipts.append(fleet.row_protocol.read_tsv(attempt / "unit-receipt.tsv")[0])
+                    for group in fleet.work_units.load(directory)[unit_id]["groups"]:
+                        session = {"platform": platform, "unit_id": unit_id, "replica_id": replica,
+                                   "group_id": group["group_id"], "unit_attempt_id": f"{host}/{sequence}"}
+                        attempt = fleet.unit_dispatch.unit_attempt_directory(result_root, session)
+                        self.run_unit(unit_id, attempt, environment=environment, replica=replica,
+                                      unit_attempt=session["unit_attempt_id"],
+                                      measured=lambda partition: measured(platform, partition), directory=directory,
+                                      group=group["group_id"])
+                        receipts.append(fleet.row_protocol.read_tsv(attempt / "unit-receipt.tsv")[0])
         fleet.write_tsv(result_root / "accepted-units.tsv", fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts)
         fleet.write_tsv(result_root / fleet.unit_session.SEMANTIC_REJECTIONS,
                         fleet.unit_session.SEMANTIC_REJECTION_FIELDS, [])

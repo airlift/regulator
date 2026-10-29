@@ -2,10 +2,10 @@
 
 `shard-dispatch.tsv` assigns each shard's rows to routes and systems.
 `run-shard.sh` measures one route, and `run-unit.sh` runs it once for each
-route a [work unit](#work-units) needs, keeping route artifacts under
-`routes/<route>`. Odd replicas run `native-access` first, while even replicas
-run `object-row` first, so route startup and thermal effects do not
-systematically favor one implementation. Expensive pinned Trino/Joni
+route a measured group of a [work unit](#work-units) needs, keeping route
+artifacts under `routes/<route>`. Odd replicas run `native-access` first, while
+even replicas run `object-row` first, so route startup and thermal effects do
+not systematically favor one implementation. Expensive pinned Trino/Joni
 preparation and the installed native comparator runners are shared through
 `BASELINE_SHARED_WORK_DIR`; measurements and semantic receipts are never shared
 between routes.
@@ -19,7 +19,7 @@ candidate.
 
 A route produces `route-session.tsv` but no acceptance receipt. `run-unit.sh`
 verifies that all route sessions describe the same host identity, combines the
-exact route rows, rejects duplicate or missing rows, and writes the unit's
+exact route rows, rejects duplicate or missing rows, and writes the group's
 `unit-session.tsv` and, once accepted, its `unit-receipt.tsv`.
 
 ## JMH Protocol
@@ -161,13 +161,15 @@ platform, `engine-build`, builds that platform's engines instead, and a language
 plan packs its comparisons into units of its own; see the
 [language guide](../language/README.md#plan-preparation).
 
-`generate-units.py` writes `units.tsv` (one line per unit with its counts and
-estimated seconds) and `unit-rows.tsv` (each unit's owned rows and
-representatives; one row ID contains a comma, so row lists are not packed into a
+`generate-units.py` writes `units.tsv` (one line per unit with its counts,
+estimated seconds, and its measured groups' estimated seconds in group order)
+and `unit-rows.tsv` (each unit's owned rows and representatives, each with its
+measured group; one row ID contains a comma, so row lists are not packed into a
 column). The generator refuses to write units that break a measurement
 requirement: each row owned by exactly one unit, comparisons, scaling groups,
 and logical rows inside one unit, one Cartesian selector block per method share,
-and no unit over the 15-minute budget. The three tables are not checked in:
+no unit over the 15-minute budget, and measured groups that keep the same
+requirements. The three tables are not checked in:
 `freeze-candidate.sh` generates them into the candidate archive and beside the
 baseline tooling, where the controller reads them, and the offline gate
 generates them before its tests. `run-unit.sh` measures one unit, and a unit
@@ -202,27 +204,41 @@ worker host leases units one at a time (see
   sequences a route, comparator order included. Changing any of them changes
   the ID.
 - No unit exceeds 900 seconds.
+- A unit is measured in groups, each uploaded as soon as it finishes, so a
+  reclaimed Spot instance loses only the group it was running. A group is a
+  union of atoms that also keeps each JMH launch, the methods sharing one
+  selector, whole, so a candidate and its comparators always share a group.
+  Groups are taken in order of their smallest row ID, and adjacent ones merge
+  until each is estimated at 5 minutes or more, since each group pays its
+  routes' correctness stage and JVM startups again; a short last group merges
+  into the one before it, so a unit shorter than 5 minutes stays one group. A
+  representative belongs to its row's group. Group IDs number the groups from 1
+  in that order. The generated tables hold 43 groups for 38 units; most units
+  are one group because one `-p` block spans their atoms.
 
 ### Running a Unit
 
-`run-unit.sh <unit-id> <smoke|qualification> <replica-id> <result-directory>`
-plans the unit with `unit_session.py` and runs `run-shard.sh` once for each
-route its rows need, so every route handler, verifier, and normalizer is the
-one a shard route runs. `BASELINE_PLAN_ONLY=true` plans without measuring.
+`run-unit.sh <unit-id> <smoke|qualification> <replica-id> <group-id> <result-directory>`
+plans one measured group of the unit with `unit_session.py` and runs
+`run-shard.sh` once for each route the group's rows need, so every route
+handler, verifier, and normalizer is the one a shard route runs.
+`BASELINE_PLAN_ONLY=true` plans without measuring.
 The `engine-build` unit runs the platform's engine build instead, and a unit of
 an installed language plan runs with `fleet.py run-unit`, as the
 [language guide](../language/README.md#work-units) describes; the rest of this
 section covers baseline units.
 
-- Each route reads the unit's expected rows. Its JMH runners execute the
-  unit's selectors instead of the handler's whole filter: one exact method
+- Each route reads the group's expected rows. Its JMH runners execute the
+  group's selectors instead of the handler's whole filter: one exact method
   list, one Cartesian `-p` block, and the rows' frozen protocol each, so
   qualification runs each row at its own process count and windows, and smoke
   keeps the route's smoke windows. A method holding a value JMH cannot select
   runs whole with the handler's own arguments.
-- Odd replicas run native access, then object row, with forward comparator
-  order; even replicas reverse both, as the unit ID's order rule binds. A
-  comparator order set in the environment that disagrees is an error.
+- Odd replicas run the unit's groups in group order, and within each group
+  native access, then object row, with forward comparator order; even
+  replicas reverse all three, as the unit ID's order rule binds. A worker
+  resuming a replica keeps that order for the groups left. A comparator order
+  set in the environment that disagrees is an error.
 - Each route records the host's CPU steal while it measures. `run-shard.sh`
   reads the aggregate `cpu` line of `/proc/stat` before the route's
   representatives and after its last row, and appends the steal ticks, the
@@ -230,7 +246,7 @@ section covers baseline units.
   `run-metadata.txt` as `cpu_steal_ticks` and `cpu_total_ticks`. Acceptance
   requires both, and the reducer's host check sums them per host; see
   `REPORTING.md`.
-- The route runs only the unit's representatives for its replica; replica 4
+- The route runs only the group's representatives for its replica; replica 4
   runs replica 1's. A failed representative exits 42 and rejects only that
   unit attempt.
 - Units of one shard on one host share a route's Surefire semantic tests. The
@@ -246,12 +262,13 @@ section covers baseline units.
   host session's capacity gate, combines the routes, and writes
   `unit-session.tsv`, `unit-evidence.tsv`, and, once `validate-unit-results.py`
   accepts the attempt, `unit-receipt.tsv`; see `ACCEPTANCE.md`.
-- `test_unit_session.py` plans every unit for both protocols and replicas 1
-  to 4 in process, and checks that the selectors expand to exactly the unit's
-  rows under their frozen protocols, in replica route order, with the unit's
-  representatives. It also plans a deterministic sample through `run-unit.sh`,
-  one unit per route handler pairing and any whole-method unit, for
-  qualification replicas 1 and 2 and smoke replica 4.
+- `test_unit_session.py` plans every group of every unit for both protocols
+  and replicas 1 to 4 in process, and checks that the selectors expand to
+  exactly the group's rows under their frozen protocols, in replica route
+  order, with the group's representatives. It also plans a deterministic
+  sample through `run-unit.sh`, one group per route handler pairing, a later
+  group of a unit, and any whole-method group, for qualification replicas 1
+  and 2 and smoke replica 4.
 
 ## Comparator Ordering
 

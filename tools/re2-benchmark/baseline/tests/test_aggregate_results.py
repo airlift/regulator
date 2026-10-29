@@ -147,7 +147,8 @@ class SampleFixture:
         receipt = {
             "campaign_id": "campaign", "platform": platform, "architecture": architecture,
             "instance_type": instance_type, "availability_zone": "us-west-2a", "shard_id": "only",
-            "unit_id": self.UNIT, "replica_id": str(replica), "unit_attempt_id": f"{platform}-session-{replica}/1",
+            "unit_id": self.UNIT, "replica_id": str(replica), "group_id": "1",
+            "unit_attempt_id": f"{platform}-session-{replica}/1",
             "instance_id": f"i-{platform}-{replica}", "host_epoch": f"{platform}-epoch-{replica}",
             "region": "us-west-2",
             "candidate_commit": "a" * 40, "engine_tree": "b" * 40, "evidence_manifest_sha256": "c" * 64,
@@ -489,11 +490,11 @@ class TestUnitCampaignReduction(unittest.TestCase):
 
         campaign = UnitCampaign(root / "campaign-results", self.SHARD, score=score,
                                 steal=lambda platform, host: steal if (platform, host) == ("r9g", 2) else 0)
-        # The controller stages each lease's result under unit-results/ before it retains the accepted copy.
+        # The controller stages each group's result under unit-results/ before it retains the accepted copy.
         for receipt in campaign.receipts:
             host_session, _, lease = receipt["unit_attempt_id"].rpartition("/")
-            shutil.copytree(campaign.directory(receipt),
-                            campaign.root / "unit-results" / host_session / f"lease-{lease}")
+            shutil.copytree(campaign.directory(receipt), campaign.root / "unit-results" / host_session /
+                            f"lease-{lease}-group-{receipt['group_id']}")
         # The controller starts each phase with an empty semantic-rejection ledger beside its accepted units.
         (root / UNIT_SESSION.SEMANTIC_REJECTIONS).write_text(
             "\t".join(UNIT_SESSION.SEMANTIC_REJECTION_FIELDS) + "\n")
@@ -520,7 +521,7 @@ class TestUnitCampaignReduction(unittest.TestCase):
             _, unstable, _, aggregate = self.reduction(root)
             summary = aggregate([])
             output = root / "output"
-            self.assertEqual(18, summary["primary_sessions"])
+            self.assertEqual(36, summary["primary_sessions"])
             aggregates = {(row["platform"], row["row_id"]): row for row in read_tsv(output / "row-aggregates.tsv")}
             joni = next(row_id for row_id in unstable["owned"] if row_id.endswith("/joni"))
             self.assertEqual(("3", "100"), (
@@ -534,6 +535,27 @@ class TestUnitCampaignReduction(unittest.TestCase):
             self.assertEqual(
                 [{"platform": "r8i", "shard_id": self.SHARD, "unit_id": unstable["unit_id"]}],
                 read_tsv(output / "confirmation-jobs.tsv"))
+
+    def test_replica_gathered_from_two_attempts_reduces(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            campaign, unstable, _, aggregate = self.reduction(root)
+            # Replica 3's host was reclaimed after the unit's first group; a fresh host measured the second.
+            [moved] = [receipt for receipt in campaign.receipts
+                       if (receipt["platform"], receipt["unit_id"], receipt["replica_id"], receipt["group_id"]) ==
+                       ("r8i", unstable["unit_id"], "3", "2")]
+            shutil.rmtree(campaign.directory(moved))
+            campaign.receipts.remove(moved)
+            campaign.receipts.extend(campaign.add("r8i", unstable, 3, host=5, groups=("2",)))
+
+            self.assertEqual(36, aggregate([])["primary_sessions"])
+            aggregates = {row["row_id"]: row for row in read_tsv(root / "output" / "row-aggregates.tsv")
+                          if row["platform"] == "r8i"}
+            self.assertEqual({"3"}, {aggregates[row_id]["host_count"] for row_id in unstable["owned"]})
+            # The fresh host measured replica 3 of the second group.
+            hosts = {(row["replica_id"], row["host_epoch"]) for row in read_tsv(root / "output" / "host-rows.tsv")
+                     if (row["platform"], row["unit_id"], row["group_id"]) == ("r8i", unstable["unit_id"], "2")}
+            self.assertEqual({("1", "r8i-epoch-1"), ("2", "r8i-epoch-2"), ("3", "r8i-epoch-5")}, hosts)
 
     def test_reduction_tables_render_a_deterministic_report(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -565,7 +587,7 @@ class TestUnitCampaignReduction(unittest.TestCase):
             self.assertTrue(any(row["source"].endswith("/run-metadata.txt") and row["key"] == "candidate_commit"
                                 for row in metadata))
             capacity = read_tsv(output / "capacity.tsv")
-            self.assertEqual(18, len(capacity))
+            self.assertEqual(36, len(capacity))
             self.assertTrue(all(row["exit_status"] == "0" for row in capacity))
             events = read_tsv(output / "events.tsv")
             self.assertEqual(["interruption"], [row["event_type"] for row in events])
@@ -656,14 +678,14 @@ class TestUnitCampaignReduction(unittest.TestCase):
             campaign, unstable, unstable_rows, aggregate = self.reduction(root)
             output = root / "output"
             confirmation = campaign.add("r8i", unstable, 4, host=4)
-            aggregate([confirmation])
+            aggregate(confirmation)
             confirmed = next(row for row in read_tsv(output / "row-aggregates.tsv")
                              if (row["platform"], row["row_id"]) == ("r8i", min(unstable_rows)))
             self.assertEqual("1", confirmed["confirmation_host_count"])
             self.assertEqual([], read_tsv(output / "confirmation-jobs.tsv"))
             reused = campaign.add("r8i", unstable, 4, host=1)
             with self.assertRaisesRegex(aggregate_results.ReductionError, "replicas of a unit share an EC2 instance"):
-                aggregate([reused])
+                aggregate(reused)
 
     def test_stealing_host_is_left_out_until_confirmations_replace_it(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -681,7 +703,7 @@ class TestUnitCampaignReduction(unittest.TestCase):
             self.assertEqual(sorted(unit["unit_id"] for unit in campaign.units), sorted(
                 job["unit_id"] for job in read_tsv(output / "confirmation-jobs.tsv") if job["platform"] == "r9g"))
 
-            aggregate([campaign.add("r9g", unit, 4, host=4) for unit in campaign.units])
+            aggregate([receipt for unit in campaign.units for receipt in campaign.add("r9g", unit, 4, host=4)])
             r9g = [row for row in read_tsv(output / "row-aggregates.tsv") if row["platform"] == "r9g"]
             self.assertEqual({("3", "1", "false")},
                              {(row["host_count"], row["flagged_host_count"], row["unresolved"]) for row in r9g})

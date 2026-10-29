@@ -15,11 +15,12 @@ attempt directories. The required row count and coverage are checked by
 The reducer refuses a phase root whose `semantic-rejections.tsv` is missing or
 lists an attempt that failed its correctness stage, as
 [unit dispatch](../aws/README.md#unit-dispatch) describes, whatever the unit's
-other attempts show. It reads each accepted unit attempt where the controller
-retains it, at
-`units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>` under its
-phase root, the layout `unit_dispatch.py` owns, and ignores the controller's
-staged copies under `unit-results/`. Each attempt directory must contain:
+other attempts show. It reads each accepted measured group of a unit attempt
+where the controller retains it, at
+`units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>/group-<g>`
+under its phase root, the layout `unit_dispatch.py` owns, and ignores the
+controller's staged copies under `unit-results/`. Each group directory must
+contain:
 
 - `unit-receipt.tsv`
 - `unit-session.tsv`
@@ -35,12 +36,14 @@ pinned JAR: its `release-artifact.json`, the `release_version` and
 `release/`. The report importer accepts only a reduction that proved the
 release it publishes.
 
-The ledgers must pass campaign unit acceptance: every platform and frozen unit
-of the selected shards, replicas 1, 2, and 3 of a unit on distinct EC2
-instances, and at most one replica-4 confirmation per platform and unit on an
-instance none of its replicas used. Accepted artifact discovery must match the
-ledgers exactly. Each attempt is reverified as unit acceptance does, and its
-receipt must regenerate from its evidence.
+The ledgers must pass campaign unit acceptance: every group of every platform
+and frozen unit of the selected shards, accepted once for each of replicas 1,
+2, and 3, and at most one replica-4 confirmation per platform and unit covering
+every group. A replica interrupted after some groups gathers its groups from
+several attempts, but no two replicas of a unit share an EC2 instance, and the
+confirmation runs only on instances none of its replicas used. Accepted
+artifact discovery must match the ledgers exactly. Each group is reverified as
+unit acceptance does, and its receipt must regenerate from its evidence.
 
 The receipt also binds the candidate commit, engine tree, and deployed source
 archive. When `--campaign-artifact` is supplied, its candidate commit must match
@@ -51,7 +54,7 @@ Confirmation receipts are supplied separately. Confirmation rows are preserved
 alongside the three primary rows and identified explicitly; they never replace
 a primary attempt.
 
-Every row has exactly one owner unit, whose three primary attempts and
+Every row has exactly one owner unit, whose three primary replicas and
 optional confirmation are that row's samples.
 
 Evidence for interrupted and rejected attempts is supplied through event files
@@ -151,10 +154,11 @@ are inverted so the direction remains consistent.
 
 ## Aggregation
 
-The unit attempt is the independent sample. Different units may share a host,
-but a row's samples come from the three primary attempts and the confirmation
-of its owner unit, each on its own instance. Same-host ratios pair a candidate
-with the comparators measured in the same unit attempt. The
+The unit replica is the independent sample, gathered from its accepted
+groups. Different units may share a host, but a row's samples come from the
+three primary replicas and the confirmation of its owner unit, no two sharing
+an instance. Same-host ratios pair a candidate with the comparators measured
+in the same group of one unit attempt, which never spans instances. The
 reducer preserves all primary and confirmation attempts, then reports for every platform and manifest row:
 
 - primary and all-host medians
@@ -225,7 +229,7 @@ positive is slower for both time and throughput units. A host's `slow` is the
 median of its deviations and its `noise` the median of their absolute
 distances from `slow`, a median absolute deviation. Its `steal_share` is the
 CPU steal ticks over the total ticks summed across every route of every
-accepted attempt it ran, so a route's weight is its length.
+accepted group it ran, so a route's weight is its length.
 
 A host is flagged when it measured at least 20 such rows and is more than 2%
 slow or 3% noisy, or when its steal share is above 1% however few rows it ran.
@@ -246,8 +250,8 @@ stays unresolved.
 
 The reducer writes:
 
-- `host-rows.tsv`: every row of each accepted attempt, with `unit_id`,
-  `unit_attempt_id`, and its attempt's CPU `steal_share`
+- `host-rows.tsv`: every row of each accepted group, with `unit_id`,
+  `unit_attempt_id`, `group_id`, and its group's CPU `steal_share`
 - `host-checks.tsv`: each host's rows, slowness, noise, steal share, and
   whether and why it was flagged
 - `row-aggregates.tsv`: per-platform row statistics and unresolved state
@@ -270,9 +274,10 @@ The reducer writes:
   `--release-version`
 - `output-checksums.tsv`: checksums for every reducer output above
 
-Every per-attempt table adds `unit_id` and `unit_attempt_id` after
-`host_epoch`, and `events.tsv` adds the `region`, `availability_zone`,
-`placement_score`, and `failure_classification` columns.
+Every per-attempt table adds `unit_id`, `unit_attempt_id`, and `group_id`
+after `host_epoch`, and `events.tsv`, whose `group_id` is empty, adds the
+`region`, `availability_zone`, `placement_score`, and `failure_classification`
+columns.
 
 The published
 [interactive benchmark report](https://airlift.github.io/regulator/benchmarks/)

@@ -30,7 +30,7 @@ class TestReleaseCapture(unittest.TestCase):
                      'hosts': [], 'observations': [], 'comparisons': []}
         self.receipts = []
         # The fixture's hosts measured no rows of their unit.
-        self.units = {'unit': {'owned': []}}
+        self.units = {'unit': {'unit_id': 'unit', 'owned': [], 'groups': [{'group_id': '1', 'owned': []}]}}
         jar = '/worker/regulator-1.0.jar'
         classes = release_capture.released_artifact.PUBLIC_CLASSES
         artifact = {'manifest': self.release, 'jar_path': jar,
@@ -41,7 +41,7 @@ class TestReleaseCapture(unittest.TestCase):
         exports = hashlib.sha256(f"{part['id']}  {'f' * 64}\n".encode()).hexdigest()
         instance_type = release_capture.fleet.platform_allocation('language-bulk', 'r8i')['instance_type']
         for replica in (1, 2, 3):
-            receipt = {'unit_attempt_id': f'host-{replica}/1', 'platform': 'r8i', 'unit_id': 'unit',
+            receipt = {'unit_attempt_id': f'host-{replica}/1', 'group_id': '1', 'platform': 'r8i', 'unit_id': 'unit',
                        'replica_id': str(replica), 'instance_id': f'i-{replica}', 'instance_type': instance_type,
                        'observed_rows_sha256': exports, 'engine_tree': self.release['engine_tree'],
                        'candidate_commit': self.collector['candidate_commit'],
@@ -151,7 +151,7 @@ class TestReleaseCapture(unittest.TestCase):
 
             # Reduced before its confirmation, so the reduction leaves the flagged host's comparisons unresolved.
             unconfirmed = reduce('unconfirmed')
-            confirmed = [campaign.add('r8i', unit, 4, host=4) for unit in campaign.units]
+            confirmed = [receipt for unit in campaign.units for receipt in campaign.add('r8i', unit, 4, host=4)]
             relabelled = [{**receipt, 'candidate_commit': 'f' * 40} for receipt in receipts + confirmed]
             confirmation = phase('confirmation', confirmed)
             phase('partial', receipts[1:])
@@ -238,9 +238,10 @@ class TestReleaseCapture(unittest.TestCase):
             row = data['observations'][0]
             source = next(host['receipt'] for host in data['hosts']
                           if host['receipt']['unit_attempt_id'] == row['unit_attempt_id'])
-            row['unit_attempt_id'] = next(
-                host['receipt']['unit_attempt_id'] for host in data['hosts']
-                if host['receipt']['instance_id'] == source['instance_id'] and host['receipt']['unit_id'] != source['unit_id'])
+            target = next(host['receipt'] for host in data['hosts']
+                          if host['receipt']['instance_id'] == source['instance_id'] and
+                          host['receipt']['unit_id'] != source['unit_id'])
+            row.update(unit_attempt_id=target['unit_attempt_id'], group_id=target['group_id'])
 
         def imported(items, change):
             # Each plan's imported rows, with the accepted receipts of the plan's units.
@@ -267,7 +268,7 @@ class TestReleaseCapture(unittest.TestCase):
             ('plan not imported', items[:1], receipts, [], 'unexpected platform'),
             ('reused replica host', items, [{**receipt, 'instance_id': 'i-r9g-1'} if receipt['instance_id'] == 'i-r9g-2'
                                             else receipt for receipt in receipts], [], 'share an EC2 instance'),
-            ('row moved between units', items, receipts, [], "differ from their accepted units' rows"),
+            ('row moved between units', items, receipts, [], "differ from their accepted groups' rows"),
         )
         for name, imported_items, ledger, rejections, message in cases:
             release_capture.fleet.write_tsv(result_root / 'accepted-units.tsv', session.UNIT_RECEIPT_FIELDS, ledger)
@@ -276,16 +277,20 @@ class TestReleaseCapture(unittest.TestCase):
             change = moved_row if name == 'row moved between units' else lambda data: None
             with self.subTest(name), patch.object(release_capture.released_artifact, 'validate_saved'):
                 if message is None:
-                    # Every row is its accepted attempt's: that unit's row of the plan, on that host and replica.
+                    # Every row is its accepted group's: that group's row of the plan, on that host and replica.
                     for shard, accepted, units, rows in imported(imported_items, change):
-                        attempts = {receipt['unit_attempt_id']: receipt for receipt in accepted}
-                        self.assertEqual(len(rows),
-                                         sum(len(units[receipt['unit_id']]['owned']) for receipt in accepted))
+                        attempts = {(receipt['unit_attempt_id'], receipt['group_id']): receipt for receipt in accepted}
+
+                        def owned(receipt):
+                            return release_capture.work_units.unit_group(units[receipt['unit_id']],
+                                                                         receipt['group_id'])['owned']
+
+                        self.assertEqual(len(rows), sum(len(owned(receipt)) for receipt in accepted))
                         for row in rows:
-                            receipt = attempts[row['unit_attempt_id']]
+                            receipt = attempts[row['unit_attempt_id'], row['group_id']]
                             case, language, _ = release_capture.fleet.row_atom(row['id'])
                             self.assertEqual(receipt['shard_id'], shard)
-                            self.assertIn(row['id'], units[receipt['unit_id']]['owned'])
+                            self.assertIn(row['id'], owned(receipt))
                             self.assertEqual(row['logical_identity'],
                                              [manifest['suite'], case, language, receipt['platform'],
                                               int(receipt['replica_id']), receipt['unit_id']])

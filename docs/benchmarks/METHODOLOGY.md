@@ -271,8 +271,11 @@ into work units of about 15 minutes and leases them to R8i and R9g worker hosts
 that `aws/run-campaign.sh` provisions. Each worker installs the prebuilt
 engines and the frozen candidate archive, records environment metadata, pins
 benchmark processes to physical cores, and measures one unit at a time,
-recording the hypervisor's CPU steal over each route. The controller collects
-the artifacts and terminates all cloud resources.
+recording the hypervisor's CPU steal over each route. A unit runs as one or
+more measured groups, each uploaded as it finishes, so a Spot reclaim loses
+only the running group: the controller keeps the finished groups and requeues
+the rest. The controller collects the artifacts and terminates all cloud
+resources.
 
 Final runs require:
 
@@ -281,18 +284,19 @@ Final runs require:
 - pinned JDK and comparator revisions
 - workload and source checksums
 - no overlapping process on a sibling hardware thread
-- a candidate and its comparators in the same unit, on the same host
+- a candidate and its comparators in the same measured group, on the same host
 
 Exploratory measurements and comparisons of alternative implementations must
 also run on R8i and R9g. Do not use local timings to accept or reject a
 candidate, or to decide whether it deserves a target-host run.
 
-The three replicas of a unit run on distinct instances; different units may
-share a host. A campaign may allow several AWS regions. Each Spot launch goes
-to the allowed region with the best Spot placement score, when scores are
-available, that has quota headroom; an On-Demand launch takes the first allowed
-region with headroom. Every region runs the same pinned image, identified by
-the name of its Oregon pin.
+No two of a unit's three replicas share an instance, even when an interrupted
+replica finishes its groups on another; different units may share a host. A
+campaign may allow several AWS regions. Each Spot launch goes to the allowed
+region with the best Spot placement score, when scores are available, that has
+quota headroom; an On-Demand launch takes the first allowed region with
+headroom. Every region runs the same pinned image, identified by the name of its
+Oregon pin.
 
 See the [AWS guide](../../tools/re2-benchmark/aws/README.md) for commands,
 environment variables, machine-hour planning, and Spot/On-Demand costs.
@@ -383,10 +387,10 @@ are one process, not independent forks. Before/after native invocations form
 two process observations. The [analysis instructions](../../benchmark-report/analysis/README.md)
 provide the exact estimator, limitations and independent replay command.
 
-In a campaign of work units, the unit attempt takes the host's place: processes
-nest within a unit attempt, and a row's independent samples are the attempts of
-the one unit that owns it, its three replicas on distinct instances. Different
-units may share a host. The
+In a campaign of work units, the unit replica takes the host's place: processes
+nest within a measured group of a unit attempt, and a row's independent samples
+are the replicas of the one unit that owns it, no two sharing an instance.
+Different units may share a host. The
 [reduction rules](../../tools/re2-benchmark/baseline/REPORTING.md#inputs)
 define ownership and pairing.
 

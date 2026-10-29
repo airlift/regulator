@@ -18,6 +18,8 @@ DIRECTORY = "engine-build"
 MANIFEST = "engine-build.json"
 # The build phase's one work unit, and its shard: one replica per platform, on a unit worker without prebuilt engines.
 UNIT_ID = SHARD = "engine-build"
+# A build is one measured group.
+GROUP_ID = "1"
 # A build took about ten minutes on r8i, so it fits a Spot lease.
 BUILD_SECONDS = 900
 # The envelope files a build attempt binds in its evidence, beside its logs and archives.
@@ -143,7 +145,9 @@ def package(shared, root, directory):
 def units():
     """The build phase's work units: the one engine build each platform needs."""
     return {UNIT_ID: {"unit_id": UNIT_ID, "shard_id": SHARD, "unit_index": "1",
-                      "estimated_seconds": str(BUILD_SECONDS), "owned": [UNIT_ID]}}
+                      "estimated_seconds": str(BUILD_SECONDS), "owned": [UNIT_ID],
+                      "groups": [{"group_id": GROUP_ID, "owned": [UNIT_ID], "representatives": [],
+                                  "estimated_seconds": float(BUILD_SECONDS)}]}}
 
 
 def inputs_sha256(build_scripts):
@@ -157,10 +161,10 @@ def unit_evidence(root):
     return sorted(unit_session.host_evidence_rows(root, paths), key=lambda row: row["artifact"])
 
 
-def accept(root, replica, unit_attempt, region, engine_tree):
+def accept(root, replica, group, unit_attempt, region, engine_tree):
     """Record a build lease's session and evidence beside its packaged build, and write its receipt."""
     environment = properties(root / "environment-manifest.txt")
-    unit_session.write_worker_unit_session(root, environment, UNIT_ID, replica, unit_attempt, region)
+    unit_session.write_worker_unit_session(root, environment, UNIT_ID, replica, group, unit_attempt, region)
     (root / "run-metadata.txt").write_text(f"unit_id={UNIT_ID}\nengine_tree={engine_tree}\n")
     write_tsv(root / "unit-evidence.tsv", EVIDENCE_FIELDS, unit_evidence(root))
     unit_session.write_unit_receipt(root / "unit-receipt.tsv", validate_unit_attempt(root))
@@ -175,8 +179,9 @@ def validate_unit_attempt(root):
     if unit_evidence(root) != row_protocol.read_tsv(root / "unit-evidence.tsv"):
         raise EngineBuildError("build evidence differs from the attempt's artifacts")
     environment = properties(root / "environment-manifest.txt")
-    if session["unit_id"] != UNIT_ID:
-        raise EngineBuildError(f"build session names unit {session['unit_id']}, not the engine build {UNIT_ID}")
+    if (session["unit_id"], session["group_id"]) != (UNIT_ID, GROUP_ID):
+        raise EngineBuildError(f"build session names unit {session['unit_id']} group {session['group_id']}, not "
+                               f"the engine build {UNIT_ID} group {GROUP_ID}")
     unit_session.check_worker_unit_session(session, environment)
     # A worker that installed prebuilt engines would package them rather than build its own.
     if (environment["verification_status"] != "verified" or environment["benchmark_mode"] != "unit-worker" or
@@ -220,8 +225,8 @@ def validate_unit_campaign(checkout, receipts, campaign_id):
     inputs = inputs_sha256({path: sha256_file(checkout / path) for path in BUILD_INPUTS})
     build_units = units()
     unit_session.check_unit_campaign(
-        receipts, platforms, build_units, {UNIT_ID: inputs}, unit_session.platform_allocations(platforms, build_units),
-        {SHARD: inputs}, campaign_id, (1,))
+        receipts, platforms, build_units, {(UNIT_ID, GROUP_ID): inputs},
+        unit_session.platform_allocations(platforms, build_units), {SHARD: inputs}, campaign_id, (1,))
 
 
 def validate_trino_pin(checkout, build):
@@ -301,6 +306,7 @@ def main():
     accept_command = commands.add_parser("accept", help="accept the build this unit lease packaged")
     accept_command.add_argument("--unit-directory", type=Path, required=True)
     accept_command.add_argument("--replica", required=True)
+    accept_command.add_argument("--group", required=True)
     accept_command.add_argument("--unit-attempt", required=True)
     accept_command.add_argument("--region", required=True)
     accept_command.add_argument("--engine-tree", required=True)
@@ -317,7 +323,7 @@ def main():
     if arguments.command == "package":
         package(arguments.shared, arguments.root, arguments.result_directory)
     elif arguments.command == "accept":
-        accept(arguments.unit_directory, arguments.replica, arguments.unit_attempt, arguments.region,
+        accept(arguments.unit_directory, arguments.replica, arguments.group, arguments.unit_attempt, arguments.region,
                arguments.engine_tree)
     elif arguments.command == "install":
         install(arguments.build, arguments.manifest_sha256, arguments.shared, arguments.environment,

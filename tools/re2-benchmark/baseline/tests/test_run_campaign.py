@@ -850,7 +850,8 @@ class TestRunCampaign(unittest.TestCase):
     @staticmethod
     def replica_items(arguments, platforms, units, seconds):
         """Three replicas of each unit on each platform, as a primary phase runs them, with their pools."""
-        items = [RUN_CAMPAIGN.WorkItem(platform.name, platform.instance_type, "shard", unit, replica, seconds)
+        items = [RUN_CAMPAIGN.WorkItem(platform.name, platform.instance_type, "shard", unit, replica, seconds,
+                                       (("1", seconds),))
                  for unit in units for replica in (1, 2, 3) for platform in platforms]
         arguments.unit_platforms = RUN_CAMPAIGN.pool_platforms(platforms, items)
         return items
@@ -1069,7 +1070,7 @@ class TestRunCampaign(unittest.TestCase):
                 RUN_CAMPAIGN.validate_unit_artifacts(refused, result_root, receipts[0])
 
     def test_a_lone_unit_past_the_unit_budget_runs_on_demand_unless_spot_only(self):
-        items = [RUN_CAMPAIGN.WorkItem("r8i", "r8i.large", "language-bulk", unit_id, 1, seconds)
+        items = [RUN_CAMPAIGN.WorkItem("r8i", "r8i.large", "language-bulk", unit_id, 1, seconds, (("1", seconds),))
                  for unit_id, seconds in (("lone", 950.0), ("packed", 900.0))]
         for spot_only, expected in ((False, ["r8i/lone/replica-1"]), (True, [])):
             dispatcher = RUN_CAMPAIGN.UnitDispatcher(SimpleNamespace(phase="primary", spot_only=spot_only),
@@ -1794,7 +1795,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     with self.subTest(unit=unit_id, shard_status=shard_status):
                         unit = root / f"{unit_id}-{shard_status}"
                         result = subprocess.run(
-                            [str(baseline / "run-unit.sh"), unit_id, "qualification", "1", str(unit)],
+                            [str(baseline / "run-unit.sh"), unit_id, "qualification", "1", "1", str(unit)],
                             env={**environment, "SHARD_STATUS": str(shard_status)},
                             capture_output=True, text=True, check=False)
                         self.assertEqual(expected, result.returncode, result.stderr)
@@ -1960,7 +1961,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
     def test_unit_ledger_recovers_retained_attempts_and_confirms_on_new_instances(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             result_root = Path(temporary_directory) / "results"
-            campaign = UnitCampaign(result_root, "like-dfa-single-use")
+            campaign = UnitCampaign(result_root, "trino-like-specialized")
             ledger = result_root / "accepted-units.tsv"
             receipt = campaign.receipts[0]
             arguments = SimpleNamespace(
@@ -1973,21 +1974,31 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
             with patch.object(RUN_CAMPAIGN, "check_output", return_value=receipt["candidate_commit"]):
                 recover()
-                # A restart revalidates the ledger against the retained attempts.
-                self.assertEqual(len(recover()), 6)
+                # A restart revalidates the ledger against the retained attempts, one per group.
+                self.assertEqual(12, len(recover()))
                 self.assertEqual(
-                    sorted(campaign.receipts, key=RUN_CAMPAIGN.unit_logical_identity),
-                    sorted(RUN_CAMPAIGN.read_accepted_units(ledger), key=RUN_CAMPAIGN.unit_logical_identity))
+                    sorted(campaign.receipts, key=RUN_CAMPAIGN.group_identity),
+                    sorted(RUN_CAMPAIGN.read_accepted_units(ledger), key=RUN_CAMPAIGN.group_identity))
                 unit = campaign.units[0]
                 confirmations = Path(temporary_directory) / "confirmation-jobs.tsv"
                 confirmations.write_text(
                     f"platform\tshard_id\tunit_id\nr8i\t{unit['shard_id']}\t{unit['unit_id']}\n")
+                # Replica 3 measured its second group on host 5 after an interruption; the confirmation avoids
+                # every instance of the split replica.
+                split = [receipt for receipt in campaign.receipts
+                         if (receipt["platform"], receipt["unit_id"], receipt["replica_id"], receipt["group_id"]) !=
+                         ("r8i", unit["unit_id"], "3", "2")] + campaign.add("r8i", unit, 3, host=5, groups=("2",))
                 self.assertEqual(
-                    [("r8i", unit["unit_id"], 4, frozenset({"i-r8i-1", "i-r8i-2", "i-r8i-3"}))],
+                    [("r8i", unit["unit_id"], 4, frozenset({"i-r8i-1", "i-r8i-2", "i-r8i-3", "i-r8i-5"}))],
                     RUN_CAMPAIGN.read_confirmation_units(
-                        confirmations, [self.platform], {unit["unit_id"]: unit}, campaign.receipts))
+                        confirmations, [self.platform], {unit["unit_id"]: unit}, split))
+                with self.assertRaisesRegex(SystemExit, "needs every group of its primary replicas"):
+                    RUN_CAMPAIGN.read_confirmation_units(
+                        confirmations, [self.platform], {unit["unit_id"]: unit}, split[:-1])
                 # A requeued replica's later completion is superseded: the first accepted attempt stays.
-                first = {RUN_CAMPAIGN.unit_logical_identity(accepted): accepted for accepted in campaign.receipts}
+                first = {}
+                for accepted in campaign.receipts:
+                    first.setdefault(RUN_CAMPAIGN.unit_logical_identity(accepted), {})[accepted["group_id"]] = accepted
                 campaign.add("r8i", unit, 2, host=4)
                 self.assertEqual(first, recover())
                 # An accepted attempt whose retained evidence no longer holds stops the restart.
@@ -2239,30 +2250,29 @@ def measure_release(directory):
 class FakeUnitHost:
     """A unit worker host behind a stubbed wrapper and S3: each lease runs as fixture evidence.
 
-    A script names what a lease does instead of completing: "interrupt" uploads an interruption
-    bundle and fails as a Spot interruption, as the wrapper reports a worker's status 43, and
-    "notice" does so before it fetches the lease. A host scripted to
-    "silent-interrupt" does so with none of its heartbeat uploads landing. "stall" stops the
-    heartbeat; once the controller stops its wrapper, the lease's completion lands late, after
-    another host completed the same replica, or never, once no other host runs, and with
-    "stall-interrupt" the stopped host reports an interruption of the lease instead. With
-    "stall-semantic" the late completion is a semantic failure, and with "stall-semantic-early"
-    it lands as soon as another host leased the replica, before that host completes it. A host the
-    fleet finds no Spot capacity for, or whose boot the fleet fails, exits before its first
-    heartbeat, as the wrapper's launch does, and one whose inputs the fleet refuses exits
-    before it launches. A host whose boot the fleet slows stays booting until it is stopped, and one
-    whose cleanup the fleet slows keeps running once stopped until every other host has exited. Every
-    host that launched uploads its host archive as it exits, as the user data's exit trap does,
-    even one that failed during bootstrap. A host
-    whose cleanup the fleet leaves unverified records its bucket's removal as failed.
-    A lease completes failed with
-    "semantic-failure" (status 44), "protocol-rejection" (status 42), "fail" (status 1), or
-    "capacity-rejected", whose capacity gate failed it with status 1. "corrupt-archive" uploads a
-    result that differs from its marker's checksum, and "foreign-receipt" a receipt that names another
-    attempt. "foreign-marker" completes with a marker naming another campaign, and "partial-marker" with
-    one lacking its result checksum. A host whose environment names a release measures RELEASE's JAR,
-    except for a lease scripted to "unreleased", which measures the candidate's own classes. The
-    fleet's unit scripts give every lease of a unit, on any host, a behavior.
+    A lease runs its groups in order, uploading each group's result and marker as it finishes, and a failed
+    group ends the lease. A script names what a lease does instead of completing: "interrupt" uploads an
+    interruption bundle and fails as a Spot interruption, as the wrapper reports a worker's status 43,
+    "interrupt-progress" does so once the lease's first group finished, and "notice" does so before it fetches
+    the lease. A host scripted to "silent-interrupt" does so with none of its heartbeat uploads landing, and one
+    scripted to "silent-crash" runs the lease's first group and then fails, its heartbeats also lost. "stall"
+    stops the heartbeat; once the controller stops its wrapper, the lease's completion lands late, after another
+    host completed the same replica, or never, once no other host runs, and with "stall-interrupt" the stopped
+    host reports an interruption of the lease instead. With "stall-semantic" the late completion is a semantic
+    failure, and with "stall-semantic-early" it lands as soon as another host leased the replica, before that
+    host completes it. A host the fleet finds no Spot capacity for, or whose boot the fleet fails, exits before
+    its first heartbeat, as the wrapper's launch does, and one whose inputs the fleet refuses exits before it
+    launches. A host whose boot the fleet slows stays booting until it is stopped, and one whose cleanup the
+    fleet slows keeps running once stopped until every other host has exited. Every host that launched uploads
+    its host archive as it exits, as the user data's exit trap does, even one that failed during bootstrap. A
+    host whose cleanup the fleet leaves unverified records its bucket's removal as failed. A lease completes
+    failed with "semantic-failure" (status 44), "protocol-rejection" (status 42), "fail" (status 1), or
+    "capacity-rejected", whose capacity gate failed it with status 1. "corrupt-archive" uploads a result that
+    differs from its marker's checksum, and "foreign-receipt" a receipt that names another attempt.
+    "foreign-marker" completes with a marker naming another campaign, and "partial-marker" with one lacking its
+    result checksum. A host whose environment names a release measures RELEASE's JAR, except for a lease
+    scripted to "unreleased", which measures the candidate's own classes. The fleet's unit scripts give every
+    lease of a unit, on any host, a behavior.
     """
 
     # Each scripted failure's exit status, as run-unit.sh reports it.
@@ -2357,6 +2367,12 @@ class FakeUnitHost:
         self.heartbeat(lease["unit_id"])
         if behavior in ("interrupt", "silent-interrupt"):
             return self.interrupt(lease["unit_id"])
+        if behavior == "silent-crash":
+            self.run_group(lease, lease["groups"][0], None)
+            return self.exit(1, "retryable-infrastructure", "host failed")
+        if behavior == "interrupt-progress":
+            self.run_group(lease, lease["groups"][0], None)
+            return self.interrupt(lease["unit_id"], lease["groups"][:1], lease["groups"][1])
         if behavior in ("stall", "stall-interrupt", "stall-semantic", "stall-semantic-early"):
             key = f"heartbeat/{self.sequence}.json"
             self.objects[key] = (self.objects[key][0],
@@ -2365,8 +2381,9 @@ class FakeUnitHost:
             return
         self.run(lease)
 
-    def interrupt(self, unit_id):
-        notice = json.dumps({"sequence": self.sequence, "unit_id": unit_id}).encode()
+    def interrupt(self, unit_id, finished=(), running=None):
+        notice = json.dumps({"schema_version": 2, "sequence": self.sequence, "unit_id": unit_id,
+                             "finished_groups": list(finished), "running_group": running}).encode()
         bundle = io.BytesIO()
         with tarfile.open(fileobj=bundle, mode="w:gz") as archive:
             member = tarfile.TarInfo("interruption.json")
@@ -2376,7 +2393,7 @@ class FakeUnitHost:
         self.exit(1, "retryable-spot", "spot-interruption-notice")
 
     def heartbeat(self, unit_id):
-        if "silent-interrupt" in self.script.values():
+        if {"silent-interrupt", "silent-crash"} & set(self.script.values()):
             return
         self.put(f"heartbeat/{self.sequence}.json", json.dumps({"sequence": self.sequence, "unit_id": unit_id}).encode())
 
@@ -2384,17 +2401,26 @@ class FakeUnitHost:
         self.objects[key] = (body, RUN_CAMPAIGN.time.time())
 
     def run(self, lease):
+        behavior = self.script.get(self.sequence, self.fleet.unit_scripts.get(lease["unit_id"]))
+        for group in lease["groups"]:
+            if self.run_group(lease, group, behavior):
+                break
+        self.fleet.log.append(("complete", self.session, self.sequence))
+        self.sequence += 1
+        self.heartbeat(None)
+
+    def run_group(self, lease, group, behavior):
+        """Measure one group of the lease and upload its result and marker; returns its exit status."""
         sequence = self.sequence
-        behavior = self.script.get(sequence, self.fleet.unit_scripts.get(lease["unit_id"]))
         unit = self.fleet.units[lease["unit_id"]]
         host = self.fleet.scratch / self.session
-        directory = host / f"lease-{sequence}"
+        directory = host / f"lease-{sequence}" / f"group-{group}"
         directory.mkdir(parents=True)
         fixture = UnitFixture(directory, unit["shard_id"], unit["unit_index"], str(lease["replica_id"]), {
             "campaign_id": lease["campaign_id"], "platform": self.platform, "instance_id": self.instance_id,
             "host_epoch": self.epoch, "architecture": self.architecture, "instance_type": self.instance_type,
             "availability_zone": f"{self.region}b",
-        })
+        }, group=group)
         if self.release_version and behavior != "unreleased":
             measure_release(directory)
         fixture.accept(f"{self.session}/{sequence + 100 if behavior == 'foreign-receipt' else sequence}")
@@ -2405,22 +2431,22 @@ class FakeUnitHost:
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:gz") as result:
             result.add(directory, arcname=".")
-        self.put(f"units/{sequence}/result.tar.gz",
+        prefix = f"units/{sequence}/groups/{group}"
+        self.put(f"{prefix}/result.tar.gz",
                  archive.getvalue()[:-1] if behavior == "corrupt-archive" else archive.getvalue())
         marker = {
-            "schema_version": 1, "host_session": self.session, "sequence": sequence,
+            "schema_version": 2, "host_session": self.session, "sequence": sequence,
             "campaign_id": "other-campaign" if behavior == "foreign-marker" else lease["campaign_id"],
             "phase": lease["phase"], "platform": self.platform,
-            "unit_id": lease["unit_id"], "replica_id": lease["replica_id"],
+            "unit_id": lease["unit_id"], "replica_id": lease["replica_id"], "group_id": group,
             "unit_attempt_id": f"{self.session}/{sequence}", "exit_status": status,
             "unit_status": "failed" if status else "complete",
-            "result_sha256": hashlib.sha256(archive.getvalue()).hexdigest()}
+            "result_sha256": hashlib.sha256(archive.getvalue()).hexdigest(), "result_bytes": len(archive.getvalue()),
+            "pack_seconds": 0.5, "upload_seconds": 1.5, "upload_attempts": 1}
         if behavior == "partial-marker":
             del marker["result_sha256"]
-        self.put(f"units/{sequence}/completion.json", json.dumps(marker).encode())
-        self.fleet.log.append(("complete", self.session, sequence))
-        self.sequence += 1
-        self.heartbeat(None)
+        self.put(f"{prefix}/completion.json", json.dumps(marker).encode())
+        return status
 
     def exit(self, status, classification="none", detail="-"):
         """Clean up as the wrapper does: recover the uploads, then record the cleanup."""
@@ -2595,8 +2621,8 @@ class TestUnitWorkers(unittest.TestCase):
                     with (result_root / "unit-attempts.tsv").open(newline="") as ledger:
                         self.ledger = list(csv.DictReader(ledger, delimiter="\t"))
         accepted = RUN_CAMPAIGN.read_accepted_units(result_root / "accepted-units.tsv")
-        self.assertEqual(sorted(item.identity for item in items),
-                         sorted(RUN_CAMPAIGN.unit_logical_identity(receipt) for receipt in accepted))
+        self.assertEqual(sorted(f"{item.identity}/group-{group}" for item in items for group, _ in item.groups),
+                         sorted(RUN_CAMPAIGN.group_identity(receipt) for receipt in accepted))
         return result_root
 
     def leases(self, outcome="leased"):
@@ -2692,6 +2718,13 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual(sorted(estimates, reverse=True), estimates)
                 self.assertEqual(True, host.leases[3].get("stop"))
                 self.assertEqual(0, host.status)
+            # Each group's upload timings, as its marker reports them, are kept beside the accepted groups.
+            with (result_root / unit_dispatch.UNIT_UPLOADS).open(newline="") as uploads:
+                self.assertEqual(
+                    sorted((receipt["unit_id"], receipt["group_id"], "1.5") for receipt in
+                           RUN_CAMPAIGN.read_accepted_units(result_root / "accepted-units.tsv")),
+                    sorted((row["unit_id"], row["group_id"], row["upload_seconds"])
+                           for row in csv.DictReader(uploads, delimiter="\t")))
 
     def test_next_phase_requires_the_phase_marked_complete_after_verified_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2742,9 +2775,11 @@ class TestUnitWorkers(unittest.TestCase):
                 result_root = self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
                 interrupted, other, replacement = fleet.hosts
                 self.assertEqual(("spot", "spot", "on-demand"), (interrupted.market, other.market, replacement.market))
+                # With no group of the lease finished, the whole unit runs again.
                 self.assertEqual(
-                    {interrupted.leases[1]["unit_id"], interrupted.leases[2]["unit_id"]},
-                    {replacement.leases[1]["unit_id"], replacement.leases[2]["unit_id"]})
+                    {(interrupted.leases[1]["unit_id"], ("1", "2")), (interrupted.leases[2]["unit_id"], ("1", "2"))},
+                    {(replacement.leases[1]["unit_id"], tuple(replacement.leases[1]["groups"])),
+                     (replacement.leases[2]["unit_id"], tuple(replacement.leases[2]["groups"]))})
                 self.assertEqual(3, len(other.leases))
                 with (result_root / "campaign-events.tsv").open(newline="") as events:
                     [event] = [row for row in csv.DictReader(events, delimiter="\t")
@@ -2752,6 +2787,32 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual(("spot-interruption-notice", "us-west-2"), (event["reason"], event["region"]))
                 self.assertEqual((interrupted.leases[1]["unit_id"], f"{interrupted.session}/1"),
                                  (event["unit_id"], event["unit_attempt_id"]))
+
+    def test_interruption_after_a_finished_group_requeues_only_the_rest_on_spot(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # The controller stops once it settled the interruption, before it leased the rest; a restart
+            # rebuilds the rest from its ledgers.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "interrupt-progress"}}, abort_after=3)
+            with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            interrupted = fleet.hosts[0]
+            unit_id = interrupted.leases[1]["unit_id"]
+            self.assertEqual([(interrupted.session, "interrupted-progress", "1")],
+                             [(row["host_session"], row["outcome"], row["groups"]) for row in self.ledger
+                              if row["outcome"].startswith("interrupted")])
+            fleet.abort_after = None
+            with self.dispatchers() as dispatchers:
+                result_root = self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
+            [(replacement, lease)] = [(host, lease) for host in fleet.hosts[1:] for lease in host.leases.values()
+                                      if (host.platform, lease.get("unit_id")) == ("r8i", unit_id)]
+            self.assertEqual(("spot", ["2"]), (replacement.market, lease["groups"]))
+            # The interrupted lease spent none of the item's attempts.
+            self.assertEqual({}, dispatchers[0][0].failures)
+            accepted = {receipt["group_id"]: receipt["unit_attempt_id"]
+                        for receipt in RUN_CAMPAIGN.read_accepted_units(result_root / "accepted-units.tsv")
+                        if (receipt["platform"], receipt["unit_id"]) == ("r8i", unit_id)}
+            self.assertEqual({"1": f"{interrupted.session}/1", "2": f"{replacement.session}/{lease['sequence']}"},
+                             accepted)
 
     def test_spot_returns_to_a_full_region_after_its_cool_down(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3063,9 +3124,9 @@ class TestUnitWorkers(unittest.TestCase):
         # A marker that names another campaign, or lacks a field the controller reads, is not evidence of
         # this lease, so the controller stops every worker rather than judge the unit.
         for script, error in (
-                ("foreign-marker", r"unit completion marker r8i-session-1/1 does not match its lease: "
+                ("foreign-marker", r"unit completion marker r8i-session-1/1 group 1 does not match its lease: "
                                    r"\['campaign_id'\]"),
-                ("partial-marker", r"unit completion marker r8i-session-1/1 lacks \['result_sha256'\]")):
+                ("partial-marker", r"unit completion marker r8i-session-1/1 group 1 lacks \['result_sha256'\]")):
             with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}})
                 with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, error):
@@ -3102,6 +3163,22 @@ class TestUnitWorkers(unittest.TestCase):
                                                     f"status 1; spent its {RUN_CAMPAIGN.MAX_UNIT_ATTEMPTS} attempts"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             self.assertEqual(RUN_CAMPAIGN.MAX_UNIT_ATTEMPTS, self.lease_count({"unit_id": unit_id, "replica_id": 1}))
+
+    def test_lease_that_finished_a_group_spends_an_attempt_though_no_heartbeat_landed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # One host at a time: the first r8i unit fails on every host but its last, which finishes a group and
+            # fails.
+            attempts = RUN_CAMPAIGN.MAX_UNIT_ATTEMPTS
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={
+                host: {1: "silent-crash" if host == attempts else "fail"} for host in range(1, attempts + 1)})
+            with self.assertRaisesRegex(SystemExit, "unresolved units: r8i/.* worker exited: classification="
+                                                    f"retryable-infrastructure; spent its {attempts} attempts"):
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 1, 1)
+            crashed = fleet.hosts[attempts - 1]
+            self.assertEqual(attempts, self.lease_count(crashed.leases[1]))
+            # The lost lease records the group it finished.
+            self.assertEqual([(crashed.session, "1")],
+                             [(row["host_session"], row["groups"]) for row in self.leases("lost")])
 
     def test_semantic_failure_of_a_lost_lease_outlasts_its_replacement(self):
         # The lost lease's semantic failure lands before or after its replacement completes.

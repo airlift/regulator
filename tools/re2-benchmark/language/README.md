@@ -319,21 +319,23 @@ of a comparison the duration policy isolates, is a unit alone. A unit's identity
 digests the partition manifests and operations it measures. The units belong to
 one shard, which defaults to the suite; `--shard-id` names another, so a
 separate manifest of the same suite, such as the literal probe, keeps distinct
-unit IDs. Validation rebuilds the units from the plan and rejects any table that
-differs.
+unit IDs. Each comparison a unit holds is one of its measured groups, which
+every replica runs in case-ID and language order. Validation rebuilds the units
+from the plan and rejects any table that differs.
 
 ### Work units
 
-On a unit worker, `run-unit.sh` runs a unit of an installed plan with
-`fleet.py run-unit`. The worker installs each plan from its bundle
+On a unit worker, `run-unit.sh` runs one measured group of a unit of an
+installed plan with `fleet.py run-unit`, and the worker uploads each group as
+it finishes. The worker installs each plan from its bundle
 (`fleet.py bundle`, checked and installed with `fleet.py install-bundle`) under
 `target/language-plans/<shard>`, which the clean-source check ignores. The
 unit checks that the host matches its platform allocation, with every vCPU
 visible and an 8g heap, and builds the candidate once per host from the source
 archive and candidate provenance. Its native runners come from the platform's
-engine build. Pinned to one CPU, it verifies and then measures each comparison
-it holds under `partitions/<partition>`; a lifecycle comparison of which it
-holds only some operations runs a copy of its partition selecting those
+engine build. Pinned to one CPU, it verifies and then measures the group's
+comparison under `partitions/<partition>`; a lifecycle comparison of which the
+unit holds only some operations runs a copy of its partition selecting those
 operations.
 
 A semantic verdict ends the unit with status 44, which its controller never
@@ -343,13 +345,14 @@ that outruns the protocol's budget ends it with status 42, which is not
 retried either. A runner that never starts or exits with a failure, and any
 other failure, is retried.
 
-`fleet.py` then accepts the attempt into a baseline `unit-receipt.tsv`, and
-its controller checks it again from the returned directory. It rejects the
-attempt unless:
+`fleet.py` then accepts the attempt's group into a baseline
+`unit-receipt.tsv`, and its controller checks it again from the returned
+directory. It rejects the group unless:
 
-- `unit-evidence.tsv` binds exactly the attempt's envelope files and raw
+- `unit-evidence.tsv` binds exactly the group's envelope files and raw
   results
-- its rows are exactly the frozen unit's, whose ID recomputes from the plan
+- its unit rows are exactly the frozen unit's, whose ID recomputes from the
+  plan
 - the host is the unit session's host, on the platform's allocated instance
   type and vCPU count, with the protocol heap
 - it ran pinned to one CPU
@@ -363,7 +366,7 @@ attempt unless:
 - each native runner's build receipt names its verified binary, the pinned
   source, and a release build (`-O3 -DNDEBUG`)
 - every partition ran the same candidate and binaries
-- its observations are exactly the unit's rows
+- its observations are exactly the group's rows
 
 A language group's CPU steal is recorded as diagnostic evidence; no host check
 or report reads it.
@@ -584,7 +587,8 @@ which carries the native runners. Each plan must name a distinct shard.
   the longest packed unit.
 - **Primary** runs with the same plans and candidate, a separate result root,
   and `--smoke-results /path/to/language-smoke` once that smoke is accepted.
-  It measures every unit on three replicas, each on its own instance.
+  It measures every unit on three replicas, and no instance measures two
+  replicas of one unit.
 - Both phases use the full qualification protocol. A language campaign has no
   confirmation phase.
 
@@ -597,25 +601,28 @@ interruptions, restarts, and the shared fleet budget follow the baseline's
 minutes runs only on On-Demand workers unless the campaign is `--spot-only`,
 and each pool's worker timeout covers its longest unit.
 
-The controller accepts an attempt into `accepted-units.tsv` only after the
-[unit checks](#work-units) pass again on the returned evidence, from a host
+The controller accepts each group of an attempt into `accepted-units.tsv` only
+after the [unit checks](#work-units) pass again on the returned evidence, from a
+host
 with the campaign's comparator pins and release selection. A semantic failure
 is recorded in `semantic-rejections.tsv` and fails the phase. The phase gate
-applies the baseline campaign rule to the plans' units: every unit the phase
-selects, the smoke units in smoke and every unit in primary, on both platforms
-for each replica, on its allocated instance type, with a unit's replicas on
-distinct instances and one candidate throughout.
+applies the baseline campaign rule to the plans' units: every group of every
+unit the phase selects, the smoke units in smoke and every unit in primary, on
+both platforms for each replica, on its allocated instance type, with no two
+replicas of a unit sharing an instance and one candidate throughout. A replica
+interrupted after some groups gathers the rest from a later attempt.
 
 Primary completion exports each plan as `<shard>-results.json`, through
 `fleet.py aggregate --plan-directory ... --results <result root> --output ...`.
 The export:
 
-- revalidates every accepted attempt from its retained evidence, without
+- revalidates every accepted group from its retained evidence, without
   rewriting it, and requires the campaign rule again;
 - rejects language-trace disagreement across a case's partitions and mixed
   candidate, comparator, or JDK identities;
-- keeps each attempt's receipt with its partitions' provenance and every raw
-  sample, without averaging away host differences.
+- keeps each group's receipt with its partition's provenance and every raw
+  sample, each row naming its attempt and group, without averaging away host
+  differences.
 
 A restart must reproduce each export byte for byte. The release importer reads
 `accepted-units.tsv` beside the exports and accepts them only as one complete

@@ -498,17 +498,17 @@ bootstraps with packages, the JDK, the environment record, and, unless it is a
 build phase's worker, the platform's prebuilt engines. A language unit worker
 also installs each language plan bundle under `target/language-plans/<shard>`.
 It then runs `run-unit-worker.sh`, which runs `../baseline/run-unit.sh` for each
-lease. The wrapper's `session.txt` records the host session (`session`),
-`bucket`, `input_prefix`, and `result_prefix`; every key below is under one of
-those prefixes.
+measured group of each lease. The wrapper's `session.txt` records the host
+session (`session`), `bucket`, `input_prefix`, and `result_prefix`; every key
+below is under one of those prefixes.
 
 | Key | Writer | Holds |
 |---|---|---|
 | `<input_prefix>/leases/<seq>.json` | controller | the host's lease `seq`, numbered from 1 |
 | `<result_prefix>/heartbeat/<seq>.json` | host | its state while it waits for, runs, or uploads lease `seq` |
-| `<result_prefix>/units/<seq>/result.tar.gz` | host | the unit directory of lease `seq` |
-| `<result_prefix>/units/<seq>/completion.json` | host | the attempt's completion marker, written last |
-| `<result_prefix>/events/<seq>-interrupted.tar.gz` | host | an interruption record and the partial unit |
+| `<result_prefix>/units/<seq>/groups/<g>/result.tar.gz` | host | the directory of group `g` of lease `seq` |
+| `<result_prefix>/units/<seq>/groups/<g>/completion.json` | host | the group's completion marker, written after its result |
+| `<result_prefix>/events/<seq>-interrupted.tar.gz` | host | an interruption record and the running group's log |
 | the job's result key | host user data | the host evidence, once the worker exits |
 
 Every upload of `run-unit-worker.sh` except a heartbeat is one PUT with its
@@ -517,13 +517,13 @@ gives up after 5 seconds connecting or 30 reading, and a failed upload is
 retried every 5 seconds while the worker keeps watching for an interruption
 notice. An attempt starts only if its worst case of 35 seconds still ends within
 `UNIT_WORKER_UPLOAD_SECONDS` (90) of the upload's start, so the whole upload
-stays within that budget. A unit result's attempts and budget grow by a second
+stays within that budget. A group result's attempts and budget grow by a second
 per 4 MiB, such as an engine build's archives, and its budget to at least two
 whole attempts; an interruption bundle uploaded meanwhile keeps its own
 35-second attempts. Since a request whose connection stays alive can
 outlive the CLI's timeouts, every S3 call of the worker, heartbeats and lease
 reads too, runs under coreutils `timeout`, which ends it after 35 seconds, or
-a unit result's stretched attempt time; a call within an upload's budget also
+a group result's stretched attempt time; a call within an upload's budget also
 ends when that budget does. The interruption bundle and
 the final heartbeat after it share one budget. The user data's upload of the
 host evidence, once the worker exits, is a plain `aws s3 cp` outside these
@@ -534,19 +534,23 @@ it cannot read.
 A lease is a JSON object:
 
 ```json
-{"schema_version": 1, "campaign_id": "primary-20261024", "phase": "primary",
+{"schema_version": 2, "campaign_id": "primary-20261024", "phase": "primary",
  "platform": "r8i", "host_session": "20261024T120000Z-4242", "sequence": 3,
- "unit_id": "<64 hex digits>", "replica_id": 2, "protocol": "qualification"}
+ "unit_id": "<64 hex digits>", "replica_id": 2, "groups": ["2", "1"],
+ "protocol": "qualification"}
 ```
 
 A measuring phase's `unit_id` is 64 hex digits; the build phase's one unit is
-`engine-build`, at replica 1. A stop lease replaces `phase`, `unit_id`,
-`replica_id`, and `protocol` with `"stop": true`. The host reads lease `seq`
-only after lease `seq - 1`'s completion marker lands, so the controller may
-write one lease ahead. The host requires schema version 1 and its own sequence,
-host session, campaign, and platform, and a work lease's unit ID, replica 1 to
-4, phase, and protocol; any other lease stops it. Each lease read is kept in the
-host evidence under `leases/`.
+`engine-build`, at replica 1. `groups` lists the unit's
+[measured groups](../baseline/SHARD_DISPATCH.md#work-units) the lease runs, in
+order: those of the replica not yet accepted, in the replica's run order. A
+stop lease replaces `phase`, `unit_id`, `replica_id`, `groups`, and `protocol`
+with `"stop": true`. The host reads lease `seq` only after lease `seq - 1` is
+done, so the controller may write one lease ahead. The host requires schema
+version 2 and its own sequence, host session, campaign, and platform, and a
+work lease's unit ID, replica 1 to 4, phase, distinct group IDs, and protocol;
+any other lease stops it. Each lease read is kept in the host evidence under
+`leases/`.
 
 A heartbeat is `{"schema_version": 1, "host_session", "instance_id",
 "sequence", "state", "unit_id", "replica_id", "timestamp", "stop_reason"}`,
@@ -554,25 +558,36 @@ written every 30 seconds and at each state change once bootstrap ends. `state`
 is `waiting`, `running`, `uploading`, `stopped`, or `interrupted`; the unit,
 replica, and stop reason are `null` when they do not apply.
 
-A completion marker is `{"schema_version": 1, "host_session", "sequence",
-"campaign_id", "phase", "platform", "unit_id", "replica_id",
+The host runs each group of a lease into its own directory and uploads the
+group's `result.tar.gz`, then its completion marker, before it starts the next
+group, so a reclaimed instance loses only the group it was running. A
+completion marker is `{"schema_version": 2, "host_session", "sequence",
+"campaign_id", "phase", "platform", "unit_id", "replica_id", "group_id",
 "unit_attempt_id", "exit_status", "unit_status", "result_sha256",
+"result_bytes", "pack_seconds", "upload_seconds", "upload_attempts",
 "started_at", "finished_at"}`. `unit_attempt_id` is `<host_session>/<seq>`,
-`unit_status` is `complete` or `failed`, and `result_sha256` is the digest of
-`result.tar.gz`. A failed unit, including one whose representative failed with
-status 42, is still uploaded and marked, and the host takes its next lease. A
-`result.tar.gz` without its completion marker is not a finished attempt.
+`unit_status` is `complete` or `failed`, and `result_sha256` and
+`result_bytes` are the digest and size of `result.tar.gz`. `pack_seconds` and
+`upload_seconds` are the wall time, to the millisecond, the host spent packing
+the result and uploading it, and `upload_attempts` the PUT attempts its upload
+took. A failed group, including one whose representative failed with status 42,
+is still uploaded and marked, and it ends the lease: the host runs none of the
+lease's later groups and takes its next lease. A lease is done once its last
+group's marker lands, or a marker reports a failure. A `result.tar.gz` without
+its completion marker is not a finished group.
 
 The worker polls the instance metadata service (IMDSv2) every 5 seconds and
 after each of its S3 calls, so a stalled S3 call delays a notice by at most that
 one call, and a stop with a notice already arrived, or arriving during its final
 heartbeat, is an interruption. A Spot instance-action notice stops leasing and
-kills the running unit's process group. The host uploads
+kills the running group's process group. The host uploads
 `events/<seq>-interrupted.tar.gz`, holding `interruption.json`
-(`schema_version`, `host_session`, `sequence`, `unit_id`, `replica_id`,
-`notice_time`, `action`, `action_time`) and the partial unit directory, then
-exits 43; its user data uploads the host evidence if the instance lasts. A unit
-whose marker had not landed never completes. The wrapper classifies status 43
+(`schema_version` 2, `host_session`, `sequence`, `unit_id`, `replica_id`,
+`finished_groups`, the lease's groups whose markers landed, `running_group`,
+`notice_time`, `action`, `action_time`) and the running group's
+`worker-unit.log`, then exits 43; the finished groups are already uploaded.
+Its user data uploads the host evidence if the instance lasts. A group whose
+marker had not landed never completes. The wrapper classifies status 43
 as `retryable-spot`, and a host that vanishes without uploading is classified
 as any other host. A rebalance recommendation is only a hint that EC2 may
 reclaim the instance, so the worker goes on leasing until the notice comes.
@@ -589,16 +604,16 @@ The worker stops, with its reason in the final heartbeat and
 | `invalid-lease`, `lease-unreadable`, `upload-failure` | a malformed lease, 12 failed lease reads in a row, or an upload still failing at its bound | 1 |
 
 The host evidence holds the environment files, `engine-build.txt`,
-`host-capacity.txt`, `leases/`, `worker-leases.tsv` (each lease's outcome,
+`host-capacity.txt`, `leases/`, `worker-leases.tsv` (each group's outcome,
 status, attempt ID, and the digest of its environment files),
 `worker-session.txt`, the shared semantic receipts, and the logs.
 
-Each unit result is self-contained: its routes record the host's CPU steal
+Each group result is self-contained: its routes record the host's CPU steal
 over their measurements, and [unit acceptance](../baseline/ACCEPTANCE.md)
 needs nothing from the host evidence.
 
-The first accepted attempt of a platform, unit, and replica wins. A later
-completed attempt of the same unit replica, such as one leased again after a
+The first accepted attempt of a platform, unit, replica, and group wins. A
+later completed attempt of the same group, such as one leased again after a
 lost heartbeat, is recorded as superseded, not accepted, and does not halt the
 campaign.
 
@@ -616,15 +631,15 @@ freezes each worker before its launch.
 A pool launches a worker only when it would start queued work sooner than the
 pool's workers would. The controller projects when each worker could take new
 work: a booting worker 5 minutes after its launch, and a busy one once its
-leases have run for their estimates, the running lease's counted from when it
-began. Taking the items in the order it leases them, the worker free soonest
-that may take an item takes it. A new worker would start its first item 5
-minutes from now, so the pool launches one when some item would start later
-than that, or no worker may take it. The market, the limits, and the budget
-then apply as below. A worker still booting is stopped once it holds no lease
-of open work and no queued item is one it could take; work requeued later
-launches a worker by the same rule. Its stop lease records it as stopping, so
-it keeps its reservation and takes no work until its cleanup is verified.
+leases have run their groups' estimates. The running lease's estimate counts
+from when that lease began. Taking the items in the order it leases them, the
+worker free soonest that may take an item takes it. A new worker would start its
+first item 5 minutes from now, so the pool launches one when some item would
+start later than that, or no worker may take it. The market, the limits, and the
+budget then apply as below. A worker still booting is stopped once it holds no
+lease of open work and no queued item is one it could take; work requeued later
+launches a worker by the same rule. Its stop lease records it as stopping, so it
+keeps its reservation and takes no work until its cleanup is verified.
 
 When several regions are allowed, a worker whose Spot launch found no capacity
 in any zone of its region cools that region for its pool for 15 minutes, and
@@ -635,32 +650,44 @@ again at once. A restarted controller forgets the cool-downs.
 
 Once a worker's session exists, the controller writes its first lease and
 keeps one lease written ahead while no idle worker of the pool could take the
-item. It leases On-Demand work first, then the longest eligible item, never a
-unit the host already leased, and never to an instance a confirmation excludes
-or another replica of the unit used. An item requeued for On-Demand only goes
-to an On-Demand host, and On-Demand hosts also take every other item. When
-the pool can give a worker nothing more, the worker gets a stop lease. Each
-lease, and each outcome it reaches, is a row of `unit-attempts.tsv`, written
-before the lease is. A unit estimated past the 15-minute unit budget, such as a
-slow language comparison isolated in its own unit, is On-Demand work from the
-start unless the campaign is `--spot-only`.
+item. It leases On-Demand work first, then the eligible item with the most
+estimated work remaining, never a unit the host already leased, and never to an
+instance a confirmation excludes or that measured any group of the unit's
+replicas. A lease runs the item's remaining groups. An item requeued for
+On-Demand only goes to an On-Demand host, and On-Demand hosts also take every
+other item. When the pool can give a worker nothing more, the worker gets a
+stop lease. Each lease, and each outcome it reaches, is a row of
+`unit-attempts.tsv`, written before the lease is; its `groups` are the groups
+a lease runs, or those whose markers an outcome processed. A unit whose
+longest remaining group is estimated past the 15-minute unit budget, such as a
+slow language comparison isolated in its own unit, is On-Demand work unless the
+campaign is `--spot-only`.
 
-The controller polls each worker's uploads. A completion marker's result must
-match `result_sha256` and its lease; the attempt then passes the unit gate,
-is retained, and is added to
-`accepted-units.tsv`. Other outcomes:
+The controller polls each worker's uploads and processes a lease's markers in
+its groups' order, each as it lands. A completion marker's result must match
+`result_sha256` and its lease; the group then passes the unit gate, is
+retained, and is added to `accepted-units.tsv`, one row per group, and the
+marker's upload timings to `unit-uploads.tsv`. Once the lease's last group is
+processed, the lease is `accepted`, or `superseded` when every group was
+accepted first elsewhere. Other outcomes:
 
 - An interruption record, or a status-43 exit while a lease ran, records an
-  `interruption` event and requeues the unit for On-Demand only. A record
-  that names no unit, from a notice while the host waited for its next lease,
+  `interruption` event. Once a group of the lease was accepted, the lease is
+  `interrupted-progress`: the item keeps its accepted groups, and its
+  remaining groups are requeued on either market without spending an attempt.
+  Otherwise the lease is `interrupted`, spends an attempt, and requeues the
+  item for On-Demand only, unless its platform buys only Spot. A record that
+  names no unit, from a notice while the host waited for its next lease,
   releases that lease without spending an attempt.
 - A heartbeat 30 minutes old, or 10 minutes old on an instance no longer
-  running, marks the host lost: its started lease is requeued, an unstarted
-  one is released, and its wrapper is stopped. Cleanup still recovers a
-  completion that lands, which is accepted if it is first and superseded
-  otherwise.
-- A failed unit is requeued. A unit replica gets 3 attempts across failures,
-  interruptions, and lost hosts, then stays unresolved.
+  running, marks the host lost, and its wrapper is stopped. A lease has
+  started if one of its groups finished or a heartbeat shows it began; the
+  lost host's started lease is requeued, and an unstarted one is released.
+  Cleanup still recovers a completion that lands, which is accepted if it is
+  first and superseded otherwise.
+- A failed group requeues the item's remaining groups. A unit replica gets 3
+  attempts across failures, interruptions without progress, and lost hosts,
+  then stays unresolved.
 - A worker that fails before its first lease passes its launch slot to a
   replacement. A worker whose uploads include a heartbeat, a completion or an
   interruption bundle has started, even if no heartbeat landed. The host
@@ -675,8 +702,8 @@ is retained, and is added to
   (`slot_failures`), so a restarted controller resumes every slot's count.
 - A status-42 protocol rejection, a status-44 semantic failure, a rejected
   unit capacity, a result that
-  does not match its marker, and a failed artifact gate leave the unit
-  unresolved without a retry while other work continues.
+  does not match its marker, and a failed artifact gate, in any group, leave
+  the unit replica unresolved without a retry while other work continues.
 - Status 44 means the route's correctness stage failed: a semantic test, the
   DFA probe, a differential verifier or its count of verified cases, or the
   pinned Trino comparator's verification, including a check that could not
@@ -691,7 +718,8 @@ is retained, and is added to
 - A marker that names another lease, unproven cleanup, and changed frozen
   inputs stop the campaign as unsafe.
 
-When a pool's remaining estimated work falls to 10% of its total, its remaining
+When a pool's remaining estimated work, the groups not yet accepted, falls to
+10% of its total, its remaining
 items become On-Demand work, leased first, and On-Demand workers launch for them
 within the budget's On-Demand allowance. Each Spot worker of the pool gets a
 stop lease only once an On-Demand worker has been admitted to replace it; until
@@ -712,8 +740,9 @@ started it: `tooling-digest.txt` records a digest of the tracked benchmark
 tooling when the phase starts, and a restart that finds a different digest, or
 none, is refused. The controller adopts each worker whose wrapper is still
 running, rewrites its outstanding leases, which must match what was written,
-and settles each exited worker from its recovered uploads, so no accepted unit
-runs again and no unit is leased to two live hosts. A unit rejected for a
+and settles each exited worker from its recovered uploads, so no accepted group
+runs again and no unit is leased to two live hosts. Each item's remaining
+groups are rebuilt from the ledgers. A unit rejected for a
 semantic failure stays unresolved across restarts, so measuring it again
 means running the whole phase again in a new result root.
 

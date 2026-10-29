@@ -150,24 +150,26 @@ import os
 print(os.environ['FAKE_RESULT_BYTES'])
 '''
 
-# A unit as run-unit.sh measures it on a worker: it exits with its scripted
-# status. A unit scripted with a child starts one that outlives it unless its
-# process group is stopped.
+# A unit's measured group as run-unit.sh measures it on a worker: it exits with
+# the status scripted for its lease, or for its lease and group as "<seq>/<group>".
+# A group scripted with a child starts one that outlives it unless its process
+# group is stopped.
 FAKE_RUN_UNIT = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 from pathlib import Path
-unit_id, protocol, replica, directory = sys.argv[1:]
+unit_id, protocol, replica, group, directory = sys.argv[1:]
 sequence = os.environ['RE2_CAMPAIGN_LEASE_SEQUENCE']
-behavior = json.loads(os.environ['FAKE_UNITS']).get(sequence, {})
+units = json.loads(os.environ['FAKE_UNITS'])
+behavior = units.get(f'{sequence}/{group}', units.get(sequence, {}))
 notices = Path(os.environ['FAKE_NOTICES'])
 child = subprocess.Popen(['sleep', '600']).pid if behavior.get('child') else None
 with open(os.environ['FAKE_RUNS'], 'a') as runs:
     runs.write(json.dumps({
-        'sequence': int(sequence), 'unit_id': unit_id, 'protocol': protocol, 'replica': replica,
+        'sequence': int(sequence), 'unit_id': unit_id, 'protocol': protocol, 'replica': replica, 'group': group,
         'replica_environment': os.environ['RE2_CAMPAIGN_REPLICA_ID'], 'pid': os.getpid(), 'child': child,
         'order': os.environ.get('JONI_COMPARATOR_ORDER'),
     }) + '\n')
-print(f'measuring lease {sequence}', flush=True)
+print(f'measuring lease {sequence} group {group}', flush=True)
 if behavior.get('notice'):
     (notices / 'spot-instance-action').write_text('{"action": "terminate", "time": "2026-10-24T12:02:00Z"}')
     time.sleep(60)
@@ -179,9 +181,11 @@ sys.exit(behavior.get('status', 0))
 '''
 
 
-def lease(sequence, unit=None, replica=1, **fields):
+def lease(sequence, unit=None, replica=1, groups=('1',), **fields):
     work = {'unit_id': UNIT[unit], 'replica_id': replica, 'phase': 'primary', 'protocol': 'smoke'} if unit else {}
-    return {'schema_version': 1, 'campaign_id': 'campaign', 'platform': 'r8i', 'host_session': 'host-1',
+    if unit or 'unit_id' in fields:
+        work['groups'] = list(groups)
+    return {'schema_version': 2, 'campaign_id': 'campaign', 'platform': 'r8i', 'host_session': 'host-1',
             'sequence': sequence, **work, **fields}
 
 
@@ -228,6 +232,8 @@ class Worker:
             'UNIT_WORKER_BUCKET': 'bucket', 'UNIT_WORKER_LEASE_PREFIX': 'input/leases',
             'UNIT_WORKER_RESULT_PREFIX': 'results', 'UNIT_WORKER_POLL_SECONDS': '0.05',
             'JONI_COMPARATOR_ORDER': 'forward',
+            # macOS tar would add AppleDouble files to the bundles a Linux worker writes.
+            'COPYFILE_DISABLE': '1',
         }
         if clock:
             # A virtual second costs no real time, so the worker polls each one.
@@ -242,6 +248,7 @@ class Worker:
         path.write_text(json.dumps(document))
 
     def run(self, units=None, controller=lambda worker: None, **environment):
+        """units scripts each lease, by sequence, or each group, by "<sequence>/<group>"."""
         self.environment['FAKE_UNITS'] = json.dumps({str(key): value for key, value in (units or {}).items()})
         self.environment.update({f'UNIT_WORKER_{name.upper()}': str(value) for name, value in environment.items()})
         process = subprocess.Popen(
@@ -283,7 +290,7 @@ class Worker:
 
 
 class TestUnitWorker(unittest.TestCase):
-    def test_worker_runs_leases_in_order(self):
+    def test_worker_runs_leases_and_their_groups_in_order(self):
         def write_stop_lease_once_awaited(worker):
             if worker.object('heartbeat/4.json').exists() and not (worker.bucket / 'input/leases/4.json').exists():
                 worker.write_lease(lease(4, stop=True))
@@ -291,62 +298,70 @@ class TestUnitWorker(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             worker = Worker(Path(temporary))
             worker.write_lease(lease(1, 'first', 1))
-            worker.write_lease(lease(2, 'second', 2))
+            # A mirrored replica runs its unit's groups in reverse.
+            worker.write_lease(lease(2, 'second', 2, groups=('2', '1')))
             worker.write_lease(lease(3, 'third', 3))
             # The controller writes the stop lease only once the host waits for it.
             status, output = worker.run({}, write_stop_lease_once_awaited, idle_seconds=30)
 
             self.assertEqual(0, status, output)
             runs = worker.runs()
-            self.assertEqual([(1, UNIT['first'], '1'), (2, UNIT['second'], '2'), (3, UNIT['third'], '3')],
-                             [(run['sequence'], run['unit_id'], run['replica']) for run in runs])
+            groups = [(1, '1'), (2, '2'), (2, '1'), (3, '1')]
+            self.assertEqual(
+                [(1, UNIT['first'], '1', '1'), (2, UNIT['second'], '2', '2'), (2, UNIT['second'], '2', '1'),
+                 (3, UNIT['third'], '3', '1')],
+                [(run['sequence'], run['unit_id'], run['replica'], run['group']) for run in runs])
             self.assertTrue(all(run['replica_environment'] == run['replica'] and run['order'] is None
                                 for run in runs))
-            completions = [worker.json(f'units/{sequence}/completion.json') for sequence in (1, 2, 3)]
-            for completion in completions:
+            for sequence, group in groups:
+                prefix = f'units/{sequence}/groups/{group}'
+                completion = worker.json(f'{prefix}/completion.json')
                 self.assertLessEqual(set(UNIT_COMPLETION_FIELDS), set(completion))
-            self.assertEqual(['complete'] * 3, [completion['unit_status'] for completion in completions])
-            for sequence, completion in enumerate(completions, 1):
-                result = worker.object(f'units/{sequence}/result.tar.gz').read_bytes()
-                self.assertEqual(hashlib.sha256(result).hexdigest(), completion['result_sha256'])
-                self.assertEqual(f'host-1/{sequence}', completion['unit_attempt_id'])
+                result = worker.object(f'{prefix}/result.tar.gz').read_bytes()
+                self.assertEqual(
+                    ('complete', f'host-1/{sequence}', group, hashlib.sha256(result).hexdigest(), len(result), 1),
+                    (completion['unit_status'], completion['unit_attempt_id'], completion['group_id'],
+                     completion['result_sha256'], completion['result_bytes'], completion['upload_attempts']))
+                # The marker reports how long the group's result took to pack and upload.
+                self.assertTrue(all(type(completion[field]) is float and completion[field] >= 0
+                                    for field in ('pack_seconds', 'upload_seconds')), completion)
             with (worker.host / 'worker-leases.tsv').open() as ledger:
                 leases = list(csv.DictReader(ledger, delimiter='\t'))
-            self.assertEqual(['host-1/1', 'host-1/2', 'host-1/3'], [row['unit_attempt_id'] for row in leases])
-            self.assertEqual(['complete'] * 3, [row['outcome'] for row in leases])
+            self.assertEqual([(f'host-1/{sequence}', group) for sequence, group in groups],
+                             [(row['unit_attempt_id'], row['group_id']) for row in leases])
+            self.assertEqual(['complete'] * 4, [row['outcome'] for row in leases])
+            # Each group's result and marker land as soon as the group finishes.
             puts = [key for key in worker.puts() if not key.startswith('results/heartbeat/')]
             self.assertEqual([
-                'results/units/1/result.tar.gz', 'results/units/1/completion.json',
-                'results/units/2/result.tar.gz', 'results/units/2/completion.json',
-                'results/units/3/result.tar.gz', 'results/units/3/completion.json',
-            ], puts)
+                f'results/units/{sequence}/groups/{group}/{name}'
+                for sequence, group in groups for name in ('result.tar.gz', 'completion.json')], puts)
             self.assertEqual(('stopped', 'stop-lease'),
                              (worker.json('heartbeat/4.json')['state'], worker.json('heartbeat/4.json')['stop_reason']))
             self.assertEqual('stop-lease', worker.stop_reason())
 
     def test_worker_stops_when_idle_or_out_of_lifetime(self):
         cases = (
-            ('idle', (), {}, {'idle_seconds': 1}, []),
-            # A failed unit is recorded with its status, and the worker goes on.
-            ('idle', ('first',), {1: {'status': 3}}, {'idle_seconds': 1}, [1]),
+            ('idle', (), ('1',), {}, {'idle_seconds': 1}, []),
+            # A failed group is recorded with its status and ends its lease, and the worker goes on.
+            ('idle', ('first',), ('1', '2'), {'1/1': {'status': 3}}, {'idle_seconds': 1}, [1]),
             # A unit in flight finishes; no lease starts after the lifetime.
-            ('lifetime', ('first', 'second'), {1: {'seconds': 2.5}}, {'lifetime_seconds': 2}, [1]),
+            ('lifetime', ('first', 'second'), ('1',), {1: {'seconds': 2.5}}, {'lifetime_seconds': 2}, [1]),
             # A rebalance recommendation is only a hint; leasing goes on until an instance-action notice.
-            ('idle', ('first', 'second'), {1: {'rebalance': True}}, {'idle_seconds': 1}, [1, 2]),
+            ('idle', ('first', 'second'), ('1',), {1: {'rebalance': True}}, {'idle_seconds': 1}, [1, 2]),
         )
-        for reason, units, behavior, environment, completed in cases:
+        for reason, units, groups, behavior, environment, completed in cases:
             with self.subTest(reason=reason, behavior=behavior), tempfile.TemporaryDirectory() as temporary:
                 worker = Worker(Path(temporary), clock=True)
                 for sequence, unit in enumerate(units, 1):
-                    worker.write_lease(lease(sequence, unit))
+                    worker.write_lease(lease(sequence, unit, groups=groups))
                 status, output = worker.run(behavior, **environment)
 
                 self.assertEqual(0, status, output)
                 self.assertEqual(reason, worker.stop_reason())
                 self.assertEqual(completed, [run['sequence'] for run in worker.runs()])
                 for sequence in completed:
-                    unit_status = behavior.get(sequence, {}).get('status', 0)
-                    completion = worker.json(f'units/{sequence}/completion.json')
+                    unit_status = behavior.get(sequence, behavior.get(f'{sequence}/1', {})).get('status', 0)
+                    completion = worker.json(f'units/{sequence}/groups/1/completion.json')
                     self.assertEqual((unit_status, 'failed' if unit_status else 'complete'),
                                      (completion['exit_status'], completion['unit_status']))
                 heartbeat = worker.json(f'heartbeat/{len(completed) + 1}.json')
@@ -363,7 +378,7 @@ class TestUnitWorker(unittest.TestCase):
 
             self.assertEqual(0, status, output)
             self.assertEqual([(engine_build.UNIT_ID, '1')], [(run['unit_id'], run['replica']) for run in worker.runs()])
-            completion = worker.json('units/1/completion.json')
+            completion = worker.json('units/1/groups/1/completion.json')
             self.assertEqual(('build', engine_build.UNIT_ID, 'complete'),
                              (completion['phase'], completion['unit_id'], completion['unit_status']))
 
@@ -374,6 +389,8 @@ class TestUnitWorker(unittest.TestCase):
                 ('another campaign', json.dumps(lease(1, 'first', campaign_id='other'))),
                 ('another sequence', json.dumps(lease(2, 'first'))),
                 ('no unit', json.dumps(lease(1))),
+                ('repeated group', json.dumps(lease(1, 'first', groups=('1', '1')))),
+                ('two groups in one name', json.dumps(lease(1, 'first', groups=('1,2',)))),
                 ('measuring engine build', json.dumps(lease(1, 'first', unit_id=engine_build.UNIT_ID))),
                 ('build of a measuring unit', json.dumps(lease(1, 'first', phase='build'))),
                 ('engine build at replica 2',
@@ -389,15 +406,16 @@ class TestUnitWorker(unittest.TestCase):
                 self.assertEqual('invalid-lease', worker.stop_reason())
                 self.assertEqual([], worker.runs())
 
-    def test_interruption_stops_the_unit_and_uploads_it_without_completing_it(self):
+    def test_interruption_keeps_finished_groups_and_bundles_only_the_running_one(self):
         with tempfile.TemporaryDirectory() as temporary:
             worker = Worker(Path(temporary))
-            worker.write_lease(lease(1, 'first', 2))
+            worker.write_lease(lease(1, 'first', 2, groups=('1', '2', '3')))
             worker.write_lease(lease(2, 'second'))
-            status, output = worker.run({1: {'notice': True, 'child': True}})
+            status, output = worker.run({'1/2': {'notice': True, 'child': True}})
 
             self.assertEqual(43, status, output)
-            [run] = worker.runs()
+            finished, run = worker.runs()
+            self.assertEqual(('1', '2'), (finished['group'], run['group']))
             with self.assertRaises(ProcessLookupError):
                 os.kill(run['pid'], 0)
             # The unit's whole process group stops; its orphaned child is reaped soon after.
@@ -411,16 +429,20 @@ class TestUnitWorker(unittest.TestCase):
             else:
                 os.kill(run['child'], signal.SIGKILL)
                 self.fail('the unit\'s child outlived the interruption')
-            self.assertFalse(worker.object('units/1/completion.json').exists())
-            self.assertFalse(worker.object('units/1/result.tar.gz').exists())
+            self.assertEqual(['units/1/groups/1/result.tar.gz', 'units/1/groups/1/completion.json'],
+                             [key.removeprefix('results/') for key in worker.puts() if '/units/' in key])
             with tarfile.open(worker.object('events/1-interrupted.tar.gz')) as bundle:
+                members = [member.name for member in bundle.getmembers() if member.isfile()]
                 interruption = json.load(bundle.extractfile('interruption.json'))
-                log = bundle.extractfile('lease-1/worker-unit.log').read().decode()
+                log = bundle.extractfile('lease-1/group-2/worker-unit.log').read().decode()
+            # The finished group is already uploaded; the bundle carries only the running group's log.
+            self.assertEqual(['interruption.json', 'lease-1/group-2/worker-unit.log'], members)
             self.assertEqual(
-                (1, UNIT['first'], 2, 'terminate', '2026-10-24T12:02:00Z'),
+                (1, UNIT['first'], 2, ['1'], '2', 'terminate', '2026-10-24T12:02:00Z'),
                 (interruption['sequence'], interruption['unit_id'], interruption['replica_id'],
-                 interruption['action'], interruption['action_time']))
-            self.assertIn('measuring lease 1', log)
+                 interruption['finished_groups'], interruption['running_group'], interruption['action'],
+                 interruption['action_time']))
+            self.assertIn('measuring lease 1 group 2', log)
             self.assertEqual('interrupted', worker.json('heartbeat/1.json')['state'])
             self.assertEqual('interrupted', worker.stop_reason())
 
@@ -442,7 +464,7 @@ class TestUnitWorker(unittest.TestCase):
 
                 self.assertEqual(expected_status, status, output)
                 self.assertEqual(expected_reason, worker.stop_reason())
-                self.assertFalse(worker.object('units/1/completion.json').exists())
+                self.assertFalse(worker.object('units/1/groups/1/completion.json').exists())
                 self.assertEqual(bool(notice), worker.object('events/1-interrupted.tar.gz').exists())
                 attempts = [[float(value) for value in line.split()[1:]]
                             for line in (worker.s3 / 'failed-calls.log').read_text().splitlines()]
@@ -493,15 +515,15 @@ class TestUnitWorker(unittest.TestCase):
 
             self.assertEqual(43, status, output)
             self.assertEqual('interrupted', worker.stop_reason())
-            self.assertTrue(worker.object('units/1/result.tar.gz').exists())
-            self.assertFalse(worker.object('units/1/completion.json').exists())
+            self.assertTrue(worker.object('units/1/groups/1/result.tar.gz').exists())
+            self.assertFalse(worker.object('units/1/groups/1/completion.json').exists())
             with tarfile.open(worker.object('events/1-interrupted.tar.gz')) as bundle:
                 self.assertEqual(UNIT['first'], json.load(bundle.extractfile('interruption.json'))['unit_id'])
             # The result's attempt ran past an unstretched one; the interruption bundle's did not.
             calls = [line.split() for line in (worker.s3 / 'stalled-calls.log').read_text().splitlines()]
             seconds = {key: float(end) - float(start) for called, key, start, end in calls if called != 'notice'}
             unstretched = 5 + 30
-            self.assertGreater(seconds['results/units/1/result.tar.gz'], unstretched)
+            self.assertGreater(seconds['results/units/1/groups/1/result.tar.gz'], unstretched)
             self.assertLess(seconds['results/events/1-interrupted.tar.gz'], unstretched)
 
 

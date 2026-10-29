@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """One work unit's route plan, exact JMH selectors, combined rows, and acceptance.
 
-run-unit.sh plans a unit into the routes its rows need and runs run-shard.sh
-once per route. Each route measures only its share of the unit: run-shard.sh
-reads the unit's expected rows, and its JMH runners execute the selectors
-planned here instead of a handler's whole-method invocation. The combined
-unit is accepted on its own, by validate-unit-results.py.
+run-unit.sh plans one measured group of a unit into the routes its rows need and
+runs run-shard.sh once per route. Each route measures only its share of the
+group: run-shard.sh reads the group's expected rows, and its JMH runners execute
+the selectors planned here instead of a handler's whole-method invocation. The
+combined group is accepted on its own, by validate-unit-results.py.
 """
 import argparse
 import csv
 import hashlib
 import json
-import math
 import re
 import shutil
 from pathlib import Path
 from typing import NoReturn
 
 import row_protocol
-import unit_cost
 import work_units
 from acceptance import (
     EVIDENCE_FIELDS,
@@ -81,13 +79,14 @@ EXECUTION_KINDS = {"jmh-forks": "forks", "native-repetitions": "native"}
 # A selector whose values JMH cannot express runs a whole method with its handler's arguments.
 ROUTE_ARGUMENTS = "route"
 SMOKE_SETTINGS = ("processes", "warmup_iterations", "measurement_iterations", "time")
-UNIT_SCHEMA_VERSION = "1"
+UNIT_SCHEMA_VERSION = "2"
 UNIT_SESSION_FIELDS = (
     "schema_version",
     "campaign_id",
     "platform",
     "unit_id",
     "replica_id",
+    "group_id",
     "unit_attempt_id",
     "instance_id",
     "host_epoch",
@@ -108,8 +107,9 @@ UNIT_RECEIPT_FIELDS = UNIT_SESSION_FIELDS + (
     "engine_tree",
     "heap_size",
 )
-# A host session leases units in sequence; each lease is one attempt.
+# A host session leases units in sequence; each lease is one attempt, which measures one or more groups.
 UNIT_ATTEMPT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*/[1-9][0-9]*")
+GROUP_ID = re.compile(r"[1-9][0-9]*")
 # Identity a unit's routes share with the host that measured them.
 ROUTE_IDENTITY_FIELDS = (
     "campaign_id", "platform", "replica_id", "instance_id", "host_epoch", "architecture", "instance_type",
@@ -274,33 +274,26 @@ def plan_routes(directory, unit, replica_id):
     return ordered_shares(route_shares(unit_rows(directory, unit), applicable_routes(dispatch)), replica_id)
 
 
+def measured_group(unit, group_id):
+    """One measured group of a unit, as a unit holding only the group's rows and representatives."""
+    group = work_units.unit_group(unit, group_id)
+    return {**unit, "group_id": group["group_id"], "owned": group["owned"],
+            "representatives": group["representatives"]}
+
+
 def plan(arguments):
     unit = load_unit(DIRECTORY, arguments.unit)
     if arguments.replica not in {"1", "2", "3", "4"}:
         raise ValueError(f"Replica must be 1, 2, 3, or 4: {arguments.replica}")
+    group = measured_group(unit, arguments.group)
     output = arguments.output_directory
-    write_tsv(output / "expected-rows.tsv", MANIFEST_FIELDS, unit_rows(DIRECTORY, unit))
+    write_tsv(output / "expected-rows.tsv", MANIFEST_FIELDS, unit_rows(DIRECTORY, group))
     write_tsv(output / "unit-rows.tsv", work_units.UNIT_ROW_FIELDS, [
         row for row in row_protocol.read_tsv(DIRECTORY / "unit-rows.tsv") if row["unit_id"] == unit["unit_id"]])
     write_tsv(output / "route-plan.tsv", ROUTE_PLAN_FIELDS, [
         {"route": route, "handler": handler, "systems": canonical_systems(systems)}
-        for route, handler, systems, _ in plan_routes(DIRECTORY, unit, arguments.replica)])
+        for route, handler, systems, _ in plan_routes(DIRECTORY, group, arguments.replica)])
     print(unit["shard_id"])
-
-
-def parameter_block(rows):
-    """The Cartesian -p block selecting exactly these rows, or None when JMH cannot express a value."""
-    parsed = [row_protocol.parse_parameters(row["parameters"]) for row in rows]
-    names = sorted(parsed[0])
-    if any(sorted(parameters) != names for parameters in parsed):
-        raise ValueError(f"Rows of {rows[0]['benchmark']} do not share parameter names")
-    block = {name: list(dict.fromkeys(parameters[name] for parameters in parsed)) for name in names}
-    if len({tuple(parameters[name] for name in names) for parameters in parsed}) != len(rows) or \
-            len(rows) != math.prod(len(values) for values in block.values()):
-        raise ValueError(f"Rows of {rows[0]['benchmark']} are not one Cartesian block")
-    if not all(work_units.expressible(values) for values in block.values()):
-        return None
-    return block
 
 
 def execution_settings(protocol, protocol_name, smoke):
@@ -334,44 +327,25 @@ def selectors(rows, shard_rows, protocols, protocol_name, smoke):
     Cartesian -p block, so it measures exactly its rows and nothing else. A row
     whose suite runs each workload in its own JMH invocation is its own selector.
     """
-    def key(row):
-        alone = row["row_id"] if unit_cost.runs_each_workload(row) else None
-        return (row["system"], row_protocol.jmh_benchmark(row), row_protocol.protocol_key(protocols[row["row_id"]]),
-                alone)
-
-    groups = {}
-    for row in rows:
-        groups.setdefault(key(row), []).append(row)
     whole = {}
     for row in shard_rows:
-        row_key = key(row)
+        row_key = work_units.launch_key(row, protocols)
         whole[row_key] = whole.get(row_key, 0) + 1
-    merged = {}
-    for (system, benchmark, protocol_key, alone), group in groups.items():
-        block = parameter_block(group)
-        if block is None:
-            if len(group) != whole[(system, benchmark, protocol_key, alone)]:
-                raise ValueError(f"{system} {benchmark} has a value JMH cannot select and is split")
-            parameters = ROUTE_ARGUMENTS
-        else:
-            parameters = json.dumps(block, ensure_ascii=False, separators=(",", ":"))
-        # Methods sharing a block share a JVM; a whole method keeps its own.
-        merge_key = (system, protocol_key, parameters, benchmark if block is None else None, alone)
-        selector = merged.setdefault(merge_key, {
-            "protocol": protocols[group[0]["row_id"]], "benchmarks": [], "rows": 0})
-        selector["benchmarks"].append(benchmark)
-        selector["rows"] += len(group)
     result = []
-    for index, ((system, _, parameters, _, _), selector) in enumerate(merged.items(), 1):
-        protocol = selector["protocol"]
+    for index, (launch, methods) in enumerate(work_units.launches(rows, protocols), 1):
+        system, _, parameters, _, _ = launch
+        for key, method_rows in methods:
+            if parameters is None and len(method_rows) != whole[key]:
+                raise ValueError(f"{system} {key[1]} has a value JMH cannot select and is split")
+        protocol = protocols[methods[0][1][0]["row_id"]]
         result.append({
             "selector": str(index),
             "system": system,
             "execution": protocol["execution"],
             **execution_settings(protocol, protocol_name, smoke),
-            "benchmarks": ",".join(selector["benchmarks"]),
-            "parameters": parameters,
-            "rows": str(selector["rows"]),
+            "benchmarks": ",".join(key[1] for key, _ in methods),
+            "parameters": ROUTE_ARGUMENTS if parameters is None else parameters,
+            "rows": str(sum(len(method_rows) for _, method_rows in methods)),
         })
     return result
 
@@ -443,7 +417,7 @@ def read_route_plan(root):
 
 
 def combine(arguments):
-    """Combine a unit's routes into its observed rows."""
+    """Combine a measured group's routes into its observed rows."""
     root = arguments.unit_directory
     route_plan = read_route_plan(root)
     observed = []
@@ -469,6 +443,7 @@ def combine(arguments):
         "schema_version": UNIT_SCHEMA_VERSION,
         **{field: sessions[0][field] for field in ROUTE_IDENTITY_FIELDS},
         "unit_id": unit_id,
+        "group_id": arguments.group,
         "unit_attempt_id": arguments.unit_attempt,
         "region": arguments.region,
     }])
@@ -535,13 +510,13 @@ def check_unit_identity(root, session, units, protocols):
     return unit
 
 
-def check_unit_rows(root, unit, manifest):
-    """Expected and observed rows are exactly the unit's rows."""
-    held = set(unit["owned"])
+def check_unit_rows(root, group, manifest):
+    """Expected and observed rows are exactly the measured group's rows."""
+    held = set(group["owned"])
     by_id = {row["row_id"]: row for row in manifest}
     expected = [row["row_id"] for row in load_manifest(root / "expected-rows.tsv")]
     if sorted(expected) != sorted(held):
-        reject(f"{root / 'expected-rows.tsv'} does not list exactly the unit's rows")
+        reject(f"{root / 'expected-rows.tsv'} does not list exactly the rows of group {group['group_id']}")
     observed_path = root / "observed-rows.tsv"
     observed = read_tsv(observed_path, ("row_id", "shard_id", "system"), OBSERVED_FIELDS)
     identifiers = [row["row_id"] for row in observed]
@@ -566,8 +541,8 @@ def check_unit_rows(root, unit, manifest):
     verify_observed_rows_checksum(root / "observed-rows.tsv.sha256")
 
 
-def check_unit_routes(root, unit, session, protocols, manifest):
-    """Routes ran in the unit's order on the unit session's host, and each recorded its CPU steal."""
+def check_unit_routes(root, group, session, protocols, manifest):
+    """The group's routes ran in the unit's order on the unit session's host, and each recorded its CPU steal."""
     recorded = read_tsv(root / "route-plan.tsv", ROUTE_PLAN_FIELDS, ROUTE_PLAN_FIELDS)
     routes = plan_routes(DIRECTORY, group, session["replica_id"])
     shares = {route: share for route, _, _, share in routes}
@@ -575,13 +550,14 @@ def check_unit_routes(root, unit, session, protocols, manifest):
         {"route": route, "handler": handler, "systems": canonical_systems(systems)}
         for route, handler, systems, _ in routes]
     if recorded != planned:
-        reject(f"{root / 'route-plan.tsv'} is not the unit's plan for replica {session['replica_id']}")
-    shard_rows = [row for row in manifest if row["shard_id"] == unit["shard_id"]]
+        reject(f"{root / 'route-plan.tsv'} is not the plan of group {group['group_id']} for replica "
+               f"{session['replica_id']}")
+    shard_rows = [row for row in manifest if row["shard_id"] == group["shard_id"]]
     for route in planned:
         directory = root / "routes" / route["route"]
         route_session = read_one_tsv(directory / "route-session.tsv", SESSION_FIELDS)
         changed = [field for field in ROUTE_IDENTITY_FIELDS if route_session[field] != session[field]]
-        changed += [field for field, value in (("shard_id", unit["shard_id"]), ("systems", route["systems"]))
+        changed += [field for field, value in (("shard_id", group["shard_id"]), ("systems", route["systems"]))
                     if route_session[field] != value]
         if changed:
             reject(f"{directory / 'route-session.tsv'} differs from the unit session and route plan: {changed}")
@@ -676,16 +652,16 @@ def copy_environment(arguments):
             shutil.copy(arguments.source / name, arguments.target / name)
 
 
-def check_unit_representatives(root, unit, session, planned):
-    """The unit's representatives for this replica ran, each on its own route, and passed."""
+def check_unit_representatives(root, group, session, planned):
+    """The group's representatives for this replica ran, each on its own route, and passed."""
     ran = []
     for route in planned:
         path = root / "routes" / route["route"] / "protocol-qualification.tsv"
         if path.is_file():
             ran.extend(row["manifest_row_id"] for row in read_tsv(path, ("manifest_row_id",)))
-    expected = unit_representatives(unit, session["replica_id"])
+    expected = unit_representatives(group, session["replica_id"])
     if sorted(ran) != expected:
-        reject(f"unit {unit['unit_id']} ran representatives {format_values(sorted(ran))}, expected "
+        reject(f"unit {group['unit_id']} ran representatives {format_values(sorted(ran))}, expected "
                f"{format_values(expected)}")
 
 
@@ -702,10 +678,10 @@ def load_unit_tables(manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTO
     }
 
 
-def write_worker_unit_session(root, environment, unit_id, replica, unit_attempt, region):
-    """Write the session of a unit a worker ran on the host its environment manifest describes."""
+def write_worker_unit_session(root, environment, unit_id, replica, group, unit_attempt, region):
+    """Write the session of a unit's group a worker ran on the host its environment manifest describes."""
     write_tsv(root / "unit-session.tsv", UNIT_SESSION_FIELDS, [{
-        "schema_version": UNIT_SCHEMA_VERSION, "unit_id": unit_id, "replica_id": replica,
+        "schema_version": UNIT_SCHEMA_VERSION, "unit_id": unit_id, "replica_id": replica, "group_id": group,
         "unit_attempt_id": unit_attempt, "region": region,
         **{field: environment[key] for field, key in WORKER_SESSION_FIELDS}}])
 
@@ -718,12 +694,14 @@ def check_worker_unit_session(session, environment):
 
 
 def read_unit_session(root):
-    """A unit attempt's session: the host, replica, and lease that measured it."""
+    """A unit attempt's session: the host, replica, lease, and group that measured it."""
     session = read_one_tsv(root / "unit-session.tsv", UNIT_SESSION_FIELDS)
     if session["schema_version"] != UNIT_SCHEMA_VERSION:
         reject(f"{root / 'unit-session.tsv'} schema_version must be {UNIT_SCHEMA_VERSION}")
     if session["replica_id"] not in {"1", "2", "3", "4"}:
         reject(f"{root / 'unit-session.tsv'} replica_id must be 1 to 4")
+    if GROUP_ID.fullmatch(session["group_id"]) is None:
+        reject(f"{root / 'unit-session.tsv'} group_id must be a positive integer")
     if UNIT_ATTEMPT.fullmatch(session["unit_attempt_id"]) is None:
         reject(f"{root / 'unit-session.tsv'} unit_attempt_id must be <host_session>/<lease_seq>")
     if not session["availability_zone"].startswith(session["region"]):
@@ -733,7 +711,7 @@ def read_unit_session(root):
 
 def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_path=DIRECTORY / "row-protocol.tsv",
                           tables=None):
-    """Accept one unit attempt on its own and return its receipt.
+    """Accept one measured group of a unit attempt on its own and return its receipt.
 
     tables, from load_unit_tables, replaces loading the manifest and protocol paths.
     """
@@ -742,15 +720,19 @@ def validate_unit_results(root, manifest_path=DIRECTORY / "rows.tsv", protocol_p
     protocols = tables["protocols"]
     manifest = tables["manifest"]
     unit = check_unit_identity(root, session, tables["units"], protocols)
-    check_unit_rows(root, unit, manifest)
-    planned = check_unit_routes(root, unit, session, protocols, manifest)
+    try:
+        group = measured_group(unit, session["group_id"])
+    except ValueError as error:
+        reject(str(error))
+    check_unit_rows(root, group, manifest)
+    planned = check_unit_routes(root, group, session, protocols, manifest)
     candidate_commit, candidate_archive_sha256, engine_tree, heap_size = verify_unit_evidence(root)
-    check_unit_representatives(root, unit, session, planned)
+    check_unit_representatives(root, group, session, planned)
     return {
         **session,
         "shard_id": unit["shard_id"],
-        "owned_row_count": str(len(unit["owned"])),
-        "row_protocol_sha256": work_units.protocol_digest(unit["owned"], protocols),
+        "owned_row_count": str(len(group["owned"])),
+        "row_protocol_sha256": work_units.protocol_digest(group["owned"], protocols),
         "manifest_sha256": tables["manifest_sha256"],
         "observed_rows_sha256": sha256_file(root / "observed-rows.tsv"),
         "evidence_manifest_sha256": sha256_file(root / "unit-evidence.tsv"),
@@ -791,8 +773,9 @@ def check_semantic_rejections(result_root):
 
 
 def protocol_digests(units, protocols):
-    """Each baseline unit's digest of its owned rows' frozen protocols."""
-    return {unit_id: work_units.protocol_digest(unit["owned"], protocols) for unit_id, unit in units.items()}
+    """Each baseline unit group's digest of its rows' frozen protocols, by (unit, group)."""
+    return {(unit_id, group["group_id"]): work_units.protocol_digest(group["owned"], protocols)
+            for unit_id, unit in units.items() for group in unit["groups"]}
 
 
 def platform_allocations(platforms, units):
@@ -805,19 +788,21 @@ def check_unit_campaign(receipts, platforms, units, unit_digests, allocations, m
                         expected_replica_ids=(1, 2, 3), confirmations=()):
     """Accept a campaign's unit receipts as a whole.
 
-    Every unit runs on every platform for each expected replica, on the instance type its shard
-    is allocated there, the replicas of a unit run on distinct EC2 instances, and every attempt
-    measured the same candidate. Different units may share a host. A confirmation is replica 4,
-    at most one per platform and unit, on an instance none of that unit's replicas used.
-    unit_digests holds each unit's row_protocol_sha256, allocations each shard's
-    {platform: instance type}, and manifest_digests each shard's manifest_sha256.
+    Every group of every unit runs once on every platform for each expected replica, on the
+    instance type its shard is allocated there, and every attempt measured the same candidate. A
+    replica may gather its groups from several attempts, but no instance that measured one replica
+    of a unit measured another. Different units may share a host. A confirmation is replica 4, at
+    most one receipt per platform, unit, and group, covering every group of a unit it confirms.
+    unit_digests holds each group's row_protocol_sha256 by (unit, group), allocations each
+    shard's {platform: instance type}, and manifest_digests each shard's manifest_sha256.
     """
     expected = {
-        (platform, unit_id, str(replica))
-        for platform in platforms for unit_id in units for replica in expected_replica_ids}
+        (platform, unit_id, str(replica), group["group_id"])
+        for platform in platforms for unit_id, unit in units.items() for replica in expected_replica_ids
+        for group in unit["groups"]}
     observed = []
     confirmed = []
-    instances_by_unit = {}
+    instances_by_replica = {}
     hosts = {}
     candidate_identities = set()
     for receipt, confirmation in [*((row, False) for row in receipts), *((row, True) for row in confirmations)]:
@@ -837,15 +822,19 @@ def check_unit_campaign(receipts, platforms, units, unit_digests, allocations, m
         if receipt["architecture"] != platform["architecture"] or \
                 receipt["instance_type"] != allocations[unit["shard_id"]][receipt["platform"]]:
             reject(f"{context} does not match its shard's frozen allocation on {receipt['platform']}")
+        try:
+            group = work_units.unit_group(unit, receipt["group_id"])
+        except ValueError:
+            reject(f"{context} names group {receipt['group_id']!r}, not a group of unit {receipt['unit_id']}")
         if confirmation:
             parse_confirmation_replica(receipt["replica_id"], context)
-            confirmed.append((receipt["platform"], receipt["unit_id"]))
+            confirmed.append((receipt["platform"], receipt["unit_id"], receipt["group_id"]))
         else:
             parse_primary_replica(receipt["replica_id"], context)
-            observed.append((receipt["platform"], receipt["unit_id"], receipt["replica_id"]))
-        if receipt["owned_row_count"] != str(len(unit["owned"])):
-            reject(f"{context} row counts differ from unit {receipt['unit_id']}")
-        if receipt["row_protocol_sha256"] != unit_digests[receipt["unit_id"]]:
+            observed.append((receipt["platform"], receipt["unit_id"], receipt["replica_id"], receipt["group_id"]))
+        if receipt["owned_row_count"] != str(len(group["owned"])):
+            reject(f"{context} row counts differ from unit {receipt['unit_id']} group {receipt['group_id']}")
+        if receipt["row_protocol_sha256"] != unit_digests[(receipt["unit_id"], receipt["group_id"])]:
             reject(f"{context} row_protocol_sha256 differs from the frozen row protocols")
         if receipt["manifest_sha256"] != manifest_digests[unit["shard_id"]]:
             reject(f"{context} manifest_sha256 does not match the frozen manifest")
@@ -861,7 +850,8 @@ def check_unit_campaign(receipts, platforms, units, unit_digests, allocations, m
         candidate_identities.add((
             receipt["candidate_commit"], receipt["candidate_archive_sha256"], receipt["engine_tree"],
             normalize_heap_size(receipt["heap_size"])))
-        instances_by_unit.setdefault((receipt["platform"], receipt["unit_id"]), []).append(receipt["instance_id"])
+        instances_by_replica.setdefault((receipt["platform"], receipt["unit_id"]), {}).setdefault(
+            receipt["replica_id"], set()).add(receipt["instance_id"])
         for identity, host in (
                 (("instance", receipt["instance_id"]), receipt["host_epoch"]),
                 (("host epoch", receipt["host_epoch"]), receipt["instance_id"]),
@@ -877,15 +867,23 @@ def check_unit_campaign(receipts, platforms, units, unit_digests, allocations, m
             f"missing={format_values(missing)}; "
             f"duplicate={format_values(duplicates)}; "
             f"unexpected={format_values(unexpected)}")
-    unknown = sorted(set(confirmed) - {(platform, unit_id) for platform, unit_id, _ in expected})
+    groups = {(platform, unit_id, group) for platform, unit_id, _, group in expected}
+    confirmed_groups = set(confirmed)
+    unknown = sorted(confirmed_groups - groups)
     repeated = duplicate_values(confirmed)
-    if repeated or unknown:
-        reject(f"confirmation must hold at most one attempt per platform and unit of the campaign: "
-               f"duplicate={format_values(repeated)}; unexpected={format_values(unknown)}")
-    attempts = duplicate_values(receipt["unit_attempt_id"] for receipt in [*receipts, *confirmations])
+    partial = sorted({(platform, unit_id) for platform, unit_id, _ in confirmed
+                      if any((platform, unit_id, group["group_id"]) not in confirmed_groups
+                             for group in units[unit_id]["groups"])})
+    if repeated or unknown or partial:
+        reject(f"confirmation must hold one attempt per group of each platform and unit it confirms: "
+               f"duplicate={format_values(repeated)}; unexpected={format_values(unknown)}; "
+               f"partial={format_values(partial)}")
+    attempts = duplicate_values(
+        (receipt["unit_attempt_id"], receipt["group_id"]) for receipt in [*receipts, *confirmations])
     if attempts:
-        reject(f"campaign reuses unit attempt IDs: {format_values(attempts)}")
-    shared = sorted(key for key, instances in instances_by_unit.items() if duplicate_values(instances))
+        reject(f"campaign reuses unit attempt and group pairs: {format_values(attempts)}")
+    shared = sorted(key for key, replicas in instances_by_replica.items()
+                    if duplicate_values(instance for instances in replicas.values() for instance in instances))
     if shared:
         reject(f"replicas of a unit share an EC2 instance: {format_values(shared)}")
     ambiguous = sorted(f"{kind} {value}" for (kind, value), names in hosts.items() if len(names) > 1)
@@ -927,6 +925,7 @@ def parser():
     plan_parser = subparsers.add_parser("plan")
     plan_parser.add_argument("--unit", required=True)
     plan_parser.add_argument("--replica", required=True)
+    plan_parser.add_argument("--group", required=True)
     plan_parser.add_argument("--output-directory", type=Path, required=True)
     plan_parser.set_defaults(function=plan)
 
@@ -950,6 +949,7 @@ def parser():
     combine_parser = subparsers.add_parser("combine")
     combine_parser.add_argument("--unit-directory", type=Path, required=True)
     combine_parser.add_argument("--unit-attempt", required=True)
+    combine_parser.add_argument("--group", required=True)
     combine_parser.add_argument("--region", required=True)
     combine_parser.set_defaults(function=combine)
 
