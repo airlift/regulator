@@ -52,7 +52,7 @@ class TestJvmBuild(unittest.TestCase):
 
     def extracted_fixture(self):
         identity = {"source_commit": self.git("rev-parse", "HEAD"), "source_tree": self.git("rev-parse", "HEAD^{tree}")}
-        # freeze-candidate.sh adds the generated benchmark tables to the Git archive.
+        # Freezing a candidate adds the generated benchmark tables to the Git archive.
         table = self.directory / "units.tsv"
         table.write_text("generated\n")
         payload = subprocess.check_output(["git", "archive", "--format=tar", "--prefix=tools/re2-benchmark/baseline/",

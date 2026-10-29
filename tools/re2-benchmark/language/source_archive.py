@@ -9,7 +9,7 @@ import re
 import tarfile
 
 
-# freeze-candidate.sh adds these generated tables to the Git archive; the archive checksum binds them.
+# Freezing a candidate adds these generated tables to the Git archive; the archive checksum binds them.
 GENERATED_TABLES = frozenset(f"tools/re2-benchmark/baseline/{name}"
                              for name in ("row-protocol.tsv", "units.tsv", "unit-rows.tsv"))
 

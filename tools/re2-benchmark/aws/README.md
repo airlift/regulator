@@ -191,18 +191,17 @@ of starting collection over.
 
 Execution requires:
 
-- a clean committed Regulator candidate
-- a candidate ref under `refs/benchmarks/`
-- the deterministic candidate archive and provenance produced by
-  `baseline/freeze-candidate.sh`
+- each candidate as a commit of the controller's checkout, whose
+  `tools/re2-benchmark` tree is the checkout's committed one; the rest of the
+  checkout, such as uncommitted changes under `src/`, does not matter
 - `zstd` and `curl` on the controller, which compresses language plan bundles
   and stages each platform's pinned JDK
 - working AWS credentials from the standard AWS credential chain, or an
   explicitly selected profile, and the configured region
 
-Keep the candidate archive, provenance, and result roots outside Maven's
-`target` directory. The controller rejects volatile paths and revalidates the
-candidate, manifests, and accepted receipts whenever it resumes.
+Keep the campaign root outside Maven's `target` directory. The controller
+rejects volatile paths and revalidates the candidate, manifests, and accepted
+receipts whenever it resumes.
 
 The checked-in inputs are:
 
@@ -222,9 +221,9 @@ the baseline tooling:
   rows are divided into, measured one at a time by `baseline/run-unit.sh`
 
 These tables are not checked in. [Freezing a candidate](#freeze-a-candidate)
-generates them and adds them to the candidate archive, and the controller
-reads them from the baseline directory, where the frozen archive must
-reproduce them.
+generates them with the candidate's own generator and adds them to its
+archive, and the controller reads its own copy from the baseline directory,
+which must match.
 
 Generate the tables and run the validators before allocating hosts:
 
@@ -236,20 +235,36 @@ python3 tools/re2-benchmark/baseline/validate-protocol-representatives.py
 
 ## Freeze a candidate
 
-`freeze-candidate.sh` runs the full build, verifies the production engine tree,
-generates the row protocols and work units, creates an immutable local
-benchmark ref, and writes a reproducible archive, holding the candidate and
-its generated tables, and a provenance record:
+Each phase names its candidate with `--candidate NAME=COMMITISH` and keeps its
+results under a campaign root, by default
+`benchmark-results/pre-review-baseline/<campaign>`:
 
-```bash
-tools/re2-benchmark/baseline/freeze-candidate.sh \
-  refs/benchmarks/<candidate-name> \
-  /durable/path/candidate.tar.gz \
-  /durable/path/candidate-provenance.tsv
-```
+- `candidates.tsv`: each candidate's name, commit, ref, and archive SHA-256
+- `<name>/candidate/`: the candidate's `regulator.tar.gz` and `provenance.tsv`
+- `<name>/build`, `<name>/smoke`, `<name>/primary`, `<name>/reduction`, and
+  `<name>/confirmation`: its phases, run as campaign `<campaign>.<name>`
+- `<name>/lang/smoke` and `<name>/lang/primary`: its language plan's phases,
+  run as campaign `<campaign>.<name>.lang`
 
-The output files must not already exist. The script never moves an existing
-benchmark ref.
+A candidate's campaign ID, `<campaign>.<name>` or `<campaign>.<name>.lang`,
+keys its budget reservations, host tags, and host epochs. It is 1-63 letters,
+digits, `.`, `_`, and `-`, starting with a letter or digit, and a campaign
+refuses candidates whose campaign IDs would collide, such as `a`'s language
+phases and `a.lang`'s baseline phases.
+
+The first execution freezes the candidate from Git, never from the working
+tree. It creates the immutable ref `refs/benchmarks/<campaign>/<name>`,
+generates the row protocols and work units with the candidate's own
+generator, and writes the deterministic archive of the candidate commit with
+those tables, and its provenance. Every later phase and restart freezes the
+candidate again, accepting the existing ref only at the same commit and
+refusing an archive, provenance, or `candidates.tsv` row that differs.
+
+Hosts run the candidate archive's copy of the benchmark tooling while the
+controller checks their results with its own, so the candidate's
+`tools/re2-benchmark` tree must be the controller's committed one. Freezing
+does not build or test the candidate: the build phase compiles it, every route
+runs its semantic verifiers, and CI runs the full suite.
 
 ## Plan and execute
 
@@ -258,8 +273,8 @@ Without `--execute`, the controller writes the phase's work items to
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
-  smoke <campaign-id> \
-  --result-root /durable/path/<campaign-id>/smoke
+  smoke <campaign> --candidate <name>=<commit> \
+  --campaign-root /durable/path/<campaign>
 ```
 
 Build each platform's engines once before the smoke. The build phase leases
@@ -268,67 +283,55 @@ type and AMI; see [engine builds](#engine-builds):
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
-  build <campaign-id> --execute \
-  --candidate-ref refs/benchmarks/<candidate-name> \
-  --candidate-archive /durable/path/candidate.tar.gz \
-  --candidate-provenance /durable/path/candidate-provenance.tsv \
-  --result-root /durable/path/<campaign-id>/build \
+  build <campaign> --execute --candidate <name>=<commit> \
+  --campaign-root /durable/path/<campaign> \
   --purchase r8i=spot --purchase r9g=spot --spot-vcpu-reserve 16
 ```
 
-`--engine-builds` requires a shared transfer bucket in every launch region
-and `TRANSFER_PREFIX`; see [launch regions](#launch-regions-and-purchase). The examples
-below run in one region with one shared bucket.
+A measuring phase installs the candidate's build, or the accepted build
+`--engine-builds` names. Installing builds requires a shared transfer bucket
+in every launch region and `TRANSFER_PREFIX`; see
+[launch regions](#launch-regions-and-purchase). The examples below run in one
+region with one shared bucket.
 
 Execute the smoke after inspecting the smoke plan above:
 
 ```bash
 TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
-  smoke <campaign-id> --execute \
-  --candidate-ref refs/benchmarks/<candidate-name> \
-  --candidate-archive /durable/path/candidate.tar.gz \
-  --candidate-provenance /durable/path/candidate-provenance.tsv \
-  --result-root /durable/path/<campaign-id>/smoke \
-  --engine-builds /durable/path/<campaign-id>/build \
+  smoke <campaign> --execute --candidate <name>=<commit> \
+  --campaign-root /durable/path/<campaign> \
   --transfer-bucket us-west-2=<bucket> \
   --max-concurrent 16 --purchase r8i=spot --purchase r9g=spot \
   --spot-vcpu-reserve 16 \
   --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
 ```
 
-The primary phase requires the accepted smoke root and measures three
-independent replicas of every work unit of every platform and shard:
+The primary phase requires the candidate's accepted smoke, or the one
+`--smoke-results` names, and measures three independent replicas of every
+work unit of every platform and shard:
 
 ```bash
 TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
-  primary <campaign-id> --execute \
-  --candidate-ref refs/benchmarks/<candidate-name> \
-  --candidate-archive /durable/path/candidate.tar.gz \
-  --candidate-provenance /durable/path/candidate-provenance.tsv \
-  --smoke-results /durable/path/<campaign-id>/smoke \
-  --result-root /durable/path/<campaign-id>/primary \
-  --engine-builds /durable/path/<campaign-id>/build \
+  primary <campaign> --execute --candidate <name>=<commit> \
+  --campaign-root /durable/path/<campaign> \
   --transfer-bucket us-west-2=<bucket> \
   --max-concurrent 16 --purchase r8i=spot --purchase r9g=spot \
   --spot-vcpu-reserve 16 \
   --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
 ```
 
-Use confirmation only for the bounded list emitted by preliminary reduction:
+Use confirmation only for the bounded list emitted by preliminary reduction.
+It requires the candidate's accepted primary, or the one `--primary-results`
+names:
 
 ```bash
 TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
-  confirmation <campaign-id> --execute \
-  --candidate-ref refs/benchmarks/<candidate-name> \
-  --candidate-archive /durable/path/candidate.tar.gz \
-  --candidate-provenance /durable/path/candidate-provenance.tsv \
-  --primary-results /durable/path/<campaign-id>/primary \
-  --confirmation-jobs /durable/path/confirmation-jobs.tsv \
-  --result-root /durable/path/<campaign-id>/confirmation \
-  --engine-builds /durable/path/<campaign-id>/build \
+  confirmation <campaign> --execute --candidate <name>=<commit> \
+  --campaign-root /durable/path/<campaign> \
+  --confirmation-jobs /durable/path/<campaign>/<name>/reduction/confirmation-jobs.tsv \
   --transfer-bucket us-west-2=<bucket> \
   --max-concurrent 16 --purchase r8i=spot --purchase r9g=spot \
   --spot-vcpu-reserve 16 \
@@ -439,14 +442,14 @@ aws ec2 describe-images --region <region> --owners 137112412989 --include-deprec
 
 Hosts read campaign inputs from a bucket in their launch region. Without a
 shared bucket, each session creates and removes its own bucket there. To reuse
-shared buckets, give each region's bucket with `--transfer-bucket
-REGION=BUCKET` and set `TRANSFER_PREFIX`; regions without one use per-session
-buckets, but `--engine-builds` requires one in every launch region. Each
-shared bucket must carry the `Project=regulator-benchmark` tag, and preflight
-checks the tag and the bucket's region. A single-region campaign may still set
-`TRANSFER_BUCKET`; a multi-region campaign must use `--transfer-bucket`
-instead. Every session uploads its own inputs to its bucket, except the engine
-build archives described below. To create a shared bucket, omitting
+shared buckets, give each region's bucket with `--transfer-bucket REGION=BUCKET`
+and set `TRANSFER_PREFIX`; regions without one use per-session buckets, but
+installing an engine build requires one in every launch region. Each shared
+bucket must carry the `Project=regulator-benchmark` tag, and preflight checks
+the tag and the bucket's region. A single-region campaign may still set
+`TRANSFER_BUCKET`; a multi-region campaign must use `--transfer-bucket` instead.
+Every session uploads its own inputs to its bucket, except the engine build
+archives described below. To create a shared bucket, omitting
 `--create-bucket-configuration` in `us-east-1`:
 
 ```bash
@@ -495,18 +498,18 @@ SHA-256, and its protocol and manifest digests cover the build scripts, so the
 phase is accepted only when every platform's build came from the checkout's
 scripts and one candidate.
 
-Smoke, primary, and confirmation execution require `--engine-builds`, naming
-an accepted build root for every platform. One build root serves any measuring
-campaign, baseline or language, whatever its campaign ID and heap: the root is
-revalidated under the campaign ID in its own `campaign-state.tsv`, which must
-name a build phase, its cleanup must be verified and it must have no semantic
-rejection. Against the measuring checkout, its builds must be of the same
-candidate and archive, made by the same build scripts from the pinned Trino
-commit, on each platform's pinned architecture and instance type. Each
-platform's manifest SHA-256 is frozen in `execution-policy.json`, and primary
-and confirmation refuse a prerequisite that used different builds. Baseline and
-language unit workers run the candidate classes and native runners of their
-platform's engine build.
+Smoke, primary, and confirmation execution require an accepted build root for
+every platform: the candidate's build phase, or the root `--engine-builds` names
+instead. One build root serves any measuring campaign, baseline or language,
+whatever its campaign ID and heap: the root is revalidated under the campaign ID
+in its own `campaign-state.tsv`, which must name a build phase, its cleanup must
+be verified and it must have no semantic rejection. Against the measuring
+checkout, its builds must be of the same candidate and archive, made by the same
+build scripts from the pinned Trino commit, on each platform's pinned
+architecture and instance type. Each platform's manifest SHA-256 is frozen in
+`execution-policy.json`, and primary and confirmation refuse a prerequisite that
+used different builds. Baseline and language unit workers run the candidate
+classes and native runners of their platform's engine build.
 
 A host installs each archive in one streaming pass: the S3 download feeds
 both a SHA-256 digest of the whole archive and `zstd -d`, whose tar stream is
@@ -528,12 +531,12 @@ and the runners in `language-native/` under the shared work directory, and
 records the manifest and installed archives beside the host evidence and in
 each route.
 
-Preflight names each launch region that lacks the shared transfer bucket
-`--engine-builds` requires. Before it launches any host,
-the controller puts each archive once in every region that may launch a host
-installing it, under `TRANSFER_PREFIX/engine-builds/<sha256>.tar.zst`, and skips
-an object with that key and checksum. A language plan's bundle, which a
-language unit worker installs, travels the same way under
+Preflight names each launch region that lacks the shared transfer bucket an
+engine build requires. Before it launches any host, the controller puts each
+archive once in every region that may launch a host installing it, under
+`TRANSFER_PREFIX/engine-builds/<sha256>.tar.zst`, and skips an object with that
+key and checksum. A language plan's bundle, which a language unit worker
+installs, travels the same way under
 `TRANSFER_PREFIX/language-plans/<sha256>.tar.zst`; the wrapper takes the bundles
 of a session's own pool shards in `LANGUAGE_PLAN_BUNDLE_SHA256S`, with the
 candidate provenance their units measure. The platform's pinned JDK travels the
@@ -850,7 +853,7 @@ Failed jobs record their failure type. A session that fails before its first
 RunInstances request, in setup such as the default VPC lookup or the instance
 profile, is `retryable-infrastructure`, since no instance can exist; cleanup
 still removes and verifies the bucket and profile it created. A session whose
-frozen inputs fail their checks before launch, such as a dirty checkout or a
+frozen inputs fail their checks before launch, such as uncommitted tooling or a
 candidate archive whose SHA-256 or engine tree differs, is instead
 `input-rejection`, since a retry would fail them again; the worker's whole pool
 gives up. [Unit dispatch](#unit-dispatch) retries a failed unit instead.

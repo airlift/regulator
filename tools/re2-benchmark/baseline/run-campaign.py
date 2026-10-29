@@ -6,6 +6,7 @@ import contextlib
 import csv
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
@@ -120,6 +121,22 @@ CANDIDATE_PROVENANCE_FIELDS = (
     "shard_manifest_sha256",
     "protocol_representatives_sha256",
 )
+# The checked-in manifests whose digests a candidate's provenance records, by provenance field.
+PROVENANCE_MANIFESTS = {
+    "row_manifest_sha256": "rows.tsv",
+    "platform_manifest_sha256": "platforms.tsv",
+    "comparator_manifest_sha256": "comparators.tsv",
+    "shard_manifest_sha256": "shards.tsv",
+    "protocol_representatives_sha256": "protocol-representatives.tsv",
+}
+# A campaign's candidates.tsv: each candidate's name, commit, benchmark ref, and archive SHA-256.
+CANDIDATE_FIELDS = ("name", "commit", "ref", "archive_sha256")
+# A frozen candidate's archive and provenance, in its candidate directory.
+CANDIDATE_ARCHIVE = "regulator.tar.gz"
+CANDIDATE_PROVENANCE = "provenance.tsv"
+CANDIDATE_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+BENCHMARK_TOOLING = "tools/re2-benchmark"
+BASELINE_TOOLING = "tools/re2-benchmark/baseline"
 JOB_MANIFEST_FIELDS = (
     "platform", "shard_id", "replica", "host_epoch", "attempt", "market", "instance_type", "architecture")
 PHASE_TIMEOUT_SECONDS = {
@@ -212,12 +229,19 @@ def campaign_engine_tree(arguments):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("phase", choices=PHASE_TIMEOUT_SECONDS)
-    parser.add_argument("campaign_id")
+    parser.add_argument("campaign", help="the campaign; each candidate's phases run as <campaign>.<name>")
+    parser.add_argument("--candidate", action="append", default=[], dest="candidate_values",
+                        metavar="NAME=COMMITISH",
+                        help="the candidate commit, frozen from Git as refs/benchmarks/<campaign>/<name>")
+    parser.add_argument("--campaign-root", type=Path,
+                        help="the campaign's results, holding candidates.tsv and <name>/candidate and each phase "
+                             "(default: benchmark-results/pre-review-baseline/<campaign>)")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--confirmation-jobs", type=Path)
-    parser.add_argument("--smoke-results", type=Path)
-    parser.add_argument("--primary-results", type=Path)
-    parser.add_argument("--result-root", type=Path)
+    parser.add_argument("--smoke-results", type=Path,
+                        help="accepted smoke a primary requires (default: the candidate's smoke)")
+    parser.add_argument("--primary-results", type=Path,
+                        help="accepted primary a confirmation requires (default: the candidate's primary)")
     parser.add_argument("--max-concurrent", type=int, default=DEFAULT_MAX_CONCURRENT)
     parser.add_argument("--max-concurrent-per-platform", type=int, default=DEFAULT_MAX_CONCURRENT)
     parser.add_argument("--spot-vcpu-reserve", type=int, default=SPOT_VCPU_SAFETY_RESERVE)
@@ -231,9 +255,6 @@ def parse_args():
                         help="shared fleet policy; all controllers must use the same coordinator directory")
     parser.add_argument("--shard", action="append", dest="selected_shards",
                         help="baseline shard to recollect; repeat to select a subset")
-    parser.add_argument("--candidate-ref")
-    parser.add_argument("--candidate-archive", type=Path)
-    parser.add_argument("--candidate-provenance", type=Path)
     parser.add_argument("--language-plan", action="append", type=Path, default=[],
                         help="language plan prepared by fleet.py, whose units the campaign measures instead of the "
                              "baseline's; repeat for lifecycle and bulk")
@@ -247,8 +268,9 @@ def parse_args():
                              f"never launches Spot, and {DEFAULT_PURCHASE}, the default, turns to On-Demand where "
                              "Spot falls short")
     parser.add_argument("--engine-builds", type=Path,
-                        help="accepted build-phase result root whose per-platform Trino harness and native "
-                             "runners every measuring unit worker installs")
+                        help="accepted build-phase result root whose per-platform prebuilt archives every "
+                             "measuring unit worker installs, verified against their pinned SHA-256 (default: the "
+                             "candidate's build)")
     parser.add_argument("--transfer-bucket", action="append", default=[], metavar="REGION=BUCKET",
                         help="shared transfer bucket for hosts launched in REGION; regions without one "
                              "use a per-session bucket")
@@ -666,8 +688,7 @@ def validate_durable_paths(root, arguments, result_root):
     build_output = (root / "target").resolve()
     paths = (
         ("result root", result_root),
-        ("candidate archive", arguments.candidate_archive),
-        ("candidate provenance", arguments.candidate_provenance),
+        ("campaign root", getattr(arguments, "campaign_root", None)),
         ("shared fleet policy", getattr(arguments, "fleet_budget", None)),
         ("engine builds", getattr(arguments, "engine_builds", None)),
     )
@@ -687,93 +708,252 @@ def campaign_heap_size(arguments):
     return arguments.heap_size
 
 
-def deterministic_archive_sha256(root, candidate):
-    # freeze-candidate.sh adds the tables it generated beside the baseline tooling to the archive.
-    tables = [root / "tools/re2-benchmark/baseline" / table for table in work_units.TABLES]
-    missing = [table.name for table in tables if not table.is_file()]
-    if missing:
-        raise SystemExit(f"the candidate's generated tables {missing} are missing; freeze-candidate.sh writes them")
+def candidate_campaign_id(campaign, name, language=False):
+    """A candidate's campaign ID, under which its phases reserve the budget, tag their hosts, and number their host
+    epochs; a language plan's phases run under their own."""
+    return f"{campaign}.{name}" + (".lang" if language else "")
+
+
+def parse_candidates(values):
+    """Each --candidate NAME=COMMITISH as (name, commitish), in the order given."""
+    candidates = {}
+    for value in values:
+        name, separator, commitish = value.partition("=")
+        if not separator or not commitish or not re.fullmatch(CANDIDATE_NAME_PATTERN, name) or name in candidates:
+            raise SystemExit(f"--candidate takes one NAME=COMMITISH per distinct name of letters, digits, '.', '_', "
+                             f"and '-', starting with a letter or digit: {value}")
+        candidates[name] = commitish
+    return list(candidates.items())
+
+
+def resolve_commit(root, commitish):
+    commit = "" if commitish.startswith("-") else subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{commitish}^{{commit}}"], cwd=root, capture_output=True,
+        text=True).stdout.strip()
+    if not commit:
+        raise SystemExit(f"candidate {commitish} is not a commit of this checkout")
+    return commit
+
+
+def check_candidate_tooling(root, commit):
+    """Hosts run the candidate archive's benchmark tooling while this checkout's copy checks their results, so the
+    two must be the same committed tree. The rest of this checkout may differ from the candidate."""
+    if check_output(["git", "status", "--porcelain", "--", BENCHMARK_TOOLING], cwd=root):
+        raise SystemExit(f"campaign execution requires committed benchmark tooling: {BENCHMARK_TOOLING} has changes")
+    if (check_output(["git", "rev-parse", f"{commit}:{BENCHMARK_TOOLING}"], cwd=root) !=
+            check_output(["git", "rev-parse", f"HEAD:{BENCHMARK_TOOLING}"], cwd=root)):
+        raise SystemExit(f"candidate {commit} has other benchmark tooling than this checkout's HEAD; run the campaign "
+                         "from a checkout whose tools/re2-benchmark matches the candidate's")
+
+
+def generate_candidate_tables(root, commit, output):
+    """Generate the candidate's row protocols and work units with its own committed generator."""
+    with tempfile.TemporaryDirectory(prefix="candidate-tooling-") as temporary:
+        archive = subprocess.Popen(["git", "archive", "--format=tar", commit, BASELINE_TOOLING], cwd=root,
+                                   stdout=subprocess.PIPE)
+        extract = subprocess.run(["tar", "-xf", "-", "-C", temporary], stdin=archive.stdout)
+        archive.stdout.close()
+        if archive.wait() != 0 or extract.returncode != 0:
+            raise SystemExit(f"could not extract candidate {commit}'s benchmark tooling")
+        output.mkdir(parents=True, exist_ok=True)
+        # The generator imports the modules beside it, so it runs from the extracted copy without -I.
+        subprocess.run([sys.executable, str(Path(temporary) / BASELINE_TOOLING / "generate-units.py"),
+                        "--output-directory", str(output)], cwd=temporary, check=True, stdout=subprocess.DEVNULL)
+
+
+def write_candidate_archive(root, commit, tables, output=None):
+    """The SHA-256 of the candidate's deterministic archive: its commit, with its generated tables beside the
+    baseline tooling, compressed without a timestamp. Writes it to output when given."""
     archive = subprocess.Popen(
-        ["git", "archive", "--format=tar", "--prefix=tools/re2-benchmark/baseline/",
-         *(f"--add-file={table}" for table in tables), "--prefix=", candidate],
-        cwd=root,
-        stdout=subprocess.PIPE)
-    compressor = subprocess.Popen(
-        ["gzip", "-n"],
-        stdin=archive.stdout,
-        stdout=subprocess.PIPE)
+        ["git", "archive", "--format=tar", "--prefix=" + BASELINE_TOOLING + "/",
+         *(f"--add-file={tables / table}" for table in work_units.TABLES), "--prefix=", commit],
+        cwd=root, stdout=subprocess.PIPE)
+    compressor = subprocess.Popen(["gzip", "-n"], stdin=archive.stdout, stdout=subprocess.PIPE)
     archive.stdout.close()
     digest = hashlib.sha256()
-    while chunk := compressor.stdout.read(1024 * 1024):
-        digest.update(chunk)
-    compressor.stdout.close()
-    compressor_status = compressor.wait()
-    archive_status = archive.wait()
+    try:
+        with (output.open("wb") if output else contextlib.nullcontext()) as output_file:
+            while chunk := compressor.stdout.read(1024 * 1024):
+                digest.update(chunk)
+                if output_file:
+                    output_file.write(chunk)
+            if output_file:
+                output_file.flush()
+                os.fsync(output_file.fileno())
+    finally:
+        compressor.stdout.close()
+        compressor_status = compressor.wait()
+        archive_status = archive.wait()
     if archive_status != 0 or compressor_status != 0:
-        raise SystemExit(
-            f"could not reproduce candidate archive: git={archive_status}, gzip={compressor_status}")
+        raise SystemExit(f"could not archive candidate {commit}: git={archive_status}, gzip={compressor_status}")
     return digest.hexdigest()
 
 
 def archive_file_list_sha256(path):
     with tarfile.open(path, "r:gz") as archive:
-        # tar -tf, used by freeze-candidate.sh, preserves directory slashes;
-        # Python's TarInfo removes them while reading the same archive.
+        # Directory entries keep the trailing slash tar -tf lists, which Python's TarInfo removes.
         names = [member.name.rstrip("/") + "/" if member.isdir() else member.name for member in archive]
         file_list = "".join(name + "\n" for name in sorted(names))
     return hashlib.sha256(file_list.encode()).hexdigest()
 
 
-def validate_source(root, arguments):
-    if not arguments.candidate_ref or arguments.candidate_archive is None or arguments.candidate_provenance is None:
-        raise SystemExit(
-            "execution requires --candidate-ref, --candidate-archive, and --candidate-provenance")
-    if check_output(["git", "status", "--porcelain"], cwd=root):
-        raise SystemExit("campaign execution requires a clean Regulator worktree")
-    head = check_output(["git", "rev-parse", "HEAD"], cwd=root)
-    candidate = check_output(["git", "rev-parse", f"{arguments.candidate_ref}^{{commit}}"], cwd=root)
-    if head != candidate:
-        raise SystemExit(f"candidate ref {arguments.candidate_ref} is {candidate}, but HEAD is {head}")
-    engine_tree = check_output(["git", "rev-parse", "HEAD:src/main"], cwd=root)
-    with arguments.candidate_provenance.open(newline="") as input_file:
-        reader = csv.DictReader(input_file, delimiter="\t")
-        if tuple(reader.fieldnames or ()) != CANDIDATE_PROVENANCE_FIELDS:
-            raise SystemExit(
-                f"candidate provenance fields are {tuple(reader.fieldnames or ())}, "
-                f"expected {CANDIDATE_PROVENANCE_FIELDS}")
-        rows = list(reader)
-    if len(rows) != 1:
-        raise SystemExit("candidate provenance must contain exactly one row")
-    provenance = rows[0]
-    archive_sha256 = hashlib.sha256(arguments.candidate_archive.read_bytes()).hexdigest()
-    expected = {
-        "candidate_ref": arguments.candidate_ref,
-        "candidate_commit": candidate,
-        "root_tree": check_output(["git", "rev-parse", "HEAD^{tree}"], cwd=root),
+def write_new_file(path, content):
+    """Write content to path durably unless the path already exists; returns whether it wrote. Callers may write the
+    same path concurrently, so each writes its own temporary file."""
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.new")
+    try:
+        with temporary.open("wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.link(temporary, path)
+    except FileExistsError:
+        return False
+    finally:
+        temporary.unlink(missing_ok=True)
+    fsync_directory(path.parent)
+    return True
+
+
+def tsv_bytes(fields, rows):
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fields, delimiter="\t", lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return output.getvalue().encode()
+
+
+@dataclass(frozen=True)
+class FrozenCandidate:
+    """A candidate commit as a campaign measures it: its immutable ref, and its archive and provenance under
+    <campaign root>/<name>/candidate."""
+    name: str
+    commit: str
+    ref: str
+    directory: Path
+    archive_sha256: str
+    engine_tree: str
+
+    @property
+    def archive(self):
+        return self.directory / CANDIDATE_ARCHIVE
+
+    @property
+    def provenance(self):
+        return self.directory / CANDIDATE_PROVENANCE
+
+    @property
+    def row(self):
+        return {"name": self.name, "commit": self.commit, "ref": self.ref, "archive_sha256": self.archive_sha256}
+
+
+def freeze_candidate(root, campaign_root, campaign, name, commitish):
+    """Freeze a candidate commit from Git, never from the working tree: create its benchmark ref, generate its tables
+    with its own generator, and write its deterministic archive and provenance. A restart reproduces each and
+    refuses any that differ."""
+    commit = resolve_commit(root, commitish)
+    check_candidate_tooling(root, commit)
+    ref = f"refs/benchmarks/{campaign}/{name}"
+    if subprocess.run(["git", "check-ref-format", ref], cwd=root).returncode != 0:
+        raise SystemExit(f"campaign {campaign} and candidate {name} do not form a valid Git ref: {ref}")
+
+    def ref_commit():
+        return subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=root,
+                              capture_output=True, text=True).stdout.strip()
+
+    existing = ref_commit()
+    if not existing:
+        created = subprocess.run(["git", "update-ref", ref, commit, "0" * 40], cwd=root, capture_output=True, text=True)
+        # Another freeze of the candidate, such as its other phase's, may have created the ref first.
+        existing = commit if created.returncode == 0 else ref_commit()
+        if not existing:
+            raise SystemExit(f"could not create candidate ref {ref}: {created.stderr.strip()}")
+    if existing != commit:
+        raise SystemExit(f"candidate ref {ref} already names {existing}, not {commit}")
+    directory = campaign_root / name / "candidate"
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="candidate-tables-") as temporary:
+        tables = Path(temporary)
+        generate_candidate_tables(root, commit, tables)
+        # The controller plans and checks units from this checkout's tables, which hosts read from the archive.
+        stale = [table for table in work_units.TABLES
+                 if not (root / BASELINE_TOOLING / table).is_file() or
+                 (root / BASELINE_TOOLING / table).read_bytes() != (tables / table).read_bytes()]
+        if stale:
+            raise SystemExit(f"this checkout's generated tables {stale} differ from candidate {name}'s; regenerate "
+                             f"them with {BASELINE_TOOLING}/generate-units.py")
+        archive = directory / CANDIDATE_ARCHIVE
+        if archive.exists():
+            archive_sha256 = write_candidate_archive(root, commit, tables)
+            if engine_build.sha256_file(archive) != archive_sha256:
+                raise SystemExit(f"candidate archive {archive} differs from the deterministic archive of {commit}")
+        else:
+            # The candidate's phases may freeze it concurrently, so each stages its own copy of the deterministic
+            # archive.
+            descriptor, temporary_archive = tempfile.mkstemp(prefix=f"{archive.name}.", suffix=".new", dir=directory)
+            os.close(descriptor)
+            try:
+                archive_sha256 = write_candidate_archive(root, commit, tables, Path(temporary_archive))
+                os.replace(temporary_archive, archive)
+            finally:
+                Path(temporary_archive).unlink(missing_ok=True)
+            fsync_directory(directory)
+
+    def blob_sha256(path):
+        return hashlib.sha256(subprocess.check_output(["git", "cat-file", "blob", f"{commit}:{path}"],
+                                                      cwd=root)).hexdigest()
+
+    engine_tree = check_output(["git", "rev-parse", f"{commit}:src/main"], cwd=root)
+    provenance = tsv_bytes(CANDIDATE_PROVENANCE_FIELDS, [{
+        "candidate_ref": ref,
+        "candidate_commit": commit,
+        "root_tree": check_output(["git", "rev-parse", f"{commit}^{{tree}}"], cwd=root),
         "engine_tree": engine_tree,
         "archive_sha256": archive_sha256,
-        "archive_file_list_sha256": archive_file_list_sha256(arguments.candidate_archive),
-        "row_manifest_sha256": hashlib.sha256(
-            campaign_manifest(root, arguments).read_bytes()).hexdigest(),
-        "platform_manifest_sha256": hashlib.sha256(
-            (root / "tools/re2-benchmark/baseline/platforms.tsv").read_bytes()).hexdigest(),
-        "comparator_manifest_sha256": hashlib.sha256(
-            (root / "tools/re2-benchmark/baseline/comparators.tsv").read_bytes()).hexdigest(),
-        "shard_manifest_sha256": hashlib.sha256(
-            campaign_shards(root, arguments).read_bytes()).hexdigest(),
-        "protocol_representatives_sha256": hashlib.sha256(
-            (root / "tools/re2-benchmark/baseline/protocol-representatives.tsv").read_bytes()).hexdigest(),
-    }
-    for field, value in expected.items():
-        if provenance.get(field) != value:
-            raise SystemExit(
-                f"candidate provenance {field} is {provenance.get(field)!r}, expected {value!r}")
-    reproducible_archive_sha256 = deterministic_archive_sha256(root, candidate)
-    if archive_sha256 != reproducible_archive_sha256:
-        raise SystemExit(
-            "candidate archive contents do not match the deterministic archive of the candidate ref")
-    arguments.candidate_archive_sha256 = archive_sha256
-    arguments.engine_tree = engine_tree
+        "archive_file_list_sha256": archive_file_list_sha256(archive),
+        **{field: blob_sha256(f"{BASELINE_TOOLING}/{manifest}") for field, manifest in PROVENANCE_MANIFESTS.items()},
+    }])
+    path = directory / CANDIDATE_PROVENANCE
+    if not write_new_file(path, provenance) and path.read_bytes() != provenance:
+        raise SystemExit(f"candidate provenance {path} differs from candidate {name} at {commit}")
+    return FrozenCandidate(name, commit, ref, directory, archive_sha256, engine_tree)
+
+
+def read_candidates(campaign_root):
+    """The campaign's candidates, as candidates.tsv records them."""
+    path = campaign_root / "candidates.tsv"
+    if not path.exists():
+        return []
+    with path.open(newline="") as input_file:
+        return list(csv.DictReader(input_file, delimiter="\t"))
+
+
+def record_candidate(campaign_root, candidate):
+    """Record the candidate in the campaign's candidates.tsv, or check that it records the candidate at the same
+    commit and archive."""
+    with (campaign_root / "candidates.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        recorded = read_candidates(campaign_root)
+        same = [row for row in recorded if row["name"] == candidate.name]
+        if same and same != [candidate.row]:
+            raise SystemExit(f"campaign candidates.tsv records candidate {candidate.name} as {same[0]}, not "
+                             f"{candidate.row}")
+        if not same:
+            write_ledger(campaign_root / "candidates.tsv", recorded + [candidate.row], CANDIDATE_FIELDS,
+                         key=lambda row: 0)
+
+
+def validate_source(root, arguments):
+    """Freeze the phase's candidate, or check the earlier freeze, and select it for the phase's hosts."""
+    [(name, commitish)] = arguments.candidates
+    candidate = freeze_candidate(root, arguments.campaign_root, arguments.campaign, name, commitish)
+    record_candidate(arguments.campaign_root, candidate)
+    arguments.candidate_ref = candidate.ref
+    arguments.candidate_commit = candidate.commit
+    arguments.candidate_archive = candidate.archive
+    arguments.candidate_provenance = candidate.provenance
+    arguments.candidate_archive_sha256 = candidate.archive_sha256
+    arguments.engine_tree = candidate.engine_tree
 
 
 def tracked_tooling(root):
@@ -851,7 +1031,7 @@ def unit_validation(root, arguments, kind, plans=None):
     campaign's validated plans by their directories."""
     receipt_fields = {
         "campaign_id": arguments.campaign_id,
-        "candidate_commit": check_output(["git", "rev-parse", "HEAD"], cwd=root),
+        "candidate_commit": arguments.candidate_commit,
         "candidate_archive_sha256": arguments.candidate_archive_sha256,
         "engine_tree": campaign_engine_tree(arguments),
         "heap_size": campaign_heap_size(arguments),
@@ -987,7 +1167,7 @@ def resolve_engine_builds(root, arguments):
             raise ValueError(f"{builds} is not a build phase's result root")
         validation = engine_build_validation(root, {
             "campaign_id": state["campaign_id"],
-            "candidate_commit": check_output(["git", "rev-parse", "HEAD"], cwd=root),
+            "candidate_commit": arguments.candidate_commit,
             "candidate_archive_sha256": arguments.candidate_archive_sha256})
         unit_session.check_semantic_rejections(builds)
         require_phase_complete(builds, state["campaign_id"], "build")
@@ -3383,15 +3563,30 @@ def main():
         arguments.shared_budget = FleetBudget(arguments.fleet_budget)
     directory = Path(__file__).resolve().parent
     root = directory.parents[2]
-    if arguments.release_version:
-        release = released_artifact.manifest(root, arguments.release_version)
-        production_tree = released_artifact.production_tree(root)
-        if production_tree != release["engine_tree"]:
-            raise SystemExit("production source differs from the selected release")
-    result_root = arguments.result_root or root / "benchmark-results" / "pre-review-baseline" / arguments.campaign_id / arguments.phase
+    arguments.candidates = parse_candidates(arguments.candidate_values)
+    arguments.campaign_root = (arguments.campaign_root or
+                               root / "benchmark-results" / "pre-review-baseline" / arguments.campaign).absolute()
     platforms = read_platforms(directory)
     parse_launch_options(arguments, platforms)
     arguments.transfer_buckets = parse_transfer_buckets(arguments.transfer_bucket)
+    if len(arguments.candidates) != 1:
+        raise SystemExit("a phase measures one --candidate NAME=COMMITISH")
+    [(name, commitish)] = arguments.candidates
+    # A candidate's phases are its campaign, laid out under <campaign root>/<name>; a language plan's phases are
+    # another, under <name>/lang, measuring the same build.
+    arguments.campaign_id = candidate_campaign_id(arguments.campaign, name, language=bool(arguments.language_plan))
+    candidate_root = arguments.campaign_root / name
+    phases = candidate_root / "lang" if arguments.language_plan else candidate_root
+    result_root = phases / arguments.phase
+    if arguments.phase != "build" and arguments.engine_builds is None:
+        arguments.engine_builds = candidate_root / "build"
+    arguments.smoke_results = arguments.smoke_results or phases / "smoke"
+    arguments.primary_results = arguments.primary_results or phases / "primary"
+    if arguments.release_version:
+        release = released_artifact.manifest(root, arguments.release_version)
+        commit = resolve_commit(root, commitish)
+        if check_output(["git", "rev-parse", f"{commit}:src/main"], cwd=root) != release["engine_tree"]:
+            raise SystemExit(f"candidate {name}'s production source differs from the selected release")
     arguments.regional_amis = read_platform_regions(directory)
     shards = read_shards(directory)
     if arguments.selected_shards is not None:
@@ -3416,8 +3611,8 @@ def main():
         units = work_units.load(directory)
     confirmation_units = ()
     if arguments.phase == "confirmation":
-        if arguments.primary_results is None or arguments.confirmation_jobs is None:
-            raise SystemExit("confirmation requires --primary-results and --confirmation-jobs")
+        if arguments.confirmation_jobs is None:
+            raise SystemExit("confirmation requires --confirmation-jobs")
         confirmation_units = read_confirmation_units(
             arguments.confirmation_jobs, platforms, units,
             read_accepted_units(arguments.primary_results / "accepted-units.tsv"))

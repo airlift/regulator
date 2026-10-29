@@ -10,12 +10,12 @@ preparation and the installed native comparator runners are shared through
 `BASELINE_SHARED_WORK_DIR`; measurements and semantic receipts are never shared
 between routes.
 
-`freeze-candidate.sh` creates an immutable benchmark ref and records that
-candidate's commit, complete tree, production tree, deterministic source
-archive, and benchmark-manifest hashes. The campaign controller validates those
-identities directly before execution. The pre-cleanup snapshot remains a
-separate regression baseline and is not a prerequisite for freezing a later
-candidate.
+[Freezing a candidate](../aws/README.md#freeze-a-candidate) creates an
+immutable benchmark ref and records that candidate's commit, complete tree,
+production tree, deterministic source archive, and benchmark-manifest hashes,
+all read from Git. Each phase reproduces those identities before execution.
+The pre-cleanup snapshot remains a separate regression baseline and is not a
+prerequisite for freezing a later candidate.
 
 A route produces `route-session.tsv` but no acceptance receipt. `run-unit.sh`
 verifies that all route sessions describe the same host identity, combines the
@@ -177,12 +177,12 @@ column). The generator refuses to write units that break a measurement
 requirement: each row owned by exactly one unit, comparisons, scaling groups,
 and logical rows inside one unit, one Cartesian selector block per method share,
 no unit over the 15-minute budget, and measured groups that keep the same
-requirements. The three tables are not checked in:
-`freeze-candidate.sh` generates them into the candidate archive and beside the
-baseline tooling, where the controller reads them, and the offline gate
-generates them before its tests. `run-unit.sh` measures one unit, and a unit
-worker host leases units one at a time (see
-[Unit workers](../aws/README.md#unit-workers)).
+requirements. The three tables are not checked in: freezing a candidate
+generates them with its own generator into its archive, where hosts read them;
+the controller reads the copy beside the baseline tooling, which must match,
+and the offline gate generates that copy before its tests. `run-unit.sh`
+measures one group of a unit, and a unit worker host leases units one at a time
+(see [Unit workers](../aws/README.md#unit-workers)).
 
 - Atoms are the rows that must share a unit: every system of one logical row,
   which keeps both routes and the comparator beside their candidates, and every
