@@ -1256,53 +1256,6 @@ final class JavaRegexpParser
             return false;
         }
 
-        private static CharClass posixCharClass(String name)
-        {
-            CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            switch (name) {
-                case "alnum" -> {
-                    characterClassBuilder.addRange('0', '9');
-                    characterClassBuilder.addRange('A', 'Z');
-                    characterClassBuilder.addRange('a', 'z');
-                }
-                case "alpha" -> {
-                    characterClassBuilder.addRange('A', 'Z');
-                    characterClassBuilder.addRange('a', 'z');
-                }
-                case "blank" -> {
-                    characterClassBuilder.addRange('\t', '\t');
-                    characterClassBuilder.addRange(' ', ' ');
-                }
-                case "cntrl" -> {
-                    characterClassBuilder.addRange(0x00, 0x1F);
-                    characterClassBuilder.addRange(0x7F, 0x7F);
-                }
-                case "digit" -> characterClassBuilder.addRange('0', '9');
-                case "graph" -> characterClassBuilder.addRange('!', '~');
-                case "lower" -> characterClassBuilder.addRange('a', 'z');
-                case "print" -> characterClassBuilder.addRange(' ', '~');
-                case "punct" -> {
-                    characterClassBuilder.addRange('!', '/');
-                    characterClassBuilder.addRange(':', '@');
-                    characterClassBuilder.addRange('[', '`');
-                    characterClassBuilder.addRange('{', '~');
-                }
-                case "space" -> {
-                    characterClassBuilder.addRange('\t', '\r'); // \t \n \v \f \r
-                    characterClassBuilder.addRange(' ', ' ');
-                }
-                case "upper" -> characterClassBuilder.addRange('A', 'Z');
-                case "xdigit" -> {
-                    characterClassBuilder.addRange('0', '9');
-                    characterClassBuilder.addRange('A', 'F');
-                    characterClassBuilder.addRange('a', 'f');
-                }
-                case "ascii" -> characterClassBuilder.addRange(0x00, 0x7F);
-                default -> throw new RegexpParseException(RegexpParseErrorCode.BAD_CHAR_CLASS, null, -1);
-            }
-            return characterClassBuilder.toCharClass();
-        }
-
         private int parseClassAtomRune(int flags)
         {
             if (atEnd()) {
@@ -1501,7 +1454,7 @@ final class JavaRegexpParser
                 if (group == null) {
                     throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, patternSegment(sequenceStart, index - sequenceStart));
                 }
-                addJavaUnicodeGroup(characterClassBuilder, name, group, sign, parseFlags);
+                addJavaUnicodeGroup(characterClassBuilder, group, sign, parseFlags);
                 return;
             }
 
@@ -1513,62 +1466,14 @@ final class JavaRegexpParser
             if (group == null) {
                 throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, patternSegment(sequenceStart, index - sequenceStart));
             }
-            addJavaUnicodeGroup(characterClassBuilder, name, group, sign, parseFlags);
+            addJavaUnicodeGroup(characterClassBuilder, group, sign, parseFlags);
         }
 
-        private void addJavaUnicodeGroup(CharClassBuilder builder, String name, CharClass group, int sign, int flags)
+        private void addJavaUnicodeGroup(CharClassBuilder builder, CharClass group, int sign, int flags)
         {
-            // Java applies property-specific case predicates before complement/intersection,
-            // not the fold closure used for literal ranges. Other properties remain unchanged.
-            if ((flags & (Regexp.ASCII_FOLD_CASE | Regexp.FOLD_CASE)) != 0) {
-                group = caseInsensitiveJavaProperty(name, group, flags);
-            }
+            // Java applies property-specific case predicates, which the lookup resolved, before
+            // complement/intersection, not the fold closure used for literal ranges.
             addGroup(builder, group, sign, flags & ~(Regexp.ASCII_FOLD_CASE | Regexp.FOLD_CASE), caseFolding);
-        }
-
-        private static CharClass caseInsensitiveJavaProperty(String name, CharClass group, int flags)
-        {
-            String property = name;
-            int equals = name.indexOf('=');
-            if (equals >= 0) {
-                String family = UnicodeCase.toLowerCase(name.substring(0, equals));
-                if (!family.equals("gc") && !family.equals("general_category")) {
-                    return group;
-                }
-                property = name.substring(equals + 1);
-            }
-            else if (name.startsWith("Is")) {
-                property = name.substring(2);
-                if (switch (UnicodeCase.toUpperCase(property)) {
-                    case "LOWER", "UPPER", "LOWERCASE", "UPPERCASE", "TITLECASE" -> true;
-                    default -> false;
-                }) {
-                    return CasedPropertyHolder.CHARACTER_CLASS;
-                }
-            }
-
-            return switch (property) {
-                case "Lu", "Ll", "Lt", "Uppercase_Letter", "Lowercase_Letter", "Titlecase_Letter" -> JavaUnicodeProperties.lookup("LC");
-                case "javaLowerCase", "javaUpperCase", "javaTitleCase" -> CasedPropertyHolder.CHARACTER_CLASS;
-                case "Lower", "Upper" -> (equals < 0 && (flags & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0)
-                        ? CasedPropertyHolder.CHARACTER_CLASS
-                        : posixCharClass("alpha");
-                default -> group;
-            };
-        }
-
-        private static final class CasedPropertyHolder
-        {
-            private static final CharClass CHARACTER_CLASS = casedProperty();
-
-            private static CharClass casedProperty()
-            {
-                CharClassBuilder builder = new CharClassBuilder();
-                builder.addCharClass(JavaUnicodeProperties.lookup("javaLowerCase"), 0, CaseFolding.JAVA);
-                builder.addCharClass(JavaUnicodeProperties.lookup("javaUpperCase"), 0, CaseFolding.JAVA);
-                builder.addCharClass(JavaUnicodeProperties.lookup("javaTitleCase"), 0, CaseFolding.JAVA);
-                return builder.toCharClass();
-            }
         }
 
         private static CharClass horizontalWhitespace(int flags, boolean negate)
@@ -1592,80 +1497,10 @@ final class JavaRegexpParser
 
         private static CharClass lookupJavaUnicodeGroup(String name, int flags)
         {
-            if (name.equals("Any")) {
-                return null;
-            }
-            String originalName = name;
-            int equals = name.indexOf('=');
-            if (equals >= 0) {
-                String family = UnicodeCase.toLowerCase(name.substring(0, equals));
-                if (family.equals("gc") || family.equals("general_category")) {
-                    // Pattern.family resolves these through forProperty, without
-                    // the Unicode POSIX widening used for bare property names.
-                    name = name.substring(equals + 1);
-                    flags &= ~Regexp.JAVA_UNICODE_CHARACTER_CLASS;
-                    if (name.startsWith("java")) {
-                        return JavaUnicodeProperties.lookup(name);
-                    }
-                }
-            }
-            if (name.equals("L1") || (equals < 0 && name.equals("IsL1"))) {
-                return Latin1PropertyHolder.CHARACTER_CLASS;
-            }
-            if ((flags & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0 && !name.equals("ASCII") && !name.equals("IsASCII")) {
-                String unicodeName = switch (name) {
-                    case "Lower" -> "IsLowercase";
-                    case "Upper" -> "IsUppercase";
-                    case "Alpha" -> "IsAlphabetic";
-                    case "Digit" -> "IsDigit";
-                    case "Alnum" -> "IsAlnum";
-                    case "Punct" -> "IsPunctuation";
-                    case "Graph" -> "IsGraph";
-                    case "Print" -> "IsPrint";
-                    case "Blank" -> "IsBlank";
-                    case "Cntrl" -> "IsControl";
-                    case "XDigit" -> "IsHexDigit";
-                    case "Space" -> "IsWhiteSpace";
-                    default -> null;
-                };
-                if (unicodeName != null) {
-                    return JavaUnicodeProperties.lookup(unicodeName);
-                }
-            }
-            String posixName = switch (name) {
-                case "Lower" -> "lower";
-                case "Upper" -> "upper";
-                case "ASCII" -> "ascii";
-                case "IsASCII" -> equals < 0 ? "ascii" : null;
-                case "Alpha" -> "alpha";
-                case "Digit" -> "digit";
-                case "Alnum" -> "alnum";
-                case "Punct" -> "punct";
-                case "Graph" -> "graph";
-                case "Print" -> "print";
-                case "Blank" -> "blank";
-                case "Cntrl" -> "cntrl";
-                case "XDigit" -> "xdigit";
-                case "Space" -> "space";
-                default -> null;
-            };
-            if (posixName != null) {
-                return posixCharClass(posixName);
-            }
-            if (!name.startsWith("Is") && name.indexOf('=') < 0) {
-                String normalizedName = name.replace("_", "");
-                for (String script : JavaUnicodeProperties.scriptNames()) {
-                    if (UnicodeCase.equalsIgnoreCase(script.replace("_", ""), normalizedName)) {
-                        return null;
-                    }
-                }
-            }
-            return JavaUnicodeProperties.lookup(originalName);
-        }
-
-        private static final class Latin1PropertyHolder
-        {
-            private static final CharClass CHARACTER_CLASS = new CharClass(false, 256, new RuneRange[] {new RuneRange(0, 0xFF)});
+            return JavaUnicodeProperties.lookup(
+                    name,
+                    (flags & Regexp.JAVA_UNICODE_CHARACTER_CLASS) != 0,
+                    (flags & (Regexp.ASCII_FOLD_CASE | Regexp.FOLD_CASE)) != 0);
         }
 
         private static CharClass verticalWhitespace(int flags, boolean negate)

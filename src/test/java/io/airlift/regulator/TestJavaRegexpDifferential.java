@@ -514,6 +514,7 @@ public class TestJavaRegexpDifferential
                 "gc=Lu",
                 "general_category=Ll",
                 "javaLowerCase",
+                "IsjavaLowerCase",
                 "javaUpperCase",
                 "javaTitleCase",
                 "Lower",
@@ -529,6 +530,12 @@ public class TestJavaRegexpDifferential
                     assertMatchesJava25(flags + expression, OptionProfile.DEFAULT, inputs);
                     assertMatchesJava25(flags + "[" + expression + "&&[a-zéÉǅẖªKıſ]]", OptionProfile.DEFAULT, inputs);
                 }
+            }
+        }
+        // Unicode character classes read a bare POSIX name in any case.
+        for (String property : List.of("lower", "UPPER")) {
+            for (String flags : List.of("(?U)", "(?iU)")) {
+                assertMatchesJava25(flags + "\\p{" + property + "}", OptionProfile.DEFAULT, inputs);
             }
         }
         assertMatchesJava25("(?i)[\\P{Lower}&&a]", OptionProfile.DEFAULT, inputs);

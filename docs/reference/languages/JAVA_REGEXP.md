@@ -110,8 +110,16 @@ differ from `Pattern`. Unicode 17.0 changed two for older characters: U+0295 is
 U+2605 BLACK STAR, are not `\p{IsExtended_Pictographic}`. And JDK 25's
 `Pattern` does not match `ß` against `ẞ` case-insensitively, which JDK 26 does.
 
-Regulator's supported property names and case-insensitive matching can differ
-from `Pattern` independently of Unicode version, as
+Property names are resolved by `Pattern`'s rules. A name may take one of the
+prefixes `In`, `Is`, `gc=`, `general_category=`, `sc=`, `script=`, `blk=`, or
+`block=`. A name without a prefix is a General_Category short name, `LD`, `L1`,
+`all`, a POSIX class, or a `java...` property, so a script needs `Is`, `sc=`,
+or `script=`, as in `\p{IsLatin}`, and `\p{Latn}` and `\p{Uppercase_Letter}`
+are errors. Under Unicode character classes, a POSIX name without a prefix may
+be written in any case, such as `\p{lower}`.
+
+Case-insensitive matching can differ from
+`Pattern` independently of Unicode version, as
 [`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) says.
 
 `find`, `lookingAt`, and `matches` have the same high-level meaning as their JDK

@@ -16,21 +16,14 @@ package io.airlift.regulator;
 import io.airlift.regulator.UnicodeDatabase.CodePointMappings;
 import io.airlift.regulator.UnicodeDatabase.MultiCharacterMappings;
 
-/// The locale-independent case conversions and comparison of [String] and
-/// [Character], from the pinned Unicode database, with which the parsers normalize property
-/// and character names as the JDK does. Property and character names are ASCII, but a name in a
-/// pattern can hold any text, and the JDK's conversions take some non-ASCII characters to ASCII,
-/// such as the long s to S and the Kelvin sign to k.
+/// The locale-independent case conversions of [String], from the pinned Unicode database, with
+/// which the parsers normalize property and character names as the JDK does. Property and
+/// character names are ASCII, but a name in a pattern can hold any text, and the JDK's
+/// conversions take some non-ASCII characters to ASCII, such as the long s to S and the Kelvin
+/// sign to k.
 final class UnicodeCase
 {
     private UnicodeCase() {}
-
-    /// Returns the simple uppercase mapping of `codePoint`, as
-    /// `Character.toUpperCase` does.
-    static int toUpperCase(int codePoint)
-    {
-        return UnicodeDatabase.simpleUppercaseMappings().map(codePoint);
-    }
 
     /// Returns `value` uppercased, as `value.toUpperCase(Locale.ROOT)` does: by the
     /// unconditional uppercase mappings of SpecialCasing.txt, such as sharp s to SS, and otherwise
@@ -49,38 +42,6 @@ final class UnicodeCase
     static String toLowerCase(String value)
     {
         return convert(value, UnicodeDatabase.fullLowercaseMappings(), UnicodeDatabase.simpleLowercaseMappings());
-    }
-
-    /// Returns whether `left` and `right` are equal ignoring case, as
-    /// `left.equalsIgnoreCase(right)` does: they have the same length, and each pair of
-    /// code points is equal, has equal simple uppercase mappings, or has equal simple lowercase
-    /// mappings of those.
-    static boolean equalsIgnoreCase(String left, String right)
-    {
-        if (left.length() != right.length()) {
-            return false;
-        }
-        int leftIndex = 0;
-        int rightIndex = 0;
-        while (leftIndex < left.length() && rightIndex < right.length()) {
-            int leftCodePoint = left.codePointAt(leftIndex);
-            int rightCodePoint = right.codePointAt(rightIndex);
-            if (leftCodePoint != rightCodePoint) {
-                int leftUppercase = toUpperCase(leftCodePoint);
-                int rightUppercase = toUpperCase(rightCodePoint);
-                if (leftUppercase != rightUppercase && toLowerCase(leftUppercase) != toLowerCase(rightUppercase)) {
-                    return false;
-                }
-            }
-            leftIndex += leftCodePoint > 0xFFFF ? 2 : 1;
-            rightIndex += rightCodePoint > 0xFFFF ? 2 : 1;
-        }
-        return true;
-    }
-
-    private static int toLowerCase(int codePoint)
-    {
-        return UnicodeDatabase.simpleLowercaseMappings().map(codePoint);
     }
 
     private static String convert(String value, MultiCharacterMappings fullMappings, CodePointMappings simpleMappings)

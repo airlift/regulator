@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.regulator.UnicodeDatabase.Aliases;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Modifier;
@@ -20,14 +21,17 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.IntPredicate;
 import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
+import static io.airlift.slice.Slices.utf8Slice;
 import static java.util.regex.Pattern.CASE_INSENSITIVE;
 import static java.util.regex.Pattern.UNICODE_CASE;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -173,12 +177,14 @@ public class TestJdkUnicodeAgreement
     public void testScriptsAgreeWithCharacterUnicodeScript()
     {
         for (Character.UnicodeScript script : Character.UnicodeScript.values()) {
-            assertRanges(JavaUnicodeProperties.lookup(script.name()), codePoint -> Character.UnicodeScript.of(codePoint) == script, script.name());
+            assertRanges(JavaUnicodeProperties.lookup("sc=" + script.name()), codePoint -> Character.UnicodeScript.of(codePoint) == script, script.name());
         }
 
         // A short or long name that UnicodeScript.forName rejects names a script Unicode added
         // after the JDK's version.
-        List<String> names = new ArrayList<>(JavaUnicodeProperties.scriptNames());
+        List<String> names = new ArrayList<>(UnicodeDatabase.scripts().names());
+        // Scripts.txt omits the default Unknown value.
+        names.add("Unknown");
         names.addAll(UnicodeDatabase.scriptShortNames().keySet());
         for (String name : names) {
             for (String spelling : List.of(name, name.toLowerCase(Locale.ROOT), name.replace("_", ""))) {
@@ -190,21 +196,7 @@ public class TestJdkUnicodeAgreement
     @Test
     public void testBlocksAgreeWithCharacterUnicodeBlock()
     {
-        List<Character.UnicodeBlock> blocks = Arrays.stream(Character.UnicodeBlock.class.getFields())
-                .filter(field -> Modifier.isStatic(field.getModifiers()))
-                .filter(field -> field.getType() == Character.UnicodeBlock.class)
-                .map(field -> {
-                    try {
-                        return (Character.UnicodeBlock) field.get(null);
-                    }
-                    catch (IllegalAccessException e) {
-                        throw new AssertionError(e);
-                    }
-                })
-                .distinct()
-                .sorted(Comparator.comparing(Object::toString))
-                .toList();
-        for (Character.UnicodeBlock block : blocks) {
+        for (Character.UnicodeBlock block : jdkBlocks()) {
             String propertyName = "In" + block;
             assertRanges(JavaUnicodeProperties.lookup(propertyName), codePoint -> Character.UnicodeBlock.of(codePoint) == block, propertyName);
         }
@@ -313,16 +305,8 @@ public class TestJdkUnicodeAgreement
             if (NEWER.get(codePoint) || hasNewer(uppercase) || hasNewer(lowercase)) {
                 continue;
             }
-            if (!uppercase.equals(value.toUpperCase(Locale.ROOT)) ||
-                    !lowercase.equals(value.toLowerCase(Locale.ROOT)) ||
-                    UnicodeCase.toUpperCase(codePoint) != Character.toUpperCase(codePoint)) {
+            if (!uppercase.equals(value.toUpperCase(Locale.ROOT)) || !lowercase.equals(value.toLowerCase(Locale.ROOT))) {
                 throw new AssertionError(String.format(Locale.ROOT, "U+%04X converts case unlike the JDK's Unicode %s", codePoint, JDK_UNICODE_VERSION));
-            }
-            for (int other : new int[] {Character.toUpperCase(codePoint), Character.toLowerCase(codePoint), 'I', 'K', 'S'}) {
-                String otherValue = Character.toString(other);
-                if (UnicodeCase.equalsIgnoreCase(value, otherValue) != value.equalsIgnoreCase(otherValue)) {
-                    throw new AssertionError(String.format(Locale.ROOT, "U+%04X and U+%04X compare ignoring case unlike the JDK's Unicode %s", codePoint, other, JDK_UNICODE_VERSION));
-                }
             }
         }
     }
@@ -347,11 +331,10 @@ public class TestJdkUnicodeAgreement
     {
         assertThat(JavaUnicodeProperties.lookup("InBasic_Latin"))
                 .isSameAs(JavaUnicodeProperties.lookup("block=Basic_Latin"));
-        assertThat(JavaUnicodeProperties.lookup("Greek"))
-                .isSameAs(JavaUnicodeProperties.lookup("script=Greek"))
-                .isSameAs(JavaUnicodeProperties.lookup("IsGreek"));
+        assertThat(JavaUnicodeProperties.lookup("IsGreek"))
+                .isSameAs(JavaUnicodeProperties.lookup("script=Greek"));
         assertThat(JavaUnicodeProperties.lookup("Lu"))
-                .isSameAs(JavaUnicodeProperties.lookup("Uppercase_Letter"))
+                .isSameAs(JavaUnicodeProperties.lookup("IsLu"))
                 .isSameAs(JavaUnicodeProperties.lookup("general_category=Lu"));
         assertThat(JavaUnicodeProperties.lookup("IsAlphabetic"))
                 .isSameAs(JavaUnicodeProperties.lookup("IsAlpha"));
@@ -368,6 +351,117 @@ public class TestJdkUnicodeAgreement
         assertThat(JavaUnicodeProperties.lookup("IsWhite_Space"))
                 .isSameAs(JavaUnicodeProperties.lookup("IsSpace"));
         assertThat(JavaUnicodeProperties.lookup("Not_A_Unicode_Property")).isNull();
+    }
+
+    // Java accepts a property name exactly when Pattern does, under every prefix and the flags
+    // that reach name resolution, except a name Unicode added after the JDK's version, which holds
+    // no code point that version assigns.
+    @Test
+    public void testPropertyNamesAgreeWithPattern()
+    {
+        for (String name : jdkPropertyNames()) {
+            for (String prefix : List.of("", "Is", "In", "sc=", "script=", "blk=", "block=", "gc=", "general_category=")) {
+                String property = prefix + name;
+                for (OptionProfile options : OptionProfile.values()) {
+                    String pattern = "\\p{" + property + "}";
+                    boolean jdkAccepts = jdkAccepts(pattern, options);
+                    boolean accepts = accepts(pattern, options);
+                    if (accepts && !jdkAccepts) {
+                        CharClass characterClass = JavaUnicodeProperties.lookup(property, options == OptionProfile.UNICODE_CHARACTER_CLASSES, options == OptionProfile.CASE_INSENSITIVE);
+                        String description = pattern + " under " + options;
+                        assertThat(characterClass.isEmpty()).as(description).isFalse();
+                        assertHoldsNoJdkAssignedCodePoint(description, characterClass);
+                    }
+                    else {
+                        assertThat(accepts).as("%s under %s", pattern, options).isEqualTo(jdkAccepts);
+                    }
+                }
+            }
+        }
+    }
+
+    // The names CharPredicates resolves, in their documented spellings, in upper and lower case,
+    // and without underscores; the scripts and blocks of Character and the database by each of
+    // their names; the database's General_Category names; and the category names of Character's
+    // constants that differ from those, such as Decimal_Digit_Number.
+    private static Set<String> jdkPropertyNames()
+    {
+        Set<String> names = new LinkedHashSet<>(List.of("LD", "L1", "all"));
+        List<String> spelledNames = new ArrayList<>(List.of("ASCII", "Alnum", "Alpha", "Blank", "Cntrl", "Digit", "Graph", "Lower", "Print", "Punct", "Space", "Upper", "XDigit"));
+        for (PropertyExpectation property : BINARY_PROPERTIES) {
+            spelledNames.add(property.name().substring("Is".length()));
+        }
+        for (PropertyExpectation property : JAVA_PROPERTIES) {
+            spelledNames.add(property.name());
+        }
+        for (String name : spelledNames) {
+            names.add(name);
+            names.add(name.toUpperCase(Locale.ROOT));
+            names.add(name.toLowerCase(Locale.ROOT));
+            names.add(name.replace("_", ""));
+        }
+        for (Aliases aliases : UnicodeDatabase.propertyValueAliases().get("gc")) {
+            names.add(aliases.shortName());
+            names.add(aliases.longName());
+        }
+        names.addAll(List.of("Combining_Spacing_Mark", "Decimal_Digit_Number", "Start_Punctuation", "End_Punctuation", "Initial_Quote_Punctuation", "Final_Quote_Punctuation"));
+        for (Character.UnicodeScript script : Character.UnicodeScript.values()) {
+            names.add(script.name());
+        }
+        for (Aliases aliases : UnicodeDatabase.propertyValueAliases().get("sc")) {
+            names.add(aliases.shortName());
+            names.add(aliases.longName());
+            names.addAll(aliases.otherAliases());
+        }
+        for (Character.UnicodeBlock block : jdkBlocks()) {
+            names.add(block.toString());
+        }
+        for (String name : UnicodeDatabase.blocks().names()) {
+            names.add(name);
+            names.add(name.replace(" ", ""));
+        }
+        return names;
+    }
+
+    private static boolean jdkAccepts(String pattern, OptionProfile options)
+    {
+        try {
+            Pattern.compile(pattern, options.jdkFlags());
+            return true;
+        }
+        catch (PatternSyntaxException e) {
+            return false;
+        }
+    }
+
+    private static boolean accepts(String pattern, OptionProfile options)
+    {
+        try {
+            JavaRegexp.parse(utf8Slice(pattern), options.newJavaOptions());
+            return true;
+        }
+        catch (RegexpParseException e) {
+            return false;
+        }
+    }
+
+    // The blocks of Character.UnicodeBlock, by its public constants.
+    private static List<Character.UnicodeBlock> jdkBlocks()
+    {
+        return Arrays.stream(Character.UnicodeBlock.class.getFields())
+                .filter(field -> Modifier.isStatic(field.getModifiers()))
+                .filter(field -> field.getType() == Character.UnicodeBlock.class)
+                .map(field -> {
+                    try {
+                        return (Character.UnicodeBlock) field.get(null);
+                    }
+                    catch (IllegalAccessException e) {
+                        throw new AssertionError(e);
+                    }
+                })
+                .distinct()
+                .sorted(Comparator.comparing(Object::toString))
+                .toList();
     }
 
     // Java folds as the JVM's case classes do, but from the database's case mappings. Unicode keeps
@@ -510,11 +604,17 @@ public class TestJdkUnicodeAgreement
             return;
         }
         if (characterClass != null) {
-            for (RuneRange range : characterClass.rangeView()) {
-                int codePoint = ASSIGNED_BY_JDK.nextSetBit(range.low());
-                if (codePoint >= 0 && codePoint <= range.high()) {
-                    throw new AssertionError(String.format(Locale.ROOT, "the JDK rejects %s, which holds U+%04X of Unicode %s", name, codePoint, JDK_UNICODE_VERSION));
-                }
+            assertHoldsNoJdkAssignedCodePoint(name, characterClass);
+        }
+    }
+
+    // A name the JDK rejects may name only code points newer than the JDK's Unicode version.
+    private static void assertHoldsNoJdkAssignedCodePoint(String description, CharClass characterClass)
+    {
+        for (RuneRange range : characterClass.rangeView()) {
+            int codePoint = ASSIGNED_BY_JDK.nextSetBit(range.low());
+            if (codePoint >= 0 && codePoint <= range.high()) {
+                throw new AssertionError(String.format(Locale.ROOT, "the JDK rejects %s, which holds U+%04X of Unicode %s", description, codePoint, JDK_UNICODE_VERSION));
             }
         }
     }
@@ -629,4 +729,34 @@ public class TestJdkUnicodeAgreement
     // The code points of the properties that Unicode changed in the given version, and how many of
     // them differ from an earlier JDK.
     private record ExpectedDifference(String since, Set<String> properties, int codePointCount, IntPredicate codePoints) {}
+
+    // The options that reach property name resolution.
+    private enum OptionProfile
+    {
+        DEFAULT(0),
+        CASE_INSENSITIVE(Pattern.CASE_INSENSITIVE),
+        UNICODE_CHARACTER_CLASSES(Pattern.UNICODE_CHARACTER_CLASS);
+
+        private final int jdkFlags;
+
+        OptionProfile(int jdkFlags)
+        {
+            this.jdkFlags = jdkFlags;
+        }
+
+        public int jdkFlags()
+        {
+            return jdkFlags;
+        }
+
+        public JavaRegexp.Options newJavaOptions()
+        {
+            JavaRegexp.Options options = JavaRegexp.Options.defaults();
+            return switch (this) {
+                case DEFAULT -> options;
+                case CASE_INSENSITIVE -> options.setCaseInsensitive(true);
+                case UNICODE_CHARACTER_CLASSES -> options.setUnicodeCharacterClasses(true);
+            };
+        }
+    }
 }

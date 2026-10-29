@@ -70,8 +70,8 @@ Java 25 and 17.0 for Java 26. They differ for:
   U+0277 uppercasing to U+A7DD; neither is ASCII, so no name resolves
   differently
 
-Regulator's supported property names and case-insensitive matching can differ
-from `Pattern` independently of Unicode version.
+Case-insensitive matching can differ from `Pattern` independently of Unicode
+version.
 
 Reading the pinned database rather than the JDK's data is an intentional
 Java-platform adaptation. It changes only Unicode-version-sensitive results; it
@@ -178,7 +178,7 @@ silently reinterpret a recognized Java spelling as a different RE2 construct.
 ### Name normalization
 
 Java resolves property and character names with the JDK's case conversions,
-such as uppercasing a script name or comparing it ignoring case. A name in a
+such as uppercasing a script name. A name in a
 pattern can hold any text, and these conversions take some non-ASCII
 characters to ASCII, such as the long s to S, the Kelvin sign to k, and sharp
 s to SS, so they read the database rather than `String`: its simple case
@@ -309,10 +309,11 @@ folding from the pinned database:
    and Java properties, which Trino's `java...` names share, and the word
    classes of Java and Trino match-time boundaries are checked against their
    corresponding `Character` APIs at every code point that the running JDK's
-   Unicode version assigns, allowing only the cited differences above. Every
-   script and block spelling the JDK accepts must name the same class, and a
-   name it rejects, such as a script Unicode added since, must hold no
-   character the JDK assigns. RE2's accepted group names and syntax are
+   Unicode version assigns, allowing only the cited differences above. Java
+   must accept every supported property spelling the JDK accepts and name the
+   same class for each script and block spelling, and a name the JDK rejects,
+   such as a script Unicode added since, must hold no character the JDK
+   assigns. RE2's accepted group names and syntax are
    checked against upstream's rule.
 2. Canonical aliases are checked for identity, and unsupported names are
    rejected. Every character name is checked against `Character.getName` and
