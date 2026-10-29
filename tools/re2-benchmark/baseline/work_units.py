@@ -1,9 +1,9 @@
 """Deterministic partition of every shard's rows into self-contained work units.
 
-A unit is the rows one host measures as one work item; a baseline unit's rows
-lie between two chained calibrations. Atoms are the row sets a comparison or a
-scaling fit needs measured together; atoms are packed greedily, largest first,
-adding a unit until every unit holding several atoms fits the unit budget.
+A unit is the rows one host measures as one work item. Atoms are the row sets a
+comparison or a scaling fit needs measured together; atoms are packed greedily,
+largest first, adding a unit until every unit holding several atoms fits the
+unit budget.
 run-unit.sh measures one unit. The generator checks every unit against the
 measurement requirements before it writes the tables.
 
@@ -36,11 +36,8 @@ UNIT_ROW_FIELDS = ("unit_id", "row_id", "role", "replica_id")
 # The generated tables, written together by generate-units.py.
 TABLES = ("row-protocol.tsv", "units.tsv", "unit-rows.tsv")
 ROLES = ("owner", "representative")
-# A unit is a 15-minute work item. Chained baseline units share their boundary calibrations, so each
-# baseline unit is charged one calibration invocation.
+# A unit is a 15-minute work item.
 UNIT_SECONDS = 900
-UNIT_CALIBRATION_INVOCATIONS = 1
-UNIT_BUDGET_SECONDS = UNIT_SECONDS - unit_cost.calibration_seconds(UNIT_CALIBRATION_INVOCATIONS)
 # A unit sequences its rows as its route handler sequences a route, comparator order included.
 ORDER_RULE = "route-handler-order-v1"
 REPRESENTATIVE_REPLICA_IDS = ("1", "2", "3")
@@ -158,12 +155,11 @@ def representative_count(row_ids, bindings):
         default=0)
 
 
-def estimate(atom, by_id, protocols, bindings, calibration_invocations=0):
+def estimate(atom, by_id, protocols, bindings):
     """Seconds to measure an atom's or unit's rows and their representatives."""
     return unit_cost.estimate(
         [by_id[row_id] for row_id in atom.owned], protocols,
-        representative_count=representative_count(atom.owned, bindings),
-        calibration_invocations=calibration_invocations)
+        representative_count=representative_count(atom.owned, bindings))
 
 
 def shard_atoms(rows, protocols, scaling_groups):
@@ -176,7 +172,7 @@ def merge(atoms):
     return Atom([row_id for atom in atoms for row_id in atom.owned])
 
 
-def pack(atoms, cost, budget=UNIT_BUDGET_SECONDS):
+def pack(atoms, cost, budget=UNIT_SECONDS):
     """Largest atom first into the lightest unit, adding a unit until only lone atoms exceed the budget.
 
     cost gives the seconds to measure an atom or a merged unit. Packing is greedy, so it can use more
@@ -231,7 +227,7 @@ def generate(manifest_rows, representatives, protocols):
         for index, (unit, _) in enumerate(packed, 1):
             unit_representatives = sorted(
                 (replica_id, row_id) for row_id in unit.owned for replica_id in bindings.get(row_id, ()))
-            seconds = estimate(unit, by_id, protocols, bindings, UNIT_CALIBRATION_INVOCATIONS)
+            seconds = estimate(unit, by_id, protocols, bindings)
             units.append({
                 "unit_id": unit_id(
                     shard_id, unit.owned,

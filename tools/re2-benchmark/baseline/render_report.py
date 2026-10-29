@@ -87,6 +87,7 @@ def render(arguments):
     inventory = read_tsv(arguments.input_dir / "artifact-inventory.tsv")
     metadata = read_tsv(arguments.input_dir / "metadata.tsv")
     capacity = read_tsv(arguments.input_dir / "capacity.tsv")
+    host_checks = read_tsv(arguments.input_dir / "host-checks.tsv")
 
     lines = [
         f"# {arguments.title}", "",
@@ -158,11 +159,25 @@ def render(arguments):
         ("Unresolved condition", "Count"),
         ((condition, str(count)) for condition, count in sorted(condition_counts.items())))
     lines.append(
-        "The row table contains host CV, allocation, maximum calibration drift, "
+        "The row table contains host CV, allocation, flagged hosts left out, "
         "contract-identity consistency, and scaling classification. Contract identity describes the benchmark "
         "setup and expected-result contract; it is not a checksum of a measured output. The host table preserves "
         "every underlying score and allocation result.")
     lines.append("")
+
+    lines.extend(["## Host Check", ""])
+    lines.append(
+        "Each host is judged against the median of the three primary replicas of each row it measured "
+        "and by its CPU steal. "
+        "A flagged host's rows are left out of the aggregates, and each unit it measured is eligible for "
+        "confirmation.")
+    lines.append("")
+    lines += table(
+        ("Platform", "Instance", "Epoch", "Rows", "Slow", "Noise", "Steal", "Reason"),
+        ((row["platform"], row["instance_id"], row["host_epoch"], row["rows"],
+          percent(row["slow"]) if row["slow"] else "-", percent(row["noise"]) if row["noise"] else "-",
+          percent(row["steal_share"]), row["reason"])
+         for row in host_checks if row["flagged"] == "true"))
 
     lines.extend(["## Host Capacity", ""])
     capacity_rows = []
@@ -222,7 +237,8 @@ def render(arguments):
     lines.extend(["## Machine-Readable Outputs", ""])
     for name, description in (
         ("host-rows.tsv", "Every accepted primary and confirmation host row"),
-        ("row-aggregates.tsv", "Per-platform row medians, CV, allocation, drift, scaling, and resolution state"),
+        ("host-checks.tsv", "Each host's slowness and noise against its rows' replica medians, and its CPU steal"),
+        ("row-aggregates.tsv", "Per-platform row medians, CV, allocation, scaling, and resolution state"),
         ("host-comparator-ratios.tsv", "Same-host normalized Java/comparator ratios"),
         ("comparison-aggregates.tsv", "Per-platform comparison medians and direction agreement"),
         ("general-classes.tsv", "General comparison classes with serious outliers excluded"),

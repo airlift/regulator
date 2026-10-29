@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import io
+import itertools
 from pathlib import Path
 import sys
 import tempfile
@@ -283,7 +284,15 @@ class TestFleet(unittest.TestCase):
                                          **{"jdk": "Temurin 25.0.4+7", "source_commit": "a" * 40,
                                             **measured(results.name)})
 
+        reads = itertools.count()
+
+        def cpu_ticks():
+            # Each read of /proc/stat sees 1 more steal tick in 100 more ticks.
+            read = next(reads)
+            return read, 100 * read
+
         with patch.object(collection, "host_identity"), \
+                patch.object(fleet, "cpu_ticks", cpu_ticks), \
                 patch.object(fleet.os, "sched_getaffinity", lambda _: set(affinity), create=True), \
                 patch.object(fleet.os, "sched_setaffinity", set_affinity, create=True), \
                 patch.object(fleet.jvm_build, "build", side_effect=build), \
@@ -318,6 +327,9 @@ class TestFleet(unittest.TestCase):
         self.assertEqual(collection.load(root / "cpu-affinity.json"), [0])
         self.assertEqual(sorted(path.name for path in (root / "partitions").iterdir()),
                          sorted(partition["id"] for partition, _ in fleet.unit_partitions(plan, units[unit_id])))
+        # The host's CPU steal and total ticks span only the partition's measurement.
+        metadata = fleet.read_properties(root / "run-metadata.txt")
+        self.assertEqual((metadata["cpu_steal_ticks"], metadata["cpu_total_ticks"]), ("1", "100"))
 
         original = dict(self.unit_environment)
         for field in ("instance_id", "instance_type", "logical_cpu_count", "platform", "benchmark_heap_size",

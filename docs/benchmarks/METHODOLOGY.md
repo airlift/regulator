@@ -270,9 +270,9 @@ and which benchmarks serve as its edge controls.
 into work units of about 15 minutes and leases them to R8i and R9g worker hosts
 that `aws/run-campaign.sh` provisions. Each worker installs the prebuilt
 engines and the frozen candidate archive, records environment metadata, pins
-benchmark processes to physical cores, and measures one unit at a time, each
-baseline unit between chained calibrations. The controller collects the
-artifacts and terminates all cloud resources.
+benchmark processes to physical cores, and measures one unit at a time,
+recording the hypervisor's CPU steal over each route. The controller collects
+the artifacts and terminates all cloud resources.
 
 Final runs require:
 
@@ -418,6 +418,32 @@ Investigate when:
 - the ratio changes materially with input size
 - coefficient of variation exceeds 5%, a review screen rather than an acceptance cutoff
 - allocation appears in an allocation-free contract
+
+### Host check
+
+A bad host shows in the rows it measured, so the reducer judges each host
+against the other replicas of its rows rather than against itself. On every
+primary row whose three replicas passed, a host's deviation is the log of its
+score over the row's median score, signed to be positive when slower for both
+time and throughput units. One outlying host therefore leaves its two partners
+near zero. A host that measured at least 20 such rows is flagged when its median
+deviation is above 2% slow or the median absolute deviation of its deviations is
+above 3%, and any host is flagged when CPU steal took more than 1% of its time.
+A flagged host's samples leave every aggregate, and each unit it measured is
+confirmed on a fourth instance. When only one of a row's primaries was flagged
+and the confirmation host passes, the row resolves from the two remaining
+primaries and the confirmation; otherwise it stays unresolved. The
+[reduction rules](../../tools/re2-benchmark/baseline/REPORTING.md#host-check)
+give the exact computation.
+
+The limits come from the 378 of 1.0's 396 hosts that measured at least 20 such
+rows: the worst whole host ran 1.3% slow and 1.5% noisy, and random 20-row
+samples of hosts reached 1.6% slow and 2.4% noisy at the 99.9th percentile, so
+2% slow and 3% noisy sit above both.
+Steal is the hypervisor's direct report of a noisy neighbor.
+
+The host check replaces per-unit calibration, which could not see a uniformly
+slow host because such a host agrees with itself.
 
 ## Bounded investigations
 

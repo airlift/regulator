@@ -107,12 +107,7 @@ iteration counts while avoiding a new forked JVM for every row:
   contain zero collections in most iterations and concentrate collection cost
   in one iteration that a median discards.
 - Smoke runs one top-level process with one 20 ms warmup and three 20 ms
-  measurement iterations per row. It also primes the calibration workload once
-  before the recorded before sample. Qualification uses only its recorded full
-  before and after calibration runs.
-- Calibration uses the `findLiteral` `KIB_LATE` workload. The formerly used
-  compact-DFA workload has two stable process-local performance modes on C9g,
-  so it cannot distinguish host drift from fresh-process code-layout variance.
+  measurement iterations per row.
 - Every process writes a separate JSON file. Normalization requires identical
   row sets in every file, combines all five process groups before computing the
   row score, and obtains normalized allocation from the profiled process. The
@@ -133,17 +128,14 @@ counterbalancing that did not occur.
 
 `unit_cost.py` estimates the measurement seconds of any set of rows from their
 frozen protocols: every warmup and measurement window, a two-second startup
-allowance for each JVM a selector or a Joni or JDK fork starts, the
-calibration invocations, and every representative comparison. For Google
-Benchmark's sizing runs, it charges a native row 2.5 times its warmup windows
-and 1.5 times its measurement windows. It leaves out the pinned Trino
-preparation and host bootstrap, which do not grow with the rows a host
-measures.
+allowance for each JVM a selector or a Joni or JDK fork starts, and every
+representative comparison. For Google Benchmark's sizing runs, it charges a
+native row 2.5 times its warmup windows and 1.5 times its measurement windows.
+It leaves out the pinned Trino preparation and host bootstrap, which do not
+grow with the rows a host measures.
 
 Measured-shard normalization requires exactly one process sample group in each
-top-level JMH JSON file. Calibration retains JMH's ordinary forked shape: one
-qualification JSON file contains five fork groups, all of which are included
-in the calibration statistics.
+top-level JMH JSON file.
 
 ### Engine Builds
 
@@ -162,8 +154,8 @@ A language unit runs the same runners.
 
 ## Work Units
 
-A baseline work unit is a set of one shard's rows that a host can measure
-between two chained calibrations in about 15 minutes, with every comparison and
+A baseline work unit is a set of one shard's rows that a host can measure in
+about 15 minutes, with every comparison and
 scaling fit it feeds complete inside it. The build phase's one unit per
 platform, `engine-build`, builds that platform's engines instead, and a language
 plan packs its comparisons into units of its own; see the
@@ -191,8 +183,8 @@ worker host leases units one at a time (see
   sizes, so rows sharing that parameter's value are one atom. JMH splits a
   `-p` value list at every comma, so a parameter with a value containing one
   never splits a method, and a method with no other parameter stays whole.
-- Each shard is packed into `ceil(cost / 788 s)` units, the 900-second unit
-  less one chained calibration, by placing atoms largest first, ties by
+- Each shard is packed into `ceil(cost / 900 s)` units, the 900-second unit
+  budget, by placing atoms largest first, ties by
   smallest row ID, into the unit with the lowest estimate. When a unit holding
   several atoms exceeds the budget, the shard gets one more unit and is packed
   again; `trino-like` needs six rather than five. Costs come from
@@ -231,14 +223,13 @@ section covers baseline units.
 - Odd replicas run native access, then object row, with forward comparator
   order; even replicas reverse both, as the unit ID's order rule binds. A
   comparator order set in the environment that disagrees is an error.
-- The first route calibrates before its rows and the last route after them,
-  always in the native-access JVM so the two sides compare across routes. The
-  unit's before/after calibration drift must be within 5%.
-  With `BASELINE_UNIT_HOST_EVIDENCE`, a worker host's evidence directory, the
-  calibrations are stored there once as `calibrations/<sha256>.json` instead
-  of in the routes' raw artifacts. Chaining, by naming the previous unit's
-  after calibration there in `BASELINE_UNIT_CALIBRATION_BEFORE`, replaces this
-  unit's before side with it, so the first route runs no before calibration.
+- Each route records the host's CPU steal while it measures. `run-shard.sh`
+  reads the aggregate `cpu` line of `/proc/stat` before the route's
+  representatives and after its last row, and appends the steal ticks, the
+  line's eighth value, and the total ticks of all its values to
+  `run-metadata.txt` as `cpu_steal_ticks` and `cpu_total_ticks`. Acceptance
+  requires both, and the reducer's host check sums them per host; see
+  `REPORTING.md`.
 - The route runs only the unit's representatives for its replica; replica 4
   runs replica 1's. A failed representative exits 42 and rejects only that
   unit attempt.
@@ -314,12 +305,11 @@ Every successful route contains:
 - normalized fragments under `normalized/`
 - `semantic-gate.tsv`, written only after semantic checks pass
 - exact, sorted `observed-rows.tsv`
-- `calibration.tsv`, except in a unit's routes, whose calibrations the unit
-  records once (see [Running a Unit](#running-a-unit))
 - `raw-artifacts.sha256`, which records raw file hashes separately from result
   identity
 - `route-session.tsv`, which the unit combines with its other routes
-- candidate, protocol, and static-runtime provenance in `run-metadata.txt`
+- candidate, protocol, and static-runtime provenance, and the route's CPU
+  steal ticks, in `run-metadata.txt`
 
 The unit directory also contains `unit-capacity.txt`, produced by the pinned
 GNU `time` package. It records total and before/after available memory, swap
@@ -337,10 +327,9 @@ identity of an otherwise unchanged row. The campaign and reducer enforce pinned
 source/runtime/comparator identities; `raw-artifacts.sha256` preserves raw
 provenance, including the complete semantic receipt and outcome evidence.
 
-Calibration drift above 5% rejects the route. Missing `gc.alloc.rate.norm`
-rejects a JMH row whose allocation contract is `recorded` or `allocation-free`;
-a nonzero allocation-free observation is retained for the gap ledger rather
-than treated as host corruption.
+Missing `gc.alloc.rate.norm` rejects a JMH row whose allocation contract is
+`recorded` or `allocation-free`; a nonzero allocation-free observation is
+retained for the gap ledger rather than treated as host corruption.
 
 `BASELINE_PLAN_ONLY=true` validates manifest selection, route applicability,
 and protocol choice without building or executing benchmarks.

@@ -71,7 +71,7 @@ class TestSpecializedPatternRows(unittest.TestCase):
                      'parameters': 'workload=literalPrefix', 'comparator': 'joni'}
                     for system in ('regulator-native-access', 'regulator-object-row', 'joni')]
 
-    def rows(self, manifest=MANIFEST, score=lambda row, replica: 10, hosts=lambda rows: rows, comparisons=lambda rows: rows):
+    def rows(self, manifest=MANIFEST, score=lambda row, replica: 10, hosts=lambda rows: rows, comparisons=lambda rows: rows, flagged=()):
         # The baseline reducer pairs every Regulator variant in a unit attempt with that attempt's one comparator run.
         # Regulator variants take score(row, replica) ns and comparators always take 100 ns.
         tables = {'row-aggregates': [], 'host-rows': []}
@@ -89,6 +89,8 @@ class TestSpecializedPatternRows(unittest.TestCase):
         tables['comparison-aggregates'] = [{'platform': 'c9g', 'comparison_id': comparison, 'unresolved': 'false', 'unresolved_reasons': ''}
                                            for comparison in sorted({row['comparison_id'] for row in ratios})]
         tables['host-comparator-ratios'] = comparisons(ratios)
+        tables['host-checks'] = [{'platform': 'c9g', 'host_epoch': f'epoch-{replica}', 'flagged': str(replica in flagged).lower()}
+                                 for replica in (1, 2, 3)]
         with tempfile.TemporaryDirectory() as directory:
             for name, rows in tables.items():
                 with (Path(directory) / f'{name}.tsv').open('w', newline='') as output:
@@ -216,6 +218,8 @@ class TestSpecializedPatternRows(unittest.TestCase):
             'unexpected comparator': ({'comparisons': like_comparisons(comparator_system='trino-optimized')},
                                       'compared with trino-optimized, not trino-sql'),
             'missing host': ({'comparisons': missing}, 'must share one host cohort'),
+            # A comparison the host check leaves with no hosts is refused, not dropped.
+            'every host flagged': ({'flagged': (1, 2, 3)}, "fewer than three hosts in c9g/.*; each needs its unit's confirmation"),
             'comparator score': ({'comparisons': third(comparator_score='101')}, 'one comparator measurement on host epoch-3'),
             'comparator row': ({'comparisons': third(comparator_row_ids='trino-specialized-patterns-a/urlHostPort/extract/joni')},
                                'one comparator measurement on host epoch-3'),

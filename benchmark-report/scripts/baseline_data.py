@@ -136,6 +136,9 @@ def baseline_rows(directory, lifecycle_manifest):
                for row in read_rows(directory / 'row-aggregates.tsv')}
     hosts = {(row['platform'], row['host_epoch'], row['row_id']): row
              for row in read_rows(directory / 'host-rows.tsv')}
+    # The reducer leaves a flagged host's samples out of every aggregate, so its comparisons do too.
+    excluded = {(row['platform'], row['host_epoch'])
+                for row in read_rows(directory / 'host-checks.tsv') if row['flagged'] == 'true'}
     sizes = {case['id']: case['input_bytes_per_operation'] for case in lifecycle_manifest['cases']}
     cases = {case['id']: case for case in lifecycle_manifest['cases']}
     # Only specialized-pattern rows read the live catalogs, so captures without them never depend on those files.
@@ -151,6 +154,14 @@ def baseline_rows(directory, lifecycle_manifest):
                 raise ValueError(f'specialized-pattern comparison {row["comparison_id"]} is in {", ".join(sorted(units - {"ns/op"}))}, not ns/op')
         if row['score_unit'] == 'ns/op':
             grouped[row['platform'], row['comparison_id']].append(row)
+    surviving = {identity: [pair for pair in pairs if (pair['platform'], pair['host_epoch']) not in excluded]
+                 for identity, pairs in grouped.items()}
+    short = sorted('/'.join(identity) for identity, pairs in surviving.items()
+                   if len(pairs) < 3 and len(pairs) < len(grouped[identity]))
+    if short:
+        raise ValueError(f'the host check left fewer than three hosts in {", ".join(short)}; '
+                         "each needs its unit's confirmation")
+    grouped = surviving
     output = []
     # Each specialized pattern's variants, keyed by platform, logical row and memory route.
     patterns = defaultdict(dict)

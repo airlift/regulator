@@ -251,7 +251,7 @@ class TestShardResults(unittest.TestCase):
         handlers = set()
         for unit in units.values():
             shard_rows = [row for row in manifest if row["shard_id"] == unit["shard_id"]]
-            for route, handler, _, share, _ in UNIT_SESSION.plan_routes(MANIFEST.parent, unit, "1"):
+            for route, handler, _, share in UNIT_SESSION.plan_routes(MANIFEST.parent, unit, "1"):
                 route_selectors = UNIT_SESSION.selectors(share, shard_rows, protocols, "qualification", {})
                 if not route_selectors:
                     continue
@@ -809,59 +809,14 @@ class TestShardResults(unittest.TestCase):
         self.assertEqual("precision-rejected", row["outcome"])
         self.assertEqual("100", row["score"])
 
-    def testCalibrationAcceptsFiveForkGroupsInOneFile(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            paths = {}
-            for phase, samples in (("before", (10, 11, 12, 13, 14)), ("after", (11, 12, 13, 14, 15))):
-                path = root / f"{phase}.json"
-                path.write_text(json.dumps([{
-                    "benchmark": "io.airlift.regulator.BenchmarkCalibration.run",
-                    "params": {"size": "1024"},
-                    "primaryMetric": {
-                        "score": 12,
-                        "scoreUnit": "ns/op",
-                        "rawData": [[sample] for sample in samples],
-                    },
-                }]))
-                paths[phase] = path
-            output = root / "calibration.tsv"
-            arguments = type("Arguments", (), {
-                "before": paths["before"],
-                "after": paths["after"],
-                "output": output,
-            })()
-
-            SHARD_RESULTS.calibration(arguments)
-
-            with output.open(newline="", encoding="utf-8") as input_file:
-                rows = list(csv.DictReader(input_file, delimiter="\t"))
-            self.assertEqual(["5", "5"], [row["sample_count"] for row in rows])
-            self.assertEqual(["12", "13"], [row["score"] for row in rows])
-
     def testStatisticsMatchTheHostPythonExactly(self):
-        # An Arm host's calibration samples; Python 3.9 there recorded this coefficient of variation,
+        # Samples from an Arm host; Python 3.9 there recorded this coefficient of variation,
         # which later Pythons' statistics.stdev misses in the last bit.
         metric = {"rawData": [[68.47069138523524], [68.7279953499649], [68.34972041129137]]}
 
         _, _, coefficient_of_variation = SHARD_RESULTS.metric_statistics(metric)
 
         self.assertEqual("0.0028196087686909693", SHARD_RESULTS.format_number(coefficient_of_variation))
-
-    def testValidateDriftRejectsValuesAboveFivePercent(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            calibration = root / "calibration.tsv"
-            SHARD_RESULTS.write_tsv(calibration, ("before_after_drift",), [
-                {"before_after_drift": "0.0500001"},
-            ])
-            arguments = type("Arguments", (), {
-                "calibration": calibration,
-                "maximum": 0.05,
-            })()
-
-            with self.assertRaisesRegex(ValueError, "exceeded"):
-                SHARD_RESULTS.validate_drift(arguments)
 
     def testCurrentManifestUsesExactRegexSystemSets(self):
         rows = SHARD_RESULTS.load_manifest(MANIFEST)

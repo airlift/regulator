@@ -353,6 +353,8 @@ attempt unless:
 - the host is the unit session's host, on the platform's allocated instance
   type and vCPU count, with the protocol heap
 - it ran pinned to one CPU
+- its `run-metadata.txt` records the host's CPU steal ticks and total ticks
+  over its measurements, read from `/proc/stat`
 - each partition's export regenerates from its raw results, including the
   trace agreement and two-attempt timeout rules of verification
 - each export names the session's instance, the candidate commit, the
@@ -362,6 +364,9 @@ attempt unless:
   source, and a release build (`-O3 -DNDEBUG`)
 - every partition ran the same candidate and binaries
 - its observations are exactly the unit's rows
+
+A language group's CPU steal is recorded as diagnostic evidence; no host check
+or report reads it.
 
 Verify the partitions on a developer machine, without timing:
 

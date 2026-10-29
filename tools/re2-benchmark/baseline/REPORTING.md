@@ -26,7 +26,6 @@ staged copies under `unit-results/`. Each attempt directory must contain:
 - `unit-rows.tsv`
 - `observed-rows.tsv`
 - `unit-evidence.tsv`
-- `calibration.tsv`, the unit's own before and after calibration
 - `unit-capacity.txt`
 
 With `--release-version`, for a campaign that measured a published release,
@@ -35,15 +34,6 @@ pinned JAR: its `release-artifact.json`, the `release_version` and
 `release_artifact_sha256` in its `run-metadata.txt`, and the JAR under
 `release/`. The report importer accepts only a reduction that proved the
 release it publishes.
-
-A worker host records its calibrations once, in its host session's
-`calibrations/` directory beside its attempts. The host calibrations an attempt
-references belong to its artifact: the inventory lists them as
-`../calibrations/<sha256>.json`, they count in its `artifact_set_sha256`, and
-the campaign archive must bind them. A chained attempt's artifact likewise
-includes `../lease-<n>-completion.json`, the completion marker of the lease its
-before calibration came from, which the controller retained beside it; the
-reducer requires that lease to have completed with that after calibration.
 
 The ledgers must pass campaign unit acceptance: every platform and frozen unit
 of the selected shards, replicas 1, 2, and 3 of a unit on distinct EC2
@@ -64,7 +54,6 @@ a primary attempt.
 Every row has exactly one owner unit, whose three primary attempts and
 optional confirmation are that row's samples.
 
-Calibration drift above 5% invalidates an attempt before acceptance.
 Evidence for interrupted and rejected attempts is supplied through event files
 and remains separate from accepted measurements.
 
@@ -174,7 +163,7 @@ reducer preserves all primary and confirmation attempts, then reports for every 
 - an explicit note that a useful confidence interval is unsupported with only
   three or four independent hosts
 - median allocation
-- maximum accepted calibration drift
+- the number of its samples left out because their host was flagged
 - benchmark contract-identity consistency
 - identifiable input-size scaling classification
 - every unresolved reason
@@ -199,6 +188,7 @@ as such rather than assigned an expected class.
 
 A row or comparison remains unresolved when applicable if:
 
+- a flagged host's samples were left out and fewer than three hosts remain
 - any contributing measurement exceeds the 5% relative standard-error gate
 - host CV exceeds 5%
 - same-host candidate/comparator ratio CV exceeds 5%
@@ -211,9 +201,10 @@ A median ratio at or beyond 0.5 or 2.0 is a serious performance outlier. These
 rows are preserved in `serious-outliers.tsv` and the gap ledger, but excluded
 from `general-classes.tsv`.
 
-`confirmation-jobs.tsv` deduplicates primary instability to the exact
-`platform, shard_id, unit_id` schema consumed by `run-campaign.py`:
-instability selects the owner unit of the unstable row. Host CV or primary
+`confirmation-jobs.tsv` deduplicates primary instability and flagged hosts to
+the exact `platform, shard_id, unit_id` schema consumed by `run-campaign.py`:
+instability selects the owner unit of the unstable row. A flagged primary host
+selects every unit it measured. Host CV or primary
 same-host ratio CV above 5%, precision rejection, material direction
 disagreement, contract-identity disagreement, and scaling class disagreement
 request confirmation. After confirmation, the all-host ratio CV determines
@@ -223,12 +214,42 @@ platform and unit that already has a replica-4 attempt is omitted because its
 one confirmation allowance is spent. Its confirmation is that unit's replica 4
 on an instance none of its replicas 1 to 3 used.
 
+### Host Check
+
+The reducer judges every host, one `instance_id` and `host_epoch`, against the
+other replicas of the rows it measured, and writes the verdicts to
+`host-checks.tsv`. Only primary rows whose three replicas all passed the
+precision gate count. On each, a host's deviation is the natural log of its
+score less the median log of the row's three replica scores, signed so that
+positive is slower for both time and throughput units. A host's `slow` is the
+median of its deviations and its `noise` the median of their absolute
+distances from `slow`, a median absolute deviation. Its `steal_share` is the
+CPU steal ticks over the total ticks summed across every route of every
+accepted attempt it ran, so a route's weight is its length.
+
+A host is flagged when it measured at least 20 such rows and is more than 2%
+slow or 3% noisy, or when its steal share is above 1% however few rows it ran.
+The [methodology](../../../docs/benchmarks/METHODOLOGY.md#host-check) grounds
+these limits.
+
+A flagged host's samples stay in `host-rows.tsv` and the comparison and scaling
+tables but are left out of every aggregate, class, and confirmation check. A row
+or comparison left with fewer than three hosts is unresolved as
+`flagged-host-excluded`, which the report import refuses until confirmed, and
+every unit a flagged host measured as a primary replica becomes a confirmation
+job. When only one of a row's primaries was flagged and the confirmation host
+passes, its replica-4 confirmation, on a fourth instance, restores three
+samples: the two remaining primaries and the confirmation. Otherwise the row
+stays unresolved.
+
 ## Outputs
 
 The reducer writes:
 
-- `host-rows.tsv`: every row of each accepted attempt, with `unit_id` and
-  `unit_attempt_id`
+- `host-rows.tsv`: every row of each accepted attempt, with `unit_id`,
+  `unit_attempt_id`, and its attempt's CPU `steal_share`
+- `host-checks.tsv`: each host's rows, slowness, noise, steal share, and
+  whether and why it was flagged
 - `row-aggregates.tsv`: per-platform row statistics and unresolved state
 - `host-comparator-ratios.tsv`: every same-host ratio
 - `comparison-aggregates.tsv`: per-platform comparison statistics
@@ -241,8 +262,9 @@ The reducer writes:
 - `metadata.tsv`: run and retrieval metadata passthrough
 - `capacity.tsv`: finalized wall-time, peak-RSS, and host-memory evidence, from
   `unit-capacity.txt` with `unit_capacity_sha256`
-- `confirmation-jobs.tsv`: unique primary-unstable `platform`, `shard_id`,
-  `unit_id` rows still eligible for the bounded replica-4 wave
+- `confirmation-jobs.tsv`: unique primary-unstable or flagged-host
+  `platform`, `shard_id`, `unit_id` rows still eligible for the bounded
+  replica-4 wave
 - `summary.json`: deterministic campaign counts and identity, with the
   `release_version` every attempt proved it measured, empty without
   `--release-version`

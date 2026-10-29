@@ -37,7 +37,7 @@ UNIT_SESSION = load_module("unit_session", BASELINE / "unit_session.py")
 # A unit whose rows span both memory routes.
 UNIT = ("trino-operations", "1")
 # A unit owning protocol representatives.
-REPRESENTATIVE_UNIT = ("trino-operations", "4")
+REPRESENTATIVE_UNIT = ("trino-operations", "3")
 
 
 class TestUnitSession(unittest.TestCase):
@@ -84,11 +84,12 @@ class TestUnitSession(unittest.TestCase):
                 receipt["row_protocol_sha256"])
             evidence = {row["artifact"]: row for row in fixture.read("unit-evidence.tsv")}
             self.assertEqual("capacity-prefix-sha256", evidence["unit-capacity.txt"]["verification"])
-            self.assertEqual("host", evidence["calibration.tsv"]["route"])
 
     def testUnitAcceptanceRejectsAnAttemptThatBreaksItsPromises(self):
-        def drift_calibration(fixture):
-            fixture.write_calibration(100, 106)
+        def drop_cpu_steal(fixture):
+            metadata = fixture.route_directory() / "run-metadata.txt"
+            metadata.write_text("".join(line for line in metadata.read_text().splitlines(keepends=True)
+                                        if not line.startswith("cpu_steal_ticks=")))
 
         def drop_unit_row(fixture):
             rows = fixture.read("unit-rows.tsv")
@@ -127,7 +128,7 @@ class TestUnitSession(unittest.TestCase):
             SHARD_RESULTS.write_tsv(fixture.root / "unit-session.tsv", UNIT_SESSION.UNIT_SESSION_FIELDS, rows)
 
         cases = (
-            (UNIT, None, drift_calibration, "drifted 0.0600"),
+            (UNIT, drop_cpu_steal, None, "records CPU steal ''"),
             (UNIT, None, drop_unit_row, "differs from the frozen rows"),
             (UNIT, add_unknown_role, None, "differs from the frozen rows"),
             (UNIT, shorten_selector_window, None, "differs from the selectors of the frozen protocol"),
@@ -162,43 +163,6 @@ class TestUnitSession(unittest.TestCase):
                         after_combine(fixture)
                     UNIT_SESSION.validate_unit_results(fixture.root)
 
-    def testWorkerUnitsShareTheCalibrationBetweenThem(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            host = Path(temporary_directory) / "host"
-            first_before, shared, second_after, drifted = (
-                store_host_calibration(host, score) for score in (100, 101, 102, 107.1))
-            first = UnitFixture(Path(temporary_directory) / "first", *UNIT)
-            first.calibrate_on_host(host, first_before, shared)
-            second = UnitFixture(Path(temporary_directory) / "second", *UNIT, chained=True)
-            second.chain(shared)
-            second.calibrate_on_host(host, shared, second_after)
-
-            for fixture in (first, second):
-                UNIT_SESSION.validate_unit_results(fixture.root, host_evidence=host)
-                evidence = {row["artifact"]: row for row in fixture.read("unit-evidence.tsv")}
-                self.assertEqual("host-sha256", evidence[f"calibrations/{shared.name}"]["verification"])
-            self.assertEqual(["none", "after"], [route["calibration"] for route in second.read("route-plan.tsv")])
-
-            with self.assertRaisesRegex(ValueError, "without a host evidence directory"):
-                UNIT_SESSION.validate_unit_results(second.root)
-            # The link must name the lease before it on the host, within the chain window, in the same environment.
-            for link, problem in (({"previous_attempt": "host-session-1/1"}, "previous_attempt"),
-                                  ({"gap_seconds": "61"}, "gap_seconds"),
-                                  ({"previous_environment_sha256": "0" * 64}, "previous_environment_sha256")):
-                with self.subTest(problem=problem):
-                    second.chain(shared, **link)
-                    second.calibrate_on_host(host, shared, second_after)
-                    with self.assertRaisesRegex(ValueError, f"does not chain from the lease before it.*{problem}"):
-                        UNIT_SESSION.validate_unit_results(second.root, host_evidence=host)
-            second.chain(shared)
-            second.calibrate_on_host(host, shared, second_after)
-            second_after.unlink()
-            with self.assertRaisesRegex(ValueError, "referenced host calibration is missing"):
-                UNIT_SESSION.validate_unit_results(second.root, host_evidence=host)
-            second.calibrate_on_host(host, shared, drifted)
-            with self.assertRaisesRegex(ValueError, re.escape("drifted 0.0604")):
-                UNIT_SESSION.validate_unit_results(second.root, host_evidence=host)
-
     def testCampaignAcceptsEveryUnitReplicaOnItsOwnInstance(self):
         def validate(campaign, receipts, replicas=(1, 2, 3)):
             return UNIT_SESSION.validate_unit_campaign(
@@ -231,13 +195,6 @@ REPLICAS = ("1", "2", "3", "4")
 # run-shard.sh smoke windows: processes, warmup and measurement iterations, iteration time.
 SMOKE_WINDOWS = dict(zip(UNIT_SESSION.SMOKE_SETTINGS, ("1", "1", "3", "20ms")))
 SHELL_RUNS = (("qualification", "1"), ("qualification", "2"), ("smoke", "4"))
-
-
-def expected_calibrations(route_count):
-    """A unit calibrates before its first route and after its last; a lone route does both."""
-    if route_count == 1:
-        return ["both"]
-    return ["before", *["none"] * (route_count - 2), "after"]
 
 
 def row_key(system, benchmark, parameters):
@@ -344,11 +301,8 @@ def plan_unit(unit, manifest, protocols, representatives):
         dispatch_order = [route for route in routes if route in order]
         if order != (dispatch_order[::-1] if int(replica) % 2 == 0 else dispatch_order):
             raise AssertionError(f"{label} runs routes {order} out of replica order")
-        if sorted(row["row_id"] for *_, share, _ in planned for row in share) != held:
+        if sorted(row["row_id"] for *_, share in planned for row in share) != held:
             raise AssertionError(f"{label} routes do not hold exactly the unit's rows")
-        calibrations = [calibration for *_, calibration in planned]
-        if calibrations != expected_calibrations(len(planned)):
-            raise AssertionError(f"{label} calibrates {calibrations}")
         target = "1" if replica == "4" else replica
         expected_representatives = sorted(
             row_id for representative_replica, row_id in unit["representatives"] if representative_replica == target)
@@ -356,7 +310,7 @@ def plan_unit(unit, manifest, protocols, representatives):
             raise AssertionError(f"{label} runs the wrong representatives")
         for protocol_name in PROTOCOLS:
             routes_plan = []
-            for route, handler, systems, share, calibration in planned:
+            for route, handler, systems, share in planned:
                 selectors = UNIT_SESSION.selectors(share, shard_rows, protocols, protocol_name, SMOKE_WINDOWS)
                 check_selectors(f"{label} {protocol_name} {route}", share, shard_rows, protocols,
                                 protocol_name, selectors)
@@ -404,11 +358,7 @@ def check_shell(result_directory, unit_id, plan):
     route_plan = row_protocol.read_tsv(result_directory / "route-plan.tsv")
     if [route["route"] for route in route_plan] != [route for route, *_ in plan]:
         raise AssertionError(f"run-unit.sh plans routes out of order in {result_directory}")
-    calibrations = expected_calibrations(len(plan))
-    if [route["calibration"] for route in route_plan] != calibrations:
-        raise AssertionError(f"run-unit.sh plans calibrations {[route['calibration'] for route in route_plan]} "
-                             f"in {result_directory}, expected {calibrations}")
-    for (route, share, selectors, representative_count, ceiling), calibration in zip(plan, calibrations):
+    for route, share, selectors, representative_count, ceiling in plan:
         route_directory = result_directory / "routes" / route
         label = f"run-unit.sh {unit_id} {route_directory}"
         expected = sorted(row["row_id"] for row in SHARD_RESULTS.load_manifest(route_directory / "expected-rows.tsv"))
@@ -419,8 +369,6 @@ def check_shell(result_directory, unit_id, plan):
         metadata = dict(
             line.split("=", 1) for line in
             (route_directory / "run-metadata.txt").read_text(encoding="utf-8").splitlines())
-        if metadata["unit_calibration"] != calibration:
-            raise AssertionError(f"{label} calibrates {metadata['unit_calibration']}, expected {calibration}")
         if metadata["unit_id"] != unit_id:
             raise AssertionError(f"{label} plans unit {metadata['unit_id']}")
         if int(metadata["protocol_representative_count"]) != representative_count:
@@ -429,19 +377,6 @@ def check_shell(result_directory, unit_id, plan):
         if metadata["maximum_relative_standard_error"] != ceiling:
             raise AssertionError(f"{label} bounds precision at {metadata['maximum_relative_standard_error']}, "
                                  f"expected {ceiling}")
-
-
-def store_host_calibration(host, score):
-    """Store one calibration JMH result in a worker host's evidence, named by its digest."""
-    document = json.dumps([{
-        "benchmark": "io.airlift.regulator.BenchmarkExpressionPlans.findLiteral",
-        "params": {"workload": "KIB_LATE"},
-        "primaryMetric": {"score": score, "scoreUnit": "ns/op", "rawData": [[score]]},
-    }]).encode()
-    path = host / "calibrations" / f"{hashlib.sha256(document).hexdigest()}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(document)
-    return path
 
 
 class UnitFixture:
@@ -456,9 +391,10 @@ class UnitFixture:
     SMOKE_METADATA = ("jmh_process_count", "jmh_process_warmup_iterations", "jmh_process_measurement_iterations",
                       "jmh_iteration_time")
 
-    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row: 1, chained=False):
+    def __init__(self, root, shard_id, unit_index, replica=None, host=None, score=lambda row: 1, steal=0):
+        """steal is the CPU steal ticks each route records in its 1,000 ticks."""
         self.root = root
-        self.host_evidence = None
+        self.steal = steal
         units = UNIT_SESSION.work_units.load(BASELINE)
         self.unit = next(unit for unit in units.values()
                          if (unit["shard_id"], unit["unit_index"]) == (shard_id, unit_index))
@@ -468,46 +404,25 @@ class UnitFixture:
         self.score = score
         with contextlib.redirect_stdout(io.StringIO()):
             UNIT_SESSION.plan(type("Arguments", (), {
-                "unit": self.unit["unit_id"], "replica": self.replica, "output_directory": root,
-                "chained_calibration": chained})())
+                "unit": self.unit["unit_id"], "replica": self.replica, "output_directory": root})())
         representatives = UNIT_SESSION.row_protocol.read_tsv(BASELINE / "protocol-representatives.tsv")
         held = UNIT_SESSION.unit_representatives(self.unit, self.replica)
         (root / "unit-capacity.txt").write_text(
             "memory_total_bytes=34359738368\nmemory_available_before_bytes=30000000000\n"
             "swap_total_bytes=0\nswap_free_before_bytes=0\noom_kills_before=0\n")
-        self.write_calibration(100, 101)
-        for route, _, systems, share, calibration in UNIT_SESSION.plan_routes(
-                BASELINE, self.unit, self.replica, chained):
+        # A confirmation replica runs replica 1's representatives.
+        target = UNIT_SESSION.protocol_replica(self.replica)
+        for route, _, systems, share in UNIT_SESSION.plan_routes(BASELINE, self.unit, self.replica):
             route_representatives = [
                 row for row in representatives
-                if (row["shard_id"], row["replica_id"], row["route"]) == (shard_id, self.replica, route)
+                if (row["shard_id"], row["replica_id"], row["route"]) == (shard_id, target, route)
                 and row["manifest_row_id"] in held]
-            self.create_route(route, systems, share, calibration, route_representatives)
+            self.create_route(route, systems, share, route_representatives)
 
     def route_directory(self):
         return self.root / "routes" / UNIT_SESSION.read_route_plan(self.root)[0]["route"]
 
-    def write_calibration(self, before, after):
-        drift = abs(after - before) / min(before, after)
-        (self.root / "calibration.tsv").write_text(
-            "phase\tscore\tscore_unit\tbefore_after_drift\n"
-            f"before\t{before}\tns/op\t{drift}\nafter\t{after}\tns/op\t{drift}\n")
-
-    def chain(self, calibration, **link):
-        """Record the chained calibration link as the worker writes it for the attempt's lease."""
-        (self.root / "unit-chain.txt").write_text("".join(f"{name}={value}\n" for name, value in {
-            "previous_attempt": "host-session-1/2", "calibration": calibration.stem, "gap_seconds": "30",
-            "previous_environment_sha256": UNIT_SESSION.environment_sha256(self.root), **link}.items()))
-
-    def calibrate_on_host(self, host, before, after):
-        """Calibrate from a worker host's stored calibrations and combine, as run-unit.sh does there."""
-        (self.root / "calibration.tsv").unlink(missing_ok=True)
-        SHARD_RESULTS.calibration(type("Arguments", (), {
-            "before": before, "after": after, "output": self.root / "calibration.tsv"})())
-        self.host_evidence = host
-        self.combine()
-
-    def create_route(self, route, systems, share, calibration, representatives):
+    def create_route(self, route, systems, share, representatives):
         directory = self.root / "routes" / route
         (directory / "semantic-reports").mkdir(parents=True)
         SHARD_RESULTS.write_tsv(directory / "route-session.tsv", SESSION_FIELDS, [{
@@ -545,7 +460,7 @@ class UnitFixture:
                     "specialized_cv": "0.01", "relative_difference": "0.01", "maximum_relative_difference": "0.05",
                     "outcome": "accepted",
                 } for row in representatives])
-        self.write_metadata(directory, calibration, len(representatives))
+        self.write_metadata(directory, len(representatives))
         (directory / "raw").mkdir()
         (directory / "logs").mkdir()
         log = directory / "logs" / "benchmark.log"
@@ -554,16 +469,17 @@ class UnitFixture:
             f"{hashlib.sha256(log.read_bytes()).hexdigest()}  logs/benchmark.log\n")
         (directory / "status.txt").write_text("status=complete\n")
 
-    def write_metadata(self, directory, calibration, representative_count):
+    def write_metadata(self, directory, representative_count):
         receipt = directory / "semantic-receipt.sha256"
         (directory / "run-metadata.txt").write_text(
             f"candidate_commit={'a' * 40}\nengine_tree={'b' * 40}\nheap_size=8g\n"
             f"protocol_qualification_required={'true' if representative_count else 'false'}\n"
             f"protocol_representative_count={representative_count}\n"
-            f"unit_id={self.unit['unit_id']}\nunit_calibration={calibration}\n"
+            f"unit_id={self.unit['unit_id']}\n"
             "protocol=qualification\n" +
             "".join(f"{name}={value}\n" for name, value in zip(self.SMOKE_METADATA, self.SMOKE)) +
-            f"semantic_receipt=measured\nsemantic_receipt_sha256={hashlib.sha256(receipt.read_bytes()).hexdigest()}\n")
+            f"semantic_receipt=measured\nsemantic_receipt_sha256={hashlib.sha256(receipt.read_bytes()).hexdigest()}\n"
+            f"cpu_steal_ticks={self.steal}\ncpu_total_ticks=1000\n")
 
     def replace_semantic_report(self):
         (self.route_directory() / "semantic-reports" / "TEST-Fixture.xml").write_text("<testsuite>other</testsuite>\n")
@@ -582,9 +498,7 @@ class UnitFixture:
         (directory / "protocol-qualification.tsv").unlink()
         if rows[1:]:
             SHARD_RESULTS.write_tsv(directory / "protocol-qualification.tsv", PROTOCOL_QUALIFICATION_FIELDS, rows[1:])
-        metadata = directory / "run-metadata.txt"
-        calibration = UNIT_SESSION.read_properties(metadata)["unit_calibration"]
-        self.write_metadata(directory, calibration, len(rows) - 1)
+        self.write_metadata(directory, len(rows) - 1)
 
     def read(self, name):
         with (self.root / name).open(newline="", encoding="utf-8") as input_file:
@@ -594,13 +508,12 @@ class UnitFixture:
         with contextlib.redirect_stdout(io.StringIO()):
             UNIT_SESSION.combine(type("Arguments", (), {
                 "unit_directory": self.root, "unit_attempt": attempt,
-                "region": self.host["availability_zone"][:-1],
-                "host_evidence": self.host_evidence})())
+                "region": self.host["availability_zone"][:-1]})())
 
     def accept(self, attempt):
         """Accept the attempt as run-unit.sh does, then finalize its capacity and status."""
         self.combine(attempt)
-        receipt = UNIT_SESSION.validate_unit_results(self.root, host_evidence=self.host_evidence)
+        receipt = UNIT_SESSION.validate_unit_results(self.root)
         UNIT_SESSION.write_unit_receipt(self.root / "unit-receipt.tsv", receipt)
         with (self.root / "unit-capacity.txt").open("a") as capacity:
             capacity.write("wall_seconds=600\nmaximum_resident_kibibytes=1048576\nexit_status=0\n"
@@ -616,14 +529,12 @@ class UnitCampaign:
     PLATFORMS = {"r8i": ("intel", "r8i.large"), "r9g": ("arm", "r9g.large")}
 
     def __init__(self, root, *shard_ids, replicas=(1, 2, 3), score=lambda row, platform, replica: 1,
-                 host_calibrations=False, chained=False):
+                 steal=lambda platform, host: 0):
+        """steal is the CPU steal ticks each route of a host records in its 1,000 ticks."""
         self.root = root
         self.shard_ids = shard_ids
         self.score = score
-        self.host_calibrations = host_calibrations
-        # With chained host calibrations, each lease after a host's first takes its before from the lease before it.
-        self.chained = chained
-        self.completions = {}
+        self.steal = steal
         self.units = sorted(
             (unit for unit in UNIT_SESSION.work_units.load(BASELINE).values() if unit["shard_id"] in shard_ids),
             key=lambda unit: (shard_ids.index(unit["shard_id"]), int(unit["unit_index"])))
@@ -637,41 +548,20 @@ class UnitCampaign:
     def directory(self, receipt):
         return unit_dispatch.unit_attempt_directory(self.root, receipt)
 
-    def add(self, platform, unit, replica, host, chained_before=None):
-        """Run one unit attempt as the next lease of the platform's host number host.
-
-        A chained lease's before is its previous lease's after, unless chained_before names another score."""
+    def add(self, platform, unit, replica, host):
+        """Run one unit attempt as the next lease of the platform's host number host."""
         host_session = f"{platform}-session-{host}"
         lease = self.leases[host_session] = self.leases.get(host_session, 0) + 1
         directory = (self.root / "units" / platform / unit["unit_id"] / f"replica-{replica}" / host_session /
                      f"lease-{lease}")
         directory.mkdir(parents=True)
         architecture, instance_type = self.PLATFORMS[platform]
-        previous = self.completions.get(host_session) if self.chained else None
         fixture = UnitFixture(
             directory, unit["shard_id"], unit["unit_index"], str(replica), {
                 "campaign_id": "campaign", "platform": platform, "instance_id": f"i-{platform}-{host}",
                 "host_epoch": f"{platform}-epoch-{host}", "architecture": architecture,
                 "instance_type": instance_type, "availability_zone": "us-west-2a",
-            }, lambda row: self.score(row, platform, replica), chained=previous is not None)
-        scores = (100, 101)
-        if self.host_calibrations:
-            if previous is not None:
-                marker, after = previous
-                scores = (after if chained_before is None else chained_before, after + 1)
-                # The controller retains the previous lease's own completion marker beside a chained attempt.
-                (directory.parent / f"lease-{lease - 1}-completion.json").write_text(json.dumps(marker))
-            # A worker host stores its calibrations once, beside its attempts.
-            calibrations = [store_host_calibration(directory.parent, score) for score in scores]
-            if previous is not None:
-                fixture.chain(calibrations[0], previous_attempt=f"{host_session}/{lease - 1}")
-            fixture.calibrate_on_host(directory.parent, *calibrations)
-            self.completions[host_session] = ({
-                "schema_version": 1, "host_session": host_session, "sequence": lease, "campaign_id": "campaign",
-                "platform": platform, "unit_id": unit["unit_id"], "replica_id": replica,
-                "unit_attempt_id": f"{host_session}/{lease}", "exit_status": 0, "unit_status": "complete",
-                "calibration_before": calibrations[0].stem, "calibration_after": calibrations[1].stem,
-                "calibration_chained": previous is not None}, scores[1])
+            }, lambda row: self.score(row, platform, replica), self.steal(platform, host))
         receipt = fixture.accept(f"{host_session}/{lease}")
         # A confirmation replica's receipt stays out of the campaign's primary receipts.
         if replica != 4:

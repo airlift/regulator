@@ -30,7 +30,7 @@ from fleet_budget import (
 from campaign_io import (
     UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
 from unit_dispatch import (
-    UNIT_COMPLETION_FIELDS, calibration_key, completion_key, extract_unit_result,
+    UNIT_COMPLETION_FIELDS, completion_key, extract_unit_result,
     get_unit_worker_result, heartbeat_key, heartbeat_sequence, interruption_key, list_unit_worker_results,
     persist_accepted_unit, persist_semantic_rejection, put_unit_lease, read_accepted_units, read_semantic_rejections,
     read_unit_attempts, read_unit_receipt, recovered_keys, result_key, retain_unit_attempt, shows_worker_start,
@@ -783,12 +783,9 @@ def unit_validation(root, arguments, kind, plans=None):
     release = released_artifact.manifest(root, version) if version else None
 
     def validate_baseline_attempt(directory, receipt):
-        """A baseline attempt's host session directory, the attempt's parent, holds the worker host's
-        calibrations it references and, for a chained attempt, the completion marker of the lease its before
-        calibration came from. A release campaign's attempt must also prove each route measured the selected
+        """An attempt's unit checks, and in a release campaign the proof that each route measured the selected
         release's JAR."""
-        regenerated = unit_session.validate_unit_results(directory, host_evidence=directory.parent, tables=tables)
-        unit_session.check_chain_predecessor(directory, directory.parent)
+        regenerated = unit_session.validate_unit_results(directory, tables=tables)
         if release:
             released_artifact.validate_baseline(directory, release)
         return regenerated
@@ -2159,15 +2156,6 @@ def read_unit_workers(path, platforms):
     return jobs
 
 
-def holds_marker(path, worker, sequence):
-    """Whether path already holds the worker's completion marker for the lease, as completing that lease fetched it."""
-    try:
-        marker = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return False
-    return marker.get("host_session") == worker.host_session and marker.get("sequence") == sequence
-
-
 class DetachedWrapper:
     """A worker wrapper an earlier controller started, followed through its process ID and session."""
 
@@ -2565,21 +2553,8 @@ class UnitDispatcher:
         if item.identity in self.semantic:
             return self.settle(worker, sequence, "superseded",
                                f"{self.semantic[item.identity]} was rejected for a semantic failure")
-        calibrations = [f"{digest}.json" for digest in (marker.get("calibration_before"), marker.get("calibration_after"))
-                        if digest]
-        if any(re.fullmatch(r"[0-9a-f]{64}\.json", name) is None for name in calibrations):
-            raise UnsafeCampaignError(f"unit completion marker {attempt} names an invalid calibration")
-        # The worker uploads a lease's calibrations before its completion marker.
-        missing = [name for name in calibrations if calibration_key(name) not in keys]
-        if missing:
-            return self.reject(worker, sequence, f"named host calibration is missing: {', '.join(missing)}")
         archive = staging / f"lease-{sequence}.tar.gz"
         fetch(result_key(sequence), archive)
-        for name in calibrations:
-            path = staging / "calibrations" / name
-            # A chained lease's before calibration is the after of the lease before it, already fetched.
-            if not path.is_file() or f"{engine_build.sha256_file(path)}.json" != name:
-                fetch(calibration_key(name), path)
         if engine_build.sha256_file(archive) != marker.get("result_sha256"):
             return self.reject(worker, sequence, "result archive does not match its completion marker")
         directory = staging / f"lease-{sequence}"
@@ -2587,12 +2562,6 @@ class UnitDispatcher:
             extract_unit_result(archive, directory)
         except (OSError, tarfile.TarError) as error:
             return self.reject(worker, sequence, f"result archive is unreadable: {error}")
-        predecessor = None
-        if (directory / "unit-chain.txt").is_file():
-            # A chained before must be the after calibration of the lease before it, by that lease's own marker.
-            predecessor = f"lease-{sequence - 1}-completion.json"
-            if completion_key(sequence - 1) in keys and not holds_marker(staging / predecessor, worker, sequence - 1):
-                fetch(completion_key(sequence - 1), staging / predecessor)
         if marker.get("unit_status") != "complete" or marker.get("exit_status") != 0:
             if marker.get("exit_status") == PROTOCOL_REJECTION_STATUS:
                 return self.reject(worker, sequence, f"numerical protocol rejection: status {PROTOCOL_REJECTION_STATUS}")
@@ -2614,7 +2583,7 @@ class UnitDispatcher:
         except (OSError, RuntimeError) as error:
             return self.reject(worker, sequence, f"artifact gate: {error}")
         final = unit_attempt_directory(self.result_root, receipt)
-        retain_unit_attempt(directory, final, calibrations, predecessor)
+        retain_unit_attempt(directory, final)
         self.accepted[item.identity] = persist_accepted_unit(self.accepted_path, final / "unit-receipt.tsv")
         self.unresolved.pop(item.identity, None)
         self.settle(worker, sequence, "accepted")

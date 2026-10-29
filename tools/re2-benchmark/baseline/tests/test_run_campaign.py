@@ -26,7 +26,7 @@ import test_engine_build  # noqa: E402
 import test_fleet_budget  # noqa: E402
 import unit_dispatch  # noqa: E402
 from shard_results import write_tsv  # noqa: E402
-from test_unit_session import UnitCampaign, UnitFixture, store_host_calibration  # noqa: E402
+from test_unit_session import UnitCampaign, UnitFixture  # noqa: E402
 SPEC = importlib.util.spec_from_file_location("baseline_run_campaign", SCRIPT)
 RUN_CAMPAIGN = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUN_CAMPAIGN)
@@ -1762,8 +1762,8 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                 "import sys\nfrom pathlib import Path\n"
                 "if sys.argv[1] == 'copy-environment':\n    sys.exit()\n"
                 "output = Path(sys.argv[sys.argv.index('--output-directory') + 1])\n"
-                "(output / 'route-plan.tsv').write_text('route\\trows\\tsystems\\tcalibration\\n"
-                "native-access\\t1\\tregulator\\tbefore\\n')\nprint('trino-operations')\n")
+                "(output / 'route-plan.tsv').write_text('route\\thandler\\tsystems\\n"
+                "native-access\\tjmh\\tregulator\\n')\nprint('trino-operations')\n")
             (baseline / "run-shard.sh").write_text('#!/bin/bash\nexit "${SHARD_STATUS}"\n')
             language_plan = root / "target/language-plans/language-lifecycle"
             language_plan.mkdir(parents=True)
@@ -1834,6 +1834,22 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "reached\n")
+
+    def test_route_cpu_steal_is_the_eighth_value_of_the_aggregate_cpu_line(self):
+        source = (SCRIPT.parent / "run-shard.sh").read_text()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            stat = Path(temporary_directory) / "stat"
+            # Ticks beyond 2^31 stay exact.
+            stat.write_text("cpu  4000000000 10 20 30 40 50 60 7 8 9\n"
+                            "cpu0 1 2 3 4 5 6 7 8 9 10\nintr 99\n")
+            function = shell_function(source, "cpu_ticks").replace("/proc/stat", str(stat))
+
+            result = subprocess.run(["bash"], input=f"set -euo pipefail\n{function}\ncpu_ticks\n", text=True,
+                                    capture_output=True, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The total leaves out guest and guest_nice, which Linux already counts in user and nice.
+        self.assertEqual(result.stdout, f"7 {4000000000 + 10 + 20 + 30 + 40 + 50 + 60 + 7}\n")
 
     def test_restart_preserves_original_campaign_start_time(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -2231,18 +2247,14 @@ class FakeUnitHost:
     another host completed the same replica, or never, once no other host runs, and with
     "stall-interrupt" the stopped host reports an interruption of the lease instead. With
     "stall-semantic" the late completion is a semantic failure, and with "stall-semantic-early"
-    it lands as soon as another host leased the replica, before that host completes it; with
-    "stall-lose-calibration" its calibrations never land. "rebalance"
+    it lands as soon as another host leased the replica, before that host completes it. "rebalance"
     stops the host before it fetches the lease, as a rebalance recommendation does. A host the
     fleet finds no Spot capacity for, or whose boot the fleet fails, exits before its first
     heartbeat, as the wrapper's launch does, and one whose inputs the fleet refuses exits
     before it launches. Every host that launched uploads its host archive
     as it exits, as the user data's exit trap does, even one that failed during bootstrap. A host
     whose cleanup the fleet leaves unverified records its bucket's removal as failed.
-    In a calibrated fleet each lease uploads its host calibrations, except when it is scripted
-    to "lose-calibration". A lease scripted to "chain" takes its before calibration from the
-    lease before it, as the worker does within the chain window; "false-chain" claims that link
-    for a before calibration the previous lease never took. A lease completes failed with
+    A lease completes failed with
     "semantic-failure" (status 44), "protocol-rejection" (status 42), "fail" (status 1), or
     "capacity-rejected", whose capacity gate failed it with status 1. "corrupt-archive" uploads a
     result that differs from its marker's checksum, and "foreign-receipt" a receipt that names another
@@ -2288,8 +2300,6 @@ class FakeUnitHost:
         self.objects = {}
         self.leases = {}
         self.sequence = 1
-        # The last completed lease's after calibration, which the next lease may chain from.
-        self.after = None
         self.booted = False
         self.stalled = False
         self.stopping = False
@@ -2342,8 +2352,7 @@ class FakeUnitHost:
         self.heartbeat(lease["unit_id"])
         if behavior in ("interrupt", "silent-interrupt"):
             return self.interrupt(lease["unit_id"])
-        if behavior in ("stall", "stall-interrupt", "stall-semantic", "stall-semantic-early",
-                         "stall-lose-calibration"):
+        if behavior in ("stall", "stall-interrupt", "stall-semantic", "stall-semantic-early"):
             key = f"heartbeat/{self.sequence}.json"
             self.objects[key] = (self.objects[key][0],
                                  RUN_CAMPAIGN.time.time() - RUN_CAMPAIGN.UNIT_HEARTBEAT_LOST_SECONDS - 60)
@@ -2388,26 +2397,11 @@ class FakeUnitHost:
         host = self.fleet.scratch / self.session
         directory = host / f"lease-{sequence}"
         directory.mkdir(parents=True)
-        chained = behavior in ("chain", "false-chain")
         fixture = UnitFixture(directory, unit["shard_id"], unit["unit_index"], str(lease["replica_id"]), {
             "campaign_id": lease["campaign_id"], "platform": self.platform, "instance_id": self.instance_id,
             "host_epoch": self.epoch, "architecture": self.architecture, "instance_type": self.instance_type,
             "availability_zone": f"{self.region}b",
-        }, chained=chained)
-        calibrations = []
-        if self.fleet.calibrated:
-            calibrations = [store_host_calibration(host, score) for score in (100, 101)]
-            if chained:
-                # The previous lease closed at 101; a false link names a before of 100.5 instead.
-                before = self.after if behavior == "chain" else store_host_calibration(host, 100.5)
-                calibrations = [before, store_host_calibration(host, 102)]
-                fixture.chain(before, previous_attempt=f"{self.session}/{sequence - 1}")
-            fixture.calibrate_on_host(host, *calibrations)
-            self.after = calibrations[1]
-            # A lost before calibration never lands; the after still does.
-            uploaded = calibrations[1:] if behavior in ("lose-calibration", "stall-lose-calibration") else calibrations
-            for calibration in uploaded:
-                self.put(f"calibrations/{calibration.name}", calibration.read_bytes())
+        })
         if self.release_version and behavior != "unreleased":
             measure_release(directory)
         fixture.accept(f"{self.session}/{sequence + 100 if behavior == 'foreign-receipt' else sequence}")
@@ -2427,10 +2421,7 @@ class FakeUnitHost:
             "unit_id": lease["unit_id"], "replica_id": lease["replica_id"],
             "unit_attempt_id": f"{self.session}/{sequence}", "exit_status": status,
             "unit_status": "failed" if status else "complete",
-            "result_sha256": hashlib.sha256(archive.getvalue()).hexdigest(),
-            "calibration_before": calibrations[0].stem if calibrations else None,
-            "calibration_after": calibrations[1].stem if calibrations else None,
-            "calibration_chained": chained}
+            "result_sha256": hashlib.sha256(archive.getvalue()).hexdigest()}
         if behavior == "partial-marker":
             del marker["result_sha256"]
         self.put(f"units/{sequence}/completion.json", json.dumps(marker).encode())
@@ -2477,11 +2468,10 @@ class FakeUnitHost:
 class FakeUnitFleet:
     """Unit worker hosts the stubbed wrapper launches, with their S3 leases and uploads."""
 
-    def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None, calibrated=False,
+    def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None,
                  failed_boot=lambda host: False, refused_inputs=lambda host: False, unit_scripts=None,
                  unverified_cleanup=lambda host: False):
         self.scratch = scratch
-        self.calibrated = calibrated
         self.failed_boot = failed_boot
         self.refused_inputs = refused_inputs
         self.unverified_cleanup = unverified_cleanup
@@ -2802,17 +2792,15 @@ class TestUnitWorkers(unittest.TestCase):
                                   event["availability_zone"], event["placement_score"]))
 
     def test_late_completion_after_requeue_is_superseded(self):
-        # A superseded completion needs none of its evidence, so calibrations that never landed do not reject it.
-        for script in ("stall", "stall-lose-calibration"):
-            with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
-                fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}}, calibrated=True)
-                self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 4, 2)
-                stalled = fleet.hosts[0]
-                replacement = next(host for host in fleet.hosts[2:] if host.platform == stalled.platform)
-                self.assertEqual([RUN_CAMPAIGN.signal.SIGTERM], stalled.signals)
-                outcomes = {(row["host_session"], row["outcome"]) for row in self.ledger}
-                self.assertLessEqual({(stalled.session, "lost"), (stalled.session, "superseded"),
-                                      (replacement.session, "accepted")}, outcomes)
+        with tempfile.TemporaryDirectory() as temporary:
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "stall"}})
+            self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 4, 2)
+            stalled = fleet.hosts[0]
+            replacement = next(host for host in fleet.hosts[2:] if host.platform == stalled.platform)
+            self.assertEqual([RUN_CAMPAIGN.signal.SIGTERM], stalled.signals)
+            outcomes = {(row["host_session"], row["outcome"]) for row in self.ledger}
+            self.assertLessEqual({(stalled.session, "lost"), (stalled.session, "superseded"),
+                                  (replacement.session, "accepted")}, outcomes)
 
     def test_tail_stops_spot_workers_and_finishes_on_demand(self):
         with tempfile.TemporaryDirectory() as temporary, \
@@ -3038,35 +3026,16 @@ class TestUnitWorkers(unittest.TestCase):
             self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             self.budget.release.assert_any_call("campaign", waiting.host_epoch, cleanup_verified=True)
 
-    def test_restart_redoes_a_calibration_copy_a_crash_cut_short(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", calibrated=True)
-            copyfile = RUN_CAMPAIGN.shutil.copyfile
-
-            def crash_while_retaining(source, target, **kwargs):
-                if Path(source).parent.name == "calibrations" and "units" in Path(target).parts:
-                    Path(target).write_bytes(Path(source).read_bytes()[:10])
-                    raise SystemExit("controller stopped")
-                return copyfile(source, target, **kwargs)
-
-            with patch.object(RUN_CAMPAIGN.shutil, "copyfile", side_effect=crash_while_retaining), \
-                    self.assertRaisesRegex(SystemExit, "controller stopped"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
-            result_root = self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
-            for calibration in result_root.glob("units/**/calibrations/*"):
-                self.assertEqual(calibration.name, hashlib.sha256(calibration.read_bytes()).hexdigest() + ".json")
-
     def test_completion_that_fails_its_checks_is_rejected_without_a_retry(self):
         # The campaign measures a release, so every other completion proves it measured the release's JAR.
         for script, detail in (
-                ("lose-calibration", "named host calibration is missing"),
                 ("corrupt-archive", "result archive does not match its completion marker"),
                 ("capacity-rejected", "unit capacity gate rejected the host's resources"),
                 ("foreign-receipt", "artifact gate: unit receipt names "),
                 ("unreleased", "release-artifact.json")):
             with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary, \
                     patch.object(RUN_CAMPAIGN.released_artifact, "manifest", return_value=RELEASE):
-                fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}}, calibrated=True)
+                fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: script}})
                 with self.assertRaisesRegex(SystemExit, f"unresolved units: .*{re.escape(detail)}"):
                     self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
                                    release_version=RELEASE["version"])
@@ -3092,26 +3061,6 @@ class TestUnitWorkers(unittest.TestCase):
                 self.assertEqual([], [host.session for host in fleet.hosts if host.status is None])
                 self.assertEqual([], self.leases("accepted"))
                 self.assertEqual([], RUN_CAMPAIGN.read_accepted_units(Path(temporary) / "results/accepted-units.tsv"))
-
-    def test_chained_calibration_must_be_the_previous_leases_after(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            # Each host's second lease claims a chain from its first; the r9g host's claim is false.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {2: "chain"}, 2: {2: "false-chain"}},
-                                  calibrated=True)
-            with self.assertRaisesRegex(SystemExit, "unresolved units: r9g/.*does not chain from the completion "
-                                                    "of r9g-session-2/1: calibration_after"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
-            chained, falsely_chained = fleet.hosts
-            self.assertEqual((("r8i", "accepted"), ("r9g", "rejected")), tuple(
-                (host.platform, next(row["outcome"] for row in self.ledger if row["outcome"] != "leased" and
-                                     (row["host_session"], row["sequence"]) == (host.session, "2")))
-                for host in (chained, falsely_chained)))
-            # The accepted chained attempt keeps its previous lease's completion marker beside it.
-            retained = next((Path(temporary) / "results" / "units").glob(f"r8i/*/replica-1/{chained.session}/lease-2"))
-            marker = json.loads((retained.parent / "lease-1-completion.json").read_text())
-            link = RUN_CAMPAIGN.read_properties(retained / "unit-chain.txt")
-            self.assertEqual((f"{chained.session}/1", "complete", link["calibration"]),
-                             (marker["unit_attempt_id"], marker["unit_status"], marker["calibration_after"]))
 
     def test_semantic_failure_or_protocol_rejection_is_final(self):
         for script, detail in (("semantic-failure", "semantic failure: status 44"),

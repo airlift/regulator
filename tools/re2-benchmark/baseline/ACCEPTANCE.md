@@ -22,21 +22,10 @@ is a distinct attempt. The validator rejects the attempt unless:
   exactly the frozen rows of the unit, roles included, and its ID recomputes
   from its owned rows and representatives under the frozen row protocols
 - `expected-rows.tsv` and `observed-rows.tsv` hold exactly the owned rows
-- `route-plan.tsv` is the unit's plan for its replica, route order and
-  calibration split included, and every route's session matches the unit
-  session's host and the unit's shard
-- the unit's `calibration.tsv`, from the first route's before and the last
-  route's after calibration, drifted at most 5%; a unit measured on a worker
-  host recomputes it from the two host calibrations it references, each
-  present with its digest, and a chained unit, whose before is the previous
-  unit's after, must reference them
-- a chained unit's `unit-chain.txt`, bound in its evidence, names the lease
-  before it on the same host, that lease's after calibration as its before, a
-  gap of at most 60 seconds, and the same environment digest as its own; an
-  unchained unit has none. The controller and the reducer also check that link
-  against the previous lease's own completion marker, retained in the host
-  session's directory as `lease-<n>-completion.json`: that lease completed, and
-  its after calibration is the one the link names
+- `route-plan.tsv` is the unit's plan for its replica, route order included,
+  and every route's session matches the unit session's host, unit, and shard
+- every route's `run-metadata.txt` records the host's CPU steal ticks and
+  total ticks over the route, with the steal no greater than a nonzero total
 - every route ran the frozen protocol: qualification or smoke, the default
   Joni JMH window, and exactly the JMH selectors that protocol plans for its
   share
@@ -61,7 +50,7 @@ protocol qualification when applicable, run metadata, normalized rows, status,
 and raw-artifact manifest, and through recursive verification of each route's
 `raw-artifacts.sha256`, every raw timing file and log. Its `host` rows bind the
 environment and engine-build provenance, route plan, unit rows, expected and
-observed rows, calibration, unit session, and the immutable
+observed rows, unit session, and the immutable
 prefix of `unit-capacity.txt`. Any change to route metadata, raw measurements,
 logs, comparator provenance, or the capacity identity after acceptance
 invalidates the receipt.
@@ -71,10 +60,7 @@ receipt therefore commits the already-written memory-total and
 available-before fields. The reducer additionally requires the completed
 capacity fields and the immutable campaign archive binds the finalized file.
 This two-stage contract avoids claiming a digest for values that do not yet
-exist at acceptance time. A worker host's unit also has `host` rows with
-verification `host-sha256` for its calibrations, which live once in the host
-evidence as `calibrations/<sha256>.json`; `--host-evidence` names that
-directory.
+exist at acceptance time.
 
 On success, the validator writes `unit-receipt.tsv`: the unit session, its
 shard and owned row count, the digest of the unit's frozen row
@@ -87,7 +73,7 @@ tools/re2-benchmark/baseline/validate-unit-results.py \
     --receipt unit-attempt/unit-receipt.tsv
 ```
 
-A language unit attempt has no routes or calibrations, so `language/fleet.py`
+A language unit attempt has no routes, so `language/fleet.py`
 accepts it instead, into the same receipt; the
 [language guide](../language/README.md#work-units) lists its checks. Its
 row-protocol digest covers the partition manifests and operations the unit
@@ -113,12 +99,11 @@ unit replica, added atomically as soon as the attempt is accepted. Do not
 reconstruct this ledger by concatenating result files. The phase leases units
 to worker hosts and writes this ledger (`../aws/README.md`). Each attempt is
 retained at `units/<platform>/<unit_id>/replica-<n>/<host_session>/lease-<seq>`
-under the result root; a baseline attempt sits beside the host session's
-`calibrations/` it references. On restart, recovery revalidates every ledger
+under the result root. On restart, recovery revalidates every ledger
 row against that directory and adds a retained attempt the ledger lacks once it
 passes the same checks: final status, accepted capacity, a receipt regenerated
 from the evidence, and the frozen candidate. A baseline unit's receipt is
-regenerated with its host's calibrations, a language unit's through the
+regenerated from its own attempt, a language unit's through the
 [language unit checks](../language/README.md#work-units), and an engine
 build's from its own archives. A `--release-version` campaign also requires
 each route's attestation that it measured the release's pinned

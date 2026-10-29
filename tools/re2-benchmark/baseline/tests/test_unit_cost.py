@@ -41,9 +41,7 @@ class TestUnitCost(unittest.TestCase):
         ]
         protocols = {row["row_id"]: bounded for row in rows}
         # Three rows whose 50 ms windows add up to five seconds each, two selectors that each start a
-        # compiler-hints JVM and five processes at two seconds, and one calibration of five forks plus their
-        # parent.
-        self.assertAlmostEqual(15 + 24 + 112, unit_cost.estimate(rows, protocols, calibration_invocations=1))
+        # compiler-hints JVM and five processes at two seconds, and one representative.
         self.assertAlmostEqual(15 + 24 + 132, unit_cost.estimate(rows, protocols, representative_count=1))
         # A specialized-pattern suite runs each workload in its own selector.
         specialized = [{**row, "suite": "trino-specialized-patterns"} for row in rows]
