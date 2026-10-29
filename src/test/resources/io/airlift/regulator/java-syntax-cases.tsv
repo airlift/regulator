@@ -42,6 +42,7 @@ REJECT	(?>abc)	Atomic groups require unsupported matching semantics
 REJECT	a++	Possessive quantifiers require unsupported matching semantics
 REJECT	(a)\1	Backreferences are not regular
 REJECT	\0	Java octal escapes require at least one digit after the leading zero
+REJECT	(?x)\c#	In comments mode a control escape needs a character after any whitespace and comments
 REJECT	(a?)*	Nullable repeated captures require Java capture-reset semantics
 REJECT	(a*)+	Nullable repeated captures require Java capture-reset semantics
 REJECT	a{1001}	The current compiler cannot represent larger counted repetitions compactly
@@ -53,4 +54,5 @@ REJECT	\p^L	Java reads \p^ as the unknown property name ^
 REJECT	[\P^L]	Java reads \P^ inside a character class as the unknown property name ^
 REJECT	\p{^Lu}	Java has no caret inversion in a property name
 REJECT	[\P{^Lu}]	Java has no caret inversion in a property name
+REJECT	(?x)\p{Lu }	In comments mode Java keeps whitespace inside property braces as part of the name
 REJECT	\N{NOT A CHARACTER NAME}	A named code-point escape must name a character

@@ -75,6 +75,7 @@ public class TestJavaRegexpSyntax
                 unsupported("x{1,2}+", "possessive quantifiers", 6),
                 unsupported("(x)\\1", "backreferences", 3),
                 unsupported("(?<name>x)\\k<name>", "backreferences", 10),
+                unsupported("(?x)(?<name>x)\\k <name>", "backreferences", 14),
                 unsupported("\\G", "previous-match boundary \\G", 0),
                 unsupported("\\R", "linebreak escape \\R", 0),
                 unsupported("\\uD800", "surrogate escapes", 0),
@@ -108,7 +109,7 @@ public class TestJavaRegexpSyntax
 
     private static List<SyntaxCase> syntaxCases()
     {
-        return TsvTestData.load(SYNTAX_CASES, 3, 55).stream()
+        return TsvTestData.load(SYNTAX_CASES, 3, 57).stream()
                 .map(row -> new SyntaxCase(row.field(1), Expected.valueOf(row.field(0)), row.field(2)))
                 .toList();
     }

@@ -537,6 +537,14 @@ public class TestJavaRegexpDifferential
         }
     }
 
+    @Test
+    public void testTruncatedPropertyEscapeMatchesJava25()
+    {
+        for (String pattern : List.of("\\p", "[\\p", "a\\P")) {
+            assertRejectsJava25(pattern, OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_CHAR_RANGE);
+        }
+    }
+
     private static QuotedClassCase quotedClassCase(String pattern, OptionProfile options, String... inputs)
     {
         return new QuotedClassCase(pattern, options, List.of(inputs));

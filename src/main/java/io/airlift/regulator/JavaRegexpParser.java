@@ -1443,7 +1443,8 @@ final class JavaRegexpParser
                 case '0' -> literalFromRune(parseOctalEscape(escapedByte, flags, sequenceStart));
                 case '1', '2', '3', '4', '5', '6', '7', '8', '9' -> throw unsupportedConstruct("backreferences", sequenceStart, index);
                 case 'k' -> {
-                    if (!atEnd() && peekByte() == '<') {
+                    int nameOpen = ignoredPatternEnd(index);
+                    if (nameOpen < end && bytes[nameOpen] == '<') {
                         throw unsupportedConstruct("backreferences", sequenceStart, index);
                     }
                     throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
@@ -1462,9 +1463,16 @@ final class JavaRegexpParser
         private void parseUnicodeGroupInto(CharClassBuilder characterClassBuilder, int sign, int parseFlags, int sequenceStart)
         {
             // Supports \pL and \p{...}. Java has no caret inversion, so \p^ and any braced name
-            // containing ^ are unknown property names.
-            if (!atEnd() && peekByte() == '{') {
+            // containing ^ are unknown property names. In comments mode the JDK skips whitespace and
+            // comments before the name or its brace and after the brace, but takes the rest of a
+            // braced name as written.
+            skipIgnoredPatternCharacters();
+            if (atEnd()) {
+                throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+            }
+            if (peekByte() == '{') {
                 consumeByte('{');
+                skipIgnoredPatternCharacters();
                 int nameStart = index;
                 while (!atEnd() && peekByte() != '}') {
                     consumeByte();
@@ -1778,14 +1786,20 @@ final class JavaRegexpParser
 
         private int parseHexEscape(int flags, int sequenceStart)
         {
-            // Supports \xNN and \x{...} with any number of hex digits (>= 1).
+            // Supports \xNN and \x{...} with any number of hex digits (>= 1). In comments mode the
+            // JDK skips whitespace and comments before each digit and brace.
             int runeMax = Regexp.maxRune(flags);
 
+            skipIgnoredPatternCharacters();
             if (!atEnd() && peekByte() == '{') {
                 consumeByte('{');
                 int value = 0;
                 int digits = 0;
-                while (!atEnd() && peekByte() != '}') {
+                while (true) {
+                    skipIgnoredPatternCharacters();
+                    if (atEnd() || peekByte() == '}') {
+                        break;
+                    }
                     int rune = readRune(flags);
                     int digitValue = decodeHexDigit(rune);
                     if (digitValue < 0) {
@@ -1811,6 +1825,7 @@ final class JavaRegexpParser
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
             int firstRune = readRune(flags);
+            skipIgnoredPatternCharacters();
             if (atEnd()) {
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
@@ -1830,14 +1845,22 @@ final class JavaRegexpParser
         private int parseUnicodeEscape(int flags, int sequenceStart)
         {
             int value = parseFourHexDigits(sequenceStart);
-            if (Character.isHighSurrogate((char) value) && index + 2 <= end && bytes[index] == '\\' && bytes[index + 1] == 'u') {
+            if (Character.isHighSurrogate((char) value)) {
                 // As in the JDK, the next escape of this form must have four hex digits, but it joins
-                // this one only when it is a low surrogate.
+                // this one only when it is a low surrogate. In comments mode the JDK skips whitespace
+                // and comments before its backslash and before its u.
                 int escapeEnd = index;
-                index += 2;
-                int lowSurrogate = parseFourHexDigits(sequenceStart);
-                if (Character.isLowSurrogate((char) lowSurrogate)) {
-                    return Character.toCodePoint((char) value, (char) lowSurrogate);
+                skipIgnoredPatternCharacters();
+                if (!atEnd() && peekByte() == '\\') {
+                    consumeByte('\\');
+                    skipIgnoredPatternCharacters();
+                    if (!atEnd() && peekByte() == 'u') {
+                        consumeByte('u');
+                        int lowSurrogate = parseFourHexDigits(sequenceStart);
+                        if (Character.isLowSurrogate((char) lowSurrogate)) {
+                            return Character.toCodePoint((char) value, (char) lowSurrogate);
+                        }
+                    }
                 }
                 index = escapeEnd;
             }
@@ -1853,6 +1876,8 @@ final class JavaRegexpParser
 
         private int parseControlEscape(int flags, int sequenceStart)
         {
+            // In comments mode the JDK skips whitespace and comments before the character.
+            skipIgnoredPatternCharacters();
             if (atEnd()) {
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
@@ -1862,6 +1887,9 @@ final class JavaRegexpParser
 
         private int parseNamedCodePoint(int sequenceStart)
         {
+            // In comments mode the JDK skips whitespace and comments before the brace, but takes the
+            // name as written.
+            skipIgnoredPatternCharacters();
             if (atEnd() || consumeByte() != '{') {
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
@@ -1886,8 +1914,10 @@ final class JavaRegexpParser
 
         private int parseFourHexDigits(int sequenceStart)
         {
+            // In comments mode the JDK skips whitespace and comments before each digit.
             int value = 0;
             for (int i = 0; i < 4; i++) {
+                skipIgnoredPatternCharacters();
                 if (atEnd()) {
                     throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
                 }
@@ -1902,6 +1932,8 @@ final class JavaRegexpParser
 
         private int parseOctalEscape(int firstDigit, int flags, int sequenceStart)
         {
+            // In comments mode the JDK skips whitespace and comments before each digit.
+            skipIgnoredPatternCharacters();
             if (firstDigit != '0' || atEnd() || peekByte() < '0' || peekByte() > '7') {
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
@@ -1911,6 +1943,7 @@ final class JavaRegexpParser
             int maximumDigits = firstOctalDigit <= '3' ? 3 : 2;
             int code = 0;
             for (int i = 0; i < maximumDigits; i++) {
+                skipIgnoredPatternCharacters();
                 if (atEnd()) {
                     break;
                 }
