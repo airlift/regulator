@@ -50,7 +50,7 @@ class TestReleaseCapture(unittest.TestCase):
             provenance = {**self.data['candidate'],
                           'instance_identity': {'instanceId': receipt['instance_id'], 'instanceType': instance_type},
                           'jvm_build': {'released_artifact': copy.deepcopy(artifact),
-                                        'jvm': {'classpath': copy.deepcopy(artifact['classpath'])}}}
+                                        'jvm': {'classpath': [jar]}}}
             self.data['hosts'].append({'receipt': dict(receipt), 'partitions': [
                 {'id': part['id'], 'export_sha256': 'f' * 64, 'provenance': provenance}]})
 

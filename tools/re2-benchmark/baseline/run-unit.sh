@@ -242,8 +242,7 @@ if [[ -n "${language_plan}" ]]; then
         --replica "${REPLICA_ID}" \
         --group "${GROUP_ID}" \
         --unit-directory "${RESULT_DIR}" \
-        --native-directory "${SHARED_WORK_DIR}/language-native" \
-        --jvm-directory "${SHARED_WORK_DIR}/language-jvm" \
+        --shared "${SHARED_WORK_DIR}" \
         --unit-attempt "${RE2_CAMPAIGN_HOST_SESSION}/${RE2_CAMPAIGN_LEASE_SEQUENCE}" \
         --region "${BASELINE_REGION}" \
         --source-archive "${LANGUAGE_SOURCE_ARCHIVE:?A language unit requires LANGUAGE_SOURCE_ARCHIVE}" \

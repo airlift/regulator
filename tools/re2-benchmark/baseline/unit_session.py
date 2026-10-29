@@ -614,7 +614,7 @@ def check_route_selectors(directory, metadata, share, shard_rows, protocols):
 
 
 def check_semantic_receipt(directory, metadata):
-    """A cached Surefire receipt is used only when the route's reports are the receipt's files."""
+    """A cached semantic test receipt is used only when the route's reports are the receipt's files."""
     if metadata.get("semantic_receipt") not in {"cached", "measured"}:
         reject(f"{directory / 'run-metadata.txt'} records semantic receipt {metadata.get('semantic_receipt')!r}, "
                "expected cached or measured")
@@ -630,7 +630,7 @@ def check_semantic_receipt(directory, metadata):
     reports = {
         f"reports/{path.name}": sha256_file(path) for path in (directory / "semantic-reports").glob("TEST-*.xml")}
     if not reports or {key: value for key, value in listed.items() if key.startswith("reports/")} != reports \
-            or set(listed) - set(reports) != {"surefire.log"}:
+            or set(listed) - set(reports) != {"launcher.log"}:
         reject(f"{directory / 'semantic-reports'} are not the files of its semantic receipt")
 
 

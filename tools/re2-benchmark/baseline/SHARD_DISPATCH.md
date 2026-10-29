@@ -114,9 +114,9 @@ iteration counts while avoiding a new forked JVM for every row:
   specialized-pattern shards run each workload in its own JVMs, so they hold
   one row per file, and their normalization checks each row's process-group
   count instead of identical row sets.
-- The semantic gate is derived from the actual successful Surefire test cases
-  and differential-verifier receipts. It is not a declaration that tests were
-  run.
+- The semantic gate is derived from the actual successful test cases, which
+  the JUnit console launcher reports in Surefire's XML format, and
+  differential-verifier receipts. It is not a declaration that tests were run.
 
 Top-level process epochs provide independent JVM, heap, JIT, and benchmark
 state. `-f 0` prevents JMH from starting another JVM for each benchmark while
@@ -139,17 +139,24 @@ top-level JMH JSON file.
 
 ### Engine Builds
 
-A host installs the pinned Trino harness from its platform's
-[engine build](../aws/README.md#engine-builds) instead of building it. Each
-route's `run-metadata.txt` records `trino_harness_build` and, for a
-specialized shard's native comparator runner, `native_runner_build`. Each is
-`prebuilt:<archive-sha256>`, `local`, or `not-used`, and `engine-build.txt` in
-the route records the installed build. Engine builds change where an engine
-came from, not what a route measures or how it is accepted and reduced. The
-same build installs the native RE2 and Rust runners on every unit worker, at
-`language-native/<runner>` under the shared work directory, with
-`engine-build/native.sha256` naming their archive; a route that runs them can
-record that archive with `prebuilt_engine native`, as it records the harness.
+A host installs the candidate's compiled classes and the pinned Trino harness
+from its platform's [engine build](../aws/README.md#engine-builds) instead of
+building them, and runs no Maven. Each route builds its classpath from the
+installed `regulator-classes/classpath.txt` and runs its semantic tests on it
+with the JUnit console launcher, from the source root, selecting the test
+classes `shard-dispatch.tsv` names as Surefire's `-Dtest` would. Each route's
+`run-metadata.txt` records `regulator_classes_build` as
+`prebuilt:<archive-sha256>`, and `trino_harness_build` and, for a specialized
+shard's native comparator runner, `native_runner_build` as
+`prebuilt:<archive-sha256>` or `not-used`; `engine-build.txt` in the route
+records the installed build. A route fails, and is retried, when an engine it
+needs is missing or the harness fails its identity check. Engine builds change
+where the classes and engines came from, not what a route measures or how it
+is accepted and reduced. The same build installs the native RE2 and Rust
+runners on every unit worker, at `language-native/<runner>` under the shared
+work directory, with `engine-build/native.sha256` naming their archive; a
+specialized shard's native-access route runs its comparator's runner from
+there.
 A language unit runs the same runners.
 
 ## Work Units
@@ -249,12 +256,12 @@ section covers baseline units.
 - The route runs only the group's representatives for its replica; replica 4
   runs replica 1's. A failed representative exits 42 and rejects only that
   unit attempt.
-- Units of one shard on one host share a route's Surefire semantic tests. The
+- Units of one shard on one host share a route's semantic tests. The
   first unit stores the reports and log under the shared work directory,
-  keyed by host epoch, shard, route, handler, tests, and candidate and
-  manifest identity; a later unit uses them only when every file matches the
-  stored SHA-256 receipt. The native-access probe, preparations, and
-  differential verifiers still run for every unit.
+  keyed by host epoch, shard, route, handler, tests, candidate and manifest
+  identity, and classes archive; a later unit uses them only when every file
+  matches the stored SHA-256 receipt. The native-access probe, preparations,
+  and differential verifiers still run for every unit.
 - Outside planning, `run-unit.sh` requires the attempt's host session,
   `RE2_CAMPAIGN_HOST_SESSION`, and lease sequence,
   `RE2_CAMPAIGN_LEASE_SEQUENCE`; the region defaults to the availability

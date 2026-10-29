@@ -41,7 +41,7 @@ def git_tree(files):
 
 
 def read(root, archive, provenance):
-    """Return checked source identity and uncompressed tar bytes. No synthetic Git commits."""
+    """Return the checked source identity. No synthetic Git commits."""
     root = root.resolve()
     if (root / ".git").exists():
         raise ValueError("archive mode requires an extracted source directory, not a Git checkout")
@@ -76,10 +76,6 @@ def read(root, archive, provenance):
             else:
                 raise ValueError("unsupported source archive entry")
             files[str(name)] = (mode, payload)
-        # Reuse the original tar bytes for the isolated build. TarFile has already
-        # checked compression and every member; extraction still uses the data filter.
-        source.fileobj.seek(0)
-        uncompressed = source.fileobj.read()
     committed = {name: entry for name, entry in files.items() if name not in GENERATED_TABLES}
     if git_tree(committed) != receipt["root_tree"]:
         raise ValueError("archive content does not match the candidate Git tree")
@@ -103,4 +99,4 @@ def read(root, archive, provenance):
             relative = str(path.relative_to(root))
             if relative not in files and not (path.is_dir() and relative in expected_directories):
                 raise ValueError(f"unrecorded file in worker source: {relative}")
-    return {"source_commit": receipt["candidate_commit"], "source_tree": receipt["root_tree"]}, uncompressed
+    return {"source_commit": receipt["candidate_commit"], "source_tree": receipt["root_tree"]}

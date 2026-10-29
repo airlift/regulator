@@ -763,6 +763,16 @@ class UnitValidation:
     # Accepts a phase's ledger of receipts as one campaign, given its path, its phase, and a confirmation
     # phase's confirmations.
     validate_ledger: object
+    # The SHA-256 of each platform's accepted classes archive, which each attempt's host must record installing;
+    # empty when the campaign installs no engine builds.
+    classes_archives: dict = field(default_factory=dict)
+
+
+def accepted_classes_archives(arguments):
+    """Each platform's accepted classes archive SHA-256, from the build manifest of its accepted engine build."""
+    return {platform: engine_build.load_manifest(directory, arguments.engine_build_policy[platform])
+            ["archives"]["classes"]["sha256"]
+            for platform, directory in getattr(arguments, "engine_build_directories", {}).items()}
 
 
 def unit_validation(root, arguments, kind, plans=None):
@@ -792,7 +802,8 @@ def unit_validation(root, arguments, kind, plans=None):
         host_fields = {"comparator_manifest_sha256": hashlib.sha256(
             (root / "tools/re2-benchmark/baseline/comparators.tsv").read_bytes()).hexdigest(),
             "regulator_release_version": version}
-        return UnitValidation(kind, receipt_fields, host_fields, validate_language_attempt, validate_language_ledger)
+        return UnitValidation(kind, receipt_fields, host_fields, validate_language_attempt, validate_language_ledger,
+                              accepted_classes_archives(arguments))
     tables = unit_session.load_unit_tables(campaign_manifest(root, arguments))
     release = released_artifact.manifest(root, version) if version else None
 
@@ -815,7 +826,8 @@ def unit_validation(root, arguments, kind, plans=None):
             selected_shards=getattr(arguments, "selected_shards", None),
             confirmations=confirmations)
 
-    return UnitValidation(kind, receipt_fields, {}, validate_baseline_attempt, validate_baseline_ledger)
+    return UnitValidation(kind, receipt_fields, {}, validate_baseline_attempt, validate_baseline_ledger,
+                          accepted_classes_archives(arguments))
 
 
 def engine_build_validation(root, receipt_fields):
@@ -924,7 +936,7 @@ def resolve_engine_builds(root, arguments):
 def validate_dependencies(root, arguments):
     if getattr(arguments, "language_plans", None):
         # Plans already contain checksummed source workloads. The unit worker
-        # resolves and verifies the pinned Joni jar during its clean build.
+        # verifies the pinned Joni jar in its engine build's candidate classes.
         for directory in arguments.language_plans.values():
             language_fleet.validate(directory)
     else:
@@ -1832,6 +1844,12 @@ def validate_unit_artifacts(validation, result_root, receipt, directory=None):
             differing = [field for field, value in validation.host_fields.items() if environment.get(field) != value]
             if differing:
                 raise RuntimeError(f"host differs from the campaign's comparator pins or release: {differing}")
+        if validation.classes_archives:
+            installed = read_properties(directory / "engine-build.txt").get("classes_archive_sha256")
+            expected = validation.classes_archives.get(receipt["platform"])
+            if installed != expected:
+                raise RuntimeError(f"host installed classes archive {installed}, not its platform's accepted build's "
+                                   f"{expected}")
     except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
         raise UnsafeCampaignError(f"unit artifacts are not accepted for {identity}: {error}") from error
     if artifact_receipt != receipt or regenerated != receipt:

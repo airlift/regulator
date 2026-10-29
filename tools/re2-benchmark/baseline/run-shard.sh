@@ -29,7 +29,6 @@ JONI_COMPARATOR_ORDER=${JONI_COMPARATOR_ORDER:-forward}
 CAMPAIGN_REPLICA_ID=${RE2_CAMPAIGN_REPLICA_ID:-1}
 CPU_LIST=${BASELINE_CPU_LIST:-0}
 HEAP_SIZE=${BASELINE_HEAP_SIZE:-8g}
-MAVEN_ARGS=(-Dmaven.gitcommitid.skip=true)
 PROTOCOL_QUALIFICATION_PROCESS_COUNT=5
 JMH_FORK_COUNT=1
 
@@ -341,7 +340,7 @@ manifest_sha256=$(sha256sum "${MANIFEST}" | awk '{print $1}')
 } > "${RESULT_DIR}/run-metadata.txt"
 
 # Where the Trino harness and the native comparator runner this route used came from:
-# prebuilt:<archive SHA-256>, local, or not-used.
+# prebuilt:<archive SHA-256> or not-used.
 trino_harness_build=not-used
 native_runner_build=not-used
 
@@ -354,19 +353,23 @@ prebuilt_engine()
 
 record_engine_builds()
 {
-    printf 'trino_harness_build=%s\nnative_runner_build=%s\n' "${trino_harness_build}" "${native_runner_build}" \
+    printf 'regulator_classes_build=%s\ntrino_harness_build=%s\nnative_runner_build=%s\n' \
+        "${regulator_classes_build}" "${trino_harness_build}" "${native_runner_build}" \
         >> "${RESULT_DIR}/run-metadata.txt"
 }
 
-(cd "${ROOT}" && ./mvnw "${MAVEN_ARGS[@]}" -q -DskipTests test-compile) | tee "${RESULT_DIR}/logs/maven-test-compile.log"
-(cd "${ROOT}" && ./mvnw "${MAVEN_ARGS[@]}" -q dependency:build-classpath \
-    -DincludeScope=test \
-    -Dmdep.outputFile="${RESULT_DIR}/classpath.txt")
-CLASSPATH="${ROOT}/target/test-classes:${ROOT}/target/classes:$(cat "${RESULT_DIR}/classpath.txt")"
+# The candidate's classes, test classes, and dependencies, compiled once for the
+# platform by its engine build; their classpath is relative to their directory.
+regulator_classes_build=$(prebuilt_engine classes) || {
+    echo "The host has no prebuilt candidate classes from its engine build" >&2
+    exit 1
+}
+CLASSES_DIR="${SHARED_WORK_DIR}/regulator-classes"
+CLASSPATH=$(tr ':' '\n' < "${CLASSES_DIR}/classpath.txt" | sed "s|^|${CLASSES_DIR}/|" | paste -sd: -)
 if [[ -n "${REGULATOR_RELEASE_VERSION:-}" ]]; then
     CLASSPATH=$(python3 "${ROOT}/tools/re2-benchmark/language/released_artifact.py" \
         --root "${ROOT}" --version "${REGULATOR_RELEASE_VERSION}" \
-        --classpath "${CLASSPATH}" --production-classes "${ROOT}/target/classes" \
+        --classpath "${CLASSPATH}" --production-classes "${CLASSES_DIR}/classes" \
         --destination "${RESULT_DIR}/release")
     cp "${RESULT_DIR}/release/release-artifact.json" "${RESULT_DIR}/release-artifact.json"
     printf 'release_version=%s\nrelease_artifact_sha256=%s\n' \
@@ -427,15 +430,10 @@ run_semantic_verifier()
     "$@" 2>&1 | tee -a "${semantic_log}" || semantic_failure "${description} failed"
 }
 semantic_report_dir="${RESULT_DIR}/semantic-reports"
-default_semantic_report_dir="${ROOT}/target/surefire-reports"
 mkdir -p "${semantic_report_dir}"
-mkdir -p "${default_semantic_report_dir}"
-find "${default_semantic_report_dir}" -mindepth 1 -delete
 expected_native_access=false
-semantic_java_options='--illegal-native-access=deny'
 if [[ "${ROUTE}" == native-access ]]; then
     expected_native_access=true
-    semantic_java_options='--enable-native-access=ALL-UNNAMED --illegal-native-access=deny'
 fi
 : > "${semantic_log}"
 run_semantic_verifier "DFA absolute-pointer probe" \
@@ -444,7 +442,7 @@ run_semantic_verifier "DFA absolute-pointer probe" \
     -Dio.airlift.regulator.dfa.native-reader-probe="${expected_native_access}" \
     -cp "${CLASSPATH}" \
     io.airlift.regulator.DfaAbsolutePointerProbe "${expected_native_access}"
-# Units of one shard on one host share a route's Surefire semantic tests. The
+# Units of one shard on one host share a route's semantic tests. The
 # receipt is keyed by the host epoch and candidate identity and verified by
 # hash; each unit still runs the native probe above and its handler's own
 # preparation and verifiers below.
@@ -464,7 +462,8 @@ if [[ -n "${unit_host_epoch}" ]]; then
             "engine_content_sha256=${source_hash_before}" \
             "manifest_sha256=${manifest_sha256}" \
             "regulator_snapshot_sha256=${REGULATOR_SNAPSHOT_SHA256:-}" \
-            "release_version=${REGULATOR_RELEASE_VERSION:-}" |
+            "release_version=${REGULATOR_RELEASE_VERSION:-}" \
+            "regulator_classes_build=${regulator_classes_build}" |
             sha256sum |
             awk '{print $1}')
     semantic_receipt_directory="${SHARED_WORK_DIR}/semantic-receipts/${semantic_receipt_key}"
@@ -473,7 +472,7 @@ fi
 semantic_receipt_is_valid()
 {
     local directory=$1
-    [[ -s "${directory}/receipt.sha256" && -s "${directory}/surefire.log" ]] || return 1
+    [[ -s "${directory}/receipt.sha256" && -s "${directory}/launcher.log" ]] || return 1
     compgen -G "${directory}/reports/TEST-*.xml" >/dev/null || return 1
     # The receipt must list exactly the files it holds, each with its hash.
     [[ "$(cd "${directory}" && find . -type f ! -name receipt.sha256 | sed 's|^[.]/||' | sort)" == \
@@ -484,11 +483,11 @@ semantic_receipt_is_valid()
 store_semantic_receipt()
 {
     local directory=$1
-    local surefire_log=$2
+    local launcher_log=$2
     local staging="${directory}.staging"
     rm -rf "${staging}" "${directory}"
     mkdir -p "${staging}/reports"
-    cp "${surefire_log}" "${staging}/surefire.log"
+    cp "${launcher_log}" "${staging}/launcher.log"
     cp "${semantic_report_dir}"/TEST-*.xml "${staging}/reports/"
     (cd "${staging}" && find . -type f | sed 's|^[.]/||' | sort | xargs sha256sum) > "${RESULT_DIR}/semantic-receipt.sha256"
     cp "${RESULT_DIR}/semantic-receipt.sha256" "${staging}/receipt.sha256"
@@ -496,26 +495,36 @@ store_semantic_receipt()
 }
 
 if [[ -n "${semantic_receipt_directory}" ]] && semantic_receipt_is_valid "${semantic_receipt_directory}"; then
-    cat "${semantic_receipt_directory}/surefire.log" >> "${semantic_log}"
+    cat "${semantic_receipt_directory}/launcher.log" >> "${semantic_log}"
     cp "${semantic_receipt_directory}"/reports/TEST-*.xml "${semantic_report_dir}/"
     cp "${semantic_receipt_directory}/receipt.sha256" "${RESULT_DIR}/semantic-receipt.sha256"
     semantic_receipt=cached
 else
-    surefire_logs=("${semantic_log}")
+    launcher_logs=("${semantic_log}")
     if [[ -n "${semantic_receipt_directory}" ]]; then
-        surefire_logs+=("${RESULT_DIR}/logs/semantic-surefire.log")
+        launcher_logs+=("${RESULT_DIR}/logs/semantic-launcher.log")
     fi
+    # The JUnit console launcher runs the requested test classes, named as
+    # Surefire's -Dtest names them, from the installed test classes in
+    # ${CLASSES_DIR}/test-classes, with the source root as its working
+    # directory, and writes their reports in Surefire's XML format.
     (
         cd "${ROOT}" &&
-            JDK_JAVA_OPTIONS="${semantic_java_options}" \
-                ./mvnw "${MAVEN_ARGS[@]}" -q \
-                -Dtest="${semantic_tests}" test
-    ) 2>&1 | tee -a "${surefire_logs[@]}" || semantic_failure "Semantic tests failed"
-    compgen -G "${default_semantic_report_dir}/TEST-*.xml" >/dev/null ||
-        semantic_failure "Semantic tests produced no Surefire XML reports"
-    cp "${default_semantic_report_dir}"/TEST-*.xml "${semantic_report_dir}/"
+            java "${route_jvm_arguments[@]}" \
+                -cp "${CLASSPATH}:${CLASSES_DIR}/lib/junit-platform-console-standalone.jar" \
+                org.junit.platform.console.ConsoleLauncher execute \
+                --disable-banner \
+                --details=summary \
+                --fail-if-no-tests \
+                --include-engine=junit-jupiter \
+                --scan-class-path="${CLASSES_DIR}/test-classes" \
+                --include-classname="^(.+\.)?(${semantic_tests//,/|})\$" \
+                --reports-dir="${semantic_report_dir}"
+    ) 2>&1 | tee -a "${launcher_logs[@]}" || semantic_failure "Semantic tests failed"
+    compgen -G "${semantic_report_dir}/TEST-*.xml" >/dev/null ||
+        semantic_failure "Semantic tests produced no XML reports"
     if [[ -n "${semantic_receipt_directory}" ]]; then
-        store_semantic_receipt "${semantic_receipt_directory}" "${RESULT_DIR}/logs/semantic-surefire.log"
+        store_semantic_receipt "${semantic_receipt_directory}" "${RESULT_DIR}/logs/semantic-launcher.log"
     fi
 fi
 if [[ -n "${semantic_receipt_directory}" ]]; then
@@ -526,20 +535,22 @@ fi
 prepare_pinned_trino()
 {
     PINNED_TRINO_WORK_DIR="${SHARED_WORK_DIR}/pinned-trino"
-    mkdir -p "${PINNED_TRINO_WORK_DIR}"
-    # First check only the harness's identity and provenance; a harness that
-    # fails, before any semantic check runs against it, is replaced by a local
-    # build. Once its semantic verifiers have run, their verdict below is final.
+    # First check only the prebuilt harness's identity and provenance; a
+    # harness that fails, before any semantic check runs against it, fails the
+    # route as a missing engine does. Once its semantic verifiers have run,
+    # their verdict below is final.
+    trino_harness_build=$(prebuilt_engine trino) || {
+        echo "The host has no prebuilt Trino harness from its engine build" >&2
+        exit 1
+    }
     if ! TRINO_COMPARATOR_IDENTITY_ONLY=true \
             TRINO_COMPARATOR_NATIVE_ACCESS="${expected_native_access}" \
             TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
             "${ROOT}/tools/re2-benchmark/trino-joni/verify.sh" \
             >> "${semantic_log}" 2>&1; then
-        rm -f "${SHARED_WORK_DIR}/engine-build/trino.sha256"
-        TRINO_COMPARATOR_IDENTITY_ONLY=true TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
-            "${ROOT}/tools/re2-benchmark/trino-joni/prepare.sh" 2>&1 | tee -a "${semantic_log}"
+        echo "The prebuilt Trino harness failed its identity check; see ${semantic_log}" >&2
+        exit 1
     fi
-    trino_harness_build=$(prebuilt_engine trino || echo local)
     run_semantic_verifier "Pinned Trino comparator verifier" \
         env TRINO_COMPARATOR_IDENTITY_ONLY=false TRINO_COMPARATOR_NATIVE_ACCESS="${expected_native_access}" \
         TRINO_COMPARATOR_WORK_DIR="${PINNED_TRINO_WORK_DIR}" \
@@ -610,19 +621,12 @@ prepare_specialized_native()
         rust-regex) runner_name=language_rust_benchmark ;;
         *) echo "No native runner for comparator ${specialized_comparator}" >&2; exit 1 ;;
     esac
-    native_runner_build=$(prebuilt_engine native || echo local)
+    # Unit hosts install no Rust or C++ toolchain; the engine build's runner serves them.
+    native_runner_build=$(prebuilt_engine native) || {
+        echo "The host has no prebuilt native comparator runners from its engine build" >&2
+        exit 1
+    }
     NATIVE_RUNNER="${SHARED_WORK_DIR}/language-native/${runner_name}"
-    if [[ "${native_runner_build}" == local ]]; then
-        # Unit hosts install no Rust toolchain; the engine build's runner serves them.
-        if [[ "${runner_name}" == language_rust_benchmark ]] && ! command -v cargo >/dev/null; then
-            echo "${specialized_comparator} needs the engine build's runner or a local cargo" >&2
-            exit 1
-        fi
-        local build_directory="${SHARED_WORK_DIR}/language-native-local"
-        RE2_NATIVE_TUNING=generic RE2_BENCHMARK_TARGETS="${runner_name}" RE2_BENCHMARK_BUILD_DIR="${build_directory}" \
-            "${ROOT}/tools/re2-benchmark/build.sh" 2>&1 | tee "${RESULT_DIR}/logs/native-build.log"
-        NATIVE_RUNNER="${build_directory}/${runner_name}"
-    fi
     NATIVE_INPUT_DIR="${RESULT_DIR}/generated/specialized-native"
     run_semantic_verifier "Specialized ${specialized_comparator} inputs" \
         java "${route_jvm_arguments[@]}" -cp "${CLASSPATH}" \

@@ -1,9 +1,9 @@
 # AWS baseline qualification
 
 The AWS tools run one kind of job, a `unit-worker`. Full qualification first
-builds each platform's Trino harness and native runners once, as a build-phase
-work unit, then measures baseline and language work units on unit workers. This
-guide gives the baseline commands; see the
+builds each platform's candidate classes, Trino harness, and native runners
+once, as a build-phase work unit, then measures baseline and language work
+units on unit workers. This guide gives the baseline commands; see the
 [language guide](../language/README.md) for language collection.
 
 `baseline/run-campaign.py` plans and controls the engine build, the smoke,
@@ -406,16 +406,26 @@ aws s3api put-bucket-tagging --bucket <bucket> --region <region> \
 
 ### Engine builds
 
-The `build` phase builds the pinned Trino harness once per platform, exactly as
-a baseline host would, and the native comparison runners from the candidate's
+The `build` phase builds, once per platform, the candidate's classes, the
+pinned Trino harness, and the native comparison runners from the candidate's
 sources: native RE2 (`language_benchmark`) and the Rust `regex` crate
 (`language_rust_benchmark`), and their bulk runners for language units, with
 generic tuning, each beside its build receipt. It freezes them in
-`trino.tar.gz` and `native.tar.gz` under a manifest, `engine-build.json`. The
-manifest lists each archive's SHA-256 and per-file hashes, and its inputs: the
-candidate, the Trino commit, and the build scripts. The build checks only the
-harness's identity and provenance; the semantic verifiers run in every measuring
-route, where a failure is final rather than retried.
+`classes.tar.gz`, `trino.tar.gz`, and `native.tar.gz` under a manifest,
+`engine-build.json`. The manifest lists each archive's SHA-256 and per-file
+hashes, and its inputs: the candidate, the Trino commit, and the build scripts.
+The build checks only the harness's identity and provenance; the semantic
+verifiers run in every measuring route, where a failure is final rather than
+retried.
+
+The classes archive holds `regulator-classes/` with the candidate's `classes/`
+and `test-classes/`, its test-scope dependency jars in `lib/`, and
+`classpath.txt`, their classpath relative to `regulator-classes/`. Its `lib/`
+also holds `junit-platform-console-standalone.jar`, the JUnit console launcher
+of the project's JUnit Platform version, which runs a route's semantic tests;
+it is not on the classpath. The harness's classpath names the installed
+candidate classes and jars rather than the builder's Maven output, so measuring
+hosts neither run Maven nor fill a Maven repository.
 
 The build phase's unit, `engine-build`, runs replica 1 on every platform and is
 estimated at 900 seconds, so it fits a Spot lease. Its workers install no
@@ -436,16 +446,17 @@ candidate and archive, made by the same build scripts from the pinned Trino
 commit, on each platform's pinned architecture and instance type. Each
 platform's manifest SHA-256 is frozen in `execution-policy.json`, and primary
 and confirmation refuse a prerequisite that used different builds. A language
-unit worker runs the native runners of its platform's engine build.
+unit worker runs the candidate classes and native runners of its platform's
+engine build.
 
 Hosts check each downloaded archive with `sha256sum --check`, then verify the
 archive and each installed file against the manifest; a mismatch fails the
-session. Every measuring unit worker installs both archives, while a build
-phase's worker installs none and builds its own: the runners land in
-`language-native/` under the shared work directory, and
-`engine-build/<archive>.sha256` marks each installed archive.
-`engine-build.txt` records the installed build beside the host evidence and in
-each route.
+session. Every measuring unit worker installs all three archives, while a
+build phase's worker installs none and builds its own: the candidate classes
+land in `regulator-classes/` and the runners in `language-native/` under the
+shared work directory, and `engine-build/<archive>.sha256` marks each installed
+archive. `engine-build.txt` records the installed build beside the host
+evidence and in each route.
 
 Preflight names each allowed region that lacks the shared transfer bucket
 `--engine-builds` requires. Before it launches any host,

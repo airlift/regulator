@@ -486,7 +486,7 @@ class UnitFixture:
         report.write_text("<testsuite/>\n")
         (directory / "semantic-receipt.sha256").write_text(
             f"{hashlib.sha256(report.read_bytes()).hexdigest()}  reports/TEST-Fixture.xml\n"
-            f"{'d' * 64}  surefire.log\n")
+            f"{'d' * 64}  launcher.log\n")
         if representatives:
             SHARD_RESULTS.write_tsv(
                 directory / "protocol-qualification.tsv", PROTOCOL_QUALIFICATION_FIELDS, [{

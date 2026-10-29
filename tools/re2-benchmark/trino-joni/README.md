@@ -46,8 +46,12 @@ tools/re2-benchmark/trino-joni/verify.sh
 
 With `TRINO_COMPARATOR_IDENTITY_ONLY=true`, both stop verifying after the
 harness's identity and provenance checks, before any semantic verifier runs.
-A baseline unit uses this to decide whether to rebuild a prebuilt harness, and
-then runs the full verification once.
+The engine build uses this when it builds the harness. A baseline unit uses it
+to check its prebuilt harness, failing on a mismatch, and then runs the full
+verification once. The engine build points the harness's classpath at its
+packaged Regulator classes and dependencies instead of the builder's
+`target/` and Maven repository, so a measuring host runs it without building
+Regulator.
 
 `TRINO_COMPARATOR_TRINO_GIT_SOURCE` may point to a local Trino Git repository
 to avoid downloading objects. The source repository is read only; the pinned
