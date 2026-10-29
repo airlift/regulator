@@ -135,7 +135,7 @@ final class JavaRegexpParser
                 if (character < 0 || isAsciiLetter(character)) {
                     rewrite.append(character, originalOffset);
                 }
-                else if (character >= '0' && character <= '9') {
+                else if (isAsciiDigit(character)) {
                     if (beginQuote) {
                         rewrite.append((byte) '\\', originalOffset);
                         rewrite.append((byte) 'x', originalOffset);
@@ -192,6 +192,11 @@ final class JavaRegexpParser
     private static boolean isAsciiLetter(int character)
     {
         return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z');
+    }
+
+    private static boolean isAsciiDigit(int value)
+    {
+        return value >= '0' && value <= '9';
     }
 
     @SuppressWarnings("CharUsedInArithmeticContext")
@@ -502,10 +507,6 @@ final class JavaRegexpParser
                 }
                 int nextByte = peekByte();
                 if (nextByte == '*' || nextByte == '+' || nextByte == '?' || nextByte == '{') {
-                    if (nextByte == '{' && !isValidRepeatBrace()) {
-                        throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, errorArgAtCurrent());
-                    }
-
                     // Stacked repetition operators are a syntax error in Perl extensions mode.
                     // In non-Perl extensions mode, they are allowed and will be simplified later.
                     if (appliedRepeat && (flags & Regexp.PERL_EXTENSIONS) != 0) {
@@ -519,61 +520,6 @@ final class JavaRegexpParser
             }
 
             return atom;
-        }
-
-        private boolean isValidRepeatBrace()
-        {
-            // Lookahead validation for repeat braces, matching C++ MaybeParseRepetition behavior.
-            // Returns false if the syntax is invalid, causing '{' to be treated as literal.
-            // C++ RE2 disallows leading zeros in repeat counts (e.g., {01} or {1,02}).
-            int position = index + 1;
-
-            // First number must exist and start with digit
-            if (position >= end) {
-                return false;
-            }
-            int firstByte = bytes[position] & 0xFF;
-            if (firstByte < '0' || firstByte > '9') {
-                return false;
-            }
-
-            // Skip first number digits
-            while (position < end && (bytes[position] & 0xFF) >= '0' && (bytes[position] & 0xFF) <= '9') {
-                position++;
-            }
-            position = ignoredPatternEnd(position);
-
-            if (position >= end) {
-                return false;
-            }
-
-            int separatorByte = bytes[position] & 0xFF;
-            if (separatorByte == ',') {
-                position++;
-                position = ignoredPatternEnd(position);
-                if (position >= end) {
-                    return false;
-                }
-                int secondNumberByte = bytes[position] & 0xFF;
-                separatorByte = secondNumberByte;
-                if (secondNumberByte != '}') {
-                    // Second number must exist and be valid
-                    if (secondNumberByte < '0' || secondNumberByte > '9') {
-                        return false;
-                    }
-                    // Skip second number digits
-                    while (position < end && (bytes[position] & 0xFF) >= '0' && (bytes[position] & 0xFF) <= '9') {
-                        position++;
-                    }
-                    position = ignoredPatternEnd(position);
-                    if (position >= end) {
-                        return false;
-                    }
-                    separatorByte = bytes[position] & 0xFF;
-                }
-            }
-
-            return separatorByte == '}';
         }
 
         private Regexp applyRepeat(Regexp atom, boolean atomHasCaptures)
@@ -603,7 +549,7 @@ final class JavaRegexpParser
             }
             else if (op == '{') {
                 repetitionOperator = RepetitionOperator.REPEAT;
-                int[] repetitionCounts = parseRepetitionCounts();
+                int[] repetitionCounts = parseRepetitionCounts(repetitionStart);
                 min = repetitionCounts[0];
                 max = repetitionCounts[1];
             }
@@ -729,35 +675,27 @@ final class JavaRegexpParser
             return (nonEmptyRepetitions != null && nonEmptyRepetitions.contains(repetition)) ? EmptyMatch.CANNOT_MATCH_EMPTY : EmptyMatch.DEPENDS_ON_CHILDREN;
         }
 
-        private int[] parseRepetitionCounts()
+        // Reads the counts after '{' as the JDK's closure does: the character right after the brace
+        // as written, but in comments mode every later character past whitespace and comments, so
+        // that (?x)a{1 2} is a{12} while (?x)a{ 1} is an error. A malformed count is an error rather
+        // than literal text.
+        private int[] parseRepetitionCounts(int braceStart)
         {
-            int minRepetitions = parseDecimal();
-            int maxRepetitions = minRepetitions;
-            skipIgnoredPatternCharacters();
-
-            if (atEnd()) {
-                throw error(RegexpParseErrorCode.MISSING_BRACKET, patternSegment(index - 1, 1));
+            if (atEnd() || !isAsciiDigit(peekByte())) {
+                throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, patternSegment(braceStart, index - braceStart));
             }
-
-            if (peekByte() == ',') {
+            int minRepetitions = parseRepetitionCount();
+            int maxRepetitions = minRepetitions;
+            if (!atEnd() && peekByte() == ',') {
                 consumeByte(',');
                 skipIgnoredPatternCharacters();
-                if (peekByte() == '}') {
-                    maxRepetitions = -1;
-                }
-                else {
-                    maxRepetitions = parseDecimal();
-                    skipIgnoredPatternCharacters();
-                }
+                maxRepetitions = (!atEnd() && peekByte() == '}') ? -1 : parseRepetitionCount();
             }
+            if (atEnd() || peekByte() != '}') {
+                throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, patternSegment(braceStart, index - braceStart));
+            }
+            consumeByte('}');
 
-            if (atEnd() || consumeByte() != '}') {
-                throw error(RegexpParseErrorCode.MISSING_BRACKET, errorArgAtCurrent());
-            }
-
-            if (minRepetitions < 0 || maxRepetitions < -1) {
-                throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, null);
-            }
             if (maxRepetitions != -1 && maxRepetitions < minRepetitions) {
                 throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, null);
             }
@@ -840,22 +778,20 @@ final class JavaRegexpParser
             Slice name = null;
             int captureIndex = -1;
 
+            // As in the JDK's group0, in comments mode whitespace and comments may separate '(' from
+            // '?', but the character after '?' is read as written. The name of (?<name>...) and a
+            // lookbehind's '=' or '!' are read past whitespace and comments again.
+            skipIgnoredPatternCharacters();
             if (!atEnd() && peekByte() == '?') {
                 if ((flags & Regexp.PERL_EXTENSIONS) == 0) {
                     // Perl-style group syntax is only available under Perl extensions.
-                    throw error(RegexpParseErrorCode.BAD_PERL_OP, patternSegment(groupStart, 2));
+                    throw error(RegexpParseErrorCode.BAD_PERL_OP, patternSegment(groupStart, index - groupStart + 1));
                 }
                 consumeByte('?');
                 if (!atEnd()) {
                     int c = peekByte();
                     if (c == '=' || c == '!') {
                         throw unsupportedConstruct("lookahead", groupStart, index + 1);
-                    }
-                    if (c == '<' && index + 1 < end) {
-                        int c2 = bytes[index + 1] & 0xFF;
-                        if (c2 == '=' || c2 == '!') {
-                            throw unsupportedConstruct("lookbehind", groupStart, index + 2);
-                        }
                     }
                     if (c == '>') {
                         throw unsupportedConstruct("atomic groups", groupStart, index + 1);
@@ -869,9 +805,12 @@ final class JavaRegexpParser
                     throw error(RegexpParseErrorCode.BAD_PERL_OP, patternSegment(groupStart, index - groupStart + 1));
                 }
                 else if (!atEnd() && peekByte() == '<') {
-                    // (?<name>...)
                     consumeByte('<');
-                    name = parseCaptureName(groupStart, '>');
+                    skipIgnoredPatternCharacters();
+                    if (!atEnd() && (peekByte() == '=' || peekByte() == '!')) {
+                        throw unsupportedConstruct("lookbehind", groupStart, index + 1);
+                    }
+                    name = parseCaptureName(groupStart);
                 }
                 else {
                     // Inline flags like (?m), (?-m), (?s:...), (?U:...), ...
@@ -976,40 +915,33 @@ final class JavaRegexpParser
             return enabled ? flags | flag : flags & ~flag;
         }
 
-        private Slice parseCaptureName(int groupStart, int endDelimiter)
+        // Reads a capture name and its '>' as the JDK's groupname does: an ASCII letter, then ASCII
+        // letters and digits. In comments mode the caller skips whitespace and comments before the
+        // first letter, and this method skips them after each character of the name.
+        private Slice parseCaptureName(int groupStart)
         {
-            int nameStart = index;
-            int nameEnd = index;
-            while (nameEnd < end && (bytes[nameEnd] & 0xFF) != endDelimiter) {
-                nameEnd++;
-            }
-            if (nameEnd >= end) {
-                // Match upstream: error_arg is the remaining "(?P<name" / "(?<name" substring.
-                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, end - groupStart));
-            }
-
-            int nameLength = nameEnd - nameStart;
-            if (nameLength <= 0) {
-                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, null);
-            }
-
-            if (!isAsciiLetter(bytes[nameStart] & 0xFF)) {
-                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, (nameEnd - groupStart) + 1));
-            }
-            for (int nameIndex = nameStart + 1; nameIndex < nameEnd; nameIndex++) {
-                int character = bytes[nameIndex] & 0xFF;
-                if (!isAsciiLetter(character) && (character < '0' || character > '9')) {
-                    throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, (nameEnd - groupStart) + 1));
+            StringBuilder captureName = new StringBuilder();
+            while (true) {
+                if (atEnd()) {
+                    throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, end - groupStart));
                 }
+                int character = peekByte();
+                boolean valid = isAsciiLetter(character) || (!captureName.isEmpty() && isAsciiDigit(character));
+                if (!valid) {
+                    if (character == '>' && !captureName.isEmpty()) {
+                        break;
+                    }
+                    throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, index + runeByteWidthAt(index) - groupStart));
+                }
+                captureName.append((char) consumeByte());
+                skipIgnoredPatternCharacters();
             }
-
-            String captureName = new String(bytes, nameStart, nameLength, StandardCharsets.US_ASCII);
-            if (!captureNames.add(captureName)) {
-                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, (nameEnd - groupStart) + 1));
+            String name = captureName.toString();
+            if (!captureNames.add(name)) {
+                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, index + 1 - groupStart));
             }
-
-            index = nameEnd + 1;
-            return Slices.wrappedBuffer(bytes, nameStart, nameLength);
+            consumeByte('>');
+            return Slices.utf8Slice(name);
         }
 
         private Regexp parseCharClass()
@@ -2136,33 +2068,15 @@ final class JavaRegexpParser
                     value == 0x0B;
         }
 
-        private int parseDecimal()
+        // Reads the digits of a repetition count and the whitespace and comments after each one.
+        // A count above MAX_REPEAT reads as MAX_REPEAT + 1.
+        private int parseRepetitionCount()
         {
-            if (atEnd()) {
-                throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, null);
-            }
-
-            int firstDigit = peekByte();
-            if (firstDigit < '0' || firstDigit > '9') {
-                throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, null);
-            }
-
             int value = 0;
-            boolean overflow = false;
-            while (!atEnd()) {
-                int nextByte = peekByte();
-                if (nextByte < '0' || nextByte > '9') {
-                    break;
-                }
-                consumeByte();
-                if (!overflow) {
-                    value = value * 10 + (nextByte - '0');
-                    if (value > MAX_REPEAT) {
-                        overflow = true;
-                    }
-                }
+            while (!atEnd() && isAsciiDigit(peekByte())) {
+                value = Math.min(value * 10 + (consumeByte() - '0'), MAX_REPEAT + 1);
+                skipIgnoredPatternCharacters();
             }
-
             return value;
         }
 

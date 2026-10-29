@@ -28,7 +28,9 @@ ACCEPT	(?m)abc	Java multiline anchors are supported
 ACCEPT	(?d)abc	Unix-lines mode is supported
 ACCEPT	(?u)abc	Unicode case-insensitive mode uses Java simple folding
 ACCEPT	(?U)abc	Unicode character-class mode uses the database's classes
-ACCEPT	(?x)abc	Java comments mode is supported throughout the grammar
+ACCEPT	(?x)abc	Java comments mode is supported
+ACCEPT	(?x)a{1 2}	In comments mode whitespace may follow the first digit of a repetition count
+REJECT	(?x)(? <n>a)	In comments mode the JDK reads the character after (? as written
 REJECT	\R	Java linebreak escape requires atomic CRLF behavior under repetition
 ACCEPT	[\Qabc\E]	Quoted character-class atoms are supported
 REJECT	[\R-z]	Linebreak escape is not legal inside a Java character class

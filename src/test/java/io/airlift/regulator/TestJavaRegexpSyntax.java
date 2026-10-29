@@ -44,6 +44,10 @@ public class TestJavaRegexpSyntax
         // The quote rewrite parses [a\. from [\Qa.\E, but the error reports the original bytes and offset.
         byte[] bytes = "xx[\\Qa.\\E".getBytes(UTF_8);
         assertError(Slices.wrappedBuffer(bytes, 2, bytes.length - 2), RegexpParseErrorCode.MISSING_BRACKET, 7, "[\\Qa.\\E");
+        // A duplicate capture name is reported at its '>', where the JDK reports it.
+        assertError(Slices.utf8Slice("(?<a>x)(?<a>y)"), RegexpParseErrorCode.BAD_NAMED_CAPTURE, 11, "(?<a>");
+        // A segment ends at the end of a character.
+        assertError(Slices.utf8Slice("(?<é>a)"), RegexpParseErrorCode.BAD_NAMED_CAPTURE, 3, "(?<é");
     }
 
     @ParameterizedTest(name = "{0}")
@@ -131,7 +135,7 @@ public class TestJavaRegexpSyntax
 
     private static List<SyntaxCase> syntaxCases()
     {
-        return TsvTestData.load(SYNTAX_CASES, 3, 57).stream()
+        return TsvTestData.load(SYNTAX_CASES, 3, 59).stream()
                 .map(row -> new SyntaxCase(row.field(1), Expected.valueOf(row.field(0)), row.field(2)))
                 .toList();
     }
