@@ -23,14 +23,16 @@ final class DisjointSuffixRepeatMatcher
     private final long prefixLowMask;
     private final long prefixHighMask;
     private final int[] repeatedRanges;
+    private final boolean repeatedMatchesAllNonAscii;
     private final int repeatCount;
     private final Slice suffix;
 
-    private DisjointSuffixRepeatMatcher(long prefixLowMask, long prefixHighMask, int[] repeatedRanges, int repeatCount, int suffix)
+    private DisjointSuffixRepeatMatcher(long prefixLowMask, long prefixHighMask, int[] repeatedRanges, boolean repeatedMatchesAllNonAscii, int repeatCount, int suffix)
     {
         this.prefixLowMask = prefixLowMask;
         this.prefixHighMask = prefixHighMask;
         this.repeatedRanges = repeatedRanges;
+        this.repeatedMatchesAllNonAscii = repeatedMatchesAllNonAscii;
         this.repeatCount = repeatCount;
         this.suffix = Slices.wrappedBuffer((byte) suffix);
     }
@@ -72,11 +74,14 @@ final class DisjointSuffixRepeatMatcher
             }
         }
         int[] ranges = new int[2 * repeated.rangeCount()];
+        boolean matchesAllNonAscii = false;
         for (int index = 0; index < repeated.rangeCount(); index++) {
-            ranges[2 * index] = repeated.range(index).low();
-            ranges[2 * index + 1] = repeated.range(index).high();
+            RuneRange range = repeated.range(index);
+            ranges[2 * index] = range.low();
+            ranges[2 * index + 1] = range.high();
+            matchesAllNonAscii |= Compiler.holdsAllNonAscii(range);
         }
-        return new DisjointSuffixRepeatMatcher(lowMask, highMask, ranges, repeat.min(), last.rune());
+        return new DisjointSuffixRepeatMatcher(lowMask, highMask, ranges, matchesAllNonAscii, repeat.min(), last.rune());
     }
 
     long estimatedRetainedSize()
@@ -119,12 +124,8 @@ final class DisjointSuffixRepeatMatcher
             // B excludes the suffix. A backward check therefore stops before the previous
             // candidate, so failed candidates cannot repeatedly traverse the same long run.
             while (remaining > 0 && position > base + start) {
-                int previous = previousRuneStart(bytes, base + start, position);
+                int previous = previousRepeatedStart(bytes, base + start, position);
                 if (previous < 0) {
-                    break;
-                }
-                long decoded = Utf8.decode(bytes, previous, position);
-                if (!containsRepeated(Utf8.decodedCodePoint(decoded))) {
                     break;
                 }
                 position = previous;
@@ -141,6 +142,18 @@ final class DisjointSuffixRepeatMatcher
         return Dfa.SEARCH_NO_MATCH;
     }
 
+    /// Returns the start of the character that ends at `end` and starts at or after `start` when B
+    /// holds it, or `-1`.
+    private int previousRepeatedStart(byte[] bytes, int start, int end)
+    {
+        int previous = previousRuneStart(bytes, start, end);
+        if (previous >= 0) {
+            return containsRepeated(Utf8.decodedCodePoint(Utf8.decode(bytes, previous, end))) ? previous : -1;
+        }
+        long malformed = previousMalformedCharacter(bytes, start, end);
+        return malformed >= 0 && containsRepeated(Utf8.decodedCodePoint(malformed)) ? end - Utf8.decodedWidth(malformed) : -1;
+    }
+
     private static int previousRuneStart(byte[] bytes, int start, int end)
     {
         int position = end - 1;
@@ -153,9 +166,32 @@ final class DisjointSuffixRepeatMatcher
         }
         long decoded = Utf8.decode(bytes, position, end);
         int width = Utf8.decodedWidth(decoded);
-        // A malformed byte decodes to RUNE_ERROR with width one. A real encoded U+FFFD
-        // has width three and remains eligible if B contains it.
+        // A malformed byte decodes to RUNE_ERROR with width one, so this returns -1, and the
+        // caller reads it with previousMalformedCharacter. A real encoded U+FFFD has width three
+        // and remains eligible if B contains it.
         return width > 1 && position + width == end ? position : -1;
+    }
+
+    /// Returns the candidate character that ends at `end` and starts at or after `start` when
+    /// [#previousRuneStart] finds no valid character there, read as B's byte ranges would read it
+    /// and packed as [Utf8#decode] packs it, or `-1` when none ends there. The caller checks that
+    /// B holds it.
+    private long previousMalformedCharacter(byte[] bytes, int start, int end)
+    {
+        // Every non-ASCII byte sequence B accepts is a lead byte and at most three continuation
+        // bytes, so the nearest lead byte is the only place the character can start.
+        int position = end - 1;
+        int minimum = Math.max(start, end - 4);
+        while (position > minimum && (bytes[position] & 0xC0) == 0x80) {
+            position--;
+        }
+        if (bytes[position] >= 0 || Utf8.decodedWidth(Utf8.decode(bytes, position, end)) != 1) {
+            // An ASCII byte or a valid character that does not end at `end`.
+            return -1;
+        }
+        long decoded = Utf8.re2DecodeMalformed(bytes, position, end, repeatedMatchesAllNonAscii);
+        int width = Utf8.decodedWidth(decoded);
+        return width > 1 && position + width == end ? decoded : -1;
     }
 
     private boolean containsRepeated(int rune)
