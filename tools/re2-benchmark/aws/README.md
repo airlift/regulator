@@ -566,18 +566,16 @@ status 42, is still uploaded and marked, and the host takes its next lease. A
 The worker polls the instance metadata service (IMDSv2) every 5 seconds and
 after each of its S3 calls, so a stalled S3 call delays a notice by at most that
 one call, and a stop with a notice already arrived, or arriving during its final
-heartbeat, is an interruption:
-
-- A rebalance recommendation lets the running unit finish and upload, then
-  stops the host.
-- A Spot instance-action notice stops leasing and kills the running unit's
-  process group. The host uploads `events/<seq>-interrupted.tar.gz`, holding
-  `interruption.json` (`schema_version`, `host_session`, `sequence`,
-  `unit_id`, `replica_id`, `notice_time`, `action`, `action_time`) and the
-  partial unit directory, then exits 43; its user data uploads the host
-  evidence if the instance lasts. A unit whose marker had not landed never
-  completes. The wrapper classifies status 43 as `retryable-spot`, and a host
-  that vanishes without uploading is classified as any other host.
+heartbeat, is an interruption. A Spot instance-action notice stops leasing and
+kills the running unit's process group. The host uploads
+`events/<seq>-interrupted.tar.gz`, holding `interruption.json`
+(`schema_version`, `host_session`, `sequence`, `unit_id`, `replica_id`,
+`notice_time`, `action`, `action_time`) and the partial unit directory, then
+exits 43; its user data uploads the host evidence if the instance lasts. A unit
+whose marker had not landed never completes. The wrapper classifies status 43
+as `retryable-spot`, and a host that vanishes without uploading is classified
+as any other host. A rebalance recommendation is only a hint that EC2 may
+reclaim the instance, so the worker goes on leasing until the notice comes.
 
 The worker stops, with its reason in the final heartbeat and
 `worker-session.txt`, on:
@@ -587,7 +585,6 @@ The worker stops, with its reason in the final heartbeat and
 | `stop-lease` | it reads a stop lease | 0 |
 | `idle` | its next lease is absent for `UNIT_WORKER_IDLE_SECONDS` (600) | 0 |
 | `lifetime` | its lifetime has passed; no lease starts after it, a running unit finishes | 0 |
-| `rebalance` | a rebalance recommendation came during the last unit or wait | 0 |
 | `interrupted` | a Spot instance-action notice | 43 |
 | `invalid-lease`, `lease-unreadable`, `upload-failure` | a malformed lease, 12 failed lease reads in a row, or an upload still failing at its bound | 1 |
 
@@ -645,10 +642,6 @@ is retained, and is added to
   `interruption` event and requeues the unit for On-Demand only. A record
   that names no unit, from a notice while the host waited for its next lease,
   releases that lease without spending an attempt.
-- A Spot worker that stops for a rebalance recommendation before any of its
-  units reached a completion marker, or within 15 minutes of its launch, records
-  an `interruption` event with reason `rebalance-recommendation` and cools its
-  region for its pool, as a Spot launch without capacity does.
 - A heartbeat 30 minutes old, or 10 minutes old on an instance no longer
   running, marks the host lost: its started lease is requeued, an unstarted
   one is released, and its wrapper is stopped. Cleanup still recovers a

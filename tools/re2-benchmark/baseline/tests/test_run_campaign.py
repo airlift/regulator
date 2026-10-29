@@ -2247,8 +2247,7 @@ class FakeUnitHost:
     another host completed the same replica, or never, once no other host runs, and with
     "stall-interrupt" the stopped host reports an interruption of the lease instead. With
     "stall-semantic" the late completion is a semantic failure, and with "stall-semantic-early"
-    it lands as soon as another host leased the replica, before that host completes it. "rebalance"
-    stops the host before it fetches the lease, as a rebalance recommendation does. A host the
+    it lands as soon as another host leased the replica, before that host completes it. A host the
     fleet finds no Spot capacity for, or whose boot the fleet fails, exits before its first
     heartbeat, as the wrapper's launch does, and one whose inputs the fleet refuses exits
     before it launches. Every host that launched uploads its host archive
@@ -2347,8 +2346,6 @@ class FakeUnitHost:
         if lease.get("stop"):
             return self.exit(0)
         behavior = self.script.get(self.sequence)
-        if behavior == "rebalance":
-            return self.rebalance()
         self.heartbeat(lease["unit_id"])
         if behavior in ("interrupt", "silent-interrupt"):
             return self.interrupt(lease["unit_id"])
@@ -2359,18 +2356,6 @@ class FakeUnitHost:
             self.stalled = True
             return
         self.run(lease)
-
-    def rebalance(self):
-        evidence = self.session_directory / self.architecture / "re2-results"
-        evidence.mkdir(parents=True)
-        (evidence / "worker-session.txt").write_text(
-            f"host_session={self.session}\nstop_reason=rebalance\nlast_sequence={self.sequence}\n"
-            "stopped_at=2026-10-25T04:34:28Z\n")
-        (evidence / "environment-manifest.txt").write_text(
-            f"availability_zone={self.region}b\ninstance_pending_time=2026-10-25T04:33:30Z\n")
-        with (self.session_directory / "session.txt").open("a") as session:
-            session.write(f"{self.architecture}_availability_zone={self.region}b\n")
-        self.exit(0)
 
     def interrupt(self, unit_id):
         notice = json.dumps({"sequence": self.sequence, "unit_id": unit_id}).encode()
@@ -2773,23 +2758,6 @@ class TestUnitWorkers(unittest.TestCase):
             # While both regions cooled, the pool asked for On-Demand, which this budget refuses.
             self.assertIn("on-demand", [call.args[1].market for call in self.budget.reserve.call_args_list])
             self.assertGreaterEqual(third.launched_at - first.launched_at, RUN_CAMPAIGN.SPOT_REGION_COOL_DOWN_SECONDS)
-
-    def test_early_rebalance_moves_the_pools_spot_workers_to_another_region(self):
-        # Before its first unit, or a minute after launch with one unit done.
-        for sequence in (1, 2):
-            with self.subTest(sequence=sequence), tempfile.TemporaryDirectory() as temporary:
-                fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {sequence: "rebalance"}})
-                result_root = self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"],
-                                             2, 1, regions=["us-east-2", "us-west-2"])
-                rebalanced = fleet.hosts[0]
-                replacement = next(host for host in fleet.hosts[1:] if host.platform == rebalanced.platform)
-                self.assertEqual([("spot", "us-east-2"), ("spot", "us-west-2")],
-                                 [(host.market, host.region) for host in (rebalanced, replacement)])
-                with (result_root / "campaign-events.tsv").open(newline="") as events:
-                    event = next(csv.DictReader(events, delimiter="\t"))
-                self.assertEqual(("interruption", "rebalance-recommendation", "us-east-2", "us-east-2b", "9"),
-                                 (event["event_type"], event["reason"], event["region"],
-                                  event["availability_zone"], event["placement_score"]))
 
     def test_late_completion_after_requeue_is_superseded(self):
         with tempfile.TemporaryDirectory() as temporary:
