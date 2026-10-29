@@ -1617,7 +1617,7 @@ final class TrinoRegexpParser
                     case 'a' -> 0x07;
                     case 'e' -> 0x1B;
                     case 'C', 'E', 'H', 'Q', 'R', 'V', 'X', 'g', 'h', 'q' -> escapedByte;
-                    case 'c' -> parseControlEscape(sequenceStart);
+                    case 'c' -> parseControlEscape(flags, sequenceStart);
                     case 'x' -> parseTrinoHexEscape(flags, sequenceStart);
                     case 'u' -> parseTrinoUnicodeEscape(flags, sequenceStart);
                     case '0', '1', '2', '3', '4', '5', '6', '7' -> parseTrinoOctalEscape(escapedByte, sequenceStart);
@@ -1743,7 +1743,7 @@ final class TrinoRegexpParser
                 case 'f' -> literalFromRune('\f');
                 case 'a' -> literalFromRune(0x07);
                 case 'e' -> literalFromRune(0x1B);
-                case 'c' -> literalFromRune(parseControlEscape(sequenceStart));
+                case 'c' -> literalFromRune(parseControlEscape(flags, sequenceStart));
                 case 'x' -> literalFromRune(parseTrinoHexEscape(flags, sequenceStart));
                 case 'u' -> literalFromRune(parseTrinoUnicodeEscape(flags, sequenceStart));
                 case '0' -> literalFromRune(parseTrinoOctalEscape(escapedByte, sequenceStart));
@@ -1929,24 +1929,25 @@ final class TrinoRegexpParser
             return parseTrinoOctalEscape(firstDigit, sequenceStart);
         }
 
-        private int parseControlEscape(int sequenceStart)
+        private int parseControlEscape(int flags, int sequenceStart)
         {
-            // Joni maps an unescaped \c? to DEL and otherwise keeps the low five bits of the next character.
-            // It decodes an escaped character first, reading a control-character escape such as \n as that
-            // character and any other as itself. A nested \c is decoded by the loop, and masking again would
-            // change nothing, so the result is masked once.
+            // Joni maps an unescaped \c? to DEL and otherwise keeps bits 7 and 0-4 of the next whole
+            // character, so a non-ASCII character becomes a code point below U+00A0. It decodes an escaped
+            // character first, reading a control-character escape such as \n as that character and any other
+            // as itself. A nested \c is decoded by the loop, and masking again would change nothing, so the
+            // result is masked once.
             boolean escaped = false;
             while (true) {
                 if (atEnd()) {
                     throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
                 }
-                int character = consumeByte();
+                int character = readRune(flags);
                 if (character == '\\') {
                     if (atEnd()) {
                         throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
                     }
                     escaped = true;
-                    character = consumeByte();
+                    character = readRune(flags);
                     if (character == 'c') {
                         continue;
                     }
@@ -1961,9 +1962,6 @@ final class TrinoRegexpParser
                         case 'e' -> 0x1B;
                         default -> character;
                     };
-                }
-                if (character >= 0x80) {
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
                 }
                 if (character == '?' && !escaped) {
                     return 0x7F;

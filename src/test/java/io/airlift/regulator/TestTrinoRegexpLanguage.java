@@ -1227,8 +1227,12 @@ public class TestTrinoRegexpLanguage
                 new MatchCase("\\81", "81", true),
                 new MatchCase("(a)\\10", "a\u0008", true),
                 new MatchCase("[\\cA]", "\u0001", true),
-                // Joni keeps the low five bits after \c, maps \c? to DEL, and decodes an escape first.
+                // Joni keeps bits 7 and 0-4 of the whole character after \c, maps \c? to DEL, and decodes an
+                // escape first.
                 new MatchCase("\\ca", "\u0001", true),
+                new MatchCase("\\cé", "\u0089", true),
+                new MatchCase("[\\c😀]", "\u0000", true),
+                new MatchCase("\\c\\中", "\r", true),
                 new MatchCase("\\c?", "\u007F", true),
                 new MatchCase("\\c\\c?", "\u001F", true),
                 new MatchCase("\\c-", "\r", true),
