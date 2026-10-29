@@ -25,7 +25,7 @@ import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.util.Objects.requireNonNull;
 
 /// One case-folding rule and its data. Each compiled pattern carries the rule of its language,
-/// and every case-insensitive construct of the pattern is folded with it.
+/// and the language's front end decides which constructs fold with it.
 ///
 /// A rule is a simple fold, which maps each code point to the code point of its case class, plus
 /// an optional set of multi-character folds. Code points with the same simple fold form an orbit,

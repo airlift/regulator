@@ -565,7 +565,7 @@ public class TestJavaRegexpDifferential
     @Test
     public void testPropertyCaseFoldingMatchesJava25()
     {
-        List<String> inputs = List.of("a", "A", "é", "É", "ǅ", "ẖ", "ª", "K", "ı", "ſ", "1", "\n", "💰");
+        List<String> inputs = List.of("a", "A", "é", "É", "ǅ", "ẖ", "ª", "K", "ı", "İ", "ſ", "1", "\n", "💰");
         for (String property : List.of(
                 "Lu",
                 "Ll",
@@ -601,6 +601,19 @@ public class TestJavaRegexpDifferential
         assertMatchesJava25("(?i)[\\P{Lower}&&a]", OptionProfile.DEFAULT, inputs);
         assertMatchesJava25("(?i:\\p{Lower})(?-i:\\p{Lower})", OptionProfile.DEFAULT, List.of("Aa", "AA", "aa"));
         assertMatchesJava25("(?iu)[a-z]", OptionProfile.DEFAULT, inputs);
+    }
+
+    @Test
+    public void testPredefinedClassCaseFoldingMatchesJava25()
+    {
+        // Java never folds a predefined class: under Unicode case folding without Unicode character
+        // classes, \w matches none of the non-ASCII case partners of its letters.
+        List<String> inputs = List.of("a", "A", "é", "É", "ǅ", "ẖ", "ª", "K", "ı", "İ", "ſ", "1", "\n", "💰");
+        for (String expression : List.of("\\w", "\\W", "[\\w]", "[^\\w]", "[\\W]")) {
+            for (String flags : List.of("(?i)", "(?iu)", "(?iU)")) {
+                assertMatchesJava25(flags + expression, OptionProfile.DEFAULT, inputs);
+            }
+        }
     }
 
     @Test
