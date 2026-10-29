@@ -845,6 +845,9 @@ final class JavaRegexpParser
         {
             int inlineFlags = base;
             boolean clearing = false;
+            // Track 'c' only within this flag header; a completed header that leaves it enabled is
+            // rejected below.
+            boolean canonicalEquivalence = false;
 
             while (!atEnd()) {
                 if ((inlineFlags & Regexp.JAVA_COMMENTS) != 0) {
@@ -861,6 +864,10 @@ final class JavaRegexpParser
                     break;
                 }
                 if (c == '-') {
+                    if (clearing) {
+                        // As in the JDK's addFlag, the flags after '-' end at a second '-'.
+                        break;
+                    }
                     consumeByte('-');
                     clearing = true;
                     continue;
@@ -875,10 +882,14 @@ final class JavaRegexpParser
                     case 'u' -> inlineFlags = setUnicodeCase(inlineFlags, !clearing);
                     case 'U' -> inlineFlags = setUnicodeCharacterClasses(inlineFlags, !clearing);
                     case 'x' -> inlineFlags = setFlag(inlineFlags, Regexp.JAVA_COMMENTS, !clearing);
+                    case 'c' -> canonicalEquivalence = !clearing;
                     default -> throw error(RegexpParseErrorCode.BAD_PERL_OP, patternSegment(groupStart, index - groupStart));
                 }
             }
 
+            if (canonicalEquivalence && !atEnd() && (peekByte() == ')' || peekByte() == ':')) {
+                throw unsupportedConstruct("canonical equivalence", groupStart, index + 1);
+            }
             return inlineFlags;
         }
 

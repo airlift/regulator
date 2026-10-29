@@ -75,7 +75,7 @@ The JDK's `start()` and `end()` then still report that empty match while
 | Predefined classes | ASCII and Unicode forms of digit, whitespace, word, horizontal-whitespace, vertical-whitespace, and POSIX classes |
 | Unicode properties | Categories, scripts, blocks, binary properties, and `java...` properties from the pinned Unicode 18.0 database |
 | Escapes | Quoting, hexadecimal, Unicode, octal, control, named-code-point, horizontal-whitespace, and vertical-whitespace escapes; a backslash also escapes any character other than an ASCII letter or digit |
-| Inline flags | `d`, `i`, `m`, `s`, `u`, `U`, and `x`, including scoped forms |
+| Inline flags | `d`, `i`, `m`, `s`, `u`, `U`, and `x`, including scoped forms; the canonical-equivalence flag `c` may be cleared, as in `(?-c)` and `(?c-c)`, but `(?c)` raises `UNSUPPORTED_CONSTRUCT` |
 
 As in the JDK, `\Q...\E` quotes are rewritten into escapes before the pattern
 is parsed, without regard to character classes or comments. An unfinished

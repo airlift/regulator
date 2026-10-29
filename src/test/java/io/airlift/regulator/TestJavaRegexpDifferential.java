@@ -456,6 +456,18 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
+    public void testInlineFlagsMatchJava25()
+    {
+        // Canonical equivalence is off unless a flag group turns it on, so clearing it changes nothing.
+        for (String pattern : List.of("(?-c)a", "(?c-c)a", "(?i-c:a)")) {
+            assertMatchesJava25(pattern, OptionProfile.DEFAULT, List.of("a", "A", "b"));
+        }
+        assertRejectsJava25("(?c", OptionProfile.DEFAULT, RegexpParseErrorCode.MISSING_PAREN);
+        // The flags after '-' end at a second '-'.
+        assertRejectsJava25("(?i-m-s)a", OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_PERL_OP);
+    }
+
+    @Test
     public void testEscapesMatchJava25()
     {
         // A backslash before any non-ASCII character escapes it, inside and outside a class.
