@@ -86,6 +86,20 @@ ends. Error offsets refer to the pattern as written.
 In comments mode, whitespace and comments are skipped exactly where the JDK
 skips them, which is not everywhere. `(?x)a{1 2}` is `a{12}`, but `(?x)a{ 1}`
 is an error; `(?x)( ?<n>a)` is a named group, but `(?x)(? <n>a)` is an error.
+In a character class, an `&` that whitespace or a comment separates from a
+character other than `&` is dropped, so `(?x)[& ]x]` matches `]` and `x`. As
+in the JDK, the class resumes one character before that next character. When a
+comment after the `&` ends at a line terminator other than LF or CR, such as
+U+2028, the terminator is a class member; if the comment has text after `#`,
+its last character is one too.
+
+As in the JDK, a class collects its single characters below U+0100 separately
+from its other members, and an intersection reads them when the class closes.
+An empty operand after `&&` keeps those characters when they are all the class
+has so far, keeps only the last member when that member was stored separately,
+and is otherwise an error, so `[ab&&]` matches `a` and `b`, `[bā&&]` matches
+only `ā`, and `[\db&&]` is an error. Under Unicode case folding, a few of those
+characters, such as `k` and `s`, count as other members.
 
 As in the JDK, a count with no atom before it repeats the empty match, so
 `{2}x` matches `x`. A count in atom position does so even right after another

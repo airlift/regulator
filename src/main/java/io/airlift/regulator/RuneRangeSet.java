@@ -26,6 +26,7 @@ import java.util.TreeMap;
 
 import static io.airlift.regulator.CharClass.RUNEMAX;
 import static java.lang.Math.max;
+import static java.lang.Math.min;
 
 // The set of a nested bracket class while its enclosing classes are open. A CharClassBuilder
 // copies a closed class into the enclosing one and rewrites its whole range list to negate or
@@ -161,6 +162,45 @@ final class RuneRangeSet
         // The complement lacks every rune above the given one only if the last stored range
         // covers them all.
         return storedHigh < RUNEMAX || storedLow > rune + 1;
+    }
+
+    // Returns a new set of the runes at or below the limit, leaving this set unchanged. It costs
+    // O(r) for the r stored ranges starting at or below the limit, plus O(log n) to find them. A
+    // builder first merges its pending ranges, a cost each range pays once.
+    public RuneRangeSet copyAtOrBelow(int runeLimit)
+    {
+        // The stored ranges, or for a complement the gaps between them, at or below the limit.
+        CharClassBuilder members = new CharClassBuilder();
+        int next = 0;
+        if (builder != null) {
+            int count = firstRangeFrom(runeLimit + 1);
+            for (int index = 0; index < count; index++) {
+                RuneRange range = builder.range(index);
+                next = copyStoredRange(members, next, range.low(), min(range.high(), runeLimit));
+            }
+        }
+        else {
+            for (Map.Entry<Integer, Integer> entry : ranges.headMap(runeLimit, true).entrySet()) {
+                next = copyStoredRange(members, next, entry.getKey(), min(entry.getValue(), runeLimit));
+            }
+        }
+        if (complemented) {
+            members.addRange(next, runeLimit);
+        }
+        return of(members);
+    }
+
+    // Adds a stored range, or for a complement the gap from next up to it, and returns the rune
+    // after the range.
+    private int copyStoredRange(CharClassBuilder members, int next, int low, int high)
+    {
+        if (complemented) {
+            members.addRange(next, low - 1);
+        }
+        else {
+            members.addRange(low, high);
+        }
+        return high + 1;
     }
 
     // Consumes the set and returns a builder holding it.

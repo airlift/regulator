@@ -971,282 +971,433 @@ final class JavaRegexpParser
         }
 
         // Nested classes keep their state on an explicit stack, as groups do in parseExpression,
-        // so nesting depth is not limited by the Java stack. Every level shares one atom cursor.
+        // so nesting depth is not limited by the Java stack. The levels follow the JDK's clazz and
+        // range, including which single characters collect in a level's bits.
         private CharClassBuilder parseCharClassBuilder(int nodeFlags)
         {
-            ClassAtomCursor atomCursor = new ClassAtomCursor();
             Deque<ClassFrame> classes = new ArrayDeque<>();
-            classes.push(openClass(atomCursor));
+            classes.push(openClass());
             while (true) {
                 ClassFrame frame = classes.peek();
-                if (parseClassUnion(nodeFlags, frame, atomCursor)) {
-                    classes.push(openClass(atomCursor));
+                skipIgnoredPatternCharacters();
+                if (atEnd()) {
+                    throw error(RegexpParseErrorCode.MISSING_BRACKET, patternSegment(frame.classStart, end - frame.classStart));
+                }
+                int nextByte = peekByte();
+                if (frame.readingRightOperand) {
+                    // The right operand of '&&' is a union of nested classes and of classes without
+                    // brackets. A class without brackets ends at a ']', which it leaves for the
+                    // class around it.
+                    if (nextByte == ']' || nextByte == '&') {
+                        if (!frame.finishIntersection()) {
+                            throw error(RegexpParseErrorCode.BAD_CHAR_CLASS, patternSegment(frame.classStart, index + 1 - frame.classStart));
+                        }
+                    }
+                    else if (nextByte == '[') {
+                        classes.push(openClass());
+                    }
+                    else {
+                        classes.push(new ClassFrame(frame.classStart, false, false));
+                    }
                     continue;
                 }
 
-                frame.finishUnion();
-                if (atomCursor.isIntersection()) {
-                    atomCursor.consumeIntersection();
-                    if (!atomCursor.atEnd() && !atomCursor.isClassEnd(false, true)) {
-                        frame.startIntersectionOperand();
+                if (nextByte == '[') {
+                    classes.push(openClass());
+                    continue;
+                }
+                if (nextByte == '&') {
+                    if (tryConsumeIntersection()) {
+                        frame.startIntersection();
                         continue;
                     }
-                }
-
-                if (atomCursor.atEnd() || !atomCursor.isClassEnd(false, false)) {
-                    throw error(RegexpParseErrorCode.MISSING_BRACKET, patternSegment(frame.classStart, end - frame.classStart));
-                }
-                consumeByte(']');
-
-                if (!frame.hasClassAtom) {
-                    throw error(RegexpParseErrorCode.BAD_CHAR_CLASS, patternSegment(frame.classStart, index - frame.classStart));
-                }
-                classes.pop();
-                if (classes.isEmpty()) {
-                    CharClassBuilder characterClassBuilder = frame.toCharClassBuilder();
-                    if (frame.negated) {
-                        characterClassBuilder.negate();
+                    skipIgnoredPatternCharacters();
+                    if (atEnd()) {
+                        throw error(RegexpParseErrorCode.MISSING_BRACKET, patternSegment(frame.classStart, end - frame.classStart));
                     }
-                    characterClassBuilder.removeAbove(Regexp.maxRune(nodeFlags));
-                    return characterClassBuilder;
                 }
-                RuneRangeSet characterClass = frame.toRuneRangeSet();
-                if (frame.negated) {
-                    characterClass.negate();
+                else if (nextByte == ']' && frame.hasMembers()) {
+                    if (frame.bracketed) {
+                        consumeByte(']');
+                    }
+                    classes.pop();
+                    ClassFrame parent = classes.peek();
+                    if (parent == null) {
+                        CharClassBuilder characterClassBuilder = frame.toCharClassBuilder();
+                        if (frame.negated) {
+                            characterClassBuilder.negate();
+                        }
+                        characterClassBuilder.removeAbove(Regexp.maxRune(nodeFlags));
+                        return characterClassBuilder;
+                    }
+                    RuneRangeSet characterClass = frame.toRuneRangeSet();
+                    if (frame.negated) {
+                        characterClass.negate();
+                    }
+                    characterClass.removeAbove(Regexp.maxRune(nodeFlags));
+                    if (parent.readingRightOperand) {
+                        parent.addRightOperand(ClassExpression.constant(characterClass));
+                    }
+                    else {
+                        parent.addMember(ClassExpression.constant(characterClass));
+                    }
+                    continue;
                 }
-                characterClass.removeAbove(Regexp.maxRune(nodeFlags));
-                ClassFrame parent = classes.peek();
-                parent.addNestedClass(characterClass);
+                parseClassRange(nodeFlags, frame);
             }
         }
 
-        private ClassFrame openClass(ClassAtomCursor atomCursor)
+        private ClassFrame openClass()
         {
             int classStart = index;
             consumeByte('[');
-            return new ClassFrame(classStart, atomCursor.tryConsumeNegation());
+            return new ClassFrame(classStart, true, tryConsumeNegation());
         }
 
-        // Adds members to the frame's current union until the union ends, or returns true at the
-        // '[' of a nested class.
-        private boolean parseClassUnion(int nodeFlags, ClassFrame frame, ClassAtomCursor atomCursor)
+        // Reads one member as the JDK's range does: a class escape, a range, or a single character.
+        // A single character below U+0100 joins the level's bits, except, under Unicode case
+        // folding, the characters with case partners outside Latin-1, which isUnicodeCaseSingle
+        // lists.
+        private void parseClassRange(int nodeFlags, ClassFrame frame)
         {
-            CharClassBuilder characterClassBuilder = frame.union;
-            while (!atomCursor.atEnd()) {
-                if (atomCursor.isClassEnd(frame.first, frame.intersectionOperand)) {
-                    break;
+            if (peekByte() == '\\') {
+                CharClassBuilder escapeClass = tryParseClassEscape(nodeFlags);
+                if (escapeClass != null) {
+                    frame.addMember(ClassExpression.constant(RuneRangeSet.of(escapeClass)));
+                    return;
                 }
-                if (atomCursor.isIntersection()) {
-                    break;
-                }
-                frame.first = false;
-
-                if (atomCursor.isNestedClass()) {
-                    return true;
-                }
-
-                if (tryParseClassEscape(nodeFlags, characterClassBuilder)) {
-                    frame.unionHasClassAtom = true;
-                    continue;
-                }
-
-                int low = atomCursor.parseLiteralRune(nodeFlags);
-                int high = low;
-                frame.unionHasClassAtom = true;
-
-                if (atomCursor.tryConsumeRangeOperator()) {
-                    high = atomCursor.parseLiteralRune(nodeFlags);
-                    if (high < low) {
-                        throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, null);
-                    }
-                }
-
-                // For explicit singletons/ranges, do not implicitly filter '\n' out.
-                characterClassBuilder.addRangeFlags(low, high, nodeFlags | Regexp.CLASS_NEWLINE, caseFolding);
             }
-            return false;
+
+            int low = parseLiteralRune(nodeFlags);
+            int high = low;
+            if (tryConsumeRangeOperator()) {
+                high = parseLiteralRune(nodeFlags);
+                if (high < low) {
+                    throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, null);
+                }
+            }
+            else if (low < 0x100 && !((nodeFlags & Regexp.FOLD_CASE) != 0 && isUnicodeCaseSingle(low))) {
+                frame.addBit(low, nodeFlags, caseFolding);
+                return;
+            }
+
+            // For explicit singletons/ranges, do not implicitly filter '\n' out.
+            CharClassBuilder member = new CharClassBuilder();
+            member.addRangeFlags(low, high, nodeFlags | Regexp.CLASS_NEWLINE, caseFolding);
+            frame.addMember(ClassExpression.constant(RuneRangeSet.of(member)));
         }
 
-        // One open bracket level: the intersection of its finished operands and the union of
-        // the operand being read. Java skips an operand without atoms, and the first operand
-        // with atoms becomes the base the later ones intersect. Nested classes and
-        // intersections combine as rune range sets, which pass to the enclosing class without
-        // copying. An outermost class with neither returns the builder of its members.
+        private static boolean isUnicodeCaseSingle(int rune)
+        {
+            return switch (rune) {
+                case 0xFF, 0xB5, 'I', 'i', 'S', 's', 'K', 'k', 0xC5, 0xE5, 0xDF -> true;
+                default -> false;
+            };
+        }
+
+        // One level of the JDK's clazz: a bracketed class, or an intersection operand that the
+        // JDK reads as a class without brackets. The JDK adds most single characters below U+0100
+        // to the level's bits, and the expressions that refer to the bits read them only once the
+        // level closes, so a character added after an intersection can change that intersection.
         private static final class ClassFrame
         {
-            private final int classStart;
-            private final boolean negated;
-            // The intersection of the finished operands. Null until a union containing nested
-            // classes finishes or an intersection operand starts; until then the class is in
-            // union.
-            private RuneRangeSet intersection;
-            private boolean hasClassAtom;
-            private boolean hasIntersectionBase;
-            private boolean intersectionOperand;
-            private CharClassBuilder union = new CharClassBuilder();
-            // The union of the nested classes of the operand being read, or null.
-            private RuneRangeSet nestedClasses;
-            private boolean first = true;
-            private boolean unionHasClassAtom;
+            private enum Current
+            {
+                // The JDK's curr is null: the class has no members yet, or the last member joined
+                // the bits.
+                NONE,
+                // The JDK's curr is the last member, held in last.
+                LAST,
+                // The JDK's curr is the operand of the intersection just before, which the class
+                // lies within.
+                INTERSECTED,
+            }
 
-            ClassFrame(int classStart, boolean negated)
+            private final int classStart;
+            private final boolean bracketed;
+            private final boolean negated;
+            // The JDK's prev is the union of previous and last.
+            private ClassExpression previous;
+            private ClassExpression last;
+            private Current current = Current.NONE;
+            private CharClassBuilder bits;
+            // The bits still need to join the current left operand; the builder outlives that.
+            private boolean hasBits;
+            // An '&&' has started and its right operand is being collected.
+            private boolean readingRightOperand;
+            // The union of completed classes in that right operand, or null.
+            private ClassExpression right;
+
+            ClassFrame(int classStart, boolean bracketed, boolean negated)
             {
                 this.classStart = classStart;
+                this.bracketed = bracketed;
                 this.negated = negated;
             }
 
-            void addNestedClass(RuneRangeSet nestedClass)
+            boolean hasPrevious()
             {
-                nestedClasses = (nestedClasses == null) ? nestedClass : nestedClasses.union(nestedClass);
-                unionHasClassAtom = true;
+                return previous != null || last != null;
             }
 
-            void finishUnion()
+            boolean hasMembers()
             {
-                if (!intersectionOperand) {
-                    if (nestedClasses != null) {
-                        intersection = finishOperand();
+                return hasPrevious() || hasBits;
+            }
+
+            void addMember(ClassExpression member)
+            {
+                previous = takePrevious();
+                last = member;
+                current = Current.LAST;
+            }
+
+            void addBit(int rune, int nodeFlags, CaseFolding caseFolding)
+            {
+                previous = takePrevious();
+                if (bits == null) {
+                    bits = new CharClassBuilder();
+                }
+                // As for explicit ranges, an explicit newline stays a member.
+                bits.addRangeFlags(rune, rune, nodeFlags | Regexp.CLASS_NEWLINE, caseFolding);
+                hasBits = true;
+                current = Current.NONE;
+            }
+
+            void addRightOperand(ClassExpression operand)
+            {
+                right = (right == null) ? operand : right.union(operand);
+            }
+
+            void startIntersection()
+            {
+                readingRightOperand = true;
+            }
+
+            // Ends the right operand of an intersection at a ']' or '&', as the JDK's clazz does. An
+            // empty right operand intersects the class with the JDK's curr instead: its last
+            // member, the operand of the intersection just before, or, when the left operand is
+            // only bits, those bits. Returns false when there is no curr, because the class has no
+            // members or its last member joined the bits after other members.
+            boolean finishIntersection()
+            {
+                ClassExpression operand = right;
+                right = null;
+                readingRightOperand = false;
+                if (hasBits) {
+                    // The bits join the left operand. When they are all of it, they are the JDK's
+                    // curr, which an empty right operand here leaves in place.
+                    hasBits = false;
+                    if (!hasPrevious()) {
+                        previous = ClassExpression.bits();
+                        current = Current.INTERSECTED;
                     }
-                    hasClassAtom = unionHasClassAtom;
-                    hasIntersectionBase = hasClassAtom;
-                    return;
+                    else if (previous == null) {
+                        previous = ClassExpression.bits();
+                    }
+                    else {
+                        previous = previous.withEveryBit();
+                    }
                 }
-                hasClassAtom |= unionHasClassAtom;
-                if (!unionHasClassAtom) {
-                    return;
+
+                if (operand != null) {
+                    ClassExpression left = takePrevious();
+                    previous = (left == null) ? operand : left.intersection(operand);
+                    current = Current.INTERSECTED;
+                    return true;
                 }
-                if (!hasIntersectionBase) {
-                    // No earlier operand had an atom, so intersection is an empty placeholder.
-                    intersection = finishOperand();
-                    hasIntersectionBase = true;
+                switch (current) {
+                    case NONE -> {
+                        return false;
+                    }
+                    // The JDK intersects the class with its last member, which the class contains.
+                    case LAST -> {
+                        previous = last;
+                        last = null;
+                        current = Current.INTERSECTED;
+                    }
+                    // The class already lies within the operand of the intersection just before.
+                    case INTERSECTED -> {}
                 }
-                else {
-                    intersection = intersection.intersection(finishOperand());
-                }
+                return true;
             }
 
-            private RuneRangeSet finishOperand()
+            ClassExpression takePrevious()
             {
-                RuneRangeSet operand = (nestedClasses == null) ? RuneRangeSet.of(union) : nestedClasses.union(union);
-                nestedClasses = null;
-                return operand;
-            }
-
-            void startIntersectionOperand()
-            {
-                if (intersection == null) {
-                    intersection = RuneRangeSet.of(union);
+                ClassExpression union = previous;
+                if (last != null) {
+                    union = (union == null) ? last : union.union(last);
+                    last = null;
                 }
-                intersectionOperand = true;
-                union = new CharClassBuilder();
-                first = true;
-                unionHasClassAtom = false;
+                previous = null;
+                return union;
             }
 
             RuneRangeSet toRuneRangeSet()
             {
-                return (intersection == null) ? RuneRangeSet.of(union) : intersection;
+                return finish().evaluate(bits);
             }
 
             CharClassBuilder toCharClassBuilder()
             {
-                return (intersection == null) ? union : intersection.toCharClassBuilder();
+                if (!hasPrevious()) {
+                    return bits;
+                }
+                return toRuneRangeSet().toCharClassBuilder();
+            }
+
+            private ClassExpression finish()
+            {
+                ClassExpression union = takePrevious();
+                if (union == null) {
+                    return ClassExpression.bits();
+                }
+                return hasBits ? union.withEveryBit() : union;
             }
         }
 
-        // Reads class syntax past COMMENTS-mode whitespace and comments.
-        private final class ClassAtomCursor
+        // A union or intersection of constant sets and a class level's bits, whose members the
+        // JDK reads only when the level closes. Every such expression equals fixed ∪ (bits ∩
+        // filter), with the part of fixed below U+0100 in filter. Operations consume their inputs.
+        // A constant always has fixed members, an expression that uses the bits is evaluated with
+        // the level's bits builder, and the operand of a union or intersection is always a
+        // constant.
+        private static final class ClassExpression
         {
-            private boolean atEnd()
+            // The bits only hold characters below U+0100: parseClassRange adds no other single
+            // character to them, and under Unicode case folding leaves out every character whose
+            // case partners lie beyond. A filter therefore matters only up to this rune.
+            private static final int MAX_BIT = 0xFF;
+
+            // The members whatever the bits hold, or null for none.
+            private final RuneRangeSet fixed;
+            // The bits that are members, or null for all of them. A constant uses the part of
+            // fixed up to MAX_BIT, so a filter holds at most 128 ranges.
+            private final RuneRangeSet filter;
+            private final boolean constant;
+
+            private ClassExpression(RuneRangeSet fixed, RuneRangeSet filter, boolean constant)
             {
-                skipIgnoredPatternCharacters();
-                return Parser.this.atEnd();
+                this.fixed = fixed;
+                this.filter = filter;
+                this.constant = constant;
             }
 
-            private boolean tryConsumeNegation()
+            static ClassExpression constant(RuneRangeSet members)
             {
-                if (Parser.this.atEnd() || peekByte() != '^') {
-                    return false;
+                return new ClassExpression(requireNonNull(members, "members is null"), null, true);
+            }
+
+            static ClassExpression bits()
+            {
+                return new ClassExpression(null, null, false);
+            }
+
+            ClassExpression withEveryBit()
+            {
+                return new ClassExpression(fixed, null, false);
+            }
+
+            ClassExpression union(ClassExpression other)
+            {
+                if (constant) {
+                    return constant(fixed.union(other.fixed));
                 }
-                consumeByte('^');
-                return true;
+                RuneRangeSet unionFilter = (filter == null) ? null : filter.union(other.fixed.copyAtOrBelow(MAX_BIT));
+                return new ClassExpression((fixed == null) ? other.fixed : fixed.union(other.fixed), unionFilter, false);
             }
 
-            private boolean isClassEnd(boolean first, boolean intersectionOperand)
+            ClassExpression intersection(ClassExpression other)
             {
-                skipIgnoredPatternCharacters();
-                return !Parser.this.atEnd() && peekByte() == ']' && (!first || intersectionOperand);
-            }
-
-            private boolean isIntersection()
-            {
-                int savedIndex = index;
-                boolean intersection = tryConsumeIntersection();
-                index = savedIndex;
-                return intersection;
-            }
-
-            private void consumeIntersection()
-            {
-                if (!tryConsumeIntersection()) {
-                    throw new IllegalStateException("not at a character class intersection");
+                if (constant) {
+                    return constant(fixed.intersection(other.fixed));
                 }
+                RuneRangeSet otherFilter = other.fixed.copyAtOrBelow(MAX_BIT);
+                RuneRangeSet intersectionFilter = (filter == null) ? otherFilter : filter.intersection(otherFilter);
+                return new ClassExpression((fixed == null) ? null : fixed.intersection(other.fixed), intersectionFilter, false);
             }
 
-            private boolean tryConsumeIntersection()
+            // Consumes the expression and the level's bits, which an expression that uses them
+            // always has.
+            RuneRangeSet evaluate(CharClassBuilder bits)
             {
-                skipIgnoredPatternCharacters();
-                if (Parser.this.atEnd() || peekByte() != '&') {
-                    return false;
+                if (constant) {
+                    return fixed;
                 }
-
-                index++;
-                skipIgnoredPatternCharacters();
-                if (Parser.this.atEnd() || peekByte() != '&') {
-                    return false;
+                RuneRangeSet members = RuneRangeSet.of(bits);
+                if (filter != null) {
+                    members = members.intersection(filter);
                 }
-                index++;
-                return true;
-            }
-
-            private boolean isNestedClass()
-            {
-                skipIgnoredPatternCharacters();
-                return !Parser.this.atEnd() && peekByte() == '[';
-            }
-
-            private int parseLiteralRune(int flags)
-            {
-                skipIgnoredPatternCharacters();
-                return parseClassAtomRune(flags);
-            }
-
-            private boolean tryConsumeRangeOperator()
-            {
-                skipIgnoredPatternCharacters();
-                if (Parser.this.atEnd() || peekByte() != '-') {
-                    return false;
-                }
-
-                // As in the JDK, the byte right after '-' decides whether a range starts; once it
-                // does, the endpoint is read past comments-mode text, even if it is ']' or '['.
-                if (index + 1 >= end || bytes[index + 1] == ']' || bytes[index + 1] == '[') {
-                    return false;
-                }
-                index++;
-                return true;
+                return (fixed == null) ? members : members.union(fixed);
             }
         }
 
-        private boolean tryParseClassEscape(int nodeFlags, CharClassBuilder characterClassBuilder)
+        private boolean tryConsumeNegation()
         {
-            if (peekByte() != '\\' || index + 1 >= end) {
+            if (atEnd() || peekByte() != '^') {
                 return false;
+            }
+            consumeByte('^');
+            return true;
+        }
+
+        // At an '&', consumes the '&&' of an intersection, or leaves the class at an atom. In
+        // comments mode the JDK's clazz reads past the whitespace and comments after an '&', and
+        // when the next character is not '&', backs up one code point and reads a class atom from
+        // there, even ']' or '['. That code point is usually whitespace or a newline that ends a
+        // comment, which is skipped, so the '&' is dropped. When a comment ends at a terminator
+        // that is not whitespace, such as U+2028, the terminator becomes a member; if the comment
+        // has text after '#', the class resumes at its last character, which becomes a member
+        // too. Without whitespace or comments after it, '&' is a literal.
+        private boolean tryConsumeIntersection()
+        {
+            int next = ignoredPatternEnd(index + 1);
+            if (next < end && bytes[next] == '&') {
+                index = next + 1;
+                return true;
+            }
+            if (next != index + 1) {
+                index = next - 1;
+                while ((bytes[index] & 0xC0) == 0x80) {
+                    index--;
+                }
+            }
+            return false;
+        }
+
+        private int parseLiteralRune(int flags)
+        {
+            skipIgnoredPatternCharacters();
+            return parseClassAtomRune(flags);
+        }
+
+        private boolean tryConsumeRangeOperator()
+        {
+            skipIgnoredPatternCharacters();
+            if (atEnd() || peekByte() != '-') {
+                return false;
+            }
+
+            // As in the JDK, the byte right after '-' decides whether a range starts; once it
+            // does, the endpoint is read past comments-mode text, even if it is ']' or '['.
+            if (index + 1 >= end || bytes[index + 1] == ']' || bytes[index + 1] == '[') {
+                return false;
+            }
+            index++;
+            return true;
+        }
+
+        // At a '\', reads a class escape such as \d or \p{L}, or returns null for any other
+        // escape.
+        private CharClassBuilder tryParseClassEscape(int nodeFlags)
+        {
+            if (index + 1 >= end) {
+                return null;
             }
 
             int escapedByte = bytes[index + 1] & 0xFF;
             if (escapedByte == 'v' && index + 2 < end && bytes[index + 2] == '-') {
-                return false;
+                return null;
             }
             CharClass characterClass = switch (escapedByte) {
                 case 'd' -> digitsCharClass(nodeFlags, false);
@@ -1263,16 +1414,18 @@ final class JavaRegexpParser
             };
             if (characterClass != null) {
                 index += 2;
+                CharClassBuilder characterClassBuilder = new CharClassBuilder();
                 addGroup(characterClassBuilder, characterClass, 1, nodeFlags, caseFolding);
-                return true;
+                return characterClassBuilder;
             }
 
             if (escapedByte == 'p' || escapedByte == 'P') {
                 index += 2;
+                CharClassBuilder characterClassBuilder = new CharClassBuilder();
                 parseUnicodeGroupInto(characterClassBuilder, (escapedByte == 'P') ? -1 : 1, nodeFlags, index - 2);
-                return true;
+                return characterClassBuilder;
             }
-            return false;
+            return null;
         }
 
         private int parseClassAtomRune(int flags)
