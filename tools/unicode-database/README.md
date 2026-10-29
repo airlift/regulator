@@ -16,8 +16,9 @@ is the version of the database. The comment at the top of `generate.py`
 documents the format. The database holds:
 
 - the simple case folding of `CaseFolding.txt`, statuses C and S, as orbits,
-  which RE2 patterns and `FilteredRe2` fold with, and which give Trino
-  patterns their single-code-point folds
+  which RE2 patterns and `FilteredRe2` fold with, which give Trino patterns
+  their single-code-point folds, and from which Java case-insensitive ranges
+  take their closing characters
 - the multi-character full case folding of `CaseFolding.txt`, status F, which
   gives Trino patterns their multi-code-point folds
 - the simple uppercase and lowercase mappings of `UnicodeData.txt`, from which

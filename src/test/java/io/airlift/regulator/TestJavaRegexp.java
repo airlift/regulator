@@ -150,6 +150,24 @@ public class TestJavaRegexp
         assertThat(JavaRegexp.compile(utf8Slice("\\p{IsSeal}")).matches(utf8Slice("\uD8B4\uDC00"))).isTrue();
     }
 
+    // A case-insensitive range also matches a character whose upper case, or the lower case of its
+    // upper case, is one of the range's closing characters. Regulator matches these as JDK 26 does,
+    // whichever JVM runs it. JDK 25 does not match them, so the differential tests leave these
+    // ranges out.
+    @Test
+    public void testRangeClosingCharactersOnEveryJvm()
+    {
+        assertRangeMatches("ς-ς", "σ", "Σ");
+        assertRangeMatches("\\x{212A}-\\x{212A}", "K", "k");
+        assertRangeMatches("\\x{1FD2}-\\x{1FE4}", "\u0390", "\u03B0");
+        assertRangeMatches("\\x{FB05}-\\x{FB05}", "\uFB06");
+        assertRangeMatches("\\x{130}-\\x{130}", "i", "I", "ı");
+        assertRangeMatches("\\x{131}-\\x{131}", "I", "i");
+        assertThat(JavaRegexp.compile(utf8Slice("(?iu)[\\x{131}-\\x{131}]")).matches(utf8Slice("İ")))
+                .as("(?iu)[\\x{131}-\\x{131}] against İ")
+                .isFalse();
+    }
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("matchCases")
     public void testSupportedSubsetMatchesJdk(MatchCase matchCase)
@@ -310,5 +328,13 @@ public class TestJavaRegexp
             return -1;
         }
         return input.substring(0, utf16Offset).getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    private static void assertRangeMatches(String range, String... inputs)
+    {
+        JavaRegexp regexp = JavaRegexp.compile(utf8Slice("(?iu)[" + range + "]"));
+        for (String input : inputs) {
+            assertThat(regexp.matches(utf8Slice(input))).as("(?iu)[%s] against %s", range, input).isTrue();
+        }
     }
 }

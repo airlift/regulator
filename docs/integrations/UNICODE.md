@@ -35,7 +35,8 @@ it:
 Regulator does not keep a copy of upstream RE2's generated category, script,
 or case-fold tables. Case folding follows each pattern's language: RE2 and Rust
 fold with the database's simple case folding, Java with its simple case
-mappings, and Trino with its full case folding.
+mappings, and Trino with its full case folding. Java's range closing characters
+also come from the simple case folding.
 
 ## Motivation
 
@@ -70,8 +71,9 @@ Java 25 and 17.0 for Java 26. They differ for:
   U+0277 uppercasing to U+A7DD; neither is ASCII, so no name resolves
   differently
 
-Case-insensitive matching can differ from `Pattern` independently of Unicode
-version.
+Case-insensitive matching folds each construct as JDK 26's `Pattern` does, so
+it differs from JDK 25's `Pattern` where JDK 26 changed it, as the
+[Java reference](../reference/languages/JAVA_REGEXP.md) says.
 
 Reading the pinned database rather than the JDK's data is an intentional
 Java-platform adaptation. It changes only Unicode-version-sensitive results; it
@@ -233,9 +235,10 @@ that rule. The rules are:
   read from the database's `UnicodeData.txt` mappings, rather than assuming
   that one lower-case mapping is complete. Exhaustive checks against the JVM's
   case classes and focused comparisons with case-insensitive `Pattern`
-  validate the resulting equivalence classes. Case-insensitive matching built
-  on these classes is not identical to `Pattern`'s, as
-  [Differences from the JDK](#differences-from-the-jdk) says.
+  validate the resulting equivalence classes. The closing characters of
+  case-insensitive ranges come from the database's simple case folding; the
+  [Java reference](../reference/languages/JAVA_REGEXP.md) states how ranges
+  match.
 - Trino: Unicode 18.0 full case folding, `CaseFolding.txt` statuses C and F,
   the rule Joni folds with. Its simple classes are the RE2 rule's, whose tables
   it shares, so dotted capital I and dotless small i stay out of the class of
@@ -273,6 +276,8 @@ Unicode data is read on first use, not on every compilation:
   two sets of tables.
 - Trino's multi-code-point folds are initialized once on first use by a
   frontend that enables full folding.
+- Java's range closing folds are initialized once, on the first Java range
+  compiled under Unicode case folding.
 - The character names are read on the first `\N{name}` from a separate
   resource, which consumers of other Unicode data can omit. They are decoded
   into arrays of words, code points, and word indexes, with a hash table of

@@ -600,7 +600,6 @@ public class TestJavaRegexpDifferential
         }
         assertMatchesJava25("(?i)[\\P{Lower}&&a]", OptionProfile.DEFAULT, inputs);
         assertMatchesJava25("(?i:\\p{Lower})(?-i:\\p{Lower})", OptionProfile.DEFAULT, List.of("Aa", "AA", "aa"));
-        assertMatchesJava25("(?iu)[a-z]", OptionProfile.DEFAULT, inputs);
     }
 
     @Test
@@ -614,6 +613,26 @@ public class TestJavaRegexpDifferential
                 assertMatchesJava25(flags + expression, OptionProfile.DEFAULT, inputs);
             }
         }
+    }
+
+    @Test
+    public void testRangeCaseFoldingMatchesJava25()
+    {
+        assertMatchesJava25("(?iu)[a-z]", OptionProfile.DEFAULT, List.of("a", "A", "é", "É", "ǅ", "ẖ", "ª", "K", "ı", "İ", "ſ", "1", "\n", "💰"));
+
+        // A range matches a character when the character, its upper case, or the lower case of its
+        // upper case is in the range, so unlike [K], [K-K] does not match the Kelvin sign. JDK 26
+        // also matches a character whose upper case, or the lower case of its upper case, is one of
+        // the range's closing characters, and JDK 25 does not, so no range here holds the source of
+        // a closing fold, such as the Kelvin sign or final sigma.
+        List<String> rangeInputs = List.of("K", "k", "\u212A", "I", "i", "İ", "ı", "Å", "å", "\u212B", "Θ", "θ", "ϑ", "\u03F4", "x");
+        for (String range : List.of("A-Z", "K-K", "Å-Å", "Θ-Θ")) {
+            assertMatchesJava25("(?iu)[" + range + "]", OptionProfile.DEFAULT, rangeInputs);
+            assertMatchesJava25("(?iu)[^" + range + "]", OptionProfile.DEFAULT, rangeInputs);
+        }
+        assertMatchesJava25("(?iu)[K]", OptionProfile.DEFAULT, rangeInputs);
+        assertMatchesJava25("(?iu)[a-z&&[A-Z]]", OptionProfile.DEFAULT, rangeInputs);
+        assertMatchesJava25("(?iu)[K-K]|x", OptionProfile.DEFAULT, rangeInputs);
     }
 
     @Test

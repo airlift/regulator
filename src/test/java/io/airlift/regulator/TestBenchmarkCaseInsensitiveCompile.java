@@ -35,9 +35,9 @@ public class TestBenchmarkCaseInsensitiveCompile
             state.pattern = pattern;
             state.setup();
 
-            // Each pattern's other case matches. K matches the non-ASCII range only by folding to
-            // U+212A KELVIN SIGN. Java and Trino do not fold a bare \p{L}, so Σ checks only its
-            // membership.
+            // Each pattern's other case matches. K is outside the non-ASCII range but matches it
+            // case-insensitively through U+212A KELVIN SIGN. Java and Trino do not fold a bare
+            // \p{L}, so Σ checks only its membership.
             String otherCase = switch (pattern) {
                 case LETTER_CLASS -> "Σ";
                 case NON_ASCII_RANGE -> "K";

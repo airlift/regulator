@@ -34,7 +34,8 @@ import static java.util.Objects.requireNonNull;
 /// its orbit successors, and its sorted case-folded runes together from the sparse list of code
 /// points its simple fold changes, which comes from the pinned [UnicodeDatabase]; each table
 /// holds only the few dozen blocks of 256 code points that have a case partner. The
-/// multi-character folds are built separately, on first use.
+/// multi-character folds, and the closing folds of Java's case-insensitive ranges, are built
+/// separately, on first use.
 ///
 /// Each table field is plain rather than volatile, so the compiler's fold loops read it without a
 /// fence. A thread that reads the field before another thread's write is visible sees null and
@@ -48,9 +49,9 @@ final class CaseFolding
     static final CaseFolding TRINO = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " full case folding", () -> SimpleCaseFolding.TABLES, true);
 
     /// Java's case classes, `toLowerCase(toUpperCase(codePoint))` as `java.util.regex`
-    /// folds them, computed from the simple case mappings of the pinned [UnicodeDatabase].
-    /// Case-insensitive matching built on these classes, such as of ranges, is Regulator's and is
-    /// not identical to `Pattern`'s.
+    /// folds them, computed from the simple case mappings of the pinned [UnicodeDatabase]. A
+    /// literal character, alone or in a class, matches its whole case class; a range matches by
+    /// the narrower rule of [#addJavaRangeCaseMembers(CharClassBuilder,int,int)].
     static final CaseFolding JAVA = new CaseFolding("Unicode " + UnicodeDatabase.UNICODE_VERSION + " case classes", () -> new FoldTables(javaSimpleFolds()), false);
 
     /// RE2's simple case folding, CaseFolding.txt statuses C and S from the pinned
@@ -120,6 +121,47 @@ final class CaseFolding
             int rune = caseFoldedRunes[index];
             for (int foldedRune = orbitSuccessors.get(rune); foldedRune != rune; foldedRune = orbitSuccessors.get(foldedRune)) {
                 builder.addRange(foldedRune, foldedRune);
+            }
+        }
+    }
+
+    /// Adds to `builder` the code points that a range from `low` through `high` matches
+    /// case-insensitively with `UNICODE_CASE`, one single-rune range per code point. The caller
+    /// adds the range itself.
+    ///
+    /// `Pattern` matches a character when it, its upper case, or the lower case of its upper
+    /// case is in the range, or when its upper case or the lower case of its upper case is a
+    /// closing character of the range: the target of a [closing fold][JavaRangeClosingFolds]
+    /// whose source the range holds and whose target it does not. Unlike a literal character, a
+    /// range need not match its members' whole case classes, so `[K-K]` does not match the
+    /// Kelvin sign. Every character the rule matches is in the case class of a code point in the
+    /// range or of a closing character, because a character's upper case and the lower case of
+    /// that are in its own class, so only the members of those classes are tested.
+    static void addJavaRangeCaseMembers(CharClassBuilder builder, int low, int high)
+    {
+        FoldTables foldTables = JAVA.foldTables();
+        CodePointMappings uppercase = UnicodeDatabase.simpleUppercaseMappings();
+        int[] caseFoldedRunes = foldTables.caseFoldedRunes;
+        int index = Arrays.binarySearch(caseFoldedRunes, low);
+        if (index < 0) {
+            index = -index - 1;
+        }
+        for (; index < caseFoldedRunes.length && caseFoldedRunes[index] <= high; index++) {
+            addJavaRangeClassMembers(builder, foldTables, uppercase, caseFoldedRunes[index], low, high);
+        }
+
+        int[] sources = JavaRangeClosingFolds.FOLDS.codePoints();
+        int[] targets = JavaRangeClosingFolds.FOLDS.values();
+        int foldIndex = Arrays.binarySearch(sources, low);
+        if (foldIndex < 0) {
+            foldIndex = -foldIndex - 1;
+        }
+        for (; foldIndex < sources.length && sources[foldIndex] <= high; foldIndex++) {
+            // A closing character's class matches by the same rule, with the closing character
+            // as the range.
+            int target = targets[foldIndex];
+            if (!isInRange(target, low, high)) {
+                addJavaRangeClassMembers(builder, foldTables, uppercase, target, target, target);
             }
         }
     }
@@ -231,6 +273,74 @@ final class CaseFolding
             }
         }
         return new CodePointMappings(Arrays.copyOf(sources, count), Arrays.copyOf(targets, count));
+    }
+
+    // Adds to the builder the members of the code point's case class that a range from low
+    // through high matches, starting with the code point itself. Every member of a class has the
+    // same lower case of upper case, so when that is in the range, the range matches the whole
+    // class; otherwise it matches each member whose upper case is in the range.
+    private static void addJavaRangeClassMembers(CharClassBuilder builder, FoldTables foldTables, CodePointMappings uppercase, int codePoint, int low, int high)
+    {
+        boolean wholeClass = isInRange(foldTables.simpleFolds.get(codePoint), low, high);
+        int member = codePoint;
+        do {
+            if (wholeClass || isInRange(uppercase.map(member), low, high)) {
+                builder.addRange(member, member);
+            }
+            member = foldTables.orbitSuccessors.get(member);
+        }
+        while (member != codePoint);
+    }
+
+    private static boolean isInRange(int codePoint, int low, int high)
+    {
+        return low <= codePoint && codePoint <= high;
+    }
+
+    /// Holds the closing folds of Java's case-insensitive ranges, sorted by source, as the JDK's
+    /// `GenerateCaseFolding` selects them for `jdk.internal.lang.CaseFolding`: each simple case
+    /// fold, `CaseFolding.txt` status C, S, or T, whose target neither upper-cases nor
+    /// lower-cases back to its source, such as the Kelvin sign's fold to k and final sigma's to
+    /// sigma.
+    private static final class JavaRangeClosingFolds
+    {
+        // CaseFolding.txt has two status T folds, I to dotless small i and dotted capital I to i,
+        // and the database omits both. The generator selects dotted capital I to i. It drops I to
+        // dotless small i, because dotless small i upper-cases back to I, and adds the reverse,
+        // dotless small i to I, by hand.
+        private static final int[] JDK_SOURCES = {0x0130, 0x0131};
+        private static final int[] JDK_TARGETS = {0x0069, 0x0049};
+
+        private static final CodePointMappings FOLDS;
+
+        static {
+            CodePointMappings simpleCaseFolding = UnicodeDatabase.simpleCaseFolding();
+            CodePointMappings uppercase = UnicodeDatabase.simpleUppercaseMappings();
+            CodePointMappings lowercase = UnicodeDatabase.simpleLowercaseMappings();
+            int[] foldSources = simpleCaseFolding.codePoints();
+            int[] foldTargets = simpleCaseFolding.values();
+            long[] folds = new long[foldSources.length + JDK_SOURCES.length];
+            int foldCount = 0;
+            for (int index = 0; index < foldSources.length; index++) {
+                int source = foldSources[index];
+                int target = foldTargets[index];
+                if (uppercase.map(target) != source && lowercase.map(target) != source) {
+                    folds[foldCount++] = ((long) source << 32) | target;
+                }
+            }
+            for (int index = 0; index < JDK_SOURCES.length; index++) {
+                folds[foldCount++] = ((long) JDK_SOURCES[index] << 32) | JDK_TARGETS[index];
+            }
+            Arrays.sort(folds, 0, foldCount);
+
+            int[] sources = new int[foldCount];
+            int[] targets = new int[foldCount];
+            for (int index = 0; index < foldCount; index++) {
+                sources[index] = (int) (folds[index] >>> 32);
+                targets[index] = (int) folds[index];
+            }
+            FOLDS = new CodePointMappings(sources, targets);
+        }
     }
 
     // The RE2 and Trino rules share the tables of the database's simple case folding.
