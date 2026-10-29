@@ -86,8 +86,20 @@ UNIT_WORKER_BOOT_SECONDS = 5 * 60
 # a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
 SEMANTIC_FAILURE_DETAIL = f"semantic failure: status {SEMANTIC_FAILURE_STATUS}"
-# Each step's child a campaign driver started writes its output here, in the step's root.
+# A controller holds this lock in the root it owns, a phase's result root or the campaign root.
+CONTROLLER_LOCK = "controller.lock"
+# A controller that finds another owning its root exits with this status, so a campaign driver that started it
+# adopts the owner rather than failing the phase.
+CONTROLLER_BUSY_STATUS = 75
+# A phase's controller records its process ID and start time here, in its result root, once it holds the root's
+# controller lock.
+DRIVER_CHILD = "driver-child.txt"
+# A detached phase controller, or any step's child a campaign driver started, writes its output here, in its root.
 DRIVER_CHILD_LOG = "driver-child.log"
+# A campaign driver records its process ID and start time here, in the campaign root, once it holds the root's
+# controller lock, and a detached one writes its output beside it.
+CAMPAIGN_DRIVER = "campaign-driver.txt"
+CAMPAIGN_DRIVER_LOG = "campaign-driver.log"
 DRIVER_POLL_SECONDS = 30
 # A unit campaign phase's digest of the tooling that started it, in its result root.
 TOOLING_DIGEST = "tooling-digest.txt"
@@ -234,7 +246,8 @@ def campaign_engine_tree(arguments):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser()
+    # No abbreviations: a detached controller drops only the exact --detach from the command it runs again.
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("phase", choices=("campaign", *PHASE_TIMEOUT_SECONDS),
                         help="one phase of a candidate, or campaign to run every candidate's phases")
     parser.add_argument("campaign",
@@ -248,6 +261,9 @@ def parse_args():
                         help="the campaign's results, holding candidates.tsv and <name>/candidate and each phase "
                              "(default: benchmark-results/pre-review-baseline/<campaign>)")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--detach", action="store_true",
+                        help="with --execute, start the controller in its own session, logging beside its results, "
+                             "and return; run the same command again to resume one that stopped")
     parser.add_argument("--confirmation-jobs", type=Path)
     parser.add_argument("--smoke-results", type=Path,
                         help="accepted smoke a primary requires (default: the candidate's smoke)")
@@ -2499,16 +2515,32 @@ def halt_and_clean_up(arguments, result_root, budget, running, error):
         raise UnsafeCampaignError(f"{reason}; {cleanup_error}") from error
 
 
+def process_start(process_id):
+    """When the process process_id names started, as ps reports it, or None while no process has that ID. With the
+    process ID, it identifies the process, as a later one given the same ID starts later. It is read in one time zone
+    and locale, so processes with different environments read the same value."""
+    try:
+        return check_output(["ps", "-p", str(process_id), "-o", "lstart="],
+                            env={**os.environ, "TZ": "UTC", "LC_ALL": "C"}) or None
+    except subprocess.CalledProcessError:
+        return None
+
+
 @contextlib.contextmanager
-def controller_lock(result_root):
+def controller_lock(result_root, record):
+    """Own result_root as its only controller, and once it does, record this process's ID and start time in record
+    there. While another controller owns it, exit with CONTROLLER_BUSY_STATUS."""
     result_root.mkdir(parents=True, exist_ok=True)
-    lock_path = result_root / "controller.lock"
+    lock_path = result_root / CONTROLLER_LOCK
     with lock_path.open("w") as lock_file:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise UnsafeCampaignError(
-                f"another controller owns campaign result root {result_root}") from error
+        except BlockingIOError:
+            print(f"another controller owns campaign result root {result_root}", file=sys.stderr, flush=True)
+            raise SystemExit(CONTROLLER_BUSY_STATUS) from None
+        temporary = result_root / (record + ".new")
+        temporary.write_text(f"pid={os.getpid()}\nstarted={process_start(os.getpid())}\n")
+        os.replace(temporary, result_root / record)
         yield
 
 
@@ -3577,11 +3609,6 @@ class UnitDispatcher:
             raise SystemExit(f"{arguments.phase} unit campaign is not accepted: {error}") from error
 
 
-def execute_units(arguments, root, result_root, items, platforms, validation):
-    with controller_lock(result_root):
-        UnitDispatcher(arguments, root, result_root, items, platforms, validation).run()
-
-
 @dataclass
 class CampaignStep:
     """One step of a candidate's chain: a phase's controller, or the reduction that lists its confirmation jobs.
@@ -3593,7 +3620,8 @@ class CampaignStep:
     complete: object
     # Whether the step has anything to do once its predecessors completed; confirmation runs only for listed jobs.
     needed: object = lambda: True
-    # Whether the child's command takes a concurrency share.
+    # Whether the child is a phase controller, whose command takes a concurrency share and which records its
+    # process ID in root; a reduction is not.
     shared: bool = True
 
 
@@ -3629,13 +3657,14 @@ class AdoptedChild:
 
 
 def child_process_id(step):
-    """The process ID of the step's live child: a process running the step's command, which names the step's root,
-    with any concurrency share."""
+    """The process ID of the step's live child. A phase's is its controller, found by the process ID and start time it
+    records, whatever options a restarted driver gives it. A reduction keeps no record of itself, so its command,
+    which names the step's root, is the one way to find it."""
+    if step.shared:
+        return controller_process(step.root, DRIVER_CHILD)
     # ps joins the arguments with spaces, so the step's are matched exactly as joined, whatever spaces its root
-    # holds. The interpreter's path is ps's, which may name another path to the same interpreter.
-    expected = re.compile(r"\S+ " + " ".join(
-        re.escape(argument.split("=", 1)[0]) + r"=\d+" if argument.startswith("--max-concurrent")
-        else re.escape(argument) for argument in step.command((1, 1) if step.shared else None)[1:]))
+    # holds. The interpreter's path is ps's, which may name another path to the same interpreter, spaces and all.
+    expected = re.compile(r".+? " + " ".join(re.escape(argument) for argument in step.command(None)[1:]))
     for line in check_output(["ps", "ax", "-o", "pid=,command="]).splitlines():
         process_id, _, command = line.lstrip().partition(" ")
         if expected.fullmatch(command):
@@ -3648,12 +3677,41 @@ def adopt_child(step):
     return None if process_id is None else AdoptedChild(process_id, step)
 
 
+def start_detached(command, root, log):
+    """Start a command in its own session, so it outlives its starter, with its output appended to the log in root.
+    A controller records its own process ID and start time there once it holds root's controller lock."""
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / log).open("a") as output:
+        return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+
+
 def start_child(step, share):
     """Start the step's child in its own session, so it outlives the driver."""
-    step.root.mkdir(parents=True, exist_ok=True)
-    with (step.root / DRIVER_CHILD_LOG).open("a") as log:
-        return subprocess.Popen(step.command(share), stdin=subprocess.DEVNULL, stdout=log,
-                                stderr=subprocess.STDOUT, start_new_session=True)
+    return start_detached(step.command(share), step.root, DRIVER_CHILD_LOG)
+
+
+def detach(root, record, log):
+    """Run this command again without --detach, in its own session, as the controller of root, and return.
+
+    While a live controller holds root's lock, only report it. Otherwise the new controller resumes from the
+    ledgers, adopting whatever its predecessor left running.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / CONTROLLER_LOCK).open("a") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            try:
+                owner = f" as process {read_properties(root / record)['pid']}"
+            except (OSError, RuntimeError, KeyError):
+                owner = ""
+            print(f"a controller already runs{owner} for {root}; its log is {root / log}")
+            return
+    command = [sys.executable, str(Path(__file__).resolve()),
+               *(argument for argument in sys.argv[1:] if argument != "--detach")]
+    process = start_detached(command, root, log)
+    print(f"started controller process {process.pid} for {root}; its log is {root / log}")
 
 
 def frozen_share(step):
@@ -3681,8 +3739,9 @@ def run_chains(chains, maximum, per_platform, start=start_child, adopt=adopt_chi
     a phase's dispatch failure also halts any fleet budget it shares, which stops every phase sharing it. A step
     already complete is skipped, and a step whose child still runs is adopted before any step starts, so the hosts
     it holds stay counted: an adopted phase holds the share its execution policy froze, and until it freezes one, no
-    other phase starts. Any chain's current phase, adopted or not, that froze a share past the limits stops the
-    driver, naming the limits that hold it."""
+    other phase starts. A child that exits because another controller owns its phase leaves the step to be adopted,
+    or started again once that controller is gone. Any chain's current phase, adopted or not, that froze a share
+    past the limits stops the driver, naming the limits that hold it."""
     limits = (maximum, per_platform)
 
     def join(chain):
@@ -3738,11 +3797,13 @@ def run_chains(chains, maximum, per_platform, start=start_child, adopt=adopt_chi
             return
         time.sleep(poll_seconds)
         for chain in chains:
-            if chain.child is not None and chain.child.poll() is not None:
+            if chain.child is not None and (status := chain.child.poll()) is not None:
                 chain.child = None
                 if chain.step.complete():
                     print(f"{chain.name}: {chain.step.label} complete", flush=True)
                     chain.position += 1
+                elif status == CONTROLLER_BUSY_STATUS:
+                    print(f"{chain.name}: another controller owns {chain.step.label}; adopting it", flush=True)
                 else:
                     chain.failure = f"{chain.step.label} failed; see {chain.step.root / DRIVER_CHILD_LOG}"
                     print(f"{chain.name}: {chain.failure}", flush=True)
@@ -3805,9 +3866,10 @@ def campaign_chains(arguments, candidates):
     return chains
 
 
-def check_campaign_options(arguments):
+def check_campaign_options(arguments, record=True):
     """Record the options that decide what the campaign's phases measure, or refuse a restart that changes them: the
-    restart skips each completed phase, so it would measure nothing under the new options."""
+    restart skips each completed phase, so it would measure nothing under the new options. Without record, only
+    compare them with any the campaign records."""
     options = json.dumps({
         "selected_shards": sorted(arguments.selected_shards) if arguments.selected_shards else None,
         "smoke_protocol": arguments.smoke_protocol,
@@ -3816,9 +3878,20 @@ def check_campaign_options(arguments):
                            for plan in arguments.language_plan},
     }, indent=2, sort_keys=True) + "\n"
     path = arguments.campaign_root / CAMPAIGN_OPTIONS
-    if not write_new_file(path, options.encode()) and path.read_text() != options:
+    written = record and write_new_file(path, options.encode())
+    if not written and path.is_file() and path.read_text() != options:
         raise SystemExit(f"the campaign's options differ from those {path} records; a restart measures what the "
                          f"campaign started measuring, so start another campaign for these:\n{options}")
+
+
+def check_campaign_candidates(campaign_root, candidates):
+    """Refuse a restart that names other candidates than the campaign's candidates.tsv records, or the same ones at
+    other commits. Each of candidates is a row of its fields, compared on the fields it holds, as a candidate not yet
+    frozen has no archive digest."""
+    recorded = read_candidates(campaign_root)
+    if recorded and [{field: row[field] for field in candidates[0]} for row in recorded] != candidates:
+        raise SystemExit(f"the campaign's candidates differ from those {campaign_root}/candidates.tsv records; a "
+                         "restart names the same candidates at the same commits")
 
 
 def run_campaign(arguments, root):
@@ -3854,13 +3927,17 @@ def run_campaign(arguments, root):
             print(f"candidate {name}: {resolve_commit(root, commitish)}, campaign "
                   f"{candidate_campaign_id(arguments.campaign, name)}, results {arguments.campaign_root / name}")
         return
-    with controller_lock(arguments.campaign_root):
+    if arguments.detach:
+        # The detached driver checks again under the campaign's lock; checking here puts a refusal in this shell.
+        check_campaign_candidates(arguments.campaign_root, [
+            {"name": name, "commit": resolve_commit(root, commitish)} for name, commitish in arguments.candidates])
+        check_campaign_options(arguments, record=False)
+        detach(arguments.campaign_root, CAMPAIGN_DRIVER, CAMPAIGN_DRIVER_LOG)
+        return
+    with controller_lock(arguments.campaign_root, CAMPAIGN_DRIVER):
         candidates = [freeze_candidate(root, arguments.campaign_root, arguments.campaign, name, commitish)
                       for name, commitish in arguments.candidates]
-        recorded = read_candidates(arguments.campaign_root)
-        if recorded and recorded != [candidate.row for candidate in candidates]:
-            raise SystemExit(f"the campaign's candidates differ from those {arguments.campaign_root}/candidates.tsv "
-                             "records; a restart names the same candidates at the same commits")
+        check_campaign_candidates(arguments.campaign_root, [candidate.row for candidate in candidates])
         for candidate in candidates:
             record_candidate(arguments.campaign_root, candidate)
         check_campaign_options(arguments)
@@ -3869,6 +3946,18 @@ def run_campaign(arguments, root):
     failed = [f"{chain.name}: {chain.failure}" for chain in chains if chain.failure]
     if failed:
         raise SystemExit("campaign finished with failed candidates:\n" + "\n".join(failed))
+
+
+def controller_process(root, record):
+    """The process ID root's controller records in record, while the process with that ID started when the record
+    says. The record outlives its controller, whose process ID may since name another process. Root's controller
+    lock is left alone, as even a shared hold of it would stop a controller that is starting from taking it."""
+    try:
+        values = read_properties(root / record)
+        process_id, started = int(values["pid"]), values["started"]
+    except (OSError, RuntimeError, KeyError, ValueError):
+        return None
+    return process_id if process_start(process_id) == started else None
 
 
 def main():
@@ -3883,6 +3972,8 @@ def main():
     platforms = read_platforms(directory)
     parse_launch_options(arguments, platforms)
     arguments.transfer_buckets = parse_transfer_buckets(arguments.transfer_bucket)
+    if arguments.detach and not arguments.execute:
+        raise SystemExit("--detach starts an execution; it requires --execute")
     if arguments.phase == "campaign":
         run_campaign(arguments, root)
         return
@@ -3944,21 +4035,27 @@ def main():
     write_work_items(items_path, items)
     print(f"planned {len(items)} work items with maximum concurrency {arguments.max_concurrent}")
     print(f"work item manifest: {items_path}")
+    if arguments.detach:
+        # The plan is checked here; the detached controller plans again and executes it.
+        detach(result_root, DRIVER_CHILD, DRIVER_CHILD_LOG)
+        return
     if arguments.execute:
-        validate_source(root, arguments)
-        validate_dependencies(root, arguments)
-        resolve_engine_builds(root, arguments)
-        validation = unit_validation(root, arguments, kind, plans)
-        validate_prerequisites(arguments, validation)
-        workers = [unit_worker_job(arguments.unit_platforms[pool], 0, 0, "spot")
-                   for pool in sorted({item.pool for item in items})]
-        validate_aws(arguments, platforms, workers)
-        stage_jdks(arguments, workers)
-        upload_engine_builds(arguments, workers)
-        if arguments.language_plan:
-            write_language_bundles(arguments, result_root)
-            upload_language_bundles(arguments, workers)
-        execute_units(arguments, root, result_root, items, platforms, validation)
+        # The controller owns its result root before its slow setup, so a second one stops at once.
+        with controller_lock(result_root, DRIVER_CHILD):
+            validate_source(root, arguments)
+            validate_dependencies(root, arguments)
+            resolve_engine_builds(root, arguments)
+            validation = unit_validation(root, arguments, kind, plans)
+            validate_prerequisites(arguments, validation)
+            workers = [unit_worker_job(arguments.unit_platforms[pool], 0, 0, "spot")
+                       for pool in sorted({item.pool for item in items})]
+            validate_aws(arguments, platforms, workers)
+            stage_jdks(arguments, workers)
+            upload_engine_builds(arguments, workers)
+            if arguments.language_plan:
+                write_language_bundles(arguments, result_root)
+                upload_language_bundles(arguments, workers)
+            UnitDispatcher(arguments, root, result_root, items, platforms, validation).run()
 
 
 if __name__ == "__main__":

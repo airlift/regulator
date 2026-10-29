@@ -427,7 +427,7 @@ class TestRunCampaign(unittest.TestCase):
                 max_concurrent=16, max_concurrent_per_platform=64, spot_vcpu_reserve=16, release_version="",
                 phase_timeout_seconds=None, fleet_budget=campaign_root / "fleet-policy.json", platform_region_values=[],
                 purchase_values=[], transfer_bucket=[], smoke_protocol="smoke", smoke_results=None,
-                primary_results=None, confirmation_jobs=None, engine_builds=None, execute=True)
+                primary_results=None, confirmation_jobs=None, engine_builds=None, execute=True, detach=False)
             candidates = [RUN_CAMPAIGN.FrozenCandidate(name, commit * 40, f"refs/benchmarks/tournament/{name}",
                                                        campaign_root / name / "candidate", "0" * 64, "e" * 40)
                           for name, commit in (("a", "a"), ("b", "b"))]
@@ -522,16 +522,27 @@ class TestRunCampaign(unittest.TestCase):
                 run()
             self.assertEqual([], events)
 
-            # A restart adopts a step's child only from a process running its command for this campaign root, not
-            # for another, even one differing only in its spaces.
+            # A restart adopts a phase's controller by the process ID and start time it records, though the restart
+            # changed its --purchase, and leaves the phase's lock to any controller starting meanwhile. Once the
+            # controller exited, the record's process ID may name a process started since, which is not adopted.
+            arguments.purchase_values = ["r8i=on-demand"]
+            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates)
+            record = chain.steps[2].root / RUN_CAMPAIGN.DRIVER_CHILD
+            with RUN_CAMPAIGN.controller_lock(chain.steps[2].root, RUN_CAMPAIGN.DRIVER_CHILD), \
+                    patch.object(RUN_CAMPAIGN.fcntl, "flock", side_effect=AssertionError("took the phase's lock")):
+                self.assertEqual(os.getpid(), RUN_CAMPAIGN.child_process_id(chain.steps[2]))
+                record.write_text(f"pid={os.getpid()}\nstarted=Thu Jan  1 00:00:00 1970\n")
+                self.assertIsNone(RUN_CAMPAIGN.child_process_id(chain.steps[2]))
+            # A reduction keeps no record, so a restart adopts it only from a process running its command for this
+            # campaign root, from any interpreter path, and not for another root, even one differing only in spaces.
             arguments.campaign_root = campaign_root / "campaign root"
             [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates)
-            step = chain.steps[2]
-            command = " ".join(step.command((4, 8)))
-            others = "\n".join(f"10{index} " + command.replace("campaign root", root)
+            step = chain.steps[3]
+            command = " ".join(step.command(None)[1:])
+            others = "\n".join(f"10{index} python3 " + command.replace("campaign root", root)
                                for index, root in ((1, "elsewhere"), (2, "campaign  root")))
             with patch.object(RUN_CAMPAIGN, "check_output",
-                              return_value=f"{others}\n103 python3 {command.split(' ', 1)[1]}"):
+                              return_value=f"{others}\n103 /opt/Python 3/bin/python3 {command}"):
                 self.assertEqual(103, RUN_CAMPAIGN.child_process_id(step))
             with patch.object(RUN_CAMPAIGN, "check_output", return_value=others):
                 self.assertIsNone(RUN_CAMPAIGN.child_process_id(step))
@@ -584,6 +595,18 @@ class TestRunCampaign(unittest.TestCase):
             run([a, b], start, lambda step: Child(step, 2) if step is b else None)
             self.assertEqual([("exit", "b"), ("start", "a", (2, 2)), ("exit", "a")], events)
 
+            # A restarted driver can start a phase whose controller holds its lock but has not yet recorded itself.
+            # The duplicate exits finding the lock held, and the driver then adopts the running controller.
+            c, owner = phase("c", 4), []
+
+            def start_duplicate(step, share):
+                events.append(("start", step.label, share))
+                owner.append(Child(step, 2))
+                return SimpleNamespace(poll=lambda: RUN_CAMPAIGN.CONTROLLER_BUSY_STATUS)
+
+            run([c], start_duplicate, lambda step: owner[0] if owner else None)
+            self.assertEqual([("start", "c", (4, 4)), ("exit", "c")], events)
+
             # Limits that cannot hold a share a phase froze stop the driver, though that phase runs adopted, naming
             # the limits that hold it.
             d = phase("d", 8)
@@ -592,13 +615,51 @@ class TestRunCampaign(unittest.TestCase):
                 run([d, phase("e", 2)], start, lambda step: Child(step, 1) if step is d else None)
             self.assertEqual([], events)
 
+    def test_detached_campaign_returns_and_a_second_launch_reports_the_live_driver(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            campaign_root = Path(temporary_directory)
+            arguments = SimpleNamespace(
+                campaign="tournament", campaign_root=campaign_root, candidates=[("a", "main")], fleet_budget=None,
+                smoke_results=None, primary_results=None, confirmation_jobs=None, engine_builds=None,
+                language_plan=[], execute=True, detach=True, max_concurrent=1, max_concurrent_per_platform=1,
+                selected_shards=None, smoke_protocol="smoke", release_version="")
+            argv = ["run-campaign.py", "campaign", "tournament", "--execute", "--detach", "--candidate=a=main"]
+            output = io.StringIO()
+
+            def start(command, **_):
+                # The driver takes the campaign's controller lock as it starts, and records itself.
+                driver.enter_context(RUN_CAMPAIGN.controller_lock(campaign_root, RUN_CAMPAIGN.CAMPAIGN_DRIVER))
+                return SimpleNamespace(pid=os.getpid())
+
+            # Popen starts only the driver here, so the driver's start time is given.
+            with contextlib.ExitStack() as driver, patch.object(RUN_CAMPAIGN.sys, "argv", argv), \
+                    contextlib.redirect_stdout(output), \
+                    patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=start) as popen, \
+                    patch.object(RUN_CAMPAIGN, "process_start", return_value="Thu Oct 29 00:00:00 2026"), \
+                    patch.object(RUN_CAMPAIGN, "resolve_commit", return_value="a" * 40), \
+                    patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze:
+                RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
+                RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
+
+            # Only the driver freezes and runs; the launch returns once it started it in its own session.
+            freeze.assert_not_called()
+            popen.assert_called_once()
+            command, options = popen.call_args
+            self.assertEqual([sys.executable, str(SCRIPT.resolve()), "campaign", "tournament", "--execute",
+                              "--candidate=a=main"], command[0])
+            self.assertTrue(options["start_new_session"])
+            self.assertEqual(str(campaign_root / RUN_CAMPAIGN.CAMPAIGN_DRIVER_LOG), options["stdout"].name)
+            started, reported = output.getvalue().splitlines()
+            self.assertIn(f"started controller process {os.getpid()}", started)
+            self.assertIn(f"already runs as process {os.getpid()}", reported)
+
     def test_campaign_refuses_candidates_whose_chains_share_a_campaign_id(self):
         # With a language plan, candidate a's language chain and candidate a.lang's baseline chain are both
         # tournament.a.lang, so they would reserve the fleet and number their hosts as one campaign.
         arguments = SimpleNamespace(
             campaign="tournament", campaign_root=Path("unused"), candidates=[("a", "main"), ("a.lang", "main")],
             fleet_budget=Path("fleet-policy.json"), smoke_results=None, primary_results=None, confirmation_jobs=None,
-            engine_builds=None, language_plan=[Path("plan")], execute=True)
+            engine_builds=None, language_plan=[Path("plan")], execute=True, detach=False)
         with patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze, \
                 self.assertRaisesRegex(SystemExit, "a and a.lang would both run as campaign tournament.a.lang"):
             RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
@@ -1313,6 +1374,42 @@ class TestRunCampaign(unittest.TestCase):
                                                    "--campaign-root", str(root / "refused")]), \
                         patch.dict(os.environ, environment), self.assertRaisesRegex(SystemExit, refusal):
                     RUN_CAMPAIGN.main()
+            # A campaign refuses malformed options before it plans anything. Options are never abbreviated, so --det
+            # is no --detach a detached driver would pass on to itself.
+            for options, refusal in (
+                    (["tournament", "--candidate", "a"], "--candidate takes one NAME=COMMITISH"),
+                    (["tournament", "--candidate", "a/b=HEAD"], "--candidate takes one NAME=COMMITISH"),
+                    (["tour/nament", "--candidate", "a=HEAD"], "candidate a's campaign ID must be"),
+                    (["tournament", "--candidate", "a=HEAD", "--platform-regions", "r8i"],
+                     "--platform-regions takes one PLATFORM=VALUE"),
+                    (["tournament", "--candidate", "a=HEAD", "--purchase", "r8i=cheap"], "--purchase policies are"),
+                    (["tournament", "--candidate", "a=HEAD", "--max-concurrent", "0"],
+                     "--max-concurrent 0 cannot give each of the campaign's 1 phase sequences"),
+                    (["tournament", "--candidate", "a=HEAD", "--language-plan", str(root / "plan"),
+                      "--max-concurrent-per-platform", "1"],
+                     "--max-concurrent-per-platform 1 cannot give each of the campaign's 2 phase sequences"),
+                    (["tournament", "--candidate", "a=HEAD", "--execute", "--det"], "unrecognized arguments: --det")):
+                errors = io.StringIO()
+                with self.subTest(refusal=refusal):
+                    with patch.object(sys, "argv", ["run-campaign.py", "campaign", *options,
+                                                    "--campaign-root", str(root / "refused")]), \
+                            contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as refused:
+                        RUN_CAMPAIGN.main()
+                    self.assertIn(refusal, f"{refused.exception}{errors.getvalue()}")
+            self.assertFalse((root / "refused").exists())
+            # A second controller of a phase stops at once, before its slow setup, while the first owns the root, with
+            # the status that tells a campaign driver to adopt the first.
+            errors = io.StringIO()
+            with patch.object(sys, "argv", ["run-campaign.py", "smoke", "language", "--language-plan",
+                                            str(root / "plan"), "--candidate", "lifecycle=HEAD",
+                                            "--campaign-root", str(root), "--execute"]), \
+                    RUN_CAMPAIGN.controller_lock(root / "lifecycle/lang/smoke", RUN_CAMPAIGN.DRIVER_CHILD), \
+                    patch.object(RUN_CAMPAIGN, "validate_source") as setup, contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as busy:
+                RUN_CAMPAIGN.main()
+            setup.assert_not_called()
+            self.assertEqual(RUN_CAMPAIGN.CONTROLLER_BUSY_STATUS, busy.exception.code)
+            self.assertIn("another controller owns", errors.getvalue())
 
     def test_language_primary_accepts_its_attempts_and_exports_each_plan_once(self):
         fixture = test_fleet.TestFleet()
@@ -1358,7 +1455,7 @@ class TestRunCampaign(unittest.TestCase):
         items = RUN_CAMPAIGN.build_work_items("primary", platforms, campaign["units"], sorted(campaign["allocations"]),
                                               allocations=campaign["allocations"])
         with FakeUnitFleet(fixture.root / "hosts").stubs():
-            RUN_CAMPAIGN.execute_units(arguments, checkout, result_root, items, platforms, accepted)
+            RUN_CAMPAIGN.UnitDispatcher(arguments, checkout, result_root, items, platforms, accepted).run()
         # A restart reproduces each plan's export, and refuses one that changed.
         export = result_root / f"{plan['shard_id']}-results.json"
         exported = export.read_bytes()
@@ -2995,8 +3092,8 @@ class TestUnitWorkers(unittest.TestCase):
         with fleet.stubs():
             self.validation = RUN_CAMPAIGN.unit_validation(SCRIPT.parents[3], arguments, "baseline")
             try:
-                RUN_CAMPAIGN.execute_units(arguments, SCRIPT.parents[3], result_root, items, self.PLATFORMS,
-                                           self.validation)
+                RUN_CAMPAIGN.UnitDispatcher(arguments, SCRIPT.parents[3], result_root, items, self.PLATFORMS,
+                                            self.validation).run()
             finally:
                 self.ledger = []
                 if (result_root / "unit-attempts.tsv").exists():
