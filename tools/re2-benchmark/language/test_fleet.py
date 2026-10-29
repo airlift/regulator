@@ -43,7 +43,7 @@ class TestFleet(unittest.TestCase):
             "r8i": {"instance_type": "r8i.large", "vcpus": 2},
         })
         self.assertEqual(fleet.validate(self.directory), plan)
-        self.assertFalse((self.directory / "source/unrelated.txt").exists())
+        self.assertNotIn("unrelated.txt", {path.name for path in self.directory.rglob("*")})
         for partition in plan["partitions"]:
             manifest = collection.load(self.directory / "partitions" / partition["id"] / "manifest.json")
             observations = list(collection.observations(manifest))
@@ -117,6 +117,29 @@ class TestFleet(unittest.TestCase):
         self.assertEqual(2, len(units))
         self.assertTrue(all(float(unit["estimated_seconds"]) <= fleet.work_units.UNIT_SECONDS
                             for unit in units.values()))
+
+    def test_partitions_read_each_input_from_the_plan_store(self):
+        plan = self.prepare_small_plan()
+        source = collection.load(self.directory / "source/manifest.json")
+        # The store holds each input once; a partition holds only its manifest.
+        self.assertEqual(sorted(path.relative_to(self.directory).as_posix()
+                                for path in (self.directory / "inputs").iterdir()),
+                         sorted({mapping["input_file"] for mapping in source["cases"][0]["mappings"].values()}))
+        for partition in plan["partitions"]:
+            self.assertEqual(["manifest.json"],
+                             [path.name for path in (self.directory / "partitions" / partition["id"]).iterdir()])
+        first = plan["partitions"][0]
+        workload = self.directory / source["cases"][0]["mappings"][first["language"]]["input_file"]
+
+        class Started(Exception):
+            pass
+
+        with patch.object(collection, "runner_identity", return_value={}), \
+                patch.object(collection, "verify_command", side_effect=Started) as command, \
+                self.assertRaises(Started):
+            fleet.verify(self.directory, self.root / "preflight", "java", "classpath",
+                         {"native-re2": "native", "native-rust": "rust"})
+        self.assertEqual(str(workload), command.call_args.args[0][-1])
 
     def test_reject_incomplete_duplicate_or_changed_plan(self):
         original = self.prepare_small_plan()
@@ -196,13 +219,14 @@ class TestFleet(unittest.TestCase):
         results = self.root / "results"
         for index, partition in enumerate(plan["partitions"]):
             self.write_partition_results(self.directory / "partitions" / partition["id"], results / partition["id"],
-                                         "r9g", "r9g.2xlarge", f"i-{index}")
+                                         self.directory, "r9g", "r9g.2xlarge", f"i-{index}")
         return results
 
     @staticmethod
-    def write_partition_results(partition, result, platform, instance_type, instance_id, jdk="JDK25", source_commit="commit",
-                                traced="61", classes_archive_sha256="c" * 64):
-        """Write one partition's synthetic verification and measurements, and export them."""
+    def write_partition_results(partition, result, inputs, platform, instance_type, instance_id, jdk="JDK25",
+                                source_commit="commit", traced="61", classes_archive_sha256="c" * 64):
+        """Write one partition's synthetic verification and measurements, and export them with the inputs of the
+        plan's store."""
         result.mkdir(parents=True, exist_ok=True)
         manifest = collection.load(partition / "manifest.json")
         runners = {"fixture": "JVM"}
@@ -247,7 +271,7 @@ class TestFleet(unittest.TestCase):
             "platform": platform, "instance_identity": {"instanceType": instance_type, "instanceId": instance_id},
             "jvm_build": {"source_tree": "tree", "classes_archive_sha256": classes_archive_sha256, "jvm": runners}})
         collection.save(result / "observations.json", observations)
-        collection.export(partition, result)
+        collection.export(partition, result, inputs=inputs)
 
     def run_unit(self, unit_id, root, verify=None, environment=None, replica="1", unit_attempt="host-1/1",
                  measured=lambda partition: {}, directory=None, group="1", classes="c" * 64):
@@ -287,14 +311,16 @@ class TestFleet(unittest.TestCase):
                              (directory, source, archive, candidate))
             return "installed classpath", receipt
 
-        def measure(path, results, java, classpath, native_runners, platform, build_receipt):
+        def measure(path, results, java, classpath, native_runners, platform, build_receipt, inputs):
             self.assertEqual(("installed classpath", receipt), (classpath, build_receipt))
             self.assertEqual(shared / "language-native", Path(native_runners["native-re2"]).parent)
+            # Even a copy of the partition selecting some operations reads its inputs from the plan's store.
+            self.assertEqual(directory or self.directory, inputs)
             host = self.unit_environment
-            self.write_partition_results(path, results, host["platform"], host["instance_type"], host["instance_id"],
-                                         **{"jdk": "Temurin 25.0.4+7", "source_commit": "a" * 40,
-                                            "classes_archive_sha256": build_receipt["classes_archive_sha256"],
-                                            **measured(results.name)})
+            self.write_partition_results(
+                path, results, inputs, host["platform"], host["instance_type"], host["instance_id"],
+                **{"jdk": "Temurin 25.0.4+7", "source_commit": "a" * 40,
+                   "classes_archive_sha256": build_receipt["classes_archive_sha256"], **measured(results.name)})
 
         reads = itertools.count()
 
@@ -308,7 +334,8 @@ class TestFleet(unittest.TestCase):
                 patch.object(fleet.os, "sched_getaffinity", lambda _: set(affinity), create=True), \
                 patch.object(fleet.os, "sched_setaffinity", set_affinity, create=True), \
                 patch.object(fleet.jvm_build, "prepare", side_effect=prepare), \
-                patch.object(collection, "verify", side_effect=verify or (lambda path, results, *args: results.mkdir(parents=True))), \
+                patch.object(collection, "verify", side_effect=verify or (
+                    lambda path, results, *args, inputs: results.mkdir(parents=True))), \
                 patch.object(collection, "measure", side_effect=measure):
             try:
                 fleet.run_unit(directory or self.directory, unit_id, replica, group, root, shared, unit_attempt,
@@ -378,7 +405,7 @@ class TestFleet(unittest.TestCase):
             rewrite(exported)
             collection.save(path, exported)
         fleet.write_unit_evidence(root)
-        with patch.object(collection, "export", side_effect=lambda _slice, result, write=False: collection.load(
+        with patch.object(collection, "export", side_effect=lambda _slice, result, write, inputs: collection.load(
                 result / "language-results.json")):
             if rejection is None:
                 fleet.validate_unit_attempt(root, self.directory)
@@ -446,7 +473,7 @@ class TestFleet(unittest.TestCase):
         self.prepare_small_plan()
         unit_id = next(iter(fleet.work_units.load(self.directory)))
 
-        def disagreeing_trace(path, results, *args):
+        def disagreeing_trace(path, results, *args, inputs):
             # Every engine reports one more match per source than the case expects.
             manifest = collection.load(path / "manifest.json")
             trace = "".join(f"{source['expected_count'] + 1}:\n" for source in manifest["cases"][0]["sources"])
@@ -456,13 +483,13 @@ class TestFleet(unittest.TestCase):
         def attempts(*phases):
             # A verifier whose attempts time out in these phases, then complete.
             outcomes = [{"outcome": "did-not-finish", "phase": phase} for phase in phases] + [{"outcome": "completed"}]
-            def verify(path, results, *args):
+            def verify(path, results, *args, inputs):
                 with patch.object(collection, "run_process", side_effect=outcomes):
                     collection.verify_command(["verifier"], results / "verifier", "native-re2", "safe")
             return verify
 
         def runner(script):
-            return lambda path, results, *args: collection.run_process(["sh", "-c", script], results / "runner")
+            return lambda path, results, *args, inputs: collection.run_process(["sh", "-c", script], results / "runner")
 
         def over_budget(partition):
             raise collection.BudgetOverrun(f"measurement process outran its budget: {partition}")
@@ -495,15 +522,23 @@ class TestFleet(unittest.TestCase):
                         fleet.main()
                     self.assertEqual(exited.exception.code, status)
 
-    def test_plan_bundle_unpacks_as_its_shard(self):
+    def test_plan_bundle_unpacks_as_its_shard_and_a_restart_reuses_it(self):
         self.prepare_small_plan()
-        bundle = self.root / "plan.tar.zst"
-        sha256 = fleet.write_bundle(self.directory, bundle)
+        bundles = self.root / "language-plans"
+        bundles.mkdir()
+        bundle, sha256 = fleet.reuse_bundle(self.directory, bundles)
         self.assertEqual(sha256, fleet.write_bundle(self.directory, self.root / "renamed.tar.zst"))
         # A worker unpacks the bundle into its plans directory, as run-host.sh streams it.
         stream = subprocess.run(["zstd", "-dcq", str(bundle)], capture_output=True, check=True).stdout
         fleet.engine_build.unpack(io.BytesIO(stream), self.root / "plans")
         self.assertEqual(fleet.validate(self.root / "plans/language-lifecycle"), fleet.validate(self.directory))
+        # A later start of the same plan reuses its bundle; a changed plan gets its own.
+        with patch.object(fleet.engine_build, "write_archive") as write:
+            self.assertEqual((bundle, sha256), fleet.reuse_bundle(self.directory, bundles))
+        write.assert_not_called()
+        (self.directory / "notes.txt").write_text("archived with the plan\n")
+        changed, _ = fleet.reuse_bundle(self.directory, bundles)
+        self.assertEqual(sorted([bundle, changed]), sorted(bundles.iterdir()))
 
     def run_campaign(self, measured=lambda platform, partition: {}, directories=None,
                      classes=lambda platform, replica: "c" * 64 if platform == "r9g" else "d" * 64):
@@ -597,7 +632,7 @@ class TestFleet(unittest.TestCase):
         evidence = {partition["id"]: collection.load(measured / partition["id"] / "verification.json")
                     for partition in plan["partitions"]}
 
-        def verify_partition(partition, output, *args):
+        def verify_partition(partition, output, *args, inputs):
             return evidence[partition.name]
 
         output = self.root / "preflight"

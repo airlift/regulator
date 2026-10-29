@@ -300,6 +300,11 @@ Each partition contains one logical case and one language, with the comparator
 and both Regulator memory modes kept together. The everyday corpus produces
 52 partitions, each measured on R9g and R8i in three independent replicas.
 
+The plan keeps the source manifest in `source/` and each partition's manifest
+in `partitions/<partition>`. Its `inputs/` store holds each input file once, at
+the path the manifests name, and the source and every partition read their
+inputs from it, each checked against its recorded SHA-256.
+
 The plan packs its comparisons into work units, written as `units.tsv`
 and `unit-rows.tsv` beside `plan.json` in the baseline unit format. An atom is
 one comparison under one operation: its comparator and both memory modes,
@@ -325,10 +330,10 @@ unit checks that the host matches its platform allocation, with every vCPU
 visible and an 8g heap, and checks the extracted source against the source
 archive and candidate provenance. Its candidate classes and native runners come
 from the platform's engine build. Pinned to one CPU, it verifies and then
-measures the group's
-comparison under `partitions/<partition>`; a lifecycle comparison of which the
-unit holds only some operations runs a copy of its partition selecting those
-operations.
+measures the group's comparison under `partitions/<partition>`; a lifecycle
+comparison of which the unit holds only some operations runs a copy of its
+partition's manifest selecting those operations. The manifest and such a copy
+both read their inputs from the plan's store.
 
 A semantic verdict ends the unit with status 44, which its controller never
 retries: engines or a result that disagree with the expected trace or result,
@@ -585,9 +590,12 @@ which carries the native runners. Each plan must name a distinct shard.
 
 Each platform's workers use the instance type the plan allocates, so
 lifecycle units on R9g run on `.2xlarge` workers. The controller writes each
-plan's bundle under the result root's `language-plans/` and uploads it beside
-the [engine archives](../aws/README.md#engine-builds). Leases, retries,
-interruptions, restarts, and the shared fleet budget follow the baseline's
+plan's bundle under the result root's `language-plans/`, named by its shard and
+a fingerprint of the plan's files and the tooling that writes the bundle, and
+uploads it beside the [engine archives](../aws/README.md#engine-builds). A
+restart of the same plans reuses the bundle; its SHA-256 stays its identity.
+Leases, retries, interruptions, restarts, and the shared fleet budget follow the
+baseline's
 [unit dispatch](../aws/README.md#unit-dispatch). A unit estimated past 15
 minutes runs only on On-Demand workers unless the campaign is `--spot-only`,
 and each pool's worker timeout covers its longest unit.

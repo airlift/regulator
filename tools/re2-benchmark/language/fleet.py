@@ -220,14 +220,43 @@ class UnitRejection(Exception):
         self.status = status
 
 
+def bundle_files(directory):
+    """The plan files a bundle archives, by their paths in the plan."""
+    return sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*") if path.is_file())
+
+
 def write_bundle(directory, output):
     """Write a plan's deterministic bundle and return its SHA-256. The bundle holds the plan's files under its
     shard ID, so a unit worker unpacks every bundle into one directory, where run-unit.sh finds each plan by its
     shard."""
     directory = directory.resolve()
     plan = validate(directory)
-    names = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*") if path.is_file())
-    return engine_build.write_archive(directory, names, output, prefix=f"{plan['shard_id']}/")["sha256"]
+    return engine_build.write_archive(directory, bundle_files(directory), output,
+                                      prefix=f"{plan['shard_id']}/")["sha256"]
+
+
+def bundle_fingerprint(directory):
+    """What determines a plan's bundle: each file it archives, by path and SHA-256, and the code that writes it."""
+    digest = hashlib.sha256()
+    for name in bundle_files(directory):
+        digest.update(f"{sha256_file(directory / name)}  {name}\n".encode())
+    for path in (Path(__file__), Path(engine_build.__file__)):
+        digest.update(f"{sha256_file(path)}  {path.name}\n".encode())
+    return digest.hexdigest()
+
+
+def reuse_bundle(directory, bundles):
+    """A plan's bundle under bundles, and its SHA-256: the bundle an earlier start wrote for the same plan files and
+    tooling, or a new one. A bundle appears under its fingerprint only once complete, so a restart reuses it."""
+    directory = directory.resolve()
+    shard = collection.load(directory / "plan.json")["shard_id"]
+    bundle = bundles / f"{shard}-{bundle_fingerprint(directory)}.tar.zst"
+    if bundle.exists():
+        return bundle, sha256_file(bundle)
+    partial = bundle.with_name(bundle.name + ".partial")
+    sha256 = write_bundle(directory, partial)
+    os.replace(partial, bundle)
+    return bundle, sha256
 
 
 def check_host(environment, suite):
@@ -244,15 +273,15 @@ def check_host(environment, suite):
 
 
 def slice_directory(directory, partition, operations, work):
-    """The directory that measures a unit's operations of one comparison: the partition itself when it
-    measures them all, otherwise a copy of the partition selecting those operations."""
+    """The manifest directory that measures a unit's operations of one comparison: the partition itself when it
+    measures them all, otherwise a copy of its manifest selecting those operations. Either way, its input files
+    resolve against the plan directory, which holds each input once."""
     path = directory / "partitions" / partition["id"]
     manifest = collection.load(path / "manifest.json")
     if operations == list(collection.case_operations(manifest, manifest["cases"][0])):
         return path
     destination = work / partition["id"]
     destination.mkdir(parents=True)
-    copy_inputs(manifest, path, destination)
     collection.save(destination / "manifest.json", {**manifest, "selected_operations": operations})
     return destination
 
@@ -320,7 +349,7 @@ def run_unit(directory, unit_id, replica, group_id, root, shared, unit_attempt, 
                 path = slice_directory(directory, partition, operations, Path(work))
                 results = root / "partitions" / partition["id"]
                 try:
-                    collection.verify(path, results, java, classpath, native_runners)
+                    collection.verify(path, results, java, classpath, native_runners, inputs=directory)
                 except collection.SemanticFailure as error:
                     # Only a verdict on the regex semantics is final; a runner that failed or never
                     # started says nothing about them.
@@ -328,7 +357,7 @@ def run_unit(directory, unit_id, replica, group_id, root, shared, unit_attempt, 
                 steal_before, total_before = cpu_ticks()
                 try:
                     collection.measure(path, results, java, classpath, native_runners, environment["platform"],
-                                       receipt)
+                                       receipt, inputs=directory)
                 except collection.BudgetOverrun as error:
                     raise UnitRejection(PROTOCOL_REJECTION_STATUS, str(error)) from error
                 steal_after, total_after = cpu_ticks()
@@ -396,7 +425,8 @@ def validate_unit_attempt(root, directory):
     with tempfile.TemporaryDirectory() as work:
         for partition, operations in partitions:
             results = root / "partitions" / partition["id"]
-            data = collection.export(slice_directory(directory, partition, operations, Path(work)), results, write=False)
+            data = collection.export(slice_directory(directory, partition, operations, Path(work)), results,
+                                     write=False, inputs=directory)
             if collection.load(results / "language-results.json") != data:
                 raise ValueError("language export differs from raw evidence")
             provenance = data["provenance"]
@@ -445,6 +475,8 @@ def validate_unit_attempt(root, directory):
 
 
 def copy_inputs(manifest, source, destination):
+    """Copy each input file the manifest's validation reads, once, to its path under destination: a bulk manifest
+    checks every mapping against its source, including a not-compatible one, which reads the source itself."""
     paths = {mapping["input_file"] for case in manifest["cases"]
              for mapping in case["mappings"].values() if mapping["status"] != "not-compatible"}
     if manifest.get("suite") == "language-bulk":
@@ -476,7 +508,9 @@ def prepare(manifest_directory, destination, selection=None, duration_policy=Non
     source = destination / "source"
     source.mkdir()
     shutil.copyfile(manifest_directory / "manifest.json", source / "manifest.json")
-    copy_inputs(manifest, manifest_directory, source)
+    # The plan's input store holds each input once, at its manifest path under the plan; the source and every
+    # partition read their inputs from it.
+    copy_inputs(manifest, manifest_directory, destination)
     parent_hash = collection.digest((manifest_directory / "manifest.json").read_bytes())
     partitions = []
     for case_index, case in enumerate(manifest["cases"]):
@@ -488,8 +522,6 @@ def prepare(manifest_directory, destination, selection=None, duration_policy=Non
             directory.mkdir(parents=True)
             subset = copy.deepcopy(manifest)
             subset.update(cases=[case], selected_languages=[language], parent_manifest_sha256=parent_hash)
-            copy_inputs(subset, manifest_directory, directory)
-            collection.validate_manifest(subset, directory)
             collection.save(directory / "manifest.json", subset)
             partitions.append({"id": partition_id, "case": case["id"], "language": language,
                                "manifest_sha256": collection.digest((directory / "manifest.json").read_bytes())})
@@ -511,7 +543,7 @@ def validate(directory):
     plan = collection.load(directory / "plan.json")
     source = directory / "source"
     manifest = collection.load(source / "manifest.json")
-    collection.validate_manifest(manifest, source)
+    collection.validate_manifest(manifest, directory)
     if "selected_languages" in manifest or "parent_manifest_sha256" in manifest:
         raise ValueError("fleet source must be unpartitioned")
     parent_hash = collection.digest((source / "manifest.json").read_bytes())
@@ -547,7 +579,6 @@ def validate(directory):
         actual = collection.load(path / "manifest.json")
         if actual != subset or collection.digest((path / "manifest.json").read_bytes()) != partition["manifest_sha256"]:
             raise ValueError("partition differs from its parent manifest")
-        collection.validate_manifest(actual, path)
     if found != expected:
         raise ValueError("incomplete fleet coverage")
     if "duration_policy" in plan:
@@ -571,7 +602,7 @@ def verify(directory, results, java, classpath, native_runners):
     runner_hash = None
     for index, partition in enumerate(plan["partitions"], start=1):
         evidence = collection.verify(directory / "partitions" / partition["id"],
-                                     results / partition["id"], java, classpath, native_runners)
+                                     results / partition["id"], java, classpath, native_runners, inputs=directory)
         if runner_hash is not None and runner_hash != evidence["runners_sha256"]:
             raise ValueError("runners changed between partition verifications")
         runner_hash = evidence["runners_sha256"]
