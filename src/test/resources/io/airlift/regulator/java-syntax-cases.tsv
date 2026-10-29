@@ -24,6 +24,8 @@ ACCEPT	\Babc	Java non-boundaries use Java combining-aware classification
 ACCEPT	\Z	Java final-terminator boundary is supported
 REJECT	\G	Previous-match boundary is stateful
 REJECT	\C	This is not a Java Pattern escape
+ACCEPT	\é	A backslash before a non-ASCII character escapes it
+REJECT	[\b]	A Java character class rejects the boundary escape
 ACCEPT	(?m)abc	Java multiline anchors are supported
 ACCEPT	(?d)abc	Unix-lines mode is supported
 ACCEPT	(?u)abc	Unicode case-insensitive mode uses Java simple folding

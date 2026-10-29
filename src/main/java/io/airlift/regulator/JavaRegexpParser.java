@@ -1311,11 +1311,14 @@ final class JavaRegexpParser
             if (peekByte() == '\\') {
                 int sequenceStart = index;
                 consumeByte('\\');
+                if (atEnd()) {
+                    throw error(RegexpParseErrorCode.MISSING_BRACKET, patternSegment(sequenceStart, end - sequenceStart));
+                }
                 int escapedByte = consumeByte();
-                // Mirror upstream ParseEscape() behavior: accept escapes for known sequences,
-                // accept escaped non-alnum ASCII as itself, otherwise error.
+                // As in the JDK's escape(), accept the known escapes and any character other than an
+                // ASCII letter or digit as itself. A class escape such as \d reaches here only as the
+                // end of a range, which the JDK rejects.
                 return switch (escapedByte) {
-                    case 'b' -> '\b';
                     case 'n' -> '\n';
                     case 'r' -> '\r';
                     case 't' -> '\t';
@@ -1323,19 +1326,21 @@ final class JavaRegexpParser
                     case 'v' -> 0x0B;
                     case 'a' -> 0x07;
                     case 'e' -> 0x1B;
-                    case 'H', 'V', 'h' -> escapedByte;
+                    case 'd', 'D', 'h', 'H', 's', 'S', 'V', 'w', 'W' -> throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, patternSegment(sequenceStart, index - sequenceStart));
                     case 'c' -> parseControlEscape(flags, sequenceStart);
                     case 'N' -> parseNamedCodePoint(sequenceStart);
                     case 'x' -> parseHexEscape(flags, sequenceStart);
                     case 'u' -> parseUnicodeEscape(flags, sequenceStart);
                     case '0' -> parseOctalEscape(escapedByte, flags, sequenceStart);
                     default -> {
-                        if (escapedByte < 0x80 && !Character.isLetterOrDigit((char) escapedByte)) {
+                        if (escapedByte >= 0x80) {
+                            index--;
+                            yield readRune(flags);
+                        }
+                        if (!Character.isLetterOrDigit((char) escapedByte)) {
                             yield escapedByte;
                         }
-                        int width = runeByteWidthAt(index - 1);
-                        int length = 1 + (width > 0 ? width : 1);
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, length));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                 };
             }
@@ -1441,12 +1446,16 @@ final class JavaRegexpParser
                     throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                 }
                 default -> {
-                    if (escapedByte < 0x80 && !Character.isLetterOrDigit((char) escapedByte)) {
+                    // As in the JDK's escape(), any character other than an ASCII letter or digit
+                    // escapes itself.
+                    if (escapedByte >= 0x80) {
+                        index--;
+                        yield literalFromRune(readRune(flags));
+                    }
+                    if (!Character.isLetterOrDigit((char) escapedByte)) {
                         yield literalFromRune(escapedByte);
                     }
-                    int width = runeByteWidthAt(index - 1);
-                    int length = 1 + (width > 0 ? width : 1);
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, length));
+                    throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                 }
             };
         }

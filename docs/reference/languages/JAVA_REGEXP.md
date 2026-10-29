@@ -74,7 +74,7 @@ The JDK's `start()` and `end()` then still report that empty match while
 | Character classes | Union, nested intersection, subtraction, negation, quoted atoms, ranges, and Java's empty intersection operands |
 | Predefined classes | ASCII and Unicode forms of digit, whitespace, word, horizontal-whitespace, vertical-whitespace, and POSIX classes |
 | Unicode properties | Categories, scripts, blocks, binary properties, and `java...` properties from the pinned Unicode 18.0 database |
-| Escapes | Quoting, hexadecimal, Unicode, octal, control, named-code-point, horizontal-whitespace, and vertical-whitespace escapes |
+| Escapes | Quoting, hexadecimal, Unicode, octal, control, named-code-point, horizontal-whitespace, and vertical-whitespace escapes; a backslash also escapes any character other than an ASCII letter or digit |
 | Inline flags | `d`, `i`, `m`, `s`, `u`, `U`, and `x`, including scoped forms |
 
 As in the JDK, `\Q...\E` quotes are rewritten into escapes before the pattern

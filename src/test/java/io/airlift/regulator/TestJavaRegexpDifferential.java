@@ -455,6 +455,22 @@ public class TestJavaRegexpDifferential
         assertRejectsJava25("(?x)(? <n>a)", OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_PERL_OP);
     }
 
+    @Test
+    public void testEscapesMatchJava25()
+    {
+        // A backslash before any non-ASCII character escapes it, inside and outside a class.
+        for (String pattern : List.of("\\é", "[\\é]", "\\ж", "\\٣", "\\💰", "[\\💰]", "[\\x00-\\💰]")) {
+            assertMatchesJava25(pattern, OptionProfile.DEFAULT, List.of("é", "ж", "٣", "💰", "e", "\\"));
+        }
+        // A trailing backslash after a range's '-' leaves the class unclosed.
+        assertRejectsJava25("[a-\\", OptionProfile.DEFAULT, RegexpParseErrorCode.MISSING_BRACKET);
+        // A class rejects the boundary \b, and a class escape cannot end a range.
+        assertRejectsJava25("[\\b]", OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_ESCAPE);
+        for (String pattern : List.of("[a-\\d]", "[a-\\D]", "[a-\\h]", "[a-\\H]", "[a-\\s]", "[a-\\S]", "[a-\\V]", "[a-\\w]", "[a-\\W]")) {
+            assertRejectsJava25(pattern, OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_CHAR_RANGE);
+        }
+    }
+
     private static void assertMatchesJava25(String pattern, OptionProfile options, List<String> inputs)
     {
         Pattern jdkPattern = Pattern.compile(pattern, options.jdkFlags());
