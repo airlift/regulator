@@ -36,6 +36,7 @@ final class BoundedCharacterClassCounter
     private final int minimum;
     private final int maximum;
     private final boolean latin1;
+    private final boolean matchesAllNonAscii;
 
     private BoundedCharacterClassCounter()
     {
@@ -43,12 +44,15 @@ final class BoundedCharacterClassCounter
         minimum = 0;
         maximum = 0;
         latin1 = false;
+        matchesAllNonAscii = false;
     }
 
     private BoundedCharacterClassCounter(RuneRange[] ranges, int minimum, int maximum, boolean latin1)
     {
         matchingCodePoints = new long[latin1 ? 4 : CODE_POINT_WORD_COUNT];
+        boolean matchesAllNonAscii = false;
         for (RuneRange range : ranges) {
+            matchesAllNonAscii |= !latin1 && Compiler.holdsAllNonAscii(range);
             int low = Math.max(0, range.low());
             int high = Math.min(latin1 ? 0xFF : CharClass.RUNEMAX, range.high());
             if (low <= high) {
@@ -58,6 +62,7 @@ final class BoundedCharacterClassCounter
         this.minimum = minimum;
         this.maximum = maximum;
         this.latin1 = latin1;
+        this.matchesAllNonAscii = matchesAllNonAscii;
     }
 
     private static void setRange(long[] words, int low, int high)
@@ -202,7 +207,9 @@ final class BoundedCharacterClassCounter
                 codePoint = Utf8.decodedCodePoint(decoded);
                 width = Utf8.decodedWidth(decoded);
                 if (width == 1 && codePoint == Utf8.RUNE_ERROR && (bytes[position] & 0xFF) >= 0x80) {
-                    codePoint = -1;
+                    long malformed = Utf8.re2DecodeMalformed(bytes, position, end, matchesAllNonAscii);
+                    codePoint = Utf8.decodedCodePoint(malformed);
+                    width = Utf8.decodedWidth(malformed);
                 }
             }
 
@@ -295,7 +302,7 @@ final class BoundedCharacterClassCounter
         int codePoint = Utf8.decodedCodePoint(decoded);
         int width = Utf8.decodedWidth(decoded);
         if (width == 1 && codePoint == Utf8.RUNE_ERROR && (bytes[position] & 0xFF) >= 0x80) {
-            return (1L << 32) | 0xFFFF_FFFFL;
+            return Utf8.re2DecodeMalformed(bytes, position, end, matchesAllNonAscii);
         }
         return decoded;
     }

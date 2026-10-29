@@ -300,14 +300,45 @@ public class TestBoundedCharacterClassCounter
     @Test
     public void testMalformedUtf8MatchesGeneralMatcher()
     {
-        Slice malformed = Slices.wrappedBuffer(new byte[] {(byte) 0xFF});
-        for (String pattern : List.of("\\p{L}{1,3}", "[^x]{1,3}")) {
-            Re2 re2 = Re2.compile(utf8Slice(pattern));
-            BoundedCharacterClassCounter counter = re2.createBoundedCharacterClassCounter();
+        // Overlong E0 80 80 and F0 80 80 80, encoded surrogates, F4 90 80 80 above U+10FFFF, a
+        // truncated E2 82, a bare continuation byte, and FF, between valid characters.
+        Slice malformed = Slices.wrappedBuffer(new byte[] {
+                'a', (byte) 0xE0, (byte) 0x80, (byte) 0x80, 'x', (byte) 0xED, (byte) 0xA0, (byte) 0x80,
+                (byte) 0xF4, (byte) 0x90, (byte) 0x80, (byte) 0x80, (byte) 0xC3, (byte) 0xA9, 'x',
+                (byte) 0xF0, (byte) 0x80, (byte) 0x80, (byte) 0x80, (byte) 0xE2, (byte) 0x82,
+                (byte) 0xED, (byte) 0xBF, (byte) 0xBF, (byte) 0x80, (byte) 0xFF, 'b',
+        });
+        // Classes of every non-ASCII character, of some including all the surrogates, of only some
+        // of the surrogates, and of some excluding them. A capture keeps the reference count on the
+        // ordinary engine; without one, a class of 32 or more ranges counts through the compact
+        // counter under test.
+        for (String pattern : List.of("[^x]{1,3}", "[^\\x{100}]{1,3}", "[\\x{D800}-\\x{DBFF}]{1,3}", "\\p{L}{1,3}")) {
+            BoundedCharacterClassCounter counter = Re2.compile(utf8Slice(pattern)).createBoundedCharacterClassCounter();
             assertThat(counter.count(malformed))
                     .as(pattern)
-                    .isEqualTo(countWithGeneralMatcher(re2, malformed));
+                    .isEqualTo(countWithGeneralMatcher(Re2.compile(utf8Slice("(" + pattern + ")")), malformed));
         }
+
+        // An encoded surrogate cut off by the end of the input, though its backing bytes continue.
+        Slice truncatedSurrogate = Slices.wrappedBuffer(new byte[] {(byte) 0xED, (byte) 0xA0, (byte) 0x80}, 0, 2);
+        BoundedCharacterClassCounter surrogateCounter = Re2.compile(utf8Slice("[^\\x{100}]{1,3}")).createBoundedCharacterClassCounter();
+        assertThat(surrogateCounter.count(truncatedSurrogate))
+                .isEqualTo(countWithGeneralMatcher(Re2.compile(utf8Slice("([^\\x{100}]{1,3})")), truncatedSurrogate))
+                .isZero();
+
+        // The compact route's class holds the surrogates. Pinned native RE2 also counts two matches
+        // here; the spans are compared with the ordinary engine's.
+        Re2 compact = Re2.compile(utf8Slice("\\P{L}+"));
+        assertThat(compact.usesCompactBoundedCharacterClassForDiagnostics()).isTrue();
+        assertThat(compact.count(malformed)).isEqualTo(2);
+        RegexpMatcher compactMatcher = compact.matcher(malformed, 0);
+        RegexpMatcher ordinaryMatcher = Re2.compile(utf8Slice("(\\P{L}+)")).groupZeroMatcher(malformed, null);
+        while (ordinaryMatcher.find()) {
+            assertThat(compactMatcher.find()).isTrue();
+            assertThat(compactMatcher.start()).isEqualTo(ordinaryMatcher.start());
+            assertThat(compactMatcher.end()).isEqualTo(ordinaryMatcher.end());
+        }
+        assertThat(compactMatcher.find()).isFalse();
 
         Re2 replacementCharacter = Re2.compile(utf8Slice("[^x]{1,3}"));
         BoundedCharacterClassCounter counter = replacementCharacter.createBoundedCharacterClassCounter();

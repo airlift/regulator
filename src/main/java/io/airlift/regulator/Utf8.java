@@ -165,6 +165,29 @@ final class Utf8
         return width;
     }
 
+    /// Reads the non-ASCII bytes at `index`, which [#decode] rejects, as the compiler's UTF-8 byte
+    /// ranges for an RE2 class read them, and returns the code point and width packed as
+    /// [#decode] packs them. A class holding every non-ASCII character (`matchesAllNonAscii`) has
+    /// lenient byte ranges, so it matches a character of [#re2CharacterWidth] bytes, returned as
+    /// U+0080, which such a class holds. Any other class accepts exactly the encodings of its
+    /// members (see [Utf8MemberTable]), so an encoded surrogate is returned as its code point for
+    /// the class to decide. Any other rejected bytes return code point `-1`, which no class holds,
+    /// with width 1.
+    static long re2DecodeMalformed(byte[] bytes, int index, int end, boolean matchesAllNonAscii)
+    {
+        if (matchesAllNonAscii) {
+            int width = re2CharacterWidth(bytes, index, end);
+            if (width != 0) {
+                return pack(0x80, width);
+            }
+        }
+        else if ((bytes[index] & 0xFF) == 0xED && end - index >= 3 && (bytes[index + 1] & 0xE0) == 0xA0 && (bytes[index + 2] & 0xC0) == 0x80) {
+            int surrogate = 0xD000 | ((bytes[index + 1] & 0x3F) << 6) | (bytes[index + 2] & 0x3F);
+            return pack(surrogate, 3);
+        }
+        return pack(-1, 1);
+    }
+
     static int decodedWidth(long decoded)
     {
         return (int) (decoded >>> 32);
