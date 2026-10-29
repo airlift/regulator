@@ -103,15 +103,16 @@ def read_unit_attempts(path):
 
 
 def write_unit_attempt(path, worker, sequence, item, outcome, detail="-"):
-    """Append one lease or lease outcome to unit-attempts.tsv; a stop lease names no unit."""
+    """Append one lease or lease outcome to unit-attempts.tsv. A stop lease names no unit, and a lease to a
+    worker that has not yet published its host session names no session."""
     write_header = not path.exists()
     with path.open("a", newline="") as output_file:
         writer = csv.writer(output_file, delimiter="\t", lineterminator="\n")
         if write_header:
             writer.writerow(UNIT_ATTEMPT_FIELDS)
         writer.writerow((worker.job.platform.name, item.unit_id if item else "-", item.replica if item else "-",
-                         worker.job.host_epoch, worker.host_session, sequence, worker.job.market, outcome,
-                         detail.replace("\t", " ").replace("\n", " ")))
+                         worker.job.host_epoch, worker.host_session if worker.metadata else "-", sequence,
+                         worker.job.market, outcome, detail.replace("\t", " ").replace("\n", " ")))
         output_file.flush()
         os.fsync(output_file.fileno())
 

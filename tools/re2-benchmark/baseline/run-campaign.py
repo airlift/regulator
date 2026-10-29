@@ -68,6 +68,10 @@ UNIT_POLL_SECONDS = 15
 # A unit pool's new Spot workers skip a region this long after it found no Spot capacity, and
 # while every region cools they launch On-Demand.
 SPOT_REGION_COOL_DOWN_SECONDS = 15 * 60
+# A new unit worker is expected to start its first lease this long after launch. Recent workers took
+# 2.4 to 2.9 minutes from boot to their first unit. A pool launches a worker only for work its workers
+# would start later than this.
+UNIT_WORKER_BOOT_SECONDS = 5 * 60
 # A work item stays unresolved once this many of its leases failed, were interrupted, or were lost;
 # a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
@@ -2211,6 +2215,10 @@ class UnitWorker:
     # consecutive failures before a start.
     slot: int = None
     slot_failures: int = 0
+    # When this controller launched or adopted the worker, and when the lease it runs began: when it was
+    # leased, the lease before it settled, or the worker started, whichever came last.
+    launched_at: float = 0.0
+    running_since: float = 0.0
 
     @property
     def pool(self):
@@ -2382,7 +2390,7 @@ class UnitDispatcher:
                 # A live worker is registered at once, so a recovery step that fails still stops it.
                 workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
                     job, DetachedWrapper(process_id, job, row["detail"], self.result_root), log,
-                    slot=slot, slot_failures=slot_failures)
+                    slot=slot, slot_failures=slot_failures, launched_at=time.monotonic())
             elif session is not None and (session / "cleanup-manifest.txt").is_file():
                 workers[job.host_epoch] = UnitWorker(job, None, None, session=session,
                                                      slot=slot, slot_failures=slot_failures)
@@ -2464,6 +2472,8 @@ class UnitDispatcher:
         identity = worker.leases[sequence]
         write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail)
         worker.settled.add(sequence)
+        # The worker goes on to its next lease.
+        worker.running_since = time.monotonic()
         if self.held.get(identity) == (worker.job.host_epoch, sequence):
             del self.held[identity]
 
@@ -2635,8 +2645,10 @@ class UnitDispatcher:
         try:
             objects = list_unit_worker_results(self.arguments, worker)
             keys = set(objects)
-            # Worker evidence shows the worker started, even one whose heartbeats never landed.
-            worker.started |= shows_worker_start(keys)
+            # Worker evidence shows the worker started, even one whose heartbeats never landed; its first lease
+            # runs from then.
+            if not worker.started and shows_worker_start(keys):
+                worker.started, worker.running_since = True, time.monotonic()
 
             def fetch(key, path):
                 get_unit_worker_result(self.arguments, worker, key, path)
@@ -2755,6 +2767,8 @@ class UnitDispatcher:
     def issue(self, worker, item):
         """Record a lease, or a stop lease without an item, before it is written."""
         sequence = max(worker.leases, default=0) + 1
+        if not worker.outstanding():
+            worker.running_since = time.monotonic()
         write_unit_attempt(self.leases_path, worker, sequence, item, "leased" if item else "stop")
         worker.leases[sequence] = item.identity if item else None
         worker.unsent.add(sequence)
@@ -2773,18 +2787,20 @@ class UnitDispatcher:
                 return
             worker.unsent.discard(sequence)
 
-    def next_item(self, worker):
+    def next_item(self, worker, queued=None, units=None):
         """The eligible queued item to lease next: On-Demand work first, then the longest. An item is
         never a unit this host already held, nor one on an instance its replicas or confirmation
-        exclude, and On-Demand-only items go to On-Demand hosts; On-Demand hosts also take the rest."""
+        exclude, and On-Demand-only items go to On-Demand hosts; On-Demand hosts also take the rest.
+        A projection passes the items still queued in it and the units the worker would hold by then."""
         used = {}
         for receipt in self.accepted.values():
             used.setdefault((receipt["platform"], receipt["unit_id"]), set()).add(receipt["instance_id"])
         on_demand_worker = worker.job.market == "on-demand"
+        units = worker.units if units is None else units
         # A Spot worker keeps taking its pool's tail items until an On-Demand worker replaces it.
         candidates = [
-            item for item in self.queued(worker.pool)
-            if item.unit_id not in worker.units and worker.instance_id not in item.excluded_instances and
+            item for item in (self.queued(worker.pool) if queued is None else queued)
+            if item.unit_id not in units and worker.instance_id not in item.excluded_instances and
             worker.instance_id not in used.get((item.platform, item.unit_id), ()) and
             (on_demand_worker or self.spot_only or item.identity not in self.on_demand_only)]
         return min(candidates, key=lambda item: (not self.on_demand(item), -item.estimated_seconds, item.identity),
@@ -2816,6 +2832,12 @@ class UnitDispatcher:
                 outstanding = worker.outstanding()
         self.send(worker)
 
+    def unneeded(self, worker):
+        """Whether a worker that has not started holds no lease of an open item and could take no queued one."""
+        return not worker.started and self.next_item(worker) is None and all(
+            identity is None or identity in self.accepted or identity in self.unresolved
+            for identity in map(worker.leases.get, worker.outstanding()))
+
     def final(self, worker):
         """Whether the worker's pool can give it no further lease."""
         others = {self.held[identity][0] for identity in self.held} - {worker.job.host_epoch}
@@ -2836,23 +2858,53 @@ class UnitDispatcher:
             if remaining <= sum(item.estimated_seconds for item in items) * ON_DEMAND_TAIL_PERCENT / 100:
                 self.tail.add(pool)
 
+    def free_at(self, worker, now):
+        """When the worker is projected to take new work: once it boots, and once the leases it holds have run
+        for their estimates, the running one counted from when it began."""
+        start = worker.running_since if worker.started else max(now, worker.launched_at + UNIT_WORKER_BOOT_SECONDS)
+        held = [self.items[identity].estimated_seconds
+                for identity in map(worker.leases.get, worker.outstanding()) if identity is not None]
+        if not held:
+            return max(now, start)
+        return max(now, start + held[0]) + sum(held[1:])
+
+    def late_items(self, pool, now):
+        """The pool's queued items its workers would start later than a new worker could.
+
+        A list schedule projects the pool's open workers, booting ones included: the worker free soonest that may
+        take an item takes the one it would be leased next and is busy for its estimate. Once that worker is free
+        only after a new worker's boot, every item still queued is late, as is any item no worker may take.
+        """
+        workers = [worker for worker in self.pool_workers(pool) if worker.open()]
+        free = {worker.job.host_epoch: self.free_at(worker, now) for worker in workers}
+        units = {worker.job.host_epoch: set(worker.units) for worker in workers}
+        queued = self.queued(pool)
+        while queued:
+            for worker in sorted(workers, key=lambda worker: free[worker.job.host_epoch]):
+                epoch = worker.job.host_epoch
+                item = self.next_item(worker, queued, units[epoch])
+                if item is not None:
+                    break
+            else:
+                return queued
+            if free[epoch] > now + UNIT_WORKER_BOOT_SECONDS:
+                return queued
+            queued.remove(item)
+            units[epoch].add(item.unit_id)
+            free[epoch] += item.estimated_seconds
+        return []
+
     def pool_demand(self, pool, now):
-        """The market of the pool's next worker, if its queued items could use one more."""
+        """The market of the pool's next worker, if a new one would start some queued item sooner."""
         if self.gave_up(pool):
             return None
-        queued = self.queued(pool)
-        waiting = [worker for worker in self.pool_workers(pool) if worker.open() and not worker.outstanding()]
-        on_demand = [item for item in queued if self.on_demand(item)]
+        late = self.late_items(pool, now)
         if self.on_demand_ready.get(pool, 0) <= now:
-            if len(on_demand) > sum(worker.job.market == "on-demand" for worker in waiting):
+            if any(self.on_demand(item) for item in late):
                 return "on-demand"
-            spot = len(queued) - len(on_demand)
-        else:
-            # While On-Demand admission is refused, Spot workers take every item Spot may still run.
-            spot = sum(item.identity not in self.on_demand_only for item in queued)
-        if spot > 0 and len(queued) > len(waiting):
-            return "spot"
-        return None
+            return "spot" if late else None
+        # While On-Demand admission is refused, Spot workers take every item Spot may still run.
+        return "spot" if any(item.identity not in self.on_demand_only for item in late) else None
 
     def candidate(self, pool, market):
         candidate = self.candidates.get(pool)
@@ -2909,11 +2961,11 @@ class UnitDispatcher:
                     if not scan:
                         return
                     break
-                worker = self.start(pool, candidate)
+                worker = self.start(pool, candidate, now)
                 if worker is not None:
                     running[candidate.host_epoch] = (worker.process, worker.job, worker.log)
 
-    def start(self, pool, job):
+    def start(self, pool, job, now):
         del self.candidates[pool]
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
         slots = self.free_slots.get(pool)
@@ -2930,7 +2982,10 @@ class UnitDispatcher:
             self.pool_ready[pool] = time.monotonic() + CAPACITY_RETRY_SECONDS
             self.release_slot(job, slot, slot_failures, False, 1, "retryable-infrastructure", detail)
             return None
-        worker = self.workers[job.host_epoch] = UnitWorker(job, process, log, slot=slot, slot_failures=slot_failures)
+        # The worker boots from the poll that launched it, so a projection in that poll counts it as booting
+        # no later than a further launch would.
+        worker = self.workers[job.host_epoch] = UnitWorker(job, process, log, slot=slot, slot_failures=slot_failures,
+                                                           launched_at=now)
         if job.market == "on-demand" and pool in self.tail:
             self.tail_on_demand[pool] = self.tail_on_demand.get(pool, 0) + 1
         write_attempt(self.attempts_path, job, "started", f"wrapper_pid={process.pid}")
@@ -2991,11 +3046,14 @@ class UnitDispatcher:
                     self.lease(worker)
                 if not deadline_reached:
                     self.launch(now)
-                drained = all(identity in self.accepted or identity in self.unresolved for identity in self.items)
                 for epoch, worker in self.workers.items():
                     # A lost host is stopped at once; its cleanup still recovers a completion that lands.
-                    # Once nothing remains to lease, so is a host that never started.
-                    if (worker.lost or (drained and not worker.started)) and epoch not in self.terminated:
+                    # So is a booting host once the pool has nothing it could take. Its stop lease first records
+                    # it stopping, so through its cleanup neither this controller nor a restarted one counts it
+                    # as open for work.
+                    if (worker.lost or self.unneeded(worker)) and epoch not in self.terminated:
+                        if not (worker.lost or worker.stopping):
+                            self.issue(worker, None)
                         self.terminated.add(epoch)
                         worker.process.send_signal(signal.SIGTERM)
                 if not self.workers and not self.queued():
