@@ -305,14 +305,21 @@ Run the complete publication campaign only after:
 - comparator revisions and workload manifests are pinned
 - no additional cleanup is planned
 
-For a release, record its manifest
-`tools/re2-benchmark/baseline/releases/<version>.json` like `1.0.json`: the
+A campaign of the released JAR publishes final results. It needs the
+release's manifest `tools/re2-benchmark/baseline/releases/<version>.json`: the
 release's `source_commit`, its `src/main` tree as `engine_tree`, and the
-published JAR's `jar_sha256`. The campaign's `--release-version <version>`
-option reads that manifest. Then run the R9g and R8i publication campaign,
-using the published artifact for public-API measurements and recording its
-checksum and release tag. The 1.0 campaign, which also measured R8g, is
-recorded in
+published JAR's `jar_sha256`. Once the tag and the Maven Central artifact
+exist, record it from them; the command refuses to replace a manifest:
+
+```bash
+python3 tools/re2-benchmark/language/released_artifact.py --root . --record <version>
+```
+
+Commit the manifest before freezing the collector revisions: workers load it
+from the collector commit. The campaign's `--release-version <version>` option
+reads that manifest. Then run the R9g and R8i publication campaign, using the
+published artifact for public-API measurements and recording its checksum and
+release tag. The 1.0 campaign, which also measured R8g, is recorded in
 [`RESULTS_1.0.md`](benchmarks/RESULTS_1.0.md). The public report is built by
 `benchmark-report/scripts/build_capture_data.py --released-campaign` from the
 language exports and the baseline unit campaign. Measure both native-memory and
@@ -359,14 +366,15 @@ campaign's replication requirements.
    If the workflow fails after staging or publication, inspect its logs, Njord
    state, repository tags, and Central before choosing a recovery step. Do not
    blindly rerun a potentially completed publication.
-5. Run the publication qualification against the released artifact and tagged
-   source following [final qualification](#final-qualification). Record the
-   artifact checksum. Write the complete capture to the private archive, and
-   import only the public output, which drops the hidden rows, using the
-   [report instructions](../benchmark-report/README.md). Regenerate the README
-   and run `npm run check`. Verify the deployed Pages report and public download
-   after those changes are merged. Its refresh is separate from publishing the
-   library artifact.
+5. Record the release manifest, which holds the artifact checksum, and commit
+   it before freezing the collector revisions. Then run the publication
+   qualification against the released artifact and tagged source following
+   [final qualification](#final-qualification). Write the complete capture to
+   the private archive, and import only the public output, which drops the
+   hidden rows, using the [report instructions](../benchmark-report/README.md).
+   Regenerate the README and run `npm run check`. Verify the deployed Pages
+   report and public download after those changes are merged. Its refresh is
+   separate from publishing the library artifact.
 
 ## Benchmark reproduction
 
