@@ -13,6 +13,8 @@ if [[ $# -ne 2 ]]; then
     exit 1
 fi
 
+# The host's startup timeline ends with this worker's wait for its first unit.
+WORKER_STARTED=${EPOCHREALTIME}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 RUN_UNIT="${SCRIPT_DIR}/../baseline/run-unit.sh"
 UNIT_TOOL="${SCRIPT_DIR}/../baseline/unit_session.py"
@@ -612,6 +614,10 @@ while true; do
     # The lease read's S3 calls may have outlasted the lifetime.
     stop_if_winding_down
     IFS=$'\t' read -r _ unit_id replica_id phase lease_groups <<<"${lease}"
+    if [[ -n "${WORKER_STARTED}" ]]; then
+        printf 'worker\t%s\t%s\n' "${WORKER_STARTED}" "${EPOCHREALTIME}" >> "${HOST_DIR}/startup-timeline.tsv"
+        WORKER_STARTED=
+    fi
     run_lease "${phase}"
     unit_id=
     replica_id=

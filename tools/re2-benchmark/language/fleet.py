@@ -15,7 +15,6 @@ import os
 import re
 import shutil
 import sys
-import tarfile
 import tempfile
 from pathlib import Path
 
@@ -222,29 +221,13 @@ class UnitRejection(Exception):
 
 
 def write_bundle(directory, output):
-    """Write a plan's deterministic bundle, which a unit worker installs, and return its SHA-256."""
+    """Write a plan's deterministic bundle and return its SHA-256. The bundle holds the plan's files under its
+    shard ID, so a unit worker unpacks every bundle into one directory, where run-unit.sh finds each plan by its
+    shard."""
     directory = directory.resolve()
-    validate(directory)
+    plan = validate(directory)
     names = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*") if path.is_file())
-    return engine_build.write_archive(directory, names, output)["sha256"]
-
-
-def install_bundle(bundle, sha256, plans):
-    """Install a checksummed plan bundle as plans/<shard ID>, where run-unit.sh finds its units."""
-    if engine_build.sha256_file(bundle) != sha256:
-        raise ValueError("language plan bundle checksum mismatch")
-    engine_build.archive_contents(bundle)
-    plans.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix="plan-", dir=plans))
-    try:
-        with tarfile.open(bundle, "r:gz") as files:
-            files.extractall(staging, filter="data")
-        plan = validate(staging)
-        staging.rename(plans / plan["shard_id"])
-    except Exception:
-        # A failed install leaves no units where run-unit.sh looks for plans.
-        shutil.rmtree(staging)
-        raise
+    return engine_build.write_archive(directory, names, output, prefix=f"{plan['shard_id']}/")["sha256"]
 
 
 def check_host(environment, suite):
@@ -709,10 +692,6 @@ def main():
     bundle_parser = commands.add_parser("bundle", help="write a plan's bundle for unit workers and print its SHA-256")
     bundle_parser.add_argument("--plan-directory", type=Path, required=True)
     bundle_parser.add_argument("--output", type=Path, required=True)
-    install_parser = commands.add_parser("install-bundle")
-    install_parser.add_argument("--bundle", type=Path, required=True)
-    install_parser.add_argument("--sha256", required=True)
-    install_parser.add_argument("--plans", type=Path, required=True)
     unit_parser = commands.add_parser("run-unit", help="measure one work unit on this unit worker")
     unit_parser.add_argument("--plan-directory", type=Path, required=True)
     unit_parser.add_argument("--unit", required=True)
@@ -745,8 +724,6 @@ def main():
                                   for unit in work_units.load(args.output_directory).values()]))
     elif args.command == "bundle":
         print(write_bundle(args.plan_directory, args.output))
-    elif args.command == "install-bundle":
-        install_bundle(args.bundle, args.sha256, args.plans)
     elif args.command == "run-unit":
         try:
             run_unit(args.plan_directory, args.unit, args.replica, args.group, args.unit_directory, args.shared,

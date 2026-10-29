@@ -338,6 +338,10 @@ class TestUnitWorker(unittest.TestCase):
             self.assertEqual(('stopped', 'stop-lease'),
                              (worker.json('heartbeat/4.json')['state'], worker.json('heartbeat/4.json')['stop_reason']))
             self.assertEqual('stop-lease', worker.stop_reason())
+            # The host's startup timeline ends once, when the worker begins its first unit.
+            steps = [line.split('\t') for line in (worker.host / 'startup-timeline.tsv').read_text().splitlines()]
+            self.assertEqual(['worker'], [step[0] for step in steps])
+            self.assertLessEqual(float(steps[0][1]), float(steps[0][2]))
 
     def test_worker_stops_when_idle_or_out_of_lifetime(self):
         cases = (

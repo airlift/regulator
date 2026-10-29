@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REGULATOR_DIR=$(cd "${SCRIPT_DIR}/../../.." && pwd)
-TRINO_DIR=${TRINO_DIR:-}
 AWS_PROFILE=${AWS_PROFILE:-}
 AWS_REGION=${AWS_REGION:-us-west-2}
 TRANSFER_BUCKET=${TRANSFER_BUCKET:-}
@@ -54,8 +53,9 @@ BASELINE_CANDIDATE_ARCHIVE_SHA256=${BASELINE_CANDIDATE_ARCHIVE_SHA256:-}
 BASELINE_EXPECTED_ENGINE_TREE=${BASELINE_EXPECTED_ENGINE_TREE:-}
 LANGUAGE_CANDIDATE_PROVENANCE=${LANGUAGE_CANDIDATE_PROVENANCE:-}
 LANGUAGE_CANDIDATE_PROVENANCE_SHA256=${LANGUAGE_CANDIDATE_PROVENANCE_SHA256:-}
-ENGINE_BUILD_DIRECTORY=${ENGINE_BUILD_DIRECTORY:-}
 ENGINE_BUILD_MANIFEST_SHA256=${ENGINE_BUILD_MANIFEST_SHA256:-}
+# The engine archives a measuring worker installs from its platform's build, as name=SHA-256 words.
+ENGINE_BUILD_ARCHIVES=${ENGINE_BUILD_ARCHIVES:-}
 # A language unit worker installs each language plan's bundle, named by its SHA-256 in the shared transfer bucket.
 LANGUAGE_PLAN_BUNDLE_SHA256S=${LANGUAGE_PLAN_BUNDLE_SHA256S:-}
 TRINO_REVISION=${TRINO_REVISION:-}
@@ -65,6 +65,9 @@ GLIBC_PACKAGE=${GLIBC_PACKAGE:-}
 CARGO_PACKAGE=${CARGO_PACKAGE:-}
 RUST_PACKAGE=${RUST_PACKAGE:-}
 TIME_PACKAGE=${TIME_PACKAGE:-}
+ZSTD_PACKAGE=${ZSTD_PACKAGE:-}
+# The controller's verified copy of this platform's JDK, which a session without a shared bucket carries.
+BENCHMARK_JAVA_ARCHIVE=${BENCHMARK_JAVA_ARCHIVE:-}
 BENCHMARK_JAVA_ARCHIVE_URL=${BENCHMARK_JAVA_ARCHIVE_URL:-}
 BENCHMARK_JAVA_ARCHIVE_SHA256=${BENCHMARK_JAVA_ARCHIVE_SHA256:-}
 BENCHMARK_AMI_ID=${BENCHMARK_AMI_ID:-}
@@ -151,12 +154,6 @@ if [[ -n "${TRANSFER_PREFIX}" ]] &&
     echo "TRANSFER_PREFIX must be a safe relative S3 prefix without '..' or a trailing slash: ${TRANSFER_PREFIX}" >&2
     exit 1
 fi
-# A unit worker measures units of every shard, or builds the pinned Trino harness.
-if [[ -z "${TRINO_DIR}" ]] ||
-        ! git -C "${TRINO_DIR}" rev-parse --git-dir >/dev/null 2>&1; then
-    echo "TRINO_DIR must name a Trino checkout" >&2
-    exit 1
-fi
 if [[ ! "${TRINO_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
     echo "TRINO_REVISION must pin a full commit ID" >&2
     exit 1
@@ -175,11 +172,20 @@ if [[ ! ${CAMPAIGN_SHARD_ID} =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$ ]]; then
     echo "CAMPAIGN_SHARD_ID must be a 1-63 character identifier: ${CAMPAIGN_SHARD_ID}" >&2
     exit 1
 fi
-# A measuring worker installs its platform's prebuilt engines; a build phase's worker has none, and builds them.
-if [[ -n "${ENGINE_BUILD_DIRECTORY}${ENGINE_BUILD_MANIFEST_SHA256}" ]] &&
-        [[ ! -d "${ENGINE_BUILD_DIRECTORY}" || ! "${ENGINE_BUILD_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "Prebuilt engines require an engine build directory and its manifest SHA-256" >&2
+# A measuring worker installs the prebuilt engine archives its units run; a build phase's worker has none, and
+# builds them.
+engine_archives_pattern='^((classes|trino|native)=[0-9a-f]{64}( |$))+$'
+if [[ -n "${ENGINE_BUILD_MANIFEST_SHA256}${ENGINE_BUILD_ARCHIVES}" ]] &&
+        [[ ! "${ENGINE_BUILD_MANIFEST_SHA256}" =~ ^[0-9a-f]{64}$ ||
+           ! "${ENGINE_BUILD_ARCHIVES}" =~ ${engine_archives_pattern} ]]; then
+    echo "Prebuilt engines require their build manifest's SHA-256 and the archives the worker installs" >&2
     exit 1
+fi
+# The Trino harness archive, which only a baseline unit's worker installs.
+TRINO_ARCHIVE_SHA256=none
+trino_archive_pattern='(^| )trino=([0-9a-f]{64})( |$)'
+if [[ "${ENGINE_BUILD_ARCHIVES}" =~ ${trino_archive_pattern} ]]; then
+    TRINO_ARCHIVE_SHA256=${BASH_REMATCH[2]}
 fi
 for bundle_sha256 in ${LANGUAGE_PLAN_BUNDLE_SHA256S}; do
     if [[ ! ${bundle_sha256} =~ ^[0-9a-f]{64}$ ]]; then
@@ -192,8 +198,12 @@ if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" && ( ! -f "${LANGUAGE_CANDIDATE_PROVE
     echo "Language plans require checksummed candidate provenance" >&2
     exit 1
 fi
-if [[ -n "${ENGINE_BUILD_DIRECTORY}" && -z "${TRANSFER_BUCKET}" ]]; then
-    echo "Prebuilt engines require TRANSFER_BUCKET, the shared bucket that holds their archives" >&2
+if [[ -n "${ENGINE_BUILD_ARCHIVES}${LANGUAGE_PLAN_BUNDLE_SHA256S}" && -z "${TRANSFER_BUCKET}" ]]; then
+    echo "Prebuilt engines and language plans require TRANSFER_BUCKET, the shared bucket that holds their archives" >&2
+    exit 1
+fi
+if [[ -z "${TRANSFER_BUCKET}" && ! -f "${BENCHMARK_JAVA_ARCHIVE}" ]]; then
+    echo "A session without a shared transfer bucket requires BENCHMARK_JAVA_ARCHIVE, the verified JDK it carries" >&2
     exit 1
 fi
 if [[ ! ${CAMPAIGN_REPLICA_ID} =~ ^[1-9][0-9]*$ || ! ${CAMPAIGN_HOST_EPOCH} =~ ^[1-9][0-9]*$ ||
@@ -242,8 +252,8 @@ if [[ ! "${BASELINE_EXPECTED_ENGINE_TREE}" =~ ^[0-9a-f]{40,64}$ ]]; then
     exit 1
 fi
 if [[ -z "${NATIVE_COMPILER_PACKAGE}" || -z "${CMAKE_PACKAGE}" || -z "${GLIBC_PACKAGE}" ||
-        -z "${CARGO_PACKAGE}" || -z "${RUST_PACKAGE}" || -z "${TIME_PACKAGE}" ]]; then
-    echo "Baseline execution requires pinned native compiler, CMake, glibc, Cargo, Rust, and time packages" >&2
+        -z "${CARGO_PACKAGE}" || -z "${RUST_PACKAGE}" || -z "${TIME_PACKAGE}" || -z "${ZSTD_PACKAGE}" ]]; then
+    echo "Baseline execution requires pinned native compiler, CMake, glibc, Cargo, Rust, time, and zstd packages" >&2
     exit 1
 fi
 
@@ -827,22 +837,6 @@ trap cleanup EXIT
 trap 'abort_campaign INT 130' INT
 trap 'abort_campaign TERM 143' TERM
 
-package_commit()
-{
-    local worktree=$1
-    local commit=$2
-    local output=$3
-    local prefix=${4:-}
-
-    if [[ -n "${prefix}" ]]; then
-        git -C "${worktree}" archive --format=tar --prefix="${prefix}" "${commit}" \
-            | gzip -n > "${output}"
-        return
-    fi
-    git -C "${worktree}" archive --format=tar "${commit}" \
-        | gzip -n > "${output}"
-}
-
 candidate_commit()
 {
     local reference
@@ -898,6 +892,18 @@ verify_shared_archive()
         record_failure_classification retryable-infrastructure "shared-archive-unavailable:s3://${BUCKET}/${key}"
         return 1
     fi
+}
+
+shared_archive()
+{
+    # Every session in the bucket's region shares one copy of each content-addressed
+    # archive; it is a campaign input, not a session resource, so cleanup keeps it.
+    local name=$1
+    local checksum=$2
+    local key=$3
+    verify_shared_archive "${checksum}" "${key}"
+    SHARED_ARCHIVE_RESOURCES+="${SHARED_ARCHIVE_RESOURCES:+,}\"arn:aws:s3:::${BUCKET}/${key}\""
+    HOST_ARCHIVES+="${name} ${checksum} s3://${BUCKET}/${key}"$'\n'
 }
 
 create_instance_profile()
@@ -996,15 +1002,21 @@ RESULT_DIR=/var/tmp/re2-results
 mkdir -p "\${RESULT_DIR}"
 exec > >(tee /var/log/re2-engineering-user-data.log) 2>&1
 
+timeline()
+{
+    # One startup step: its name, the \$EPOCHREALTIME it started at, and now. The kernel's uptime dates the boot.
+    printf '%s\t%s\t%s\n' "\$1" "\$2" "\${EPOCHREALTIME}" >> "\${RESULT_DIR}/startup-timeline.tsv"
+}
+step_started=\${EPOCHREALTIME}
+printf 'step\tstarted\tfinished\n' > "\${RESULT_DIR}/startup-timeline.tsv"
+timeline boot "\$(awk -v now="\${step_started}" '{printf "%.3f", now - \$1}' /proc/uptime)"
+
 finish()
 {
     status=\$?
     trap - EXIT
     set +e
     printf '%s\n' "\${status}" > "\${RESULT_DIR}/exit-status"
-    if [[ -d /opt/re2-work/trino/core/trino-main/target/surefire-reports ]]; then
-        cp -a /opt/re2-work/trino/core/trino-main/target/surefire-reports "\${RESULT_DIR}/trino-surefire-reports"
-    fi
     cp /var/log/re2-engineering-user-data.log "\${RESULT_DIR}/user-data.log" || true
     archive_status=0
     tar -czf /var/tmp/re2-results.tar.gz -C /var/tmp re2-results || archive_status=\$?
@@ -1057,8 +1069,11 @@ download_input()
     return 1
 }
 
+step_started=\${EPOCHREALTIME}
 wait_for_aws_credentials
+timeline credentials "\${step_started}"
 
+step_started=\${EPOCHREALTIME}
 mkdir -p /opt/re2-work/regulator
 download_input 's3://${BUCKET}/${INPUT_PREFIX}/regulator.tar.gz' /tmp/regulator.tar.gz
 printf '%s  %s\n' '${REGULATOR_SHA256}' /tmp/regulator.tar.gz | sha256sum --check -
@@ -1070,34 +1085,14 @@ if [[ '${LANGUAGE_PLAN_BUNDLE_SHA256S}' != '' ]]; then
     export LANGUAGE_SOURCE_ARCHIVE=/tmp/regulator.tar.gz
     export LANGUAGE_CANDIDATE_PROVENANCE=/tmp/candidate-provenance.tsv
 fi
-mkdir -p /opt/re2-work/trino
-download_input 's3://${BUCKET}/${INPUT_PREFIX}/trino.tar.gz' /tmp/trino.tar.gz
-printf '%s  %s\n' '${TRINO_SHA256}' /tmp/trino.tar.gz | sha256sum --check -
-tar -xzf /tmp/trino.tar.gz -C /opt/re2-work/trino
-export LANGUAGE_PLAN_INPUT_DIR=/opt/re2-work/language-plans
-export ENGINE_BUILD_INPUT_DIR=
+timeline candidate "\${step_started}"
 export ENGINE_BUILD_MANIFEST_SHA256='${ENGINE_BUILD_MANIFEST_SHA256}'
-if [[ '${ENGINE_BUILD_MANIFEST_SHA256}' != '' ]]; then
-    ENGINE_BUILD_INPUT_DIR=/opt/re2-work/engine-build
-    mkdir -p "\${ENGINE_BUILD_INPUT_DIR}"
-    download_input 's3://${BUCKET}/${INPUT_PREFIX}/engine-build.json' "\${ENGINE_BUILD_INPUT_DIR}/engine-build.json"
-    printf '%s  %s\n' '${ENGINE_BUILD_MANIFEST_SHA256}' "\${ENGINE_BUILD_INPUT_DIR}/engine-build.json" | sha256sum --check -
-fi
-while read -r -u 3 shared_file shared_sha256 shared_key; do
-    if [[ -n "\${shared_file}" ]]; then
-        mkdir -p "/opt/re2-work/\$(dirname "\${shared_file}")"
-        download_input "s3://${BUCKET}/\${shared_key}" "/opt/re2-work/\${shared_file}"
-        printf '%s  %s\n' "\${shared_sha256}" "/opt/re2-work/\${shared_file}" | sha256sum --check -
-    fi
-done 3<<'SHARED_ARCHIVES'
-${SHARED_ARCHIVES}
-SHARED_ARCHIVES
+export HOST_ARCHIVES='${HOST_ARCHIVES}'
 
 export REGULATOR_SNAPSHOT_COMMIT='${REGULATOR_COMMIT}'
 export REGULATOR_SNAPSHOT_SHA256='${REGULATOR_SHA256}'
 export REGULATOR_CONTENT_SHA256='${REGULATOR_CONTENT_SHA256}'
-export TRINO_SNAPSHOT_COMMIT='${TRINO_COMMIT}'
-export TRINO_SNAPSHOT_SHA256='${TRINO_SHA256}'
+export TRINO_SNAPSHOT_COMMIT='${TRINO_REVISION}'
 export CAMPAIGN_PROVENANCE='${CAMPAIGN_PROVENANCE}'
 export RE2_CAMPAIGN_ID='${CAMPAIGN_ID}'
 export RE2_CAMPAIGN_PLATFORM='${CAMPAIGN_PLATFORM}'
@@ -1114,6 +1109,7 @@ export GLIBC_PACKAGE='${GLIBC_PACKAGE}'
 export CARGO_PACKAGE='${CARGO_PACKAGE}'
 export RUST_PACKAGE='${RUST_PACKAGE}'
 export TIME_PACKAGE='${TIME_PACKAGE}'
+export ZSTD_PACKAGE='${ZSTD_PACKAGE}'
 export JONI_EVIDENCE_SCOPE='${JONI_EVIDENCE_SCOPE}'
 export EXPECTED_AMI_ID='${expected_ami_id}'
 export EXPECTED_AMI_NAME='${expected_ami_name}'
@@ -1136,7 +1132,6 @@ export UNIT_WORKER_LIFETIME_SECONDS='${UNIT_WORKER_LIFETIME_SECONDS}'
 
 /opt/re2-work/regulator/tools/re2-benchmark/aws/run-host.sh \
     /opt/re2-work/regulator \
-    /opt/re2-work/trino \
     "\${RESULT_DIR}"
 EOF
 }
@@ -1270,8 +1265,6 @@ launch_instance()
 
 REGULATOR_COMMIT=$(candidate_commit) ||
     reject_input "Frozen candidate archive does not identify a local Regulator commit"
-TRINO_COMMIT=$(git -C "${TRINO_DIR}" rev-parse "${TRINO_REVISION}^{commit}") ||
-    reject_input "Trino revision is not a commit of the Trino checkout"
 
 require_clean_worktree "${REGULATOR_DIR}" Regulator
 if [[ ! -f "${BASELINE_CANDIDATE_ARCHIVE}" ||
@@ -1291,27 +1284,8 @@ if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
         reject_input "Language candidate provenance checksum mismatch"
     fi
 fi
-package_commit "${TRINO_DIR}" "${TRINO_COMMIT}" "${SESSION_DIR}/trino.tar.gz"
-
-# Each content-addressed archive a host installs from the shared transfer bucket, one line each:
-# its path under /opt/re2-work on the host, its SHA-256, and its key.
-SHARED_ARCHIVES=
-if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
-    engine_archives=$(
-        PYTHONDONTWRITEBYTECODE=1 python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" checksum \
-            --build "${ENGINE_BUILD_DIRECTORY}" --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256}") ||
-        reject_input "Engine build archives do not match their manifest"
-    while read -r archive_file archive_sha256; do
-        SHARED_ARCHIVES+="engine-build/${archive_file} ${archive_sha256} ${TRANSFER_PREFIX}/engine-builds/${archive_sha256}.tar.gz"$'\n'
-    done <<<"${engine_archives}"
-fi
-for bundle_sha256 in ${LANGUAGE_PLAN_BUNDLE_SHA256S}; do
-    SHARED_ARCHIVES+="language-plans/${bundle_sha256}.tar.gz ${bundle_sha256} ${TRANSFER_PREFIX}/language-plans/${bundle_sha256}.tar.gz"$'\n'
-done
-
 REGULATOR_SHA256=$(sha256 "${SESSION_DIR}/regulator.tar.gz")
 REGULATOR_CONTENT_SHA256=$(archive_content_sha256 "${SESSION_DIR}/regulator.tar.gz")
-TRINO_SHA256=$(sha256 "${SESSION_DIR}/trino.tar.gz")
 ACCOUNT_ID=$(aws_cli sts get-caller-identity --query Account --output text)
 LOWER_SESSION_ID=$(printf '%s' "${SESSION_ID}" | tr '[:upper:]' '[:lower:]')
 if [[ -n "${TRANSFER_BUCKET}" ]]; then
@@ -1356,19 +1330,23 @@ aws_cli s3 cp "${SESSION_DIR}/regulator.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/
 if [[ -n "${LANGUAGE_PLAN_BUNDLE_SHA256S}" ]]; then
     aws_cli s3 cp "${SESSION_DIR}/candidate-provenance.tsv" "s3://${BUCKET}/${INPUT_PREFIX}/candidate-provenance.tsv" --only-show-errors
 fi
-aws_cli s3 cp "${SESSION_DIR}/trino.tar.gz" "s3://${BUCKET}/${INPUT_PREFIX}/trino.tar.gz" --only-show-errors
-if [[ -n "${ENGINE_BUILD_DIRECTORY}" ]]; then
-    aws_cli s3 cp "${ENGINE_BUILD_DIRECTORY}/engine-build.json" "s3://${BUCKET}/${INPUT_PREFIX}/engine-build.json" --only-show-errors
-fi
-# Every session in the bucket's region shares one copy of each content-addressed
-# archive; it is a campaign input, not a session resource, so cleanup keeps it.
+# Each archive the host streams into place, one line each: its name, its SHA-256, and its S3 URI.
+HOST_ARCHIVES=
 SHARED_ARCHIVE_RESOURCES=
-while read -r -u 3 _ archive_sha256 archive_key; do
-    if [[ -n "${archive_key:-}" ]]; then
-        verify_shared_archive "${archive_sha256}" "${archive_key}"
-        SHARED_ARCHIVE_RESOURCES+="${SHARED_ARCHIVE_RESOURCES:+,}\"arn:aws:s3:::${BUCKET}/${archive_key}\""
-    fi
-done 3<<<"${SHARED_ARCHIVES}"
+if [[ -n "${TRANSFER_BUCKET}" ]]; then
+    shared_archive jdk "${java_sha256}" "${TRANSFER_PREFIX}/jdks/${java_sha256}.tar.gz"
+else
+    # A session without a shared bucket carries its own copy of the controller's verified JDK.
+    aws_cli s3 cp "${BENCHMARK_JAVA_ARCHIVE}" "s3://${BUCKET}/${INPUT_PREFIX}/jdk.tar.gz" --only-show-errors
+    HOST_ARCHIVES+="jdk ${java_sha256} s3://${BUCKET}/${INPUT_PREFIX}/jdk.tar.gz"$'\n'
+fi
+for engine_archive in ${ENGINE_BUILD_ARCHIVES}; do
+    shared_archive "${engine_archive%%=*}" "${engine_archive#*=}" \
+        "${TRANSFER_PREFIX}/engine-builds/${engine_archive#*=}.tar.zst"
+done
+for bundle_sha256 in ${LANGUAGE_PLAN_BUNDLE_SHA256S}; do
+    shared_archive language-plan "${bundle_sha256}" "${TRANSFER_PREFIX}/language-plans/${bundle_sha256}.tar.zst"
+done
 
 create_instance_profile
 
@@ -1432,8 +1410,7 @@ baseline_candidate_archive_sha256=${BASELINE_CANDIDATE_ARCHIVE_SHA256:-not-used}
 baseline_protocol=${BASELINE_PROTOCOL}
 baseline_expected_engine_tree=${BASELINE_EXPECTED_ENGINE_TREE}
 baseline_protocol_qualification=${BASELINE_PROTOCOL_QUALIFICATION}
-trino_commit=${TRINO_COMMIT}
-trino_snapshot_sha256=${TRINO_SHA256}
+trino_commit=${TRINO_REVISION}
 engine_build_manifest_sha256=${ENGINE_BUILD_MANIFEST_SHA256:-none}
 language_plan_bundle_sha256s=${LANGUAGE_PLAN_BUNDLE_SHA256S:-none}
 joni_evidence_scope=${JONI_EVIDENCE_SCOPE}
@@ -1501,10 +1478,14 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                 else
                     expected_instance_type=${ARM_INSTANCE_TYPE}
                 fi
-                # A worker without prebuilt engines builds them, native Rust runners included.
+                # Only a worker without prebuilt engines has the toolchain that builds them.
+                expected_native_compiler_package=${NATIVE_COMPILER_PACKAGE}
+                expected_cmake_package=${CMAKE_PACKAGE}
                 expected_cargo_package=${CARGO_PACKAGE}
                 expected_rust_package=${RUST_PACKAGE}
                 if [[ -n "${ENGINE_BUILD_MANIFEST_SHA256}" ]]; then
+                    expected_native_compiler_package=not-installed
+                    expected_cmake_package=not-installed
                     expected_cargo_package=not-installed
                     expected_rust_package=not-installed
                 fi
@@ -1516,8 +1497,8 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                         ! grep -Fqx "replica=${CAMPAIGN_REPLICA_ID}" "${environment_manifest}" ||
                         ! grep -Fqx "host_epoch=${CAMPAIGN_HOST_EPOCH}" "${environment_manifest}" ||
                         ! grep -Fqx "baseline_protocol=${BASELINE_PROTOCOL}" "${environment_manifest}" ||
-                        ! grep -Fqx "native_compiler_package=${NATIVE_COMPILER_PACKAGE}" "${environment_manifest}" ||
-                        ! grep -Fqx "cmake_package=${CMAKE_PACKAGE}" "${environment_manifest}" ||
+                        ! grep -Fqx "native_compiler_package=${expected_native_compiler_package}" "${environment_manifest}" ||
+                        ! grep -Fqx "cmake_package=${expected_cmake_package}" "${environment_manifest}" ||
                         ! grep -Fqx "glibc_package=${GLIBC_PACKAGE}" "${environment_manifest}" ||
                         ! grep -Fqx "cargo_package=${expected_cargo_package}" "${environment_manifest}" ||
                         ! grep -Fqx "rust_package=${expected_rust_package}" "${environment_manifest}" ||
@@ -1539,7 +1520,8 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                         ! grep -Fqx "platform_manifest_sha256=${BASELINE_PLATFORM_MANIFEST_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "comparator_manifest_sha256=${BASELINE_COMPARATOR_MANIFEST_SHA256}" "${environment_manifest}" ||
                         ! grep -Fqx "protocol_representatives_sha256=${BASELINE_PROTOCOL_REPRESENTATIVES_SHA256}" "${environment_manifest}" ||
-                        ! grep -Fqx "time_package=${TIME_PACKAGE}" "${environment_manifest}"; then
+                        ! grep -Fqx "time_package=${TIME_PACKAGE}" "${environment_manifest}" ||
+                        ! grep -Fqx "zstd_package=${ZSTD_PACKAGE}" "${environment_manifest}"; then
                     echo "${label} baseline manifest identity is inconsistent" >&2
                     campaign_failed=1
                     continue
@@ -1551,8 +1533,8 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                     campaign_failed=1
                     continue
                 fi
-                if ! grep -Fqx "trino_commit=${TRINO_COMMIT}" "${environment_manifest}" ||
-                        ! grep -Fqx "trino_archive_sha256=${TRINO_SHA256}" "${environment_manifest}"; then
+                if ! grep -Fqx "trino_commit=${TRINO_REVISION}" "${environment_manifest}" ||
+                        ! grep -Fqx "trino_archive_sha256=${TRINO_ARCHIVE_SHA256}" "${environment_manifest}"; then
                     echo "${label} qualification Trino identity is inconsistent" >&2
                     campaign_failed=1
                     continue

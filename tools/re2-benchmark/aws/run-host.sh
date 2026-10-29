@@ -11,8 +11,8 @@ if [[ -z ${HOME:-} ]]; then
     mkdir -p "${HOME}"
 fi
 
-if [[ $# -ne 3 ]]; then
-    echo "Usage: $0 <regulator-directory> <trino-directory> <result-directory>" >&2
+if [[ $# -ne 2 ]]; then
+    echo "Usage: $0 <regulator-directory> <result-directory>" >&2
     exit 1
 fi
 
@@ -39,8 +39,11 @@ GLIBC_PACKAGE=${GLIBC_PACKAGE:?GLIBC_PACKAGE is required}
 CARGO_PACKAGE=${CARGO_PACKAGE:?CARGO_PACKAGE is required}
 RUST_PACKAGE=${RUST_PACKAGE:?RUST_PACKAGE is required}
 TIME_PACKAGE=${TIME_PACKAGE:?TIME_PACKAGE is required}
+ZSTD_PACKAGE=${ZSTD_PACKAGE:?ZSTD_PACKAGE is required}
 # A measuring worker installs its platform's prebuilt engines; a build phase's worker builds them.
 ENGINE_BUILD_MANIFEST_SHA256=${ENGINE_BUILD_MANIFEST_SHA256:-}
+# Each archive this host installs, one line each: its name, its SHA-256, and its S3 URI.
+HOST_ARCHIVES=${HOST_ARCHIVES:?HOST_ARCHIVES is required}
 REGULATOR_DIR=$(cd "$1" && pwd)
 # A unit worker is not a shard: it measures units of every shard, or builds the
 # platform's engines.
@@ -49,12 +52,9 @@ if [[ "${RE2_CAMPAIGN_SHARD_ID:-}" != "${BENCHMARK_MODE}" ]]; then
         "RE2_CAMPAIGN_SHARD_ID=${RE2_CAMPAIGN_SHARD_ID:-unset}" >&2
     exit 1
 fi
-if [[ -z "$2" || ! -d "$2" ]]; then
-    echo "A unit worker requires a Trino checkout" >&2
-    exit 1
-fi
-TRINO_DIR=$(cd "$2" && pwd)
-RESULT_DIR=$(mkdir -p "$3" && cd "$3" && pwd)
+RESULT_DIR=$(mkdir -p "$2" && cd "$2" && pwd)
+# User data starts the startup timeline; each step here adds its row.
+STARTUP_TIMELINE="${RESULT_DIR}/startup-timeline.tsv"
 PHYSICAL_CPU_LIST=$(lscpu -p=CPU,CORE,SOCKET | awk -F, '!/^#/ {key=$2 ":" $3; if (!seen[key]++) {cpus=(cpus == "" ? $1 : cpus "," $1)}} END {print cpus}')
 PHYSICAL_CORE_COUNT=$(awk -F, '{print NF}' <<<"${PHYSICAL_CPU_LIST}")
 LOGICAL_CPU_COUNT=$(nproc --all)
@@ -70,34 +70,140 @@ RE2_CAMPAIGN_HOST_EPOCH=${RE2_CAMPAIGN_HOST_EPOCH:?RE2_CAMPAIGN_HOST_EPOCH is re
 
 exec > >(tee "${RESULT_DIR}/run.log") 2>&1
 
+timeline()
+{
+    # One startup step: its name, the $EPOCHREALTIME it started at, and now.
+    printf '%s\t%s\t%s\n' "$1" "$2" "${EPOCHREALTIME}" >> "${STARTUP_TIMELINE}"
+}
+
 install_packages()
 {
-    sudo dnf install -y "${CMAKE_PACKAGE}" "${NATIVE_COMPILER_PACKAGE}" "${GLIBC_PACKAGE}" \
-        "${TIME_PACKAGE}" git jq make ninja-build perf tar gzip
+    # Every worker streams its engine and plan archives through zstd, and its JDK through gzip.
+    sudo dnf install -y "${GLIBC_PACKAGE}" "${TIME_PACKAGE}" "${ZSTD_PACKAGE}" jq tar gzip
     if [[ -z "${ENGINE_BUILD_MANIFEST_SHA256}" ]]; then
-        # A worker without prebuilt engines builds them, and the Rust language comparator links the pinned
-        # regex crate.
-        sudo dnf install -y "${CARGO_PACKAGE}" "${RUST_PACKAGE}"
+        # A worker without prebuilt engines builds them: the Trino harness from its Git source, and the native
+        # runners with the C++ toolchain and the pinned Rust regex crate. A measuring worker runs them prebuilt.
+        sudo dnf install -y "${CMAKE_PACKAGE}" "${NATIVE_COMPILER_PACKAGE}" "${CARGO_PACKAGE}" "${RUST_PACKAGE}" \
+            git make ninja-build
     fi
 }
 
-install_java()
+unpack()
 {
-    if [[ -n ${BENCHMARK_JAVA_ARCHIVE_URL:-} ]]; then
-        curl --fail --location --retry 5 \
-            "${BENCHMARK_JAVA_ARCHIVE_URL}" \
-            --output /tmp/benchmark-jdk.tar.gz
-        printf '%s  %s\n' "${BENCHMARK_JAVA_ARCHIVE_SHA256}" /tmp/benchmark-jdk.tar.gz | sha256sum --check -
-        INSTALLED_JAVA_ARCHIVE_SHA256=$(sha256sum /tmp/benchmark-jdk.tar.gz | awk '{print $1}')
-        sudo mkdir -p /opt/benchmark-jdk
-        sudo tar -xzf /tmp/benchmark-jdk.tar.gz -C /opt/benchmark-jdk --strip-components=1
-        export JAVA_HOME=/opt/benchmark-jdk
-        export PATH="${JAVA_HOME}/bin:${PATH}"
-        return
-    fi
+    # Extracts one archive stream into directory $2: our zstd tarballs through the engine build's safe extractor,
+    # and the JDK, the vendor's own gzip tarball with symbolic links under one top-level directory, through tar.
+    case "$1" in
+        zstd)
+            zstd -dcq |
+                python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" unpack --destination "$2"
+            ;;
+        jdk) gzip -dc | tar -x --strip-components=1 -C "$2" ;;
+        *)
+            echo "Unknown archive format: $1" >&2
+            return 1
+            ;;
+    esac
+}
 
-    echo "Qualification requires a controller-provided JDK archive and SHA-256" >&2
-    exit 1
+install_archive()
+{
+    # Streams one archive from S3 through its SHA-256 and unpack, in the given format, into a staging directory
+    # inside its destination, and moves the staged entries into place only once the whole stream matches the pin.
+    local name=$1
+    local sha256=$2
+    local source=$3
+    local destination=$4
+    local format=$5
+    local actual=
+    local attempt
+    local entry
+    local -a entries=()
+    local staging
+    local started=${EPOCHREALTIME}
+    mkdir -p "${destination}"
+    for attempt in 1 2 3; do
+        staging=$(mktemp -d "${destination}/.install.XXXXXX")
+        # tee hands the compressed stream to sha256sum on descriptor 3, so the archive is read once.
+        if actual=$({ aws s3 cp "${source}" - --region "${BASELINE_REGION}" --only-show-errors |
+                tee /dev/fd/3 | unpack "${format}" "${staging}" >&2; } 3>&1 | sha256sum | awk '{print $1}'); then
+            break
+        fi
+        # Any failed download or unpack, a refused entry included, retries from the start, three attempts in all;
+        # a complete stream that fails its pin does not.
+        actual=
+        rm -rf "${staging}"
+        if ((attempt < 3)); then
+            sleep 5
+        fi
+    done
+    if [[ -z "${actual}" ]]; then
+        echo "Archive ${source} did not download and unpack in 3 attempts" >&2
+        return 1
+    fi
+    if [[ "${actual}" != "${sha256}" ]]; then
+        rm -rf "${staging}"
+        echo "Archive ${source} has SHA-256 ${actual}, not its pinned ${sha256}" >&2
+        return 1
+    fi
+    # The patterns also match dot entries, never . or ..; a pattern that matches nothing stays literal and is skipped.
+    # Every entry is checked before any moves, so a refused archive installs nothing.
+    for entry in "${staging}"/* "${staging}"/.[!.]* "${staging}"/..?*; do
+        if [[ ! -e "${entry}" && ! -L "${entry}" ]]; then
+            continue
+        fi
+        if [[ -e "${destination}/${entry##*/}" || -L "${destination}/${entry##*/}" ]]; then
+            rm -rf "${staging}"
+            echo "Archive ${source} would replace ${destination}/${entry##*/}" >&2
+            return 1
+        fi
+        entries+=("${entry}")
+    done
+    for entry in "${entries[@]}"; do
+        mv "${entry}" "${destination}/"
+    done
+    rmdir "${staging}"
+    timeline "${name}" "${started}"
+}
+
+install_archives()
+{
+    # Installs each archive the controller chose for this host's units: the JDK, the platform's engine archives,
+    # and the language plan bundles of the pool's shards.
+    local name
+    local sha256
+    local source
+    if [[ -n "${ENGINE_BUILD_MANIFEST_SHA256}" ]]; then
+        printf 'engine_build_manifest_sha256=%s\n' "${ENGINE_BUILD_MANIFEST_SHA256}" > "${RESULT_DIR}/engine-build.txt"
+    fi
+    while read -r -u 4 name sha256 source; do
+        case "${name}" in
+            '') ;;
+            jdk)
+                install_archive "${name}" "${sha256}" "${source}" /opt/benchmark-jdk jdk
+                INSTALLED_JAVA_ARCHIVE_SHA256=${sha256}
+                export JAVA_HOME=/opt/benchmark-jdk
+                export PATH="${JAVA_HOME}/bin:${PATH}"
+                ;;
+            classes | trino | native)
+                install_archive "${name}" "${sha256}" "${source}" "${BASELINE_SHARED_WORK_DIR}" zstd
+                # A route reads this marker to record that its engine came prebuilt, and from which archive.
+                mkdir -p "${BASELINE_SHARED_WORK_DIR}/engine-build"
+                printf '%s\n' "${sha256}" > "${BASELINE_SHARED_WORK_DIR}/engine-build/${name}.sha256"
+                printf '%s_archive_sha256=%s\n' "${name}" "${sha256}" >> "${RESULT_DIR}/engine-build.txt"
+                if [[ "${name}" == trino ]]; then
+                    TRINO_ARCHIVE_SHA256=${sha256}
+                fi
+                ;;
+            language-plan)
+                # run-unit.sh finds each plan under its shard ID, the bundle's one top-level directory.
+                install_archive "${name}" "${sha256}" "${source}" "${REGULATOR_DIR}/target/language-plans" zstd
+                ;;
+            *)
+                echo "Unknown host archive: ${name}" >&2
+                return 1
+                ;;
+        esac
+    done 4<<<"${HOST_ARCHIVES}"
 }
 
 package_version()
@@ -168,8 +274,7 @@ record_environment()
             echo "Qualification JDK archive identity is incomplete" >&2
             exit 1
         fi
-        if [[ ! ${TRINO_SNAPSHOT_COMMIT:-} =~ ^[0-9a-f]{40}$ ||
-                ! ${TRINO_SNAPSHOT_SHA256:-} =~ ^[0-9a-f]{64}$ ]]; then
+        if [[ ! ${TRINO_SNAPSHOT_COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
             echo "Qualification Trino source identity is incomplete" >&2
             exit 1
         fi
@@ -201,12 +306,14 @@ record_environment()
         printf 'cargo_package=%s\n' "$(package_version cargo)"
         printf 'rust_package=%s\n' "$(package_version rust)"
         printf 'time_package=%s\n' "$(package_version time)"
+        printf 'zstd_package=%s\n' "$(package_version zstd)"
         printf 'regulator_commit=%s\n' "${REGULATOR_SNAPSHOT_COMMIT:-unknown}"
         printf 'regulator_archive_sha256=%s\n' "${REGULATOR_SNAPSHOT_SHA256:-unknown}"
         printf 'regulator_content_sha256=%s\n' "${REGULATOR_CONTENT_SHA256:-unknown}"
         printf 'trino_used=true\n'
         printf 'trino_commit=%s\n' "${TRINO_SNAPSHOT_COMMIT:-none}"
-        printf 'trino_archive_sha256=%s\n' "${TRINO_SNAPSHOT_SHA256:-none}"
+        # The Trino harness archive, which only a baseline unit's worker installs.
+        printf 'trino_archive_sha256=%s\n' "${TRINO_ARCHIVE_SHA256}"
         printf 'expected_ami_id=%s\n' "${EXPECTED_AMI_ID:-unverified}"
         printf 'expected_ami_name=%s\n' "${EXPECTED_AMI_NAME:-unverified}"
         printf 'actual_ami_id=%s\n' "${actual_ami_id:-unknown}"
@@ -235,15 +342,15 @@ record_environment()
             -Xlog:gc+heap+coops=debug \
             -XX:+PrintFlagsFinal \
             -version 2>&1 | grep -E 'Compressed Oops mode|ObjectAlignmentInBytes|UseCompressedClassPointers|UseCompressedOops'
-        c++ --version
-        cmake --version
-        git --version
+        # Only a worker that builds its engines has their toolchain.
+        if command -v c++ >/dev/null; then c++ --version; fi
+        if command -v cmake >/dev/null; then cmake --version; fi
+        if command -v git >/dev/null; then git --version; fi
         if command -v cargo >/dev/null; then cargo --version; fi
         printf 'regulator_snapshot_commit=%s\n' "${REGULATOR_SNAPSHOT_COMMIT:-unknown}"
         printf 'regulator_snapshot_sha256=%s\n' "${REGULATOR_SNAPSHOT_SHA256:-unknown}"
         printf 'regulator_content_sha256=%s\n' "${REGULATOR_CONTENT_SHA256:-unknown}"
         printf 'trino_snapshot_commit=%s\n' "${TRINO_SNAPSHOT_COMMIT:-unknown}"
-        printf 'trino_snapshot_sha256=%s\n' "${TRINO_SNAPSHOT_SHA256:-unknown}"
         printf 'campaign_provenance=%s\n' "${CAMPAIGN_PROVENANCE}"
         printf 'baseline_campaign=%s\n' "${RE2_CAMPAIGN_ID}"
         printf 'platform=%s\n' "${RE2_CAMPAIGN_PLATFORM}"
@@ -275,41 +382,18 @@ record_environment()
     } > "${RESULT_DIR}/environment.txt" 2>&1
 }
 
-install_engine_build()
-{
-    # Install the platform's prebuilt Trino harness and native runners.
-    python3 "${REGULATOR_DIR}/tools/re2-benchmark/baseline/engine_build.py" install \
-        --build "${ENGINE_BUILD_INPUT_DIR:?A measuring unit worker requires prebuilt engines}" \
-        --manifest-sha256 "${ENGINE_BUILD_MANIFEST_SHA256:?}" \
-        --shared "${BASELINE_SHARED_WORK_DIR}" \
-        --environment "${RESULT_DIR}/environment-manifest.txt" \
-        --output "${RESULT_DIR}/engine-build.txt"
-}
-
-install_language_plans()
-{
-    # Install language plan bundles where run-unit.sh looks up their units.
-    local bundle
-    for bundle in "${LANGUAGE_PLAN_INPUT_DIR:?A unit worker requires its language plan directory}"/*.tar.gz; do
-        if [[ -f "${bundle}" ]]; then
-            python3 "${REGULATOR_DIR}/tools/re2-benchmark/language/fleet.py" install-bundle \
-                --bundle "${bundle}" --sha256 "$(basename "${bundle}" .tar.gz)" \
-                --plans "${REGULATOR_DIR}/target/language-plans"
-        fi
-    done
-}
-
-install_packages
-install_java
-record_environment
-
 export BASELINE_CPU_LIST=${BENCHMARK_CPU_LIST:-0}
     export BASELINE_HEAP_SIZE=${BENCHMARK_HEAP_SIZE:-8g}
     export BASELINE_SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${REGULATOR_DIR}/target/baseline-shared}
-    if [[ -n "${ENGINE_BUILD_MANIFEST_SHA256}" ]]; then
-        install_engine_build
-    fi
-    install_language_plans
+    step_started=${EPOCHREALTIME}
+    install_packages
+    timeline packages "${step_started}"
+    INSTALLED_JAVA_ARCHIVE_SHA256=
+    TRINO_ARCHIVE_SHA256=none
+    install_archives
+    step_started=${EPOCHREALTIME}
+    record_environment
+    timeline environment "${step_started}"
     capacity_file="${RESULT_DIR}/host-capacity.txt"
     memory_total_bytes=$(awk '/^MemTotal:/ {print $2 * 1024; exit}' /proc/meminfo)
     memory_available_before_bytes=$(awk '/^MemAvailable:/ {print $2 * 1024; exit}' /proc/meminfo)

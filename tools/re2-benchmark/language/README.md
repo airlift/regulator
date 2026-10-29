@@ -317,8 +317,9 @@ from the plan and rejects any table that differs.
 
 On a unit worker, `run-unit.sh` runs one measured group of a unit of an
 installed plan with `fleet.py run-unit`, and the worker uploads each group as
-it finishes. The worker installs each plan from its bundle
-(`fleet.py bundle`, checked and installed with `fleet.py install-bundle`) under
+it finishes. The worker installs the plan of each of its pool's shards from
+its bundle, written by `fleet.py bundle` as a deterministic zstd-compressed tar
+of the plan under its shard ID and pinned by its SHA-256, under
 `target/language-plans/<shard>`, which the clean-source check ignores. The
 unit checks that the host matches its platform allocation, with every vCPU
 visible and an 8g heap, and checks the extracted source against the source
@@ -561,7 +562,6 @@ its LIKE and Trino-operation shards. Keep both source manifests and fleet
 plans outside Maven's `target` directory for a final campaign.
 
 ```sh
-TRINO_DIR=/path/to/trino \
 python3 tools/re2-benchmark/baseline/run-campaign.py smoke final-v1 \
   --language-plan /path/to/lifecycle-fleet \
   --language-plan /path/to/bulk-fleet \
