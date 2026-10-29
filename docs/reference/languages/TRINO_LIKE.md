@@ -34,8 +34,9 @@ TrinoLikePattern pattern = TrinoLikePattern.compile(
 boolean matches = pattern.matches(Slices.utf8Slice("100%"));
 ```
 
-`setEscape` throws `IllegalArgumentException` for a value that is not a valid
-code point, and `clearEscape` removes a previously set escape character.
+`setEscape` throws `IllegalArgumentException` unless the value is a Unicode
+scalar value; a surrogate can never appear in a UTF-8 pattern. `clearEscape`
+removes a previously set escape character.
 
 An escape character must be followed by `%`, `_`, or itself. A trailing escape
 and any other escaped code point throw `TrinoLikePatternSyntaxException`; its

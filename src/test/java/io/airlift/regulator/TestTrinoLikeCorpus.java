@@ -601,7 +601,13 @@ public class TestTrinoLikeCorpus
         assertThat(supplementaryEscape.matches(Slices.utf8Slice("%"))).isTrue();
         assertThatThrownBy(() -> TrinoLikePattern.Options.defaults().setEscape(Character.MAX_CODE_POINT + 1))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("escapeCodePoint must be a valid code point: 1114112");
+                .hasMessage("escapeCodePoint must be a Unicode scalar value: 1114112");
+        assertThatThrownBy(() -> TrinoLikePattern.Options.defaults().setEscape(Character.MIN_SURROGATE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("escapeCodePoint must be a Unicode scalar value: 55296");
+        assertThatThrownBy(() -> TrinoLikePattern.Options.defaults().setEscape(Character.MAX_SURROGATE))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("escapeCodePoint must be a Unicode scalar value: 57343");
         TrinoLikePattern.Options clearedEscape = TrinoLikePattern.Options.defaults().setEscape('\\').clearEscape();
         assertThat(TrinoLikePattern.compile(Slices.utf8Slice("abc\\"), clearedEscape).matches(Slices.utf8Slice("abc\\"))).isTrue();
 
