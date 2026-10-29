@@ -1204,6 +1204,7 @@ public sealed class Re2
         return pattern.copy();
     }
 
+    /// Returns the number of capturing groups, excluding group zero (the whole match).
     public int capturingGroupCount()
     {
         return capturingGroupCount;
