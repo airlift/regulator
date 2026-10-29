@@ -156,7 +156,8 @@ def validate_saved(receipt, jvm=None):
     validate_manifest(identity)
     jar = receipt["jar_path"]
     classpath = receipt["classpath"]
-    if jvm is not None and classpath != jvm["classpath"]:
+    # A JVM build receipt names its classpath's entries.
+    if jvm is not None and jvm["classpath"] != [entry["path"] for entry in classpath]:
         raise ValueError("release attestation differs from the measured classpath")
     if receipt["code_sources"] != {"io.airlift.regulator." + name: jar for name in PUBLIC_CLASSES}:
         raise ValueError("release code sources differ from the expected JAR")

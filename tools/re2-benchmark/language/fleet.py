@@ -2,8 +2,8 @@
 """Plan language comparisons as work units, run a unit on a unit worker, and validate and export the results.
 
 This module does not allocate AWS resources. A unit worker runs each unit leased
-to it on an already-provisioned qualification host with its own clean build
-receipts.
+to it on an already-provisioned qualification host, with the candidate classes
+and native runners of its platform's engine build.
 """
 
 import argparse
@@ -285,14 +285,6 @@ def unit_partitions(plan, unit):
     return [(partitions[key], operations) for key, operations in unit_slices(unit["owned"]).items()]
 
 
-def jvm_build_once(destination, java, archive, provenance):
-    """Build the candidate once per host; a build cut short is rebuilt."""
-    if not (destination / "jvm-build.json").is_file():
-        shutil.rmtree(destination, ignore_errors=True)
-        jvm_build.build(destination, java, collection.ROOT, archive, provenance)
-    return destination / "jvm-build.json"
-
-
 def cpu_ticks():
     """The steal and total ticks of /proc/stat's aggregate cpu line; steal is its eighth value. The total sums the
     first eight values, because the guest values that follow are already counted in user and nice."""
@@ -304,8 +296,8 @@ def cpu_ticks():
     raise ValueError("/proc/stat has no aggregate cpu line")
 
 
-def run_unit(directory, unit_id, replica, group_id, root, native_directory, jvm_directory, unit_attempt, region,
-             archive, provenance, java="java"):
+def run_unit(directory, unit_id, replica, group_id, root, shared, unit_attempt, region, archive, provenance,
+             java="java"):
     """Verify and measure one measured group of a unit, its one comparison, on this host, pinned to one CPU, and
     accept the attempt's group."""
     directory, root = directory.resolve(), root.resolve()
@@ -325,10 +317,10 @@ def run_unit(directory, unit_id, replica, group_id, root, native_directory, jvm_
         ("unit_id", unit_id), ("candidate_commit", candidate["candidate_commit"]),
         ("engine_tree", candidate["engine_tree"]), ("heap_size", environment["benchmark_heap_size"]),
         ("regulator_release_version", environment["regulator_release_version"]))))
-    receipt = jvm_build_once(jvm_directory, java, archive, provenance)
-    classpath = (jvm_directory / "classpath.txt").read_text().strip()
+    classpath, receipt = jvm_build.prepare(shared, java, collection.ROOT, archive, provenance)
     # Every unit of the plan runs the same binaries, whichever comparators its comparisons need.
-    native_runners = {engine: str(native_directory / collection.native_target({"suite": suite}, engine))
+    native_runners = {engine: str(shared / engine_build.LANGUAGE_NATIVE_DIRECTORY /
+                                  collection.native_target({"suite": suite}, engine))
                       for engine in collection.NATIVE_RUNNERS}
     affinity = os.sched_getaffinity(0)
     # The host's CPU steal while the group's partitions measure. The counters are diagnostic evidence: the receipt
@@ -353,7 +345,7 @@ def run_unit(directory, unit_id, replica, group_id, root, native_directory, jvm_
                 steal_before, total_before = cpu_ticks()
                 try:
                     collection.measure(path, results, java, classpath, native_runners, environment["platform"],
-                                       receipt, archive, provenance)
+                                       receipt)
                 except collection.BudgetOverrun as error:
                     raise UnitRejection(PROTOCOL_REJECTION_STATUS, str(error)) from error
                 steal_after, total_after = cpu_ticks()
@@ -414,6 +406,8 @@ def validate_unit_attempt(root, directory):
         raise ValueError("language unit has missing or unexpected partitions")
     version = environment["regulator_release_version"]
     expected_release = released_artifact.manifest(collection.ROOT, version) if version else None
+    # The classes archive the host installed from its platform's engine build, under the archive's pinned SHA-256.
+    classes_digest = read_properties(root / "engine-build.txt").get("classes_archive_sha256")
     candidate = runners = None
     observed, exports = set(), []
     with tempfile.TemporaryDirectory() as work:
@@ -439,6 +433,8 @@ def validate_unit_attempt(root, directory):
                         raise ValueError(f"{engine}: language result lacks its native build receipt")
                     collection.validate_native_build(data["manifest"], engine, provenance[f"{key}_build"],
                                                      data["runners"][f"{key}_binary_sha256"])
+            if provenance["jvm_build"]["classes_archive_sha256"] != classes_digest:
+                raise ValueError("language result ran classes other than its engine build's")
             release = provenance["jvm_build"].get("released_artifact")
             if expected_release is not None and (release is None or release["manifest"] != expected_release):
                 raise ValueError("language partition lacks the selected released artifact")
@@ -666,6 +662,8 @@ def aggregate(directory, result_root, output):
     unit_session.check_semantic_rejections(result_root)
     observations, comparisons, hosts = [], [], []
     candidate = None
+    # Each platform runs the classes of its own engine build.
+    classes_digests = {}
     semantic_traces = {}
     for receipt in receipts:
         attempt = unit_dispatch.unit_attempt_directory(result_root, receipt)
@@ -682,8 +680,9 @@ def aggregate(directory, result_root, output):
                         raise ValueError("verification-failed: language partitions disagree")
             provenance = data["provenance"]
             identity = {key: provenance[key] for key in CANDIDATE_FIELDS}
-            if candidate not in (None, identity):
-                raise ValueError("mixed candidates or comparator versions")
+            digest = provenance["jvm_build"]["classes_archive_sha256"]
+            if candidate not in (None, identity) or classes_digests.setdefault(receipt["platform"], digest) != digest:
+                raise ValueError("mixed candidates, candidate classes, or comparator versions")
             candidate = identity
             partitions.append({"id": results.name, "provenance": provenance,
                                "export_sha256": sha256_file(results / "language-results.json")})
@@ -720,8 +719,8 @@ def main():
     unit_parser.add_argument("--replica", required=True)
     unit_parser.add_argument("--group", required=True)
     unit_parser.add_argument("--unit-directory", type=Path, required=True)
-    unit_parser.add_argument("--native-directory", type=Path, required=True)
-    unit_parser.add_argument("--jvm-directory", type=Path, required=True)
+    unit_parser.add_argument("--shared", type=Path, required=True,
+                             help="the shared work directory where the engine build is installed")
     unit_parser.add_argument("--unit-attempt", required=True)
     unit_parser.add_argument("--region", required=True)
     unit_parser.add_argument("--source-archive", type=Path, required=True)
@@ -750,9 +749,8 @@ def main():
         install_bundle(args.bundle, args.sha256, args.plans)
     elif args.command == "run-unit":
         try:
-            run_unit(args.plan_directory, args.unit, args.replica, args.group, args.unit_directory,
-                     args.native_directory, args.jvm_directory, args.unit_attempt, args.region,
-                     archive=args.source_archive, provenance=args.candidate_provenance)
+            run_unit(args.plan_directory, args.unit, args.replica, args.group, args.unit_directory, args.shared,
+                     args.unit_attempt, args.region, archive=args.source_archive, provenance=args.candidate_provenance)
         except UnitRejection as rejection:
             print(f"unit {args.unit} rejected: {rejection}", file=sys.stderr)
             sys.exit(rejection.status)

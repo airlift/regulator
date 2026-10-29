@@ -10,9 +10,10 @@ mode, `unit-worker`, and reject any other.
   public-language plans of `language/fleet.py`, and measures them one at a
   time. See [work units](SHARD_DISPATCH.md#work-units) and the
   [language guide](../language/README.md). The build phase's `engine-build`
-  unit measures nothing: it builds the pinned Trino harness and the native RE2
-  and Rust comparison runners once per platform, which later unit workers
-  install. See [engine builds](SHARD_DISPATCH.md#engine-builds).
+  unit measures nothing: it builds the candidate's classes, the pinned Trino
+  harness, and the native RE2 and Rust comparison runners once per platform,
+  which later unit workers install. See
+  [engine builds](SHARD_DISPATCH.md#engine-builds).
 
 The specialized-pattern shards are in the formal campaign to answer what a
 pattern gains from the specialized engine and from the opt-in compiler:

@@ -61,7 +61,7 @@ class TestReleasedArtifact(unittest.TestCase):
         with patch.object(release.subprocess, "check_output", return_value=output):
             receipt = release.attest(self.classpath, self.jar, self.identity, self.root)
         self.assertEqual(receipt, self.receipt())
-        release.validate_saved(receipt, {"classpath": release.classpath_identity(self.classpath)})
+        release.validate_saved(receipt, {"classpath": [entry["path"] for entry in receipt["classpath"]]})
         with patch.object(release.subprocess, "check_output", return_value=output.splitlines()[1] + "\n"):
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 release.attest(self.classpath, self.jar, self.identity, self.root)
@@ -70,14 +70,13 @@ class TestReleasedArtifact(unittest.TestCase):
         original = self.receipt()
         for change in ("digest", "origins", "shadow", "measured"):
             receipt = copy.deepcopy(original)
-            jvm = {"classpath": copy.deepcopy(receipt["classpath"])}
+            jvm = {"classpath": [entry["path"] for entry in receipt["classpath"]]}
             if change == "digest":
                 receipt["manifest"]["jar_sha256"] = "c" * 64
             elif change == "origins":
                 receipt["code_sources"]["io.airlift.regulator.Re2"] = "/source/classes"
             elif change == "shadow":
                 receipt["classpath"][0]["files"][self.classes[-1]] = "d" * 64
-                jvm["classpath"] = receipt["classpath"]
             else:
                 jvm["classpath"].pop()
             with self.subTest(change=change), self.assertRaises(ValueError):

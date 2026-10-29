@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -22,16 +23,32 @@ PLATFORMS = tuple((name, row["architecture"], row["instance_type"])
 
 
 class TestEngineBuild(unittest.TestCase):
-    def package(self, root, platform=PLATFORMS[0], candidate="a" * 40, trino_commit="c7503d17", checkout=ROOT):
-        """Build and accept one platform's engine build lease, as run-unit.sh does on a unit worker, from the
-        checkout's build scripts."""
+    def package(self, root, platform=PLATFORMS[0], candidate="a" * 40, trino_commit="c7503d17", scripts=ROOT):
+        """Build and accept one platform's engine build lease, as run-unit.sh does on a unit worker, from a
+        candidate checkout holding copies of the build scripts in scripts."""
         name, architecture, instance_type = platform
+        checkout = root / f"candidate-{name}"
+        for path in ENGINE_BUILD.BUILD_INPUTS:
+            (checkout / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(scripts / path, checkout / path)
+        # build-engines.sh compiles the candidate, resolves its dependencies, and adds the console launcher.
+        for directory in ("classes", "test-classes"):
+            (checkout / "target" / directory / "io/airlift").mkdir(parents=True)
+            (checkout / "target" / directory / "io/airlift/Fixture.class").write_text(directory + "\n")
+        repository = root / f"repository-{name}"
+        repository.mkdir()
+        dependencies = [repository / "slice-2.8.jar", repository / "jmh-core-1.37.jar"]
+        for jar in dependencies:
+            jar.write_text(jar.name + "\n")
         shared = root / f"builder-{name}"
+        (shared / ENGINE_BUILD.CLASSES_DIRECTORY / "lib").mkdir(parents=True)
+        (shared / ENGINE_BUILD.CLASSES_DIRECTORY / ENGINE_BUILD.CONSOLE_LAUNCHER).write_text("launcher\n")
+        (shared / ENGINE_BUILD.CLASSES_DEPENDENCIES).write_text(":".join(map(str, dependencies)) + "\n")
         trino = shared / ENGINE_BUILD.TRINO_DIRECTORY
         (trino / "classes/io/trino").mkdir(parents=True)
         (trino / "classes/io/trino/Benchmark.class").write_text("class\n")
-        # Regulator's own classes stay out of the archive; each host builds its candidate.
-        (trino / "classpath.txt").write_text(f"{trino / 'classes'}:{root / 'regulator/target/classes'}")
+        # prepare.sh compiles the harness against the builder's candidate classes and dependencies.
+        (trino / "classpath.txt").write_text(f"{trino / 'classes'}:{checkout / 'target/classes'}:{dependencies[0]}")
         (trino / "joni-jar.path").write_text("joni.jar\n")
         (trino / "provenance.properties").write_text(f"trino_commit={trino_commit}\n")
         (shared / ENGINE_BUILD.LANGUAGE_NATIVE_DIRECTORY).mkdir()
@@ -61,10 +78,20 @@ class TestEngineBuild(unittest.TestCase):
         self.assertEqual(ENGINE_BUILD.validate_unit_attempt(result), receipt)
         self.assertEqual(ENGINE_BUILD.sha256_file(result / "engine-build/engine-build.json"),
                          receipt["observed_rows_sha256"])
-        self.assertEqual(sorted(json.loads((result / "engine-build/engine-build.json").read_text())
-                                ["archives"]["trino"]["files"]),
+        archives = json.loads((result / "engine-build/engine-build.json").read_text())["archives"]
+        self.assertEqual(sorted(archives["trino"]["files"]),
                          ["pinned-trino/classes/io/trino/Benchmark.class", "pinned-trino/classpath.txt",
                           "pinned-trino/joni-jar.path", "pinned-trino/provenance.properties"])
+        classes = shared / ENGINE_BUILD.CLASSES_DIRECTORY
+        self.assertEqual(sorted(archives["classes"]["files"]), [
+            "regulator-classes/classes/io/airlift/Fixture.class", "regulator-classes/classpath.txt",
+            "regulator-classes/lib/jmh-core-1.37.jar", "regulator-classes/lib/junit-platform-console-standalone.jar",
+            "regulator-classes/lib/slice-2.8.jar", "regulator-classes/test-classes/io/airlift/Fixture.class"])
+        self.assertEqual("test-classes:classes:lib/slice-2.8.jar:lib/jmh-core-1.37.jar\n",
+                         (classes / "classpath.txt").read_text())
+        # The harness runs the packaged candidate classes, not the builder's.
+        self.assertEqual(f"{trino / 'classes'}:{classes / 'classes'}:{classes / 'lib/slice-2.8.jar'}",
+                         (trino / "classpath.txt").read_text())
         environment = root / "host-environment.txt"
         environment.write_text(f"platform={name}\nregulator_commit={candidate}\n"
                                "regulator_archive_sha256=" + "5" * 64 + "\n")
@@ -86,7 +113,7 @@ class TestEngineBuild(unittest.TestCase):
             with self.assertRaisesRegex(ENGINE_BUILD.EngineBuildError, "built its own engines"):
                 ENGINE_BUILD.validate_unit_attempt(root / "r8i")
 
-    def test_host_installs_the_prebuilt_trino_harness_and_native_runners(self):
+    def test_host_installs_the_prebuilt_trino_harness_native_runners_and_candidate_classes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             build, receipt, environment = self.package(root)
@@ -101,6 +128,11 @@ class TestEngineBuild(unittest.TestCase):
                 self.assertTrue((shared / "language-native" / runner).is_file())
                 self.assertTrue((shared / "language-native" / f"{runner}.build.json").is_file())
             self.assertTrue((shared / "engine-build/native.sha256").is_file())
+            classes = shared / "regulator-classes"
+            self.assertEqual(
+                (f"{classes}/test-classes:{classes}/classes:{classes}/lib/slice-2.8.jar:{classes}/lib/jmh-core-1.37.jar",
+                 record["classes_archive_sha256"]),
+                ENGINE_BUILD.installed_classes(shared))
             self.assertIn(f"engine_build_manifest_sha256={manifest_sha256}\n",
                           (root / "engine-build.txt").read_text())
 

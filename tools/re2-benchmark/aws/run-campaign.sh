@@ -1002,9 +1002,6 @@ finish()
     trap - EXIT
     set +e
     printf '%s\n' "\${status}" > "\${RESULT_DIR}/exit-status"
-    if [[ -d /opt/re2-work/regulator/target/surefire-reports ]]; then
-        cp -a /opt/re2-work/regulator/target/surefire-reports "\${RESULT_DIR}/regulator-surefire-reports"
-    fi
     if [[ -d /opt/re2-work/trino/core/trino-main/target/surefire-reports ]]; then
         cp -a /opt/re2-work/trino/core/trino-main/target/surefire-reports "\${RESULT_DIR}/trino-surefire-reports"
     fi

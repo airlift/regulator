@@ -32,7 +32,7 @@ validator rejects the group unless:
 - every route ran the frozen protocol: qualification or smoke, the default
   Joni JMH window, and exactly the JMH selectors that protocol plans for its
   share
-- every route's Surefire reports are the files of its semantic receipt,
+- every route's semantic test reports are the files of its semantic receipt,
   whether that receipt was measured by this unit or cached from an earlier
   unit of the shard on the same host
 - the representatives the routes ran are exactly the group's for the replica,

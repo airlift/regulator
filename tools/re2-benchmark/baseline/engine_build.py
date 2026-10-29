@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Package one platform's pinned Trino harness and native comparison runners, and install them on its unit workers."""
+"""Package one platform's pinned Trino harness, native comparison runners, and compiled candidate, and install them on
+its unit workers."""
 
 import argparse
 import gzip
 import hashlib
 import json
+import shutil
 import tarfile
 from pathlib import Path, PurePosixPath
 
@@ -32,7 +34,14 @@ TRINO_METADATA = ("classpath.txt", "joni-jar.path", "provenance.properties")
 LANGUAGE_NATIVE_DIRECTORY = "language-native"
 LANGUAGE_NATIVE_TARGETS = ("language_benchmark", "language_bulk_benchmark", "language_rust_benchmark",
                            "language_rust_bulk_benchmark")
-ARCHIVES = ("trino", "native")
+# The candidate's classes, test classes, and test-scope dependency jars, compiled once per platform, with their
+# classpath relative to the directory, and the JUnit console launcher that runs a route's semantic tests from them.
+CLASSES_DIRECTORY = "regulator-classes"
+CLASSES_CLASSPATH = "classpath.txt"
+CONSOLE_LAUNCHER = "lib/junit-platform-console-standalone.jar"
+# build-engines.sh writes the builder's absolute dependency classpath here, beside the directory.
+CLASSES_DEPENDENCIES = "regulator-dependencies.txt"
+ARCHIVES = ("trino", "native", "classes")
 # Beyond the candidate commit, these choose what the harness is built from and how.
 BUILD_INPUTS = (
     "tools/re2-benchmark/trino-joni/pins.env",
@@ -72,14 +81,44 @@ def properties(path):
     return values
 
 
+def copy_classes(shared, root):
+    """Copy the candidate's compiled classes and dependency jars into the classes directory, write their classpath
+    relative to it, and return each copy by the builder path it came from."""
+    directory = shared / CLASSES_DIRECTORY
+    copies = {}
+    for name in ("test-classes", "classes"):
+        copies[root / "target" / name] = directory / name
+        shutil.copytree(root / "target" / name, directory / name)
+    for entry in (shared / CLASSES_DEPENDENCIES).read_text().strip().split(":"):
+        jar = directory / "lib" / Path(entry).name
+        if jar.exists():
+            raise EngineBuildError(f"two dependencies share a file name: {jar.name}")
+        copies[Path(entry)] = jar
+        shutil.copyfile(entry, jar)
+    (directory / CLASSES_CLASSPATH).write_text(
+        ":".join(path.relative_to(directory).as_posix() for path in copies.values()) + "\n")
+    if not (directory / CONSOLE_LAUNCHER).is_file():
+        raise EngineBuildError(f"the classes lack the JUnit console launcher: {CONSOLE_LAUNCHER}")
+    return copies
+
+
+def relocate_trino_classpath(shared, copies):
+    """Point the harness's classpath at the installed candidate classes rather than the builder's build of them."""
+    path = shared / TRINO_DIRECTORY / "classpath.txt"
+    path.write_text(":".join(str(copies.get(Path(entry), entry)) for entry in path.read_text().split(":")))
+
+
 def trino_files(shared):
     work = shared / TRINO_DIRECTORY
+    classes = shared / CLASSES_DIRECTORY
     files = {f"{TRINO_DIRECTORY}/{name}" for name in TRINO_METADATA}
     for entry in (work / "classpath.txt").read_text().split(":"):
         path = Path(entry)
-        if work != path and work not in path.parents:
-            # Regulator's classes and dependencies come from each host's own candidate build.
+        if classes in path.parents:
+            # The classes archive holds Regulator's classes and dependencies.
             continue
+        if work != path and work not in path.parents:
+            raise EngineBuildError(f"pinned Trino classpath entry is in neither archive: {path}")
         if path.is_dir():
             files.update(file.relative_to(shared).as_posix() for file in path.rglob("*") if file.is_file())
         elif path.is_file():
@@ -127,6 +166,9 @@ def package(shared, root, directory):
     environment = properties(directory / "environment-manifest.txt")
     output = directory / DIRECTORY
     output.mkdir()
+    relocate_trino_classpath(shared, copy_classes(shared, root))
+    classes = sorted(path.relative_to(shared).as_posix() for path in (shared / CLASSES_DIRECTORY).rglob("*")
+                     if path.is_file())
     manifest = {
         "schema_version": 1,
         **{field: environment[key] for field, key in BUILDER_FIELDS.items()},
@@ -137,6 +179,9 @@ def package(shared, root, directory):
         "archives": {
             "trino": write_archive(shared, trino_files(shared), output / "trino.tar.gz"),
             "native": write_archive(shared, language_native_files(), output / "native.tar.gz"),
+            "classes": write_archive(shared, sorted(path.relative_to(shared).as_posix() for path in
+                                                    (shared / CLASSES_DIRECTORY).rglob("*") if path.is_file()),
+                                     output / "classes.tar.gz"),
         },
     }
     (output / MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -268,6 +313,16 @@ def unpack(build, archive, shared):
     marker.write_text(archive["sha256"] + "\n")
 
 
+def installed_classes(shared):
+    """The installed candidate classes' absolute classpath, and the SHA-256 of the archive they came from."""
+    directory = shared / CLASSES_DIRECTORY
+    marker = shared / DIRECTORY / "classes.sha256"
+    if not marker.is_file():
+        raise EngineBuildError(f"no prebuilt candidate classes are installed in {shared}")
+    entries = (directory / CLASSES_CLASSPATH).read_text().strip().split(":")
+    return ":".join(str(directory / entry) for entry in entries), marker.read_text().strip()
+
+
 def install(build, manifest_sha256, shared, environment_path, output):
     manifest = load_manifest(build, manifest_sha256)
     environment = properties(environment_path)
@@ -279,7 +334,8 @@ def install(build, manifest_sha256, shared, environment_path, output):
         unpack(build, manifest["archives"][name], shared)
     record = {"engine_build_manifest_sha256": manifest_sha256, "trino_harness": "prebuilt",
               "trino_archive_sha256": manifest["archives"]["trino"]["sha256"],
-              "native_archive_sha256": manifest["archives"]["native"]["sha256"]}
+              "native_archive_sha256": manifest["archives"]["native"]["sha256"],
+              "classes_archive_sha256": manifest["archives"]["classes"]["sha256"]}
     output.write_text("".join(f"{key}={value}\n" for key, value in record.items()))
     return record
 
@@ -299,7 +355,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     package_command = commands.add_parser(
-        "package", help="package the Trino harness and native runners this builder host built")
+        "package", help="package the Trino harness, native runners, and candidate classes this builder host built")
     package_command.add_argument("--shared", type=Path, required=True)
     package_command.add_argument("--root", type=Path, required=True)
     package_command.add_argument("--result-directory", type=Path, required=True)
@@ -310,7 +366,8 @@ def main():
     accept_command.add_argument("--unit-attempt", required=True)
     accept_command.add_argument("--region", required=True)
     accept_command.add_argument("--engine-tree", required=True)
-    install_command = commands.add_parser("install", help="install the prebuilt Trino harness and native runners")
+    install_command = commands.add_parser(
+        "install", help="install the prebuilt Trino harness, native runners, and candidate classes")
     install_command.add_argument("--shared", type=Path, required=True)
     install_command.add_argument("--environment", type=Path, required=True)
     install_command.add_argument("--output", type=Path, required=True)

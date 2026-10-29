@@ -435,8 +435,7 @@ class TestCollection(unittest.TestCase):
         collection.save(results / "runners.json", runners)
         collection.save(results / "verification.json", {
             "manifest_sha256": manifest_hash, "runners_sha256": runners_hash, "receipts": receipts})
-        jvm_receipt = self.root / "jvm-build.json"
-        collection.save(jvm_receipt, {"jvm": {"fixture": "JVM"}, "source_tree": "tree"})
+        jvm_receipt = {"jvm": {"fixture": "JVM"}, "source_commit": "commit", "source_tree": "tree"}
         for runner, key, target in ((native, "native", "language_benchmark"),
                                     (native_rust, "native_rust", "language_rust_benchmark")):
             collection.save(runner.with_suffix(".build.json"), {
@@ -445,12 +444,8 @@ class TestCollection(unittest.TestCase):
                 "runner_compile_commands": [{"command": "c++ -O3 -DNDEBUG"}]})
 
         def host_command(command, **kwargs):
-            if command[:2] == ["git", "status"]:
-                return b""
             if command == ["java", "-version"]:
                 return b"25.0.4+7"
-            if command == ["git", "rev-parse", "HEAD^{tree}"]:
-                return b"tree"
             return b"fixture"
 
         measured = []
@@ -482,7 +477,6 @@ class TestCollection(unittest.TestCase):
                 patch.object(collection, "runner_identity", return_value=runners), \
                 patch.object(collection.subprocess, "check_output", side_effect=host_command), \
                 patch.object(collection, "host_identity", return_value={"instanceType": "r9g.xlarge"}), \
-                patch.object(collection.jvm_build, "validate_receipt"), \
                 patch.object(collection, "run_process", side_effect=measurement_process):
             def measure():
                 collection.measure(Path(os.path.relpath(self.directory)), Path(os.path.relpath(results)), "java", "classpath",

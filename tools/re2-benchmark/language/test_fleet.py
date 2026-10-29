@@ -200,7 +200,7 @@ class TestFleet(unittest.TestCase):
 
     @staticmethod
     def write_partition_results(partition, result, platform, instance_type, instance_id, jdk="JDK25", source_commit="commit",
-                                traced="61"):
+                                traced="61", classes_archive_sha256="c" * 64):
         """Write one partition's synthetic verification and measurements, and export them."""
         result.mkdir(parents=True, exist_ok=True)
         manifest = collection.load(partition / "manifest.json")
@@ -244,16 +244,19 @@ class TestFleet(unittest.TestCase):
             "manifest_sha256": manifest_hash, "runners_sha256": runners_hash,
             "source_commit": source_commit, "source_tree": "tree", "comparators_sha256": COMPARATORS_SHA256, "jdk": jdk,
             "platform": platform, "instance_identity": {"instanceType": instance_type, "instanceId": instance_id},
-            "jvm_build": {"source_tree": "tree", "jvm": runners}})
+            "jvm_build": {"source_tree": "tree", "classes_archive_sha256": classes_archive_sha256, "jvm": runners}})
         collection.save(result / "observations.json", observations)
         collection.export(partition, result)
 
     def run_unit(self, unit_id, root, verify=None, environment=None, replica="1", unit_attempt="host-1/1",
-                 measured=lambda partition: {}, directory=None, group="1"):
-        """Run one group of a unit attempt of the plan, by default this test's, through fleet.run_unit, with
-        synthetic verification and measurements; measured names each partition's changes to its synthetic
-        results."""
+                 measured=lambda partition: {}, directory=None, group="1", classes="c" * 64):
+        """Run one group of a unit attempt of a plan, by default this test's, through fleet.run_unit with synthetic
+        verification and measurements. classes is the SHA-256 of the classes archive the host installed, and
+        measured names each partition's changes to its synthetic results."""
         root.mkdir(parents=True)
+        # As run-host.sh does, record the engine build archives the host installed.
+        (root / "engine-build.txt").write_text(
+            f"engine_build_manifest_sha256={'e' * 64}\nclasses_archive_sha256={classes}\n")
         self.unit_environment = {
             "verification_status": "verified", "benchmark_mode": "unit-worker", "baseline_campaign": "language",
             "platform": "r9g", "host_epoch": "2", "campaign_architecture": "arm", "instance_id": "i-unit",
@@ -274,15 +277,22 @@ class TestFleet(unittest.TestCase):
             affinity.clear()
             affinity.update(cpus)
 
-        def build(destination, *args):
-            destination.mkdir(parents=True)
-            (destination / "classpath.txt").write_text("classpath\n")
-            collection.save(destination / "jvm-build.json", {})
+        # The unit measures the engine build's installed classes and native runners, compiling nothing.
+        shared = self.root / "shared"
+        receipt = {"classes_archive_sha256": classes}
 
-        def measure(path, results, *args):
+        def prepare(directory, java, source, archive, candidate):
+            self.assertEqual((shared, collection.ROOT, self.root / "regulator.tar.gz", provenance),
+                             (directory, source, archive, candidate))
+            return "installed classpath", receipt
+
+        def measure(path, results, java, classpath, native_runners, platform, build_receipt):
+            self.assertEqual(("installed classpath", receipt), (classpath, build_receipt))
+            self.assertEqual(shared / "language-native", Path(native_runners["native-re2"]).parent)
             host = self.unit_environment
             self.write_partition_results(path, results, host["platform"], host["instance_type"], host["instance_id"],
                                          **{"jdk": "Temurin 25.0.4+7", "source_commit": "a" * 40,
+                                            "classes_archive_sha256": build_receipt["classes_archive_sha256"],
                                             **measured(results.name)})
 
         reads = itertools.count()
@@ -296,13 +306,12 @@ class TestFleet(unittest.TestCase):
                 patch.object(fleet, "cpu_ticks", cpu_ticks), \
                 patch.object(fleet.os, "sched_getaffinity", lambda _: set(affinity), create=True), \
                 patch.object(fleet.os, "sched_setaffinity", set_affinity, create=True), \
-                patch.object(fleet.jvm_build, "build", side_effect=build), \
+                patch.object(fleet.jvm_build, "prepare", side_effect=prepare), \
                 patch.object(collection, "verify", side_effect=verify or (lambda path, results, *args: results.mkdir(parents=True))), \
                 patch.object(collection, "measure", side_effect=measure):
             try:
-                fleet.run_unit(directory or self.directory, unit_id, replica, group, root, self.root / "native",
-                               self.root / "jvm", unit_attempt, "us-west-2", archive=self.root / "regulator.tar.gz",
-                               provenance=provenance)
+                fleet.run_unit(directory or self.directory, unit_id, replica, group, root, shared, unit_attempt,
+                               "us-west-2", archive=self.root / "regulator.tar.gz", provenance=provenance)
             finally:
                 # The worker's CPU affinity is restored whether or not the unit was accepted.
                 self.assertEqual(affinity, {0, 1})
@@ -414,6 +423,16 @@ class TestFleet(unittest.TestCase):
             with self.subTest(rejection=rejection):
                 self.assert_rewritten_exports_validate(root, rewrite, rejection)
 
+    def test_unit_attempt_requires_the_classes_of_its_engine_build(self):
+        self.prepare_small_plan()
+        unit_id = next(iter(fleet.work_units.load(self.directory)))
+        root = self.root / "attempt"
+        self.run_unit(unit_id, root)
+
+        def rewrite(exported):
+            exported["provenance"]["jvm_build"]["classes_archive_sha256"] = "0" * 64
+        self.assert_rewritten_exports_validate(root, rewrite, "classes other than its engine build's")
+
     def test_unit_rejects_a_host_off_its_allocation_before_verifying(self):
         self.prepare_small_plan()
         unit_id = next(iter(fleet.work_units.load(self.directory)))
@@ -466,7 +485,7 @@ class TestFleet(unittest.TestCase):
                     # The run-unit command exits with the rejection's status for the controller.
                     arguments = ["fleet.py", "run-unit", "--unit", unit_id, "--replica", "1", "--group", "1",
                                  "--unit-attempt", "1", "--region", "us-west-2"]
-                    for name in ("plan-directory", "unit-directory", "native-directory", "jvm-directory",
+                    for name in ("plan-directory", "unit-directory", "shared",
                                  "source-archive", "candidate-provenance"):
                         arguments += [f"--{name}", str(self.root / name)]
                     with patch.object(fleet, "run_unit", side_effect=rejection.exception), \
@@ -485,7 +504,8 @@ class TestFleet(unittest.TestCase):
         fleet.install_bundle(bundle, sha256, self.root / "plans")
         self.assertEqual(fleet.validate(self.root / "plans/language-lifecycle"), fleet.validate(self.directory))
 
-    def run_campaign(self, measured=lambda platform, partition: {}, directories=None):
+    def run_campaign(self, measured=lambda platform, partition: {}, directories=None,
+                     classes=lambda platform, replica: "c" * 64 if platform == "r9g" else "d" * 64):
         """Accept every unit of the plans of one suite, by default a two-language plan, at replicas 1 to 3 on both
         platforms, as a primary campaign does, with one synthetic worker per replica and platform running all
         its units, each unit's groups in one lease. classes names the SHA-256 of the classes archive each host
@@ -516,7 +536,7 @@ class TestFleet(unittest.TestCase):
                         self.run_unit(unit_id, attempt, environment=environment, replica=replica,
                                       unit_attempt=session["unit_attempt_id"],
                                       measured=lambda partition: measured(platform, partition), directory=directory,
-                                      group=group["group_id"])
+                                      group=group["group_id"], classes=classes(platform, replica))
                         receipts.append(fleet.row_protocol.read_tsv(attempt / "unit-receipt.tsv")[0])
         fleet.write_tsv(result_root / "accepted-units.tsv", fleet.unit_session.UNIT_RECEIPT_FIELDS, receipts)
         fleet.write_tsv(result_root / fleet.unit_session.SEMANTIC_REJECTIONS,
@@ -563,6 +583,11 @@ class TestFleet(unittest.TestCase):
         result_root, _ = self.run_campaign(
             lambda platform, partition: {"jdk": "Temurin 25.0.4+7.1"} if platform == "r8i" else {})
         with self.assertRaisesRegex(ValueError, "mixed candidates"):
+            fleet.aggregate(self.directory, result_root, self.root / "export.json")
+
+    def test_aggregate_requires_one_classes_archive_per_platform(self):
+        result_root, _ = self.run_campaign(classes=lambda platform, replica: "d" * 64 if replica == "2" else "c" * 64)
+        with self.assertRaisesRegex(ValueError, "mixed candidates, candidate classes"):
             fleet.aggregate(self.directory, result_root, self.root / "export.json")
 
     def test_local_preflight_checks_all_partitions_without_measurement(self):

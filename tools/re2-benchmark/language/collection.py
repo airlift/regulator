@@ -632,7 +632,8 @@ def validate_native_build(manifest, engine, build, binary_sha256):
         raise ValueError(f"{engine}: native comparator requires a release build")
 
 
-def measure(directory, results, java, classpath, native_runners, platform_id, jvm_receipt, archive=None, candidate_provenance=None):
+def measure(directory, results, java, classpath, native_runners, platform_id, build_receipt):
+    """Measure verified comparisons with the classpath that build_receipt, from jvm_build.prepare, identifies."""
     directory, results = directory.resolve(), results.resolve()
     if (results / "provenance.json").exists() or (results / "observations.json").exists():
         raise ValueError("will not overwrite an existing measurement cohort or its call contract")
@@ -655,9 +656,6 @@ def measure(directory, results, java, classpath, native_runners, platform_id, jv
     runners = runner_identity(java, classpath, native_runners)
     if digest(encode(runners)) != evidence["runners_sha256"]:
         raise ValueError("runners differ from verified binaries")
-    jvm_build.require_clean_source(ROOT, archive, candidate_provenance)
-    build_receipt = load(jvm_receipt)
-    jvm_build.validate_receipt(build_receipt, ROOT, java, classpath, archive, candidate_provenance)
     version = subprocess.check_output([java, "-version"], stderr=subprocess.STDOUT).decode()
     if JDK_VERSION not in version:
         raise ValueError(f"JDK differs from baseline/comparators.tsv's {JDK_VERSION}")
@@ -671,7 +669,7 @@ def measure(directory, results, java, classpath, native_runners, platform_id, jv
         native_evidence[f"{key}_binary_sha256"] = digest(Path(native_runners[engine]).read_bytes())
         native_evidence[f"{key}_build"] = build
     provenance = {
-        **jvm_build.source_identity(ROOT, archive, candidate_provenance),
+        "source_commit": build_receipt["source_commit"], "source_tree": build_receipt["source_tree"],
         "jdk": version, "platform": platform_id, "machine": platform.machine(),
         "instance_identity": host_identity(platform_id),
         "lscpu": subprocess.check_output(["lscpu"]).decode(),
@@ -820,17 +818,12 @@ def export(directory, results, *, write=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("prepare", "verify", "measure", "export"))
+    parser.add_argument("action", choices=("prepare", "verify", "export"))
     parser.add_argument("--manifest-directory", required=True, type=Path)
     parser.add_argument("--results", type=Path)
     parser.add_argument("--java", default="java")
     parser.add_argument("--classpath")
     add_native_runner_arguments(parser)
-    import fleet
-    parser.add_argument("--platform", choices=fleet.PLATFORMS)
-    parser.add_argument("--jvm-build-receipt", type=Path)
-    parser.add_argument("--source-archive", type=Path)
-    parser.add_argument("--candidate-provenance", type=Path)
     args = parser.parse_args()
     if args.action == "prepare":
         prepare(args.manifest_directory)
@@ -840,15 +833,8 @@ def main():
         export(args.manifest_directory, args.results)
     else:
         if not args.results or not args.classpath or not args.native_runner:
-            parser.error("verification/measurement requires --results, --classpath, and --native-runner")
-        native_runners = native_runner_arguments(args)
-        if args.action == "verify":
-            verify(args.manifest_directory, args.results, args.java, args.classpath, native_runners)
-        else:
-            if not args.platform or not args.jvm_build_receipt:
-                parser.error("measurement requires --platform and --jvm-build-receipt")
-            measure(args.manifest_directory, args.results, args.java, args.classpath, native_runners, args.platform,
-                    args.jvm_build_receipt, args.source_archive, args.candidate_provenance)
+            parser.error("verification requires --results, --classpath, and --native-runner")
+        verify(args.manifest_directory, args.results, args.java, args.classpath, native_runner_arguments(args))
 
 
 if __name__ == "__main__":

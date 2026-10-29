@@ -136,7 +136,7 @@ class TestRunCampaign(unittest.TestCase):
                 shutil.copy(checkout / path, scripts / path)
             with (scripts / "tools/re2-benchmark/build.sh").open("a") as script:
                 script.write("# changed\n")
-            return {"checkout": scripts}
+            return {"scripts": scripts}
 
         def rewrite_state(**changes):
             def rewrite(builds):
@@ -1035,10 +1035,20 @@ class TestRunCampaign(unittest.TestCase):
             candidate_archive_sha256=receipts[0]["candidate_archive_sha256"], engine_tree=receipts[0]["engine_tree"],
             language_plans={plan["shard_id"]: fixture.directory})
 
-        def validation(root=checkout, release=""):
+        def validation(root=checkout, release="", classes=(("r8i", "d" * 64), ("r9g", "c" * 64))):
+            """The campaign's validation, installing each platform's engine build, whose classes archive has the
+            SHA-256 classes gives it, by default the one its hosts installed."""
             arguments.release_version = release
+            builds, manifests = {}, {}
+            for platform, sha256 in classes:
+                build = builds[platform] = fixture.root / "builds" / platform / sha256
+                build.mkdir(parents=True, exist_ok=True)
+                (build / "engine-build.json").write_text(json.dumps({"archives": {"classes": {"sha256": sha256}}}))
+                manifests[platform] = hashlib.sha256((build / "engine-build.json").read_bytes()).hexdigest()
+            installing = SimpleNamespace(**vars(arguments), engine_build_directories=builds,
+                                         engine_build_policy=manifests)
             with patch.object(RUN_CAMPAIGN, "check_output", return_value=receipts[0]["candidate_commit"]):
-                return RUN_CAMPAIGN.unit_validation(root, arguments, "language", {fixture.directory: plan})
+                return RUN_CAMPAIGN.unit_validation(root, installing, "language", {fixture.directory: plan})
 
         accepted = validation()
         for receipt in receipts:
@@ -1059,14 +1069,16 @@ class TestRunCampaign(unittest.TestCase):
         export.write_bytes(exported + b"\n")
         with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
             RUN_CAMPAIGN.aggregate_language_plans(arguments, result_root)
-        # A controller whose checkout pins other comparators, or which selects a release, refuses the hosts.
+        # A controller whose checkout pins other comparators, which selects a release, or whose accepted build
+        # holds other classes, here r9g's holding r8i's, refuses the hosts.
         other = fixture.root / "other-checkout"
         (other / "tools/re2-benchmark/baseline").mkdir(parents=True)
         (other / "tools/re2-benchmark/baseline/comparators.tsv").write_text("changed\n")
-        for refused, field in ((validation(root=other), "comparator_manifest_sha256"),
-                               (validation(release="1.0"), "regulator_release_version")):
-            with self.subTest(field=field), \
-                    self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, f"comparator pins or release: .*{field}"):
+        for refused, error in ((validation(root=other), "comparator pins or release: .*comparator_manifest_sha256"),
+                               (validation(release="1.0"), "comparator pins or release: .*regulator_release_version"),
+                               (validation(classes=(("r8i", "d" * 64), ("r9g", "d" * 64))),
+                                f"classes archive {'c' * 64}, not its platform's accepted build's {'d' * 64}")):
+            with self.subTest(error=error), self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, error):
                 RUN_CAMPAIGN.validate_unit_artifacts(refused, result_root, receipts[0])
 
     def test_a_lone_unit_past_the_unit_budget_runs_on_demand_unless_spot_only(self):
@@ -1615,7 +1627,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
         self.assertEqual(3, len(checks), checks)
         self.assertTrue(all("|| semantic_failure " in statement for statement in checks), checks)
         # The DFA probe, every Java verifier, and the pinned Trino comparator's verification fail as a verdict.
-        # Only the identity check of a prebuilt harness, whose failure rebuilds it, runs bare.
+        # Only the identity check of the prebuilt harness, whose failure is a missing engine, runs bare.
         verifiers = [statement for statement in statements if re.search(
             r" (io\.airlift\.regulator\.DfaAbsolutePointerProbe|\S*Verifier|\S*BenchmarkTrinoLike\S*)( |$)",
             statement) and " java " in statement]
@@ -1641,44 +1653,98 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
                     self.assertEqual(expected, result.returncode, result.stderr)
                     self.assertIn(output, (root / "logs" / "semantic-tests.log").read_text())
 
-    def test_prebuilt_trino_harness_is_rebuilt_only_when_its_identity_fails(self):
+    def test_route_runs_its_semantic_tests_on_the_installed_candidate_classes(self):
+        source = (SCRIPT.parent / "run-shard.sh").read_text()
+        stage = source[source.index("regulator_classes_build=$(prebuilt_engine classes)"):
+                       source.index("prepare_pinned_trino()")]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            classes = root / "shared/regulator-classes"
+            # The JUnit console launcher stands in for the tests: it records its directory and arguments and
+            # writes a report, then exits with STATUS.
+            java = ('java() {\n'
+                    '    [[ " $* " == *" org.junit.platform.console.ConsoleLauncher "* ]] || return 0\n'
+                    '    printf "%s\\n" "${PWD}" "$@" > "${RESULT_DIR}/launcher-arguments"\n'
+                    '    local argument\n'
+                    '    for argument; do [[ ${argument} != --reports-dir=* ]] || '
+                    'echo "<testsuite/>" > "${argument#--reports-dir=}/TEST-junit-jupiter.xml"; done\n'
+                    '    return "${STATUS}"\n}\n')
+            prefix = (f"set -euo pipefail\nRESULT_DIR={shlex.quote(str(root / 'route'))}\n"
+                      f"ROOT={shlex.quote(str(root))}\nSHARED_WORK_DIR={shlex.quote(str(root / 'shared'))}\n"
+                      "mkdir -p \"${RESULT_DIR}/logs\"\nROUTE=native-access\nCPU_LIST=0\nHEAP_SIZE=1g\n"
+                      "semantic_tests=TestScanPlan,TestTrinoLikeCorpus\nRE2_CAMPAIGN_HOST_EPOCH=\n"
+                      "taskset() { shift 2; \"$@\"; }\n" + java + shell_functions(source, "prebuilt_engine"))
+            for installed, status, expected in ((True, 0, 0), (True, 1, RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS),
+                                                (False, 0, 1)):
+                with self.subTest(installed=installed, status=status):
+                    shutil.rmtree(root / "shared", ignore_errors=True)
+                    shutil.rmtree(root / "route", ignore_errors=True)
+                    (root / "shared/engine-build").mkdir(parents=True)
+                    classes.mkdir()
+                    (classes / "classpath.txt").write_text("test-classes:classes:lib/slice-2.8.jar\n")
+                    if installed:
+                        (root / "shared/engine-build/classes.sha256").write_text("c" * 64 + "\n")
+                    result = subprocess.run(
+                        ["bash"], input=f'{prefix}STATUS={status}\n{stage}echo "${{regulator_classes_build}}"\n',
+                        text=True, capture_output=True, check=False)
+                    self.assertEqual(expected, result.returncode, result.stderr)
+                    if expected != 0:
+                        continue
+                    # The route records the classes archive it ran.
+                    self.assertEqual(f"prebuilt:{'c' * 64}\n", result.stdout)
+                    arguments = (root / "route/launcher-arguments").read_text().splitlines()
+                    # The tests run from the source root, on the installed classpath, without Maven.
+                    self.assertEqual(str(root), arguments[0])
+                    self.assertEqual(
+                        f"{classes}/test-classes:{classes}/classes:{classes}/lib/slice-2.8.jar:"
+                        f"{classes}/lib/junit-platform-console-standalone.jar",
+                        arguments[arguments.index("-cp") + 1])
+                    self.assertIn("--enable-native-access=ALL-UNNAMED", arguments)
+                    self.assertIn(f"--scan-class-path={classes}/test-classes", arguments)
+                    self.assertIn(r"--include-classname=^(.+\.)?(TestScanPlan|TestTrinoLikeCorpus)$", arguments)
+                    self.assertTrue((root / "route/semantic-reports/TEST-junit-jupiter.xml").is_file())
+
+    def test_route_fails_without_a_prebuilt_trino_harness_that_passes_its_identity_check(self):
         source = (SCRIPT.parent / "run-shard.sh").read_text()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             prefix = self.semantic_verifier_script(source, temporary)
-            # A prebuilt Trino harness is rebuilt only when its identity fails, before any semantic check runs;
-            # an identity-only setting in the environment does not reach the full verification.
+            # A missing harness, or one whose identity fails before any semantic check runs, fails the route as a
+            # missing engine does and is retried; once the full verification runs, its failure is final. An
+            # identity-only setting in the environment does not reach the full verification.
             comparator = root / "tools/re2-benchmark/trino-joni"
             comparator.mkdir(parents=True)
             (comparator / "verify.sh").write_text(
                 '#!/bin/bash\nprintf fixture > "${TRINO_COMPARATOR_WORK_DIR}/classpath.txt"\n'
-                '[[ -f "${TRINO_COMPARATOR_WORK_DIR}/rebuilt" ]] || [[ "${FAIL}" == semantics ]] || exit 1\n'
+                '[[ "${FAIL}" != identity ]] || exit 1\n'
                 '[[ "${TRINO_COMPARATOR_IDENTITY_ONLY:-false}" == true || "${FAIL}" != semantics ]] || exit 1\n')
-            (comparator / "prepare.sh").write_text('#!/bin/bash\ntouch "${TRINO_COMPARATOR_WORK_DIR}/rebuilt"\n')
-            for script_path in comparator.iterdir():
-                script_path.chmod(0o755)
-            for failure, identity_only, expected, rebuilt in (
-                    ("semantics", "", RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS, False),
-                    ("semantics", "export TRINO_COMPARATOR_IDENTITY_ONLY=true\n",
-                     RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS, False),
-                    ("identity", "", 0, True)):
-                with self.subTest(failure=failure, identity_only=bool(identity_only)):
+            (comparator / "verify.sh").chmod(0o755)
+            for failure, identity_only, installed, expected in (
+                    ("semantics", "", True, RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS),
+                    ("semantics", "export TRINO_COMPARATOR_IDENTITY_ONLY=true\n", True,
+                     RUN_CAMPAIGN.SEMANTIC_FAILURE_STATUS),
+                    ("identity", "", True, 1),
+                    ("none", "", False, 1),
+                    ("none", "", True, 0)):
+                with self.subTest(failure=failure, identity_only=bool(identity_only), installed=installed):
                     shutil.rmtree(root / "shared", ignore_errors=True)
                     (root / "shared/engine-build").mkdir(parents=True)
-                    (root / "shared/engine-build/trino.sha256").write_text("a" * 64)
+                    (root / "shared/pinned-trino").mkdir()
+                    if installed:
+                        (root / "shared/engine-build/trino.sha256").write_text("a" * 64)
                     script = (prefix + identity_only + "expected_native_access=true\n"
                               + shell_functions(source, "prebuilt_engine", "prepare_pinned_trino")
-                              + f"FAIL={failure} prepare_pinned_trino\n")
+                              + f"FAIL={failure} prepare_pinned_trino\n"
+                              + 'printf "%s\\n" "${trino_harness_build}"\n')
                     result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
                     self.assertEqual(expected, result.returncode, result.stderr)
-                    self.assertEqual(rebuilt, (root / "shared/pinned-trino/rebuilt").exists())
+                    if expected == 0:
+                        self.assertEqual(f"prebuilt:{'a' * 64}\n", result.stdout)
 
-            # A cached harness that lists no benchmark methods fails the real identity check, so it is
-            # rebuilt before any semantic check runs; the full verification then runs each verifier once.
+            # The real identity check passes a prebuilt harness that lists its benchmark methods, and the full
+            # verification then runs each verifier once.
             shutil.rmtree(comparator)
-            shutil.copytree(SCRIPT.parents[1] / "trino-joni", comparator, ignore=shutil.ignore_patterns("prepare.sh"))
-            (comparator / "prepare.sh").write_text('#!/bin/bash\ntouch "${TRINO_COMPARATOR_WORK_DIR}/rebuilt"\n')
-            (comparator / "prepare.sh").chmod(0o755)
+            shutil.copytree(SCRIPT.parents[1] / "trino-joni", comparator)
             verify = (comparator / "verify.sh").read_text()
             pins = dict(line.split("=", 1) for line in (comparator / "pins.env").read_text().splitlines())
             version = pins["TRINO_COMPARATOR_JONI_VERSION"]
@@ -1705,8 +1771,7 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             (binary / "java").write_text(
                 '#!/bin/bash\ncase " $* " in\n'
                 '    *" org.openjdk.jmh.Main "*)\n'
-                '        [[ ! -f "${TRINO_COMPARATOR_WORK_DIR}/rebuilt" ]] || '
-                f'cat {shlex.quote(str(root / "benchmarks.txt"))} ;;\n'
+                f'        cat {shlex.quote(str(root / "benchmarks.txt"))} ;;\n'
                 f'    *) for argument; do [[ ${{argument}} != *Verifier ]] || echo "${{argument}}" '
                 f'>> {shlex.quote(str(root / "verifiers"))}; '
                 'done ;;\nesac\n')
@@ -1716,7 +1781,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False,
                                     env={**os.environ, "PATH": f"{binary}{os.pathsep}{os.environ['PATH']}"})
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertTrue((work / "rebuilt").exists())
             verifier_classes = sorted(set(re.findall(r"io\.trino\.operator\.scalar\.(\w+Verifier)\b", verify)))
             self.assertEqual(5, len(verifier_classes), verifier_classes)
             self.assertEqual([f"io.trino.operator.scalar.{verifier}" for verifier in verifier_classes],

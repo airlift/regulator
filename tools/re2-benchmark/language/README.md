@@ -198,42 +198,32 @@ LANGUAGE_NATIVE_RUST_RUNNER=target/re2-benchmark-build/language_rust_benchmark \
 
 ## Target-host measurement and saved data
 
-On a qualification host, first build the clean candidate with a JVM receipt:
-
-```sh
-python3 tools/re2-benchmark/language/jvm_build.py \
-  --output-directory target/language-jvm-build
-LANGUAGE_CP="$(<target/language-jvm-build/classpath.txt)"
-```
-
-The build extracts the exact candidate archive into a new directory and runs
-Maven there. It does not clean the original checkout's `target` directory or
-remove existing native binaries, verification, or result files. The receipt
-records the source tree, selected JDK, ordered classpath hashes, and comparator
-pins. The actual Joni jar must match the pinned checksum. A missing receipt,
-changed classes, changed classpath order, different source tree, or substituted
-comparator blocks measurement. The output directory must not already exist.
-
-AWS workers receive an extracted archive rather than a Git checkout. On those
-workers, pass `--source-archive` and `--candidate-provenance` to both
-`jvm_build.py` and `collection.py measure`. The provenance is the TSV produced
-by `baseline/freeze-candidate.sh`. Archive mode checks the archive checksum,
-embedded Git commit, reconstructed Git tree, and extracted file contents and
-modes. Extra files outside `target` are rejected. It does not create synthetic
-commits or trust a source SHA supplied without its archive. The ordinary Git
-checkout path remains available for standalone qualification hosts.
+Measurement runs only in [work units](#work-units) on AWS unit workers, which
+run the candidate classes and native runners of their platform's
+[engine build](../aws/README.md#engine-builds) and compile nothing. Each unit
+receives an extracted archive rather than a Git checkout, with the source
+archive and the candidate provenance TSV produced by
+`baseline/freeze-candidate.sh`. Before it measures, the unit checks once the
+archive checksum, embedded Git commit, reconstructed Git tree, and extracted
+file contents and modes, rejecting extra files outside `target`. It does not
+create synthetic commits or trust a source SHA supplied without its archive.
+Its JVM build receipt, which every partition's provenance records, names that
+source, the SHA-256 of the installed classes archive, the selected JDK and
+ordered classpath, and the comparator pins. The classpath's Joni jar must match
+the pinned checksum. The engine build verified every installed file against its
+archive's manifest, so the archive's SHA-256 identifies the classes. The
+controller rejects an attempt whose `engine-build.txt` records a classes
+archive other than its platform's accepted build's, and acceptance rejects a
+partition whose receipt names a classes archive other than that one.
 
 Set `PYTHONDONTWRITEBYTECODE=1` before running any Python tools in an extracted
 worker source tree. Otherwise imports create `__pycache__` directories that
 the frozen-source check correctly rejects as extra files. Do not exempt caches
 from source validation or reuse an already-modified extracted directory.
 
-Run `verify` with this classpath, then run `measure` with the same manifest,
-result directory, classpath, and native runner arguments, plus `--platform r9g`
-or `r8i` and `--jvm-build-receipt target/language-jvm-build/jvm-build.json`.
-It refuses non-Linux hosts, a dirty source tree, changed runner binaries, the
-wrong pinned JDK, or a mismatched EC2 instance identity. Verification must be
-performed on that host with those binaries first.
+Measurement refuses non-Linux hosts, changed runner binaries, the wrong pinned
+JDK, or a mismatched EC2 instance identity. Verification must be performed on
+that host with those binaries first.
 
 The opt-in `steady-state-v1` manifest profile uses five forks, thirty
 one-second warmups for lifecycle cases or sixty for bulk cases, followed by
@@ -331,9 +321,10 @@ it finishes. The worker installs each plan from its bundle
 (`fleet.py bundle`, checked and installed with `fleet.py install-bundle`) under
 `target/language-plans/<shard>`, which the clean-source check ignores. The
 unit checks that the host matches its platform allocation, with every vCPU
-visible and an 8g heap, and builds the candidate once per host from the source
-archive and candidate provenance. Its native runners come from the platform's
-engine build. Pinned to one CPU, it verifies and then measures the group's
+visible and an 8g heap, and checks the extracted source against the source
+archive and candidate provenance. Its candidate classes and native runners come
+from the platform's engine build. Pinned to one CPU, it verifies and then
+measures the group's
 comparison under `partitions/<partition>`; a lifecycle comparison of which the
 unit holds only some operations runs a copy of its partition selecting those
 operations.
@@ -500,10 +491,10 @@ Unlike `bulk.py probe`, this requires repeatable operation timeouts and fails
 on any result disagreement. A completed operation whose trace times out is a
 verification failure, never an execution timeout. Raw traces remain on disk;
 receipts store their hashes. Measurement and export recheck the original
-native reference and every completed trace. `collection.py measure` and
-`export`, and the `fleet.py` plan and unit commands, accept both suite
-manifests. Bulk cases measure only their original operation, compilation for
-compile cases and execution for the other five models.
+native reference and every completed trace. `fleet.py run-unit`,
+`collection.py export`, and the other `fleet.py` plan and unit commands accept
+both suite manifests. Bulk cases measure only their original operation,
+compilation for compile cases and execution for the other five models.
 
 All adapters split grep inputs before timing, trim a trailing carriage return,
 and avoid a phantom final line. This differs from official Rebar timing, which
@@ -618,8 +609,9 @@ The export:
 
 - revalidates every accepted group from its retained evidence, without
   rewriting it, and requires the campaign rule again;
-- rejects language-trace disagreement across a case's partitions and mixed
-  candidate, comparator, or JDK identities;
+- rejects language-trace disagreement across a case's partitions, mixed
+  candidate, comparator, or JDK identities, and more than one classes archive
+  on a platform;
 - keeps each group's receipt with its partition's provenance and every raw
   sample, each row naming its attempt and group, without averaging away host
   differences.
