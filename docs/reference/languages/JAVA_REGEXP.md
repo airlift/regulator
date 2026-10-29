@@ -83,6 +83,10 @@ escape before an empty quote therefore reads on past it, so `\x4\Q\E1` matches
 `A`, and a quote opened inside a comment escapes the text after the comment
 ends. Error offsets refer to the pattern as written.
 
+In comments mode, whitespace and comments are skipped exactly where the JDK
+skips them, which is not everywhere. `(?x)a{1 2}` is `a{12}`, but `(?x)a{ 1}`
+is an error; `(?x)( ?<n>a)` is a named group, but `(?x)(? <n>a)` is an error.
+
 Repetition counts are limited to 1,000. The implementation preserves Java's
 final-terminator behavior, multiline CRLF handling, Unix-lines mode, Unicode
 case folding, and Unicode character classes.

@@ -439,6 +439,22 @@ public class TestJavaRegexpDifferential
         assertRejectsJava25("(?x)\\0#\\Q\n\\Q\\E1", OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_ESCAPE);
     }
 
+    @Test
+    public void testCommentsModeReadsMatchJava25()
+    {
+        // A count's first digit is read as written, and every later character past whitespace and comments.
+        assertMatchesJava25("(?x)a{1 2}", OptionProfile.DEFAULT, List.of("a", "a".repeat(12)));
+        assertMatchesJava25("(?x)a{1# comment\n2}", OptionProfile.DEFAULT, List.of("a", "a".repeat(12)));
+        assertRejectsJava25("(?x)a{ 1}", OptionProfile.DEFAULT, RegexpParseErrorCode.REPEAT_ARGUMENT);
+        // Whitespace may separate '(' from '?', '<' from a group name, and the characters of the name, but not
+        // '?' from what follows.
+        assertMatchesJava25("(?x)( ?< n a>a)", OptionProfile.DEFAULT, List.of("a", " a"));
+        assertThat(JavaRegexp.compile(utf8Slice("(?x)( ?< n a>a)")).namedCapturingGroups())
+                .isEqualTo(Pattern.compile("(?x)( ?< n a>a)").namedGroups())
+                .isEqualTo(Map.of("na", 1));
+        assertRejectsJava25("(?x)(? <n>a)", OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_PERL_OP);
+    }
+
     private static void assertMatchesJava25(String pattern, OptionProfile options, List<String> inputs)
     {
         Pattern jdkPattern = Pattern.compile(pattern, options.jdkFlags());
