@@ -284,6 +284,10 @@ public class TestJavaRegexp
                 new MatchCase("(?x)\\N {WHITE SMILING FACE}", "☺", Operation.MATCHES, true),
                 new MatchCase("(?x)\\p { Lu}", "A", Operation.MATCHES, true),
                 new MatchCase("(?x)[\\p L]", "a", Operation.MATCHES, true),
+                // The JDK deletes an empty \Q\E before parsing, so it does not end an octal escape; a non-empty quote does.
+                new MatchCase("\\0\\Q\\E1\\Q\\E\\Q\\E2", "\n", Operation.MATCHES, true),
+                new MatchCase("(?x)\\0 1\\Q\\E 2", "\n", Operation.MATCHES, true),
+                new MatchCase("\\01\\Q2\\E", "\u00012", Operation.MATCHES, true),
                 new MatchCase("(?U-u)\\w+", "élan", Operation.MATCHES, true),
                 new MatchCase("(?U-U)\\w+", "élan", Operation.MATCHES, false),
                 new MatchCase("[\\v-z]", "a", Operation.MATCHES, true),
