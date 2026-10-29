@@ -29,9 +29,8 @@ UNIT = {name: hashlib.sha256(name.encode()).hexdigest() for name in ('first', 's
 # clock until just before its timeout and then succeeds, logged as its operation,
 # key, start, and end. A Spot notice arrives as the first such call starts whose
 # operation FAKE_NOTICE_DURING_STALLED_CALL names, or whose key or body it is a
-# fragment of, logged as a notice at that start. A rebalance recommendation arrives
-# during the first call whose operation FAKE_REBALANCE_DURING_CALL names. Every PUT
-# but a heartbeat's must carry the conditional-write and checksum options.
+# fragment of, logged as a notice at that start. Every PUT but a heartbeat's must
+# carry the conditional-write and checksum options.
 FAKE_AWS = r'''#!/usr/bin/env python3
 import base64, hashlib, json, os, sys
 from pathlib import Path
@@ -53,9 +52,6 @@ service, operation = positional[:2]
 path = root / options['--bucket'] / options.get('--key', '')
 target = options.get('--key', options.get('--prefix', ''))
 notice = Path(os.environ['FAKE_NOTICES']) / 'spot-instance-action'
-rebalance = Path(os.environ['FAKE_NOTICES']) / 'events-recommendations-rebalance'
-if os.environ.get('FAKE_REBALANCE_DURING_CALL') == operation and not rebalance.exists():
-    rebalance.write_text('{"noticeTime": "2026-10-24T12:00:00Z"}')
 if os.environ.get('FAKE_CLOCK') and any(
         fragment in target for fragment in json.loads(os.environ.get('FAKE_STALLED_CALLS', '[]'))):
     clock = Path(os.environ['FAKE_CLOCK'])
@@ -328,25 +324,21 @@ class TestUnitWorker(unittest.TestCase):
                              (worker.json('heartbeat/4.json')['state'], worker.json('heartbeat/4.json')['stop_reason']))
             self.assertEqual('stop-lease', worker.stop_reason())
 
-    def test_worker_stops_when_idle_out_of_lifetime_or_asked_to_rebalance(self):
+    def test_worker_stops_when_idle_or_out_of_lifetime(self):
         cases = (
-            ('idle', (), {}, {'idle_seconds': 1}, [], None),
+            ('idle', (), {}, {'idle_seconds': 1}, []),
             # A failed unit is recorded with its status, and the worker goes on.
-            ('idle', ('first',), {1: {'status': 3}}, {'idle_seconds': 1}, [1], None),
+            ('idle', ('first',), {1: {'status': 3}}, {'idle_seconds': 1}, [1]),
             # A unit in flight finishes; no lease starts after the lifetime.
-            ('lifetime', ('first', 'second'), {1: {'seconds': 2.5}}, {'lifetime_seconds': 2}, [1], None),
-            ('rebalance', ('first', 'second'), {1: {'rebalance': True}}, {}, [1], None),
-            # A recommendation that arrives while the lease is read leaves the lease unstarted.
-            ('rebalance', ('first',), {}, {}, [], 'get-object'),
+            ('lifetime', ('first', 'second'), {1: {'seconds': 2.5}}, {'lifetime_seconds': 2}, [1]),
+            # A rebalance recommendation is only a hint; leasing goes on until an instance-action notice.
+            ('idle', ('first', 'second'), {1: {'rebalance': True}}, {'idle_seconds': 1}, [1, 2]),
         )
-        for reason, units, behavior, environment, completed, rebalance_during in cases:
-            with self.subTest(reason=reason, behavior=behavior, rebalance_during=rebalance_during), \
-                    tempfile.TemporaryDirectory() as temporary:
+        for reason, units, behavior, environment, completed in cases:
+            with self.subTest(reason=reason, behavior=behavior), tempfile.TemporaryDirectory() as temporary:
                 worker = Worker(Path(temporary), clock=True)
                 for sequence, unit in enumerate(units, 1):
                     worker.write_lease(lease(sequence, unit))
-                if rebalance_during:
-                    worker.environment['FAKE_REBALANCE_DURING_CALL'] = rebalance_during
                 status, output = worker.run(behavior, **environment)
 
                 self.assertEqual(0, status, output)

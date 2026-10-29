@@ -18,7 +18,6 @@ import tarfile
 import tempfile
 import time
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from pathlib import Path
 
 import engine_build
@@ -69,9 +68,6 @@ UNIT_POLL_SECONDS = 15
 # A unit pool's new Spot workers skip a region this long after it found no Spot capacity, and
 # while every region cools they launch On-Demand.
 SPOT_REGION_COOL_DOWN_SECONDS = 15 * 60
-# A Spot worker that stops for a rebalance recommendation this soon after launch, or before it
-# completes a unit, found its region short of Spot capacity, and the region cools as above.
-EARLY_REBALANCE_SECONDS = 15 * 60
 # A work item stays unresolved once this many of its leases failed, were interrupted, or were lost;
 # a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
@@ -2695,11 +2691,6 @@ class UnitDispatcher:
         self.release_slot(worker.job, worker.slot, worker.slot_failures, worker.started, status,
                           classification, detail, worker.job.host_epoch in self.terminated)
         if worker.started:
-            rebalance = self.early_rebalance(worker, session, keys)
-            if rebalance is not None:
-                self.cool_down(pool, cleanup.get("aws_region") or worker.job.region)
-                write_event(self.events_path, "interruption", self.arguments.campaign_id, worker.job, session,
-                            "rebalance-recommendation", rebalance, unit_id="")
             return
         if status != 0 and worker.job.host_epoch not in self.terminated:
             # Each launch that failed before its worker started is recorded as a failed session.
@@ -2716,25 +2707,6 @@ class UnitDispatcher:
     def cool_down(self, pool, region):
         """Keep the pool's new Spot workers out of the region for its cool-down."""
         self.pool_regions.setdefault(pool, {})[region] = time.monotonic()
-
-    def early_rebalance(self, worker, session, keys):
-        """Describe a Spot worker's stop for a rebalance recommendation that came early, or return None."""
-        evidence = session / worker.job.platform.architecture / "re2-results"
-        try:
-            stop = read_properties(evidence / "worker-session.txt")
-        except (OSError, RuntimeError):
-            return None
-        if worker.job.market != "spot" or stop.get("stop_reason") != "rebalance":
-            return None
-        completed = sum(key.startswith("units/") and key.endswith("/completion.json") for key in keys)
-        try:
-            launched = read_properties(evidence / "environment-manifest.txt")["instance_pending_time"]
-            seconds = (datetime.fromisoformat(stop["stopped_at"]) - datetime.fromisoformat(launched)).total_seconds()
-        except (OSError, RuntimeError, KeyError, ValueError):
-            seconds = None
-        if completed and (seconds is None or seconds > EARLY_REBALANCE_SECONDS):
-            return None
-        return f"units_completed={completed};seconds_after_launch={'unknown' if seconds is None else int(seconds)}"
 
     def release_slot(self, job, slot, failures, started, status, classification, detail, terminated=False):
         """Free the launch slot of an exited worker, from its exit as the attempts ledger records it.

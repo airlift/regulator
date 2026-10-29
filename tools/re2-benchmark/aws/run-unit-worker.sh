@@ -77,7 +77,6 @@ unit_id=
 replica_id=
 unit_pid=
 unit_directory=
-no_new_leases=false
 next_heartbeat=0
 lease_failures=0
 imds_token=
@@ -247,19 +246,15 @@ imds_get()
 
 check_notices()
 {
-    # An instance-action notice ends the host; a rebalance recommendation only
-    # stops new leases. The interruption's own uploads have no later notice to
-    # wait for.
+    # An instance-action notice ends the host. A rebalance recommendation is
+    # only a hint, so the worker keeps leasing until the notice comes. The
+    # interruption's own uploads have no later notice to wait for.
     local notice
     if [[ "${state}" == interrupted ]]; then
         return 0
     fi
     if notice=$(imds_get spot/instance-action 2>/dev/null) && [[ -n "${notice}" ]]; then
         interrupt "${notice}"
-    fi
-    if [[ "${no_new_leases}" != true ]] && imds_get events/recommendations/rebalance >/dev/null 2>&1; then
-        echo "Rebalance recommended; leasing stops after lease ${sequence}"
-        no_new_leases=true
     fi
 }
 
@@ -359,10 +354,7 @@ pause()
 
 stop_if_winding_down()
 {
-    # No lease starts after a rebalance recommendation or once the worker's lifetime is spent.
-    if [[ "${no_new_leases}" == true ]]; then
-        stop rebalance
-    fi
+    # No lease starts once the worker's lifetime is spent.
     if (($(now) - started_at >= LIFETIME_SECONDS)); then
         stop lifetime
     fi
@@ -547,7 +539,7 @@ while true; do
     if [[ "${lease}" == stop ]]; then
         stop stop-lease
     fi
-    # The lease read's S3 calls may have brought a rebalance notice or outlasted the lifetime.
+    # The lease read's S3 calls may have outlasted the lifetime.
     stop_if_winding_down
     IFS=$'\t' read -r _ unit_id replica_id phase <<<"${lease}"
     run_lease "${phase}"
