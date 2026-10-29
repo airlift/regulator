@@ -297,13 +297,12 @@ A new code change starts a new candidate and invalidates its affected results.
 
 ## Final qualification
 
-Run the complete frozen publication campaign only after:
+Run the complete publication campaign only after:
 
 - source, API, tests, and documentation are frozen
 - the full correctness matrix passes
 - the worktree is clean
 - comparator revisions and workload manifests are pinned
-- the user-facing publication inventory is frozen independently of results
 - no additional cleanup is planned
 
 For a release, record its manifest
@@ -324,7 +323,7 @@ A later change invalidates at least the affected publication shards; a broad or
 hard-to-isolate change invalidates the complete publication campaign.
 
 Commit one final public report and download containing the exact candidate
-commit, hosts, JDK, compiler flags, comparator revisions, frozen public workload
+commit, hosts, JDK, compiler flags, comparator revisions, public workload
 identities, final measurements, aggregation rules, and separately listed
 limitations. Index the private complete campaign, diagnostics, failed attempts,
 and superseded cohorts without adding them to the public download. If the
@@ -359,9 +358,8 @@ replication requirements.
    blindly rerun a potentially completed publication.
 5. Run the publication qualification against the released artifact and tagged
    source following [final qualification](#final-qualification). Record the
-   artifact checksum. Project the accepted measurements onto the frozen public
-   workload source, write the complete capture to the private archive, and
-   import only the curated public output using the
+   artifact checksum. Write the complete capture to the private archive, and
+   import only the public output, which drops the hidden rows, using the
    [report instructions](../benchmark-report/README.md). Regenerate the README
    and run `npm run check`. Verify the deployed Pages report and public download
    after those changes are merged. Its refresh is separate from publishing the
@@ -381,7 +379,8 @@ A benchmark change must preserve:
 - architecture and JDK identity
 - native compiler optimization flags
 - clean-source and checksum checks
-- exact public workload-source identity and checksum
+- exact workload identities and checksums, and for the 1.0 publication its
+  frozen workload source's checksum
 - clear separation between publication, measurement-quality, and diagnostic runs
 
 ## Trino adoption evidence

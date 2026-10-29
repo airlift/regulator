@@ -54,11 +54,12 @@ original estimators and warning labels. See
 [statistical replay](analysis/README.md) for definitions and reproduction.
 
 Import checks platform and memory-mode coverage, that the platforms and
-languages match one campaign profile, publication scope, and the pinned
-workload-source checksum. It stores the data as deterministic gzip with
-a hash of the uncompressed JSON and updates the manifest. Both JSON and
-`.json.gz` inputs are supported. It preserves previous publication entries;
-choosing which reports to publish is a separate decision.
+languages match one campaign profile, and publication scope; for the frozen
+1.0 publication it also checks the pinned workload-source checksum. It stores
+the data as deterministic gzip with a hash of the uncompressed JSON and updates
+the manifest. Both JSON and `.json.gz` inputs are supported. It preserves
+previous publication entries; choosing which reports to publish is a separate
+decision.
 
 Compression keeps the checked-in data below GitHub's large-file warning. Import
 and CI reject stored files of 50 MiB or larger. The site build derives compact
@@ -66,29 +67,35 @@ page files from that evidence without changing the input data. GitHub Pages
 compresses JSON responses over HTTP; browsers decompress them automatically.
 No client-side compression library is needed.
 
-The footer links directly to a public `.json.gz` download containing the frozen
-publication inventory with every configuration, supplied pattern, per-host
+The footer links directly to a public `.json.gz` download containing every
+published row with every configuration, supplied pattern, per-host
 measurement, provenance, report classification, and commentary. Browsing never
 fetches that file. Original publication captures are also retained as gzip in
 the site artifact. Generated page files are not substitutes for the public
 evidence download.
 
-For a released artifact, `scripts/build_capture_data.py` first builds the
+For a release campaign, `scripts/build_capture_data.py` first builds the
 complete accepted campaign for the private archive. `scripts/publication_data.py`
-then matches the frozen public workload source by case, operation, language,
-CPU family, and memory mode. The projection preserves the source order, workload
-content, and published explanations while taking measurements, uncertainty, and
-provenance from the final campaign. It records the source candidate and exact
-file checksum in `publicationScope`. Import validation rejects missing, extra,
-reordered, or changed public workloads.
+then publishes every campaign row, unchanged and in campaign order, except a
+short hide list: optimizer, engine, and synthetic-scaling probes that do not
+represent user work, and LIKE controls that duplicate a public row. To show or
+hide rows, edit that list, regenerate the publication with
+`scripts/publication_data.py --campaign … --output …`, then import it and
+regenerate the README. A campaign of the released artifact publishes as
+`Regulator <version> results`. `publicationScope` records the complete,
+published, and hidden row counts, the last as `excludedCampaignRows`, and
+import validation rejects a publication that contains a hidden row. The 1.0
+publication instead kept the rows of a frozen workload source, which its
+validation still checks.
 
-Campaign-only observations do not enter the release manifest, Pages artifact,
-standalone report, or public download. Preserve them through
-`docs/benchmarks/results-1.0/raw-archives.json` with raw diagnostics, failed and
-superseded attempts, and the complete captured campaign. The compact measurement
-summary and applicable timing flags are added to the public layout. The all-page
-checks compare the frozen workload order and details, render every fold-down,
-and verify that public measurement evidence is unchanged.
+Hidden rows and other campaign-only observations do not enter the report
+manifest, Pages artifact, standalone report, or public download. Preserve them
+through `docs/benchmarks/results-<version>/raw-archives.json` with raw
+diagnostics, failed and superseded attempts, and the complete captured campaign.
+The compact measurement summary and applicable timing flags are added to the
+public layout. The all-page checks compare every page with the publication data,
+render every fold-down, and verify that public measurement evidence is
+unchanged; for 1.0 they also compare its frozen workload order and details.
 
 Patterns larger than 4,096 UTF-8 bytes have a 240-codepoint preview in the UI,
 their full byte size, and a pinned benchmark-source link where available.
@@ -153,16 +160,14 @@ preliminary capture's original identity and label.
 
 `scripts/build_capture_data.py` builds the language report from a released
 campaign: the complete verified language exports and the baseline reduction.
-Provide both the frozen publication workload source and a separate private
-complete-capture destination. The baseline is accepted against the row
-protocols and work units, which are generated rather than checked in, so
-generate them first:
+Provide a separate private complete-capture destination. The baseline is
+accepted against the row protocols and work units, which are generated rather
+than checked in, so generate them first:
 
 ```bash
 python3 tools/re2-benchmark/baseline/generate-units.py
 python3 benchmark-report/scripts/build_capture_data.py \
   --released-campaign campaign-paths.json \
-  --publication-workloads benchmark-report/data/frozen-publication.json.gz \
   --complete-output /private/archive/complete-campaign.json \
   --output /tmp/publication.json
 python3 benchmark-report/scripts/report_data.py import /tmp/publication.json
@@ -209,9 +214,8 @@ Every API page combines single-use and multi-use timings in its pattern
 lifecycle table. The page order is everyday operations, the specialized engine
 and compiler where measured, pattern lifecycle, Trino-specific operations where
 available, text processing, literal-probe distributions, then collapsed
-adversarial and synthetic stress groups. Compile-only measurements retained by
-the frozen publication inventory remain in the public JSON download, without a
-separate construction or compiler-stress table.
+adversarial and synthetic stress groups. Compile-only measurements remain in the
+public JSON download, without a separate construction or compiler-stress table.
 
 The specialized engine and compiler table has one row per pattern and
 operation. The comparator a specialized-pattern catalog row names selects its

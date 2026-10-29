@@ -486,7 +486,8 @@ function ResultsTable({ rows, comparator }: { rows: Row[]; comparator: string })
   </table></div>;
 }
 
-// Only these collected LIKE workloads select Trino's DFA when enabled.
+// Only these collected LIKE workloads select Trino's DFA when enabled; LIKE_DFA_PATTERNS in
+// scripts/publication_data.py keeps the same set public.
 function likeDfaVariant(row: Row): boolean {
   return row.language === "like" && /^trino-like\/ANY_(ASCII|MULTIBYTE)(\/optimized)?$/.test(row.caseId);
 }

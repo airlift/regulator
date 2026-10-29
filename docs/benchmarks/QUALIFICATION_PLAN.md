@@ -9,11 +9,13 @@ R8g. The [release results](RESULTS_1.0.md) report it and its
 [measurement-quality follow-up](MEASUREMENT_QUALITY.md). The preliminary
 development measurements remain a separate historical capture.
 
-Record the artifact checksum and release tag. Measure the frozen user-facing
-workload inventory through public APIs with that artifact. Trino operations are
-part of the comparison; integration into Trino is a separate project. Run
-internal-engine diagnostics from the same tag only when a qualification result
-or explicit measurement-quality question requires them.
+Record the artifact checksum and release tag. Measure the campaign's workloads
+through public APIs with that artifact. Where 1.0 published a frozen
+user-facing workload inventory, the report publishes every row except those the
+[publication boundary](METHODOLOGY.md#publication-boundary) hides. Trino
+operations are part of the comparison; integration into Trino is a separate
+project. Run internal-engine diagnostics from the same tag only when a
+qualification result or explicit measurement-quality question requires them.
 
 For machine-hour and dollar planning, see the
 [AWS cost guide](../../tools/re2-benchmark/aws/README.md#machine-hours-and-cost).
@@ -85,8 +87,8 @@ for changed code cannot qualify the new candidate without a rerun.
 
 ## Comparators
 
-Build and record exact revisions for the comparators used by the frozen public
-inventory:
+Build and record exact revisions for the comparators used by the campaign's
+public workloads:
 
 1. pinned native RE2 at `972a15cedd008d846f1a39b2e88ce48d7f166cbd`
 2. Regulator through the public Slice API
@@ -388,9 +390,10 @@ not a reproducible campaign.
    gates.
 8. If the candidate changed, recollect the invalidated coverage according to
    the entry gate; otherwise retain the completed qualification.
-9. Project the accepted measurements onto the frozen publication inventory,
-   archive the complete campaign privately, and commit the decision-focused
-   report and required reproduction metadata.
+9. Publish the accepted campaign's rows except those the
+   [publication boundary](METHODOLOGY.md#publication-boundary) hides, archive
+   the complete campaign privately, and commit the decision-focused report and
+   required reproduction metadata.
 
 ## Measurement-quality follow-up
 

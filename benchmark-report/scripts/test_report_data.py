@@ -22,8 +22,8 @@ report_data = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(report_data)
 
 
-def use_release_platforms(report):
-    report['platforms'] = RELEASE_1_0_PLATFORMS
+def prepare_publication(report, platforms=RELEASE_1_0_PLATFORMS):
+    report['platforms'] = platforms
     for row in report['rows']:
         row['platform'] = 'r' + row['platform'][1:]
         result = row['result']
@@ -107,7 +107,7 @@ class TestReportData(unittest.TestCase):
             source.write_text(report_data.encode_json(report_fixture()))
             with self.use_data_directory(root / 'published'):
                 report_data.import_data(source)
-                manifest, path, data = report_data.validate_published_data()
+                manifest, path, data, _ = report_data.validate_published_data()
                 self.assertTrue(path.name.endswith('.json.gz'))
                 first = path.read_bytes()
                 report_data.import_data(path)
@@ -154,7 +154,7 @@ class TestReportData(unittest.TestCase):
             (root / 'manifest.json').write_text(json.dumps(manifest))
             with self.use_data_directory(root):
                 report_data.import_data(root / filename)
-                manifest, _, _ = report_data.validate_published_data()
+                manifest, _, _, _ = report_data.validate_published_data()
                 self.assertEqual([filename + '.gz'], [entry['file'] for entry in manifest['releases']])
 
     def test_build_preserves_current_and_historical_data(self):
@@ -238,10 +238,10 @@ class TestReportData(unittest.TestCase):
         source = report_fixture()
         source['rows'][0].update(population='ordinary-scalar', family='fixture',
                                  mapping={'status': 'translated', 'reason': 'expanded class', 'patternPreview': 'a', 'patternBytes': 1})
-        current = use_release_platforms(copy.deepcopy(source))
+        current = prepare_publication(copy.deepcopy(source))
         # The frozen row records the source pattern's size; the current row records the measured translation's.
         current['rows'][0]['mapping']['patternBytes'] = 7000
-        current['sources'].update(currentCandidate=release['source_commit'],
+        current['sources'].update(currentLabel='Regulator 1.0 results', currentCandidate=release['source_commit'],
                                   engineTree=release['engine_tree'], releaseVersion='1.0')
         current['provenance']['releasedArtifact'] = copy.deepcopy(release)
         current['publicationScope'] = {
@@ -289,8 +289,7 @@ class TestReportData(unittest.TestCase):
                         ('id', 'changed'), ('population', 'changed'), ('family', 'changed'),
                         ('artifact.version', '1.1'), ('artifact.source_commit', 'd' * 40),
                         ('artifact.engine_tree', 'd' * 40), ('artifact.jar_sha256', 'd' * 64),
-                        ('sources.currentCandidate', 'd' * 40),
-                        ('sources.engineTree', 'd' * 40), ('sources.releaseVersion', '1.1')):
+                        ('sources.currentCandidate', 'd' * 40), ('sources.engineTree', 'd' * 40)):
                     changed = copy.deepcopy(current)
                     if field.startswith('artifact.'):
                         changed['provenance']['releasedArtifact'][field.split('.', 1)[1]] = value
@@ -318,6 +317,76 @@ class TestReportData(unittest.TestCase):
                                            operation='singleUse', caseId='trino-like/ANY_ASCII/optimized')
                 report_data.validate_publication_scope(migrated, releases)
 
+    def test_later_release_publishes_every_row_except_hidden_ones(self):
+        release = {
+            'schema_version': 1, 'group_id': 'io.airlift', 'artifact_id': 'regulator',
+            'version': '2.0', 'source_commit': 'a' * 40, 'engine_tree': 'b' * 40,
+            'jar_sha256': 'c' * 64,
+        }
+        final = prepare_publication(report_fixture(CURRENT_PLATFORMS, LANGUAGES), CURRENT_PLATFORMS)
+        # A release campaign measures the whole LIKE lifecycle in its baseline.
+        for row in final['rows']:
+            if row['source'] == 'like-supplement':
+                row['source'] = 'baseline'
+        final['sources'].update(currentLabel='Regulator 2.0 results', currentCandidate=release['source_commit'],
+                                engineTree=release['engine_tree'], releaseVersion='2.0')
+        final['provenance'] = {'releasedArtifact': release,
+                               'collectors': {'baseline': {'engine_tree': release['engine_tree']}}}
+        final['publicationScope'] = {
+            'policy': 'user-facing-release-v2', 'completeCampaignRows': len(final['rows']) + 20,
+            'publishedRows': len(final['rows']), 'excludedCampaignRows': 20,
+            'internalEvidence': 'docs/benchmarks/results-2.0/raw-archives.json',
+        }
+        publication = {'status': 'preliminary', 'sourcePolicy': 'mixed-development-revisions',
+                       'note': 'Development builds.'}
+
+        def unreleased(report):
+            del report['sources']['releaseVersion'], report['publicationScope']
+
+        cases = (
+            ('final publication', final, lambda report: report.update(publication=publication),
+             'must not carry publication metadata'),
+            ('final 1.0 scope', final,
+             lambda report: report['publicationScope'].update(policy='user-facing-release-v1'), 'publication scope'),
+            ('final label', final,
+             lambda report: report['sources'].update(currentLabel='Regulator 2.0 final results'), 'currentLabel'),
+            ('final unreleased', final, unreleased, 'requires a release version'),
+            ('final without artifact', final, lambda report: report['provenance'].pop('releasedArtifact'),
+             'requires released-artifact provenance'),
+        )
+        with patch.object(report_data.released_artifact, 'manifest', return_value=release):
+            report_data.validate_publication_scope(final, [])
+            for name, report, change, message in cases:
+                changed = copy.deepcopy(report)
+                change(changed)
+                with self.subTest(name), self.assertRaisesRegex(ValueError, message):
+                    report_data.validate_publication_scope(changed, [])
+            with tempfile.TemporaryDirectory() as directory, self.use_data_directory(Path(directory) / 'published'):
+                root = Path(directory)
+                (root / 'final.json').write_text(report_data.encode_json(final))
+                report_data.import_data(root / 'final.json')
+                manifest = report_data.MANIFEST_FILE.read_bytes()
+                # Import refuses a publication that carries a hidden row.
+                probe = copy.deepcopy(final)
+                probe['rows'][0]['family'] = 'optimizer-probe'
+                (root / 'probe.json').write_text(report_data.encode_json(probe))
+                with self.assertRaisesRegex(ValueError, 'hidden row'):
+                    report_data.import_data(root / 'probe.json')
+                self.assertEqual(manifest, report_data.MANIFEST_FILE.read_bytes())
+                # Hiding a stored workload leaves the stored report valid, and the publication regenerated
+                # without it imports.
+                extended = copy.deepcopy(final)
+                extended['rows'] += [dict(copy.deepcopy(row), id='fixture/probe') for row in final['rows']
+                                     if row['id'] == 'fixture/execute']
+                extended['publicationScope'].update(publishedRows=len(extended['rows']),
+                                                    excludedCampaignRows=len(final['rows']) + 20 - len(extended['rows']))
+                (root / 'extended.json').write_text(report_data.encode_json(extended))
+                report_data.import_data(root / 'extended.json')
+                with patch.object(report_data.publication_data, 'hidden', lambda row: row['id'] == 'fixture/probe'):
+                    report_data.validate_published_data()
+                    report_data.import_data(root / 'final.json')
+                    self.assertEqual(final, report_data.validate_published_data()[2])
+
     def test_report_serialization_rejects_nonfinite_number(self):
         with self.assertRaises(ValueError):
             report_data.encode_json({"nested": {"measurement": math.inf}})
@@ -340,7 +409,7 @@ class TestReportData(unittest.TestCase):
             with self.use_data_directory(root / 'published'):
                 report_data.import_data(previous_path)
                 report_data.import_data(current_path)
-                manifest, _, current = report_data.validate_published_data()
+                manifest, _, current, _ = report_data.validate_published_data()
                 self.assertEqual(2, manifest['reportSchemaVersion'])
                 self.assertEqual(['candidate', 'previous'], [entry['candidate'] for entry in manifest['releases']])
                 self.assertEqual(report, current)
@@ -370,7 +439,7 @@ class TestReportData(unittest.TestCase):
             source.write_text(report_data.encode_json(report))
             with self.use_data_directory(root / "published"):
                 report_data.import_data(source)
-                _, published, _ = report_data.validate_published_data()
+                _, published, _, _ = report_data.validate_published_data()
                 subprocess.run([
                     "node", "-e",
                     "const data = JSON.parse(require('zlib').gunzipSync(require('fs').readFileSync(process.argv[1])).toString('utf8'));"
@@ -520,7 +589,7 @@ class TestReportData(unittest.TestCase):
             workloads['sources'].update(currentCandidate='workloads', currentLabel='Preliminary workloads')
             source_name = self.write_report(root, workloads, 'workloads')
             source_path = root / source_name
-            report = use_release_platforms(copy.deepcopy(workloads))
+            report = prepare_publication(copy.deepcopy(workloads))
             release = report_data.released_artifact.manifest(report_data.REPOSITORY_ROOT, '1.0')
             report['sources'].update(currentCandidate=release['source_commit'], engineTree=release['engine_tree'],
                                      currentLabel='Regulator 1.0 results', releaseVersion='1.0')
@@ -548,7 +617,7 @@ class TestReportData(unittest.TestCase):
             workloads['sources'].update(currentCandidate='workloads', currentLabel='Preliminary workloads')
             source_name = self.write_report(root, workloads, 'workloads')
             source_path = root / source_name
-            report = use_release_platforms(copy.deepcopy(workloads))
+            report = prepare_publication(copy.deepcopy(workloads))
             release = report_data.released_artifact.manifest(report_data.REPOSITORY_ROOT, '1.0')
             report['sources'].update(currentCandidate=release['source_commit'], engineTree=release['engine_tree'],
                                      currentLabel='Regulator 1.0 results', releaseVersion='1.0')
@@ -586,7 +655,7 @@ class TestReportData(unittest.TestCase):
             workloads['sources'].update(currentCandidate='workloads', currentLabel='Preliminary workloads')
             source_name = self.write_report(root, workloads, 'workloads')
             source_path = root / source_name
-            report = use_release_platforms(copy.deepcopy(workloads))
+            report = prepare_publication(copy.deepcopy(workloads))
             release = report_data.released_artifact.manifest(report_data.REPOSITORY_ROOT, '1.0')
             report['sources'].update(currentCandidate=release['source_commit'], engineTree=release['engine_tree'],
                                      currentLabel='Regulator 1.0 results', releaseVersion='1.0')

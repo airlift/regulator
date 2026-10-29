@@ -57,10 +57,10 @@ These project rules apply without requiring any personal agent skills.
 
 Before planning or publishing a release benchmark, also read
 [`docs/benchmarks/WORKLOAD_ORGANIZATION.md`](docs/benchmarks/WORKLOAD_ORGANIZATION.md).
-Freeze the user-facing publication inventory before collection; keep targeted
-measurement-quality evidence and internal diagnostics in their separate
-inventories and archives. Never expand the public report or download with
-campaign-only probes merely because they were collected.
+The public report and download publish every campaign row except a short,
+editable hide list of probes and duplicates. Targeted measurement-quality
+evidence and internal diagnostics keep their separate inventories and archives,
+and the complete campaign is preserved privately.
 
 ## Implementation Standards
 

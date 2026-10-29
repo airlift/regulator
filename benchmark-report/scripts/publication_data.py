@@ -1,108 +1,57 @@
 #!/usr/bin/env python3
-"""Project a complete release campaign onto a frozen user-facing workload set."""
+"""Publish a complete release campaign's rows, except the hidden ones, as user-facing results."""
 
 from __future__ import annotations
 
 import argparse
 import copy
 import gzip
-import hashlib
 import json
 from pathlib import Path
+import re
 
 
-POLICY = 'user-facing-release-v1'
-NOTES = json.loads((Path(__file__).resolve().parents[1] / 'src/workload-notes.json').read_text())
+POLICY = 'user-facing-release-v2'
+RELEASE_VERSION = r'[0-9]+(?:\.[0-9]+)*'
+# Hidden rows either do not represent user work or duplicate a public row; edit the rules below to show or hide rows.
+HIDDEN_FAMILIES = {'engine-probe', 'optimizer-probe', 'synthetic-scaling'}
+# The exceptions the hidden-family and optimized-LIKE filters keep visible. LIKE_DFA_PATTERNS matches likeDfaVariant
+# in src/language-report.tsx.
+PUBLIC_CASES = {'imported/rsc/no-exponential'}
+LIKE_DFA_PATTERNS = {'ANY_ASCII', 'ANY_MULTIBYTE'}
 
 
-def read_bytes(path: Path) -> bytes:
-    content = path.read_bytes()
-    return gzip.decompress(content) if path.suffix == '.gz' else content
+def hidden(row):
+    identifier = row['id']
+    if row['family'] in HIDDEN_FAMILIES:
+        # The ReDoS-shaped case stays public.
+        return row['caseId'] not in PUBLIC_CASES
+    if re.fullmatch(r'baseline/trino-like/[^/]+/optimized', identifier):
+        # Trino's optional LIKE DFA changes nothing for the other patterns.
+        return identifier.split('/')[2] not in LIKE_DFA_PATTERNS
+    # DFA-disabled controls duplicate the ordinary single-use rows.
+    return re.fullmatch(r'baseline/like-dfa-single-use/[^/]+', identifier) is not None
 
 
 def load(path: Path):
-    return json.loads(read_bytes(path))
+    content = path.read_bytes()
+    return json.loads(gzip.decompress(content) if path.suffix == '.gz' else content)
 
 
-def workload_key(row):
-    return (row['caseId'], row['operation'], row['language'],
-            row['platform'].replace('c', 'r', 1), row['memoryMode'])
-
-
-def presentation_performance(row):
-    if row['result']['state'] == 'not-compatible':
-        return None
-    if row.get('workload', {}).get('performanceContext') is not None:
-        return row['workload']['performanceContext']
-    for note in NOTES['performance']:
-        matches = row['caseId'] in note.get('cases', []) or any(
-            row['caseId'].startswith(prefix) for prefix in note.get('prefixes', []))
-        if (matches
-                and (not note.get('languages') or row['language'] in note['languages'])
-                and row['operation'] in note['operations']
-                and (not note.get('qualifiedOnly') or row.get('measurementSource', {}).get('cohort') is not None)):
-            return note['text']
-    return None
-
-
-def publication_data(campaign, workloads, workload_source_sha256):
-    artifact = campaign.get('provenance', {}).get('releasedArtifact', {})
-    release_version = artifact.get('version')
-    if not isinstance(release_version, str) or not release_version:
-        raise ValueError('release publication requires released-artifact provenance')
-
-    index = {}
-    for row in campaign['rows']:
-        index.setdefault(workload_key(row), []).append(row)
-
-    selected = set()
-    rows = []
-    for previous in workloads['rows']:
-        key = workload_key(previous)
-        matches = index.get(key, [])
-        # The final LIKE campaign has both an ordinary disabled single-use
-        # result and a disabled control from the DFA collector. Preserve the
-        # workload chosen by the frozen publication instead of selecting by
-        # measured performance.
-        if len(matches) > 1 and previous['language'] == 'like' and previous['operation'] == 'singleUse':
-            matches = [row for row in matches if row['id'].startswith('baseline/like-single-use/')]
-        if len(matches) != 1:
-            raise ValueError(f'ambiguous or missing publication workload: {key}')
-        row = matches[0]
-        for field in ('caseId', 'operation', 'language', 'memoryMode', 'model', 'inputBytes'):
-            if row[field] != previous[field]:
-                raise ValueError(f'publication workload changed: {key}/{field}')
-        # Frozen 1.0 rows record the source pattern's size; current rows record the measured pattern's size.
-        for field in ('status', 'reason', 'patternPreview'):
-            if row.get('mapping', {}).get(field) != previous.get('mapping', {}).get(field):
-                raise ValueError(f'publication pattern mapping changed: {key}/{field}')
-        identity = (row['id'], row['language'], row['platform'], row['memoryMode'])
-        if identity in selected:
-            raise ValueError(f'duplicate publication workload: {key}')
-        selected.add(identity)
-        published = copy.deepcopy(row)
-        for field in ('population', 'family'):
-            published[field] = previous[field]
-        published['releasePerformanceContext'] = row.get('workload', {}).get('performanceContext')
-        published['workload'] = copy.deepcopy(previous.get('workload')) or {}
-        # An explicit empty value suppresses current fallback commentary when
-        # the frozen publication showed no performance note for this row.
-        published['workload']['performanceContext'] = presentation_performance(previous) or ''
-        rows.append(published)
-
-    result = copy.deepcopy(campaign)
-    result['sources']['currentLabel'] = f'Regulator {release_version} results'
-    result['sources']['releaseVersion'] = release_version
-    result['rows'] = rows
+def publication_data(campaign):
+    version = campaign['sources'].get('releaseVersion')
+    if not isinstance(version, str) or not re.fullmatch(RELEASE_VERSION, version):
+        raise ValueError('campaign sources.releaseVersion is not a release version')
+    if 'releasedArtifact' not in campaign.get('provenance', {}):
+        raise ValueError('publication requires released-artifact provenance')
+    result = copy.deepcopy({**campaign, 'rows': [row for row in campaign['rows'] if not hidden(row)]})
+    result['sources']['currentLabel'] = f'Regulator {version} results'
     result['publicationScope'] = {
         'policy': POLICY,
-        'workloadSourceCandidate': workloads['sources']['currentCandidate'],
-        'workloadSourceSha256': workload_source_sha256,
-        'workloadSourceRows': len(workloads['rows']),
         'completeCampaignRows': len(campaign['rows']),
-        'publishedRows': len(rows),
-        'excludedCampaignRows': len(campaign['rows']) - len(rows),
-        'internalEvidence': 'docs/benchmarks/results-1.0/raw-archives.json',
+        'publishedRows': len(result['rows']),
+        'excludedCampaignRows': len(campaign['rows']) - len(result['rows']),
+        'internalEvidence': f'docs/benchmarks/results-{version}/raw-archives.json',
     }
     return result
 
@@ -111,18 +60,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--campaign', type=Path, required=True,
                         help='complete verified campaign capture; retained outside the public report')
-    parser.add_argument('--workloads', type=Path, required=True,
-                        help='frozen public workload report whose identities and presentation are preserved')
     parser.add_argument('--output', type=Path, required=True)
     arguments = parser.parse_args()
-    result = publication_data(
-        load(arguments.campaign),
-        load(arguments.workloads),
-        hashlib.sha256(arguments.workloads.read_bytes()).hexdigest())
+    result = publication_data(load(arguments.campaign))
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(json.dumps(result, allow_nan=False, ensure_ascii=False, separators=(',', ':')) + '\n')
     print(f"Published {len(result['rows'])} user-facing rows; "
-          f"excluded {result['publicationScope']['excludedCampaignRows']} campaign-only rows: {arguments.output}")
+          f"hid {result['publicationScope']['excludedCampaignRows']} campaign rows: {arguments.output}")
 
 
 if __name__ == '__main__':
