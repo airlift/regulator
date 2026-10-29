@@ -391,7 +391,7 @@ public sealed class TrinoRegexp
         return re2.pattern();
     }
 
-    /// Returns the number of capturing groups.
+    /// Returns the number of capturing groups, excluding group zero (the whole match).
     public int capturingGroupCount()
     {
         return re2.capturingGroupCount();

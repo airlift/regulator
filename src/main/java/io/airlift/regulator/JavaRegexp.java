@@ -383,11 +383,13 @@ public final class JavaRegexp
         return re2.pattern();
     }
 
+    /// Returns the number of capturing groups, excluding group zero (the whole match).
     public int capturingGroupCount()
     {
         return re2.capturingGroupCount();
     }
 
+    /// Returns an immutable mapping from capture names to group numbers.
     public Map<String, Integer> namedCapturingGroups()
     {
         return re2.namedCapturingGroups();
