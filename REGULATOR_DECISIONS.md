@@ -301,6 +301,9 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   backreferences, atomic groups, and possessive quantifiers remain deterministic
   compile-time rejections because their observable semantics do not map to the
   current bounded linear-time execution contract.
+- The grapheme cluster `\X` and the grapheme cluster boundary `\b{g}` are
+  rejected as unsupported, because Unicode's grapheme cluster segmentation is a
+  separate algorithm that no Regulator engine implements.
 - Escapes that name a lone surrogate, which the JDK accepts, are rejected as
   unsupported, because no UTF-8 text contains a lone surrogate. The rule is
   about how a pattern spells a character, not what a set contains:
