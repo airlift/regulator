@@ -611,8 +611,20 @@ baseline shard. Each worker is a job of the controller's ordinary launch path,
 so regions, placement scores, Spot launch retries in the next region,
 `--max-concurrent`, the per-platform limit, and the shared budget apply to it,
 and its reservation lasts until its cleanup is verified. `unit-workers.tsv`
-freezes each worker before its launch. A pool launches a worker only while its
-queued items outnumber its idle workers.
+freezes each worker before its launch.
+
+A pool launches a worker only when it would start queued work sooner than the
+pool's workers would. The controller projects when each worker could take new
+work: a booting worker 5 minutes after its launch, and a busy one once its
+leases have run for their estimates, the running lease's counted from when it
+began. Taking the items in the order it leases them, the worker free soonest
+that may take an item takes it. A new worker would start its first item 5
+minutes from now, so the pool launches one when some item would start later
+than that, or no worker may take it. The market, the limits, and the budget
+then apply as below. A worker still booting is stopped once it holds no lease
+of open work and no queued item is one it could take; work requeued later
+launches a worker by the same rule. Its stop lease records it as stopping, so
+it keeps its reservation and takes no work until its cleanup is verified.
 
 When several regions are allowed, a worker whose Spot launch found no capacity
 in any zone of its region cools that region for its pool for 15 minutes, and

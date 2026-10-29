@@ -2250,8 +2250,10 @@ class FakeUnitHost:
     it lands as soon as another host leased the replica, before that host completes it. A host the
     fleet finds no Spot capacity for, or whose boot the fleet fails, exits before its first
     heartbeat, as the wrapper's launch does, and one whose inputs the fleet refuses exits
-    before it launches. Every host that launched uploads its host archive
-    as it exits, as the user data's exit trap does, even one that failed during bootstrap. A host
+    before it launches. A host whose boot the fleet slows stays booting until it is stopped, and one
+    whose cleanup the fleet slows keeps running once stopped until every other host has exited. Every
+    host that launched uploads its host archive as it exits, as the user data's exit trap does,
+    even one that failed during bootstrap. A host
     whose cleanup the fleet leaves unverified records its bucket's removal as failed.
     A lease completes failed with
     "semantic-failure" (status 44), "protocol-rejection" (status 42), "fail" (status 1), or
@@ -2306,6 +2308,10 @@ class FakeUnitHost:
         self.signals = []
 
     def tick(self):
+        if self.stopping and self.status is None and not self.stalled:
+            if all(host is self or host.status is not None for host in self.fleet.hosts):
+                self.exit(143, "controller-abort", "terminated")
+            return
         if self.stopping and self.status is None:
             lease = self.leases[self.sequence]
             behavior = self.script.get(self.sequence)
@@ -2324,7 +2330,9 @@ class FakeUnitHost:
         if self.status is not None or self.stalled:
             return
         if not self.booted:
-            self.session_directory.mkdir(parents=True)
+            self.session_directory.mkdir(parents=True, exist_ok=True)
+            if self.fleet.slow_boot(self):
+                return
             self.booted = True
             # A launch that finds no capacity, or whose inputs are refused, never publishes its session.
             if self.full:
@@ -2431,14 +2439,16 @@ class FakeUnitHost:
         if status == 0:
             (self.session_directory / "campaign-success").touch()
         self.status = status
+        self.fleet.log.append(("exit", self.session))
 
     def poll(self):
         return self.status
 
     def send_signal(self, sent_signal):
         self.signals.append(sent_signal)
+        self.fleet.log.append(("signal", self.session))
         if self.status is None:
-            if self.stalled:
+            if self.stalled or self.fleet.slow_cleanup(self):
                 self.stopping = True
             else:
                 self.exit(143, "controller-abort", "terminated")
@@ -2455,9 +2465,11 @@ class FakeUnitFleet:
 
     def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None,
                  failed_boot=lambda host: False, refused_inputs=lambda host: False, unit_scripts=None,
-                 unverified_cleanup=lambda host: False):
+                 unverified_cleanup=lambda host: False, slow_boot=lambda host: False, slow_cleanup=lambda host: False):
         self.scratch = scratch
         self.failed_boot = failed_boot
+        self.slow_boot = slow_boot
+        self.slow_cleanup = slow_cleanup
         self.refused_inputs = refused_inputs
         self.unverified_cleanup = unverified_cleanup
         self.scripts = scripts or {}
@@ -2758,6 +2770,39 @@ class TestUnitWorkers(unittest.TestCase):
             # While both regions cooled, the pool asked for On-Demand, which this budget refuses.
             self.assertIn("on-demand", [call.args[1].market for call in self.budget.reserve.call_args_list])
             self.assertGreaterEqual(third.launched_at - first.launched_at, RUN_CAMPAIGN.SPOT_REGION_COOL_DOWN_SECONDS)
+
+    def test_pool_launches_only_for_work_its_workers_would_start_after_a_boot(self):
+        work = sum(float(unit["estimated_seconds"]) for unit in RUN_CAMPAIGN.work_units.load(SCRIPT.parent).values()
+                   if unit["shard_id"] == "trino-like")
+        # The first r8i worker is reclaimed as it boots, so its partner alone holds the pool's six units. A
+        # replacement launches only if it would start one before that worker could.
+        for boot_seconds, workers in ((RUN_CAMPAIGN.UNIT_WORKER_BOOT_SECONDS, 3), (work, 2)):
+            with self.subTest(boot_seconds=boot_seconds), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(RUN_CAMPAIGN, "UNIT_WORKER_BOOT_SECONDS", boot_seconds):
+                fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {1: "notice"}})
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like"], 4, 2)
+                self.assertEqual(workers, sum(host.platform == "r8i" for host in fleet.hosts))
+
+    def test_booting_worker_stops_once_the_queue_holds_nothing_for_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # The second r8i worker is still booting when the first, done with one unit, leases the other, and
+            # its cleanup is slow. That lease then fails.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {2: "fail"}},
+                                  slow_boot=lambda host: host.number == 2, slow_cleanup=lambda host: host.number == 2)
+            self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 6, 3)
+            first, booting = fleet.hosts[:2]
+            self.assertEqual(({}, [RUN_CAMPAIGN.signal.SIGTERM]), (booting.leases, booting.signals))
+            # It stops while the first still measures that unit, not once the phase drains, and its stop lease
+            # records it stopping for a restart.
+            self.assertLess(fleet.log.index(("signal", booting.session)),
+                            fleet.log.index(("complete", first.session, 2)))
+            self.assertIn((booting.epoch, "stop"), {(row["host_epoch"], row["outcome"]) for row in self.ledger})
+            # The failed unit goes to a new host while the stopping worker still cleans up.
+            unit_id = first.leases[2]["unit_id"]
+            [replacement] = [host for host in fleet.hosts[2:] if host.platform == "r8i"]
+            self.assertEqual(unit_id, replacement.leases[1]["unit_id"])
+            self.assertLess(fleet.log.index(("lease", replacement.session, 1, unit_id)),
+                            fleet.log.index(("exit", booting.session)))
 
     def test_late_completion_after_requeue_is_superseded(self):
         with tempfile.TemporaryDirectory() as temporary:
