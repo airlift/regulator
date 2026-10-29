@@ -42,10 +42,16 @@ def publication_data(campaign):
     version = campaign['sources'].get('releaseVersion')
     if not isinstance(version, str) or not re.fullmatch(RELEASE_VERSION, version):
         raise ValueError('campaign sources.releaseVersion is not a release version')
-    if 'releasedArtifact' not in campaign.get('provenance', {}):
-        raise ValueError('publication requires released-artifact provenance')
     result = copy.deepcopy({**campaign, 'rows': [row for row in campaign['rows'] if not hidden(row)]})
-    result['sources']['currentLabel'] = f'Regulator {version} results'
+    if 'releasedArtifact' in campaign.get('provenance', {}):
+        result['sources']['currentLabel'] = f'Regulator {version} results'
+    else:
+        result['sources']['currentLabel'] = f'Regulator {version} preliminary results'
+        result['publication'] = {
+            'status': 'preliminary', 'sourcePolicy': 'candidate-build',
+            'note': f"Preliminary results from candidate build {campaign['sources']['currentCandidate'][:12]}, "
+                    f"measured before the {version} release.",
+        }
     result['publicationScope'] = {
         'policy': POLICY,
         'completeCampaignRows': len(campaign['rows']),

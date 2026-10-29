@@ -205,6 +205,11 @@ def released_publication_id(previous: dict) -> str:
     return previous['id']
 
 
+def candidate_build(data: dict) -> bool:
+    publication = data.get('publication')
+    return isinstance(publication, dict) and publication.get('sourcePolicy') == 'candidate-build'
+
+
 def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict]]) -> None:
     sources = data['sources']
     version = sources.get('releaseVersion')
@@ -212,8 +217,8 @@ def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict
     if version is None:
         if scope is not None:
             raise ValueError('publication scope requires a release version')
-        if 'releasedArtifact' in data.get('provenance', {}):
-            raise ValueError('released-artifact report requires a release version')
+        if 'releasedArtifact' in data.get('provenance', {}) or candidate_build(data):
+            raise ValueError('released-artifact or candidate-build report requires a release version')
         return
     if not isinstance(version, str) or re.fullmatch(publication_data.RELEASE_VERSION, version) is None:
         raise ValueError('report sources.releaseVersion is not a release version')
@@ -242,22 +247,40 @@ def validate_publication_scope(data: dict, releases: list[tuple[dict, Path, dict
             or scope.get('excludedCampaignRows') != scope['completeCampaignRows'] - len(data['rows'])):
         raise ValueError('publication scope row counts do not reconcile')
     artifact = data.get('provenance', {}).get('releasedArtifact')
-    if artifact is None:
-        raise ValueError(f'release {version} report requires released-artifact provenance')
-    expected_artifact = released_artifact.manifest(REPOSITORY_ROOT, version)
-    if artifact != expected_artifact:
-        raise ValueError('released-artifact report artifact identity does not match the frozen release manifest')
-    expected_sources = {
-        'currentCandidate': expected_artifact['source_commit'],
-        'engineTree': expected_artifact['engine_tree'],
-    }
-    for field, expected in expected_sources.items():
-        if sources.get(field) != expected:
-            raise ValueError(f'released-artifact report sources.{field} does not match artifact provenance')
-    if sources.get('currentLabel') != f'Regulator {version} results':
-        raise ValueError(f'released-artifact report sources.currentLabel must be Regulator {version} results')
-    if 'publication' in data:
-        raise ValueError('released-artifact report must not carry publication metadata')
+    if artifact is None and frozen:
+        raise ValueError('release 1.0 report requires released-artifact provenance')
+    if artifact is not None:
+        expected_artifact = released_artifact.manifest(REPOSITORY_ROOT, version)
+        if artifact != expected_artifact:
+            raise ValueError('released-artifact report artifact identity does not match the frozen release manifest')
+        expected_sources = {
+            'currentCandidate': expected_artifact['source_commit'],
+            'engineTree': expected_artifact['engine_tree'],
+        }
+        for field, expected in expected_sources.items():
+            if sources.get(field) != expected:
+                raise ValueError(f'released-artifact report sources.{field} does not match artifact provenance')
+        if sources.get('currentLabel') != f'Regulator {version} results':
+            raise ValueError(f'released-artifact report sources.currentLabel must be Regulator {version} results')
+        if 'publication' in data:
+            raise ValueError('released-artifact report must not carry publication metadata')
+    else:
+        if not candidate_build(data):
+            raise ValueError(
+                'report without released-artifact provenance requires candidate-build publication metadata')
+        if sources.get('currentLabel') != f'Regulator {version} preliminary results':
+            raise ValueError(
+                f'candidate-build report sources.currentLabel must be Regulator {version} preliminary results')
+        collectors = data['provenance'].get('collectors')
+        if (not isinstance(collectors, dict) or not collectors
+                or any(not isinstance(collector, dict) for collector in collectors.values())):
+            raise ValueError('candidate-build report requires collector provenance')
+        if any(collector.get('engine_tree') != sources['engineTree'] for collector in collectors.values()):
+            raise ValueError('collector engine tree differs from the measured candidate build')
+        # The preliminary note names this commit, so a collector must have built it.
+        if not any(collector.get('candidate_commit') == sources['currentCandidate']
+                   for collector in collectors.values()):
+            raise ValueError('candidate-build report sources.currentCandidate is not a collector commit')
     if frozen:
         validate_frozen_workloads(data, scope, releases)
 
@@ -344,7 +367,7 @@ def summary_markdown(data: dict) -> str:
         lines.append(f"| {comparator} | {' | '.join(cells)} |")
     source = data['sources']['currentLabel']
     source += (". Development builds with targeted updates; per-row sources are in the report"
-               if data.get('publication', {}).get('status') == 'preliminary'
+               if data.get('publication', {}).get('sourcePolicy') == 'mixed-development-revisions'
                else f" `{data['sources']['currentCandidate']}`")
     platform = next(cpu for cpu in data['platforms'] if cpu in ('r9g', 'c9g')).capitalize()
     lines.extend(("", f"_Source: {source}. {platform} with native access enabled and compiled patterns reused. "
@@ -375,6 +398,12 @@ def import_data(source: Path) -> None:
     stored = []
     if MANIFEST_FILE.exists():
         _, _, _, stored = validate_published_data()
+        # A preliminary report would replace its release's final one as current.
+        if candidate_build(data) and any(
+                'releasedArtifact' in report.get('provenance', {})
+                and report['sources'].get('releaseVersion') == data['sources'].get('releaseVersion')
+                for _, _, report in stored):
+            raise ValueError("candidate-build report cannot replace its release's released-artifact report")
     elif DATA_DIRECTORY.exists() and any(DATA_DIRECTORY.iterdir()):
         raise ValueError("report data directory contains files but no valid manifest")
     schema_version = data["schemaVersion"]

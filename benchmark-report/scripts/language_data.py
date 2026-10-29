@@ -258,13 +258,14 @@ def validate_language_report(data):
     if data.get('schemaVersion') != 2:
         raise ValueError('unsupported language report schema')
     publication = data.get('publication')
-    preliminary = publication is not None
-    if preliminary:
+    if publication is not None:
         if (not isinstance(publication, dict) or publication.get('status') != 'preliminary'
-                or publication.get('sourcePolicy') != 'mixed-development-revisions'
+                or publication.get('sourcePolicy') not in ('mixed-development-revisions', 'candidate-build')
                 or not isinstance(publication.get('note'), str) or not publication['note'].strip()
                 or 'preliminary' not in data['sources']['currentLabel'].lower()):
             raise ValueError('invalid preliminary publication metadata')
+    # Only the 1.0 preliminary snapshot mixed development revisions with targeted single-host follow-ups.
+    targeted = publication is not None and publication['sourcePolicy'] == 'mixed-development-revisions'
     platforms = data['platforms']
     if set(data['memoryModes']) != set(MEMORY_MODES):
         raise ValueError('missing memory mode')
@@ -335,10 +336,10 @@ def validate_language_report(data):
                 raise ValueError('unpublishable result')
             if not warning_list(result['warnings']):
                 raise ValueError('invalid timing warning')
-            if len(result['hosts']) < (1 if preliminary else 3) or len({host['instanceId'] for host in result['hosts']}) != len(result['hosts']):
-                raise ValueError('preliminary report requires independent hosts' if preliminary
-                                 else 'report requires at least three independent hosts per row')
-            if preliminary and len(result['hosts']) < 3 and (not isinstance(row.get('measurementSource'), dict) or not row['measurementSource']):
+            if len(result['hosts']) < (1 if targeted else 3) or len({host['instanceId'] for host in result['hosts']}) != len(result['hosts']):
+                raise ValueError('mixed-revision preliminary report requires at least one independent host per row'
+                                 if targeted else 'report requires at least three independent hosts per row')
+            if targeted and len(result['hosts']) < 3 and (not isinstance(row.get('measurementSource'), dict) or not row['measurementSource']):
                 raise ValueError('preliminary targeted rows require measurement source provenance')
             if result['state'] == 'compared':
                 for key in ('candidateNs', 'comparatorNs', 'ratio', 'minimumRatio', 'maximumRatio'):
@@ -366,7 +367,8 @@ def validate_language_report(data):
             for mode in MEMORY_MODES:
                 operations = coverage[language, platform, mode]
                 if language == 'like':
-                    source = 'baseline' if data.get('provenance', {}).get('releasedArtifact') else 'like-supplement'
+                    # Release campaigns measure the whole LIKE lifecycle in the baseline.
+                    source = 'baseline' if data['sources'].get('releaseVersion') else 'like-supplement'
                     required = {('baseline', 'matches'), (source, 'compile'), (source, 'singleUse')}
                 else:
                     required = {('language', operation) for operation in (

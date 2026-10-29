@@ -80,7 +80,10 @@ release. The option names the release manifest
 `tools/re2-benchmark/baseline/releases/<version>.json`, and the named
 candidate's committed `src/main` tree must match that release. The
 [maintenance guide](../../../docs/MAINTAINING_REGULATOR.md#final-qualification)
-says how to record a release's manifest. Remeasure the 1.0 artifact with
+says how to record a release's manifest. A candidate-build campaign, run
+before the release, omits `--release-version` from collection and reduction;
+its publication still names the release as `release_version` in its paths file
+and publishes preliminary results. Remeasure the 1.0 artifact with
 `--release-version 1.0` from
 [commit `32406d25`](https://github.com/airlift/regulator/tree/32406d25a6032b15d366cddb414ade57c972d0ee);
 the published campaign's collector revisions are in its capture provenance.

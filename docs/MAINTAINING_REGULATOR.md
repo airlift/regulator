@@ -328,10 +328,13 @@ identities, final measurements, aggregation rules, and separately listed
 limitations. Index the private complete campaign, diagnostics, failed attempts,
 and superseded cohorts without adding them to the public download. If the
 candidate changes afterward, its affected results are no longer final.
-Preliminary results may combine development revisions and targeted single-host
-follow-ups, provided the report says so and preserves each row's actual source,
-host coverage, and uncertainty. They do not satisfy the final campaign's
-replication requirements.
+A campaign of a candidate build before the release publishes as preliminary
+results for that release version; a later campaign of the released JAR
+supersedes it as the current report. Preliminary results may instead combine
+development revisions and targeted single-host follow-ups, as the 1.0 ones did,
+provided the report says so and preserves each row's actual source, host
+coverage, and uncertainty. Mixed-revision results do not satisfy the final
+campaign's replication requirements.
 
 ## Release checklist
 

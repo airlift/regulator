@@ -7,7 +7,7 @@ benchmark report. The build writes a Pages-ready site to
 Each language page compares its Regulator API with the corresponding library:
 native RE2, JDK `Pattern`, Joni, the pinned Rust `regex` crate through its
 `str` and bytes APIs, or Trino's SQL LIKE route. The default uses
-native memory on R9g for released-artifact captures or C9g for historical
+native memory on R9g for release campaigns or C9g for historical
 captures. The URL fragment stores the language, CPU, and memory
 selection, even when opening a local file.
 
@@ -37,7 +37,7 @@ README generation invokes the report's TypeScript summary through Node.js, so
 install the report dependencies before running `update-readme` or `check`.
 The summary uses the same workload classification and equivalent-work checks
 as the dashboard. It has separate everyday and text-processing columns, each
-using R9g native-access measurements for released-artifact captures or C9g for
+using R9g native-access measurements for release campaigns or C9g for
 historical captures. It takes a geometric mean of the eligible row time ratios,
 with each row weighted equally. Each row retains its existing
 aggregation of paired-host measurements; raw repetitions are not pooled.
@@ -82,11 +82,14 @@ represent user work, and LIKE controls that duplicate a public row. To show or
 hide rows, edit that list, regenerate the publication with
 `scripts/publication_data.py --campaign … --output …`, then import it and
 regenerate the README. A campaign of the released artifact publishes as
-`Regulator <version> results`. `publicationScope` records the complete,
-published, and hidden row counts, the last as `excludedCampaignRows`, and
-import validation rejects a publication that contains a hidden row. The 1.0
-publication instead kept the rows of a frozen workload source, which its
-validation still checks.
+`Regulator <version> results`. A campaign of a candidate build, run before the
+release, publishes as `Regulator <version> preliminary results` with a
+`publication` object whose `sourcePolicy` is `candidate-build`; a later
+campaign of the released JAR supersedes it as the current report.
+`publicationScope` records the complete, published, and hidden row counts, the
+last as `excludedCampaignRows`, and import validation rejects a publication
+that contains a hidden row. The 1.0 publication instead kept the rows of a
+frozen workload source, which its validation still checks.
 
 Hidden rows and other campaign-only observations do not enter the report
 manifest, Pages artifact, standalone report, or public download. Preserve them
@@ -111,12 +114,13 @@ retry behavior. Current
 page files must stay below 1,100 KB uncompressed and 210 KB gzipped. These limits
 apply to each page's data, not the shared JavaScript and stylesheet.
 
-Keep released-version reports when historical comparisons are useful.
-Development snapshots belong in an external evidence archive, not the release
-manifest. Before removing a snapshot, archive its exact bytes, manifest entry,
-and SHA-256 so it can be recovered. Leave the current dataset and underlying
-raw evidence unchanged. Schema tests use small synthetic fixtures instead of
-old measurement datasets.
+Keep released-version reports when historical comparisons are useful. The
+historical preliminary 1.0 snapshot and candidate-build preliminary reports are
+the only committed preliminary reports. Other development snapshots belong in
+an external evidence archive, not the report manifest. Before removing a
+snapshot, archive its exact bytes, manifest entry, and SHA-256 so it can be
+recovered. Leave the current dataset and underlying raw evidence unchanged.
+Schema tests use small synthetic fixtures instead of old measurement datasets.
 
 ## Local standalone report
 
@@ -145,20 +149,21 @@ Keep the base capture identity in `sources` and each replaced row's actual
 source and predecessor results. Do not relabel mixed measurements as a run
 against one final commit.
 
-Only explicitly preliminary reports may contain targeted rows with fewer than
+Only this mixed-revision snapshot may contain targeted rows with fewer than
 three independent hosts, and those rows must identify their measurement source.
-Final-report validation still requires at least three independent hosts. Missing
-data, incompatible work, and verification failures do not become comparisons.
+Final and candidate-build reports require at least three independent hosts.
+Missing data, incompatible work, and verification failures do not become
+comparisons.
 
-Preliminary tables show median estimates with variation in the expandable row
-details and raw download. When hosts disagree about the winner, the comparison
-says so rather than assigning a faster/slower claim. Released-artifact results
-form a separate versioned capture of the same library release. Keep the
-preliminary capture's original identity and label.
+These historical tables show median estimates with variation in the expandable
+row details and raw download. When hosts disagree about the winner, the
+comparison says so rather than assigning a faster/slower claim.
+Released-artifact results form a separate versioned capture of the same library
+release. Keep the preliminary capture's original identity and label.
 
 ## Capture requirements
 
-`scripts/build_capture_data.py` builds the language report from a released
+`scripts/build_capture_data.py` builds the language report from a release
 campaign: the complete verified language exports and the baseline reduction.
 Provide a separate private complete-capture destination. The baseline is
 accepted against the row protocols and work units, which are generated rather
@@ -178,11 +183,17 @@ archive and index; it is never an input to `report_data.py import`.
 The paths file identifies `release_version`, `candidate_provenance`, both
 `language` plan/export pairs, and `baseline` primary, optional confirmation,
 reduction, and campaign ID. LIKE lifecycle comes from accepted baseline units.
+A baseline reduction made without `--release-version` does not prove a release
+JAR, so the import treats the campaign as a candidate build: the baseline
+entry's `candidate_provenance`, or the common pin when it has none, names the
+measured build, every collector and receipt must measure its production tree,
+and no host may carry a release JAR.
 Each language entry and the baseline entry may specify its own
 `candidate_provenance`, overriding the common collector pin. This permits a
 baseline-only protocol repair to retain unaffected language collection. Every
 component still requires one exact collector commit and archive, the same
-released production tree and JAR, and its complete independent-host matrix.
+measured production tree, the release JAR when measuring the released artifact,
+and its complete independent-host matrix.
 The report records collector identities by suite.
 The importer checks published-JAR receipts separately from collector identity,
 R-family topology, manifest and receipt checksums, independent-host coverage,
@@ -190,17 +201,17 @@ and lifecycle pairing. The baseline must be a complete unit campaign: its
 `accepted-units.tsv` ledgers pass unit-campaign acceptance and their
 `semantic-rejections.tsv` ledgers list no attempt, the reduction's
 `output-checksums.tsv` matches every reduced file, its `summary.json` names the
-release whose JAR the reducer proved every attempt measured, and its host rows
-come from exactly the accepted unit attempts, with the campaign, host,
-candidate, and evidence identity of their receipts. Each language export must
-likewise come from a complete unit campaign of its plans: the
-`accepted-units.tsv` beside it passes the same acceptance, its
+release whose JAR the reducer proved every attempt measured, or, for a candidate
+build, has an empty `release_version` while no attempt recorded release
+metadata, and its host rows come from exactly the accepted unit attempts,
+with the campaign, host, candidate, and evidence identity of their receipts.
+Each language export must likewise come from a complete unit campaign of its
+plans: the `accepted-units.tsv` beside it passes the same acceptance, its
 `semantic-rejections.tsv` lists no attempt, and its hosts are exactly the
 accepted attempts, each with the exports its receipt digests and exactly its
 unit's rows. Neither the public nor the complete output may lie inside a
 language result root, which holds the export beside its ledgers and attempts.
-Historical
-C-family datasets retain their labels.
+Historical C-family datasets retain their labels.
 It rejects missing rows and verification failures. Timeouts and incompatibilities remain
 distinct nonnumeric results.
 

@@ -67,7 +67,7 @@ export type ReportData = {
   rows: Row[];
   methodology: string[];
   provenance: Record<string, unknown>;
-  publication?: { status: "preliminary"; note: string; sourcePolicy: "mixed-development-revisions" };
+  publication?: { status: "preliminary"; note: string; sourcePolicy: "mixed-development-revisions" | "candidate-build" };
   fullResultsUrl?: string;
   selection?: Selection;
 };
@@ -749,10 +749,11 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
   };
   const { language, cpu, memory } = selection;
   const comparator = data.languages[language].comparator;
-  const preliminary = data.publication?.status === "preliminary";
-  // Preliminary tables show median estimates, but never assert a consistent winner when hosts
+  // Only the 1.0 preliminary snapshot mixed development revisions; a candidate build is one campaign.
+  const mixed = data.publication?.sourcePolicy === "mixed-development-revisions";
+  // Mixed preliminary tables show median estimates, but never assert a consistent winner when hosts
   // disagree. Full measurement warnings remain in row details; full gain warnings remain in downloads.
-  const shownWarnings = (warnings: string[]) => preliminary ? warnings.filter(warning => warning.includes("disagree")) : warnings;
+  const shownWarnings = (warnings: string[]) => mixed ? warnings.filter(warning => warning.includes("disagree")) : warnings;
   const selectedRows = data.rows.filter(row => row.language === language && row.platform === cpu && row.memoryMode === memory && workloadSection(row) !== "diagnostic-only")
     .map(row => ({ ...row, measurementWarnings: row.result.warnings, result: { ...displayResult(row.result), warnings: shownWarnings(row.result.warnings) },
       ...(row.variantGainWarnings ? { variantGainWarnings: Object.fromEntries(Object.entries(row.variantGainWarnings).map(([id, warnings]) => [id, shownWarnings(warnings)])) } : {}) }));
@@ -777,8 +778,8 @@ export function LanguageReport({ data, selection = selectionFromUrl(data), onSel
       <h1 className={data.sources.releaseVersion ? "release-title" : undefined}>Regulator{data.sources.releaseVersion && ` ${data.sources.releaseVersion}`} benchmarks</h1>
       <p className="source-line">{data.sources.releaseVersion
         ? ""
-        : !preliminary ? `Engine ${data.sources.currentCandidate.slice(0, 12)} · ` : ""}{data.sources.jdk}</p>
-      {preliminary && <p className="source-line">{data.publication!.note}</p>}</div>
+        : !mixed ? `Engine ${data.sources.currentCandidate.slice(0, 12)} · ` : ""}{data.sources.jdk}</p>
+      {data.publication && <p className="source-line">{data.publication.note}</p>}</div>
       <div className="benchmark-controls"><div className="platform-switch">{cpuOrder(data).map(platform => <button key={platform} className={cpu === platform ? "active" : ""} onClick={() => select({ cpu: platform })}>{data.platforms[platform]}</button>)}</div>
         <label className="safe-toggle"><input type="checkbox" checked={memory === "safe"} onChange={event => select({ memory: event.target.checked ? "safe" : "native" })} /> Pure Java · no native memory</label>
       </div></header>
