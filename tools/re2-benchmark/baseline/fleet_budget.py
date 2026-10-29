@@ -21,6 +21,7 @@ import time
 REGION_PATTERN = r"[a-z]+(?:-[a-z]+)+-[0-9]+"
 # Every On-Demand launch leaves this much of its region's On-Demand quota free.
 ON_DEMAND_VCPU_SAFETY_RESERVE = 32
+STATE_FILE = "fleet-state.json"
 
 
 class BudgetError(RuntimeError):
@@ -190,7 +191,7 @@ class FleetBudget:
         self.policy_path = Path(policy_path).resolve()
         self.policy = json.loads(self.policy_path.read_text())
         validate_policy(self.policy)
-        self.state_path = self.policy_path.with_name("fleet-state.json")
+        self.state_path = self.policy_path.with_name(STATE_FILE)
         self.lock_path = self.policy_path.with_name("fleet-budget.lock")
 
     @contextmanager
@@ -311,3 +312,23 @@ class FleetBudget:
         stop time, and its reservation counts as spent until its owner releases it."""
         with self.locked() as state:
             refuse_halted(state)
+
+
+def spend_by_owner(policy_path, now):
+    """Each owner's spend in the fleet of policy_path, in USD, as (spent so far, reserved beyond now): its completed
+    attempts' actual hours and its reservations' hours since they started, and their hours left to their reserved
+    ends. Reads the state without the budget's lock, as each change replaces the whole file; None before the
+    fleet's first reservation."""
+    state_path = Path(policy_path).with_name(STATE_FILE)
+    if not state_path.is_file():
+        return None
+    state = json.loads(state_path.read_text())
+    spend = {}
+    for item in state["completed"].values():
+        spent, reserved = spend.get(item["owner"], (0.0, 0.0))
+        spend[item["owner"]] = (spent + item["machine_hours"] * item["hourly_rate"], reserved)
+    for item in state["reservations"].values():
+        spent, reserved = spend.get(item["owner"], (0.0, 0.0))
+        spend[item["owner"]] = (spent + max(0, now - item["started_at"]) / 3600 * item["hourly_rate"],
+                                reserved + max(0, item["reserved_until"] - now) / 3600 * item["hourly_rate"])
+    return spend

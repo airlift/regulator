@@ -13,12 +13,15 @@ import os
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+from collections import Counter
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
 
 import engine_build
@@ -27,16 +30,16 @@ import work_units
 from acceptance import normalize_heap_size
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, REGION_PATTERN, BudgetError, FleetBudget, FleetHalted, on_demand_regions,
-    region_limits)
+    region_limits, spend_by_owner)
 from campaign_io import (
     UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
 from unit_dispatch import (
     UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, completion_key, extract_unit_result, get_unit_worker_result,
     group_identity, heartbeat_key, heartbeat_sequence, interruption_key, list_unit_worker_results,
     persist_accepted_unit, persist_semantic_rejection, persist_unit_upload, put_unit_lease, read_accepted_units,
-    read_semantic_rejections, read_unit_attempts, read_unit_receipt, recovered_keys, result_key, retain_unit_attempt,
-    shows_worker_start, unit_attempt_directory, unit_logical_identity, unit_worker_instance_state, write_unit_attempt,
-    write_unresolved_units)
+    read_semantic_rejections, read_unit_attempts, read_unit_receipt, read_unit_uploads, recovered_keys, result_key,
+    retain_unit_attempt, shows_worker_start, unit_attempt_directory, unit_logical_identity,
+    unit_worker_instance_state, write_unit_attempt, write_unresolved_units)
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
@@ -122,6 +125,9 @@ TOOLING_DIGEST = "tooling-digest.txt"
 # Written once a unit phase's controller has verified every worker's cleanup and its phase gate has passed;
 # a later phase consumes the result root only once it exists.
 PHASE_COMPLETE = "phase-complete.txt"
+# What only a running unit phase's controller knows, rewritten each poll for the status command: its live workers'
+# states and the items queued and unresolved.
+DISPATCH_STATUS = "dispatch-status.json"
 WORK_ITEM_FIELDS = ("platform", "instance_type", "shard_id", "unit_id", "replica", "estimated_seconds", "groups",
                     "excluded_instances")
 # Lease outcomes that spend one of the item's attempts. An interruption after the lease's first accepted group,
@@ -266,7 +272,9 @@ def campaign_engine_tree(arguments):
 
 def parse_args():
     # No abbreviations: a detached controller drops only the exact --detach from the command it runs again.
-    parser = argparse.ArgumentParser(allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        allow_abbrev=False,
+        epilog=f"{Path(__file__).name} status ROOT reports a campaign's or one phase's progress from its ledgers")
     parser.add_argument("phase", choices=("campaign", *PHASE_TIMEOUT_SECONDS),
                         help="one phase of a candidate, or campaign to run every candidate's phases")
     parser.add_argument("campaign",
@@ -2707,6 +2715,18 @@ class UnitWorker:
     def open(self):
         return not (self.stopping or self.lost)
 
+    def state(self, terminated=False):
+        """What the worker is doing: stopping once lost or terminated; otherwise booting until it starts, then
+        running while it holds a work lease, even behind its stop lease, stopping once only its stop lease remains,
+        and idle while it waits for a lease."""
+        if self.lost or terminated:
+            return "stopping"
+        if self.started and any(self.leases[sequence] is not None for sequence in self.outstanding()):
+            return "running"
+        if self.stopping:
+            return "stopping"
+        return "idle" if self.started else "booting"
+
 
 class UnitDispatcher:
     """One phase's unit queue: the work items that remain, each worker's leases, and what each became.
@@ -3305,6 +3325,18 @@ class UnitDispatcher:
         else:
             self.free_slots.setdefault(pool, []).append((slot, failures))
 
+    def write_status(self):
+        """Record the live workers' states and the items queued and unresolved for the status command."""
+        status = {"updated_at": round(time.time()), "queued": len(self.queued()),
+                  "unresolved": len(set(self.unresolved) | set(self.semantic)),
+                  "workers": [{"host_epoch": epoch, "platform": worker.job.platform.name,
+                               "instance_type": worker.job.platform.instance_type, "region": worker.job.region,
+                               "market": worker.job.market, "state": worker.state(epoch in self.terminated)}
+                              for epoch, worker in sorted(self.workers.items())]}
+        temporary = self.result_root / (DISPATCH_STATUS + ".new")
+        temporary.write_text(json.dumps(status, sort_keys=True) + "\n")
+        os.replace(temporary, self.result_root / DISPATCH_STATUS)
+
     def resolve_unlaunchable(self, deadline_reached):
         """Leave unresolved the queued items no worker can take: past the deadline, or in a pool that gave up."""
         for item in self.queued():
@@ -3669,6 +3701,7 @@ class UnitDispatcher:
                             self.issue(worker, None)
                         self.terminated.add(epoch)
                         worker.process.send_signal(signal.SIGTERM)
+                self.write_status()
                 if not self.workers and not self.queued():
                     break
                 time.sleep(UNIT_POLL_SECONDS)
@@ -3801,12 +3834,14 @@ def detach(root, record, log):
                 owner = f" as process {read_properties(root / record)['pid']}"
             except (OSError, RuntimeError, KeyError):
                 owner = ""
-            print(f"a controller already runs{owner} for {root}; its log is {root / log}")
+            print(f"a controller already runs{owner} for {root}; its log is {root / log}; "
+                  f"see its progress with {Path(__file__).name} status {root}")
             return
     command = [sys.executable, str(Path(__file__).resolve()),
                *(argument for argument in sys.argv[1:] if argument != "--detach")]
     process = start_detached(command, root, log)
-    print(f"started controller process {process.pid} for {root}; its log is {root / log}")
+    print(f"started controller process {process.pid} for {root}; its log is {root / log}; "
+          f"see its progress with {Path(__file__).name} status {root}")
 
 
 def frozen_share(step):
@@ -4055,7 +4090,125 @@ def controller_process(root, record):
     return process_id if process_start(process_id) == started else None
 
 
+def clock_time(epoch, now, zone=None):
+    """A local clock time, such as "about 6:40 p.m. PDT", with its day when that is not today's."""
+    moment, today = (datetime.fromtimestamp(value).astimezone(zone) for value in (epoch, now))
+    text = (f"about {moment.hour % 12 or 12}:{moment.minute:02d} {'a.m.' if moment.hour < 12 else 'p.m.'} "
+            f"{moment.tzname()}")
+    return text if moment.date() == today.date() else f"{text} on {moment:%a %b} {moment.day}"
+
+
+def phase_status(label, root, now, fleets, zone=None):
+    """A unit phase's lines for the status command, read from its ledgers and its controller's latest snapshot.
+    fleets holds each fleet policy's spend_by_owner, so the phases sharing a fleet read its state once."""
+    live = False
+    if (root / PHASE_COMPLETE).is_file():
+        state = "complete"
+    elif (process_id := controller_process(root, DRIVER_CHILD)) is not None:
+        state = f"running as process {process_id}"
+        live = True
+    else:
+        state = "no live controller"
+    lines = [f"  {label:<18}{state}"]
+    if not (root / "work-items.tsv").is_file():
+        return lines
+
+    def line(name, text):
+        lines.append(f"    {name:<10}{text}")
+
+    with (root / "work-items.tsv").open(newline="") as input_file:
+        items = list(csv.DictReader(input_file, delimiter="\t"))
+    accepted = {(row["platform"], row["unit_id"], row["replica_id"], row["group_id"])
+                for row in read_accepted_units(root / "accepted-units.tsv")}
+    groups = units_accepted = groups_accepted = 0
+    remaining = 0.0
+    for item in items:
+        done = True
+        for group in item["groups"].split(","):
+            group_id, seconds = group.split(":")
+            groups += 1
+            if (item["platform"], item["unit_id"], item["replica"], group_id) in accepted:
+                groups_accepted += 1
+            else:
+                done = False
+                remaining += float(seconds)
+        units_accepted += done
+    snapshot = json.loads((root / DISPATCH_STATUS).read_text()) if (root / DISPATCH_STATUS).is_file() else None
+    unresolved_path = root / "unresolved-units.tsv"
+    # A controller writes its unresolved units when it ends, so a live one's snapshot is newer than them.
+    if unresolved_path.is_file() and not (live and snapshot):
+        with unresolved_path.open(newline="") as input_file:
+            unresolved = sum(1 for _ in csv.DictReader(input_file, delimiter="\t"))
+    else:
+        unresolved = snapshot["unresolved"] if snapshot else 0
+    queued = f", {snapshot['queued']} queued" if snapshot and state != "complete" else ""
+    line("units", f"{units_accepted}/{len(items)} accepted ({groups_accepted}/{groups} groups), {unresolved} unresolved"
+                  f"{queued}")
+    running = 0
+    # Without a live controller, the snapshot's workers may since have stopped.
+    if snapshot and live:
+        workers = snapshot["workers"]
+        states = ("booting", "running", "idle", "stopping")
+
+        def counts(members):
+            tally = Counter(worker["state"] for worker in members)
+            return ", ".join(f"{tally[name]} {name}" for name in states if tally[name]) or "none"
+
+        line("workers", f"{counts(workers)}, as of {max(0, round(now - snapshot['updated_at']))}s ago")
+        for key in sorted({(worker["platform"], worker["instance_type"], worker["region"], worker["market"])
+                           for worker in workers}):
+            members = [worker for worker in workers
+                       if (worker["platform"], worker["instance_type"], worker["region"], worker["market"]) == key]
+            line("", f"{' '.join(key)}: {counts(members)}")
+        running = sum(worker["state"] == "running" for worker in workers)
+    policy_path = root / "execution-policy.json"
+    budget = json.loads(policy_path.read_text()).get("fleet_budget") if policy_path.is_file() else None
+    if budget and budget not in fleets:
+        fleets[budget] = spend_by_owner(budget, now)
+    if budget and fleets[budget] is not None:
+        spent, reserved = fleets[budget].get(str(root.resolve()), (0.0, 0.0))
+        line("spend", f"${spent:.2f} so far, ${reserved:.2f} reserved")
+    elif budget is None and policy_path.is_file():
+        line("spend", "no fleet budget")
+    if live and remaining:
+        line("finish", clock_time(now + remaining / running, now, zone) if running else "unknown; no worker runs")
+    boot = [float(match.group(1)) for row in read_attempts(root / "job-attempts.tsv")
+            if (match := re.search(r"boot_to_first_unit_seconds=([0-9.]+)", row["detail"]))]
+    uploads = [float(row["upload_seconds"]) for row in read_unit_uploads(root / UNIT_UPLOADS)]
+    measured = [f"{name} {statistics.median(values):.0f}s" for name, values in
+                (("boot to first unit", boot), ("upload", uploads)) if values]
+    if measured:
+        line("medians", ", ".join(measured))
+    return lines
+
+
+def campaign_status(root, now=None, zone=None):
+    """The status command's lines for a campaign root, or for one phase's root."""
+    now = time.time() if now is None else now
+    if (root / "work-items.tsv").is_file() or (root / DRIVER_CHILD).is_file():
+        return [f"phase {root}", *phase_status(root.name, root, now, {}, zone)]
+    if not (root / "candidates.tsv").is_file():
+        raise SystemExit(f"{root} holds neither a campaign's candidates.tsv nor a phase's work-items.tsv")
+    driver = controller_process(root, CAMPAIGN_DRIVER)
+    lines = [f"campaign {root}: " + (f"driver running as process {driver}" if driver else "no live driver")]
+    fleets = {}
+    for candidate in read_candidates(root):
+        lines.append(f"candidate {candidate['name']} at {candidate['commit'][:12]}")
+        for prefix in ("", "lang/"):
+            for phase in ("build", "smoke", "primary", "confirmation"):
+                directory = root / candidate["name"] / prefix / phase
+                if directory.is_dir() and (prefix == "" or phase != "build"):
+                    lines.extend(phase_status(prefix.replace("/", " ") + phase, directory, now, fleets, zone))
+    return lines
+
+
 def main():
+    if sys.argv[1:2] == ["status"]:
+        parser = argparse.ArgumentParser(prog=f"{Path(sys.argv[0]).name} status",
+                                         description="report a campaign's or phase's progress from its ledgers")
+        parser.add_argument("root", type=Path, help="the campaign root, or one phase's root")
+        print("\n".join(campaign_status(parser.parse_args(sys.argv[2:]).root.absolute())))
+        return
     arguments = parse_args()
     if arguments.fleet_budget:
         arguments.shared_budget = FleetBudget(arguments.fleet_budget)
