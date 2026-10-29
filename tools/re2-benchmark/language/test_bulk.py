@@ -181,17 +181,30 @@ class TestBulkEvidence(unittest.TestCase):
             manifest = prepare_manifest("wild/bibleref/long", mappings.BIBLEREF_PATTERN, directory)
         bulk.validate_manifest(manifest, directory, archived=True)
 
-    def test_fleet_partitions_keep_bulk_operation_and_all_source_inputs(self):
+    def test_fleet_partitions_keep_bulk_operation_and_read_one_input_store(self):
         destination = self.root / "fleet"
         plan = fleet.prepare(self.directory, destination)
         self.assertEqual(len(plan["partitions"]), 4)
         self.assertEqual(plan["platform_allocations"]["r9g"], {"instance_type": "r9g.large", "vcpus": 2})
         for partition in plan["partitions"]:
-            directory = destination / "partitions" / partition["id"]
-            manifest = collection.load(directory / "manifest.json")
-            bulk.validate_manifest(manifest, directory)
+            manifest = collection.load(destination / "partitions" / partition["id"] / "manifest.json")
+            bulk.validate_manifest(manifest, destination)
             self.assertEqual(collection.case_operations(manifest, manifest["cases"][0]), ("execute",))
             self.assertEqual(len(list(collection.observations(manifest))), 3)
+        # The source and its four language mappings share one stored input, which verification reads.
+        [case] = self.manifest["cases"]
+        self.assertEqual([case["source_file"]], [path.relative_to(destination).as_posix()
+                                                 for path in destination.rglob("*.klv")])
+
+        class Started(Exception):
+            pass
+
+        with patch.object(collection, "runner_identity", return_value={}), \
+                patch.object(collection, "verify_command", side_effect=Started) as command, \
+                self.assertRaises(Started):
+            fleet.verify(destination, self.root / "preflight", "java", "classes",
+                         {"native-re2": "native", "native-rust": "native-rust"})
+        self.assertEqual(str(destination / case["source_file"]), command.call_args.args[0][-1])
 
     def test_smoke_covers_each_language_and_model_and_each_isolated_comparison(self):
         source = self.root / "models"

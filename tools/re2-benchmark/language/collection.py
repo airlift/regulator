@@ -414,13 +414,15 @@ def verify_command(command, prefix, engine, mode, *, hash_trace=False):
     return {**receipt, "attempts": attempts}
 
 
-def verify(directory, results, java, classpath, native_runners):
+def verify(directory, results, java, classpath, native_runners, inputs=None):
+    """Verify the manifest in directory; the manifest's input files resolve against inputs, by default its directory."""
     directory, results = directory.resolve(), results.resolve()
+    inputs = directory if inputs is None else inputs.resolve()
     manifest = load(directory / "manifest.json")
     if manifest.get("suite") == "language-bulk":
         import bulk
-        return bulk.verify(directory, results, java, classpath, native_runners)
-    validate_manifest(manifest, directory)
+        return bulk.verify(directory, results, java, classpath, native_runners, inputs)
+    validate_manifest(manifest, inputs)
     require_native_runners(manifest, native_runners)
     results.mkdir(parents=True, exist_ok=False)
     runners = runner_identity(java, classpath, native_runners)
@@ -432,7 +434,7 @@ def verify(directory, results, java, classpath, native_runners):
             excluded = {"outcome": "not-compatible", "reason": mapping["reason"]}
             receipts[identity] = {**excluded, "operations": {operation: excluded.copy() for operation in OPERATIONS}}
             continue
-        workload = str((directory / mapping["input_file"]).resolve())
+        workload = str((inputs / mapping["input_file"]).resolve())
         command = ([native_runners[engine], "--verify", workload] if engine in NATIVE_RUNNERS else
                    java_command(java, classpath, mode) + [CLASS, "--verify", engine, workload])
         prefix = results / identity
@@ -632,15 +634,17 @@ def validate_native_build(manifest, engine, build, binary_sha256):
         raise ValueError(f"{engine}: native comparator requires a release build")
 
 
-def measure(directory, results, java, classpath, native_runners, platform_id, build_receipt):
-    """Measure verified comparisons with the classpath that build_receipt, from jvm_build.prepare, identifies."""
+def measure(directory, results, java, classpath, native_runners, platform_id, build_receipt, inputs=None):
+    """Measure verified comparisons with the classpath that build_receipt, from jvm_build.prepare, identifies; the
+    manifest's input files resolve against inputs, by default its directory."""
     directory, results = directory.resolve(), results.resolve()
+    inputs = directory if inputs is None else inputs.resolve()
     if (results / "provenance.json").exists() or (results / "observations.json").exists():
         raise ValueError("will not overwrite an existing measurement cohort or its call contract")
     if platform.system() != "Linux":
         raise ValueError("timing is restricted to qualification hosts; use verify on a developer machine")
     manifest = load(directory / "manifest.json")
-    validate_manifest(manifest, directory)
+    validate_manifest(manifest, inputs)
     if manifest.get("suite") == "language-bulk" and any(
             mapping["verifier"] != "bulk-result-boundaries-and-bytes-v2"
             for case in manifest["cases"] for mapping in case["mappings"].values()):
@@ -694,7 +698,7 @@ def measure(directory, results, java, classpath, native_runners, platform_id, bu
             if raw.exists():
                 raise ValueError(f"will not overwrite existing measurements: {raw}")
             raw.parent.mkdir(parents=True, exist_ok=True)
-            workload = str((directory / case["mappings"][language]["input_file"]).resolve())
+            workload = str((inputs / case["mappings"][language]["input_file"]).resolve())
             if engine in NATIVE_RUNNERS:
                 command = [native_runners[engine], workload, operation, "--benchmark_repetitions=5", "--benchmark_min_time=1s",
                            "--benchmark_min_warmup_time=10", "--benchmark_time_unit=ns",
@@ -735,17 +739,20 @@ def measure(directory, results, java, classpath, native_runners, platform_id, bu
                                          "command": command, **allocation_evidence}
             save(results / "observations.partial.json", observations_data)
     save(results / "observations.json", observations_data)
-    export(directory, results)
+    export(directory, results, inputs=inputs)
 
 
-def export(directory, results, *, write=True):
+def export(directory, results, *, write=True, inputs=None):
+    """Regenerate the export from the raw results; the manifest's input files resolve against inputs, by default
+    its directory."""
     directory, results = directory.resolve(), results.resolve()
+    inputs = directory if inputs is None else inputs.resolve()
     provenance = load(results / "provenance.json")
     if provenance.get("jvm_build", {}).get("released_artifact") is not None and provenance.get("measured_jvm_arguments") != {
             mode: measured_jvm_arguments(mode) for mode in MODES}:
         raise ValueError("release measurement lacks the frozen JVM memory protocol")
     manifest = load(directory / "manifest.json")
-    validate_manifest(manifest, directory, has_release_1_0_languages(manifest))
+    validate_manifest(manifest, inputs, has_release_1_0_languages(manifest))
     evidence = load(results / "verification.json")
     validate_receipts(manifest, evidence["receipts"])
     if manifest.get("suite") == "language-bulk":

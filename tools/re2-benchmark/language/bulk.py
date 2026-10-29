@@ -147,10 +147,11 @@ def validate_manifest(manifest, directory, archived=False):
                 raise ValueError("unrecorded bulk translation")
 
 
-def verify(directory, results, java, classpath, native_runners):
-    """Qualify each operation independently, including an original native-RE2 reference."""
+def verify(directory, results, java, classpath, native_runners, inputs):
+    """Qualify each operation independently, including an original native-RE2 reference; the manifest's input
+    files resolve against inputs."""
     manifest = collection.load(directory / "manifest.json")
-    validate_manifest(manifest, directory)
+    validate_manifest(manifest, inputs)
     if any(mapping["status"] == "pending" for case in manifest["cases"] for mapping in case["mappings"].values()):
         raise ValueError("pending bulk mappings cannot qualify")
     collection.require_native_runners(manifest, native_runners)
@@ -169,7 +170,7 @@ def verify(directory, results, java, classpath, native_runners):
         if mapping["status"] == "not-compatible":
             excluded = {"outcome": "not-compatible", "reason": mapping["reason"]}
             return {**excluded, "operations": {operation: excluded.copy()}}
-        workload = (directory / mapping["input_file"]).resolve()
+        workload = (inputs / mapping["input_file"]).resolve()
         prefix = results / identity
         execution = collection.verify_command(command(engine, mode, "execute", workload), prefix / operation, engine, mode)
         if execution["outcome"] == "did-not-finish":
@@ -186,7 +187,7 @@ def verify(directory, results, java, classpath, native_runners):
     references = {}
     for case in manifest["cases"]:
         prefix = results / "reference" / case["id"]
-        source = (directory / case["source_file"]).resolve()
+        source = (inputs / case["source_file"]).resolve()
         count = collection.verify_command([native, "--execute", str(source)], prefix / "execute", "native-re2", "safe")
         expected = "compiled\n" if case["model"] == "compile" else str(case["expected_result"]) + "\n"
         if count["outcome"] != "completed" or count["trace"] != expected:

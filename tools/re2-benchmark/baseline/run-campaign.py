@@ -426,13 +426,12 @@ def language_plans(arguments):
 
 
 def write_language_bundles(arguments, result_root):
-    """Write each language plan's bundle under the result root, keeping its path and SHA-256 by shard."""
+    """Write each language plan's bundle under the result root, or reuse the one an earlier start wrote for the
+    same plan, keeping its path and SHA-256 by shard."""
     directory = result_root / "language-plans"
     directory.mkdir(parents=True, exist_ok=True)
-    arguments.language_bundles = {}
-    for shard, plan in sorted(arguments.language_plans.items()):
-        bundle = directory / f"{shard}.tar.zst"
-        arguments.language_bundles[shard] = (bundle, language_fleet.write_bundle(plan, bundle))
+    arguments.language_bundles = {shard: language_fleet.reuse_bundle(plan, directory)
+                                  for shard, plan in sorted(arguments.language_plans.items())}
 
 
 def aggregate_language_plans(arguments, result_root):

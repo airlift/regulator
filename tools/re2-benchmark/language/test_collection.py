@@ -413,9 +413,13 @@ class TestCollection(unittest.TestCase):
     def test_relative_measurement_exports_only_operation_specific_timeouts(self):
         results = self.root / "results"
         results.mkdir()
+        # As in a fleet partition, the manifest's input files live in a separate store.
+        store = self.root / "store"
+        store.mkdir()
+        (self.directory / "inputs").rename(store / "inputs")
         receipts = self.receipts()
         for identity, case, language, *_ in collection.observations(self.manifest):
-            workload = str((self.directory / case["mappings"][language]["input_file"]).resolve())
+            workload = str((store / case["mappings"][language]["input_file"]).resolve())
             receipts[identity]["command"] = ["verify", workload]
         first = next(iter(receipts))
         attempt = {"outcome": "did-not-finish", "phase": "execution", "limit_seconds": 30}
@@ -480,7 +484,8 @@ class TestCollection(unittest.TestCase):
                 patch.object(collection, "run_process", side_effect=measurement_process):
             def measure():
                 collection.measure(Path(os.path.relpath(self.directory)), Path(os.path.relpath(results)), "java", "classpath",
-                                   {"native-re2": str(native), "native-rust": str(native_rust)}, "r9g", jvm_receipt)
+                                   {"native-re2": str(native), "native-rust": str(native_rust)}, "r9g", jvm_receipt,
+                                   Path(os.path.relpath(store)))
             # Each native runner's receipt must describe a release build of the current sources.
             rust_receipt = native_rust.with_suffix(".build.json")
             valid = collection.load(rust_receipt)
@@ -508,7 +513,7 @@ class TestCollection(unittest.TestCase):
         data[first + "/reusedCount"]["limit_seconds"] = 999
         collection.save(results / "observations.json", data)
         with self.assertRaisesRegex(ValueError, "changed operation timeout evidence"):
-            collection.export(self.directory, results)
+            collection.export(self.directory, results, inputs=store)
 
 
 if __name__ == "__main__":
