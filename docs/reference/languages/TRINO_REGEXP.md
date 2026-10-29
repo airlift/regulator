@@ -221,18 +221,19 @@ the pattern, where it is the literal letter; a malformed braced `\x{...}` is
 rejected. A bare `\u` at the end of the pattern is the letter `u`; any other
 `\u` needs four hex digits, as in modern Joni and Oniguruma, so `\u12` and
 `[\u]` are rejected. Trino's pinned Joni differs: it reads `\u12` as U+0012 and
-`[\u]` as U+0000. `\c` keeps the low five bits of the character after it, as in
-Joni, so `\ca` matches U+0001 and `\c?` matches DEL; an escaped character such
-as `\n` after it is decoded first. Outside a character class, a digit escape is
-a backreference, which is unsupported, when its number is at most 9 or at most
-the number of groups before it, as in Joni. A number too large for Joni's
-integer arithmetic is not a backreference, as in Oniguruma; both Jonis wrap it,
-so in Trino `(a)\8589934593` matches `aa`. Otherwise, and always inside a class,
-it is an octal escape or the digit `8` or `9`, so `\18` matches U+0001 then `8`,
-`(a)\10` matches U+0008, and `[\8]` matches `8`. An octal escape above `\377` is
-rejected, as in modern Joni; Trino's pinned Joni wraps it, so `\400` matches
-U+0000. Inside a class, `\p` or `\P` without braces is the literal letter, so
-`[\pL]` matches `p` or `L`; use `[\p{L}]` for letters.
+`[\u]` as U+0000. `\c` keeps bits 7 and 0-4 (mask `0x9F`) of the code point
+after it, as in Joni, so `\ca` matches U+0001, `\cé` matches U+0089, and `\c?`
+matches DEL; an escaped character such as `\n` after it is decoded first.
+Outside a character class, a digit escape is a backreference, which is
+unsupported, when its number is at most 9 or at most the number of groups before
+it, as in Joni. A number too large for Joni's integer arithmetic is not a
+backreference, as in Oniguruma; both Jonis wrap it, so in Trino `(a)\8589934593`
+matches `aa`. Otherwise, and always inside a class, it is an octal escape or the
+digit `8` or `9`, so `\18` matches U+0001 then `8`, `(a)\10` matches U+0008, and
+`[\8]` matches `8`. An octal escape above `\377` is rejected, as in modern Joni;
+Trino's pinned Joni wraps it, so `\400` matches U+0000. Inside a class, `\p` or
+`\P` without braces is the literal letter, so `[\pL]` matches `p` or `L`; use
+`[\p{L}]` for letters.
 
 Inside a character class, a dash after a range is a literal, as in modern Joni
 and Oniguruma, even when nested classes come between them, so `[a-zA-Z0-9-_]`

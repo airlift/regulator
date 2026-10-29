@@ -59,7 +59,7 @@ public class TestTrinoRegexpDifferential
     private static final int PATTERN_COUNT = 400;
     private static final int INPUTS_PER_PATTERN = 8;
     private static final int CASE_COUNT = PATTERN_COUNT * INPUTS_PER_PATTERN;
-    private static final String CORPUS_SHA256 = "bbbaa456e0f85033c645ebac06303be30b6cb9e2966979ee17cada24048c4254";
+    private static final String CORPUS_SHA256 = "4ad598861f4d46603fb3201c2674481cc34416cdbefb5a996e6a1b9a20e4e87b";
 
     private static final int MAX_DEPTH = 3;
     private static final int MAX_INPUT_CHARACTERS = 12;
@@ -169,6 +169,10 @@ public class TestTrinoRegexpDifferential
             List.of("Ａ", "ａ"));
 
     private static final Map<String, List<String>> CASE_ORBIT_BY_CHARACTER = caseOrbitByCharacter();
+
+    // Joni keeps bits 7 and 0-4 of the whole character after \c, so a non-ASCII text character
+    // can write a control character: \c中 is a carriage return, and \cǅ (U+01C5) is U+0085.
+    private static final Map<Integer, List<String>> NON_ASCII_CONTROL_OPERANDS = nonAsciiControlOperands();
 
     // Property names TrinoRegexp and pinned Joni both accept with the same members on the text
     // characters. Olck, Sundanese, and Saurashtra are left out: pinned Joni reads them as ASCII
@@ -489,6 +493,18 @@ public class TestTrinoRegexpDifferential
     private static List<String> codePoints(String value)
     {
         return value.codePoints().mapToObj(Character::toString).toList();
+    }
+
+    private static Map<Integer, List<String>> nonAsciiControlOperands()
+    {
+        Map<Integer, List<String>> operands = new HashMap<>();
+        for (String character : TEXT_CHARACTERS) {
+            int codePoint = character.codePointAt(0);
+            if (codePoint >= 0x80) {
+                operands.computeIfAbsent(codePoint & 0x9F, _ -> new ArrayList<>()).add(character);
+            }
+        }
+        return Map.copyOf(operands);
     }
 
     private static Map<String, List<String>> caseOrbitByCharacter()
@@ -954,8 +970,16 @@ public class TestTrinoRegexpDifferential
             if (form == 2 && codePoint <= 0xFFFF) {
                 return "\\u" + HexFormat.of().toHexDigits((short) codePoint);
             }
-            if (form == 3 && codePoint >= 1 && codePoint <= 26) {
-                return "\\c" + (char) ((random.nextBoolean() ? 'A' : 'a') + codePoint - 1);
+            if (form == 3) {
+                boolean hasLetterOperand = codePoint >= 1 && codePoint <= 26;
+                List<String> operands = NON_ASCII_CONTROL_OPERANDS.getOrDefault(codePoint, List.of());
+                if (!operands.isEmpty() && (!hasLetterOperand || random.nextBoolean())) {
+                    // Joni reads an escaped operand as itself.
+                    return "\\c" + (random.nextBoolean() ? "\\" : "") + operands.get(random.nextInt(operands.size()));
+                }
+                if (hasLetterOperand) {
+                    return "\\c" + (char) ((random.nextBoolean() ? 'A' : 'a') + codePoint - 1);
+                }
             }
             // Octal escapes stay at or below \177: above it they are non-ASCII byte escapes,
             // which are unsupported (TRINO_REGEXP.md, Unsupported features).
