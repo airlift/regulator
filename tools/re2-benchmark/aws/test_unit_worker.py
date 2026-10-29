@@ -154,13 +154,11 @@ import os
 print(os.environ['FAKE_RESULT_BYTES'])
 '''
 
-# A unit as run-unit.sh measures it on a worker: it stores its calibrations in
-# the host evidence, chaining the before it is given, and names them in its table,
-# then exits with its scripted status. An engine build, as in run-unit.sh, stores
-# no calibrations. A unit scripted with a child starts one that outlives it unless
-# its process group is stopped.
+# A unit as run-unit.sh measures it on a worker: it exits with its scripted
+# status. A unit scripted with a child starts one that outlives it unless its
+# process group is stopped.
 FAKE_RUN_UNIT = r'''#!/usr/bin/env python3
-import hashlib, json, os, subprocess, sys, time
+import json, os, subprocess, sys, time
 from pathlib import Path
 unit_id, protocol, replica, directory = sys.argv[1:]
 sequence = os.environ['RE2_CAMPAIGN_LEASE_SEQUENCE']
@@ -171,7 +169,6 @@ with open(os.environ['FAKE_RUNS'], 'a') as runs:
     runs.write(json.dumps({
         'sequence': int(sequence), 'unit_id': unit_id, 'protocol': protocol, 'replica': replica,
         'replica_environment': os.environ['RE2_CAMPAIGN_REPLICA_ID'], 'pid': os.getpid(), 'child': child,
-        'chained': os.environ['BASELINE_UNIT_CALIBRATION_BEFORE'],
         'order': os.environ.get('JONI_COMPARATOR_ORDER'),
     }) + '\n')
 print(f'measuring lease {sequence}', flush=True)
@@ -182,20 +179,6 @@ if behavior.get('rebalance'):
     (notices / 'events-recommendations-rebalance').write_text('{"noticeTime": "2026-10-24T12:00:00Z"}')
 # The sleep on PATH, so a unit on the virtual clock takes virtual time.
 subprocess.run(['sleep', str(behavior.get('seconds', 0))], check=True)
-if unit_id == 'engine-build':
-    sys.exit(behavior.get('status', 0))
-store = Path(os.environ['BASELINE_UNIT_HOST_EVIDENCE']) / 'calibrations'
-def stored(content):
-    path = store / (hashlib.sha256(content.encode()).hexdigest() + '.json')
-    path.write_text(content)
-    return path
-before = os.environ['BASELINE_UNIT_CALIBRATION_BEFORE']
-before = store / f'{before}.json' if before else stored(f'before {sequence}')
-after = stored(f'after {sequence}')
-if behavior.get('stale'):
-    os.utime(after, (time.time() - 120, time.time() - 120))
-Path(directory, 'calibration.tsv').write_text(
-    f'phase\traw_result\nbefore\t{before.name}\nafter\t{after.name}\n')
 sys.exit(behavior.get('status', 0))
 '''
 
@@ -304,7 +287,7 @@ class Worker:
 
 
 class TestUnitWorker(unittest.TestCase):
-    def test_worker_runs_leases_in_order_and_chains_a_calibration_within_a_minute(self):
+    def test_worker_runs_leases_in_order(self):
         def write_stop_lease_once_awaited(worker):
             if worker.object('heartbeat/4.json').exists() and not (worker.bucket / 'input/leases/4.json').exists():
                 worker.write_lease(lease(4, stop=True))
@@ -315,7 +298,7 @@ class TestUnitWorker(unittest.TestCase):
             worker.write_lease(lease(2, 'second', 2))
             worker.write_lease(lease(3, 'third', 3))
             # The controller writes the stop lease only once the host waits for it.
-            status, output = worker.run({2: {'stale': True}}, write_stop_lease_once_awaited, idle_seconds=30)
+            status, output = worker.run({}, write_stop_lease_once_awaited, idle_seconds=30)
 
             self.assertEqual(0, status, output)
             runs = worker.runs()
@@ -331,34 +314,14 @@ class TestUnitWorker(unittest.TestCase):
                 result = worker.object(f'units/{sequence}/result.tar.gz').read_bytes()
                 self.assertEqual(hashlib.sha256(result).hexdigest(), completion['result_sha256'])
                 self.assertEqual(f'host-1/{sequence}', completion['unit_attempt_id'])
-            # The first unit's after is the second's before; the second's after was too old to chain.
-            self.assertEqual(['', completions[0]['calibration_after'], ''], [run['chained'] for run in runs])
-            self.assertEqual([False, True, False], [completion['calibration_chained'] for completion in completions])
-            self.assertEqual(completions[0]['calibration_after'], completions[1]['calibration_before'])
-            # The chained unit's evidence names its link, which the host's ledger also records.
-            with tarfile.open(worker.object('units/2/result.tar.gz')) as result:
-                link = dict(line.split('=', 1) for line in
-                            result.extractfile('./unit-chain.txt').read().decode().splitlines())
-            with tarfile.open(worker.object('units/3/result.tar.gz')) as result:
-                self.assertNotIn('./unit-chain.txt', result.getnames())
             with (worker.host / 'worker-leases.tsv').open() as ledger:
                 leases = list(csv.DictReader(ledger, delimiter='\t'))
             self.assertEqual(['host-1/1', 'host-1/2', 'host-1/3'], [row['unit_attempt_id'] for row in leases])
-            self.assertEqual(['none', 'host-1/1', 'none'], [row['chained_from'] for row in leases])
-            self.assertEqual({'previous_attempt': 'host-1/1', 'calibration': completions[0]['calibration_after'],
-                              'previous_environment_sha256': leases[0]['environment_sha256']},
-                             {key: link[key] for key in ('previous_attempt', 'calibration',
-                                                          'previous_environment_sha256')})
-            self.assertLessEqual(int(link['gap_seconds']), 60)
+            self.assertEqual(['complete'] * 3, [row['outcome'] for row in leases])
             puts = [key for key in worker.puts() if not key.startswith('results/heartbeat/')]
             self.assertEqual([
-                f'results/calibrations/{completions[0]["calibration_before"]}.json',
-                f'results/calibrations/{completions[0]["calibration_after"]}.json',
                 'results/units/1/result.tar.gz', 'results/units/1/completion.json',
-                f'results/calibrations/{completions[1]["calibration_after"]}.json',
                 'results/units/2/result.tar.gz', 'results/units/2/completion.json',
-                f'results/calibrations/{completions[2]["calibration_before"]}.json',
-                f'results/calibrations/{completions[2]["calibration_after"]}.json',
                 'results/units/3/result.tar.gz', 'results/units/3/completion.json',
             ], puts)
             self.assertEqual(('stopped', 'stop-lease'),
@@ -409,9 +372,8 @@ class TestUnitWorker(unittest.TestCase):
             self.assertEqual(0, status, output)
             self.assertEqual([(engine_build.UNIT_ID, '1')], [(run['unit_id'], run['replica']) for run in worker.runs()])
             completion = worker.json('units/1/completion.json')
-            self.assertEqual(('build', engine_build.UNIT_ID, 'complete', None, None),
-                             (completion['phase'], completion['unit_id'], completion['unit_status'],
-                              completion['calibration_before'], completion['calibration_after']))
+            self.assertEqual(('build', engine_build.UNIT_ID, 'complete'),
+                             (completion['phase'], completion['unit_id'], completion['unit_status']))
 
     def test_worker_refuses_a_lease_that_is_not_its_next(self):
         for name, body in (
@@ -470,13 +432,13 @@ class TestUnitWorker(unittest.TestCase):
             self.assertEqual('interrupted', worker.json('heartbeat/1.json')['state'])
             self.assertEqual('interrupted', worker.stop_reason())
 
-    def test_failed_calibration_upload_or_lease_read_leaves_the_unit_incomplete(self):
+    def test_failed_result_upload_or_lease_read_leaves_the_unit_incomplete(self):
         # A failing upload gives up within its 90 seconds, each attempt hanging until its timeout on a virtual
         # clock; a Spot notice during its last attempt interrupts the host, as does one during the twelfth failed
         # lease read in a row, on which the worker gives up.
         for failing, notice, expected_status, expected_reason in (
-                ('results/calibrations/', 0, 1, 'upload-failure'),
-                ('results/calibrations/', 2, 43, 'interrupted'),
+                ('results/units/', 0, 1, 'upload-failure'),
+                ('results/units/', 2, 43, 'interrupted'),
                 ('input/leases/', 0, 1, 'lease-unreadable'),
                 ('input/leases/', 12, 43, 'interrupted')):
             with self.subTest(failing=failing, notice=notice), tempfile.TemporaryDirectory() as temporary:

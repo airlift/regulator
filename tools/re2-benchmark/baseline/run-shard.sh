@@ -22,10 +22,6 @@ SPECIALIZED_CATALOG="${SCRIPT_DIR}/specialized-patterns.tsv"
 # run-unit.sh names a planned work unit; the route measures only the unit's rows
 # and leaves acceptance to the unit.
 UNIT_DIRECTORY=${BASELINE_UNIT_DIRECTORY:?A route runs only inside a work unit; set BASELINE_UNIT_DIRECTORY}
-UNIT_CALIBRATION=${BASELINE_UNIT_CALIBRATION:-both}
-# On a worker host a unit's calibrations become host evidence, so they are
-# written outside the route's raw artifacts.
-UNIT_CALIBRATION_DIRECTORY=${BASELINE_UNIT_CALIBRATION_DIRECTORY:-}
 PLAN_ONLY=${BASELINE_PLAN_ONLY:-false}
 PROTOCOL_QUALIFICATION=${BASELINE_PROTOCOL_QUALIFICATION:-true}
 SHARED_WORK_DIR=${BASELINE_SHARED_WORK_DIR:-${ROOT}/target/baseline-shared}
@@ -38,22 +34,7 @@ PROTOCOL_QUALIFICATION_PROCESS_COUNT=5
 JMH_FORK_COUNT=1
 
 case "${PROTOCOL}" in
-    smoke)
-        CALIBRATION_FORKS=1
-        CALIBRATION_WARMUP_ITERATIONS=3
-        CALIBRATION_MEASUREMENT_ITERATIONS=3
-        CALIBRATION_WARMUP_TIME=1s
-        CALIBRATION_MEASUREMENT_TIME=1s
-        CALIBRATION_PRIME_INVOCATIONS=1
-        ;;
-    qualification)
-        CALIBRATION_FORKS=5
-        CALIBRATION_WARMUP_ITERATIONS=10
-        CALIBRATION_MEASUREMENT_ITERATIONS=10
-        CALIBRATION_WARMUP_TIME=1s
-        CALIBRATION_MEASUREMENT_TIME=1s
-        CALIBRATION_PRIME_INVOCATIONS=0
-        ;;
+    smoke | qualification) ;;
     *)
         echo "Protocol must be smoke or qualification: ${PROTOCOL}" >&2
         exit 1
@@ -109,13 +90,6 @@ if [[ ! ${CAMPAIGN_REPLICA_ID} =~ ^[1-4]$ ]]; then
     echo "RE2_CAMPAIGN_REPLICA_ID must be 1, 2, 3, or 4: ${CAMPAIGN_REPLICA_ID}" >&2
     exit 1
 fi
-case "${UNIT_CALIBRATION}" in
-    before | after | both | none) ;;
-    *)
-        echo "BASELINE_UNIT_CALIBRATION must be before, after, both, or none: ${UNIT_CALIBRATION}" >&2
-        exit 1
-        ;;
-esac
 JMH_SUITE_ORDER=forward
 if ((CAMPAIGN_REPLICA_ID % 2 == 0)); then
     JMH_SUITE_ORDER=reverse
@@ -136,8 +110,6 @@ if [[ -n "${unexpected_existing}" ]]; then
     exit 1
 fi
 mkdir -p "${RESULT_DIR}/raw" "${RESULT_DIR}/logs" "${RESULT_DIR}/normalized"
-calibration_output_directory=${UNIT_CALIBRATION_DIRECTORY:-${RESULT_DIR}/raw}
-mkdir -p "${calibration_output_directory}"
 
 status_file="${RESULT_DIR}/status.txt"
 printf 'status=running\n' > "${status_file}"
@@ -286,13 +258,6 @@ write_route_plan()
     printf 'handler=%s\n' "${handler}"
     printf 'systems=%s\n' "${systems}"
     printf 'unit_id=%s\n' "${UNIT_ID}"
-    printf 'unit_calibration=%s\n' "${UNIT_CALIBRATION}"
-    printf 'calibration_forks=%s\n' "${CALIBRATION_FORKS}"
-    printf 'calibration_warmup=%sx%s\n' \
-        "${CALIBRATION_WARMUP_ITERATIONS}" "${CALIBRATION_WARMUP_TIME}"
-    printf 'calibration_measurement=%sx%s\n' \
-        "${CALIBRATION_MEASUREMENT_ITERATIONS}" "${CALIBRATION_MEASUREMENT_TIME}"
-    printf 'calibration_prime_invocations=%s\n' "${CALIBRATION_PRIME_INVOCATIONS}"
     printf 'joni_comparator_order=%s\n' "${JONI_COMPARATOR_ORDER}"
     printf 'jmh_execution_protocol=%s\n' "${JMH_EXECUTION_PROTOCOL}"
     printf 'jmh_suite_order=%s\n' "${JMH_SUITE_ORDER}"
@@ -414,11 +379,6 @@ jmh_process_jvm_arguments=("${route_jvm_arguments[@]}" -Xms"${HEAP_SIZE}" -Xmx"$
 jmh_fork_arguments="${jmh_process_jvm_arguments[*]}"
 jmh_launcher_jvm_arguments=("${route_jvm_arguments[@]}" -Xms64m -Xmx256m)
 jmh_host_compiler_arguments=()
-# A unit's calibrations compare across its routes, and later with the next
-# unit's, so every unit calibrates in the native-access JVM.
-calibration_jvm_arguments=(--enable-native-access=ALL-UNNAMED --illegal-native-access=deny --add-modules=jdk.incubator.vector)
-calibration_launcher_jvm_arguments=("${calibration_jvm_arguments[@]}" -Xms64m -Xmx256m)
-calibration_fork_arguments="${calibration_jvm_arguments[*]} -Xms${HEAP_SIZE} -Xmx${HEAP_SIZE} -XX:+AlwaysPreTouch"
 
 prepare_jmh_host_compiler_arguments()
 {
@@ -741,32 +701,11 @@ semantic_result_digest=$(sha256sum "${RESULT_DIR}/semantic-evidence.tsv" | awk '
     printf '%s\t%s\taccepted\t%s\n' "${ROUTE}" "${semantic_tests}" "${semantic_result_digest}"
 } > "${RESULT_DIR}/semantic-gate.tsv"
 
-run_calibration_jmh_with_classpath()
+# Prints the steal and total ticks of /proc/stat's aggregate cpu line; steal is its eighth value. The total sums the
+# first eight values, because the guest values that follow are already counted in user and nice.
+cpu_ticks()
 {
-    local classpath=$1
-    local filter=$2
-    local output=$3
-    shift 3
-    taskset --cpu-list "${CPU_LIST}" \
-        java "${calibration_launcher_jvm_arguments[@]}" \
-        -cp "${classpath}" \
-        org.openjdk.jmh.Main "${filter}" \
-        -f "${CALIBRATION_FORKS}" \
-        -wi "${CALIBRATION_WARMUP_ITERATIONS}" \
-        -i "${CALIBRATION_MEASUREMENT_ITERATIONS}" \
-        -w "${CALIBRATION_WARMUP_TIME}" \
-        -r "${CALIBRATION_MEASUREMENT_TIME}" \
-        -foe true \
-        -prof gc \
-        -jvmArgs "${calibration_fork_arguments}" \
-        -rf json \
-        -rff "${output}" \
-        "$@"
-}
-
-run_calibration_jmh()
-{
-    run_calibration_jmh_with_classpath "${CLASSPATH}" "$@"
+    awk '$1 == "cpu" {for (i = 2; i <= 9; i++) total += $i; printf "%.0f %.0f\n", $9, total; exit}' /proc/stat
 }
 
 run_protocol_qualification()
@@ -1071,20 +1010,11 @@ forked_process_arguments=(
     --allow-mixed-process-sets
     --expected-process-groups "${JMH_FORK_COUNT}")
 
-calibration_filter='^io\.airlift\.regulator\.BenchmarkExpressionPlans\.findLiteral$'
-calibration_parameters=(-p workload=KIB_LATE)
+# The route's CPU steal is the share of the host's CPU time that a ready vCPU
+# spent waiting for the hypervisor while the route measures, from before its
+# representatives to after its last row.
+read -r cpu_steal_before cpu_total_before < <(cpu_ticks)
 run_protocol_qualification
-# A unit calibrates before its first route and after its last.
-if [[ "${UNIT_CALIBRATION}" == before || "${UNIT_CALIBRATION}" == both ]]; then
-    if [[ ${CALIBRATION_PRIME_INVOCATIONS} -gt 0 ]]; then
-        run_calibration_jmh "${calibration_filter}" "${RESULT_DIR}/raw/calibration-prime.json" \
-            "${calibration_parameters[@]}" |
-            tee "${RESULT_DIR}/logs/calibration-prime.log"
-    fi
-    run_calibration_jmh "${calibration_filter}" "${calibration_output_directory}/calibration-before.json" \
-        "${calibration_parameters[@]}" |
-        tee "${RESULT_DIR}/logs/calibration-before.log"
-fi
 
 normalized_files=()
 
@@ -1445,11 +1375,11 @@ case "${handler}" in
         ;;
 esac
 
-if [[ "${UNIT_CALIBRATION}" == after || "${UNIT_CALIBRATION}" == both ]]; then
-    run_calibration_jmh "${calibration_filter}" "${calibration_output_directory}/calibration-after.json" \
-        "${calibration_parameters[@]}" |
-        tee "${RESULT_DIR}/logs/calibration-after.log"
-fi
+read -r cpu_steal_after cpu_total_after < <(cpu_ticks)
+{
+    printf 'cpu_steal_ticks=%s\n' "$((cpu_steal_after - cpu_steal_before))"
+    printf 'cpu_total_ticks=%s\n' "$((cpu_total_after - cpu_total_before))"
+} >> "${RESULT_DIR}/run-metadata.txt"
 
 if [[ ${#normalized_files[@]} -eq 0 ]]; then
     echo "Shard produced no normalized result files" >&2

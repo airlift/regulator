@@ -3,7 +3,6 @@ import csv
 import hashlib
 import importlib.util
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -150,10 +149,11 @@ class SampleFixture:
             "instance_type": instance_type, "availability_zone": "us-west-2a", "shard_id": "only",
             "unit_id": self.UNIT, "replica_id": str(replica), "unit_attempt_id": f"{platform}-session-{replica}/1",
             "instance_id": f"i-{platform}-{replica}", "host_epoch": f"{platform}-epoch-{replica}",
+            "region": "us-west-2",
             "candidate_commit": "a" * 40, "engine_tree": "b" * 40, "evidence_manifest_sha256": "c" * 64,
         }
         self.sessions[(platform, replica)] = aggregate_results.Session(
-            receipt, Path(platform, f"replica-{replica}"), replica == 4, 0.01, "d" * 64, (), {})
+            receipt, Path(platform, f"replica-{replica}"), replica == 4, 0, 1000, "d" * 64, (), {})
         self.observed[(platform, replica)] = {row["row_id"]: {
             "row_id": row["row_id"], "score": f"{self.score(row, replica):.12g}",
             "score_unit": "ns/op", "allocation_bytes": "0" if row["allocation_contract"] == "allocation-free" else "16",
@@ -169,11 +169,13 @@ class SampleFixture:
         observed = {session.key: list(self.observed[key].values()) for key, session in self.sessions.items()}
         _, host_rows = aggregate_results.build_host_rows(
             sessions, observed, {row["row_id"]: row for row in self.rows}, {}, {})
+        _, host_checks = aggregate_results.build_host_checks(host_rows, sessions)
+        excluded = aggregate_results.flagged_hosts(host_checks)
         _, comparisons = aggregate_results.build_comparisons(host_rows, self.rows)
-        _, scaling, membership, mismatches, classes = aggregate_results.build_scaling(host_rows, self.rows)
-        _, rows, _ = aggregate_results.build_row_aggregates(host_rows, membership, mismatches, classes)
-        _, comparison_rows, _ = aggregate_results.build_comparison_aggregates(comparisons)
-        _, jobs = aggregate_results.build_confirmation_jobs(rows, host_rows, comparisons, scaling, sessions)
+        _, scaling, membership, mismatches, classes = aggregate_results.build_scaling(host_rows, self.rows, excluded)
+        _, rows, _ = aggregate_results.build_row_aggregates(host_rows, excluded, membership, mismatches, classes)
+        _, comparison_rows, _ = aggregate_results.build_comparison_aggregates(comparisons, excluded)
+        _, jobs = aggregate_results.build_confirmation_jobs(rows, host_rows, comparisons, scaling, sessions, excluded)
         return argparse.Namespace(rows=rows, comparisons=comparison_rows, confirmation_jobs=jobs)
 
 
@@ -324,10 +326,43 @@ class TestReductionRules(unittest.TestCase):
         self.assertNotIn("ratio-host-cv-above-5-percent", row["unresolved_reasons"])
         self.assertEqual(reduction.confirmation_jobs, [])
 
-    def test_drift_limit_uses_published_precision(self):
-        self.assertFalse(aggregate_results.exceeds_drift_limit(0.049999999999))
-        self.assertFalse(aggregate_results.exceeds_drift_limit(0.050000000000000044))
-        self.assertTrue(aggregate_results.exceeds_drift_limit(0.050000000001))
+    def test_cv_limit_uses_published_precision(self):
+        self.assertFalse(aggregate_results.exceeds_cv_limit(0.049999999999))
+        self.assertFalse(aggregate_results.exceeds_cv_limit(0.050000000000000044))
+        self.assertTrue(aggregate_results.exceeds_cv_limit(0.050000000001))
+
+    def test_host_check_flags_only_a_slow_noisy_or_stealing_host(self):
+        def check(row_count, multiplier, unit="ns/op", steal=0):
+            """The host check of three hosts measuring row_count rows, the third scaled by multiplier(row)."""
+            sessions = [aggregate_results.Session(
+                {"platform": "r8i", "instance_id": f"i-{host}", "host_epoch": f"epoch-{host}", "region": "us-west-2"},
+                Path(), False, steal if host == 3 else 0, 1000, "", (), {}) for host in (1, 2, 3)]
+            host_rows = [{
+                "platform": "r8i", "row_id": f"row-{row}", "host_epoch": f"epoch-{host}", "confirmation": "false",
+                "score": str(100 * (multiplier(row) if host == 3 else 1)), "score_unit": unit, "outcome": "accepted",
+            } for row in range(row_count) for host in (1, 2, 3)]
+            _, checks = aggregate_results.build_host_checks(host_rows, sessions)
+            return [row["reason"] for row in checks]
+
+        # Each host is judged against the median of its rows' three primary replicas, so one outlying host leaves
+        # its two partners unflagged.
+        for name, arguments, reason in (
+                ("slow", (20, lambda row: 1.12), "slow-above-2-percent"),
+                ("slightly slow", (20, lambda row: 1.025), "slow-above-2-percent"),
+                ("just under the slow limit", (20, lambda row: 1.0195), ""),
+                # A host is judged by its median deviation, so one outlying row does not make it slow or noisy.
+                ("one outlying row", (20, lambda row: 2 if row == 0 else 1), ""),
+                # Fewer ops per second is slower.
+                ("slow throughput", (20, lambda row: 1 / 1.12, "ops/s"), "slow-above-2-percent"),
+                ("fast", (20, lambda row: 0.94), ""),
+                ("fast throughput", (20, lambda row: 1 / 0.94, "ops/s"), ""),
+                ("noisy", (20, lambda row: 1.04 if row % 2 else 1 / 1.04), "noise-above-3-percent"),
+                ("just under the noise limit", (20, lambda row: 1.029 if row % 2 else 1 / 1.029), ""),
+                # Too few rows to judge slowness by.
+                ("slow on 19 rows", (19, lambda row: 1.12), ""),
+                ("stealing", (5, lambda row: 1, "ns/op", 11), "steal-above-1-percent")):
+            with self.subTest(name):
+                self.assertEqual(["", "", reason], check(*arguments))
 
     def test_persistent_ratio_variability_remains_unresolved_after_confirmation(self):
         candidate = "only/joni/count/regulator-native-access"
@@ -439,8 +474,10 @@ class TestUnitCampaignReduction(unittest.TestCase):
     SHARD = "trino-operations"
     SCORES = {"joni": 100, "regulator-native-access": 80, "regulator-object-row": 300}
 
-    def reduction(self, root):
-        """A chained unit campaign of the shard whose first unit is unstable on r8i, and a reducer over it."""
+    def reduction(self, root, steal=0):
+        """A unit campaign of the shard whose first unit is unstable on r8i, and a reducer over it.
+
+        steal is the CPU steal ticks, of each route's 1,000, that the r9g host running replica 2 records."""
         unstable = next(unit for unit in UNIT_SESSION.work_units.load(BASELINE).values()
                         if (unit["shard_id"], unit["unit_index"]) == (self.SHARD, "1"))
         unstable_rows = {row_id for row_id in unstable["owned"] if row_id.endswith("/regulator-native-access")}
@@ -450,8 +487,8 @@ class TestUnitCampaignReduction(unittest.TestCase):
                 return {1: 60, 2: 80, 3: 100, 4: 80}[replica]
             return self.SCORES[row["system"]]
 
-        campaign = UnitCampaign(root / "campaign-results", self.SHARD, score=score, host_calibrations=True,
-                                chained=True)
+        campaign = UnitCampaign(root / "campaign-results", self.SHARD, score=score,
+                                steal=lambda platform, host: steal if (platform, host) == ("r9g", 2) else 0)
         # The controller stages each lease's result under unit-results/ before it retains the accepted copy.
         for receipt in campaign.receipts:
             host_session, _, lease = receipt["unit_attempt_id"].rpartition("/")
@@ -483,7 +520,7 @@ class TestUnitCampaignReduction(unittest.TestCase):
             _, unstable, _, aggregate = self.reduction(root)
             summary = aggregate([])
             output = root / "output"
-            self.assertEqual(24, summary["primary_sessions"])
+            self.assertEqual(18, summary["primary_sessions"])
             aggregates = {(row["platform"], row["row_id"]): row for row in read_tsv(output / "row-aggregates.tsv")}
             joni = next(row_id for row_id in unstable["owned"] if row_id.endswith("/joni"))
             self.assertEqual(("3", "100"), (
@@ -528,7 +565,7 @@ class TestUnitCampaignReduction(unittest.TestCase):
             self.assertTrue(any(row["source"].endswith("/run-metadata.txt") and row["key"] == "candidate_commit"
                                 for row in metadata))
             capacity = read_tsv(output / "capacity.tsv")
-            self.assertEqual(24, len(capacity))
+            self.assertEqual(18, len(capacity))
             self.assertTrue(all(row["exit_status"] == "0" for row in capacity))
             events = read_tsv(output / "events.tsv")
             self.assertEqual(["interruption"], [row["event_type"] for row in events])
@@ -613,23 +650,6 @@ class TestUnitCampaignReduction(unittest.TestCase):
             with self.assertRaisesRegex(aggregate_results.ReductionError, "no semantic-rejection ledger"):
                 aggregate([])
 
-    def test_campaign_archive_binds_each_attempts_calibrations_and_previous_completion(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            _, _, _, aggregate = self.reduction(root)
-            aggregate([])
-            inventory = read_tsv(root / "output/artifact-inventory.tsv")
-            # An attempt's artifact includes the host calibrations it references, and each chained attempt the
-            # previous lease's completion marker it was checked against.
-            self.assertEqual(24 * 2, sum(row["logical_name"].startswith("../calibrations/") for row in inventory))
-            self.assertEqual(2 * 3 * 3, sum(
-                re.fullmatch(r"\.\./lease-[0-9]+-completion\.json", row["logical_name"]) is not None
-                for row in inventory))
-            for unbound in (lambda path: path.parent.name == "calibrations",
-                            lambda path: path.name.endswith("-completion.json")):
-                with self.assertRaisesRegex(aggregate_results.ReductionError, "not bound by the campaign archive"):
-                    aggregate([], unbound=unbound)
-
     def test_confirmation_replica_settles_its_unit_only_on_another_instance(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -645,21 +665,27 @@ class TestUnitCampaignReduction(unittest.TestCase):
             with self.assertRaisesRegex(aggregate_results.ReductionError, "replicas of a unit share an EC2 instance"):
                 aggregate([reused])
 
-    def test_chain_claim_is_checked_against_the_previous_leases_retained_completion(self):
+    def test_stealing_host_is_left_out_until_confirmations_replace_it(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            campaign, unstable, _, aggregate = self.reduction(root)
-            # An attempt is refused when it claims to chain from a before calibration that its previous lease
-            # never took, even though its own evidence agrees with the claim.
-            honest = next(receipt for receipt in campaign.receipts if (
-                receipt["platform"], receipt["unit_id"], receipt["replica_id"]) == ("r8i", unstable["unit_id"], "1"))
-            shutil.rmtree(campaign.directory(honest))
-            campaign.receipts.remove(honest)
-            # Each chained lease of the host closed one point higher; its fourth closed at 104.
-            campaign.add("r8i", unstable, 1, host=1, chained_before=103.5)
-            with self.assertRaisesRegex(aggregate_results.ReductionError,
-                                        "does not chain from the completion of r8i-session-1/4: calibration_after"):
-                aggregate([])
+            campaign, _, _, aggregate = self.reduction(root, steal=20)
+            output = root / "output"
+            self.assertEqual(1, aggregate([])["flagged_hosts"])
+            [flagged] = [row for row in read_tsv(output / "host-checks.tsv") if row["flagged"] == "true"]
+            self.assertEqual(("r9g-epoch-2", "0.02", "steal-above-1-percent"),
+                             (flagged["host_epoch"], flagged["steal_share"], flagged["reason"]))
+            r9g = [row for row in read_tsv(output / "row-aggregates.tsv") if row["platform"] == "r9g"]
+            self.assertEqual({("2", "1", "flagged-host-excluded")},
+                             {(row["host_count"], row["flagged_host_count"], row["unresolved_reasons"]) for row in r9g})
+            # Every unit the host measured is confirmed on a host that measured none of its replicas.
+            self.assertEqual(sorted(unit["unit_id"] for unit in campaign.units), sorted(
+                job["unit_id"] for job in read_tsv(output / "confirmation-jobs.tsv") if job["platform"] == "r9g"))
+
+            aggregate([campaign.add("r9g", unit, 4, host=4) for unit in campaign.units])
+            r9g = [row for row in read_tsv(output / "row-aggregates.tsv") if row["platform"] == "r9g"]
+            self.assertEqual({("3", "1", "false")},
+                             {(row["host_count"], row["flagged_host_count"], row["unresolved"]) for row in r9g})
+            self.assertEqual([], [job for job in read_tsv(output / "confirmation-jobs.tsv") if job["platform"] == "r9g"])
 
 
 if __name__ == "__main__":

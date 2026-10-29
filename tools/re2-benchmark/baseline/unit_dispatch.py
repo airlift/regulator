@@ -1,13 +1,11 @@
 """The campaign controller's unit ledgers, its S3 exchange with unit workers, and accepted attempts' layout.
 
 A unit campaign's controller leases work units to worker hosts through S3, retains each accepted attempt
-under units/<platform>/<unit>/replica-<n>/<host session>/lease-<n>, with the host calibrations and
-predecessor marker it references beside it in the host session's directory, and records it in
-accepted-units.tsv. Recovery and the reducer find retained attempts by the same layout.
+under units/<platform>/<unit>/replica-<n>/<host session>/lease-<n>, and records it in accepted-units.tsv.
+Recovery and the reducer find retained attempts by the same layout.
 """
 
 import csv
-import hashlib
 import json
 import os
 import re
@@ -28,7 +26,7 @@ WORKER_EVIDENCE_PATTERN = r"heartbeat/[0-9]+\.json|events/[0-9]+-interrupted\.ta
 # The completion marker fields the controller reads; a unit worker writes each of them.
 UNIT_COMPLETION_FIELDS = (
     "schema_version", "host_session", "sequence", "campaign_id", "phase", "platform", "unit_id", "replica_id",
-    "unit_attempt_id", "exit_status", "unit_status", "result_sha256", "calibration_before", "calibration_after")
+    "unit_attempt_id", "exit_status", "unit_status", "result_sha256")
 
 
 def accepted_row(rows, receipt, identity, attempt_field, attempts):
@@ -192,10 +190,6 @@ def result_key(sequence):
     return f"units/{sequence}/result.tar.gz"
 
 
-def calibration_key(name):
-    return f"calibrations/{name}"
-
-
 def recovered_keys(objects):
     """The keys of a worker's uploads that its cleanup recovered into objects."""
     return {path.relative_to(objects).as_posix() for path in objects.rglob("*") if path.is_file()}
@@ -262,27 +256,8 @@ def extract_unit_result(archive, directory):
         result.extractall(directory, filter="data")
 
 
-def retain_unit_attempt(directory, final, calibrations, predecessor=None):
-    """Copy an accepted attempt to its retained directory, and the host calibrations it references and
-    a chained attempt's predecessor completion marker beside it, in the host session's directory."""
-    host_files = [f"calibrations/{name}" for name in calibrations] + ([predecessor] if predecessor else [])
-    for name in host_files:
-        source = directory.parent / name
-        target = final.parent / name
-        if target.exists():
-            if target.read_bytes() != source.read_bytes():
-                raise UnsafeCampaignError(f"retained host evidence differs: {target}")
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # A host file appears only whole and verified, so a copy a crash cut short is redone.
-        temporary = target.with_name(f".{target.name}.new")
-        shutil.copyfile(source, temporary)
-        copied = temporary.read_bytes()
-        if name.startswith("calibrations/") and f"{hashlib.sha256(copied).hexdigest()}.json" != target.name:
-            raise UnsafeCampaignError(f"host calibration does not match its name: {source}")
-        if copied != source.read_bytes():
-            raise UnsafeCampaignError(f"retained host evidence differs from its source: {source}")
-        os.replace(temporary, target)
+def retain_unit_attempt(directory, final):
+    """Copy an accepted attempt to its retained directory."""
     if final.exists():
         raise UnsafeCampaignError(f"retained unit attempt already exists: {final}")
     temporary = final.with_name(f".{final.name}.new")

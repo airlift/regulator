@@ -500,41 +500,6 @@ def combine(arguments):
     print(f"Validated {len(rows)} observed rows")
 
 
-def calibration(arguments):
-    rows = calibration_rows(arguments.before, arguments.after)
-    write_tsv(arguments.output, tuple(rows[0]), rows)
-
-
-def calibration_rows(before_path, after_path):
-    """The before/after calibration table of two calibration JMH results."""
-    rows = []
-    for phase, path in (("before", before_path), ("after", after_path)):
-        actual = jmh_results([path], require_one_process_group_per_file=False)
-        if len(actual) != 1:
-            raise ValueError(f"Expected one calibration row in {path}, found {len(actual)}")
-        (benchmark, parameters), result = next(iter(actual.items()))
-        metric = result["primaryMetric"]
-        score, sample_count, coefficient_of_variation = metric_statistics(metric)
-        rows.append({
-            "phase": phase,
-            "benchmark": benchmark,
-            "parameters": parameters,
-            "score": format_number(score),
-            "score_unit": metric["scoreUnit"],
-            "sample_count": str(sample_count),
-            "coefficient_of_variation": format_number(coefficient_of_variation),
-            "raw_result": path.name,
-        })
-    if rows[0]["benchmark"] != rows[1]["benchmark"] or rows[0]["parameters"] != rows[1]["parameters"]:
-        raise ValueError("Calibration before and after rows do not describe the same workload")
-    before = float(rows[0]["score"])
-    after = float(rows[1]["score"])
-    drift = abs(after - before) / min(before, after)
-    for row in rows:
-        row["before_after_drift"] = format_number(drift)
-    return rows
-
-
 class ProtocolQualificationError(ValueError):
     """Valid timing evidence failed the numerical protocol gate."""
 
@@ -618,28 +583,6 @@ def protocol_equivalence(arguments):
             f"Specialized JMH protocol failed the median or relative standard error gate "
             f"(maximum median difference {format_number(arguments.maximum)}, maximum RSE 0.05): "
             f"{', '.join(failures)}")
-
-
-def validate_drift(arguments):
-    failures = []
-    path = arguments.calibration
-    with path.open(newline="", encoding="utf-8") as input_file:
-        reader = csv.DictReader(input_file, delimiter="\t")
-        if "before_after_drift" not in (reader.fieldnames or ()):
-            raise ValueError(f"Drift evidence has no before_after_drift column: {path}")
-        rows = list(reader)
-    if not rows:
-        raise ValueError(f"Drift evidence is empty: {path}")
-    for line_number, row in enumerate(rows, start=2):
-        drift = float(row["before_after_drift"])
-        if not math.isfinite(drift) or drift < 0:
-            raise ValueError(f"Invalid drift in {path}:{line_number}: {row['before_after_drift']!r}")
-        if drift > arguments.maximum:
-            failures.append(f"{path}:{line_number}={format_number(drift)}")
-    if failures:
-        raise ValueError(
-            f"Before/after drift exceeded {format_number(arguments.maximum)}: "
-            + ", ".join(failures))
 
 
 def jmh_runtime_seconds(row_count, process_count, warmup_iterations, measurement_iterations, iteration_seconds):
@@ -757,12 +700,6 @@ def parser():
     combine_parser.add_argument("inputs", type=Path, nargs="+")
     combine_parser.set_defaults(function=combine)
 
-    calibration_parser = subparsers.add_parser("calibration")
-    calibration_parser.add_argument("--before", type=Path, required=True)
-    calibration_parser.add_argument("--after", type=Path, required=True)
-    calibration_parser.add_argument("--output", type=Path, required=True)
-    calibration_parser.set_defaults(function=calibration)
-
     protocol_parser = subparsers.add_parser("protocol-equivalence")
     protocol_parser.add_argument("--reference", type=Path, required=True)
     protocol_parser.add_argument("--specialized", type=Path, action="append", required=True)
@@ -773,11 +710,6 @@ def parser():
     protocol_parser.add_argument("--maximum", type=float, required=True)
     protocol_parser.add_argument("--output", type=Path, required=True)
     protocol_parser.set_defaults(function=protocol_equivalence)
-
-    drift_parser = subparsers.add_parser("validate-drift")
-    drift_parser.add_argument("--calibration", type=Path, required=True)
-    drift_parser.add_argument("--maximum", type=float, required=True)
-    drift_parser.set_defaults(function=validate_drift)
 
     return argument_parser
 

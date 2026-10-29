@@ -283,6 +283,17 @@ def jvm_build_once(destination, java, archive, provenance):
     return destination / "jvm-build.json"
 
 
+def cpu_ticks():
+    """The steal and total ticks of /proc/stat's aggregate cpu line; steal is its eighth value. The total sums the
+    first eight values, because the guest values that follow are already counted in user and nice."""
+    for line in Path("/proc/stat").read_text().splitlines():
+        fields = line.split()
+        if fields and fields[0] == "cpu":
+            values = [int(value) for value in fields[1:]]
+            return values[7], sum(values[:8])
+    raise ValueError("/proc/stat has no aggregate cpu line")
+
+
 def run_unit(directory, unit_id, replica, root, native_directory, jvm_directory, unit_attempt, region, archive,
              provenance, java="java"):
     """Verify and measure one unit's comparisons on this host, pinned to one CPU, and accept the attempt."""
@@ -309,6 +320,9 @@ def run_unit(directory, unit_id, replica, root, native_directory, jvm_directory,
     native_runners = {engine: str(native_directory / collection.native_target({"suite": suite}, engine))
                       for engine in collection.NATIVE_RUNNERS}
     affinity = os.sched_getaffinity(0)
+    # The host's CPU steal while the group's partitions measure. The counters are diagnostic evidence: the receipt
+    # check validates them, but no host check or report reads them.
+    steal = total = 0
     try:
         # Children inherit affinity: all verification and timing run on one CPU.
         os.sched_setaffinity(0, {min(affinity)})
@@ -325,13 +339,19 @@ def run_unit(directory, unit_id, replica, root, native_directory, jvm_directory,
                     # Only a verdict on the regex semantics is final; a runner that failed or never
                     # started says nothing about them.
                     raise UnitRejection(SEMANTIC_FAILURE_STATUS, str(error)) from error
+                steal_before, total_before = cpu_ticks()
                 try:
                     collection.measure(path, results, java, classpath, native_runners, environment["platform"],
                                        receipt, archive, provenance)
                 except collection.BudgetOverrun as error:
                     raise UnitRejection(PROTOCOL_REJECTION_STATUS, str(error)) from error
+                steal_after, total_after = cpu_ticks()
+                steal += steal_after - steal_before
+                total += total_after - total_before
     finally:
         os.sched_setaffinity(0, affinity)
+    with (root / "run-metadata.txt").open("a") as file:
+        file.write(f"cpu_steal_ticks={steal}\ncpu_total_ticks={total}\n")
     write_unit_evidence(root)
     unit_session.write_unit_receipt(root / "unit-receipt.tsv", validate_unit_attempt(root, directory))
 
@@ -373,6 +393,7 @@ def validate_unit_attempt(root, directory):
     metadata = read_properties(root / "run-metadata.txt")
     if metadata["unit_id"] != unit["unit_id"] or metadata["heap_size"] != environment["benchmark_heap_size"]:
         raise ValueError("unit metadata differs from its unit or host")
+    unit_session.route_cpu_ticks(root / "run-metadata.txt", metadata)
     affinity = collection.load(root / "cpu-affinity.json")
     if len(affinity) != 1 or type(affinity[0]) is not int or affinity[0] < 0:
         raise ValueError("language unit lacks single-CPU affinity evidence")

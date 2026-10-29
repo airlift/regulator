@@ -13,15 +13,13 @@ def parse_args():
     parser.add_argument("--row-protocol", type=Path, default=directory / "row-protocol.tsv")
     parser.add_argument("--unit-directory", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
-    parser.add_argument("--host-evidence", type=Path)
     return parser.parse_args()
 
 
 def main():
     arguments = parse_args()
     try:
-        receipt = validate_unit_results(
-            arguments.unit_directory, arguments.manifest, arguments.row_protocol, arguments.host_evidence)
+        receipt = validate_unit_results(arguments.unit_directory, arguments.manifest, arguments.row_protocol)
         write_unit_receipt(arguments.receipt, receipt)
     except (OSError, ValueError) as error:
         raise SystemExit(f"unit result rejected: {error}") from error

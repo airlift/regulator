@@ -1,9 +1,9 @@
 """Static measurement seconds of manifest rows under their frozen protocols.
 
-These are the per-row, per-selector, representative, and calibration costs of
-a unit's JMH runs, and the cost of a language comparison's runs. Engines are
-prebuilt, so building, pinned Trino preparation, and host bootstrap are not
-charged; they do not scale with the rows a host measures.
+These are the per-row, per-selector, and representative costs of a unit's JMH
+runs, and the cost of a language comparison's runs. Engines are prebuilt, so
+building, pinned Trino preparation, and host bootstrap are not charged; they do
+not scale with the rows a host measures.
 """
 from shard_results import jmh_runtime_seconds
 
@@ -11,11 +11,6 @@ import row_protocol
 
 
 JMH_STARTUP_SECONDS = 2
-# One qualification calibration: five forks of ten warmup and ten measurement seconds.
-CALIBRATION_FORKS = 5
-CALIBRATION_WARMUP_ITERATIONS = 10
-CALIBRATION_MEASUREMENT_ITERATIONS = 10
-CALIBRATION_ITERATION_SECONDS = 1
 # A full five-fork reference and five bounded host-JVM processes for one representative.
 PROTOCOL_REPRESENTATIVE_SECONDS = 132
 
@@ -54,14 +49,6 @@ def selector_startup_seconds(protocol):
     if protocol["execution"] == "jmh-processes":
         return (int(protocol["processes"]) + 1) * JMH_STARTUP_SECONDS
     return JMH_STARTUP_SECONDS
-
-
-def calibration_seconds(invocations):
-    measured = jmh_runtime_seconds(
-        1, CALIBRATION_FORKS, CALIBRATION_WARMUP_ITERATIONS, CALIBRATION_MEASUREMENT_ITERATIONS,
-        CALIBRATION_ITERATION_SECONDS)
-    # Each invocation starts its forks and the parent JVM.
-    return invocations * (measured + (CALIBRATION_FORKS + 1) * JMH_STARTUP_SECONDS)
 
 
 def representative_seconds(count):
@@ -123,9 +110,8 @@ def measurement_seconds(rows, protocols):
     return sum(row_seconds(protocols[row["row_id"]]) for row in rows)
 
 
-def estimate(rows, protocols, representative_count=0, calibration_invocations=0):
+def estimate(rows, protocols, representative_count=0):
     return (
         measurement_seconds(rows, protocols) +
         sum(selector_startup_seconds(protocol) for protocol in selectors(rows, protocols).values()) +
-        representative_seconds(representative_count) +
-        calibration_seconds(calibration_invocations))
+        representative_seconds(representative_count))

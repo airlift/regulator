@@ -506,7 +506,6 @@ those prefixes.
 |---|---|---|
 | `<input_prefix>/leases/<seq>.json` | controller | the host's lease `seq`, numbered from 1 |
 | `<result_prefix>/heartbeat/<seq>.json` | host | its state while it waits for, runs, or uploads lease `seq` |
-| `<result_prefix>/calibrations/<sha256>.json` | host | a calibration result, before the first unit referencing it |
 | `<result_prefix>/units/<seq>/result.tar.gz` | host | the unit directory of lease `seq` |
 | `<result_prefix>/units/<seq>/completion.json` | host | the attempt's completion marker, written last |
 | `<result_prefix>/events/<seq>-interrupted.tar.gz` | host | an interruption record and the partial unit |
@@ -558,7 +557,6 @@ replica, and stop reason are `null` when they do not apply.
 A completion marker is `{"schema_version": 1, "host_session", "sequence",
 "campaign_id", "phase", "platform", "unit_id", "replica_id",
 "unit_attempt_id", "exit_status", "unit_status", "result_sha256",
-"calibration_before", "calibration_after", "calibration_chained",
 "started_at", "finished_at"}`. `unit_attempt_id` is `<host_session>/<seq>`,
 `unit_status` is `complete` or `failed`, and `result_sha256` is the digest of
 `result.tar.gz`. A failed unit, including one whose representative failed with
@@ -591,30 +589,16 @@ The worker stops, with its reason in the final heartbeat and
 | `lifetime` | its lifetime has passed; no lease starts after it, a running unit finishes | 0 |
 | `rebalance` | a rebalance recommendation came during the last unit or wait | 0 |
 | `interrupted` | a Spot instance-action notice | 43 |
-| `invalid-lease`, `lease-unreadable`, `upload-failure` | a malformed lease, 12 failed lease reads in a row, or an upload, such as a calibration's, still failing at its bound | 1 |
+| `invalid-lease`, `lease-unreadable`, `upload-failure` | a malformed lease, 12 failed lease reads in a row, or an upload still failing at its bound | 1 |
 
 The host evidence holds the environment files, `engine-build.txt`,
-`host-capacity.txt`, `leases/`, `calibrations/`, `worker-leases.tsv` (each
-lease's outcome, status, calibrations, attempt ID, the attempt it chained from
-and after what gap, and the digest of its environment files),
+`host-capacity.txt`, `leases/`, `worker-leases.tsv` (each lease's outcome,
+status, attempt ID, and the digest of its environment files),
 `worker-session.txt`, the shared semantic receipts, and the logs.
 
-Calibrations are host evidence of baseline units; a language unit or engine
-build runs none. `run-unit.sh` stores each baseline unit's calibrations once,
-as `calibrations/<sha256>.json`, and the unit's `unit-evidence.tsv` references
-them by digest. When the next baseline lease starts within 60 seconds of the
-previous complete unit's after calibration, that calibration is the next
-unit's before and the next unit runs no before of its own; otherwise it
-calibrates before afresh. A chained unit's `unit-chain.txt` names the attempt it
-chained from, that attempt's after calibration, the gap, and the previous
-attempt's environment digest, and acceptance requires the lease before it on
-the same host, within 60 seconds, in the same environment. The controller
-checks that link against the previous lease's own completion marker, which must
-show it complete with the named after calibration, and retains that marker
-beside the accepted attempt as `lease-<n>-completion.json`. Accepting a
-worker's baseline unit therefore needs its host's `calibrations/`, through
-`validate-unit-results.py --host-evidence`; see
-[unit acceptance](../baseline/ACCEPTANCE.md).
+Each unit result is self-contained: its routes record the host's CPU steal
+over their measurements, and [unit acceptance](../baseline/ACCEPTANCE.md)
+needs nothing from the host evidence.
 
 The first accepted attempt of a platform, unit, and replica wins. A later
 completed attempt of the same unit replica, such as one leased again after a
@@ -653,8 +637,8 @@ slow language comparison isolated in its own unit, is On-Demand work from the
 start unless the campaign is `--spot-only`.
 
 The controller polls each worker's uploads. A completion marker's result must
-match `result_sha256` and its lease; the attempt then passes the unit gate
-against the host's calibrations, is retained, and is added to
+match `result_sha256` and its lease; the attempt then passes the unit gate,
+is retained, and is added to
 `accepted-units.tsv`. Other outcomes:
 
 - An interruption record, or a status-43 exit while a lease ran, records an
@@ -685,7 +669,7 @@ against the host's calibrations, is retained, and is added to
   host epoch of the slot's first worker) and the failures it inherited
   (`slot_failures`), so a restarted controller resumes every slot's count.
 - A status-42 protocol rejection, a status-44 semantic failure, a rejected
-  unit capacity, a marker naming a calibration missing from S3, a result that
+  unit capacity, a result that
   does not match its marker, and a failed artifact gate leave the unit
   unresolved without a retry while other work continues.
 - Status 44 means the route's correctness stage failed: a semantic test, the

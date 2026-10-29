@@ -43,9 +43,6 @@ UPLOAD_RETRY_SECONDS=5
 # A unit result's upload attempts and budget grow by its size at this rate, so
 # a large one, such as an engine build's archives, has time to land.
 UPLOAD_MINIMUM_RATE=$((4 * 1024 * 1024))
-# A calibration serves as the next unit's before only while the host is still
-# in the state it measured.
-CHAIN_WINDOW_SECONDS=60
 # The worker gives up on this many consecutive failed lease reads.
 MAXIMUM_LEASE_FAILURES=12
 INTERRUPTED_STATUS=43
@@ -69,10 +66,9 @@ INSTANCE_ID=$(awk -F= '$1 == "instance_id" {print substr($0, length($1) + 2); ex
     "${HOST_DIR}/environment-manifest.txt" 2>/dev/null || true)
 LEDGER="${HOST_DIR}/worker-leases.tsv"
 {
-    printf 'sequence\tunit_id\treplica_id\toutcome\texit_status\tcalibration_before\tcalibration_after\t'
-    printf 'calibration_chained\tcalibration_gap_seconds\tunit_attempt_id\tchained_from\tenvironment_sha256\n'
+    printf 'sequence\tunit_id\treplica_id\toutcome\texit_status\tunit_attempt_id\tenvironment_sha256\n'
 } > "${LEDGER}"
-mkdir -p "${HOST_DIR}/calibrations" "${HOST_DIR}/leases"
+mkdir -p "${HOST_DIR}/leases"
 
 started_at=$(date +%s)
 sequence=1
@@ -86,11 +82,6 @@ next_heartbeat=0
 lease_failures=0
 imds_token=
 imds_token_time=0
-uploaded_calibrations=" "
-# The last complete unit's after calibration, while it may still chain, and
-# the environment digest that unit ran with.
-chain_digest=
-chain_environment=
 # When the current upload budget ends, while one runs.
 upload_deadline=
 # The last S3 call's output and errors.
@@ -446,75 +437,24 @@ read_lease()
     printf 'unit\t%s\t%s\t%s\n' "${lease_unit}" "${lease_replica}" "${lease_phase}"
 }
 
-calibration_result()
-{
-    # The stored host calibration a unit's calibration table names for a phase.
-    local phase=$1
-    local name
-    name=$(awk -F '\t' -v phase="${phase}" '
-        NR == 1 {for (i = 1; i <= NF; i++) column[$i] = i; next}
-        $column["phase"] == phase {print $column["raw_result"]; exit}' \
-        "${unit_directory}/calibration.tsv" 2>/dev/null || true)
-    if [[ ${name} =~ ^[0-9a-f]{64}\.json$ && -f "${HOST_DIR}/calibrations/${name}" ]]; then
-        printf '%s\n' "${name%.json}"
-    fi
-}
-
-upload_calibration()
-{
-    local digest=$1
-    if [[ -z "${digest}" || "${uploaded_calibrations}" == *" ${digest} "* ]]; then
-        return 0
-    fi
-    put_once "${HOST_DIR}/calibrations/${digest}.json" "${RESULT_PREFIX}/calibrations/${digest}.json" || return 1
-    uploaded_calibrations+="${digest} "
-}
-
 run_lease()
 {
     local phase=$1
-    local chained=
-    local gap=none
     local unit_started
     local unit_finished
     local unit_status=0
     local outcome
-    local before
-    local after
     local archive
     local result_sha256
     local completion
     local environment
     local unit_attempt="${HOST_SESSION}/${sequence}"
-    local calibration_chained=false
-    local previous_attempt=none
 
     unit_directory="${UNIT_ROOT}/lease-${sequence}"
-    if [[ -n "${chain_digest}" ]]; then
-        gap=$(python3 -c 'import os, sys, time; print(int(time.time() - os.stat(sys.argv[1]).st_mtime))' \
-            "${HOST_DIR}/calibrations/${chain_digest}.json")
-        if ((gap <= CHAIN_WINDOW_SECONDS)); then
-            chained=${chain_digest}
-            calibration_chained=true
-            previous_attempt="${HOST_SESSION}/$((sequence - 1))"
-        fi
-    fi
-    chain_digest=
     mkdir -p "${unit_directory}"
     # One digest of a lease's environment files: the host, its JVM, and its engines.
     python3 "${UNIT_TOOL}" copy-environment --source "${HOST_DIR}" --target "${unit_directory}"
     environment=$(python3 "${UNIT_TOOL}" environment-sha256 --directory "${unit_directory}")
-    if [[ -n "${chained}" ]]; then
-        # The unit's evidence names the link: the lease before it on this host, that lease's
-        # after calibration, the gap since it, and the environment it ran with.
-        {
-            printf 'previous_attempt=%s\n' "${previous_attempt}"
-            printf 'calibration=%s\n' "${chained}"
-            printf 'gap_seconds=%s\n' "${gap}"
-            printf 'previous_environment_sha256=%s\n' "${chain_environment}"
-        } > "${unit_directory}/unit-chain.txt"
-    fi
-    chain_environment=
 
     state=running
     heartbeat
@@ -526,8 +466,6 @@ run_lease()
         unset JONI_COMPARATOR_ORDER
         export RE2_CAMPAIGN_REPLICA_ID=${replica_id}
         export RE2_CAMPAIGN_LEASE_SEQUENCE=${sequence}
-        export BASELINE_UNIT_HOST_EVIDENCE=${HOST_DIR}
-        export BASELINE_UNIT_CALIBRATION_BEFORE=${chained}
         exec python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' \
             "${RUN_UNIT}" "${unit_id}" "${PROTOCOL}" "${replica_id}" "${unit_directory}"
     ) > "${unit_directory}/worker-unit.log" 2>&1 &
@@ -546,10 +484,6 @@ run_lease()
 
     state=uploading
     heartbeat
-    before=$(calibration_result before)
-    after=$(calibration_result after)
-    upload_calibration "${before}" || stop upload-failure 1
-    upload_calibration "${after}" || stop upload-failure 1
     archive="${UNIT_ROOT}/lease-${sequence}.tar.gz"
     tar -czf "${archive}" -C "${unit_directory}" .
     result_sha256=$(sha256_of "${archive}")
@@ -569,29 +503,18 @@ run_lease()
         --argjson exit_status "${unit_status}" \
         --arg unit_status "${outcome}" \
         --arg result_sha256 "${result_sha256}" \
-        --arg calibration_before "${before}" \
-        --arg calibration_after "${after}" \
-        --argjson calibration_chained "${calibration_chained}" \
         --arg started_at "${unit_started}" \
         --arg finished_at "${unit_finished}" \
         '{schema_version: 1, host_session: $host_session, sequence: $sequence, campaign_id: $campaign_id,
           phase: $phase, platform: $platform, unit_id: $unit_id, replica_id: $replica_id,
           unit_attempt_id: $unit_attempt_id, exit_status: $exit_status, unit_status: $unit_status,
-          result_sha256: $result_sha256,
-          calibration_before: (if $calibration_before == "" then null else $calibration_before end),
-          calibration_after: (if $calibration_after == "" then null else $calibration_after end),
-          calibration_chained: $calibration_chained, started_at: $started_at, finished_at: $finished_at}' \
+          result_sha256: $result_sha256, started_at: $started_at, finished_at: $finished_at}' \
         > "${completion}"
     # A notice before the marker lands leaves the unit incomplete.
     check_notices
     put_once "${completion}" "${RESULT_PREFIX}/units/${sequence}/completion.json" || stop upload-failure 1
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${sequence}" "${unit_id}" "${replica_id}" \
-        "${outcome}" "${unit_status}" "${before:-none}" "${after:-none}" "${calibration_chained}" "${gap}" \
-        "${unit_attempt}" "${previous_attempt}" "${environment}" >> "${LEDGER}"
-    if [[ "${outcome}" == complete && -n "${after}" ]]; then
-        chain_digest=${after}
-        chain_environment=${environment}
-    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${sequence}" "${unit_id}" "${replica_id}" \
+        "${outcome}" "${unit_status}" "${unit_attempt}" "${environment}" >> "${LEDGER}"
     rm -rf "${unit_directory}" "${archive}"
     unit_directory=
 }

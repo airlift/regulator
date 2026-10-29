@@ -32,8 +32,8 @@ class TestWorkUnits(unittest.TestCase):
                 check=True, capture_output=True, text=True)
             self.assertEqual(sorted(work_units.TABLES), sorted(path.name for path in Path(temporary).iterdir()))
         # Each shard's unit minutes, by their smallest, median and largest unit.
-        self.assertIn("like-dfa-single-use\t1\t12.5\t12.5\t12.5\t12.5\n", result.stdout)
-        self.assertIn("trino-operations\t4\t12.1\t12.2\t12.3\t48.7\n", result.stdout)
+        self.assertIn("like-dfa-single-use\t1\t10.6\t10.6\t10.6\t10.6\n", result.stdout)
+        self.assertIn("trino-operations\t3\t13.1\t13.2\t13.2\t39.5\n", result.stdout)
 
     def test_a_method_holding_a_value_jmh_cannot_select_is_never_split(self):
         rows = [{"parameters": f"pattern={pattern};size={size}"} for pattern in ("a,b", "c") for size in ("1", "2")]

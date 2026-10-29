@@ -117,12 +117,15 @@ class TestReleaseCapture(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shards = [row['shard_id'] for row in release_capture.read_rows(release_capture.BASELINE / 'shards.tsv')]
-            # Replicas 1 to 3 of every unit on both platforms, each worker running every unit of its replica,
-            # and one unit confirmed on a fourth host.
-            campaign = UnitCampaign(root / 'results', *shards)
-            confirmed = campaign.add('r8i', campaign.units[0], 4, host=4)
+            # Replicas 1 to 3 of every unit on both platforms, each worker running every unit of its replica. The
+            # host check flags r8i's third host for its CPU steal, so a fourth host confirms every unit it ran.
+            # Regulator runs 1.5 times slower on the flagged host and 1.04 times slower on the fourth.
+            campaign = UnitCampaign(
+                root / 'results', *shards,
+                score=lambda row, platform, replica: {3: 1.5, 4: 1.04}.get(replica, 1) if (
+                    platform == 'r8i' and row['system'].startswith('regulator')) else 1,
+                steal=lambda platform, host: 20 if (platform, host) == ('r8i', 3) else 0)
             receipts = campaign.receipts
-            relabelled = [{**receipt, 'candidate_commit': 'f' * 40} for receipt in receipts + [confirmed]]
 
             def phase(name, ledger, rejected=()):
                 # The controller keeps each phase's semantic-rejection ledger beside its accepted units.
@@ -134,37 +137,43 @@ class TestReleaseCapture(unittest.TestCase):
                     writer.writerows(rejected)
                 return campaign.write_ledger(root / name / 'accepted-units.tsv', ledger)
 
-            primary, confirmation = phase('primary', receipts), phase('confirmation', [confirmed])
+            primary = phase('primary', receipts)
+
+            def reduce(name, release_version='', confirmations=()):
+                aggregate_results.aggregate(argparse.Namespace(
+                    manifest=release_capture.BASELINE / 'rows.tsv', platforms=release_capture.BASELINE / 'platforms.tsv',
+                    shards=release_capture.BASELINE / 'shards.tsv', primary_receipts=[primary],
+                    confirmation_receipts=list(confirmations), artifacts_root=[campaign.root], session_dir=[], events=[],
+                    artifact_index=[], campaign_artifact=None, output_dir=root / name,
+                    expected_manifest_rows=aggregate_results.parser().get_default('expected_manifest_rows'),
+                    release_version=release_version))
+                return str(root / name)
+
+            # Reduced before its confirmation, so the reduction leaves the flagged host's comparisons unresolved.
+            unconfirmed = reduce('unconfirmed')
+            confirmed = [campaign.add('r8i', unit, 4, host=4) for unit in campaign.units]
+            relabelled = [{**receipt, 'candidate_commit': 'f' * 40} for receipt in receipts + confirmed]
+            confirmation = phase('confirmation', confirmed)
             phase('partial', receipts[1:])
             phase('rejected', receipts, rejected=receipts[:1])
-            phase('relabelled', relabelled[:-1])
-            phase('relabelled-confirmation', relabelled[-1:])
+            phase('relabelled', relabelled[:len(receipts)])
+            phase('relabelled-confirmation', relabelled[len(receipts):])
             # A confirmation ledger in an older receipt schema, with a column the current one lacks.
             (root / 'stale').mkdir()
             with (root / 'stale/accepted-units.tsv').open('w') as output:
                 fields = [*release_capture.unit_session.UNIT_RECEIPT_FIELDS, 'copied_row_count']
                 writer = csv.DictWriter(output, fieldnames=fields, delimiter='\t')
                 writer.writeheader()
-                writer.writerow({**confirmed, 'copied_row_count': '0'})
-
-            def reduce(name, release_version=''):
-                aggregate_results.aggregate(argparse.Namespace(
-                    manifest=release_capture.BASELINE / 'rows.tsv', platforms=release_capture.BASELINE / 'platforms.tsv',
-                    shards=release_capture.BASELINE / 'shards.tsv', primary_receipts=[primary],
-                    confirmation_receipts=[confirmation], artifacts_root=[campaign.root], session_dir=[], events=[],
-                    artifact_index=[], campaign_artifact=None, output_dir=root / name,
-                    expected_manifest_rows=aggregate_results.parser().get_default('expected_manifest_rows'),
-                    release_version=release_version))
-                return str(root / name)
+                writer.writerows({**receipt, 'copied_row_count': '0'} for receipt in confirmed)
             # The fixture's attempts carry no release JAR; released_artifact's own tests cover the reducer's proof.
             with patch.object(release_capture.released_artifact, 'validate_baseline'):
-                reduction = reduce('reduction', '1.0')
-            unproven = reduce('unproven')
+                reduction = reduce('reduction', '1.0', [confirmation])
+            unproven = reduce('unproven', confirmations=[confirmation])
             baseline = {'primary': str(root / 'primary'), 'confirmation': str(root / 'confirmation'),
                         'reduction': reduction, 'campaign_id': 'campaign'}
-            release = {'version': '1.0', 'engine_tree': confirmed['engine_tree']}
-            collector = {'candidate_commit': confirmed['candidate_commit'],
-                         'archive_sha256': confirmed['candidate_archive_sha256'],
+            release = {'version': '1.0', 'engine_tree': confirmed[0]['engine_tree']}
+            collector = {'candidate_commit': confirmed[0]['candidate_commit'],
+                         'archive_sha256': confirmed[0]['candidate_archive_sha256'],
                          'platform_manifest_sha256': release_capture.digest(release_capture.BASELINE / 'platforms.tsv')}
             release_capture.validate_baseline(baseline, release, collector)
             lifecycle = collection.prepare(root / 'lifecycle')
@@ -173,6 +182,17 @@ class TestReleaseCapture(unittest.TestCase):
             populations = ('trino-operations', 'like', 'specialized-patterns', 'diagnostics-and-stress')
             self.assertEqual({(platform, population) for platform in ('r8i', 'r9g') for population in populations},
                              {(row['platform'], row['population']) for row in rows})
+            # Without the flagged host, each comparison's ratio and hosts are the reduction's.
+            self.assertEqual({(row['platform'], float(row['median_ratio']), int(row['host_count']))
+                              for row in release_capture.read_rows(Path(reduction) / 'comparison-aggregates.tsv')},
+                             {(row['platform'], row['result']['ratio'], len(row['result']['hosts'])) for row in rows})
+            # The flagged host measured none of them, and the fourth host stands in for it on r8i.
+            instances = {(row['platform'], host['instanceId']) for row in rows for host in row['result']['hosts']}
+            self.assertNotIn(('r8i', 'i-r8i-3'), instances)
+            self.assertIn(('r8i', 'i-r8i-4'), instances)
+            # Before its confirmation, a comparison the flagged host measured has two hosts left and is refused.
+            with self.assertRaisesRegex(ValueError, r"fewer than three hosts in r8i/.*; each needs its unit's confirmation"):
+                release_capture.baseline_rows(unconfirmed, lifecycle)
             cases = (
                 ({}, {'engine_tree': '0' * 40}, {}, 'changed release source or collector'),
                 ({}, {}, {'candidate_commit': '0' * 40}, 'changed release source or collector'),

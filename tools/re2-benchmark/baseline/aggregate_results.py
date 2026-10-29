@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from acceptance import EVIDENCE_FIELDS, EXPECTED_PLATFORMS, ValidationError
+from acceptance import EVIDENCE_FIELDS, EXPECTED_PLATFORMS, ValidationError, exceeds_published_limit
 import unit_dispatch
 import unit_session
 from row_protocol import comparison_specs, identify_scaling_groups, logical_row_id, parse_parameters
@@ -40,10 +40,18 @@ CAMPAIGN_ARTIFACT_FIELDS = (
     "campaign_id", "source_directory", "file_count", "source_manifest_sha256",
 )
 SOURCE_MANIFEST_FIELDS = ("path", "size", "sha256")
-DRIFT_LIMIT = 0.05
+CV_LIMIT = 0.05
 MATERIAL_LIMIT = 0.05
 SERIOUS_RATIO_LOW = 0.5
 SERIOUS_RATIO_HIGH = 2.0
+# In the 1.0 release campaign (378 hosts with at least 20 rows), the worst whole host ran 1.3% slow and 1.5% noisy
+# against the median of its rows' three primary replicas, and random 20-row samples of hosts reached 1.6% slow and
+# 2.4% noisy at the 99.9th percentile.
+HOST_MINIMUM_ROWS = 20
+HOST_SLOW_LIMIT = 0.02
+HOST_NOISE_LIMIT = 0.03
+# The share of a host's CPU time while it measured that a ready vCPU spent waiting for the hypervisor.
+HOST_STEAL_LIMIT = 0.01
 # Each sample names its unit attempt beside its host.
 UNIT_ATTEMPT_FIELDS = ("unit_id", "unit_attempt_id")
 RECEIPT_NAME = "unit-receipt.tsv"
@@ -61,7 +69,8 @@ class Session:
     receipt: dict[str, str]
     directory: Path
     confirmation: bool
-    calibration_drift: float
+    steal_ticks: int
+    total_ticks: int
     artifact_set_sha256: str
     evidence_rows: tuple[dict[str, str], ...]
     capacity: dict[str, str]
@@ -69,6 +78,11 @@ class Session:
     @property
     def key(self):
         return session_key(self.receipt)
+
+    @property
+    def steal_share(self):
+        return self.steal_ticks / self.total_ticks
+
 
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -159,9 +173,8 @@ def format_number(value):
     return f"{value:.12g}"
 
 
-def exceeds_drift_limit(value):
-    """Compare at the same precision published in the campaign tables."""
-    return float(format_number(value)) > DRIFT_LIMIT
+def exceeds_cv_limit(value):
+    return exceeds_published_limit(value, CV_LIMIT)
 
 
 def coefficient_of_variation(values):
@@ -283,44 +296,15 @@ def read_one(path, fields, exact=None):
     return rows[0]
 
 
-def artifact_files(directory, evidence_rows):
-    """An accepted artifact's files by logical name: its own directory, then the host files it references.
-
-    A unit attempt references calibrations its host recorded once beside its attempts, and a chained attempt
-    also references the completion marker of the lease its before calibration came from, which its controller
-    retained there.
-    Both are named here from that host session's directory, the attempt's parent."""
-    files = sorted(
+def artifact_files(directory):
+    """An accepted artifact's files by logical name, their path within its directory."""
+    return sorted(
         ((str(item.relative_to(directory)), item) for item in directory.rglob("*") if item.is_file()),
         key=lambda item: item[0])
-    host_artifacts = sorted(row["artifact"] for row in evidence_rows if row["verification"] == "host-sha256")
-    if (directory / "unit-chain.txt").is_file():
-        host_artifacts.append(unit_session.chain_predecessor_marker(directory))
-    return [*files, *((f"../{artifact}", directory.parent / artifact) for artifact in host_artifacts)]
 
 
 def file_set_digest(files):
     return stable_digest(f"{name}\0{path.stat().st_size}\0{sha256_file(path)}" for name, path in files)
-
-
-def read_calibration(path):
-    rows = read_tsv(path, ("phase", "score", "score_unit"))
-    by_phase = {row["phase"]: row for row in rows}
-    if len(rows) != 2 or set(by_phase) != {"before", "after"}:
-        raise ReductionError(f"{path} must contain exactly before and after calibration rows")
-    if by_phase["before"]["score_unit"] != by_phase["after"]["score_unit"]:
-        raise ReductionError(f"{path} changes calibration units")
-    before = parse_float(by_phase["before"]["score"], f"{path} before score")
-    after = parse_float(by_phase["after"]["score"], f"{path} after score")
-    if min(before, after) <= 0:
-        raise ReductionError(f"{path} calibration scores must be positive")
-    drift = abs(after - before) / min(before, after)
-    for row in rows:
-        if row.get("before_after_drift"):
-            recorded = parse_float(row["before_after_drift"], f"{path} recorded drift", nonnegative=True)
-            if not math.isclose(recorded, drift, rel_tol=1e-9, abs_tol=1e-12):
-                raise ReductionError(f"{path} recorded calibration drift is incorrect")
-    return drift
 
 
 def read_final_capacity(path):
@@ -373,9 +357,8 @@ def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_
     if clean_artifact != {field: ledger_receipt[field] for field in fields}:
         raise ReductionError(f"artifact receipt does not match its ledger row: {directory}")
     try:
-        # A worker host's calibrations live once in its host session's directory, the attempt's parent.
-        regenerated = unit_session.validate_unit_results(directory, manifest_path, host_evidence=directory.parent)
-        unit_session.check_chain_predecessor(directory, directory.parent)
+        regenerated = unit_session.validate_unit_results(directory, manifest_path)
+        cpu_ticks = unit_session.unit_cpu_ticks(directory)
         if release:
             released_artifact.validate_baseline(directory, release)
     except (OSError, ValueError, KeyError) as error:
@@ -391,12 +374,12 @@ def verify_unit_attempt(directory, ledger_receipt, confirmation, unit, manifest_
         raise ReductionError(f"artifact does not contain the exact unit rows: {directory}")
     return verify_measurements(
         directory, artifact_receipt, confirmation, evidence_rows, observed_path, observed, expected,
-        [directory / "calibration.tsv"], directory / CAPACITY_NAME)
+        cpu_ticks, directory / CAPACITY_NAME)
 
 
 def verify_measurements(directory, artifact_receipt, confirmation, evidence_rows, observed_path, observed, expected,
-                        calibration_paths, capacity_path):
-    """Check one session's rows, outcomes, calibration, and finalized capacity."""
+                        cpu_ticks, capacity_path):
+    """Check one session's rows, outcomes, and finalized capacity."""
     for row in observed:
         manifest_row = expected[row["row_id"]]
         if row["shard_id"] != manifest_row["shard_id"] or row["system"] != manifest_row["system"]:
@@ -409,16 +392,10 @@ def verify_measurements(directory, artifact_receipt, confirmation, evidence_rows
         allocation = row["allocation_bytes"]
         if allocation not in {"not-measured", "-", ""}:
             parse_float(allocation, f"{observed_path}:{row['_line']} allocation", nonnegative=True)
-    if not calibration_paths:
-        raise ReductionError(f"host evidence has no routed calibration: {directory}")
-    calibration_drift = max(read_calibration(path) for path in calibration_paths)
     capacity = read_final_capacity(capacity_path)
-    if exceeds_drift_limit(calibration_drift):
-        raise ReductionError(
-            f"accepted session exceeds the 5% calibration drift gate: {directory}")
     return Session(
-        artifact_receipt, directory, confirmation, calibration_drift,
-        file_set_digest(artifact_files(directory, evidence_rows)), tuple(evidence_rows), capacity), observed
+        artifact_receipt, directory, confirmation, *cpu_ticks,
+        file_set_digest(artifact_files(directory)), tuple(evidence_rows), capacity), observed
 
 
 def load_sessions(primary_receipts, confirmation_receipts, artifact_roots, session_directories,
@@ -522,9 +499,8 @@ def verify_campaign_source_manifest(campaign_artifact, source_manifest, sessions
         except ValueError as error:
             raise ReductionError(
                 f"accepted session is outside the archived campaign source: {session.directory}") from error
-        for name, path in artifact_files(session.directory, session.evidence_rows):
-            relative = relative_directory.parent / name[3:] if name.startswith("../") else relative_directory / name
-            archive_path = "campaign-results/" + relative.as_posix()
+        for name, path in artifact_files(session.directory):
+            archive_path = "campaign-results/" + (relative_directory / name).as_posix()
             expected = source_manifest.get(archive_path)
             actual = (path.stat().st_size, sha256_file(path))
             if expected != actual:
@@ -586,7 +562,7 @@ def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_inde
         "system", "benchmark", "parameters", "comparator", "expected_result",
         "allocation_contract", "workload_checksum", "score", "score_unit",
         "allocation_bytes", "contract_identity", "outcome",
-        "calibration_drift", "artifact_set_sha256", "artifact_uri",
+        "steal_share", "artifact_set_sha256", "artifact_uri",
         "artifact_sha256", "retrieved_at", "campaign_s3_uri", "campaign_version_id",
         "campaign_archive_sha256", "session_directory",
     )
@@ -608,7 +584,7 @@ def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_inde
                 **{field: observed.get(field, "") for field in (
                     "score", "score_unit", "allocation_bytes", "outcome")},
                 "contract_identity": observed["result_checksum"],
-                "calibration_drift": format_number(session.calibration_drift),
+                "steal_share": format_number(session.steal_share),
                 "artifact_set_sha256": session.artifact_set_sha256,
                 "artifact_uri": index.get("artifact_uri", index.get("retrieval_uri", "")),
                 "artifact_sha256": index.get("artifact_sha256", index.get("archive_sha256", "")),
@@ -623,6 +599,82 @@ def build_host_rows(sessions, observed_by_session, manifest_by_id, artifact_inde
     rows.sort(key=lambda row: (
         row["platform"], row["row_id"], int(row["replica_id"]), row["host_epoch"], attempt_key(row)))
     return host_fields, rows
+
+
+def slowness_sign(unit):
+    """+1 when a larger score is slower (time per op), -1 when it is faster (ops per time), else None.
+
+    The host check reads its own units rather than `score_kind`'s: only a time per operation or operations
+    per time measures a host's speed, so sizes such as bytes stay out of it.
+    """
+    numerator, _, denominator = unit.lower().replace(" ", "").partition("/")
+    times = {"ns", "us", "ms", "s"}
+    if numerator in times and denominator == "op":
+        return 1
+    if numerator == "ops" and denominator in times:
+        return -1
+    return None
+
+
+def host_key(row):
+    """A host within a platform; each host epoch names exactly one instance."""
+    return row["platform"], row["host_epoch"]
+
+
+def build_host_checks(host_rows, sessions):
+    """Judge each host against the median of the three primary replicas of each row it measured, and by its CPU steal.
+
+    A host's deviation on a primary row whose three replicas all passed is the log of its score over
+    the row's median score, signed so that positive is slower; one outlying host leaves its partners at zero.
+    A host is slow by its median deviation and noisy by its deviations' median absolute deviation.
+    """
+    deviations = defaultdict(list)
+    for (platform, row_id), rows in _group(host_rows, "platform", "row_id"):
+        primary = [row for row in rows if row["confirmation"] == "false"]
+        sign = slowness_sign(primary[0]["score_unit"]) if primary else None
+        if (len(primary) != 3 or sign is None or any(row["outcome"] != "accepted" for row in primary) or
+                any(float(row["score"]) <= 0 for row in primary)):
+            continue
+        logs = [math.log(float(row["score"])) for row in primary]
+        center = median(logs)
+        for row, log in zip(primary, logs):
+            deviations[host_key(row)].append(sign * (log - center))
+    hosts = {}
+    ticks = defaultdict(lambda: [0, 0])
+    for session in sessions:
+        key = host_key(session.receipt)
+        hosts.setdefault(key, session.receipt)
+        ticks[key][0] += session.steal_ticks
+        ticks[key][1] += session.total_ticks
+    fields = (
+        "platform", "instance_id", "host_epoch", "region", "rows", "slow", "noise", "steal_share", "flagged",
+        "reason")
+    rows = []
+    for key, receipt in hosts.items():
+        values = deviations.get(key, [])
+        slow = median(values)
+        noise = median([abs(value - slow) for value in values])
+        steal = ticks[key][0] / ticks[key][1]
+        reasons = []
+        if len(values) >= HOST_MINIMUM_ROWS:
+            if exceeds_published_limit(slow, HOST_SLOW_LIMIT):
+                reasons.append("slow-above-2-percent")
+            if exceeds_published_limit(noise, HOST_NOISE_LIMIT):
+                reasons.append("noise-above-3-percent")
+        if exceeds_published_limit(steal, HOST_STEAL_LIMIT):
+            reasons.append("steal-above-1-percent")
+        rows.append({
+            "platform": receipt["platform"], "instance_id": receipt["instance_id"],
+            "host_epoch": receipt["host_epoch"], "region": receipt["region"], "rows": str(len(values)),
+            "slow": format_number(slow), "noise": format_number(noise), "steal_share": format_number(steal),
+            "flagged": str(bool(reasons)).lower(), "reason": ",".join(reasons),
+        })
+    rows.sort(key=lambda row: (row["platform"], row["instance_id"], row["host_epoch"]))
+    return fields, rows
+
+
+def flagged_hosts(host_checks):
+    return {host_key(row) for row in host_checks if row["flagged"] == "true"}
 
 
 def score_kind(unit):
@@ -738,8 +790,11 @@ def scaling_class(slope):
     return "superlinear"
 
 
-def build_scaling(host_rows, manifest_rows):
-    """One signature per scaling group and unit attempt; units hold whole groups."""
+def build_scaling(host_rows, manifest_rows, excluded):
+    """One signature per scaling group and unit attempt; units hold whole groups.
+
+    A group's class across hosts leaves out the flagged hosts in excluded.
+    """
     by_host_row = {(row["platform"], attempt_key(row), row["row_id"]): row for row in host_rows}
     host_identity = {(row["platform"], attempt_key(row)): row for row in host_rows}
     fields = (
@@ -784,7 +839,8 @@ def build_scaling(host_rows, manifest_rows):
     mismatches = set()
     aggregate_classes = {}
     for (platform, group_id), group_rows in _group(rows, "platform", "scaling_group"):
-        classes = {row["classification"] for row in group_rows if row["classification"] != "unclassified"}
+        classes = {row["classification"] for row in group_rows
+                   if row["classification"] != "unclassified" and host_key(row) not in excluded}
         aggregate_classes[(platform, group_id)] = next(iter(classes)) if len(classes) == 1 else "mixed"
         if len(classes) > 1:
             mismatches.add((platform, group_id))
@@ -802,14 +858,15 @@ def allocation_value(value):
     return None if value in {"", "-", "not-measured"} else float(value)
 
 
-def build_row_aggregates(host_rows, scaling_membership, scaling_mismatches, scaling_classes):
+def build_row_aggregates(host_rows, excluded, scaling_membership, scaling_mismatches, scaling_classes):
+    """Reduce each row across its hosts, leaving out the flagged hosts in excluded."""
     fields = (
         "platform", "row_id", "shard_id", "suite", "system", "benchmark",
         "parameters", "comparator", "allocation_contract", "primary_host_count",
         "confirmation_host_count", "host_count", "score_unit", "primary_median_score",
         "median_score", "minimum_score", "maximum_score", "primary_host_cv", "host_cv",
         "confidence_interval_status",
-        "median_allocation_bytes", "maximum_calibration_drift",
+        "median_allocation_bytes", "flagged_host_count",
         "contract_identity_status", "scaling_groups", "scaling_class", "unresolved",
         "unresolved_reasons",
     )
@@ -823,22 +880,27 @@ def build_row_aggregates(host_rows, scaling_membership, scaling_mismatches, scal
         units = {row["score_unit"] for row in hosts}
         if len(units) != 1:
             raise ReductionError(f"row {row_id} on {platform} changes score units")
+        first = hosts[0]
+        flagged = sum(host_key(row) in excluded for row in hosts)
+        hosts = [row for row in hosts if host_key(row) not in excluded]
+        primary = [row for row in hosts if row["confirmation"] == "false"]
+        confirmation = [row for row in hosts if row["confirmation"] == "true"]
         scores = [float(row["score"]) for row in hosts]
         primary_scores = [float(row["score"]) for row in primary]
         allocations = [allocation_value(row["allocation_bytes"]) for row in hosts]
         measured_allocations = [value for value in allocations if value is not None]
         reasons = []
+        if len(hosts) < 3:
+            reasons.append("flagged-host-excluded")
         if any(row["outcome"] != "accepted" for row in hosts):
             reasons.append("precision-rejected")
         host_cv = coefficient_of_variation(scores)
-        if exceeds_drift_limit(host_cv):
+        if exceeds_cv_limit(host_cv):
             reasons.append("host-cv-above-5-percent")
-        calibration = max(float(row["calibration_drift"]) for row in hosts)
-        first = hosts[0]
         if first["allocation_contract"] == "allocation-free" and any(value > 0 for value in measured_allocations):
             reasons.append("allocation-free-row-allocated")
         contract_identities = {row["contract_identity"] for row in hosts}
-        identity_status = "consistent" if len(contract_identities) == 1 else "mismatch"
+        identity_status = "consistent" if len(contract_identities) <= 1 else "mismatch"
         if identity_status == "mismatch":
             reasons.append("contract-identity-mismatch")
         memberships = scaling_membership.get((platform, row_id), [])
@@ -853,13 +915,14 @@ def build_row_aggregates(host_rows, scaling_membership, scaling_mismatches, scal
             "allocation_contract": first["allocation_contract"], "primary_host_count": str(len(primary)),
             "confirmation_host_count": str(len(confirmation)), "host_count": str(len(hosts)),
             "score_unit": next(iter(units)), "primary_median_score": format_number(median(primary_scores)),
-            "median_score": format_number(median(scores)), "minimum_score": format_number(min(scores)),
-            "maximum_score": format_number(max(scores)),
+            "median_score": format_number(median(scores)),
+            "minimum_score": format_number(min(scores, default=None)),
+            "maximum_score": format_number(max(scores, default=None)),
             "primary_host_cv": format_number(coefficient_of_variation(primary_scores)),
             "host_cv": format_number(host_cv),
             "confidence_interval_status": "not-supported-with-3-or-4-independent-hosts",
             "median_allocation_bytes": format_number(median(measured_allocations)),
-            "maximum_calibration_drift": format_number(calibration),
+            "flagged_host_count": str(flagged),
             "contract_identity_status": identity_status, "scaling_groups": ",".join(group_ids),
             "scaling_class": ",".join(classes) if classes else "not-identifiable",
             "unresolved": str(bool(reasons)).lower(), "unresolved_reasons": ",".join(sorted(set(reasons))),
@@ -872,7 +935,8 @@ def build_row_aggregates(host_rows, scaling_membership, scaling_mismatches, scal
     return fields, rows, gaps
 
 
-def build_comparison_aggregates(comparisons):
+def build_comparison_aggregates(comparisons, excluded):
+    """Reduce each comparison across its hosts, leaving out the flagged hosts in excluded."""
     fields = (
         "platform", "comparison_id", "shard_id", "suite", "candidate_row_id",
         "candidate_system", "comparator_system", "primary_host_count", "confirmation_host_count",
@@ -888,24 +952,33 @@ def build_comparison_aggregates(comparisons):
         confirmation = [row for row in hosts if row["confirmation"] == "true"]
         if len(primary) != 3 or len(confirmation) > 1:
             raise ReductionError(f"comparison {comparison_id} on {platform} has invalid host counts")
+        first = hosts[0]
+        hosts = [row for row in hosts if host_key(row) not in excluded]
+        primary = [row for row in hosts if row["confirmation"] == "false"]
+        confirmation = [row for row in hosts if row["confirmation"] == "true"]
         ratios = [float(row["ratio"]) for row in hosts]
         primary_ratios = [float(row["ratio"]) for row in primary]
         primary_ratio_cv = coefficient_of_variation(primary_ratios)
         ratio_cv = coefficient_of_variation(ratios)
         material_directions = {row["direction"] for row in hosts if row["material"] == "true"}
         reasons = []
+        if len(hosts) < 3:
+            reasons.append("flagged-host-excluded")
         if any(row["outcome"] != "accepted" for row in hosts):
             reasons.append("precision-rejected")
         if material_directions >= {"faster", "slower"}:
             reasons.append("host-direction-disagreement")
         effective_ratio_cv = ratio_cv if confirmation else primary_ratio_cv
-        if exceeds_drift_limit(effective_ratio_cv):
+        if exceeds_cv_limit(effective_ratio_cv):
             reasons.append("ratio-host-cv-above-5-percent")
         value = median(ratios)
-        serious = value <= SERIOUS_RATIO_LOW or value >= SERIOUS_RATIO_HIGH
-        first = hosts[0]
+        serious = value is not None and (value <= SERIOUS_RATIO_LOW or value >= SERIOUS_RATIO_HIGH)
         counts = Counter(row["direction"] for row in hosts)
-        direction = "faster" if value < 1.0 - MATERIAL_LIMIT else "slower" if value > 1.0 + MATERIAL_LIMIT else "parity"
+        direction = (
+            "" if value is None else
+            "faster" if value < 1.0 - MATERIAL_LIMIT else
+            "slower" if value > 1.0 + MATERIAL_LIMIT else
+            "parity")
         row = {
             "platform": platform, "comparison_id": comparison_id, "shard_id": first["shard_id"],
             "suite": first["suite"],
@@ -913,7 +986,8 @@ def build_comparison_aggregates(comparisons):
             "comparator_system": first["comparator_system"], "primary_host_count": str(len(primary)),
             "confirmation_host_count": str(len(confirmation)), "host_count": str(len(hosts)),
             "primary_median_ratio": format_number(median(primary_ratios)), "median_ratio": format_number(value),
-            "minimum_ratio": format_number(min(ratios)), "maximum_ratio": format_number(max(ratios)),
+            "minimum_ratio": format_number(min(ratios, default=None)),
+            "maximum_ratio": format_number(max(ratios, default=None)),
             "primary_ratio_host_cv": format_number(primary_ratio_cv),
             "ratio_host_cv": format_number(ratio_cv),
             "confidence_interval_status": "not-supported-with-3-or-4-independent-hosts",
@@ -923,6 +997,12 @@ def build_comparison_aggregates(comparisons):
             "unresolved_reasons": ",".join(reasons),
         }
         rows.append(row)
+        if "flagged-host-excluded" in reasons:
+            gaps.append(gap_row(
+                "unresolved", "comparison", platform, first["shard_id"],
+                first["candidate_row_id"], comparison_id, "", "flagged-host-excluded",
+                f"hosts after excluding flagged hosts={row['host_count']}", gap_threshold("flagged-host-excluded"),
+                "A host the host check flagged measured this comparison"))
         if "host-direction-disagreement" in reasons:
             gaps.append(gap_row("unresolved", "comparison", platform, first["shard_id"],
                                 first["candidate_row_id"], comparison_id, "", "host-direction-disagreement",
@@ -969,7 +1049,7 @@ def build_classes(comparison_aggregates):
         "comparison_count", "median_ratio", "p10_ratio", "p90_ratio", "faster_count",
         "parity_count", "slower_count", "unresolved_count",
     )
-    general = [row for row in comparison_aggregates if row["serious_outlier"] == "false"]
+    general = [row for row in comparison_aggregates if row["serious_outlier"] == "false" and row["median_ratio"]]
     rows = []
     for key, values in _group(general, "platform", "suite", "candidate_system", "comparator_system"):
         ratios = [float(row["median_ratio"]) for row in values]
@@ -985,18 +1065,24 @@ def build_classes(comparison_aggregates):
     return fields, rows
 
 
-def build_confirmation_jobs(row_aggregates, host_rows, comparisons, scaling, sessions):
-    """Select each unstable platform/unit not yet confirmed."""
+def build_confirmation_jobs(row_aggregates, host_rows, comparisons, scaling, sessions, excluded):
+    """Select each unstable platform/unit not yet confirmed, and each unit a flagged host measured.
+
+    The primary checks leave out the flagged hosts in excluded, as the aggregates do.
+    """
     def scope(row):
         return row["platform"], row["shard_id"], row["unit_id"]
 
     scope_by_row = {(row["platform"], row["row_id"]): scope(row) for row in host_rows}
-    eligible = set()
+    eligible = {scope(row) for row in host_rows if row["confirmation"] == "false" and host_key(row) in excluded}
+    host_rows = [row for row in host_rows if host_key(row) not in excluded]
+    comparisons = [row for row in comparisons if host_key(row) not in excluded]
+    scaling = [row for row in scaling if host_key(row) not in excluded]
     for row in row_aggregates:
         row_scope = scope_by_row[(row["platform"], row["row_id"])]
         if "precision-rejected" in row["unresolved_reasons"].split(","):
             eligible.add(row_scope)
-        if exceeds_drift_limit(float(row["primary_host_cv"])):
+        if exceeds_cv_limit(float(row["primary_host_cv"])):
             eligible.add(row_scope)
 
     for (platform, row_id), rows in _group(host_rows, "platform", "row_id"):
@@ -1010,7 +1096,7 @@ def build_confirmation_jobs(row_aggregates, host_rows, comparisons, scaling, ses
             for row in rows
             if row["confirmation"] == "false"
         ]
-        if exceeds_drift_limit(coefficient_of_variation(primary_ratios)):
+        if exceeds_cv_limit(coefficient_of_variation(primary_ratios)):
             eligible.add(scope(rows[0]))
         primary_directions = {
             row["direction"] for row in rows
@@ -1040,6 +1126,7 @@ def build_confirmation_jobs(row_aggregates, host_rows, comparisons, scaling, ses
 
 def gap_observed(reason, row):
     mapping = {
+        "flagged-host-excluded": f"hosts after excluding flagged hosts={row['host_count']}",
         "precision-rejected": "at least one host exceeded the precision gate",
         "host-cv-above-5-percent": f"CV={row['host_cv']}",
         "allocation-free-row-allocated": f"median allocation={row['median_allocation_bytes']} B/op",
@@ -1051,6 +1138,7 @@ def gap_observed(reason, row):
 
 def gap_threshold(reason):
     return {
+        "flagged-host-excluded": "3 hosts after excluding flagged hosts",
         "precision-rejected": "all host rows accepted",
         "host-cv-above-5-percent": "CV <= 0.05",
         "allocation-free-row-allocated": "0 B/op",
@@ -1095,7 +1183,7 @@ def build_inventory(sessions, artifact_indexes, campaign_artifact):
     rows = []
     for session in sessions:
         index = artifact_indexes.get(session.key, {})
-        for name, path in artifact_files(session.directory, session.evidence_rows):
+        for name, path in artifact_files(session.directory):
             rows.append({
                 **{field: session.receipt[field] for field in (
                     "campaign_id", "platform", "shard_id", "replica_id", "host_epoch")},
@@ -1236,15 +1324,18 @@ def aggregate(arguments):
     manifest_by_id = {row["row_id"]: row for row in manifest_rows}
     host_fields, host_rows = build_host_rows(
         sessions, observed, manifest_by_id, indexes, campaign_artifact)
+    host_check_fields, host_checks = build_host_checks(host_rows, sessions)
+    excluded = flagged_hosts(host_checks)
     comparison_fields, comparisons = build_comparisons(host_rows, manifest_rows)
     scaling_fields, scaling, membership, scaling_mismatches, scaling_classes = build_scaling(
-        host_rows, manifest_rows)
+        host_rows, manifest_rows, excluded)
     aggregate_fields, row_aggregates, row_gaps = build_row_aggregates(
-        host_rows, membership, scaling_mismatches, scaling_classes)
-    comparison_aggregate_fields, comparison_aggregates, comparison_gaps = build_comparison_aggregates(comparisons)
+        host_rows, excluded, membership, scaling_mismatches, scaling_classes)
+    comparison_aggregate_fields, comparison_aggregates, comparison_gaps = build_comparison_aggregates(
+        comparisons, excluded)
     class_fields, classes = build_classes(comparison_aggregates)
     confirmation_fields, confirmation_jobs = build_confirmation_jobs(
-        row_aggregates, host_rows, comparisons, scaling, sessions)
+        row_aggregates, host_rows, comparisons, scaling, sessions, excluded)
     inventory_fields, inventory = build_inventory(sessions, indexes, campaign_artifact)
     metadata_fields, metadata = build_metadata(sessions, indexes, campaign_artifact)
     capacity_fields, capacity = build_capacity(sessions)
@@ -1257,6 +1348,7 @@ def aggregate(arguments):
     serious = [row for row in comparison_aggregates if row["serious_outlier"] == "true"]
     outputs = {
         "host-rows.tsv": (host_fields, host_rows),
+        "host-checks.tsv": (host_check_fields, host_checks),
         "row-aggregates.tsv": (aggregate_fields, row_aggregates),
         "host-comparator-ratios.tsv": (comparison_fields, comparisons),
         "comparison-aggregates.tsv": (comparison_aggregate_fields, comparison_aggregates),
@@ -1283,6 +1375,7 @@ def aggregate(arguments):
         "primary_sessions": len(primary),
         "confirmation_sessions": len(confirmation),
         "host_rows": len(host_rows),
+        "flagged_hosts": len(excluded),
         "same_host_ratios": len(comparisons),
         "comparison_aggregates": len(comparison_aggregates),
         "serious_outliers": len(serious),
