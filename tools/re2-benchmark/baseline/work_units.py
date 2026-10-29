@@ -11,9 +11,10 @@ unit keeps its finished groups. A group joins atoms that share a JMH launch, and
 adjacent groups merge until each fills GROUP_SECONDS. The generator checks every
 unit and group against the measurement requirements before it writes the tables.
 
-The tables are not checked in: freeze-candidate.sh generates them into the
-candidate archive and beside these modules, where hosts and the controller read
-them, and the offline gate generates them before its tests.
+The tables are not checked in: freezing a candidate generates them with the
+candidate's own copy of this module into its archive, where hosts read them; the
+controller reads the copy generated beside these modules, which must match, and
+the offline gate generates that copy before its tests.
 """
 import csv
 import hashlib

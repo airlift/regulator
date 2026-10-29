@@ -185,7 +185,7 @@ class TestRunCampaign(unittest.TestCase):
                 arguments = SimpleNamespace(
                     phase="smoke", campaign_id="language", heap_size="16g", engine_builds=builds,
                     platform_regions={"r8i": ["us-west-2"]}, transfer_buckets={"us-west-2": "bucket"},
-                    candidate_archive_sha256="5" * 64)
+                    candidate_commit=candidate, candidate_archive_sha256="5" * 64)
                 if error is None:
                     RUN_CAMPAIGN.resolve_engine_builds(checkout, arguments)
                     self.assertEqual({receipt["platform"]: receipt["observed_rows_sha256"] for receipt in receipts},
@@ -282,92 +282,6 @@ class TestRunCampaign(unittest.TestCase):
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "buys only On-Demand"):
                 RUN_CAMPAIGN.job_environment(launched, arguments, root, root)
 
-    def freeze_archive(self, repository, archive):
-        """Archive HEAD with generated tables beside the baseline tooling, as freeze-candidate.sh does."""
-        baseline = repository / "tools/re2-benchmark/baseline"
-        baseline.mkdir(parents=True, exist_ok=True)
-        for table in ("row-protocol.tsv", "units.tsv", "unit-rows.tsv"):
-            (baseline / table).write_text(f"{table}\n")
-        with archive.open("wb") as output_file:
-            git_archive = subprocess.Popen(
-                ["git", "archive", "--format=tar", "--prefix=tools/re2-benchmark/baseline/",
-                 *(f"--add-file={baseline / table}" for table in ("row-protocol.tsv", "units.tsv", "unit-rows.tsv")),
-                 "--prefix=", "HEAD"], cwd=repository, stdout=subprocess.PIPE)
-            gzip = subprocess.run(["gzip", "-n"], stdin=git_archive.stdout, stdout=output_file, check=True)
-            git_archive.stdout.close()
-            self.assertEqual(git_archive.wait(), 0)
-            self.assertEqual(gzip.returncode, 0)
-        return archive
-
-    def frozen_candidate(self, root):
-        repository = root / "repository"
-        repository.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=repository, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repository, check=True)
-        (repository / "src/main").mkdir(parents=True)
-        (repository / "src/main/Engine.java").write_text("final class Engine {}\n")
-        baseline = repository / "tools/re2-benchmark/baseline"
-        baseline.mkdir(parents=True)
-        manifest_names = (
-            "rows.tsv",
-            "platforms.tsv",
-            "comparators.tsv",
-            "shards.tsv",
-            "protocol-representatives.tsv",
-        )
-        for name in manifest_names:
-            (baseline / name).write_text(f"{name}\n")
-        (repository / ".gitignore").write_text(
-            "".join(f"/tools/re2-benchmark/baseline/{table}\n" for table in RUN_CAMPAIGN.work_units.TABLES))
-        subprocess.run(["git", "add", "."], cwd=repository, check=True)
-        subprocess.run(["git", "commit", "-qm", "Candidate"], cwd=repository, check=True)
-
-        candidate_ref = "refs/benchmarks/test-candidate"
-        subprocess.run(["git", "update-ref", candidate_ref, "HEAD"], cwd=repository, check=True)
-        archive = self.freeze_archive(repository, root / "candidate.tar.gz")
-
-        commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
-        root_tree = subprocess.check_output(
-            ["git", "rev-parse", "HEAD^{tree}"], cwd=repository, text=True).strip()
-        engine_tree = subprocess.check_output(
-            ["git", "rev-parse", "HEAD:src/main"], cwd=repository, text=True).strip()
-        provenance = root / "candidate.tsv"
-        archive_listing = subprocess.check_output(["tar", "-tzf", str(archive)])
-        values = {
-            "candidate_ref": candidate_ref,
-            "candidate_commit": commit,
-            "root_tree": root_tree,
-            "engine_tree": engine_tree,
-            "archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-            "archive_file_list_sha256": hashlib.sha256(
-                b"".join(sorted(archive_listing.splitlines(keepends=True)))).hexdigest(),
-            **{
-                field: hashlib.sha256((baseline / name).read_bytes()).hexdigest()
-                for field, name in (
-                    ("row_manifest_sha256", "rows.tsv"),
-                    ("platform_manifest_sha256", "platforms.tsv"),
-                    ("comparator_manifest_sha256", "comparators.tsv"),
-                    ("shard_manifest_sha256", "shards.tsv"),
-                    ("protocol_representatives_sha256", "protocol-representatives.tsv"),
-                )
-            },
-        }
-        with provenance.open("w", newline="") as output_file:
-            writer = csv.DictWriter(
-                output_file,
-                fieldnames=RUN_CAMPAIGN.CANDIDATE_PROVENANCE_FIELDS,
-                delimiter="\t",
-                lineterminator="\n")
-            writer.writeheader()
-            writer.writerow(values)
-        arguments = SimpleNamespace(
-            candidate_ref=candidate_ref,
-            candidate_archive=archive,
-            candidate_provenance=provenance)
-        return repository, arguments, values
-
     def write_cleanup_session(self, result_root, job):
         """Leave the session a wrapper leaves after its launch ends."""
         session = RUN_CAMPAIGN.job_result_root(result_root, job) / "session"
@@ -414,70 +328,94 @@ class TestRunCampaign(unittest.TestCase):
 
             self.assertEqual(values["maximum_resident_kibibytes"], "1048576")
 
-    def test_deterministic_archive_checksum_matches_the_frozen_archive_and_its_tables(self):
+    def git(self, repository, *arguments):
+        return subprocess.check_output(["git", *arguments], cwd=repository, text=True).strip()
+
+    def commit(self, repository, files, message):
+        for name, content in files.items():
+            (repository / name).parent.mkdir(parents=True, exist_ok=True)
+            (repository / name).write_text(content)
+        self.git(repository, "add", ".")
+        self.git(repository, "commit", "-qm", message)
+        return self.git(repository, "rev-parse", "HEAD")
+
+    def test_candidate_freezes_from_git_whatever_else_the_checkout_holds(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
-            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
-            (root / "file.txt").write_text("content\n")
-            subprocess.run(["git", "add", "file.txt"], cwd=root, check=True)
-            subprocess.run(["git", "commit", "-qm", "Test"], cwd=root, check=True)
-            with self.assertRaisesRegex(SystemExit, "generated tables .* are missing"):
-                RUN_CAMPAIGN.deterministic_archive_sha256(root, "HEAD")
-            archive = self.freeze_archive(root, root / "candidate.tar.gz")
-            with tarfile.open(archive) as members:
-                self.assertEqual(["file.txt", "tools/re2-benchmark/baseline/row-protocol.tsv",
-                                  "tools/re2-benchmark/baseline/unit-rows.tsv", "tools/re2-benchmark/baseline/units.tsv"],
-                                 sorted(member.name for member in members if member.isfile()))
-
-            self.assertEqual(
-                RUN_CAMPAIGN.deterministic_archive_sha256(root, "HEAD"),
-                hashlib.sha256(archive.read_bytes()).hexdigest())
-            # Tables regenerated differently since the freeze no longer reproduce the candidate archive.
-            (root / "tools/re2-benchmark/baseline/units.tsv").write_text("changed\n")
-            self.assertNotEqual(
-                RUN_CAMPAIGN.deterministic_archive_sha256(root, "HEAD"),
-                hashlib.sha256(archive.read_bytes()).hexdigest())
-
-    def test_candidate_source_accepts_its_own_new_engine_tree(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            repository, arguments, values = self.frozen_candidate(root)
+            repository = root / "repository"
+            repository.mkdir()
+            self.git(repository, "init", "-q")
+            self.git(repository, "config", "user.name", "Test")
+            self.git(repository, "config", "user.email", "test@example.com")
+            baseline = "tools/re2-benchmark/baseline"
+            # The candidate's generator writes its tables from a module beside it.
+            candidate = self.commit(repository, {
+                "src/main/Engine.java": "final class Engine {}\n",
+                f"{baseline}/neighbour.py": "TABLE = 'frozen'\n",
+                f"{baseline}/generate-units.py":
+                    "import argparse, pathlib, neighbour\n"
+                    "parser = argparse.ArgumentParser()\n"
+                    "parser.add_argument('--output-directory', type=pathlib.Path,"
+                    " default=pathlib.Path(__file__).parent)\n"
+                    "for name in ('row-protocol.tsv', 'units.tsv', 'unit-rows.tsv'):\n"
+                    "    (parser.parse_args().output_directory / name).write_text(neighbour.TABLE + name)\n",
+                **{f"{baseline}/{name}": f"{name}\n" for name in RUN_CAMPAIGN.PROVENANCE_MANIFESTS.values()},
+                ".gitignore": "__pycache__/\n" + "".join(
+                    f"/{baseline}/{table}\n" for table in RUN_CAMPAIGN.work_units.TABLES)},
+                "Candidate")
+            subprocess.run([sys.executable, str(repository / baseline / "generate-units.py")], check=True)
+            # The controller's checkout has since moved on, and has uncommitted engine changes.
+            head = self.commit(repository, {"src/main/Engine.java": "final class Engine { int next; }\n"}, "Next")
+            (repository / "src/main/Engine.java").write_text("uncommitted\n")
+            campaign_root = root / "campaign"
+            arguments = SimpleNamespace(candidates=[("first", candidate[:12])], campaign="tournament",
+                                        campaign_root=campaign_root)
+            # The controller plans from this checkout's tables, so a stale or missing one is refused before any
+            # archive is written.
+            units = repository / baseline / "units.tsv"
+            for change in (lambda: units.write_text("stale\n"), units.unlink):
+                change()
+                with self.assertRaisesRegex(SystemExit, r"generated tables \['units\.tsv'\] differ"):
+                    RUN_CAMPAIGN.validate_source(repository, arguments)
+            self.assertFalse((campaign_root / "first" / "candidate" / "regulator.tar.gz").exists())
+            subprocess.run([sys.executable, str(repository / baseline / "generate-units.py")], check=True)
 
             RUN_CAMPAIGN.validate_source(repository, arguments)
 
-            self.assertEqual(arguments.engine_tree, values["engine_tree"])
-            self.assertEqual(arguments.candidate_archive_sha256, values["archive_sha256"])
-
-            # The controller runs the candidate it measures.
-            (repository / "controller.py").write_text("newer\n")
-            subprocess.run(["git", "add", "."], cwd=repository, check=True)
-            subprocess.run(["git", "commit", "-qm", "Controller"], cwd=repository, check=True)
-            with self.assertRaisesRegex(SystemExit, "but HEAD is"):
+            self.assertEqual(candidate, arguments.candidate_commit)
+            self.assertEqual(candidate, self.git(repository, "rev-parse", "refs/benchmarks/tournament/first"))
+            self.assertEqual(self.git(repository, "rev-parse", f"{candidate}:src/main"), arguments.engine_tree)
+            with tarfile.open(arguments.candidate_archive) as archive:
+                self.assertEqual(candidate, archive.pax_headers["comment"])
+                self.assertEqual(b"final class Engine {}\n", archive.extractfile("src/main/Engine.java").read())
+                self.assertEqual(b"frozenunits.tsv", archive.extractfile(f"{baseline}/units.tsv").read())
+            with arguments.candidate_provenance.open(newline="") as provenance:
+                [values] = csv.DictReader(provenance, delimiter="\t")
+            self.assertEqual({"candidate_ref": "refs/benchmarks/tournament/first", "candidate_commit": candidate,
+                              "engine_tree": arguments.engine_tree,
+                              "archive_sha256": arguments.candidate_archive_sha256},
+                             {field: values[field] for field in
+                              ("candidate_ref", "candidate_commit", "engine_tree", "archive_sha256")})
+            self.assertEqual("name\tcommit\tref\tarchive_sha256\n"
+                             f"first\t{candidate}\trefs/benchmarks/tournament/first\t"
+                             f"{arguments.candidate_archive_sha256}\n",
+                             (campaign_root / "candidates.tsv").read_text())
+            # A restart reproduces the freeze, and refuses a changed archive or another commit under the name.
+            RUN_CAMPAIGN.validate_source(repository, arguments)
+            frozen = arguments.candidate_archive.read_bytes()
+            arguments.candidate_archive.write_bytes(frozen + b"\0")
+            with self.assertRaisesRegex(SystemExit, "differs from the deterministic archive"):
                 RUN_CAMPAIGN.validate_source(repository, arguments)
-
-    def test_archive_listing_preserves_directory_slashes_from_freeze_script(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            _, arguments, values = self.frozen_candidate(Path(temporary_directory))
-            self.assertEqual(RUN_CAMPAIGN.archive_file_list_sha256(arguments.candidate_archive),
-                             values["archive_file_list_sha256"])
-
-    def test_candidate_source_rejects_mismatched_engine_tree_provenance(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            repository, arguments, values = self.frozen_candidate(root)
-            values["engine_tree"] = "f" * 40
-            with arguments.candidate_provenance.open("w", newline="") as output_file:
-                writer = csv.DictWriter(
-                    output_file,
-                    fieldnames=RUN_CAMPAIGN.CANDIDATE_PROVENANCE_FIELDS,
-                    delimiter="\t",
-                    lineterminator="\n")
-                writer.writeheader()
-                writer.writerow(values)
-
-            with self.assertRaisesRegex(SystemExit, "candidate provenance engine_tree"):
+            arguments.candidate_archive.write_bytes(frozen)
+            with self.assertRaisesRegex(SystemExit, "already names"):
+                RUN_CAMPAIGN.validate_source(repository, SimpleNamespace(**{**vars(arguments),
+                                                                            "candidates": [("first", head)]}))
+            # Hosts run the candidate's tooling while this checkout's checks their results, so the two must match.
+            (repository / baseline / "neighbour.py").write_text("TABLE = 'edited'\n")
+            with self.assertRaisesRegex(SystemExit, "requires committed benchmark tooling"):
+                RUN_CAMPAIGN.validate_source(repository, arguments)
+            self.commit(repository, {}, "Tooling")
+            with self.assertRaisesRegex(SystemExit, "other benchmark tooling"):
                 RUN_CAMPAIGN.validate_source(repository, arguments)
 
     def test_primary_requires_accepted_smoke_results(self):
@@ -490,20 +428,13 @@ class TestRunCampaign(unittest.TestCase):
             root = Path(temporary_directory)
             durable = root.parent / "durable"
             target = root / "target"
-            arguments = SimpleNamespace(
-                candidate_archive=durable / "candidate.tar.gz",
-                candidate_provenance=durable / "candidate.tsv")
+            arguments = SimpleNamespace(campaign_root=durable / "campaign")
 
-            RUN_CAMPAIGN.validate_durable_paths(root, arguments, durable / "results")
+            RUN_CAMPAIGN.validate_durable_paths(root, arguments, durable / "campaign" / "results")
 
             cases = (
                 ("result root", target / "results", arguments),
-                ("candidate archive", durable / "results", SimpleNamespace(
-                    candidate_archive=target / "candidate.tar.gz",
-                    candidate_provenance=durable / "candidate.tsv")),
-                ("candidate provenance", durable / "results", SimpleNamespace(
-                    candidate_archive=durable / "candidate.tar.gz",
-                    candidate_provenance=target / "candidate.tsv")),
+                ("campaign root", durable / "results", SimpleNamespace(campaign_root=target / "campaign")),
             )
             for label, result_root, case_arguments in cases:
                 with self.subTest(label=label), self.assertRaisesRegex(SystemExit, label):
@@ -1165,13 +1096,15 @@ class TestRunCampaign(unittest.TestCase):
                                               ("primary", units, ("1", "2", "3"))):
                 with self.subTest(phase=phase):
                     with patch.object(sys, "argv", ["run-campaign.py", phase, "language", "--language-plan",
-                                                    str(root / "plan"), "--result-root", str(root / phase)]):
+                                                    str(root / "plan"), "--candidate", "lifecycle=HEAD",
+                                                    "--campaign-root", str(root)]):
                         arguments = RUN_CAMPAIGN.parse_args()
                     with patch.object(RUN_CAMPAIGN, "parse_args", return_value=arguments), \
                             contextlib.redirect_stdout(io.StringIO()):
                         RUN_CAMPAIGN.main()
                     self.assertEqual(RUN_CAMPAIGN.phase_protocol(arguments), "qualification")
-                    with (root / phase / "work-items.tsv").open(newline="") as manifest:
+                    self.assertEqual("language.lifecycle.lang", arguments.campaign_id)
+                    with (root / "lifecycle/lang" / phase / "work-items.tsv").open(newline="") as manifest:
                         items = list(csv.DictReader(manifest, delimiter="\t"))
                     # The lifecycle suite runs on the larger r9g allocation its plan freezes.
                     self.assertEqual({(item["platform"], item["instance_type"]) for item in items},
@@ -1186,7 +1119,8 @@ class TestRunCampaign(unittest.TestCase):
                 with self.subTest(refusal=refusal), \
                         patch.object(sys, "argv", ["run-campaign.py", phase, "language",
                                                    *["--language-plan", str(root / "plan")] * plans,
-                                                   "--result-root", str(root / "refused")]), \
+                                                   "--candidate", "lifecycle=HEAD",
+                                                   "--campaign-root", str(root / "refused")]), \
                         patch.dict(os.environ, environment), self.assertRaisesRegex(SystemExit, refusal):
                     RUN_CAMPAIGN.main()
 
@@ -1208,7 +1142,7 @@ class TestRunCampaign(unittest.TestCase):
         arguments = SimpleNamespace(
             phase="primary", campaign_id=receipts[0]["campaign_id"], heap_size="8g", max_concurrent=2,
             candidate_archive_sha256=receipts[0]["candidate_archive_sha256"], engine_tree=receipts[0]["engine_tree"],
-            language_plans={plan["shard_id"]: fixture.directory})
+            candidate_commit=receipts[0]["candidate_commit"], language_plans={plan["shard_id"]: fixture.directory})
 
         def validation(root=checkout, release="", classes=(("r8i", "d" * 64), ("r9g", "c" * 64))):
             """The campaign's validation, installing each platform's engine build, whose classes archive has the
@@ -1222,8 +1156,7 @@ class TestRunCampaign(unittest.TestCase):
                 manifests[platform] = hashlib.sha256((build / "engine-build.json").read_bytes()).hexdigest()
             installing = SimpleNamespace(**vars(arguments), engine_build_directories=builds,
                                          engine_build_policy=manifests)
-            with patch.object(RUN_CAMPAIGN, "check_output", return_value=receipts[0]["candidate_commit"]):
-                return RUN_CAMPAIGN.unit_validation(root, installing, "language", {fixture.directory: plan})
+            return RUN_CAMPAIGN.unit_validation(root, installing, "language", {fixture.directory: plan})
 
         accepted = validation()
         for receipt in receipts:
@@ -2198,47 +2131,47 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             receipt = campaign.receipts[0]
             arguments = SimpleNamespace(
                 campaign_id=receipt["campaign_id"], candidate_archive_sha256=receipt["candidate_archive_sha256"],
-                engine_tree=receipt["engine_tree"], heap_size=receipt["heap_size"], phase="primary")
+                candidate_commit=receipt["candidate_commit"], engine_tree=receipt["engine_tree"],
+                heap_size=receipt["heap_size"], phase="primary")
 
             def recover():
                 validation = RUN_CAMPAIGN.unit_validation(SCRIPT.parents[3], arguments, "baseline")
                 return RUN_CAMPAIGN.recover_accepted_units(validation, result_root, ledger)
 
-            with patch.object(RUN_CAMPAIGN, "check_output", return_value=receipt["candidate_commit"]):
+            recover()
+            # A restart revalidates the ledger against the retained attempts, one per group.
+            self.assertEqual(12, len(recover()))
+            self.assertEqual(
+                sorted(campaign.receipts, key=RUN_CAMPAIGN.group_identity),
+                sorted(RUN_CAMPAIGN.read_accepted_units(ledger), key=RUN_CAMPAIGN.group_identity))
+            unit = campaign.units[0]
+            confirmations = Path(temporary_directory) / "confirmation-jobs.tsv"
+            confirmations.write_text(
+                f"platform\tshard_id\tunit_id\nr8i\t{unit['shard_id']}\t{unit['unit_id']}\n")
+            # Replica 3 measured its second group on host 5 after an interruption; the confirmation avoids
+            # every instance of the split replica.
+            split = [receipt for receipt in campaign.receipts
+                     if (receipt["platform"], receipt["unit_id"], receipt["replica_id"], receipt["group_id"]) !=
+                     ("r8i", unit["unit_id"], "3", "2")] + campaign.add("r8i", unit, 3, host=5, groups=("2",))
+            self.assertEqual(
+                [("r8i", unit["unit_id"], 4, frozenset({"i-r8i-1", "i-r8i-2", "i-r8i-3", "i-r8i-5"}))],
+                RUN_CAMPAIGN.read_confirmation_units(
+                    confirmations, [self.platform], {unit["unit_id"]: unit}, split))
+            with self.assertRaisesRegex(SystemExit, "needs every group of its primary replicas"):
+                RUN_CAMPAIGN.read_confirmation_units(
+                    confirmations, [self.platform], {unit["unit_id"]: unit}, split[:-1])
+            # A requeued replica's later completion is superseded: the first accepted attempt stays.
+            first = {}
+            for accepted in campaign.receipts:
+                first.setdefault(RUN_CAMPAIGN.unit_logical_identity(accepted), {})[accepted["group_id"]] = accepted
+            campaign.add("r8i", unit, 2, host=4)
+            self.assertEqual(first, recover())
+            # An accepted attempt whose retained evidence no longer holds stops the restart.
+            (RUN_CAMPAIGN.unit_attempt_directory(result_root, receipt) / "status.txt").write_text(
+                "status=failed\n")
+            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError,
+                                        "unit artifacts are not accepted .*did not complete"):
                 recover()
-                # A restart revalidates the ledger against the retained attempts, one per group.
-                self.assertEqual(12, len(recover()))
-                self.assertEqual(
-                    sorted(campaign.receipts, key=RUN_CAMPAIGN.group_identity),
-                    sorted(RUN_CAMPAIGN.read_accepted_units(ledger), key=RUN_CAMPAIGN.group_identity))
-                unit = campaign.units[0]
-                confirmations = Path(temporary_directory) / "confirmation-jobs.tsv"
-                confirmations.write_text(
-                    f"platform\tshard_id\tunit_id\nr8i\t{unit['shard_id']}\t{unit['unit_id']}\n")
-                # Replica 3 measured its second group on host 5 after an interruption; the confirmation avoids
-                # every instance of the split replica.
-                split = [receipt for receipt in campaign.receipts
-                         if (receipt["platform"], receipt["unit_id"], receipt["replica_id"], receipt["group_id"]) !=
-                         ("r8i", unit["unit_id"], "3", "2")] + campaign.add("r8i", unit, 3, host=5, groups=("2",))
-                self.assertEqual(
-                    [("r8i", unit["unit_id"], 4, frozenset({"i-r8i-1", "i-r8i-2", "i-r8i-3", "i-r8i-5"}))],
-                    RUN_CAMPAIGN.read_confirmation_units(
-                        confirmations, [self.platform], {unit["unit_id"]: unit}, split))
-                with self.assertRaisesRegex(SystemExit, "needs every group of its primary replicas"):
-                    RUN_CAMPAIGN.read_confirmation_units(
-                        confirmations, [self.platform], {unit["unit_id"]: unit}, split[:-1])
-                # A requeued replica's later completion is superseded: the first accepted attempt stays.
-                first = {}
-                for accepted in campaign.receipts:
-                    first.setdefault(RUN_CAMPAIGN.unit_logical_identity(accepted), {})[accepted["group_id"]] = accepted
-                campaign.add("r8i", unit, 2, host=4)
-                self.assertEqual(first, recover())
-                # An accepted attempt whose retained evidence no longer holds stops the restart.
-                (RUN_CAMPAIGN.unit_attempt_directory(result_root, receipt) / "status.txt").write_text(
-                    "status=failed\n")
-                with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError,
-                                            "unit artifacts are not accepted .*did not complete"):
-                    recover()
 
     def test_on_demand_capacity_accounts_for_unrelated_work_and_local_reservations(self):
         running_job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "on-demand")
@@ -2781,8 +2714,6 @@ class FakeUnitFleet:
         self.log.append(("lease", host.session, sequence, document.get("unit_id")))
 
     def check_output(self, command, **kwargs):
-        if command[:2] == ["git", "rev-parse"]:
-            return "a" * 40
         if "get-spot-placement-scores" in command:
             raise subprocess.CalledProcessError(254, command)
         if command[:2] == ["ps", "-p"]:
@@ -2844,7 +2775,7 @@ class TestUnitWorkers(unittest.TestCase):
         arguments = SimpleNamespace(
             phase=phase, campaign_id="campaign", campaign_root=root, max_concurrent=max_concurrent,
             max_concurrent_per_platform=per_platform, candidate_archive=root / "candidate.tar.gz",
-            candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
+            candidate_commit="a" * 40, candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
             shared_budget=budget, selected_shards=shards, platform_regions=platform_regions or {},
             purchases=purchases or {}, topology_deadline_seconds=deadline, primary_results=primary_results,
             release_version=release_version)

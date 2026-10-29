@@ -203,15 +203,16 @@ run the candidate classes and native runners of their platform's
 [engine build](../aws/README.md#engine-builds) and compile nothing. Each unit
 receives an extracted archive rather than a Git checkout, with the source
 archive and the candidate provenance TSV produced by
-`baseline/freeze-candidate.sh`. Before it measures, the unit checks once the
-archive checksum, embedded Git commit, reconstructed Git tree, and extracted
-file contents and modes, rejecting extra files outside `target`. It does not
-create synthetic commits or trust a source SHA supplied without its archive.
-Its JVM build receipt, which every partition's provenance records, names that
-source, the SHA-256 of the installed classes archive, the selected JDK and
-ordered classpath, and the comparator pins. The classpath's Joni jar must match
-the pinned checksum. The engine build verified every installed file against its
-archive's manifest, so the archive's SHA-256 identifies the classes. The
+[freezing the candidate](../aws/README.md#freeze-a-candidate). Before it
+measures, the unit checks the archive checksum, embedded Git commit,
+reconstructed Git tree, and extracted file contents and modes once, rejecting
+extra files outside `target`. It does not create synthetic commits or trust a
+source SHA supplied without its archive. Its JVM build receipt, which every
+partition's provenance records, names that source, the SHA-256 of the
+installed classes archive, the selected JDK and ordered classpath, and the
+comparator pins. The classpath's Joni jar must match the pinned checksum. The
+worker installed the classes archive only once its whole stream matched the
+archive's pinned SHA-256, so that SHA-256 identifies the classes. The
 controller rejects an attempt whose `engine-build.txt` records a classes
 archive other than its platform's accepted build's, and acceptance rejects a
 partition whose receipt names a classes archive other than that one.
@@ -561,28 +562,31 @@ the usual first workload for each language.
 ## AWS dispatch and recovery
 
 A language campaign runs its plans' work units on the baseline's unit
-workers, as its own controller invocation with its own result roots. Run the
-baseline campaign separately; language plans add coverage and do not replace
-its LIKE and Trino-operation shards. Keep both source manifests and fleet
+workers, as its own controller invocation under the candidate's `lang`
+directory and campaign ID `<campaign>.<name>.lang`, on the candidate's build.
+Run the baseline campaign separately; language plans add coverage and do not
+replace its LIKE and Trino-operation shards. Keep both source manifests and fleet
 plans outside Maven's `target` directory for a final campaign.
 
 ```sh
 python3 tools/re2-benchmark/baseline/run-campaign.py smoke final-v1 \
+  --candidate release=<commit> \
   --language-plan /path/to/lifecycle-fleet \
   --language-plan /path/to/bulk-fleet \
-  --result-root /path/to/language-smoke
+  --campaign-root /path/to/final-v1
 ```
 
-Without `--execute`, this only writes `work-items.tsv`. Execution also
-requires the frozen `--candidate-ref`, `--candidate-archive`, and
-`--candidate-provenance`, and `--engine-builds` from an accepted build phase,
-which carries the native runners. Each plan must name a distinct shard.
+Without `--execute`, this only writes `work-items.tsv`, here under
+`/path/to/final-v1/release/lang/smoke`. Execution also freezes the candidate
+and requires the candidate's accepted build phase, or the one
+`--engine-builds` names, which carries the candidate classes and native
+runners. Each plan must name a distinct shard.
 
 - **Smoke** measures each plan's smoke units on replica 1. They cover the first
   comparison of each language and model, every isolated or required pair, and
   the longest packed unit.
-- **Primary** runs with the same plans and candidate, a separate result root,
-  and `--smoke-results /path/to/language-smoke` once that smoke is accepted.
+- **Primary** runs with the same plans and candidate once that smoke is
+  accepted.
   It measures every unit on three replicas, and no instance measures two
   replicas of one unit.
 - Both phases use the full qualification protocol. A language campaign has no

@@ -71,12 +71,12 @@ does not require a campaign archive.
 
 ```bash
 python3 tools/re2-benchmark/baseline/archive_results.py \
-    /durable/path/<campaign-id>/results \
-    /durable/path/<campaign-id>/campaign-results.tar.gz \
-    /durable/path/<campaign-id>/retrieval-metadata.tsv \
+    /durable/path/<campaign>/<name> \
+    /durable/path/<campaign>/<name>-results.tar.gz \
+    /durable/path/<campaign>/<name>-retrieval-metadata.tsv \
     --candidate-commit <candidate-commit> \
-    --candidate-ref refs/benchmarks/<candidate-name> \
-    --campaign-id <campaign-id>
+    --candidate-ref refs/benchmarks/<campaign>/<name> \
+    --campaign-id <campaign>.<name>
 ```
 
 Keep these paths outside Maven's `target` directory. This command writes to

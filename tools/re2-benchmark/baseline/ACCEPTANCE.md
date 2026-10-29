@@ -92,10 +92,11 @@ the exports of its partitions.
 The candidate archive, provenance, and result root must remain outside Maven's
 `target` directory so build cleanup cannot remove retained evidence.
 
-Primary execution requires the complete accepted smoke result root through
-`--smoke-results`. Confirmation execution similarly requires the complete
-accepted primary result root through `--primary-results`, and smoke, primary,
-and confirmation require the accepted build root through `--engine-builds`. A
+Primary execution requires the candidate's complete accepted smoke result
+root, and confirmation execution its complete accepted primary result root.
+Smoke, primary, and confirmation require its accepted build root. Each
+prerequisite defaults to the candidate's own phase root; `--smoke-results`,
+`--primary-results`, and `--engine-builds` name another instead. A
 phase's controller writes `phase-complete.txt` in its result root only after it
 has verified every worker's cleanup and the phase gate has passed. Before
 starting the next phase, the controller requires that marker, then revalidates

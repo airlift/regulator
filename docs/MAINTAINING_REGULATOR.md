@@ -260,9 +260,9 @@ is a separate decision, not the default development loop.
    collection tools, also run the offline gate in [testing.md](testing.md).
    Prepare pinned comparators and verify equivalent requested work before
    collecting either side's timings.
-4. Freeze each measured source revision with the
-   [candidate preparation procedure](../tools/re2-benchmark/aws/README.md#freeze-a-candidate).
-   Keep archives, manifests, and results outside `target`. Plan without
+4. Name each measured source revision as a candidate commit, which the
+   campaign [freezes from Git](../tools/re2-benchmark/aws/README.md#freeze-a-candidate).
+   Keep the campaign root and manifests outside `target`. Plan without
    `--execute`; inspect the work items, selected cases, unit estimates, host
    limits, and cost allowance before launching. The plan is complete only when
    every affected path and protected control has an identified measurement.
@@ -283,14 +283,13 @@ launching machines. Choose shards based on the changed path, not this example:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py smoke focused-change \
-  --shard trino-operations --shard trino-like \
-  --result-root /durable/path/focused-change/smoke --max-concurrent 4
+  --candidate change=<commit> --shard trino-operations --shard trino-like \
+  --campaign-root /durable/path/focused-change --max-concurrent 4
 ```
 
-Execution additionally requires `--execute` and the frozen candidate arguments
-from the AWS guide, and the engines of an accepted build phase
-(`--engine-builds`). Primary collection requires the
-accepted smoke root and the same selection. Resume an interrupted campaign
+Execution additionally requires `--execute` and the candidate's accepted build
+phase, as the AWS guide describes. Primary collection requires the accepted
+smoke and the same selection. Resume an interrupted campaign
 with its original inputs; do not change source, heap, selection, or
 concurrency inside a resumed run.
 A new code change starts a new candidate and invalidates its affected results.

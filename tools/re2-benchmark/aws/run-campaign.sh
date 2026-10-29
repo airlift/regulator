@@ -856,13 +856,12 @@ PYTHON
     git -C "${REGULATOR_DIR}" rev-parse --verify "${reference}^{commit}"
 }
 
-require_clean_worktree()
+require_committed_tooling()
 {
-    local worktree=$1
-    local label=$2
-
-    if [[ -n $(git -C "${worktree}" status --porcelain) ]]; then
-        reject_input "Qualification requires a clean ${label} worktree: ${worktree}"
+    # Hosts run the candidate archive's benchmark tooling, which must match this checkout's committed
+    # tooling; the rest of the checkout may differ from the candidate.
+    if [[ -n $(git -C "${REGULATOR_DIR}" status --porcelain -- tools/re2-benchmark) ]]; then
+        reject_input "Qualification requires committed benchmark tooling: ${REGULATOR_DIR}/tools/re2-benchmark"
     fi
 }
 
@@ -1266,7 +1265,7 @@ launch_instance()
 REGULATOR_COMMIT=$(candidate_commit) ||
     reject_input "Frozen candidate archive does not identify a local Regulator commit"
 
-require_clean_worktree "${REGULATOR_DIR}" Regulator
+require_committed_tooling
 if [[ ! -f "${BASELINE_CANDIDATE_ARCHIVE}" ||
         ! "${BASELINE_CANDIDATE_ARCHIVE_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
     reject_input "Formal baseline execution requires the frozen candidate archive and SHA-256"
