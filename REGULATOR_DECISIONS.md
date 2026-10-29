@@ -311,7 +311,8 @@ Garay, Jurchen, Proto_Cuneiform, and Seal.
   encoded surrogate, which the garbage-in/garbage-out contract allows.
 
 Java match positions remain UTF-8 byte offsets over `Slice`, not the JDK's
-UTF-16 code-unit offsets.
+UTF-16 code-unit offsets. Java parse-error offsets count UTF-8 bytes in the
+original pattern, including when quoting rewrites it before parsing.
 
 ## Rust Frontend
 

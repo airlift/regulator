@@ -50,7 +50,9 @@ final class JavaRegexpParser
             }
         }
 
-        Parser parser = new Parser(pattern, parseFlags, CaseFolding.JAVA);
+        Parser parser = ((parseFlags & Regexp.LITERAL) == 0)
+                ? QuoteRewrite.parser(pattern, parseFlags)
+                : new Parser(pattern, pattern, null, parseFlags, CaseFolding.JAVA);
         Regexp parsedRegexp = parser.parseRegexp();
         if (!parser.atEnd()) {
             // Unconsumed input at the top-level is typically a stray ')'.
@@ -67,6 +69,131 @@ final class JavaRegexpParser
         return new ParseResult(simplifiedRegexp, parser.capturingGroupCount, capturingGroupNames, CaseFolding.JAVA);
     }
 
+    /// The JDK's quote rewrite, which runs before parsing unless the pattern is literal. Mirrors
+    /// `Pattern.RemoveQEQuoting`, which rewrites every `\Q...\E` into ordinary syntax, knowing
+    /// nothing of classes or comments. Inside a quote, a backslash becomes an escaped backslash
+    /// unless `E` follows it, and every other ASCII character that is not a letter or digit gets a
+    /// backslash. Letters and non-ASCII characters are copied unchanged. A digit at the start of a
+    /// quote gets a `\x3` prefix, so that it cannot continue an escape before the quote; other
+    /// digits are copied unchanged. An empty quote contributes no bytes, so an unfinished escape
+    /// before it continues after it. Outside a quote, a backslash and the character after it are
+    /// copied. Copying non-ASCII bytes one at a time copies each code point.
+    private static final class QuoteRewrite
+    {
+        private final byte[] rewritten;
+        // The original offset of each rewritten byte, then the original length at rewrittenLength.
+        private final int[] originalOffsets;
+        private int rewrittenLength;
+
+        private QuoteRewrite(int capacity)
+        {
+            rewritten = new byte[capacity];
+            originalOffsets = new int[capacity + 1];
+        }
+
+        static Parser parser(Slice pattern, int parseFlags)
+        {
+            byte[] source = pattern.byteArray();
+            int sourceStart = pattern.byteArrayOffset();
+            int length = pattern.length();
+            int position = 0;
+            while (position < length - 1) {
+                if (source[sourceStart + position] != '\\') {
+                    position++;
+                }
+                else if (source[sourceStart + position + 1] != 'Q') {
+                    position += 2;
+                }
+                else {
+                    break;
+                }
+            }
+            if (position >= length - 1) {
+                return new Parser(pattern, pattern, null, parseFlags, CaseFolding.JAVA);
+            }
+
+            int prefixLength = position;
+            position += 2;
+            QuoteRewrite rewrite;
+            // Use the JDK's conservative capacity bound: quoted punctuation can double, and a quote's
+            // first digit becomes four bytes.
+            try {
+                rewrite = new QuoteRewrite(Math.addExact(prefixLength + 2, Math.multiplyExact(3, length - position)));
+            }
+            catch (ArithmeticException _) {
+                throw new OutOfMemoryError("Required pattern length too large");
+            }
+            for (int offset = 0; offset < prefixLength; offset++) {
+                rewrite.append(source[sourceStart + offset], offset);
+            }
+
+            boolean inQuote = true;
+            boolean beginQuote = true;
+            while (position < length) {
+                int originalOffset = position;
+                byte character = source[sourceStart + position++];
+                if (character < 0 || isAsciiLetter(character)) {
+                    rewrite.append(character, originalOffset);
+                }
+                else if (character >= '0' && character <= '9') {
+                    if (beginQuote) {
+                        rewrite.append((byte) '\\', originalOffset);
+                        rewrite.append((byte) 'x', originalOffset);
+                        rewrite.append((byte) '3', originalOffset);
+                    }
+                    rewrite.append(character, originalOffset);
+                }
+                else if (character != '\\') {
+                    if (inQuote) {
+                        rewrite.append((byte) '\\', originalOffset);
+                    }
+                    rewrite.append(character, originalOffset);
+                }
+                else {
+                    int next = (position < length) ? source[sourceStart + position] : 0;
+                    if (inQuote) {
+                        if (next == 'E') {
+                            position++;
+                            inQuote = false;
+                        }
+                        else {
+                            rewrite.append((byte) '\\', originalOffset);
+                            rewrite.append((byte) '\\', originalOffset);
+                        }
+                    }
+                    else if (next == 'Q') {
+                        position++;
+                        inQuote = true;
+                        beginQuote = true;
+                        continue;
+                    }
+                    else {
+                        rewrite.append(character, originalOffset);
+                        if (position != length) {
+                            rewrite.append(source[sourceStart + position], position);
+                            position++;
+                        }
+                    }
+                }
+                beginQuote = false;
+            }
+            rewrite.originalOffsets[rewrite.rewrittenLength] = length;
+            Slice rewritten = Slices.wrappedBuffer(rewrite.rewritten, 0, rewrite.rewrittenLength);
+            return new Parser(rewritten, pattern, rewrite.originalOffsets, parseFlags, CaseFolding.JAVA);
+        }
+
+        private void append(byte value, int originalOffset)
+        {
+            originalOffsets[rewrittenLength] = originalOffset;
+            rewritten[rewrittenLength++] = value;
+        }
+    }
+
+    private static boolean isAsciiLetter(int character)
+    {
+        return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z');
+    }
+
     @SuppressWarnings("CharUsedInArithmeticContext")
     private static final class Parser
     {
@@ -75,22 +202,28 @@ final class JavaRegexpParser
         private final byte[] bytes;
         private final int start;
         private final int end;
+        // Errors report the pattern as written, which differs from the parsed bytes when the
+        // quote rewrite changed them; see QuoteRewrite.
+        private final Slice originalPattern;
+        // Maps rewritten byte offsets to original offsets; null when no rewrite was needed.
+        private final int[] originalOffsets;
         private final CaseFolding caseFolding;
         private int index;
 
         private int flags;
         private int capturingGroupCount;
-        private boolean inQuote;
         private final Set<String> captureNames = new HashSet<>();
         // The repetitions with a minimum of one or more whose atom a check found cannot match the
         // empty string, so that later checks need not walk them again; see canMatchEmpty.
         private Set<Regexp> nonEmptyRepetitions;
 
-        Parser(Slice pattern, int flags, CaseFolding caseFolding)
+        Parser(Slice pattern, Slice originalPattern, int[] originalOffsets, int flags, CaseFolding caseFolding)
         {
             this.bytes = pattern.byteArray();
             this.start = pattern.byteArrayOffset();
             this.end = start + pattern.length();
+            this.originalPattern = originalPattern;
+            this.originalOffsets = originalOffsets;
             this.caseFolding = caseFolding;
             this.index = start;
             this.flags = flags;
@@ -114,12 +247,39 @@ final class JavaRegexpParser
             if (width <= 0) {
                 return null;
             }
-            return Slices.wrappedBuffer(bytes, index, width);
+            return patternSegment(index, width);
         }
 
         private Slice errorArgAll()
         {
-            return Slices.wrappedBuffer(bytes, start, end - start);
+            return originalPattern;
+        }
+
+        // The original pattern bytes from which the length parsed bytes starting at offset were
+        // rewritten. A segment that reaches the end of the parsed pattern reaches the end of the
+        // original.
+        private Slice patternSegment(int offset, int length)
+        {
+            if (originalOffsets == null) {
+                return Slices.wrappedBuffer(bytes, offset, length);
+            }
+            int segmentStart = originalOffset(offset);
+            int segmentEnd;
+            if (offset + length == end) {
+                segmentEnd = originalPattern.length();
+            }
+            else {
+                // Each parsed byte comes from exactly one original byte.
+                segmentEnd = originalOffset(offset + length - 1) + 1;
+            }
+            return originalPattern.slice(segmentStart, segmentEnd - segmentStart);
+        }
+
+        // The original byte offset of a parsed byte offset.
+        private int originalOffset(int offset)
+        {
+            int parsedOffset = Math.max(offset - start, 0);
+            return (originalOffsets == null) ? parsedOffset : originalOffsets[parsedOffset];
         }
 
         private int runeByteWidthAt(int offset)
@@ -137,15 +297,15 @@ final class JavaRegexpParser
 
         private RegexpParseException error(RegexpParseErrorCode errorCode, Slice invalidPatternSegment)
         {
-            return new RegexpParseException(errorCode, invalidPatternSegment, Math.max(index - start, 0));
+            return new RegexpParseException(errorCode, invalidPatternSegment, originalOffset(index));
         }
 
         private RegexpParseException unsupportedConstruct(String construct, int constructStart, int constructEnd)
         {
             return new RegexpParseException(
                     RegexpParseErrorCode.UNSUPPORTED_CONSTRUCT,
-                    Slices.wrappedBuffer(bytes, constructStart, constructEnd - constructStart),
-                    constructStart - start,
+                    patternSegment(constructStart, constructEnd - constructStart),
+                    originalOffset(constructStart),
                     construct);
         }
 
@@ -180,18 +340,15 @@ final class JavaRegexpParser
                     break;
                 }
                 GroupFrame group = groups.peek();
-                if (tryConsumeQuoteDirective()) {
-                    continue;
-                }
                 int nextByte = peekByte();
 
-                if (!inQuote && nextByte == '|') {
+                if (nextByte == '|') {
                     consumeByte('|');
                     group.expression().nextAlternative(flags);
                     continue;
                 }
 
-                if (!inQuote && nextByte == ')') {
+                if (nextByte == ')') {
                     if (groups.size() == 1) {
                         break;
                     }
@@ -208,7 +365,7 @@ final class JavaRegexpParser
                     continue;
                 }
 
-                if (!inQuote && nextByte == '(') {
+                if (nextByte == '(') {
                     GroupFrame opened = parseGroupStart();
                     if (opened == null) {
                         group.expression().add(Regexp.emptyMatch(flags));
@@ -341,13 +498,6 @@ final class JavaRegexpParser
             while (!atEnd()) {
                 skipIgnoredPatternCharacters();
                 if (atEnd()) {
-                    break;
-                }
-                if (tryConsumeQuoteDirective()) {
-                    // \Q and \E are syntax; they should not block repetition parsing.
-                    continue;
-                }
-                if (inQuote) {
                     break;
                 }
                 int nextByte = peekByte();
@@ -586,7 +736,7 @@ final class JavaRegexpParser
             skipIgnoredPatternCharacters();
 
             if (atEnd()) {
-                throw error(RegexpParseErrorCode.MISSING_BRACKET, Slices.wrappedBuffer(bytes, index - 1, 1));
+                throw error(RegexpParseErrorCode.MISSING_BRACKET, patternSegment(index - 1, 1));
             }
 
             if (peekByte() == ',') {
@@ -622,25 +772,17 @@ final class JavaRegexpParser
         // atom := '(' ... ')' | '[' ... ']' | '.' | '^' | '$' | '\' escape | literal
         private Regexp parseAtom()
         {
-            // Perl quoted literals: \Q...\E
-            // These are syntax directives; they do not correspond to regexp operations themselves.
-            do {
-                skipIgnoredPatternCharacters();
-                if (atEnd()) {
-                    return null;
-                }
+            skipIgnoredPatternCharacters();
+            if (atEnd()) {
+                return null;
             }
-            while (tryConsumeQuoteDirective());
 
             int nextByte = peekByte();
-            if (inQuote) {
-                return literalFromRune(readRune(flags));
-            }
 
             // Repetition operators are not valid in atom position.
             // See upstream re2/parse.cc PushRepeatOp()/PushRepetition().
             if (nextByte == '*' || nextByte == '+' || nextByte == '?' || nextByte == '{') {
-                throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, Slices.wrappedBuffer(bytes, index, 1));
+                throw error(RegexpParseErrorCode.REPEAT_ARGUMENT, patternSegment(index, 1));
             }
 
             if (nextByte == '[') {
@@ -689,28 +831,6 @@ final class JavaRegexpParser
             return parseLiteral();
         }
 
-        private boolean tryConsumeQuoteDirective()
-        {
-            if ((flags & Regexp.PERL_EXTENSIONS) == 0) {
-                return false;
-            }
-            if (peekByte() != '\\' || index + 1 >= end) {
-                return false;
-            }
-            int next = bytes[index + 1] & 0xFF;
-            if (!inQuote && next == 'Q') {
-                index += 2;
-                inQuote = true;
-                return true;
-            }
-            if (inQuote && next == 'E') {
-                index += 2;
-                inQuote = false;
-                return true;
-            }
-            return false;
-        }
-
         private GroupFrame parseGroupStart()
         {
             int groupFlags = flags;
@@ -723,7 +843,7 @@ final class JavaRegexpParser
             if (!atEnd() && peekByte() == '?') {
                 if ((flags & Regexp.PERL_EXTENSIONS) == 0) {
                     // Perl-style group syntax is only available under Perl extensions.
-                    throw error(RegexpParseErrorCode.BAD_PERL_OP, Slices.wrappedBuffer(bytes, groupStart, 2));
+                    throw error(RegexpParseErrorCode.BAD_PERL_OP, patternSegment(groupStart, 2));
                 }
                 consumeByte('?');
                 if (!atEnd()) {
@@ -746,7 +866,7 @@ final class JavaRegexpParser
                     capturing = false;
                 }
                 else if (!atEnd() && peekByte() == 'P') {
-                    throw error(RegexpParseErrorCode.BAD_PERL_OP, Slices.wrappedBuffer(bytes, groupStart, index - groupStart + 1));
+                    throw error(RegexpParseErrorCode.BAD_PERL_OP, patternSegment(groupStart, index - groupStart + 1));
                 }
                 else if (!atEnd() && peekByte() == '<') {
                     // (?<name>...)
@@ -816,7 +936,7 @@ final class JavaRegexpParser
                     case 'u' -> inlineFlags = setUnicodeCase(inlineFlags, !clearing);
                     case 'U' -> inlineFlags = setUnicodeCharacterClasses(inlineFlags, !clearing);
                     case 'x' -> inlineFlags = setFlag(inlineFlags, Regexp.JAVA_COMMENTS, !clearing);
-                    default -> throw error(RegexpParseErrorCode.BAD_PERL_OP, Slices.wrappedBuffer(bytes, groupStart, index - groupStart));
+                    default -> throw error(RegexpParseErrorCode.BAD_PERL_OP, patternSegment(groupStart, index - groupStart));
                 }
             }
 
@@ -865,7 +985,7 @@ final class JavaRegexpParser
             }
             if (nameEnd >= end) {
                 // Match upstream: error_arg is the remaining "(?P<name" / "(?<name" substring.
-                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, Slices.wrappedBuffer(bytes, groupStart, end - groupStart));
+                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, end - groupStart));
             }
 
             int nameLength = nameEnd - nameStart;
@@ -874,27 +994,22 @@ final class JavaRegexpParser
             }
 
             if (!isAsciiLetter(bytes[nameStart] & 0xFF)) {
-                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, Slices.wrappedBuffer(bytes, groupStart, (nameEnd - groupStart) + 1));
+                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, (nameEnd - groupStart) + 1));
             }
             for (int nameIndex = nameStart + 1; nameIndex < nameEnd; nameIndex++) {
                 int character = bytes[nameIndex] & 0xFF;
                 if (!isAsciiLetter(character) && (character < '0' || character > '9')) {
-                    throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, Slices.wrappedBuffer(bytes, groupStart, (nameEnd - groupStart) + 1));
+                    throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, (nameEnd - groupStart) + 1));
                 }
             }
 
             String captureName = new String(bytes, nameStart, nameLength, StandardCharsets.US_ASCII);
             if (!captureNames.add(captureName)) {
-                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, Slices.wrappedBuffer(bytes, groupStart, (nameEnd - groupStart) + 1));
+                throw error(RegexpParseErrorCode.BAD_NAMED_CAPTURE, patternSegment(groupStart, (nameEnd - groupStart) + 1));
             }
 
             index = nameEnd + 1;
             return Slices.wrappedBuffer(bytes, nameStart, nameLength);
-        }
-
-        private static boolean isAsciiLetter(int character)
-        {
-            return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z');
         }
 
         private Regexp parseCharClass()
@@ -905,8 +1020,7 @@ final class JavaRegexpParser
         }
 
         // Nested classes keep their state on an explicit stack, as groups do in parseExpression,
-        // so nesting depth is not limited by the Java stack. A nested class opens and closes only
-        // outside a quote, so every level shares one atom cursor.
+        // so nesting depth is not limited by the Java stack. Every level shares one atom cursor.
         private CharClassBuilder parseCharClassBuilder(int nodeFlags)
         {
             ClassAtomCursor atomCursor = new ClassAtomCursor();
@@ -929,12 +1043,12 @@ final class JavaRegexpParser
                 }
 
                 if (atomCursor.atEnd() || !atomCursor.isClassEnd(false, false)) {
-                    throw error(RegexpParseErrorCode.MISSING_BRACKET, Slices.wrappedBuffer(bytes, frame.classStart, end - frame.classStart));
+                    throw error(RegexpParseErrorCode.MISSING_BRACKET, patternSegment(frame.classStart, end - frame.classStart));
                 }
                 consumeByte(']');
 
                 if (!frame.hasClassAtom) {
-                    throw error(RegexpParseErrorCode.BAD_CHAR_CLASS, Slices.wrappedBuffer(bytes, frame.classStart, index - frame.classStart));
+                    throw error(RegexpParseErrorCode.BAD_CHAR_CLASS, patternSegment(frame.classStart, index - frame.classStart));
                 }
                 classes.pop();
                 if (classes.isEmpty()) {
@@ -980,7 +1094,7 @@ final class JavaRegexpParser
                     return true;
                 }
 
-                if (!atomCursor.isQuoted() && tryParseClassEscape(nodeFlags, characterClassBuilder)) {
+                if (tryParseClassEscape(nodeFlags, characterClassBuilder)) {
                     frame.unionHasClassAtom = true;
                     continue;
                 }
@@ -1089,22 +1203,18 @@ final class JavaRegexpParser
             }
         }
 
+        // Reads class syntax past COMMENTS-mode whitespace and comments.
         private final class ClassAtomCursor
         {
-            // Java quote directives are zero-width class syntax, but every code point inside a
-            // quote remains an independent literal atom. Keep that state local to this class.
-            private boolean quoted;
-
             private boolean atEnd()
             {
-                skipZeroWidthSyntax();
+                skipIgnoredPatternCharacters();
                 return Parser.this.atEnd();
             }
 
             private boolean tryConsumeNegation()
             {
-                skipQuoteDirectives();
-                if (quoted || Parser.this.atEnd() || peekByte() != '^') {
+                if (Parser.this.atEnd() || peekByte() != '^') {
                     return false;
                 }
                 consumeByte('^');
@@ -1113,17 +1223,15 @@ final class JavaRegexpParser
 
             private boolean isClassEnd(boolean first, boolean intersectionOperand)
             {
-                skipZeroWidthSyntax();
-                return !quoted && !Parser.this.atEnd() && peekByte() == ']' && (!first || intersectionOperand);
+                skipIgnoredPatternCharacters();
+                return !Parser.this.atEnd() && peekByte() == ']' && (!first || intersectionOperand);
             }
 
             private boolean isIntersection()
             {
                 int savedIndex = index;
-                boolean savedQuoted = quoted;
                 boolean intersection = tryConsumeIntersection();
                 index = savedIndex;
-                quoted = savedQuoted;
                 return intersection;
             }
 
@@ -1136,14 +1244,14 @@ final class JavaRegexpParser
 
             private boolean tryConsumeIntersection()
             {
-                skipZeroWidthSyntax();
-                if (quoted || Parser.this.atEnd() || peekByte() != '&') {
+                skipIgnoredPatternCharacters();
+                if (Parser.this.atEnd() || peekByte() != '&') {
                     return false;
                 }
 
                 index++;
-                skipZeroWidthSyntax();
-                if (quoted || Parser.this.atEnd() || peekByte() != '&') {
+                skipIgnoredPatternCharacters();
+                if (Parser.this.atEnd() || peekByte() != '&') {
                     return false;
                 }
                 index++;
@@ -1152,79 +1260,30 @@ final class JavaRegexpParser
 
             private boolean isNestedClass()
             {
-                skipZeroWidthSyntax();
-                return !quoted && !Parser.this.atEnd() && peekByte() == '[';
-            }
-
-            private boolean isQuoted()
-            {
-                skipZeroWidthSyntax();
-                return quoted;
+                skipIgnoredPatternCharacters();
+                return !Parser.this.atEnd() && peekByte() == '[';
             }
 
             private int parseLiteralRune(int flags)
             {
-                skipZeroWidthSyntax();
-                if (quoted) {
-                    return readRune(flags);
-                }
+                skipIgnoredPatternCharacters();
                 return parseClassAtomRune(flags);
             }
 
             private boolean tryConsumeRangeOperator()
             {
-                skipZeroWidthSyntax();
-                if (quoted || Parser.this.atEnd() || peekByte() != '-') {
+                skipIgnoredPatternCharacters();
+                if (Parser.this.atEnd() || peekByte() != '-') {
                     return false;
                 }
 
-                int rangeOperatorIndex = index;
+                // As in the JDK, the byte right after '-' decides whether a range starts; once it
+                // does, the endpoint is read past comments-mode text, even if it is ']' or '['.
+                if (index + 1 >= end || bytes[index + 1] == ']' || bytes[index + 1] == '[') {
+                    return false;
+                }
                 index++;
-                // Quote directives do not separate '-' from its endpoint. COMMENTS text does:
-                // Java commits to range parsing and rejects the class if no endpoint follows it.
-                skipQuoteDirectives();
-                if (Parser.this.atEnd() || (!quoted && (peekByte() == ']' || peekByte() == '['))) {
-                    index = rangeOperatorIndex;
-                    quoted = false;
-                    return false;
-                }
-                skipZeroWidthSyntax();
                 return true;
-            }
-
-            private void skipZeroWidthSyntax()
-            {
-                while (!Parser.this.atEnd()) {
-                    if (!quoted) {
-                        index = ignoredPatternEnd(index);
-                        if (Parser.this.atEnd()) {
-                            return;
-                        }
-                    }
-
-                    int directiveIndex = index;
-                    skipQuoteDirectives();
-                    if (index == directiveIndex) {
-                        return;
-                    }
-                }
-            }
-
-            private void skipQuoteDirectives()
-            {
-                while (index + 1 < end && bytes[index] == '\\') {
-                    if (!quoted && bytes[index + 1] == 'Q') {
-                        quoted = true;
-                        index += 2;
-                    }
-                    else if (quoted && bytes[index + 1] == 'E') {
-                        quoted = false;
-                        index += 2;
-                    }
-                    else {
-                        return;
-                    }
-                }
             }
         }
 
@@ -1344,7 +1403,7 @@ final class JavaRegexpParser
                         }
                         int width = runeByteWidthAt(index - 1);
                         int length = 1 + (width > 0 ? width : 1);
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, length));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, length));
                     }
                 };
             }
@@ -1361,13 +1420,13 @@ final class JavaRegexpParser
             return switch (escapedByte) {
                 case 'A' -> {
                     if ((flags & Regexp.PERL_EXTENSIONS) == 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     yield Regexp.beginText(flags);
                 }
                 case 'z' -> {
                     if ((flags & Regexp.PERL_EXTENSIONS) == 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     yield Regexp.endText(flags);
                 }
@@ -1382,37 +1441,37 @@ final class JavaRegexpParser
                 case 'R' -> throw unsupportedConstruct("linebreak escape \\R", sequenceStart, index);
                 case 'd' -> {
                     if ((flags & Regexp.PERL_CLASSES) == 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     yield perlDigits(flags, false);
                 }
                 case 'D' -> {
                     if ((flags & Regexp.PERL_CLASSES) == 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     yield perlDigits(flags, true);
                 }
                 case 's' -> {
                     if ((flags & Regexp.PERL_CLASSES) == 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     yield perlSpaces(flags, false);
                 }
                 case 'S' -> {
                     if ((flags & Regexp.PERL_CLASSES) == 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     yield perlSpaces(flags, true);
                 }
                 case 'w' -> {
                     if ((flags & Regexp.PERL_CLASSES) == 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     yield perlWord(flags, false);
                 }
                 case 'W' -> {
                     if ((flags & Regexp.PERL_CLASSES) == 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     yield perlWord(flags, true);
                 }
@@ -1422,14 +1481,14 @@ final class JavaRegexpParser
                 case 'V' -> Regexp.charClass(flags & ~Regexp.FOLD_CASE, verticalWhitespace(flags, true));
                 case 'p', 'P' -> {
                     if ((flags & Regexp.UNICODE_GROUPS) == 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     CharClassBuilder characterClassBuilder = new CharClassBuilder();
                     parseUnicodeGroupInto(characterClassBuilder, (escapedByte == 'P') ? -1 : 1, flags, index - 2);
                     characterClassBuilder.removeAbove(Regexp.maxRune(flags));
                     yield Regexp.charClass(flags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());
                 }
-                case 'Q', 'E' -> throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                case 'Q', 'E' -> throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                 case 'n' -> literalFromRune('\n');
                 case 'r' -> literalFromRune('\r');
                 case 't' -> literalFromRune('\t');
@@ -1447,7 +1506,7 @@ final class JavaRegexpParser
                     if (nameOpen < end && bytes[nameOpen] == '<') {
                         throw unsupportedConstruct("backreferences", sequenceStart, index);
                     }
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                    throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                 }
                 default -> {
                     if (escapedByte < 0x80 && !Character.isLetterOrDigit((char) escapedByte)) {
@@ -1455,7 +1514,7 @@ final class JavaRegexpParser
                     }
                     int width = runeByteWidthAt(index - 1);
                     int length = 1 + (width > 0 ? width : 1);
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, length));
+                    throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, length));
                 }
             };
         }
@@ -1468,7 +1527,7 @@ final class JavaRegexpParser
             // braced name as written.
             skipIgnoredPatternCharacters();
             if (atEnd()) {
-                throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, patternSegment(sequenceStart, index - sequenceStart));
             }
             if (peekByte() == '{') {
                 consumeByte('{');
@@ -1478,14 +1537,14 @@ final class JavaRegexpParser
                     consumeByte();
                 }
                 if (atEnd() || consumeByte() != '}') {
-                    throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, end - sequenceStart));
+                    throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, patternSegment(sequenceStart, end - sequenceStart));
                 }
                 int nameEnd = index - 1;
 
                 String name = new String(bytes, nameStart, nameEnd - nameStart, StandardCharsets.UTF_8);
                 CharClass group = lookupJavaUnicodeGroup(name, parseFlags);
                 if (group == null) {
-                    throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                    throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, patternSegment(sequenceStart, index - sequenceStart));
                 }
                 addJavaUnicodeGroup(characterClassBuilder, name, group, sign, parseFlags);
                 return;
@@ -1497,7 +1556,7 @@ final class JavaRegexpParser
             String name = new String(bytes, nameStart, index - nameStart, StandardCharsets.UTF_8);
             CharClass group = lookupJavaUnicodeGroup(name, parseFlags);
             if (group == null) {
-                throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, patternSegment(sequenceStart, index - sequenceStart));
             }
             addJavaUnicodeGroup(characterClassBuilder, name, group, sign, parseFlags);
         }
@@ -1803,16 +1862,16 @@ final class JavaRegexpParser
                     int rune = readRune(flags);
                     int digitValue = decodeHexDigit(rune);
                     if (digitValue < 0) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                     digits++;
                     value = (value << 4) | digitValue;
                     if (value > runeMax) {
-                        throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                     }
                 }
                 if (digits == 0 || atEnd() || consumeByte() != '}') {
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                    throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                 }
                 if (value >= Character.MIN_SURROGATE && value <= Character.MAX_SURROGATE) {
                     throw unsupportedConstruct("surrogate escapes", sequenceStart, index);
@@ -1822,22 +1881,22 @@ final class JavaRegexpParser
 
             // \xNN
             if (atEnd()) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             int firstRune = readRune(flags);
             skipIgnoredPatternCharacters();
             if (atEnd()) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             int secondRune = readRune(flags);
             int firstDigit = decodeHexDigit(firstRune);
             int secondDigit = decodeHexDigit(secondRune);
             if (firstDigit < 0 || secondDigit < 0) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             int value = (firstDigit << 4) | secondDigit;
             if (value > runeMax) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             return value;
         }
@@ -1869,7 +1928,7 @@ final class JavaRegexpParser
                 throw unsupportedConstruct("surrogate escapes", sequenceStart, index);
             }
             if (value > Regexp.maxRune(flags)) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             return value;
         }
@@ -1879,7 +1938,7 @@ final class JavaRegexpParser
             // In comments mode the JDK skips whitespace and comments before the character.
             skipIgnoredPatternCharacters();
             if (atEnd()) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             // As in the JDK, flip bit 6 of the whole next code point, which keeps it a scalar value.
             return readRune(flags) ^ 64;
@@ -1891,20 +1950,20 @@ final class JavaRegexpParser
             // name as written.
             skipIgnoredPatternCharacters();
             if (atEnd() || consumeByte() != '{') {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             int nameStart = index;
             while (!atEnd() && peekByte() != '}') {
                 consumeByte();
             }
             if (nameStart == index || atEnd()) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             String name = new String(bytes, nameStart, index - nameStart, StandardCharsets.UTF_8);
             consumeByte('}');
             int codePoint = JavaCharacterNames.codePointOf(name);
             if (codePoint < 0) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             if (codePoint >= Character.MIN_SURROGATE && codePoint <= Character.MAX_SURROGATE) {
                 throw unsupportedConstruct("surrogate escapes", sequenceStart, index);
@@ -1919,11 +1978,11 @@ final class JavaRegexpParser
             for (int i = 0; i < 4; i++) {
                 skipIgnoredPatternCharacters();
                 if (atEnd()) {
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                    throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                 }
                 int digit = decodeHexDigit(consumeByte());
                 if (digit < 0) {
-                    throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                    throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
                 }
                 value = (value << 4) | digit;
             }
@@ -1932,9 +1991,10 @@ final class JavaRegexpParser
 
         private int parseOctalEscape(int firstDigit, int flags, int sequenceStart)
         {
-            skipIgnoredCharactersAndEmptyQuotes();
+            // In comments mode the JDK skips whitespace and comments before each digit.
+            skipIgnoredPatternCharacters();
             if (firstDigit != '0' || atEnd() || peekByte() < '0' || peekByte() > '7') {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
 
             int runeMax = Regexp.maxRune(flags);
@@ -1942,7 +2002,7 @@ final class JavaRegexpParser
             int maximumDigits = firstOctalDigit <= '3' ? 3 : 2;
             int code = 0;
             for (int i = 0; i < maximumDigits; i++) {
-                skipIgnoredCharactersAndEmptyQuotes();
+                skipIgnoredPatternCharacters();
                 if (atEnd()) {
                     break;
                 }
@@ -1954,23 +2014,9 @@ final class JavaRegexpParser
                 code = (code * 8) + (c - '0');
             }
             if (code > runeMax) {
-                throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
+                throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, index - sequenceStart));
             }
             return code;
-        }
-
-        private void skipIgnoredCharactersAndEmptyQuotes()
-        {
-            // In comments mode the JDK skips whitespace and comments before each digit. It also deletes
-            // every empty \Q\E before parsing, so one does not end the escape. A non-empty quote does:
-            // the JDK rewrites a digit that begins a quote as a hex escape.
-            while (true) {
-                skipIgnoredPatternCharacters();
-                if (index + 3 >= end || bytes[index] != '\\' || bytes[index + 1] != 'Q' || bytes[index + 2] != '\\' || bytes[index + 3] != 'E') {
-                    return;
-                }
-                index += 4;
-            }
         }
 
         private Regexp parseLiteral()
@@ -2042,15 +2088,12 @@ final class JavaRegexpParser
 
         private void skipIgnoredPatternCharacters()
         {
-            if (inQuote || (flags & Regexp.JAVA_COMMENTS) == 0) {
-                return;
-            }
             index = ignoredPatternEnd(index);
         }
 
         private int ignoredPatternEnd(int position)
         {
-            if (inQuote || (flags & Regexp.JAVA_COMMENTS) == 0) {
+            if ((flags & Regexp.JAVA_COMMENTS) == 0) {
                 return position;
             }
 

@@ -77,6 +77,12 @@ The JDK's `start()` and `end()` then still report that empty match while
 | Escapes | Quoting, hexadecimal, Unicode, octal, control, named-code-point, horizontal-whitespace, and vertical-whitespace escapes |
 | Inline flags | `d`, `i`, `m`, `s`, `u`, `U`, and `x`, including scoped forms |
 
+As in the JDK, `\Q...\E` quotes are rewritten into escapes before the pattern
+is parsed, without regard to character classes or comments. An unfinished
+escape before an empty quote therefore reads on past it, so `\x4\Q\E1` matches
+`A`, and a quote opened inside a comment escapes the text after the comment
+ends. Error offsets refer to the pattern as written.
+
 Repetition counts are limited to 1,000. The implementation preserves Java's
 final-terminator behavior, multiline CRLF handling, Unix-lines mode, Unicode
 case folding, and Unicode character classes.
