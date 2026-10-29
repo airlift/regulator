@@ -13,6 +13,7 @@
  */
 package io.airlift.regulator;
 
+import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -20,6 +21,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -34,6 +36,14 @@ public class TestJavaRegexpSyntax
         assertBadUtf8(new byte[] {'a', (byte) 0xE2, (byte) 0x82, 'b'}, 1);
         assertBadUtf8(new byte[] {'a', 'b', (byte) 0xED, (byte) 0xA0, (byte) 0x80}, 2);
         assertBadUtf8(new byte[] {(byte) 0xFF}, 0);
+    }
+
+    @Test
+    public void testErrorsReportThePatternAsWritten()
+    {
+        // The quote rewrite parses [a\. from [\Qa.\E, but the error reports the original bytes and offset.
+        byte[] bytes = "xx[\\Qa.\\E".getBytes(UTF_8);
+        assertError(Slices.wrappedBuffer(bytes, 2, bytes.length - 2), RegexpParseErrorCode.MISSING_BRACKET, 7, "[\\Qa.\\E");
     }
 
     @ParameterizedTest(name = "{0}")
@@ -77,6 +87,8 @@ public class TestJavaRegexpSyntax
                 unsupported("(?<name>x)\\k<name>", "backreferences", 10),
                 unsupported("(?x)(?<name>x)\\k <name>", "backreferences", 14),
                 unsupported("\\G", "previous-match boundary \\G", 0),
+                // The offset is in the pattern as written, not the rewritten a\.\G that is parsed.
+                unsupported("\\Qa.\\E\\G", "previous-match boundary \\G", 6),
                 unsupported("\\R", "linebreak escape \\R", 0),
                 unsupported("\\uD800", "surrogate escapes", 0),
                 unsupported("\\uDC00", "surrogate escapes", 0),
@@ -96,6 +108,16 @@ public class TestJavaRegexpSyntax
                 pattern,
                 RegexpParseErrorCode.UNSUPPORTED_CONSTRUCT,
                 "unsupported regular-expression construct: " + feature + " at byte offset " + byteOffset);
+    }
+
+    private static void assertError(Slice pattern, RegexpParseErrorCode errorCode, int byteOffset, String invalidPatternSegment)
+    {
+        assertThatThrownBy(() -> JavaRegexp.compile(pattern))
+                .isInstanceOfSatisfying(RegexpParseException.class, exception -> {
+                    assertThat(exception.errorCode()).isEqualTo(errorCode);
+                    assertThat(exception.byteOffset()).isEqualTo(byteOffset);
+                    assertThat(exception.invalidPatternSegment()).isEqualTo(Slices.utf8Slice(invalidPatternSegment));
+                });
     }
 
     private static void assertBadUtf8(byte[] pattern, int byteOffset)

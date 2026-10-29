@@ -423,6 +423,22 @@ public class TestJavaRegexpDifferential
         assertRejectsJava25("[a-\\Q\\E # no endpoint\n ]", OptionProfile.COMMENTS, RegexpParseErrorCode.BAD_CHAR_RANGE);
     }
 
+    @Test
+    public void testQuotesRewrittenBeforeParsingMatchJava25()
+    {
+        // The JDK rewrites each quote into escapes before parsing. An escape before the quote
+        // continues past an empty quote and into a quoted letter, but not into a digit that starts
+        // a quote.
+        assertMatchesJava25("\\x4\\Q\\E1", OptionProfile.DEFAULT, List.of("A", "x41"));
+        assertMatchesJava25("\\x\\Q\\E41", OptionProfile.DEFAULT, List.of("A", "x41"));
+        assertMatchesJava25("\\c\\Q\\EA", OptionProfile.DEFAULT, List.of("\u0001", "cA"));
+        assertMatchesJava25("\\x4\\QA\\E", OptionProfile.DEFAULT, List.of("J", "A", "x4A"));
+        // A quote inside a comment still escapes the characters after the comment ends.
+        assertMatchesJava25("(?x)a#\\Q\n.", OptionProfile.DEFAULT, List.of("a.", "ab", "a"));
+        // After skipping the comment, \0 sees the backslash produced from the later \Q, not an octal digit.
+        assertRejectsJava25("(?x)\\0#\\Q\n\\Q\\E1", OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_ESCAPE);
+    }
+
     private static void assertMatchesJava25(String pattern, OptionProfile options, List<String> inputs)
     {
         Pattern jdkPattern = Pattern.compile(pattern, options.jdkFlags());
