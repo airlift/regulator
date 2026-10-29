@@ -110,10 +110,11 @@ construction fails.
   they do not change with the JDK. Pinned upstream RE2's generated Unicode
   tables are intentionally not retained.
 - The database holds only Unicode data. RE2 names it by upstream's rule, as
-  RE2 Unicode Property Groups describes. Java layers the JDK's names on it:
-  categories with their long names and `LC`, `LD`, and `Cn`, scripts with
-  their ISO 15924 codes, blocks with the JDK's identifiers, the `In`, `Is`,
-  `gc=`, `sc=`, and `blk=` forms, binary properties, `java...` properties,
+  RE2 Unicode Property Groups describes. Java layers the JDK's names on it,
+  resolved by `Pattern`'s rules: category short names and `LC`, `LD`, and
+  `L1`, scripts with their ISO 15924 codes, blocks with the JDK's identifiers,
+  the `In`, `Is`, `gc=`, `general_category=`, `sc=`, `script=`, `blk=`, and
+  `block=` forms, binary properties, `java...` properties,
   and its POSIX classes. Each JDK property is the JDK's own computation over
   the database, as Language Authorities describes, and a JDK choice that is
   not Unicode data is a constant citing the JDK. Rust layers the regex crate's
@@ -176,9 +177,8 @@ after the JDK's version, such as the Unicode 18.0 scripts Jurchen and Seal and
 the names of their characters, resolve only in Regulator. This agreement is of
 property membership, which is the JDK's computation over the pinned database
 for Java and for Trino's `java...` names, and the database's values for
-Trino's other names apart from its POSIX names. Java's accepted property
-spellings keep Regulator's existing rules, which are not identical to
-`Pattern`'s, and Trino's are pinned jcodings' names.
+Trino's other names apart from its POSIX names. Java accepts the property
+spellings `Pattern` accepts, and Trino's are pinned jcodings' names.
 
 This intentionally differs from pinned upstream's Unicode snapshot while
 preserving its matching algorithms, byte semantics, and resource guarantees.
