@@ -2018,17 +2018,20 @@ final class JavaRegexpParser
                     return position;
                 }
 
+                // As in the JDK, a comment ends before NUL or a line terminator of the current line mode:
+                // only a newline under UNIX_LINES, otherwise also a carriage return, U+0085, U+2028, or
+                // U+2029. The outer loop then skips a newline or carriage return as whitespace; any other
+                // terminator is a pattern character.
                 position++;
                 while (position < end) {
                     long decoded = Utf8.decode(bytes, position, end);
                     int codePoint = Utf8.decodedCodePoint(decoded);
-                    int width = Utf8.decodedWidth(decoded);
-                    position += width;
-                    if (codePoint == '\n' ||
+                    if (codePoint == 0 || codePoint == '\n' ||
                             ((flags & Regexp.JAVA_UNIX_LINES) == 0 &&
                                     (codePoint == '\r' || codePoint == 0x0085 || codePoint == 0x2028 || codePoint == 0x2029))) {
                         break;
                     }
+                    position += Utf8.decodedWidth(decoded);
                 }
             }
             return position;
