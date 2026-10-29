@@ -1415,7 +1415,7 @@ final class JavaRegexpParser
             if (characterClass != null) {
                 index += 2;
                 CharClassBuilder characterClassBuilder = new CharClassBuilder();
-                addGroup(characterClassBuilder, characterClass, 1, nodeFlags, caseFolding);
+                addUnfoldedGroup(characterClassBuilder, characterClass, 1, nodeFlags);
                 return characterClassBuilder;
             }
 
@@ -1626,7 +1626,7 @@ final class JavaRegexpParser
                 if (group == null) {
                     throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, patternSegment(sequenceStart, index - sequenceStart));
                 }
-                addJavaUnicodeGroup(characterClassBuilder, group, sign, parseFlags);
+                addUnfoldedGroup(characterClassBuilder, group, sign, parseFlags);
                 return;
             }
 
@@ -1638,13 +1638,13 @@ final class JavaRegexpParser
             if (group == null) {
                 throw error(RegexpParseErrorCode.BAD_CHAR_RANGE, patternSegment(sequenceStart, index - sequenceStart));
             }
-            addJavaUnicodeGroup(characterClassBuilder, group, sign, parseFlags);
+            addUnfoldedGroup(characterClassBuilder, group, sign, parseFlags);
         }
 
-        private void addJavaUnicodeGroup(CharClassBuilder builder, CharClass group, int sign, int flags)
+        private void addUnfoldedGroup(CharClassBuilder builder, CharClass group, int sign, int flags)
         {
-            // Java applies property-specific case predicates, which the lookup resolved, before
-            // complement/intersection, not the fold closure used for literal ranges.
+            // Java never folds a predefined class or a property. A property applies the
+            // property-specific case predicates that the lookup resolved.
             addGroup(builder, group, sign, flags & ~(Regexp.ASCII_FOLD_CASE | Regexp.FOLD_CASE), caseFolding);
         }
 
@@ -1724,7 +1724,7 @@ final class JavaRegexpParser
         private Regexp perlCharClass(int flags, boolean negate, CharClass group)
         {
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            addGroup(characterClassBuilder, group, negate ? -1 : 1, flags, caseFolding);
+            addUnfoldedGroup(characterClassBuilder, group, negate ? -1 : 1, flags);
             characterClassBuilder.removeAbove(Regexp.maxRune(flags));
             return Regexp.charClass(flags & ~Regexp.FOLD_CASE, characterClassBuilder.toCharClass());
         }
@@ -1800,7 +1800,7 @@ final class JavaRegexpParser
                 return group;
             }
             CharClassBuilder characterClassBuilder = new CharClassBuilder();
-            addGroup(characterClassBuilder, group, -1, flags, caseFolding);
+            addUnfoldedGroup(characterClassBuilder, group, -1, flags);
             characterClassBuilder.removeAbove(Regexp.maxRune(flags));
             return characterClassBuilder.toCharClass();
         }

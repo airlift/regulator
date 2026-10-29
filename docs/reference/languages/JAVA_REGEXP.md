@@ -136,9 +136,12 @@ or `script=`, as in `\p{IsLatin}`, and `\p{Latn}` and `\p{Uppercase_Letter}`
 are errors. Under Unicode character classes, a POSIX name without a prefix may
 be written in any case, such as `\p{lower}`.
 
-Case-insensitive matching can differ from
-`Pattern` independently of Unicode version, as
+Case-insensitive matching can differ from `Pattern` independently of Unicode
+version, as
 [`UNICODE.md`](../../integrations/UNICODE.md#differences-from-the-jdk) says.
+Case-insensitive matching never folds a predefined class, such as `\w`, or a
+property, so `(?iu)\w` does not match the Kelvin sign; `Pattern` itself defines
+a few properties, such as `\p{Lower}`, to match more case-insensitively.
 
 `find`, `lookingAt`, and `matches` have the same high-level meaning as their JDK
 counterparts. Captures are returned as zero-copy Slice views.
