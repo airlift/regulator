@@ -74,6 +74,7 @@ class TestEngineBuild(unittest.TestCase):
             "verification_status=verified\nbenchmark_mode=unit-worker\nbaseline_campaign=baseline\n"
             f"platform={name}\nhost_epoch={PLATFORMS.index(platform) + 1}\ninstance_id=i-{name}\n"
             f"instance_type={instance_type}\ncampaign_architecture={architecture}\navailability_zone=us-west-2a\n"
+            "instance_market_type=spot\n"
             f"benchmark_heap_size=8g\nregulator_commit={candidate}\nregulator_archive_sha256=" + "5" * 64 + "\n")
         ENGINE_BUILD.package(shared, checkout, result)
         ENGINE_BUILD.accept(result, "1", ENGINE_BUILD.GROUP_ID, f"session-{name}/1", "us-west-2", "e" * 40)

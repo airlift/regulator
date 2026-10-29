@@ -597,8 +597,8 @@ restart of the same plans reuses the bundle; its SHA-256 stays its identity.
 Leases, retries, interruptions, restarts, and the shared fleet budget follow the
 baseline's
 [unit dispatch](../aws/README.md#unit-dispatch). A unit estimated past 15
-minutes runs only on On-Demand workers unless the campaign is `--spot-only`,
-and each pool's worker timeout covers its longest unit.
+minutes runs only on On-Demand workers unless its platform buys only Spot, and
+each pool's worker timeout covers its longest unit.
 
 The controller accepts each group of an attempt into `accepted-units.tsv` only
 after the [unit checks](#work-units) pass again on the returned evidence, from a
@@ -628,8 +628,9 @@ A restart must reproduce each export byte for byte. The release importer reads
 `accepted-units.tsv` beside the exports and accepts them only as one complete
 campaign of the imported plans, with no semantic rejection.
 
-`--max-concurrent`, `--max-concurrent-per-platform`, `--spot-only`,
-`--fleet-budget`, and `--release-version` work as they do for the baseline.
+`--max-concurrent`, `--max-concurrent-per-platform`, `--platform-regions`,
+`--purchase`, `--fleet-budget`, and `--release-version` work as they do for the
+baseline.
 Select `--release-version 2.0` to measure the published 2.0 artifact. See the
 [AWS guide](../aws/README.md#shared-fleet-budget) for the fleet budget, release
 manifests and remeasuring 1.0. For the

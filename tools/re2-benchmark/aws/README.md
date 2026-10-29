@@ -55,25 +55,30 @@ time. Saved price estimates are not a reconciled AWS invoice.
 A Spot launch that finds no capacity in its zone tries each other zone of its
 region that offers the type before it fails. A unit whose worker is reclaimed
 or fails goes back to its pool, as [unit dispatch](#unit-dispatch) describes.
-Without `--spot-only`, once a pool's remaining estimated work falls to 10% of
-its total, its last items run on On-Demand workers, so a phase's last units do
-not wait on Spot capacity. Budget these hours at On-Demand prices.
+Each platform launches in its own regions and buys hosts by its own purchase
+policy; see [launch regions and purchase](#launch-regions-and-purchase).
+Under the default `spot-then-on-demand` purchase, once a pool's remaining
+estimated work falls to 10% of its total, its last items run on On-Demand
+workers, so a phase's last units do not wait on Spot capacity. Budget these
+hours at On-Demand prices.
 
-Use `--spot-only` to prohibit On-Demand workers. Other users' running and
-pending Spot work still consumes quota. Keep one owner for each mutable capacity
-limit. Transfer reservations only after cleanup or a complete finite-inventory
-bound proves they are available. A temporary gap between worker launches is not
-free reserved capacity.
+Buy a platform's hosts with `--purchase PLATFORM=spot` to prohibit its
+On-Demand workers. Other users' running and pending Spot work still consumes
+quota. Keep one owner for each mutable capacity limit. Transfer reservations
+only after cleanup or a complete finite-inventory bound proves they are
+available. A temporary gap between worker launches is not free reserved
+capacity.
 
 ## Shared fleet budget
 
 Run both collectors on one persistent coordinator filesystem with renewable
-AWS credentials. Supply the same `--fleet-budget PATH` to every phase, with
-`--spot-only` unless the policy allows On-Demand. Set `--spot-vcpu-reserve` to
-the policy's reserved headroom and use `--release-version 2.0` when measuring
-the 2.0 release. The option names the release manifest
-`tools/re2-benchmark/baseline/releases/<version>.json`, and the controller runs
-only from source whose `src/main` tree matches that release. The
+AWS credentials. Supply the same `--fleet-budget PATH` to every phase, buying
+each platform's hosts with `--purchase PLATFORM=spot` unless the policy allows
+On-Demand in one of its regions. Set `--spot-vcpu-reserve` to the policy's
+reserved headroom and use `--release-version 2.0` when measuring the 2.0
+release. The option names the release manifest
+`tools/re2-benchmark/baseline/releases/<version>.json`, and the named
+candidate's committed `src/main` tree must match that release. The
 [maintenance guide](../../../docs/MAINTAINING_REGULATOR.md#final-qualification)
 says how to record a release's manifest. Remeasure the 1.0 artifact with
 `--release-version 1.0` from
@@ -82,11 +87,12 @@ the published campaign's collector revisions are in its capture provenance.
 
 The policy records the expected AWS account and home region, resource and
 spending ceilings, and hourly price ceilings for each selected worker type.
-The controller checks the active account against it, and every allowed launch
-region against the policy's regions, before execution. The top-level
-`max_vcpus` and `spot_vcpu_reserve` limit the home region. A campaign that may
-launch elsewhere adds a `regions` object naming each other region's own
-`max_vcpus` and `spot_vcpu_reserve`, because Spot quotas are regional:
+The controller checks the active account against it, and every region of
+every platform's list against the policy's regions, before execution. The
+top-level `max_vcpus` and `spot_vcpu_reserve` limit the home region. A
+campaign that may launch elsewhere adds a `regions` object naming each other
+region's own `max_vcpus` and `spot_vcpu_reserve`, because Spot quotas are
+regional:
 
 ```json
 "regions": {"eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 16}}
@@ -96,15 +102,15 @@ Admission counts each region's quota, reserve, vCPU limit, and pending
 launches against that region's instances and reservations in the same market.
 Each reservation records its region and market. Hosts, machine hours,
 spending, and the launch interval remain fleet-wide. The hourly price ceilings
-apply in every region, so set them for the most expensive allowed region.
+apply in every region, so set them for the most expensive launch region.
 Policies without `regions` keep their single-region meaning. The worker types
 remain those in `platforms.tsv`.
 
 A policy without `on_demand_max_vcpus` refuses On-Demand, so its campaigns
-require `--spot-only`. To allow On-Demand replacements and phase tails, set
-`on_demand_max_vcpus` at the top level for the home region, or in a region's
-entry for that region, and give every worker type an `on_demand_total` hourly
-cost:
+buy every platform's hosts with `--purchase PLATFORM=spot`. To allow
+On-Demand replacements and phase tails, set `on_demand_max_vcpus` at the top
+level for the home region, or in a region's entry for that region, and give
+every worker type an `on_demand_total` hourly cost:
 
 ```json
 "on_demand_max_vcpus": 400,
@@ -116,9 +122,9 @@ Other workloads' On-Demand use and a 32-vCPU safety reserve come out of the
 region's On-Demand quota, which admission checks the same way as Spot quota.
 On-Demand hosts count against the same host, machine-hour, and spending
 ceilings, at their `on_demand_total` rate. Regions without an allowance launch
-only Spot, and an On-Demand launch takes the first allowed region that admits
-it. Without `--spot-only`, each worker type needs an allowance in an allowed
-region that holds its image in `platform-regions.tsv`.
+only Spot, and an On-Demand launch takes the first region of its platform's
+list that admits it. Each platform whose purchase is not `spot` needs an
+allowance in a region of its list.
 
 For example, a policy for at most 16 ordinary workers could contain:
 
@@ -170,13 +176,12 @@ and live quota checks enforce aggregate capacity across collectors. Multicore
 workers, reserved headroom, unrelated Spot use, and spending reservations can
 reduce actual concurrency. Derived phase deadlines use the configured host,
 per-platform, and shared vCPU limits, plus one retry wave and a capacity
-allowance; the shared limit is the sum of the allowed regions' `max_vcpus`.
+allowance; the shared limit is the sum of the launch regions' `max_vcpus`.
 Every worker type, including each unit pool's host, must fit the largest
-`max_vcpus` among the allowed regions that hold its image. Without a shared
-policy, deadline planning uses host counts; live quota shortages can require
-a larger explicit deadline. An explicit
-`--phase-timeout-seconds` is frozen on first execution and cannot change on
-resume.
+`max_vcpus` among the regions of its platform's list. Without a shared policy,
+deadline planning uses host counts; live quota shortages can require a larger
+explicit deadline. An explicit `--phase-timeout-seconds` is frozen on first
+execution and cannot change on resume.
 
 For a focused change, budget only the affected cases and protected controls.
 Preserve accepted work and resume with unchanged frozen inputs instead
@@ -268,11 +273,11 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --candidate-archive /durable/path/candidate.tar.gz \
   --candidate-provenance /durable/path/candidate-provenance.tsv \
   --result-root /durable/path/<campaign-id>/build \
-  --spot-only --spot-vcpu-reserve 16
+  --purchase r8i=spot --purchase r9g=spot --spot-vcpu-reserve 16
 ```
 
-`--engine-builds` requires a shared transfer bucket in every allowed region
-and `TRANSFER_PREFIX`; see [launch regions](#launch-regions). The examples
+`--engine-builds` requires a shared transfer bucket in every launch region
+and `TRANSFER_PREFIX`; see [launch regions](#launch-regions-and-purchase). The examples
 below run in one region with one shared bucket.
 
 Execute the smoke after inspecting the smoke plan above:
@@ -287,7 +292,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --result-root /durable/path/<campaign-id>/smoke \
   --engine-builds /durable/path/<campaign-id>/build \
   --transfer-bucket us-west-2=<bucket> \
-  --max-concurrent 16 --spot-only --spot-vcpu-reserve 16 \
+  --max-concurrent 16 --purchase r8i=spot --purchase r9g=spot \
+  --spot-vcpu-reserve 16 \
   --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
 ```
 
@@ -305,7 +311,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --result-root /durable/path/<campaign-id>/primary \
   --engine-builds /durable/path/<campaign-id>/build \
   --transfer-bucket us-west-2=<bucket> \
-  --max-concurrent 16 --spot-only --spot-vcpu-reserve 16 \
+  --max-concurrent 16 --purchase r8i=spot --purchase r9g=spot \
+  --spot-vcpu-reserve 16 \
   --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
 ```
 
@@ -323,7 +330,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --result-root /durable/path/<campaign-id>/confirmation \
   --engine-builds /durable/path/<campaign-id>/build \
   --transfer-bucket us-west-2=<bucket> \
-  --max-concurrent 16 --spot-only --spot-vcpu-reserve 16 \
+  --max-concurrent 16 --purchase r8i=spot --purchase r9g=spot \
+  --spot-vcpu-reserve 16 \
   --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
 ```
 
@@ -346,29 +354,78 @@ pipelining a shard's primary behind its accepted smoke is future work.
 Set `AWS_PROFILE` before any execution command when selecting a named profile;
 otherwise the AWS CLI uses its standard credential chain.
 
-### Launch regions
+### Launch regions and purchase
 
-Hosts launch in `AWS_REGION`, or `us-west-2` when it is unset. Repeat
-`--region` to allow several regions; benchmarks do not depend on the region.
+Each platform has its own ordered list of launch regions and its own purchase
+policy, both set on the command line; benchmarks do not depend on the region.
+
+- `--platform-regions PLATFORM=REGION[,REGION...]` names the platform's
+  regions. A platform without a list launches in `AWS_REGION`, or `us-west-2`
+  when it is unset.
+- `--purchase PLATFORM=POLICY` names how the platform buys hosts. The default,
+  `spot-then-on-demand`, buys Spot and turns to On-Demand for interrupted and
+  oversized items, the phase tail, and a Spot shortage outlasting its bounded
+  wait. `spot` buys only Spot and never falls back. `on-demand` buys only
+  On-Demand.
+
+Neither is frozen: a restarted phase takes the lists and purchases its command
+names, or the defaults, so a campaign whose Spot capacity ran dry can resume in
+other regions. Every result records its host's region and market.
+
 For each Spot launch, the controller asks AWS for the Spot placement score of
-the worker type in every allowed region that offers it, caches the answer for
-five minutes, and launches in the best-scored region with quota headroom.
-Equal scores go to the earlier `--region`. When scores are unavailable, the
-first allowed region with headroom launches and the session records no score.
-On-Demand launches take the first allowed region with headroom. Headroom is
-the shared budget's when one is set. Without one, On-Demand launches query
-quota, and Spot launches query it only with `--spot-only` or a
+the worker type in every region of its platform's list that offers it, caches
+the answer for five minutes, and launches in the best-scored region with quota
+headroom. Equal scores keep the list's order. When scores are unavailable, the
+first region of the list with headroom launches and the session records no
+score. On-Demand launches take the first region of the list with headroom.
+Headroom is the shared budget's when one is set. Without one, On-Demand launches
+query quota, and Spot launches query it only for a `spot` purchase or a
 `--max-concurrent` above 32; otherwise a Spot launch takes the first placement
-and learns of a full region from EC2. A campaign
-with one region asks for no score. Within the chosen region, each attempt
-starts in a different zone that offers the worker type, and a Spot launch that
-finds a zone without capacity moves on to the region's next zone. Each session
-runs and verifies its cleanup in its own region.
+and learns of a full region from EC2. A list of one region asks for no score.
+Within the chosen region, each attempt starts in a different zone that offers
+the worker type, and a Spot launch that finds a zone without capacity moves on
+to the region's next zone. Each session runs and verifies its cleanup in its own
+region, and its unit receipts record the region and the market the host read
+from instance metadata.
+
+A worker type's Spot shortage starts when one of its Spot launches finds no
+capacity in a region, or, without a shared budget, when no region of its list
+has Spot quota headroom. It ends when one of its Spot workers starts. A
+`spot-then-on-demand` pool keeps buying Spot for 15 minutes of shortage, one
+region cool-down, so every region of its list is tried again; after that, while
+every region cools or none has Spot quota, its new workers launch On-Demand in
+the list's order. A `spot` pool waits for Spot however long the shortage lasts.
+A restarted controller forgets the shortage.
+
+Quotas are regional and account-wide, so read them before choosing lists. On
+October 28, 2026, the account's standard Spot quota was 256 vCPUs in
+`us-east-2`, `eu-central-1`, `eu-west-1`, and `ap-south-1` and 736 in
+`us-west-2`; its standard On-Demand quota was 1,000 vCPUs in `us-west-2`.
+Preflight reads the live quotas and refuses a platform whose regions cannot
+admit one host under its purchase. That afternoon, at 2:30 p.m. PDT, r8i
+scored 1 in Oregon, Ohio, and Virginia and 3 in Ireland, Frankfurt, and
+Mumbai, and r9g scored 3 in Ohio and Frankfurt. A campaign then could send
+r8i to Europe and Mumbai on Spot alone, and r9g to Ohio and Frankfurt with
+Oregon's On-Demand quota behind it:
+
+```bash
+--platform-regions r8i=eu-west-1,eu-central-1,ap-south-1 \
+--purchase r8i=spot \
+--platform-regions r9g=us-east-2,eu-central-1,us-west-2
+```
+
+r8i launches in Ireland until its quota or capacity runs out, then Frankfurt,
+then Mumbai, since equal scores keep the list's order. r9g launches Spot in
+its best-scored region, Ohio before Frankfurt at equal scores, and after a
+15-minute shortage turns to On-Demand, which the policy allows only in Oregon.
+Each region needs the platform's AMI in `platform-regions.tsv`, a shared
+transfer bucket for the engine build, and a shared policy entry, and the
+policy's `on_demand_max_vcpus` bounds r9g's On-Demand hosts in Oregon.
 
 `platforms.tsv` pins each AMI by its ID in `us-west-2`. Preflight resolves that
-image's name and requires each allowed region's AMI in `platform-regions.tsv`
+image's name and requires each launch region's AMI in `platform-regions.tsv`
 to have that exact name, Amazon's owner ID, and the platform's architecture.
-Hosts record the name. The controller refuses an allowed region with
+Hosts record the name. The controller refuses a platform's region with
 no row in the table. Amazon deprecates its images after about three months;
 deprecated images still launch by ID but are hidden from name searches. To add
 a region, find the pinned image's copy there:
@@ -384,7 +441,7 @@ Hosts read campaign inputs from a bucket in their launch region. Without a
 shared bucket, each session creates and removes its own bucket there. To reuse
 shared buckets, give each region's bucket with `--transfer-bucket
 REGION=BUCKET` and set `TRANSFER_PREFIX`; regions without one use per-session
-buckets, but `--engine-builds` requires one in every allowed region. Each
+buckets, but `--engine-builds` requires one in every launch region. Each
 shared bucket must carry the `Project=regulator-benchmark` tag, and preflight
 checks the tag and the bucket's region. A single-region campaign may still set
 `TRANSFER_BUCKET`; a multi-region campaign must use `--transfer-bucket`
@@ -471,7 +528,7 @@ and the runners in `language-native/` under the shared work directory, and
 records the manifest and installed archives beside the host evidence and in
 each route.
 
-Preflight names each allowed region that lacks the shared transfer bucket
+Preflight names each launch region that lacks the shared transfer bucket
 `--engine-builds` requires. Before it launches any host,
 the controller puts each archive once in every region that may launch a host
 installing it, under `TRANSFER_PREFIX/engine-builds/<sha256>.tar.zst`, and skips
@@ -683,12 +740,13 @@ lease of open work and no queued item is one it could take; work requeued later
 launches a worker by the same rule. Its stop lease records it as stopping, so it
 keeps its reservation and takes no work until its cleanup is verified.
 
-When several regions are allowed, a worker whose Spot launch found no capacity
-in any zone of its region cools that region for its pool for 15 minutes, and
-the pool's new Spot workers launch elsewhere meanwhile. While every allowed
-region cools, the pool's new workers launch On-Demand, and Spot resumes in each
-region once its cool-down ends; a `--spot-only` pool instead tries every region
-again at once. A restarted controller forgets the cool-downs.
+A worker whose Spot launch found no capacity in any zone of its region cools
+that region for its pool for 15 minutes, and the pool's new Spot workers launch
+in the list's other regions meanwhile. While every region of the list cools,
+the pool tries every region again at once until its Spot shortage has lasted
+its [bounded wait](#launch-regions-and-purchase); a `spot-then-on-demand`
+pool's new workers then launch On-Demand, and Spot resumes in each region once
+its cool-down ends. A restarted controller forgets the cool-downs.
 
 Once a worker's session exists, the controller writes its first lease and
 keeps one lease written ahead while no idle worker of the pool could take the
@@ -702,8 +760,8 @@ stop lease. Each lease, and each outcome it reaches, is a row of
 `unit-attempts.tsv`, written before the lease is; its `groups` are the groups
 a lease runs, or those whose markers an outcome processed. A unit whose
 longest remaining group is estimated past the 15-minute unit budget, such as a
-slow language comparison isolated in its own unit, is On-Demand work unless the
-campaign is `--spot-only`.
+slow language comparison isolated in its own unit, is On-Demand work unless its
+platform buys only Spot.
 
 The controller polls each worker's uploads and processes a lease's markers in
 its groups' order, each as it lands. A completion marker's result must match
@@ -761,19 +819,19 @@ accepted first elsewhere. Other outcomes:
   inputs stop the campaign as unsafe.
 
 When a pool's remaining estimated work, the groups not yet accepted, falls to
-10% of its total, its remaining
-items become On-Demand work, leased first, and On-Demand workers launch for them
-within the budget's On-Demand allowance. Each Spot worker of the pool gets a
-stop lease only once an On-Demand worker has been admitted to replace it; until
-then it keeps taking the pool's items. While the budget refuses an On-Demand
-launch, the pool's Spot launches go on for the items Spot may run. A
-`--spot-only` campaign never switches. Once every item is accepted or
-unresolved, the controller waits for every worker's verified cleanup, lists the
-unresolved items in `unresolved-units.tsv`, and otherwise validates the phase's
-accepted units as one campaign. Only then does it write `phase-complete.txt` in
-the result root, atomically; a later phase, including one consuming an engine
-build root, refuses a root without it, such as one whose controller stopped
-after its ledger was complete.
+10% of its total, its remaining items become On-Demand work, leased first, and
+On-Demand workers launch for them within the budget's On-Demand allowance. Each
+Spot worker of the pool gets a stop lease only once an On-Demand worker has been
+admitted to replace it; until then it keeps taking the pool's items. While the
+budget refuses an On-Demand launch, the pool's Spot launches go on for the items
+Spot may run. A `spot` pool never switches, and an `on-demand` pool runs every
+item On-Demand. Once every item is accepted or unresolved, the controller waits
+for every worker's verified cleanup, lists the unresolved items in
+`unresolved-units.tsv`, and otherwise validates the phase's accepted units as
+one campaign. Only then does it write `phase-complete.txt` in the result root,
+atomically; a later phase, including one consuming an engine build root, refuses
+a root without it, such as one whose controller stopped after its ledger was
+complete.
 
 ## Recovery and evidence
 

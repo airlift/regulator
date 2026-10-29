@@ -150,7 +150,7 @@ class SampleFixture:
             "unit_id": self.UNIT, "replica_id": str(replica), "group_id": "1",
             "unit_attempt_id": f"{platform}-session-{replica}/1",
             "instance_id": f"i-{platform}-{replica}", "host_epoch": f"{platform}-epoch-{replica}",
-            "region": "us-west-2",
+            "region": "us-west-2", "market": "spot",
             "candidate_commit": "a" * 40, "engine_tree": "b" * 40, "evidence_manifest_sha256": "c" * 64,
         }
         self.sessions[(platform, replica)] = aggregate_results.Session(
@@ -336,7 +336,8 @@ class TestReductionRules(unittest.TestCase):
         def check(row_count, multiplier, unit="ns/op", steal=0):
             """The host check of three hosts measuring row_count rows, the third scaled by multiplier(row)."""
             sessions = [aggregate_results.Session(
-                {"platform": "r8i", "instance_id": f"i-{host}", "host_epoch": f"epoch-{host}", "region": "us-west-2"},
+                {"platform": "r8i", "instance_id": f"i-{host}", "host_epoch": f"epoch-{host}", "region": "us-west-2",
+                 "market": "spot"},
                 Path(), False, steal if host == 3 else 0, 1000, "", (), {}) for host in (1, 2, 3)]
             host_rows = [{
                 "platform": "r8i", "row_id": f"row-{row}", "host_epoch": f"epoch-{host}", "confirmation": "false",
@@ -694,8 +695,9 @@ class TestUnitCampaignReduction(unittest.TestCase):
             output = root / "output"
             self.assertEqual(1, aggregate([])["flagged_hosts"])
             [flagged] = [row for row in read_tsv(output / "host-checks.tsv") if row["flagged"] == "true"]
-            self.assertEqual(("r9g-epoch-2", "0.02", "steal-above-1-percent"),
-                             (flagged["host_epoch"], flagged["steal_share"], flagged["reason"]))
+            self.assertEqual(("r9g-epoch-2", "us-west-2", "spot", "0.02", "steal-above-1-percent"),
+                             (flagged["host_epoch"], flagged["region"], flagged["market"], flagged["steal_share"],
+                              flagged["reason"]))
             r9g = [row for row in read_tsv(output / "row-aggregates.tsv") if row["platform"] == "r9g"]
             self.assertEqual({("2", "1", "flagged-host-excluded")},
                              {(row["host_count"], row["flagged_host_count"], row["unresolved_reasons"]) for row in r9g})
@@ -703,7 +705,12 @@ class TestUnitCampaignReduction(unittest.TestCase):
             self.assertEqual(sorted(unit["unit_id"] for unit in campaign.units), sorted(
                 job["unit_id"] for job in read_tsv(output / "confirmation-jobs.tsv") if job["platform"] == "r9g"))
 
-            aggregate([receipt for unit in campaign.units for receipt in campaign.add("r9g", unit, 4, host=4)])
+            aggregate([receipt for unit in campaign.units
+                       for receipt in campaign.add("r9g", unit, 4, host=4, market="on-demand")])
+            # Each host row names where and how its host was bought.
+            self.assertEqual({("r9g-epoch-2", "us-west-2", "spot"), ("r9g-epoch-4", "us-west-2", "on-demand")},
+                             {(row["host_epoch"], row["region"], row["market"]) for row in read_tsv(output / "host-rows.tsv")
+                              if row["host_epoch"] in ("r9g-epoch-2", "r9g-epoch-4")})
             r9g = [row for row in read_tsv(output / "row-aggregates.tsv") if row["platform"] == "r9g"]
             self.assertEqual({("3", "1", "false")},
                              {(row["host_count"], row["flagged_host_count"], row["unresolved"]) for row in r9g})

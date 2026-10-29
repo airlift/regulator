@@ -11,8 +11,12 @@ on its own, from the directory `run-unit.sh` writes. The directory holds a
 one-row `unit-session.tsv` with these columns, in order:
 
 ```text
-schema_version campaign_id platform unit_id replica_id group_id unit_attempt_id instance_id host_epoch architecture instance_type availability_zone region
+schema_version campaign_id platform unit_id replica_id group_id unit_attempt_id instance_id host_epoch architecture instance_type availability_zone region market
 ```
+
+`market` is `spot` or `on-demand`, as the host read it from instance metadata;
+the controller accepts the group only from a host it launched in that region
+and market.
 
 `unit_attempt_id` is `<host_session>/<lease_seq>`, the host session that
 leased the unit and the lease's sequence number there, so each retry of a unit

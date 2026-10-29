@@ -1509,6 +1509,7 @@ while [[ ${#pending[@]} -gt 0 && ${SECONDS} -lt ${deadline} ]]; do
                         ! grep -Fqx "actual_ami_id=${expected_ami}" "${environment_manifest}" ||
                         ! grep -Fqx "instance_id=${instance_id}" "${environment_manifest}" ||
                         ! grep -Fqx "instance_type=${expected_instance_type}" "${environment_manifest}" ||
+                        ! grep -Fqx "instance_market_type=${INSTANCE_MARKET_TYPE}" "${environment_manifest}" ||
                         ! grep -Fqx "jdk_archive_sha256=${expected_java_sha256}" "${environment_manifest}" ||
                         ! grep -Fqx "trino_used=true" "${environment_manifest}" ||
                         ! grep -Fqx "joni_evidence_scope=${JONI_EVIDENCE_SCOPE}" "${environment_manifest}"; then

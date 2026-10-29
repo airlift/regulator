@@ -285,8 +285,9 @@ class TestFleet(unittest.TestCase):
         self.unit_environment = {
             "verification_status": "verified", "benchmark_mode": "unit-worker", "baseline_campaign": "language",
             "platform": "r9g", "host_epoch": "2", "campaign_architecture": "arm", "instance_id": "i-unit",
-            "instance_type": "r9g.2xlarge", "availability_zone": "us-west-2a", "logical_cpu_count": "8",
-            "benchmark_heap_size": "8g", "regulator_release_version": "", "regulator_archive_sha256": "5" * 64,
+            "instance_type": "r9g.2xlarge", "availability_zone": "us-west-2a", "instance_market_type": "spot",
+            "logical_cpu_count": "8", "benchmark_heap_size": "8g", "regulator_release_version": "",
+            "regulator_archive_sha256": "5" * 64,
             "comparator_manifest_sha256": COMPARATORS_SHA256, "java_runtime_version": "25.0.4+7-LTS",
             **(environment or {})}
         self.write_unit_environment(root)

@@ -167,11 +167,18 @@ environment_value()
 {
     local key=$1
     local file
+    local value
+    # The first file naming the key wins. A pipe through head would kill the
+    # unit under pipefail once both files name it.
     for file in "${RESULT_DIR}/environment-manifest.txt" "${RESULT_DIR}/environment.txt"; do
         if [[ -f "${file}" ]]; then
-            awk -F= -v key="${key}" '$1 == key {print substr($0, length($1) + 2); exit}' "${file}"
+            value=$(awk -F= -v key="${key}" '$1 == key {print substr($0, length($1) + 2); exit}' "${file}")
+            if [[ -n "${value}" ]]; then
+                printf '%s\n' "${value}"
+                return
+            fi
         fi
-    done | head -1
+    done
 }
 
 # A host measures units of many shards, so the unit names the shard and the
@@ -194,9 +201,11 @@ if [[ "${PLAN_ONLY}" != true ]]; then
     RE2_CAMPAIGN_HOST_SESSION=${RE2_CAMPAIGN_HOST_SESSION:-}
     RE2_CAMPAIGN_LEASE_SEQUENCE=${RE2_CAMPAIGN_LEASE_SEQUENCE:-}
     BASELINE_REGION=${BASELINE_REGION:-${BASELINE_AVAILABILITY_ZONE%[a-z]}}
+    # How the host was bought, as it read from instance metadata.
+    BASELINE_MARKET=${BASELINE_MARKET:-$(environment_value instance_market_type)}
     for value_name in RE2_CAMPAIGN_ID RE2_CAMPAIGN_PLATFORM RE2_CAMPAIGN_HOST_EPOCH \
             RE2_ENGINEERING_ARCHITECTURE BASELINE_INSTANCE_ID BASELINE_INSTANCE_TYPE BASELINE_AVAILABILITY_ZONE \
-            RE2_CAMPAIGN_HOST_SESSION RE2_CAMPAIGN_LEASE_SEQUENCE BASELINE_REGION; do
+            RE2_CAMPAIGN_HOST_SESSION RE2_CAMPAIGN_LEASE_SEQUENCE BASELINE_REGION BASELINE_MARKET; do
         if [[ -z ${!value_name} || ${!value_name} == unknown || ${!value_name} == standalone ]]; then
             echo "Missing formal host identity: ${value_name}" >&2
             exit 1
@@ -289,7 +298,8 @@ python3 "${UNIT_TOOL}" combine \
     --unit-directory "${RESULT_DIR}" \
     --unit-attempt "${RE2_CAMPAIGN_HOST_SESSION}/${RE2_CAMPAIGN_LEASE_SEQUENCE}" \
     --group "${GROUP_ID}" \
-    --region "${BASELINE_REGION}"
+    --region "${BASELINE_REGION}" \
+    --market "${BASELINE_MARKET}"
 python3 "${SCRIPT_DIR}/validate-unit-results.py" \
     --unit-directory "${RESULT_DIR}" \
     --receipt "${RESULT_DIR}/unit-receipt.tsv"
