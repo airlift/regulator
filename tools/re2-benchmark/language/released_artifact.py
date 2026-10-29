@@ -1,4 +1,7 @@
-"""Bind public measurements to a checksummed release, independently of collector source."""
+"""Bind public measurements to a checksummed release, independently of collector source.
+
+With --record VERSION, record a new release's manifest from its tag and Maven Central JAR instead; that mode
+takes no attest options."""
 
 import argparse
 import hashlib
@@ -38,11 +41,14 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def manifest(root, version):
+def manifest_path(root, version):
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", version):
         raise ValueError("invalid release version")
-    path = root / "tools/re2-benchmark/baseline/releases" / (version + ".json")
-    value = json.loads(path.read_text())
+    return root / "tools/re2-benchmark/baseline/releases" / (version + ".json")
+
+
+def manifest(root, version):
+    value = json.loads(manifest_path(root, version).read_text())
     validate_manifest(value)
     if value["version"] != version:
         raise ValueError("release manifest has a different version")
@@ -57,6 +63,29 @@ def validate_manifest(value):
     for name, length in (("source_commit", 40), ("engine_tree", 40), ("jar_sha256", 64)):
         if not re.fullmatch(r"[0-9a-f]{" + str(length) + r"}", value.get(name, "")):
             raise ValueError("invalid release identity: " + name)
+
+
+def download(version):
+    url = f"https://repo.maven.apache.org/maven2/io/airlift/regulator/{version}/regulator-{version}.jar"
+    with urllib.request.urlopen(url, timeout=60) as response:
+        return response.read()
+
+
+def record(root, version):
+    """Build a release's manifest from its tag and its JAR on Maven Central."""
+    # Check the version before naming revisions with it.
+    manifest_path(root, version)
+
+    def git(revision):
+        return subprocess.check_output(["git", "-C", str(root), "rev-parse", "--verify", revision], text=True).strip()
+
+    # Qualified, so a branch named for the version cannot stand in for its tag.
+    tag = "refs/tags/" + version
+    value = {"schema_version": 1, "group_id": "io.airlift", "artifact_id": "regulator", "version": version,
+             "source_commit": git(tag + "^{commit}"), "engine_tree": git(tag + ":src/main"),
+             "jar_sha256": digest(download(version))}
+    validate_manifest(value)
+    return value
 
 
 def production_tree(root):
@@ -78,9 +107,7 @@ def prepare(root, version, destination):
     destination.mkdir(parents=True, exist_ok=True)
     jar = destination / ("regulator-" + version + ".jar")
     if not jar.exists():
-        url = f"https://repo.maven.apache.org/maven2/io/airlift/regulator/{version}/{jar.name}"
-        with urllib.request.urlopen(url, timeout=60) as response:
-            payload = response.read()
+        payload = download(version)
         if digest(payload) != identity["jar_sha256"]:
             raise ValueError("downloaded release JAR checksum mismatch")
         with jar.open("xb") as output:
@@ -191,11 +218,29 @@ def validate_baseline(directory, expected):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--classpath", required=True)
-    parser.add_argument("--production-classes", type=Path, required=True)
-    parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--record", metavar="VERSION",
+                        help="write the release's manifest from its tag and Maven Central, then exit")
+    parser.add_argument("--version")
+    parser.add_argument("--classpath")
+    parser.add_argument("--production-classes", type=Path)
+    parser.add_argument("--destination", type=Path)
     arguments = parser.parse_args()
+    attest_options = ("version", "classpath", "production_classes", "destination")
+    if arguments.record is not None:
+        given = [name for name in attest_options if getattr(arguments, name) is not None]
+        if given:
+            parser.error("--record takes no --" + ", --".join(name.replace("_", "-") for name in given))
+        path = manifest_path(arguments.root, arguments.record)
+        if path.exists():
+            parser.error(f"release manifest already exists: {path}")
+        value = record(arguments.root, arguments.record)
+        with path.open("x") as output:
+            output.write(json.dumps(value, indent=2) + "\n")
+        print(path)
+        return
+    missing = [name for name in attest_options if getattr(arguments, name) is None]
+    if missing:
+        parser.error("attesting a release requires --" + ", --".join(name.replace("_", "-") for name in missing))
     jar, identity = prepare(arguments.root, arguments.version, arguments.destination)
     entries = arguments.classpath.split(os.pathsep)
     source = arguments.production_classes.resolve()

@@ -1,4 +1,6 @@
+import contextlib
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -108,6 +110,37 @@ class TestReleasedArtifact(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 release.prepare(self.root, "1.0", self.root)
             download.assert_not_called()
+
+    def test_record_writes_a_new_release_manifest_from_its_tag_and_central_jar(self):
+        revisions = {"refs/tags/2.0^{commit}": "a" * 40 + "\n", "refs/tags/2.0:src/main": "b" * 40 + "\n"}
+        path = self.root / "tools/re2-benchmark/baseline/releases/2.0.json"
+        path.parent.mkdir(parents=True)
+        command = ["released_artifact.py", "--root", str(self.root), "--record", "2.0"]
+        expected = json.dumps({**self.identity, "version": "2.0"}, indent=2) + "\n"
+        with patch.object(release.subprocess, "check_output",
+                          side_effect=lambda arguments, text: revisions[arguments[-1]]), \
+                patch.object(release.urllib.request, "urlopen") as download, patch("sys.argv", command), \
+                contextlib.redirect_stdout(io.StringIO()):
+            download.return_value.__enter__.return_value.read.return_value = self.jar.read_bytes()
+            release.main()
+            # The same format as the committed manifests.
+            committed = Path(__file__).resolve().parents[1] / "baseline/releases/1.0.json"
+            self.assertEqual(committed.read_text(), json.dumps(json.loads(committed.read_text()), indent=2) + "\n")
+            self.assertEqual(path.read_text(), expected)
+            # Recording again, or with attest options, is refused and leaves the manifest as it was.
+            for options, refusal in (([], "release manifest already exists"),
+                                     (["--version", "2.0", "--destination", str(self.root)],
+                                      "--record takes no --version, --destination")):
+                errors = io.StringIO()
+                with self.subTest(refusal=refusal), patch("sys.argv", command + options), \
+                        contextlib.redirect_stderr(errors), self.assertRaises(SystemExit):
+                    release.main()
+                self.assertIn(refusal, errors.getvalue())
+                self.assertEqual(path.read_text(), expected)
+            with patch("sys.argv", command[:-1] + [""]), self.assertRaisesRegex(ValueError, "invalid release version"):
+                release.main()
+            download.assert_called_once_with(
+                "https://repo.maven.apache.org/maven2/io/airlift/regulator/2.0/regulator-2.0.jar", timeout=60)
 
     def test_baseline_recovery_requires_release_proof_for_every_route(self):
         for name in ("safe", "native-access"):
