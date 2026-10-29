@@ -364,6 +364,39 @@ options that decide what its phases measure, the selected shards, smoke
 protocol, release version, and language plans, in `campaign-options.json`, and
 refuses a restart that changes them.
 
+See a campaign's progress, or one phase's, without disturbing it:
+
+```bash
+python3 tools/re2-benchmark/baseline/run-campaign.py status /durable/path/<campaign>
+```
+
+```text
+campaign /durable/path/<campaign>: driver running as process 4242
+candidate before at 0c1d2e3f4a5b
+  build             complete
+  smoke             complete
+  primary           running as process 4310
+    units     212/449 accepted (530/1104 groups), 1 unresolved, 180 queued
+    workers   2 booting, 24 running, 1 idle, as of 12s ago
+              r8i r8i.large us-east-2 spot: 2 booting, 14 running
+              r9g r9g.large us-west-2 on-demand: 10 running, 1 idle
+    spend     $3.12 so far, $1.80 reserved
+    finish    about 6:40 p.m. PDT
+    medians   boot to first unit 172s, upload 4s
+```
+
+The command only reads files. Units and groups accepted, the estimate left,
+spend, and medians come from the phase's ledgers: `work-items.tsv`,
+`accepted-units.tsv`, `unresolved-units.tsv` once the phase ends, the fleet
+state of the policy its `execution-policy.json` names, `job-attempts.tsv`, and
+`unit-uploads.tsv`. Spend is the phase's completed hosts' cost plus the cost of
+its live hosts' hours so far; reserved is what their reservations hold beyond
+now. The workers, and the queued and unresolved counts while the phase runs,
+come from `dispatch-status.json`, which the phase's controller rewrites every
+poll; its age shows how current they are. The finish is the estimated seconds of
+groups not yet accepted, divided among the running workers, as a local clock
+time. Given a phase's root, the command reports that phase alone.
+
 ## Run a phase
 
 Each phase can also run alone. Without `--execute`, the controller writes the
