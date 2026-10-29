@@ -1932,8 +1932,7 @@ final class JavaRegexpParser
 
         private int parseOctalEscape(int firstDigit, int flags, int sequenceStart)
         {
-            // In comments mode the JDK skips whitespace and comments before each digit.
-            skipIgnoredPatternCharacters();
+            skipIgnoredCharactersAndEmptyQuotes();
             if (firstDigit != '0' || atEnd() || peekByte() < '0' || peekByte() > '7') {
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
@@ -1943,7 +1942,7 @@ final class JavaRegexpParser
             int maximumDigits = firstOctalDigit <= '3' ? 3 : 2;
             int code = 0;
             for (int i = 0; i < maximumDigits; i++) {
-                skipIgnoredPatternCharacters();
+                skipIgnoredCharactersAndEmptyQuotes();
                 if (atEnd()) {
                     break;
                 }
@@ -1958,6 +1957,20 @@ final class JavaRegexpParser
                 throw error(RegexpParseErrorCode.BAD_ESCAPE, Slices.wrappedBuffer(bytes, sequenceStart, index - sequenceStart));
             }
             return code;
+        }
+
+        private void skipIgnoredCharactersAndEmptyQuotes()
+        {
+            // In comments mode the JDK skips whitespace and comments before each digit. It also deletes
+            // every empty \Q\E before parsing, so one does not end the escape. A non-empty quote does:
+            // the JDK rewrites a digit that begins a quote as a hex escape.
+            while (true) {
+                skipIgnoredPatternCharacters();
+                if (index + 3 >= end || bytes[index] != '\\' || bytes[index + 1] != 'Q' || bytes[index + 2] != '\\' || bytes[index + 3] != 'E') {
+                    return;
+                }
+                index += 4;
+            }
         }
 
         private Regexp parseLiteral()
