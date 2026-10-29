@@ -14,6 +14,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -418,6 +419,191 @@ class TestRunCampaign(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "other benchmark tooling"):
                 RUN_CAMPAIGN.validate_source(repository, arguments)
 
+    def test_campaign_advances_each_candidate_as_its_own_phases_complete(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            campaign_root = Path(temporary_directory)
+            arguments = SimpleNamespace(
+                campaign="tournament", campaign_root=campaign_root, language_plan=[], selected_shards=["trino-like"],
+                max_concurrent=16, max_concurrent_per_platform=64, spot_vcpu_reserve=16, release_version="",
+                phase_timeout_seconds=None, fleet_budget=campaign_root / "fleet-policy.json", platform_region_values=[],
+                purchase_values=[], transfer_bucket=[], smoke_protocol="smoke", smoke_results=None,
+                primary_results=None, confirmation_jobs=None, engine_builds=None, execute=True)
+            candidates = [RUN_CAMPAIGN.FrozenCandidate(name, commit * 40, f"refs/benchmarks/tournament/{name}",
+                                                       campaign_root / name / "candidate", "0" * 64, "e" * 40)
+                          for name, commit in (("a", "a"), ("b", "b"))]
+            frozen = {candidate.name: candidate for candidate in candidates}
+            run_chains = RUN_CAMPAIGN.run_chains
+            # Each step's child runs this many polls; A's smoke is slow and then fails. A's reduction lists a job.
+            polls = {"a/smoke": 4}
+            failing = {"a/smoke"}
+            confirmed = {"a/reduction": "r8i\ttrino-like\tunit-1\n"}
+            events = []
+
+            class Child:
+                def __init__(self, step):
+                    self.step = step
+                    self.name = str(step.root.relative_to(campaign_root))
+                    self.remaining = polls.get(self.name, 1)
+
+                def poll(self):
+                    self.remaining -= 1
+                    if self.remaining:
+                        return None
+                    events.append(("exit", self.name))
+                    if self.name in failing:
+                        return 1
+                    self.step.root.mkdir(parents=True, exist_ok=True)
+                    if self.step.label == "reduction":
+                        (self.step.root / "confirmation-jobs.tsv").write_text(
+                            "platform\tshard_id\tunit_id\n" + confirmed.get(self.name, ""))
+                        (self.step.root / "output-checksums.tsv").touch()
+                    else:
+                        (self.step.root / "campaign-events.tsv").touch()
+                        (self.step.root / RUN_CAMPAIGN.PHASE_COMPLETE).touch()
+                    return 0
+
+            def start(step, share):
+                child = Child(step)
+                events.append(("start", child.name, step.command(share)))
+                return child
+
+            def run(names=("a", "b")):
+                events.clear()
+                arguments.candidates = [(name, frozen[name].commit) for name in names]
+                driver_polls = iter(range(100))
+
+                def sleep(_):
+                    # A driver that never finishes fails rather than hangs.
+                    if next(driver_polls, None) is None:
+                        self.fail("the campaign driver never finished")
+
+                with patch.object(RUN_CAMPAIGN, "freeze_candidate",
+                                  side_effect=lambda root, campaign_root, campaign, name, commitish: frozen[name]), \
+                        patch.object(RUN_CAMPAIGN, "run_chains", lambda chains, maximum, per_platform: run_chains(
+                            chains, maximum, per_platform, start=start, adopt=lambda step: None, poll_seconds=0)), \
+                        patch.object(RUN_CAMPAIGN.time, "sleep", sleep), contextlib.redirect_stdout(io.StringIO()):
+                    RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
+
+            # A's failure stops only A, and the campaign then exits naming it.
+            with self.assertRaisesRegex(SystemExit, "failed candidates:\ntournament.a: smoke failed") as failed:
+                run()
+
+            order = [event[:2] for event in events]
+            # B's primary starts once B's smoke passed, while A's smoke still runs, at half the campaign's hosts.
+            self.assertLess(order.index(("start", "b/primary")), order.index(("exit", "a/smoke")))
+            command = next(event[2] for event in events if event[:2] == ("start", "b/primary"))
+            self.assertIn(f"--candidate=b={'b' * 40}", command)
+            self.assertIn("--max-concurrent=8", command)
+            self.assertIn("--max-concurrent-per-platform=32", command)
+            # B's reduction takes its primary's events.
+            command = next(event[2] for event in events if event[:2] == ("start", "b/reduction"))
+            self.assertIn(f"--events={campaign_root / 'b' / 'primary' / 'campaign-events.tsv'}", command)
+            # B reduces its primary and, with no confirmation jobs listed, completes.
+            self.assertNotIn(("start", "a/primary"), order)
+            self.assertIn(("exit", "b/reduction"), order)
+            self.assertNotIn(("start", "b/confirmation"), order)
+            self.assertNotIn("tournament.b", str(failed.exception))
+
+            # A restart skips every completed step: A resumes at its smoke, alone, with every host, and confirms the
+            # job its reduction listed on the shards it measured.
+            failing.clear()
+            run()
+
+            self.assertEqual([("start", "a/smoke"), ("start", "a/primary"), ("start", "a/reduction"),
+                              ("start", "a/confirmation")], [event[:2] for event in events if event[0] == "start"])
+            self.assertIn("--max-concurrent=16", events[0][2])
+            self.assertIn("--shard=trino-like",
+                          next(event[2] for event in events if event[:2] == ("start", "a/confirmation")))
+            # A restart measures what the campaign started measuring, of the candidates it started with.
+            with self.assertRaisesRegex(SystemExit, "candidates differ"):
+                run(names=("a",))
+            arguments.selected_shards = None
+            with self.assertRaisesRegex(SystemExit, "options differ"):
+                run()
+            self.assertEqual([], events)
+
+            # A restart adopts a step's child only from a process running its command for this campaign root, not
+            # for another, even one differing only in its spaces.
+            arguments.campaign_root = campaign_root / "campaign root"
+            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates)
+            step = chain.steps[2]
+            command = " ".join(step.command((4, 8)))
+            others = "\n".join(f"10{index} " + command.replace("campaign root", root)
+                               for index, root in ((1, "elsewhere"), (2, "campaign  root")))
+            with patch.object(RUN_CAMPAIGN, "check_output",
+                              return_value=f"{others}\n103 python3 {command.split(' ', 1)[1]}"):
+                self.assertEqual(103, RUN_CAMPAIGN.child_process_id(step))
+            with patch.object(RUN_CAMPAIGN, "check_output", return_value=others):
+                self.assertIsNone(RUN_CAMPAIGN.child_process_id(step))
+
+    def test_restarted_driver_starts_a_phase_once_the_hosts_for_its_frozen_share_are_free(self):
+        # Under limits of four, A's phase froze half of them and failed, and B's next phase then took all four. A
+        # restarted driver adopts B's phase, which still runs, before restarting A's, which waits for B's hosts.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            events = []
+
+            def phase(name, frozen):
+                root = Path(temporary_directory) / name
+                root.mkdir()
+                (root / "execution-policy.json").write_text(
+                    json.dumps({"max_concurrent": frozen, "max_concurrent_per_platform": frozen}))
+                return RUN_CAMPAIGN.CampaignStep(name, root, None,
+                                                 lambda: (root / RUN_CAMPAIGN.PHASE_COMPLETE).is_file())
+
+            class Child:
+                def __init__(self, step, polls):
+                    self.step, self.polls = step, polls
+
+                def poll(self):
+                    self.polls -= 1
+                    if self.polls:
+                        return None
+                    events.append(("exit", self.step.label))
+                    (self.step.root / RUN_CAMPAIGN.PHASE_COMPLETE).touch()
+                    return 0
+
+            def start(step, share):
+                events.append(("start", step.label, share))
+                return Child(step, 1)
+
+            def run(steps, start, adopt):
+                events.clear()
+                chains = [RUN_CAMPAIGN.CampaignChain(step.label, [step]) for step in steps]
+                driver_polls = iter(range(10))
+
+                def sleep(_):
+                    # A driver that never finishes fails rather than hangs.
+                    if next(driver_polls, None) is None:
+                        self.fail("the campaign driver never finished")
+
+                with patch.object(RUN_CAMPAIGN.time, "sleep", sleep), contextlib.redirect_stdout(io.StringIO()):
+                    RUN_CAMPAIGN.run_chains(chains, 4, 4, start=start, adopt=adopt)
+                self.assertEqual(["" for _ in chains], [chain.failure for chain in chains])
+
+            a, b = phase("a", 2), phase("b", 4)
+            run([a, b], start, lambda step: Child(step, 2) if step is b else None)
+            self.assertEqual([("exit", "b"), ("start", "a", (2, 2)), ("exit", "a")], events)
+
+            # Limits that cannot hold a share a phase froze stop the driver, though that phase runs adopted, naming
+            # the limits that hold it.
+            d = phase("d", 8)
+            with self.assertRaisesRegex(SystemExit, "d d 8 hosts, 8 per platform; give at least --max-concurrent 8 "
+                                                    "--max-concurrent-per-platform 8"):
+                run([d, phase("e", 2)], start, lambda step: Child(step, 1) if step is d else None)
+            self.assertEqual([], events)
+
+    def test_campaign_refuses_candidates_whose_chains_share_a_campaign_id(self):
+        # With a language plan, candidate a's language chain and candidate a.lang's baseline chain are both
+        # tournament.a.lang, so they would reserve the fleet and number their hosts as one campaign.
+        arguments = SimpleNamespace(
+            campaign="tournament", campaign_root=Path("unused"), candidates=[("a", "main"), ("a.lang", "main")],
+            fleet_budget=Path("fleet-policy.json"), smoke_results=None, primary_results=None, confirmation_jobs=None,
+            engine_builds=None, language_plan=[Path("plan")], execute=True)
+        with patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze, \
+                self.assertRaisesRegex(SystemExit, "a and a.lang would both run as campaign tournament.a.lang"):
+            RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
+        freeze.assert_not_called()
+
     def test_primary_requires_accepted_smoke_results(self):
         arguments = SimpleNamespace(phase="primary", smoke_results=None)
         with self.assertRaisesRegex(SystemExit, "requires --smoke-results"):
@@ -612,7 +798,7 @@ class TestRunCampaign(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             archives, manifest = self.engine_build(root)
-            language_platform = RUN_CAMPAIGN.replace(self.platform, instance_type="r8i.large", vcpus=2)
+            language_platform = replace(self.platform, instance_type="r8i.large", vcpus=2)
             bundles = {"language-bulk": (root / "bulk.tar.zst", "1" * 64),
                        "language-lifecycle": (root / "lifecycle.tar.zst", "2" * 64)}
             (root / "provenance.tsv").write_text("provenance\n")
@@ -880,15 +1066,14 @@ class TestRunCampaign(unittest.TestCase):
                 self.assertEqual(expected, [region for region, _ in RUN_CAMPAIGN.launch_placements(arguments, job)])
 
     def test_aws_preflight_uses_routed_worker_topologies(self):
-        platform = RUN_CAMPAIGN.replace(
+        platform = replace(
             self.platform,
             instance_type="r8i.large",
             vcpus=2,
             concurrency_instance_type="r8i.2xlarge",
             concurrency_vcpus=8)
         # A unit worker runs on the instance its plan allocates, here the platform's multicore worker.
-        jobs = [RUN_CAMPAIGN.unit_worker_job(
-            RUN_CAMPAIGN.replace(platform, instance_type="r8i.2xlarge", vcpus=8), 1, 1, "spot")]
+        jobs = [RUN_CAMPAIGN.unit_worker_job(replace(platform, instance_type="r8i.2xlarge", vcpus=8), 1, 1, "spot")]
         arguments = SimpleNamespace(shared_budget=None, purchases={"r8i": "spot"}, spot_vcpu_reserve=4)
         spot_quota = 11
 
@@ -997,6 +1182,11 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(arguments, long_items)
         arguments.shared_budget.policy["max_attempt_seconds"] = 102600
         RUN_CAMPAIGN.validate_configuration(arguments, long_items)
+        # A phase refuses a campaign ID the driver would, as the ID tags its hosts and names its S3 prefixes.
+        arguments.campaign_id = "tournament.a/b"
+        with self.assertRaisesRegex(SystemExit, "campaign ID must be"):
+            RUN_CAMPAIGN.validate_configuration(arguments, items)
+        arguments.campaign_id = "baseline"
         arguments.max_concurrent = 0
         with self.assertRaisesRegex(SystemExit, "positive integer"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
@@ -2071,6 +2261,23 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
             budget.release.assert_not_called()
 
+    def test_recovery_finds_only_its_own_campaigns_wrapper_of_the_job(self):
+        job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 1, "spot")
+        runner = "/bin/bash /checkout/tools/re2-benchmark/aws/run-campaign.sh"
+        # Another candidate's wrapper of the same job, and this campaign's wrapper of a later host epoch.
+        processes = {101: f"{runner} tournament.b {job.identity}",
+                     102: f"{runner} tournament.a {replace(job, host_epoch=100001).identity}",
+                     103: f"{runner} tournament.a {job.identity}"}
+
+        def ps(command, **_):
+            if command[:2] == ["ps", "-p"]:
+                return processes[int(command[2])]
+            return "".join(f" {process_id} {line}\n" for process_id, line in processes.items())
+
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=ps):
+            self.assertEqual(103, RUN_CAMPAIGN.wrapper_process_id("tournament.a", job, "-"))
+            self.assertIsNone(RUN_CAMPAIGN.wrapper_process_id("tournament.a", job, "wrapper_pid=101"))
+
     def test_tooling_digest_covers_each_tracked_files_path_and_content(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -2451,11 +2658,12 @@ class FakeUnitHost:
         "protocol-rejection": RUN_CAMPAIGN.PROTOCOL_REJECTION_STATUS, "fail": 1, "capacity-rejected": 1,
     }
 
-    def __init__(self, fleet, number, identity, environment):
+    def __init__(self, fleet, number, arguments, environment):
         self.fleet = fleet
         self.number = number
         self.pid = 4_000_000 + number
-        self.identity = identity
+        # The wrapper's arguments, by which ps shows it.
+        self.arguments = arguments
         self.platform = environment["CAMPAIGN_PLATFORM"]
         self.instance_type = environment.get("INTEL_INSTANCE_TYPE") or environment["ARM_INSTANCE_TYPE"]
         self.market = environment["INSTANCE_MARKET_TYPE"]
@@ -2693,7 +2901,7 @@ class FakeUnitFleet:
         return next(host for host in self.hosts if host.session == worker.metadata["session"])
 
     def popen(self, command, **kwargs):
-        host = FakeUnitHost(self, len(self.hosts) + 1, command[1], kwargs["env"])
+        host = FakeUnitHost(self, len(self.hosts) + 1, command[1:], kwargs["env"])
         self.hosts.append(host)
         return host
 
@@ -2720,7 +2928,7 @@ class FakeUnitFleet:
             host = next(host for host in self.hosts if host.pid == int(command[2]))
             if host.status is not None:
                 raise subprocess.CalledProcessError(1, command)
-            return f"bash run-campaign.sh {host.identity}"
+            return " ".join(["bash", "run-campaign.sh", *host.arguments])
         raise AssertionError(command)
 
     def kill(self, process_id, sent_signal):

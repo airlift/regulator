@@ -266,10 +266,59 @@ controller checks their results with its own, so the candidate's
 does not build or test the candidate: the build phase compiles it, every route
 runs its semantic verifiers, and CI runs the full suite.
 
-## Plan and execute
+## Run a campaign
 
-Without `--execute`, the controller writes the phase's work items to
-`work-items.tsv` without allocating AWS resources:
+`campaign` freezes every candidate and runs each through its phases as its own
+controller: build, smoke, primary, the reduction of its primary, and a
+confirmation of the jobs that reduction lists, if any. Each candidate starts a
+phase as soon as its own previous phase completes, and a failed phase stops
+only its own candidate's later phases. A controller that fails while it
+recovers or dispatches its hosts also halts the
+[shared fleet](#shared-fleet-budget), which stops every candidate's running
+phases. With `--language-plan`, each candidate also runs the plan's smoke and
+primary on its build.
+
+```bash
+TRANSFER_PREFIX=<transfer-prefix> \
+python3 tools/re2-benchmark/baseline/run-campaign.py \
+  campaign <campaign> --execute \
+  --candidate before=main --candidate after=user/me/faster-scan \
+  --campaign-root /durable/path/<campaign> \
+  --transfer-bucket us-west-2=<bucket> \
+  --max-concurrent 32 --purchase r8i=spot --purchase r9g=spot \
+  --spot-vcpu-reserve 16 --fleet-budget /durable/path/fleet-policy.json
+```
+
+Every candidate's `tools/re2-benchmark` tree must be the controller's committed
+one, so `before=main` works only while `main` carries the same benchmark
+tooling as the checkout running the controller.
+
+Several candidates share one fleet, so they require `--fleet-budget`. Each
+phase starts with an even share of `--max-concurrent` and
+`--max-concurrent-per-platform` among the sequences of phases still running,
+a candidate's language plan counting as another sequence, and keeps that share
+through restarts. The command refuses a limit that is not positive or is
+smaller than the number of sequences that run together, so every share is at
+least one host. A phase starts only once its share fits the hosts the running
+phases leave free, so a restart that retries a failed candidate waits for the
+hosts its phase froze. A restart whose limits are smaller than a share some
+running or unfinished phase froze stops at once, naming the smallest limits
+that hold it. The other options pass to each phase that takes them.
+
+Each phase runs as a child process in its own session, logging to
+`driver-child.log` in its root. Stopping the campaign leaves its children
+running; a restart adopts each live child, a process running its step's
+command for this campaign root, skips every completed phase, whose root holds
+`phase-complete.txt`, and restarts the others, which resume from their
+ledgers. Stop a phase by sending its child SIGTERM. The driver records the
+options that decide what its phases measure, the selected shards, smoke
+protocol, release version, and language plans, in `campaign-options.json`, and
+refuses a restart that changes them.
+
+## Run a phase
+
+Each phase can also run alone. Without `--execute`, the controller writes the
+phase's work items to `work-items.tsv` without allocating AWS resources:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
@@ -351,8 +400,7 @@ of each `--confirmation-jobs` row, which names `platform`, `shard_id`, and
 accepted primary. A shared fleet budget must allow `max_attempt_seconds` of at
 least the longest pool's worker timeout plus 15 minutes: 27,900 seconds for
 baseline units, and 102,600 for a pool holding a Java or Trino slow-bulk
-comparison's 75,600-second unit. Each phase is still its own controller run;
-pipelining a shard's primary behind its accepted smoke is future work.
+comparison's 75,600-second unit.
 
 Set `AWS_PROFILE` before any execution command when selecting a named profile;
 otherwise the AWS CLI uses its standard credential chain.
@@ -562,6 +610,9 @@ aws s3 rm "s3://<bucket>/<transfer-prefix>/jdks/" --recursive --region <region>
 
 The controller uses `run-campaign.sh` to run one AWS job, a
 `CAMPAIGN_MODE=unit-worker` job that leases [work units](#unit-workers). The
+wrapper reads only its environment; the controller names it with the campaign
+ID and the job's identity as its arguments, so a restarted controller adopts
+only its own campaign's wrappers. The
 wrapper verifies the archive, provisions an isolated
 instance, uploads inputs through a private temporary S3 location, downloads the
 result, and verifies instance, IAM, and S3 cleanup.

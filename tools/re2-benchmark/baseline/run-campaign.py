@@ -86,10 +86,13 @@ UNIT_WORKER_BOOT_SECONDS = 5 * 60
 # a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
 SEMANTIC_FAILURE_DETAIL = f"semantic failure: status {SEMANTIC_FAILURE_STATUS}"
-# A unit campaign phase's digest of the tooling that started it, beside its campaign state.
+# Each step's child a campaign driver started writes its output here, in the step's root.
+DRIVER_CHILD_LOG = "driver-child.log"
+DRIVER_POLL_SECONDS = 30
+# A unit campaign phase's digest of the tooling that started it, in its result root.
 TOOLING_DIGEST = "tooling-digest.txt"
 # Written once a unit phase's controller has verified every worker's cleanup and its phase gate has passed;
-# a later phase consumes the result root only beside it.
+# a later phase consumes the result root only once it exists.
 PHASE_COMPLETE = "phase-complete.txt"
 WORK_ITEM_FIELDS = ("platform", "instance_type", "shard_id", "unit_id", "replica", "estimated_seconds", "groups",
                     "excluded_instances")
@@ -135,6 +138,10 @@ CANDIDATE_FIELDS = ("name", "commit", "ref", "archive_sha256")
 CANDIDATE_ARCHIVE = "regulator.tar.gz"
 CANDIDATE_PROVENANCE = "provenance.tsv"
 CANDIDATE_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+# A phase's campaign ID tags its AWS resources and names its S3 prefixes.
+CAMPAIGN_ID_PATTERN = r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}"
+# The driver's options that decide what its candidates' phases measure, recorded beside candidates.tsv.
+CAMPAIGN_OPTIONS = "campaign-options.json"
 BENCHMARK_TOOLING = "tools/re2-benchmark"
 BASELINE_TOOLING = "tools/re2-benchmark/baseline"
 JOB_MANIFEST_FIELDS = (
@@ -228,11 +235,15 @@ def campaign_engine_tree(arguments):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=PHASE_TIMEOUT_SECONDS)
-    parser.add_argument("campaign", help="the campaign; each candidate's phases run as <campaign>.<name>")
+    parser.add_argument("phase", choices=("campaign", *PHASE_TIMEOUT_SECONDS),
+                        help="one phase of a candidate, or campaign to run every candidate's phases")
+    parser.add_argument("campaign",
+                        help="the campaign; each candidate's phases run as <campaign>.<name>, and its language "
+                             "phases as <campaign>.<name>.lang")
     parser.add_argument("--candidate", action="append", default=[], dest="candidate_values",
                         metavar="NAME=COMMITISH",
-                        help="the candidate commit, frozen from Git as refs/benchmarks/<campaign>/<name>")
+                        help="a candidate commit, frozen from Git as refs/benchmarks/<campaign>/<name>; a phase takes "
+                             "one and a campaign takes one or more")
     parser.add_argument("--campaign-root", type=Path,
                         help="the campaign's results, holding candidates.tsv and <name>/candidate and each phase "
                              "(default: benchmark-results/pre-review-baseline/<campaign>)")
@@ -256,8 +267,9 @@ def parse_args():
     parser.add_argument("--shard", action="append", dest="selected_shards",
                         help="baseline shard to recollect; repeat to select a subset")
     parser.add_argument("--language-plan", action="append", type=Path, default=[],
-                        help="language plan prepared by fleet.py, whose units the campaign measures instead of the "
-                             "baseline's; repeat for lifecycle and bulk")
+                        help="language plan prepared by fleet.py, whose units a phase measures instead of the "
+                             "baseline's and a campaign measures in language phases beside the baseline's; repeat "
+                             "for lifecycle and bulk")
     parser.add_argument("--platform-regions", action="append", default=[], dest="platform_region_values",
                         metavar="PLATFORM=REGION[,REGION...]",
                         help="AWS regions the platform's hosts may launch in; with several, Spot placement scores "
@@ -642,8 +654,7 @@ def validate_configuration(arguments, items):
     if budget and budget.policy["max_attempt_seconds"] < worker_timeout + 15 * 60:
         raise SystemExit("unit workers require a shared fleet max_attempt_seconds of at least "
                          f"{worker_timeout + 15 * 60}, a worker's timeout and cleanup")
-    if not arguments.campaign_id or len(arguments.campaign_id) > 63:
-        raise SystemExit("campaign_id must contain 1-63 characters")
+    validate_campaign_id(arguments.campaign_id)
     if type(arguments.max_concurrent) is not int or arguments.max_concurrent < 1:
         raise SystemExit("max concurrency must be a positive integer")
     per_platform = getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT)
@@ -706,6 +717,12 @@ def campaign_heap_size(arguments):
     if not hasattr(arguments, "heap_size"):
         arguments.heap_size = normalize_heap_size(os.environ.get("BENCHMARK_HEAP_SIZE") or "8g")
     return arguments.heap_size
+
+
+def validate_campaign_id(campaign_id, label="campaign ID"):
+    if not re.fullmatch(CAMPAIGN_ID_PATTERN, campaign_id):
+        raise SystemExit(f"{label} must be 1-63 letters, digits, '.', '_', and '-', starting with a letter or digit: "
+                         f"{campaign_id}")
 
 
 def candidate_campaign_id(campaign, name, language=False):
@@ -2251,7 +2268,15 @@ def recover_budget_reservations(budget, arguments, result_root, jobs, attempts_p
         budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
 
 
-def wrapper_process_id(job, detail):
+def wrapper_command(command, campaign_id, job):
+    """Whether a process's command line is the job's wrapper in the campaign: run-campaign.sh with the campaign ID
+    and the job's identity as its arguments, which start_wrapper gives it."""
+    arguments = command.split()
+    return (len(arguments) >= 3 and Path(arguments[-3]).name == "run-campaign.sh" and
+            arguments[-2:] == [campaign_id, job.identity])
+
+
+def wrapper_process_id(campaign_id, job, detail):
     marker = "wrapper_pid="
     if marker in detail:
         value = detail.split(marker, 1)[1].split(";", 1)[0].strip()
@@ -2263,14 +2288,12 @@ def wrapper_process_id(job, detail):
             command = check_output(["ps", "-p", str(process_id), "-o", "command="])
         except subprocess.CalledProcessError:
             return None
-        if "run-campaign.sh" in command and job.identity in command:
-            return process_id
-        return None
+        return process_id if wrapper_command(command, campaign_id, job) else None
     processes = check_output(["ps", "ax", "-o", "pid=,command="])
     matches = []
     for line in processes.splitlines():
         process_id, separator, command = line.strip().partition(" ")
-        if separator and "run-campaign.sh" in command and job.identity in command:
+        if separator and wrapper_command(command, campaign_id, job):
             matches.append(int(process_id))
     if len(matches) > 1:
         raise UnsafeCampaignError(f"multiple detached wrappers match {job.identity}: {matches}")
@@ -2435,8 +2458,9 @@ def start_wrapper(arguments, root, result_root, runner, attempts_path, job, slot
              if job.spot_capacity_failures else "") +
             (f";slot={slot};slot_failures={slot_failures}" if slot is not None else ""))
         try:
+            # The wrapper reads only its environment; its arguments name it, so recovery finds this campaign's.
             process = subprocess.Popen(
-                [str(runner), job.identity],
+                [str(runner), arguments.campaign_id, job.identity],
                 cwd=root,
                 env=environment,
                 stdout=log,
@@ -2514,14 +2538,15 @@ def read_unit_workers(path, platforms):
 class DetachedWrapper:
     """A worker wrapper an earlier controller started, followed through its process ID and session."""
 
-    def __init__(self, process_id, job, detail, result_root):
+    def __init__(self, process_id, campaign_id, job, detail, result_root):
         self.pid = process_id
+        self.campaign_id = campaign_id
         self.job = job
         self.detail = detail
         self.result_root = result_root
 
     def poll(self):
-        if wrapper_process_id(self.job, self.detail) is not None:
+        if wrapper_process_id(self.campaign_id, self.job, self.detail) is not None:
             return None
         try:
             session = single_session(self.result_root, self.job)
@@ -2761,7 +2786,7 @@ class UnitDispatcher:
                     session = None
                 if session is not None and (session / "cleanup-manifest.txt").is_file():
                     break
-                process_id = wrapper_process_id(job, row["detail"])
+                process_id = wrapper_process_id(self.arguments.campaign_id, job, row["detail"])
                 if process_id is not None:
                     break
                 if probe == 0:
@@ -2769,9 +2794,9 @@ class UnitDispatcher:
             if process_id is not None:
                 log = (self.result_root / "controller-logs" / (job.identity.replace("/", "-") + ".log")).open("a")
                 # A live worker is registered at once, so a recovery step that fails still stops it.
+                wrapper = DetachedWrapper(process_id, self.arguments.campaign_id, job, row["detail"], self.result_root)
                 workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
-                    job, DetachedWrapper(process_id, job, row["detail"], self.result_root), log,
-                    slot=slot, slot_failures=slot_failures, launched_at=time.monotonic())
+                    job, wrapper, log, slot=slot, slot_failures=slot_failures, launched_at=time.monotonic())
             elif session is not None and (session / "cleanup-manifest.txt").is_file():
                 workers[job.host_epoch] = UnitWorker(job, None, None, session=session,
                                                      slot=slot, slot_failures=slot_failures)
@@ -3557,6 +3582,295 @@ def execute_units(arguments, root, result_root, items, platforms, validation):
         UnitDispatcher(arguments, root, result_root, items, platforms, validation).run()
 
 
+@dataclass
+class CampaignStep:
+    """One step of a candidate's chain: a phase's controller, or the reduction that lists its confirmation jobs.
+    It runs as a child process the driver can adopt after a restart."""
+    label: str
+    root: Path
+    # The child's command, given the step's (max concurrent, max concurrent per platform) share.
+    command: object
+    complete: object
+    # Whether the step has anything to do once its predecessors completed; confirmation runs only for listed jobs.
+    needed: object = lambda: True
+    # Whether the child's command takes a concurrency share.
+    shared: bool = True
+
+
+@dataclass
+class CampaignChain:
+    """A candidate's steps, each started once the one before it completed."""
+    name: str
+    steps: list
+    position: int = 0
+    child: object = None
+    # The share of the campaign's hosts the driver started its child with; an adopted child's is its frozen one.
+    share: object = None
+    failure: str = ""
+
+    @property
+    def step(self):
+        return self.steps[self.position]
+
+    @property
+    def finished(self):
+        return bool(self.failure) or self.position == len(self.steps)
+
+
+class AdoptedChild:
+    """A step's child process an earlier driver started, followed through its process ID."""
+
+    def __init__(self, process_id, step):
+        self.pid = process_id
+        self.step = step
+
+    def poll(self):
+        return None if child_process_id(self.step) == self.pid else 0
+
+
+def child_process_id(step):
+    """The process ID of the step's live child: a process running the step's command, which names the step's root,
+    with any concurrency share."""
+    # ps joins the arguments with spaces, so the step's are matched exactly as joined, whatever spaces its root
+    # holds. The interpreter's path is ps's, which may name another path to the same interpreter.
+    expected = re.compile(r"\S+ " + " ".join(
+        re.escape(argument.split("=", 1)[0]) + r"=\d+" if argument.startswith("--max-concurrent")
+        else re.escape(argument) for argument in step.command((1, 1) if step.shared else None)[1:]))
+    for line in check_output(["ps", "ax", "-o", "pid=,command="]).splitlines():
+        process_id, _, command = line.lstrip().partition(" ")
+        if expected.fullmatch(command):
+            return int(process_id)
+    return None
+
+
+def adopt_child(step):
+    process_id = child_process_id(step)
+    return None if process_id is None else AdoptedChild(process_id, step)
+
+
+def start_child(step, share):
+    """Start the step's child in its own session, so it outlives the driver."""
+    step.root.mkdir(parents=True, exist_ok=True)
+    with (step.root / DRIVER_CHILD_LOG).open("a") as log:
+        return subprocess.Popen(step.command(share), stdin=subprocess.DEVNULL, stdout=log,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def frozen_share(step):
+    """The (max concurrent, max concurrent per platform) share a phase's execution policy froze, or None before the
+    phase froze one."""
+    policy = step.root / "execution-policy.json"
+    if not policy.exists():
+        return None
+    recorded = json.loads(policy.read_text())
+    return recorded["max_concurrent"], recorded["max_concurrent_per_platform"]
+
+
+def step_share(step, open_chains, limits, free):
+    """The share a phase starts with, as (max concurrent, max concurrent per platform), or None while the hosts free
+    of the campaign's limits cannot hold it. A restarted phase needs the share its execution policy froze. A new one
+    takes an even share, rounded down, of the limits among the chains still open, or what is free of it, at least one
+    host; the campaign refuses limits smaller than its number of chains, so an even share is at least one host."""
+    share = frozen_share(step) or tuple(min(limit // open_chains, left) for limit, left in zip(limits, free))
+    return share if all(1 <= want <= left for want, left in zip(share, free)) else None
+
+
+def run_chains(chains, maximum, per_platform, start=start_child, adopt=adopt_child, poll_seconds=DRIVER_POLL_SECONDS):
+    """Advance every chain until each completes or fails, starting each chain's next step once the one before it
+    completed and the campaign's hosts are free for its share. A chain's failure starts no more of its steps, though
+    a phase's dispatch failure also halts any fleet budget it shares, which stops every phase sharing it. A step
+    already complete is skipped, and a step whose child still runs is adopted before any step starts, so the hosts
+    it holds stay counted: an adopted phase holds the share its execution policy froze, and until it freezes one, no
+    other phase starts. Any chain's current phase, adopted or not, that froze a share past the limits stops the
+    driver, naming the limits that hold it."""
+    limits = (maximum, per_platform)
+
+    def join(chain):
+        # A candidate's language chain shares its build with the candidate's baseline chain.
+        other = next((other for other in chains if other.child is not None and other.step is chain.step), None)
+        if other is not None:
+            chain.child, chain.share = other.child, other.share
+        return other is not None
+
+    while True:
+        for chain in chains:
+            while chain.child is None and not chain.finished and (chain.step.complete() or not chain.step.needed()):
+                chain.position += 1
+        # A phase keeps the share it froze, adopted or restarted, so limits that cannot hold it stop the driver.
+        oversized = {}
+        for chain in chains:
+            share = None if chain.finished or not chain.step.shared else frozen_share(chain.step)
+            if share and any(want > limit for want, limit in zip(share, limits)):
+                oversized.setdefault(chain.step.root, (f"{chain.name} {chain.step.label}", share))
+        if oversized:
+            needed = [max(limit, *(share[index] for _, share in oversized.values()))
+                      for index, limit in enumerate(limits)]
+            raise SystemExit("phases froze shares past the campaign's limits: " + ", ".join(
+                f"{phase} {share[0]} hosts, {share[1]} per platform" for phase, share in oversized.values()) +
+                f"; give at least --max-concurrent {needed[0]} --max-concurrent-per-platform {needed[1]}")
+        open_chains = sum(not chain.finished for chain in chains)
+        waiting = [chain for chain in chains if chain.child is None and not chain.finished]
+        for chain in waiting:
+            if not join(chain):
+                chain.child, chain.share = adopt(chain.step), None
+            if chain.child is not None:
+                print(f"{chain.name}: adopted the running {chain.step.label}", flush=True)
+        held = {id(chain.child): chain.share or frozen_share(chain.step)
+                for chain in chains if chain.child is not None and chain.step.shared}
+        free = None if None in held.values() else [limit - sum(share[index] for share in held.values())
+                                                   for index, limit in enumerate(limits)]
+        for chain in waiting:
+            if chain.child is not None:
+                continue
+            step = chain.step
+            if join(chain):
+                print(f"{chain.name}: adopted the running {step.label}", flush=True)
+                continue
+            share = None
+            if step.shared:
+                share = None if free is None else step_share(step, open_chains, limits, free)
+                if share is None:
+                    continue
+                free = [left - want for left, want in zip(free, share)]
+            print(f"{chain.name}: starting {step.label}" + (f" with {share[0]} hosts" if share else ""), flush=True)
+            chain.child, chain.share = start(step, share), share
+        if open_chains == 0:
+            return
+        time.sleep(poll_seconds)
+        for chain in chains:
+            if chain.child is not None and chain.child.poll() is not None:
+                chain.child = None
+                if chain.step.complete():
+                    print(f"{chain.name}: {chain.step.label} complete", flush=True)
+                    chain.position += 1
+                else:
+                    chain.failure = f"{chain.step.label} failed; see {chain.step.root / DRIVER_CHILD_LOG}"
+                    print(f"{chain.name}: {chain.failure}", flush=True)
+
+
+def confirmation_jobs_listed(path):
+    with path.open(newline="") as input_file:
+        return any(True for _ in csv.DictReader(input_file, delimiter="\t"))
+
+
+def campaign_chains(arguments, candidates):
+    """Each candidate's chain, build, smoke, primary, reduction, and confirmation when the reduction lists jobs, and
+    with language plans, a second chain running their smoke and primary on the same build. The reduction takes the
+    primary's events; a campaign archive, and with it any retrieval metadata, exists only once the campaign ends."""
+    script = str(Path(__file__).resolve())
+    common = [f"--spot-vcpu-reserve={arguments.spot_vcpu_reserve}",
+              *([f"--release-version={arguments.release_version}"] if arguments.release_version else []),
+              *([f"--phase-timeout-seconds={arguments.phase_timeout_seconds}"]
+                if arguments.phase_timeout_seconds is not None else []),
+              *([f"--fleet-budget={arguments.fleet_budget.resolve()}"] if arguments.fleet_budget else []),
+              *(f"--platform-regions={value}" for value in arguments.platform_region_values),
+              *(f"--purchase={value}" for value in arguments.purchase_values),
+              *(f"--transfer-bucket={value}" for value in arguments.transfer_bucket)]
+    shards = [f"--shard={shard}" for shard in arguments.selected_shards or ()]
+
+    def phase(candidate, label, root, *options):
+        selection = f"{candidate.name}={candidate.commit}"
+        return CampaignStep(label, root, lambda share: [
+            sys.executable, script, label, arguments.campaign, "--execute", f"--candidate={selection}",
+            f"--campaign-root={arguments.campaign_root.resolve()}", f"--max-concurrent={share[0]}",
+            f"--max-concurrent-per-platform={share[1]}", *common, *options], lambda: (root / PHASE_COMPLETE).is_file())
+
+    chains = []
+    for candidate in candidates:
+        directory = arguments.campaign_root / candidate.name
+        reduction = directory / "reduction"
+        build = phase(candidate, "build", directory / "build")
+        chains.append(CampaignChain(candidate_campaign_id(arguments.campaign, candidate.name), [
+            build,
+            phase(candidate, "smoke", directory / "smoke", f"--smoke-protocol={arguments.smoke_protocol}", *shards),
+            phase(candidate, "primary", directory / "primary", *shards),
+            CampaignStep("reduction", reduction, lambda share, primary=directory / "primary", output=reduction: [
+                sys.executable, str(Path(script).with_name("aggregate_results.py")),
+                f"--primary-receipts={primary / 'accepted-units.tsv'}", f"--artifacts-root={primary}",
+                # A phase writes its events file with its first event.
+                *([f"--events={primary / 'campaign-events.tsv'}"] if (primary / "campaign-events.tsv").is_file()
+                  else []),
+                f"--output-dir={output.resolve()}", *shards,
+                *([f"--release-version={arguments.release_version}"] if arguments.release_version else [])],
+                lambda output=reduction: (output / "output-checksums.tsv").is_file(), shared=False),
+            replace(phase(candidate, "confirmation", directory / "confirmation",
+                          f"--confirmation-jobs={(reduction / 'confirmation-jobs.tsv').resolve()}", *shards),
+                    needed=lambda jobs=reduction / "confirmation-jobs.tsv": confirmation_jobs_listed(jobs))]))
+        if arguments.language_plan:
+            plans = [f"--language-plan={plan.resolve()}" for plan in arguments.language_plan]
+            chains.append(CampaignChain(candidate_campaign_id(arguments.campaign, candidate.name, language=True), [
+                build,
+                phase(candidate, "smoke", directory / "lang" / "smoke", *plans),
+                phase(candidate, "primary", directory / "lang" / "primary", *plans)]))
+    return chains
+
+
+def check_campaign_options(arguments):
+    """Record the options that decide what the campaign's phases measure, or refuse a restart that changes them: the
+    restart skips each completed phase, so it would measure nothing under the new options."""
+    options = json.dumps({
+        "selected_shards": sorted(arguments.selected_shards) if arguments.selected_shards else None,
+        "smoke_protocol": arguments.smoke_protocol,
+        "release_version": arguments.release_version,
+        "language_plans": {str(plan.resolve()): hashlib.sha256((plan / "plan.json").read_bytes()).hexdigest()
+                           for plan in arguments.language_plan},
+    }, indent=2, sort_keys=True) + "\n"
+    path = arguments.campaign_root / CAMPAIGN_OPTIONS
+    if not write_new_file(path, options.encode()) and path.read_text() != options:
+        raise SystemExit(f"the campaign's options differ from those {path} records; a restart measures what the "
+                         f"campaign started measuring, so start another campaign for these:\n{options}")
+
+
+def run_campaign(arguments, root):
+    """Freeze every candidate, then run each candidate's phases as their own controllers, side by side."""
+    if not arguments.candidates:
+        raise SystemExit("a campaign requires at least one --candidate NAME=COMMITISH")
+    if len(arguments.candidates) > 1 and arguments.fleet_budget is None:
+        raise SystemExit("a campaign of several candidates shares one fleet; name its policy with --fleet-budget")
+    given = [option for option, value in (("--smoke-results", arguments.smoke_results),
+                                          ("--primary-results", arguments.primary_results),
+                                          ("--confirmation-jobs", arguments.confirmation_jobs),
+                                          ("--engine-builds", arguments.engine_builds)) if value is not None]
+    if given:
+        raise SystemExit(f"a campaign passes each phase its prerequisites itself; it takes no {', '.join(given)}")
+    # Each chain reserves the fleet and numbers its hosts under its own campaign ID.
+    chain_names = {}
+    for name, _ in arguments.candidates:
+        for language in (False, True) if arguments.language_plan else (False,):
+            campaign_id = candidate_campaign_id(arguments.campaign, name, language)
+            validate_campaign_id(campaign_id, f"candidate {name}'s campaign ID")
+            if campaign_id in chain_names:
+                raise SystemExit(f"candidates {chain_names[campaign_id]} and {name} would both run as campaign "
+                                 f"{campaign_id}; rename one")
+            chain_names[campaign_id] = name
+    # Each chain's running phase takes at least one host.
+    for option, limit in (("--max-concurrent", arguments.max_concurrent),
+                          ("--max-concurrent-per-platform", arguments.max_concurrent_per_platform)):
+        if limit < len(chain_names):
+            raise SystemExit(f"{option} {limit} cannot give each of the campaign's {len(chain_names)} phase sequences "
+                             f"running together a host; give at least {len(chain_names)}")
+    if not arguments.execute:
+        for name, commitish in arguments.candidates:
+            print(f"candidate {name}: {resolve_commit(root, commitish)}, campaign "
+                  f"{candidate_campaign_id(arguments.campaign, name)}, results {arguments.campaign_root / name}")
+        return
+    with controller_lock(arguments.campaign_root):
+        candidates = [freeze_candidate(root, arguments.campaign_root, arguments.campaign, name, commitish)
+                      for name, commitish in arguments.candidates]
+        recorded = read_candidates(arguments.campaign_root)
+        if recorded and recorded != [candidate.row for candidate in candidates]:
+            raise SystemExit(f"the campaign's candidates differ from those {arguments.campaign_root}/candidates.tsv "
+                             "records; a restart names the same candidates at the same commits")
+        for candidate in candidates:
+            record_candidate(arguments.campaign_root, candidate)
+        check_campaign_options(arguments)
+        chains = campaign_chains(arguments, candidates)
+        run_chains(chains, arguments.max_concurrent, arguments.max_concurrent_per_platform)
+    failed = [f"{chain.name}: {chain.failure}" for chain in chains if chain.failure]
+    if failed:
+        raise SystemExit("campaign finished with failed candidates:\n" + "\n".join(failed))
+
+
 def main():
     arguments = parse_args()
     if arguments.fleet_budget:
@@ -3569,6 +3883,9 @@ def main():
     platforms = read_platforms(directory)
     parse_launch_options(arguments, platforms)
     arguments.transfer_buckets = parse_transfer_buckets(arguments.transfer_bucket)
+    if arguments.phase == "campaign":
+        run_campaign(arguments, root)
+        return
     if len(arguments.candidates) != 1:
         raise SystemExit("a phase measures one --candidate NAME=COMMITISH")
     [(name, commitish)] = arguments.candidates
@@ -3590,7 +3907,7 @@ def main():
     arguments.regional_amis = read_platform_regions(directory)
     shards = read_shards(directory)
     if arguments.selected_shards is not None:
-        if (arguments.language_plan or arguments.phase in ('confirmation', 'build') or
+        if (arguments.language_plan or arguments.phase == 'build' or
                 not set(arguments.selected_shards) <= set(shards) or
                 len(arguments.selected_shards) != len(set(arguments.selected_shards))):
             raise SystemExit('invalid baseline shard selection')

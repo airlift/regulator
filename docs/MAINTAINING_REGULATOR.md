@@ -260,8 +260,9 @@ is a separate decision, not the default development loop.
    collection tools, also run the offline gate in [testing.md](testing.md).
    Prepare pinned comparators and verify equivalent requested work before
    collecting either side's timings.
-4. Name each measured source revision as a candidate commit, which the
-   campaign [freezes from Git](../tools/re2-benchmark/aws/README.md#freeze-a-candidate).
+4. Name each measured source revision as a candidate commit; the campaign
+   [freezes it from Git](../tools/re2-benchmark/aws/README.md#freeze-a-candidate),
+   and [runs several candidates side by side](../tools/re2-benchmark/aws/README.md#run-a-campaign).
    Keep the campaign root and manifests outside `target`. Plan without
    `--execute`; inspect the work items, selected cases, unit estimates, host
    limits, and cost allowance before launching. The plan is complete only when

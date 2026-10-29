@@ -563,9 +563,10 @@ the usual first workload for each language.
 
 A language campaign runs its plans' work units on the baseline's unit
 workers, as its own controller invocation under the candidate's `lang`
-directory and campaign ID `<campaign>.<name>.lang`, on the candidate's build.
-Run the baseline campaign separately; language plans add coverage and do not
-replace its LIKE and Trino-operation shards. Keep both source manifests and fleet
+directory and campaign ID `<campaign>.<name>.lang`. `run-campaign.py campaign
+--language-plan` runs it beside each candidate's baseline phases, on the same
+build; language plans add coverage and do not replace the baseline's LIKE and
+Trino-operation shards. Keep both source manifests and fleet
 plans outside Maven's `target` directory for a final campaign.
 
 ```sh
