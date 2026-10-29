@@ -469,6 +469,10 @@ public class TestJavaRegexpDifferential
         for (String pattern : List.of("[a-\\d]", "[a-\\D]", "[a-\\h]", "[a-\\H]", "[a-\\s]", "[a-\\S]", "[a-\\V]", "[a-\\w]", "[a-\\W]")) {
             assertRejectsJava25(pattern, OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_CHAR_RANGE);
         }
+        // \b{ is the grapheme boundary only when g follows the brace; otherwise the brace is a repetition.
+        assertRejectsJava25("\\b{gx}", OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_ESCAPE);
+        assertRejectsJava25("\\b{w}", OptionProfile.DEFAULT, RegexpParseErrorCode.REPEAT_ARGUMENT);
+        assertRejectsJava25("(?x)\\b{ g}", OptionProfile.DEFAULT, RegexpParseErrorCode.REPEAT_ARGUMENT);
     }
 
     private static void assertMatchesJava25(String pattern, OptionProfile options, List<String> inputs)

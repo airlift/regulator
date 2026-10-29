@@ -48,6 +48,9 @@ public class TestJavaRegexpSyntax
         assertError(Slices.utf8Slice("(?<a>x)(?<a>y)"), RegexpParseErrorCode.BAD_NAMED_CAPTURE, 11, "(?<a>");
         // A segment ends at the end of a character.
         assertError(Slices.utf8Slice("(?<é>a)"), RegexpParseErrorCode.BAD_NAMED_CAPTURE, 3, "(?<é");
+        assertError(Slices.utf8Slice("\\b{gé}"), RegexpParseErrorCode.BAD_ESCAPE, 4, "\\b{gé");
+        // An unfinished grapheme boundary is reported where the JDK reports it, after the g.
+        assertError(Slices.utf8Slice("\\b{g"), RegexpParseErrorCode.BAD_ESCAPE, 4, "\\b{g");
     }
 
     @ParameterizedTest(name = "{0}")
@@ -94,6 +97,9 @@ public class TestJavaRegexpSyntax
                 // The offset is in the pattern as written, not the rewritten a\.\G that is parsed.
                 unsupported("\\Qa.\\E\\G", "previous-match boundary \\G", 6),
                 unsupported("\\R", "linebreak escape \\R", 0),
+                unsupported("\\X", "grapheme cluster \\X", 0),
+                unsupported("\\b{g}", "grapheme cluster boundary \\b{g}", 0),
+                unsupported("(?x)\\b {g }", "grapheme cluster boundary \\b{g}", 4),
                 unsupported("\\uD800", "surrogate escapes", 0),
                 unsupported("\\uDC00", "surrogate escapes", 0),
                 unsupported("\\uD800\\u0041", "surrogate escapes", 0),

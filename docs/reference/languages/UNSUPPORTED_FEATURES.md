@@ -22,6 +22,7 @@ or silently switch to an engine with different resource guarantees.
 | Atomic groups and possessive quantifiers | Their behavior controls where backtracking may occur, while the current engine does not backtrack. |
 | `\G` | The assertion depends on mutable state from the preceding match operation, not only on the current input position. |
 | `\R` | Java requires CRLF to behave as one atomic linebreak under repetition. The current character-class representation is insufficient. |
+| Java grapheme clusters | `\X` and `\b{g}` follow Unicode's grapheme cluster segmentation rules, a separate algorithm that no Regulator engine implements. |
 | Nullable repeated captures | Java resets captures within repeated nullable groups according to rules not represented by the current capture program. |
 | Canonical equivalence | Supporting canonical normalization equivalence requires a defined expansion, matching, and resource policy. |
 | Raw byte and lone surrogate escapes | No UTF-8 text contains a lone surrogate, so a lone surrogate escape could match only malformed input. Java patterns represent Unicode code points, and Trino does not assign portable character semantics to raw byte escapes. Patterns must also be valid UTF-8, so a malformed byte cannot appear as literal pattern text either. |

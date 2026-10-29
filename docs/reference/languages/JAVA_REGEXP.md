@@ -153,6 +153,7 @@ option:
 - atomic groups and possessive quantifiers
 - the previous-match boundary `\G`
 - the linebreak escape `\R`
+- the grapheme cluster `\X` and the grapheme cluster boundary `\b{g}`
 - lone surrogate escapes such as `\uD800`, `\x{DC00}`, or `\N{HIGH SURROGATES D800}`
 - canonical equivalence
 - repeated captures whose body can match the empty string

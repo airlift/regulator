@@ -1372,8 +1372,22 @@ final class JavaRegexpParser
                     nodeFlags |= (flags & Regexp.JAVA_UNIX_LINES) != 0 ? Regexp.FINAL_LINE_END : Regexp.JAVA_FINAL_END;
                     yield Regexp.endText(nodeFlags);
                 }
-                case 'b' -> Regexp.wordBoundary(flags | Regexp.JAVA_WORD_BOUNDARY);
+                case 'b' -> {
+                    // As in the JDK's escape(), \b{g} is the grapheme form only when g follows the brace as
+                    // written; any other brace is left to the repetition parser, so \b{2} repeats \b.
+                    int braceOpen = ignoredPatternEnd(index);
+                    if (braceOpen + 1 < end && bytes[braceOpen] == '{' && bytes[braceOpen + 1] == 'g') {
+                        int braceClose = ignoredPatternEnd(braceOpen + 2);
+                        if (braceClose < end && bytes[braceClose] == '}') {
+                            throw unsupportedConstruct("grapheme cluster boundary \\b{g}", sequenceStart, braceClose + 1);
+                        }
+                        index = braceClose;
+                        throw error(RegexpParseErrorCode.BAD_ESCAPE, patternSegment(sequenceStart, braceClose + runeByteWidthAt(braceClose) - sequenceStart));
+                    }
+                    yield Regexp.wordBoundary(flags | Regexp.JAVA_WORD_BOUNDARY);
+                }
                 case 'B' -> Regexp.noWordBoundary(flags | Regexp.JAVA_WORD_BOUNDARY);
+                case 'X' -> throw unsupportedConstruct("grapheme cluster \\X", sequenceStart, index);
                 case 'G' -> throw unsupportedConstruct("previous-match boundary \\G", sequenceStart, index);
                 case 'R' -> throw unsupportedConstruct("linebreak escape \\R", sequenceStart, index);
                 case 'd' -> {
