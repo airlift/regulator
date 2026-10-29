@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -2986,7 +2987,9 @@ class FakeUnitFleet:
         self.unverified_cleanup = unverified_cleanup
         self.scripts = scripts or {}
         self.unit_scripts = unit_scripts or {}
+        # The controller stops after this many polls, by raising this exception, as a crash does by default.
         self.abort_after = abort_after
+        self.abort = SystemExit
         # Each platform's first Spot launches that find no capacity.
         self.full_spot = dict(full_spot or {})
         # The shared fleet's reservations a restart recovers, or None to leave recovery stubbed.
@@ -3047,7 +3050,7 @@ class FakeUnitFleet:
         for host in list(self.hosts):
             host.tick()
         if self.sleeps == self.abort_after:
-            raise SystemExit("controller stopped")
+            raise self.abort("controller stopped")
 
     def stubs(self):
         stack = contextlib.ExitStack()
@@ -3073,21 +3076,27 @@ class TestUnitWorkers(unittest.TestCase):
 
     def run_phase(self, root, fleet, phase, shards, max_concurrent, per_platform, platform_regions=None, purchases=None,
                   on_demand=True, deadline=None, confirmations=(), primary_results=None, release_version="",
-                  extend=True):
-        """Drain the phase's work items through the fleet; return the result directory. The stub budget admits
-        every extension of a host's reservation if extend, logging each, and refuses every one otherwise.
+                  extend=True, budget=None):
+        """Drain the phase's work items through the fleet; return the result directory. Unless given a shared
+        fleet budget, the stub budget admits every extension of a host's reservation if extend, logging each, and
+        refuses every one otherwise.
 
         The unit attempt ledger is left in self.ledger."""
-        self.budget = budget = Mock(policy={"hourly_rates": {
-            instance_type: {"spot": 0.2} for platform in self.PLATFORMS
-            for instance_type in (platform.instance_type, platform.concurrency_instance_type)}},
-            policy_path="fleet.json")
-        budget.reserve.side_effect = lambda campaign, job, *_, **__: (
-            on_demand or job.market == "spot", "fleet quota or pending-launch limit")
-        budget.extend.side_effect = lambda campaign, epoch, until: (
-            fleet.log.append(("extend", epoch, until, extend)) or
-            (extend, "fleet spending or machine-hour ceiling"))
-        budget.reservations.return_value = fleet.reservations or []
+        if budget is None:
+            budget = Mock(policy={"hourly_rates": {
+                instance_type: {"spot": 0.2} for platform in self.PLATFORMS
+                for instance_type in (platform.instance_type, platform.concurrency_instance_type)}},
+                policy_path="fleet.json")
+            budget.reserve.side_effect = lambda campaign, job, *_, **__: (
+                on_demand or job.market == "spot", "fleet quota or pending-launch limit")
+
+            def extend_reservation(campaign, epoch, *, until):
+                fleet.log.append(("extend", epoch, until, extend))
+                return extend, "fleet spending or machine-hour ceiling"
+
+            budget.extend.side_effect = extend_reservation
+            budget.reservations.return_value = fleet.reservations or []
+        self.budget = budget
         arguments = SimpleNamespace(
             phase=phase, campaign_id="campaign", campaign_root=root, max_concurrent=max_concurrent,
             max_concurrent_per_platform=per_platform, candidate_archive=root / "candidate.tar.gz",
@@ -3389,7 +3398,7 @@ class TestUnitWorkers(unittest.TestCase):
                                   slow_boot=lambda host: host.number == 2, slow_cleanup=lambda host: host.number == 2)
             self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 6, 3)
             first, booting = fleet.hosts[:2]
-            self.assertEqual(({}, [RUN_CAMPAIGN.signal.SIGTERM]), (booting.leases, booting.signals))
+            self.assertEqual(({}, [signal.SIGTERM]), (booting.leases, booting.signals))
             # It stops while the first still measures that unit, not once the phase drains, and its stop lease
             # records it stopping for a restart.
             self.assertLess(fleet.log.index(("signal", booting.session)),
@@ -3408,7 +3417,7 @@ class TestUnitWorkers(unittest.TestCase):
             self.run_phase(Path(temporary), fleet, "smoke", ["like-dfa-single-use"], 4, 2)
             stalled = fleet.hosts[0]
             replacement = next(host for host in fleet.hosts[2:] if host.platform == stalled.platform)
-            self.assertEqual([RUN_CAMPAIGN.signal.SIGTERM], stalled.signals)
+            self.assertEqual([signal.SIGTERM], stalled.signals)
             outcomes = {(row["host_session"], row["outcome"]) for row in self.ledger}
             self.assertLessEqual({(stalled.session, "lost"), (stalled.session, "superseded"),
                                   (replacement.session, "accepted")}, outcomes)
@@ -3452,6 +3461,76 @@ class TestUnitWorkers(unittest.TestCase):
             # restarted controller extends its reservation from there.
             self.assertEqual({epoch: stop_by for epoch, (_, stop_by) in dispatchers[0][1].items()},
                              {epoch: stopped[epoch] for epoch in dispatchers[0][1]})
+
+    def test_cancelled_controller_leaves_the_fleet_running_and_a_failed_one_halts_it_until_its_restart(self):
+        # Two controllers share a fleet; one stops partway, from Ctrl-C, SIGTERM, or a failure, its cleanup verified.
+        def terminated(message):
+            # The signal handler the controller installed, as SIGTERM would run it.
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+        for name, abort, stopped, message in (("Ctrl-C", KeyboardInterrupt, KeyboardInterrupt, "controller stopped"),
+                                              ("SIGTERM", terminated, KeyboardInterrupt, ""),
+                                              ("failure", RuntimeError, RuntimeError, "controller stopped")):
+            snapshot = {"quota": 736, "instances": [], "requests": []}
+            with self.subTest(abort=name), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot", return_value=snapshot):
+                other = test_fleet_budget.TestFleetBudget()
+                other.setUp()
+                self.addCleanup(other.doCleanups)
+                other.policy["hourly_rates"]["r9g.large"] = {"spot": 0.065, "total": 0.075}
+                other.path.write_text(json.dumps(other.policy))
+                other.budget, budget = (RUN_CAMPAIGN.FleetBudget(other.path) for _ in range(2))
+                fleet = FakeUnitFleet(Path(temporary) / "hosts", abort_after=2)
+                fleet.abort = abort
+                # Recovery reads the shared fleet's reservations.
+                fleet.reservations = []
+                with self.assertRaisesRegex(stopped, message), \
+                        RUN_CAMPAIGN.controller_lock(Path(temporary) / "results", RUN_CAMPAIGN.DRIVER_CHILD):
+                    self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
+                                   purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
+                self.assertEqual([], budget.reservations(Path(temporary) / "results"))
+                if stopped is RuntimeError:
+                    # A failure halts the fleet, and only its own controller's restart clears that halt.
+                    other.budget.resume(other.root / "other")
+                    with self.assertRaisesRegex(RuntimeError, "shared fleet is halted: controller stopped"):
+                        other.reserve(1, campaign="other", now=RUN_CAMPAIGN.time.time())
+                else:
+                    self.assertTrue(other.reserve(1, campaign="other", now=RUN_CAMPAIGN.time.time())[0])
+                fleet.abort_after = None
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
+                               purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
+                self.assertTrue(other.reserve(2, campaign="other", now=RUN_CAMPAIGN.time.time())[0])
+
+    def test_cancelled_controller_with_a_host_awaiting_cleanup_halts_the_fleet_until_its_own_restart(self):
+        # A controller cancelled before its recovery adopted a host that an earlier run left halts the fleet, since
+        # that host still awaits cleanup.
+        fixture = test_fleet_budget.TestFleetBudget()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.reserve(1)
+        RUN_CAMPAIGN.halt_and_clean_up(SimpleNamespace(campaign_id="baseline"), fixture.root / "baseline",
+                                       fixture.budget, {}, KeyboardInterrupt())
+        with self.assertRaisesRegex(RuntimeError,
+                                    "halted: KeyboardInterrupt; hosts of .* await verified cleanup") as halted:
+            fixture.budget.check()
+        # Another controller that observes the halt and proves its cleanup stops without recording one of its own.
+        RUN_CAMPAIGN.halt_and_clean_up(SimpleNamespace(campaign_id="language"), fixture.root / "language",
+                                       fixture.budget, {}, halted.exception)
+        self.assertEqual([str((fixture.root / "baseline").resolve())],
+                         list(json.loads(fixture.budget.state_path.read_text())["halts"]))
+        # One that cannot prove its own cleanup, as when ps cannot start to follow a wrapper it adopted, records its
+        # own halt, which outlasts the first owner's restart.
+        job = RUN_CAMPAIGN.unit_worker_job(self.PLATFORMS[0], 1, 1, "spot")
+        wrapper = RUN_CAMPAIGN.DetachedWrapper(101, "confirmation", job, "wrapper_pid=101",
+                                               fixture.root / "confirmation")
+        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=OSError("cannot start ps")), \
+                self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "cannot start ps"):
+            RUN_CAMPAIGN.halt_and_clean_up(SimpleNamespace(campaign_id="confirmation"), fixture.root / "confirmation",
+                                           fixture.budget, {101: (wrapper, job, io.StringIO())}, halted.exception)
+        fixture.budget.release("baseline", 1, cleanup_verified=True)
+        fixture.budget.resume(fixture.root / "baseline")
+        with self.assertRaisesRegex(RuntimeError, "halted: .*cannot start ps"):
+            fixture.budget.check()
 
     def test_phase_resumes_only_with_the_tooling_that_started_it(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -26,7 +26,8 @@ import unit_session
 import work_units
 from acceptance import normalize_heap_size
 from fleet_budget import (
-    ON_DEMAND_VCPU_SAFETY_RESERVE, REGION_PATTERN, BudgetError, FleetBudget, on_demand_regions, region_limits)
+    ON_DEMAND_VCPU_SAFETY_RESERVE, REGION_PATTERN, BudgetError, FleetBudget, FleetHalted, on_demand_regions,
+    region_limits)
 from campaign_io import (
     UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
 from unit_dispatch import (
@@ -2519,23 +2520,40 @@ def launch_record(row):
 
 
 def halt_and_clean_up(arguments, result_root, budget, running, error):
-    """Stop a controller that failed with error: halt the fleet budget, and terminate the running hosts,
-    as process ID to (process, job, log), and prove their cleanup. The caller then re-raises error."""
-    if budget:
-        # Stop the other collector's admissions and ask it to drain too.
+    """Stop a controller that failed with error: terminate the running hosts, as process ID to (process, job, log),
+    prove their cleanup, and release their reservations. A failure halts the fleet budget in the name of
+    result_root, its owner, whose restart clears it once its cleanup is verified. A cancellation, Ctrl-C or SIGTERM,
+    or FleetHalted, which another owner's halt raises, halts it only when cleanup cannot be proven for every host the
+    owner holds a reservation for, so a halt stays its owner's alone to clear. The caller then re-raises error."""
+    reason = str(error) or type(error).__name__
+
+    def halt(reason):
         # Cleanup must still run if persisting the stop marker fails.
         try:
-            budget.halt(str(error) or type(error).__name__)
+            budget.halt(reason, result_root)
         except (OSError, RuntimeError):
             pass
+
+    cancelled = isinstance(error, (KeyboardInterrupt, FleetHalted))
+    if budget and not cancelled:
+        # Stop the other collectors' admissions and ask them to drain too.
+        halt(reason)
     try:
         terminate_and_validate_cleanup(running, result_root)
         if budget:
             for _, job, _ in running.values():
                 budget.release(arguments.campaign_id, job.host_epoch, cleanup_verified=True)
-    except RuntimeError as cleanup_error:
-        reason = str(error) or type(error).__name__
+            # A host the controller had not adopted yet, such as one an earlier run left, still awaits cleanup.
+            if cancelled and budget.reservations(result_root):
+                halt(f"{reason}; hosts of {result_root} await verified cleanup")
+    except (OSError, RuntimeError) as cleanup_error:
+        if budget and cancelled:
+            halt(f"{reason}; {cleanup_error}")
         raise UnsafeCampaignError(f"{reason}; {cleanup_error}") from error
+
+
+def interrupt(signal_number, frame):
+    raise KeyboardInterrupt
 
 
 def process_start(process_id):
@@ -2552,7 +2570,9 @@ def process_start(process_id):
 @contextlib.contextmanager
 def controller_lock(result_root, record):
     """Own result_root as its only controller, and once it does, record this process's ID and start time in record
-    there. While another controller owns it, exit with CONTROLLER_BUSY_STATUS."""
+    there. While another controller owns it, exit with CONTROLLER_BUSY_STATUS. While it does, SIGTERM stops it as
+    Ctrl-C does: its workers are cleaned up, and the shared fleet keeps running unless their cleanup cannot be
+    proven or their release cannot be recorded."""
     result_root.mkdir(parents=True, exist_ok=True)
     lock_path = result_root / CONTROLLER_LOCK
     with lock_path.open("w") as lock_file:
@@ -2564,7 +2584,11 @@ def controller_lock(result_root, record):
         temporary = result_root / (record + ".new")
         temporary.write_text(f"pid={os.getpid()}\nstarted={process_start(os.getpid())}\n")
         os.replace(temporary, result_root / record)
-        yield
+        previous = signal.signal(signal.SIGTERM, interrupt)
+        try:
+            yield
+        finally:
+            signal.signal(signal.SIGTERM, previous)
 
 
 def read_unit_workers(path, platforms):
@@ -2872,6 +2896,8 @@ class UnitDispatcher:
             live = {epoch for epoch, worker in workers.items() if worker.process is not None}
             recover_budget_reservations(self.budget, self.arguments, self.result_root, self.planned,
                                         self.attempts_path, live)
+            # A halt this controller's failure set clears once no host of its own awaits verified cleanup.
+            self.budget.resume(self.result_root)
         self.accepted = recover_accepted_units(self.validation, self.result_root, self.accepted_path)
         for row in read_semantic_rejections(self.rejections_path):
             identity = unit_logical_identity(row)
