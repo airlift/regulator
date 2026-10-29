@@ -192,8 +192,17 @@ Reservations remain until verified cleanup, which charges the host's actual
 hours; crashes never expire them, and one past its stop time counts as spent
 to now until then. A
 rejected work unit follows the [unit dispatch](#unit-dispatch) retry rules.
-Unproven cleanup, changed frozen inputs, conflicting accepted identities and
-shared resource-policy failures halt both collectors. See the
+A controller that fails while it recovers or dispatches its hosts, through
+unproven cleanup, changed frozen inputs, conflicting accepted identities, a
+shared resource-policy failure, or any other error, halts every collector
+sharing the policy and records its result root as the halt's owner. Stopping a
+controller with Ctrl-C or SIGTERM halts nothing once it has verified the cleanup
+of every host it holds a reservation for. A failure in its startup checks
+before recovery, or in its final validation once every host's cleanup is
+verified, halts nothing: hosts an earlier run left stay charged to the budget,
+and their stop times bound them. Each owner's restart clears its own halt once
+its recovery has verified the cleanup of every host it held; the fleet stays
+halted while another owner's halt stands. See the
 [protocol rules](../baseline/SHARD_DISPATCH.md#jmh-protocol). Preserve the
 policy and state together across restarts. More than 64 executing workers
 requires this shared policy. Ramp from canaries to the approved cap, using the

@@ -27,6 +27,11 @@ class BudgetError(RuntimeError):
     pass
 
 
+class FleetHalted(BudgetError):
+    """An owner's halt stands, so the fleet admits nothing. A controller that observes it stops and cleans up as a
+    cancelled one does, without recording a halt of its own."""
+
+
 def validate_region_limits(limits):
     if (not isinstance(limits, dict) or {"max_vcpus", "spot_vcpu_reserve"} - set(limits) or
             set(limits) - {"max_vcpus", "spot_vcpu_reserve", "on_demand_max_vcpus"}):
@@ -175,9 +180,9 @@ def capacity(snapshot, reservations, policy, *, region=None, market="spot", reme
 
 
 def refuse_halted(state):
-    """Refuse to go on while the fleet is halted."""
-    if state.get("halted"):
-        raise BudgetError("shared fleet is halted: " + state["halted"])
+    """Refuse to go on while any owner's halt stands."""
+    if state.get("halts"):
+        raise FleetHalted("shared fleet is halted: " + "; ".join(state["halts"].values()))
 
 
 class FleetBudget:
@@ -287,13 +292,22 @@ class FleetBudget:
         with self.locked() as state:
             return [item.copy() for item in state["reservations"].values() if item["owner"] == str(Path(owner).resolve())]
 
-    def halt(self, reason):
+    def halt(self, reason, owner):
+        """Halt every controller's admissions for the owner's failure; each owner's first reason stands."""
         with self.locked() as state:
-            if not state.get("halted"):
-                state["halted"] = reason
+            state.setdefault("halts", {}).setdefault(str(Path(owner).resolve()), reason)
+
+    def resume(self, owner):
+        """Clear the owner's halt, once verified cleanup has released every reservation it holds. The fleet stays
+        halted while another owner's halt stands."""
+        owner = str(Path(owner).resolve())
+        with self.locked() as state:
+            if owner in state.get("halts", {}) and not any(
+                    item["owner"] == owner for item in state["reservations"].values()):
+                del state["halts"][owner]
 
     def check(self):
-        """Refuse to go on while the fleet is halted. A host past its reservation's end is no halt: it stops at its
+        """Raise FleetHalted while the fleet is halted. A host past its reservation's end is no halt: it stops at its
         stop time, and its reservation counts as spent until its owner releases it."""
         with self.locked() as state:
             refuse_halted(state)

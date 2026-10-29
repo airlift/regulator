@@ -356,29 +356,32 @@ class TestFleetBudget(unittest.TestCase):
         self.budget.release("baseline", 1, cleanup_verified=True, now=1000 + 1000 * 3600)
         self.assertTrue(self.reserve(2, campaign="language", now=1000 + 1500 * 3600)[0])
 
-    def test_fatal_failure_stops_other_controllers(self):
+    def test_failure_stops_admission_until_its_owner_cleans_up_and_resumes(self):
         self.reserve(1)
-        self.budget.halt("semantic disagreement")
+        self.assertTrue(self.reserve(2, campaign="language", now=1001)[0])
+        self.budget.halt("semantic disagreement", self.root / "baseline")
+        # The owner's first reason stands.
+        self.budget.halt("cleanup failure", self.root / "baseline")
         other = fleet_budget.FleetBudget(self.path)
+        # Neither another owner nor the failed one, while its host awaits verified cleanup, clears the halt.
+        for owner in ("language", "baseline"):
+            other.resume(self.root / owner)
+            with self.assertRaisesRegex(RuntimeError, "halted: semantic disagreement$"):
+                other.check()
         with self.assertRaisesRegex(RuntimeError, "semantic disagreement"):
-            other.reserve("language", self.job(2), self.root, lambda: self.snapshot, 1002, until=8200)
+            other.reserve("third", self.job(3), self.root / "third", lambda: self.snapshot, 1002, until=8200)
         # The stop marker must not prevent verified cleanup from returning capacity.
         other.release("baseline", 1, cleanup_verified=True, now=1003)
         self.assertEqual(other.reservations(self.root / "baseline"), [])
-
-    def test_failure_after_resume_stops_admission_and_preserves_first_reason(self):
-        self.reserve(1)
-        with self.budget.locked() as state:
-            state["halted"] = None
-        self.budget.halt("semantic disagreement after resume")
-        other = fleet_budget.FleetBudget(self.path)
-        other.halt("secondary controller failure")
-        with self.assertRaisesRegex(RuntimeError, "semantic disagreement after resume"):
+        # Another owner's failure stands once the first owner cleaned up and resumed, until it does the same.
+        other.halt("secondary controller failure", self.root / "language")
+        self.budget.resume(self.root / "baseline")
+        with self.assertRaisesRegex(RuntimeError, "halted: secondary controller failure$"):
             other.check()
-        with self.assertRaisesRegex(RuntimeError, "semantic disagreement after resume"):
-            other.reserve("language", self.job(2), self.root, lambda: self.snapshot, 1002, until=8200)
-        other.release("baseline", 1, cleanup_verified=True, now=1003)
-        self.assertEqual(other.reservations(self.root / "baseline"), [])
+        other.release("language", 2, cleanup_verified=True, now=1004)
+        other.resume(self.root / "language")
+        other.check()
+        self.assertTrue(self.reserve(3, campaign="third", now=1005)[0])
 
 
 if __name__ == "__main__":
