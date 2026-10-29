@@ -127,6 +127,18 @@ if [[ ! "${UNIT_WORKER_LIFETIME_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "UNIT_WORKER_LIFETIME_SECONDS must be a positive number of seconds" >&2
     exit 1
 fi
+# The worker stops once its next lease has been absent this long.
+UNIT_WORKER_IDLE_SECONDS=${UNIT_WORKER_IDLE_SECONDS:-600}
+if [[ ! "${UNIT_WORKER_IDLE_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "UNIT_WORKER_IDLE_SECONDS must be a positive number of seconds" >&2
+    exit 1
+fi
+# The host powers off at this epoch second unless a lease extends it; the controller reserved the time in its budget.
+CAMPAIGN_HOST_STOP_BY=${CAMPAIGN_HOST_STOP_BY:-}
+if [[ ! "${CAMPAIGN_HOST_STOP_BY}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "A unit worker requires CAMPAIGN_HOST_STOP_BY, its host's stop time in epoch seconds" >&2
+    exit 1
+fi
 # run-unit-worker.sh exits with its INTERRUPTED_STATUS after a Spot interruption notice.
 UNIT_WORKER_INTERRUPTED_STATUS=43
 # The controller adds host setup, final uploads and the pool's last unit, at least 5400 seconds together,
@@ -1001,6 +1013,19 @@ RESULT_DIR=/var/tmp/re2-results
 mkdir -p "\${RESULT_DIR}"
 exec > >(tee /var/log/re2-engineering-user-data.log) 2>&1
 
+# The host powers off at its stop time, whatever it is doing, and only a lease moves the time later. The
+# controller covered each stop time in its budget, so the host stops within its reservation even when the
+# controller has died or a step hangs. Its instance terminates on shutdown.
+HOST_STOP_BY_FILE=/var/tmp/re2-stop-by
+printf '%s\n' '${CAMPAIGN_HOST_STOP_BY}' > "\${HOST_STOP_BY_FILE}"
+(
+    while ((\$(date +%s) < \$(<"\${HOST_STOP_BY_FILE}"))); do
+        sleep 15
+    done
+    echo "Host reached its stop time; shutting down" >&2
+    shutdown -h now
+) &
+
 timeline()
 {
     # One startup step: its name, the \$EPOCHREALTIME it started at, and now. The kernel's uptime dates the boot.
@@ -1128,6 +1153,8 @@ export UNIT_WORKER_BUCKET='${BUCKET}'
 export UNIT_WORKER_LEASE_PREFIX='${INPUT_PREFIX}/leases'
 export UNIT_WORKER_RESULT_PREFIX='${RESULT_PREFIX}'
 export UNIT_WORKER_LIFETIME_SECONDS='${UNIT_WORKER_LIFETIME_SECONDS}'
+export UNIT_WORKER_IDLE_SECONDS='${UNIT_WORKER_IDLE_SECONDS}'
+export UNIT_WORKER_STOP_BY_FILE="\${HOST_STOP_BY_FILE}"
 
 /opt/re2-work/regulator/tools/re2-benchmark/aws/run-host.sh \
     /opt/re2-work/regulator \

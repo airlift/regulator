@@ -18,6 +18,8 @@ sys.path.insert(0, str(DIRECTORY.parent / 'baseline'))
 import engine_build
 from unit_dispatch import UNIT_COMPLETION_FIELDS
 UNIT = {name: hashlib.sha256(name.encode()).hexdigest() for name in ('first', 'second', 'third')}
+# A host stop time no test reaches: 2100-01-01.
+FAR_STOP_BY = 4102444800
 
 # S3 as the aws CLI calls it from a unit worker: exact-key listings, reads, and
 # checksummed conditional writes, with every write logged in order. A call whose
@@ -184,7 +186,7 @@ sys.exit(behavior.get('status', 0))
 def lease(sequence, unit=None, replica=1, groups=('1',), **fields):
     work = {'unit_id': UNIT[unit], 'replica_id': replica, 'phase': 'primary', 'protocol': 'smoke'} if unit else {}
     if unit or 'unit_id' in fields:
-        work['groups'] = list(groups)
+        work.update(groups=list(groups), stop_by=FAR_STOP_BY)
     return {'schema_version': 2, 'campaign_id': 'campaign', 'platform': 'r8i', 'host_session': 'host-1',
             'sequence': sequence, **work, **fields}
 
@@ -221,6 +223,9 @@ class Worker:
         self.bucket = self.s3 / 'bucket'
         self.notices = root / 'notices'
         self.notices.mkdir()
+        # The host's stop time as its user data records it, and as leases move it.
+        self.stop_by = root / 'stop-by'
+        self.stop_by.write_text(f'{FAR_STOP_BY}\n')
         self.runs_log = root / 'runs.jsonl'
         self.environment = {
             **os.environ,
@@ -231,6 +236,7 @@ class Worker:
             'BASELINE_PROTOCOL': 'smoke', 'BASELINE_REGION': 'us-west-2',
             'UNIT_WORKER_BUCKET': 'bucket', 'UNIT_WORKER_LEASE_PREFIX': 'input/leases',
             'UNIT_WORKER_RESULT_PREFIX': 'results', 'UNIT_WORKER_POLL_SECONDS': '0.05',
+            'UNIT_WORKER_STOP_BY_FILE': str(self.stop_by),
             'JONI_COMPARATOR_ORDER': 'forward',
             # macOS tar would add AppleDouble files to the bundles a Linux worker writes.
             'COPYFILE_DISABLE': '1',
@@ -371,6 +377,20 @@ class TestUnitWorker(unittest.TestCase):
                 heartbeat = worker.json(f'heartbeat/{len(completed) + 1}.json')
                 self.assertEqual(('stopped', reason), (heartbeat['state'], heartbeat['stop_reason']))
 
+    def test_leases_move_the_hosts_stop_time_only_later(self):
+        # The host powers off at its stop time, so a lease that names an earlier stop time leaves it unchanged.
+        with tempfile.TemporaryDirectory() as temporary:
+            worker = Worker(Path(temporary), clock=True)
+            start = int(float((worker.root / 'clock').read_text()))
+            worker.stop_by.write_text(f'{start + 30}\n')
+            worker.write_lease(lease(1, 'first', stop_by=start + 300))
+            worker.write_lease(lease(2, 'second', stop_by=start + 200))
+            status, output = worker.run({1: {'seconds': 20}, 2: {'seconds': 20}}, idle_seconds=10)
+
+            self.assertEqual(0, status, output)
+            self.assertEqual(('idle', [1, 2]), (worker.stop_reason(), [run['sequence'] for run in worker.runs()]))
+            self.assertEqual(f'{start + 300}\n', worker.stop_by.read_text())
+
     def test_worker_runs_the_build_phases_engine_build_lease(self):
         # The controller leases a platform's engine build as the build phase's one unit, named rather than hashed.
         with tempfile.TemporaryDirectory() as temporary:
@@ -393,6 +413,7 @@ class TestUnitWorker(unittest.TestCase):
                 ('another campaign', json.dumps(lease(1, 'first', campaign_id='other'))),
                 ('another sequence', json.dumps(lease(2, 'first'))),
                 ('no unit', json.dumps(lease(1))),
+                ('no stop time', json.dumps(lease(1, 'first', stop_by=None))),
                 ('repeated group', json.dumps(lease(1, 'first', groups=('1', '1')))),
                 ('two groups in one name', json.dumps(lease(1, 'first', groups=('1,2',)))),
                 ('measuring engine build', json.dumps(lease(1, 'first', unit_id=engine_build.UNIT_ID))),

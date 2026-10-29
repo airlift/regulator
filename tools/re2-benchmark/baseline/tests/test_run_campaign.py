@@ -35,7 +35,7 @@ SPEC.loader.exec_module(RUN_CAMPAIGN)
 import test_fleet  # noqa: E402
 UNIT_WORKER_WRAPPER = {"CAMPAIGN_MODE": "unit-worker", "CAMPAIGN_SHARD_ID": RUN_CAMPAIGN.UNIT_WORKER_SHARD,
                        "TIMEOUT_SECONDS": str(RUN_CAMPAIGN.unit_worker_timeout(0)),
-                       "CAMPAIGN_PROVENANCE": "qualification"}
+                       "CAMPAIGN_HOST_STOP_BY": "1800000000", "CAMPAIGN_PROVENANCE": "qualification"}
 
 
 def shell_function(source, name):
@@ -713,7 +713,7 @@ class TestRunCampaign(unittest.TestCase):
                 user_data = Path(temporary_directory) / "user-data.sh"
                 script = (
                     f"{function}\n"
-                    f"HOST_ARCHIVES={shlex.quote(archives)} {settings} "
+                    f"HOST_ARCHIVES={shlex.quote(archives)} CAMPAIGN_HOST_STOP_BY=1800000045 {settings} "
                     f"create_user_data test x86_64 result.tar.gz {user_data} ami url sha\n"
                     f"bash -n {user_data}\n")
 
@@ -724,6 +724,17 @@ class TestRunCampaign(unittest.TestCase):
                 self.assertEqual(bool(settings), provenance_check in text)
                 self.assertIn(f"export HOST_ARCHIVES='{archives}'\n", text)
                 self.assertIn("printf 'step\\tstarted\\tfinished\\n' > \"${RESULT_DIR}/startup-timeline.tsv\"", text)
+                # The host powers off at its stop time, which a lease moves from 1800000045 to 1800000060.
+                start = text.index("HOST_STOP_BY_FILE=")
+                loop = text[start:text.index(") &\n", start)].replace("/var/tmp/re2-stop-by", "stop-by")
+                result = subprocess.run(["bash", "-c", "clock=1800000000\n"
+                                         "date() { echo \"${clock}\"; }\n"
+                                         "sleep() { clock=$((clock + $1)); ((clock != 1800000030)) || "
+                                         "echo 1800000060 > stop-by; }\n"
+                                         "shutdown() { echo \"shutdown $* at ${clock}\"; }\n"
+                                         f"{loop})\n"], cwd=temporary_directory, text=True,
+                                        capture_output=True, check=False)
+                self.assertEqual((0, "shutdown -h now at 1800000060\n"), (result.returncode, result.stdout))
 
     def test_a_unit_worker_lists_only_its_leases(self):
         source = AWS_RUNNER.read_text()
@@ -1213,7 +1224,7 @@ class TestRunCampaign(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "requires a shared fleet budget"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.shared_budget = SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512, "max_vcpus": 1024,
-                                                          "spot_vcpu_reserve": 16, "max_attempt_seconds": 86400})
+                                                          "spot_vcpu_reserve": 16})
         arguments.purchases, arguments.spot_vcpu_reserve = {"r8i": "spot"}, 16
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.spot_vcpu_reserve = 0
@@ -1234,15 +1245,10 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.regional_amis[("r8i", "eu-west-1")] = "ami"
         RUN_CAMPAIGN.validate_configuration(arguments, items)
-        # A worker's attempt covers its setup, lifetime and uploads, then a last unit as long as its pool's
-        # longest: a baseline pool's 27,000 seconds, and a slow 75,600-second unit's 101,700, then cleanup.
+        # A worker's wrapper waits through its setup, lifetime and uploads, then a last unit as long as its pool's
+        # longest: a baseline pool's 27,000 seconds, and a slow 75,600-second unit's 101,700.
         self.assertEqual(RUN_CAMPAIGN.unit_worker_timeout(900), 27000)
-        long_items = self.replica_items(arguments, [self.platform], ["unit-0001"], 75600)
         self.assertEqual(RUN_CAMPAIGN.unit_worker_timeout(75600), 101700)
-        with self.assertRaisesRegex(SystemExit, "max_attempt_seconds of at least 102600"):
-            RUN_CAMPAIGN.validate_configuration(arguments, long_items)
-        arguments.shared_budget.policy["max_attempt_seconds"] = 102600
-        RUN_CAMPAIGN.validate_configuration(arguments, long_items)
         # A phase refuses a campaign ID the driver would, as the ID tags its hosts and names its S3 prefixes.
         arguments.campaign_id = "tournament.a/b"
         with self.assertRaisesRegex(SystemExit, "campaign ID must be"):
@@ -1257,8 +1263,7 @@ class TestRunCampaign(unittest.TestCase):
                                     purchases={"r8i": "spot"}, spot_vcpu_reserve=0,
                                     platform_regions={"r8i": ["us-west-2"]},
                                     shared_budget=SimpleNamespace(policy={"region": "us-west-2", "max_hosts": 512,
-                                                                         "max_vcpus": 8, "spot_vcpu_reserve": 0,
-                                                                         "max_attempt_seconds": 86400}),
+                                                                         "max_vcpus": 8, "spot_vcpu_reserve": 0}),
                                     phase_timeout_seconds=54000)
         # 18 worker hours of units: one worker lifetime and a retry wave on three workers, but not on one.
         items = self.replica_items(arguments, [self.platform], [f"unit-{index}" for index in range(24)], 900)
@@ -2767,6 +2772,7 @@ class FakeUnitHost:
         self.region = environment["AWS_REGION"]
         self.launched_at = fleet.clock
         self.epoch = environment["CAMPAIGN_HOST_EPOCH"]
+        self.stop_by = int(environment["CAMPAIGN_HOST_STOP_BY"])
         self.archive_key = (f"{self.platform}/{environment['CAMPAIGN_SHARD_ID']}/"
                             f"replica-{environment['CAMPAIGN_REPLICA_ID']}/epoch-{self.epoch}/"
                             f"{environment['CAMPAIGN_ARCHITECTURES']}.tar.gz")
@@ -3066,16 +3072,21 @@ class TestUnitWorkers(unittest.TestCase):
     PLATFORMS = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
 
     def run_phase(self, root, fleet, phase, shards, max_concurrent, per_platform, platform_regions=None, purchases=None,
-                  on_demand=True, deadline=None, confirmations=(), primary_results=None, release_version=""):
-        """Drain the phase's work items through the fleet; return the result directory.
+                  on_demand=True, deadline=None, confirmations=(), primary_results=None, release_version="",
+                  extend=True):
+        """Drain the phase's work items through the fleet; return the result directory. The stub budget admits
+        every extension of a host's reservation if extend, logging each, and refuses every one otherwise.
 
         The unit attempt ledger is left in self.ledger."""
         self.budget = budget = Mock(policy={"hourly_rates": {
             instance_type: {"spot": 0.2} for platform in self.PLATFORMS
             for instance_type in (platform.instance_type, platform.concurrency_instance_type)}},
             policy_path="fleet.json")
-        budget.reserve.side_effect = lambda campaign, job, *_: (
+        budget.reserve.side_effect = lambda campaign, job, *_, **__: (
             on_demand or job.market == "spot", "fleet quota or pending-launch limit")
+        budget.extend.side_effect = lambda campaign, epoch, until: (
+            fleet.log.append(("extend", epoch, until, extend)) or
+            (extend, "fleet spending or machine-hour ceiling"))
         budget.reservations.return_value = fleet.reservations or []
         arguments = SimpleNamespace(
             phase=phase, campaign_id="campaign", campaign_root=root, max_concurrent=max_concurrent,
@@ -3120,7 +3131,8 @@ class TestUnitWorkers(unittest.TestCase):
 
         def recover_and_record(dispatcher):
             recover(dispatcher)
-            dispatchers.append((dispatcher, {epoch: worker.job for epoch, worker in dispatcher.workers.items()}))
+            dispatchers.append((dispatcher, {epoch: (worker.job, worker.stop_by)
+                                             for epoch, worker in dispatcher.workers.items()}))
 
         with patch.object(RUN_CAMPAIGN.UnitDispatcher, "recover", autospec=True, side_effect=recover_and_record):
             yield dispatchers
@@ -3209,6 +3221,32 @@ class TestUnitWorkers(unittest.TestCase):
                            RUN_CAMPAIGN.read_accepted_units(result_root / "accepted-units.tsv")),
                     sorted((row["unit_id"], row["group_id"], row["upload_seconds"])
                            for row in csv.DictReader(uploads, delimiter="\t")))
+
+    def test_leases_wait_for_the_budget_to_cover_their_hosts_stop_times(self):
+        # A host powers off at the stop time it was launched with or a lease sent it, so whatever becomes of its
+        # controller, it stops within what the fleet budget covers: its reservation, as each admitted extension left
+        # it, less its teardown.
+        teardown = RUN_CAMPAIGN.UNIT_WORKER_TEARDOWN_SECONDS
+        for extend in (True, False):
+            with self.subTest(extend=extend), tempfile.TemporaryDirectory() as temporary:
+                fleet = FakeUnitFleet(Path(temporary) / "hosts")
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1, extend=extend)
+                hosts = {host.session: host for host in fleet.hosts}
+                covered = {int(host.epoch): host.stop_by + teardown for host in fleet.hosts}
+                self.assertLessEqual(covered.items(), {
+                    (call.args[1].host_epoch, call.kwargs["until"]) for call in self.budget.reserve.call_args_list})
+                for entry in fleet.log:
+                    if entry[0] == "extend" and entry[3]:
+                        covered[entry[1]] = max(covered[entry[1]], entry[2])
+                    elif entry[0] == "lease" and entry[3] is not None:
+                        host = hosts[entry[1]]
+                        self.assertLessEqual(host.leases[entry[2]]["stop_by"] + teardown, covered[int(host.epoch)])
+                for host in fleet.hosts:
+                    # A lease ahead needs an extension; once refused, the next lease waits for the one before it,
+                    # whose own stop time still covers it.
+                    lease_ahead = (fleet.log.index(("lease", host.session, 2, host.leases[2]["unit_id"])) <
+                                   fleet.log.index(("complete", host.session, 1)))
+                    self.assertEqual(extend, lease_ahead)
 
     def test_next_phase_requires_the_phase_marked_complete_after_verified_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3398,15 +3436,22 @@ class TestUnitWorkers(unittest.TestCase):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             self.assertTrue(any(entry[0] == "complete" for entry in fleet.log))
             fleet.abort_after = None
+            stopped = {int(host.epoch):
+                       max([host.stop_by] + [lease.get("stop_by", 0) for lease in host.leases.values()])
+                       for host in fleet.hosts}
             with self.dispatchers() as dispatchers:
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             self.assertEqual(2, len(fleet.hosts))
             # An adopted worker is booked to the region it was placed in.
             self.assertEqual({int(host.epoch): host.region for host in fleet.hosts},
-                             {epoch: job.region for epoch, job in dispatchers[0][1].items()})
+                             {epoch: job.region for epoch, (job, _) in dispatchers[0][1].items()})
             leased = [(row["platform"], row["unit_id"], row["replica"]) for row in self.leases()]
             self.assertEqual(len(leased), len(set(leased)))
             self.assertEqual(4, len(self.leases("accepted")))
+            # Each adopted worker's host stop time is the latest it was sent, at launch or in a lease, so the
+            # restarted controller extends its reservation from there.
+            self.assertEqual({epoch: stop_by for epoch, (_, stop_by) in dispatchers[0][1].items()},
+                             {epoch: stopped[epoch] for epoch in dispatchers[0][1]})
 
     def test_phase_resumes_only_with_the_tooling_that_started_it(self):
         with tempfile.TemporaryDirectory() as temporary:

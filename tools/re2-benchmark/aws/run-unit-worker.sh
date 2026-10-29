@@ -5,8 +5,9 @@ set -euo pipefail
 # at a time, until a stop lease, an idle wait, its lifetime, or a Spot notice.
 # A lease names the unit's measured groups to run, in order; the worker uploads
 # each group's result as soon as the group finishes, so a Spot notice loses only
-# the group it interrupts. aws/README.md "Unit workers" specifies the S3 keys,
-# schemas, and stop rules.
+# the group it interrupts. Each work lease names the host's new stop time, which
+# the worker records for the host's power-off. aws/README.md "Unit workers"
+# specifies the S3 keys, schemas, and stop rules.
 
 if [[ $# -ne 2 ]]; then
     echo "Usage: $0 <host-evidence-directory> <unit-directory>" >&2
@@ -28,6 +29,8 @@ REGION=${BASELINE_REGION:?BASELINE_REGION is required}
 BUCKET=${UNIT_WORKER_BUCKET:?UNIT_WORKER_BUCKET is required}
 LEASE_PREFIX=${UNIT_WORKER_LEASE_PREFIX:?UNIT_WORKER_LEASE_PREFIX is required}
 RESULT_PREFIX=${UNIT_WORKER_RESULT_PREFIX:?UNIT_WORKER_RESULT_PREFIX is required}
+# The host powers off at the epoch second this file holds; only a work lease extends it.
+STOP_BY_FILE=${UNIT_WORKER_STOP_BY_FILE:?UNIT_WORKER_STOP_BY_FILE is required}
 LIFETIME_SECONDS=${UNIT_WORKER_LIFETIME_SECONDS:-21600}
 IDLE_SECONDS=${UNIT_WORKER_IDLE_SECONDS:-600}
 POLL_SECONDS=${UNIT_WORKER_POLL_SECONDS:-5}
@@ -410,22 +413,22 @@ fetch_lease()
 
 read_lease()
 {
-    # Prints stop, or the unit, replica, phase, and comma-separated groups of a
-    # work lease; rejects any lease that is not this host's next one.
+    # Prints stop, or the unit, replica, phase, comma-separated groups, and host
+    # stop time of a work lease; rejects any lease that is not this host's next one.
     local file="${HOST_DIR}/leases/${sequence}.json"
     local fields
     local lease_schema lease_sequence lease_host lease_campaign lease_platform lease_stop
-    local lease_phase lease_unit lease_replica lease_protocol lease_groups
+    local lease_phase lease_unit lease_replica lease_protocol lease_groups lease_stop_by
     if ! fields=$(jq -r '[.schema_version, .sequence, .host_session, .campaign_id, .platform,
             (.stop // false), .phase, .unit_id, .replica_id, .protocol,
             (if (.groups | type) == "array" and (.groups | all(type == "string" and test("^[1-9][0-9]*$")))
-             then .groups | join(",") else "-" end)]
+             then .groups | join(",") else "-" end), .stop_by]
             | map(tostring | if . == "" or . == "null" then "-" else . end) | @tsv' "${file}"); then
         echo "Lease ${sequence} is not JSON" >&2
         return 1
     fi
     IFS=$'\t' read -r lease_schema lease_sequence lease_host lease_campaign lease_platform lease_stop \
-        lease_phase lease_unit lease_replica lease_protocol lease_groups <<<"${fields}"
+        lease_phase lease_unit lease_replica lease_protocol lease_groups lease_stop_by <<<"${fields}"
     if [[ "${lease_schema}" != 2 || "${lease_sequence}" != "${sequence}" || "${lease_host}" != "${HOST_SESSION}" ||
             "${lease_campaign}" != "${CAMPAIGN_ID}" || "${lease_platform}" != "${PLATFORM}" ]]; then
         echo "Lease ${sequence} is not this host's lease ${sequence}: schema ${lease_schema}," \
@@ -444,13 +447,24 @@ read_lease()
             ! ${lease_replica} =~ ^[1-4]$ ||
             "${lease_protocol}" != "${PROTOCOL}" || ! ${lease_phase} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ||
             ! ${lease_groups} =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ||
-            $(tr , '\n' <<<"${lease_groups}" | sort | uniq -d) != "" ]]; then
-        echo "Lease ${sequence} does not name a unit, replica, phase, distinct groups, and protocol ${PROTOCOL}:" \
-            "unit ${lease_unit}, replica ${lease_replica}, phase ${lease_phase}, groups ${lease_groups}," \
-            "protocol ${lease_protocol}" >&2
+            $(tr , '\n' <<<"${lease_groups}" | sort | uniq -d) != "" || ! ${lease_stop_by} =~ ^[1-9][0-9]*$ ]]; then
+        echo "Lease ${sequence} does not name a unit, replica, phase, distinct groups, protocol ${PROTOCOL}," \
+            "and stop time: unit ${lease_unit}, replica ${lease_replica}, phase ${lease_phase}," \
+            "groups ${lease_groups}, protocol ${lease_protocol}, stop time ${lease_stop_by}" >&2
         return 1
     fi
-    printf 'unit\t%s\t%s\t%s\t%s\n' "${lease_unit}" "${lease_replica}" "${lease_phase}" "${lease_groups}"
+    printf 'unit\t%s\t%s\t%s\t%s\t%s\n' "${lease_unit}" "${lease_replica}" "${lease_phase}" "${lease_groups}" \
+        "${lease_stop_by}"
+}
+
+extend_stop_by()
+{
+    # Moves the host's power-off to a lease's stop time, never earlier. The
+    # controller covered that time in the fleet budget before writing the lease.
+    if (($1 > $(<"${STOP_BY_FILE}"))); then
+        printf '%s\n' "$1" > "${STOP_BY_FILE}.new"
+        mv "${STOP_BY_FILE}.new" "${STOP_BY_FILE}"
+    fi
 }
 
 elapsed_since()
@@ -613,7 +627,8 @@ while true; do
     fi
     # The lease read's S3 calls may have outlasted the lifetime.
     stop_if_winding_down
-    IFS=$'\t' read -r _ unit_id replica_id phase lease_groups <<<"${lease}"
+    IFS=$'\t' read -r _ unit_id replica_id phase lease_groups lease_stop_by <<<"${lease}"
+    extend_stop_by "${lease_stop_by}"
     if [[ -n "${WORKER_STARTED}" ]]; then
         printf 'worker\t%s\t%s\n' "${WORKER_STARTED}" "${EPOCHREALTIME}" >> "${HOST_DIR}/startup-timeline.tsv"
         WORKER_STARTED=

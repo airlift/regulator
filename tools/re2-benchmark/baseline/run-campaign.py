@@ -82,6 +82,21 @@ SPOT_SHORTAGE_WAIT_SECONDS = 15 * 60
 # 2.4 to 2.9 minutes from boot to their first unit. A pool launches a worker only for work its workers
 # would start later than this.
 UNIT_WORKER_BOOT_SECONDS = 5 * 60
+# A unit worker's host powers off at its stop time, which only a lease extends, and the controller covers each stop
+# time and the host's teardown in the fleet budget before it issues the lease. So a host whose controller died stops
+# within its reservation, and a reservation holds only the work its host was issued: the leases it holds, each run
+# for its timeout, after its boot allowance before its first lease, then its idle stop and wind-down.
+# The boot allowance runs from admission to the latest start of the worker's first lease.
+UNIT_WORKER_BOOT_ALLOWANCE_SECONDS = 20 * 60
+# The worker stops once its next lease has been absent this long.
+UNIT_WORKER_IDLE_SECONDS = 10 * 60
+# From the worker's idle stop until its host powers off: up to 8 minutes of failing lease reads, the final
+# heartbeat, the host evidence, and its upload.
+UNIT_WORKER_WIND_DOWN_SECONDS = 15 * 60
+# From the host's stop time until its cleanup is verified and its reservation released.
+UNIT_WORKER_TEARDOWN_SECONDS = 15 * 60
+# A lease's timeout is this multiple of its groups' estimate, or of the unit budget when that is longer.
+UNIT_LEASE_TIMEOUT_FACTOR = 2
 # A work item stays unresolved once this many of its leases failed, were interrupted, or were lost;
 # a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
@@ -231,6 +246,9 @@ class Job:
     placement_score: str = ""
     # Regions where the pool's Spot launches found no capacity within the cool-down.
     spot_capacity_failures: tuple = ()
+    # Chosen at admission, in epoch seconds: the end of the worker's boot allowance, and its host's first stop time.
+    boot_by: int = 0
+    stop_by: int = 0
 
     @property
     def identity(self):
@@ -599,6 +617,11 @@ def unit_worker_timeout(longest_unit_seconds):
             max(UNIT_WORKER_LAST_UNIT_SECONDS, math.ceil(longest_unit_seconds)))
 
 
+def lease_timeout(estimated_seconds):
+    """The time a host's stop time allots a lease of groups estimated at this many seconds."""
+    return UNIT_LEASE_TIMEOUT_FACTOR * max(work_units.UNIT_SECONDS, math.ceil(estimated_seconds))
+
+
 def longest_units(items):
     """Each pool's longest estimated unit."""
     longest = {}
@@ -666,10 +689,6 @@ def validate_configuration(arguments, items):
                          "policy an On-Demand allowance in one of its regions, or buy with --purchase PLATFORM=spot")
     if getattr(arguments, "execute", False) and arguments.max_concurrent > DEFAULT_MAX_CONCURRENT and budget is None:
         raise SystemExit("more than 64 workers requires a shared fleet budget")
-    worker_timeout = unit_worker_timeout(max(longest_units(items).values(), default=0))
-    if budget and budget.policy["max_attempt_seconds"] < worker_timeout + 15 * 60:
-        raise SystemExit("unit workers require a shared fleet max_attempt_seconds of at least "
-                         f"{worker_timeout + 15 * 60}, a worker's timeout and cleanup")
     validate_campaign_id(arguments.campaign_id)
     if type(arguments.max_concurrent) is not int or arguments.max_concurrent < 1:
         raise SystemExit("max concurrency must be a positive integer")
@@ -1856,6 +1875,7 @@ def job_environment(job, arguments, root, result_root):
         "BENCHMARK_EXPECTED_VCPUS": str(job.platform.vcpus),
         "TIMEOUT_SECONDS": str(unit_worker_timeout(getattr(arguments, "longest_units", {}).get(
             unit_worker_pool(job), 0))),
+        "CAMPAIGN_HOST_STOP_BY": str(job.stop_by),
         "RESULT_ROOT": str(job_result_root(result_root, job)),
         "TRINO_REVISION": "c7503d170344c4e266f03fdb39e53c82aa7e3594",
         "JONI_COMPARATOR_ORDER": "forward" if job.replica % 2 else "reverse",
@@ -1873,6 +1893,7 @@ def job_environment(job, arguments, root, result_root):
         "BENCHMARK_HEAP_SIZE": campaign_heap_size(arguments),
     })
     environment["UNIT_WORKER_LIFETIME_SECONDS"] = str(UNIT_WORKER_LIFETIME_SECONDS)
+    environment["UNIT_WORKER_IDLE_SECONDS"] = str(UNIT_WORKER_IDLE_SECONDS)
     # Only a measuring phase's workers install engine builds; never pass the controller's own environment through.
     environment.pop("ENGINE_BUILD_ARCHIVES", None)
     environment.pop("ENGINE_BUILD_MANIFEST_SHA256", None)
@@ -2430,7 +2451,8 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
                 admitted, reason = budget.reserve(
                     arguments.campaign_id, place(candidate, placement), result_root,
                     lambda region=placement[0], market=candidate.market:
-                    shared_fleet_snapshot(arguments, region, market))
+                    shared_fleet_snapshot(arguments, region, market),
+                    until=candidate.stop_by + UNIT_WORKER_TEARDOWN_SECONDS)
             except BudgetError:
                 raise
             except (OSError, RuntimeError, subprocess.SubprocessError) as error:
@@ -2472,7 +2494,8 @@ def start_wrapper(arguments, root, result_root, runner, attempts_path, job, slot
             f"placement_score={environment.get('CAMPAIGN_PLACEMENT_SCORE', '')}" +
             (f";spot_capacity_failures={','.join(job.spot_capacity_failures)}"
              if job.spot_capacity_failures else "") +
-            (f";slot={slot};slot_failures={slot_failures}" if slot is not None else ""))
+            (f";slot={slot};slot_failures={slot_failures}" if slot is not None else "") +
+            f";boot_by={job.boot_by};stop_by={job.stop_by}")
         try:
             # The wrapper reads only its environment; its arguments name it, so recovery finds this campaign's.
             process = subprocess.Popen(
@@ -2635,6 +2658,10 @@ class UnitWorker:
     # leased, the lease before it settled, or the worker started, whichever came last.
     launched_at: float = 0.0
     running_since: float = 0.0
+    # The host's stop time, the latest of its admission's and its work leases', and each work lease's, in epoch
+    # seconds.
+    stop_by: int = 0
+    lease_stop_by: dict = field(default_factory=dict)
 
     @property
     def pool(self):
@@ -2809,7 +2836,8 @@ class UnitDispatcher:
                 continue
             # The starting record names the region the worker was placed in.
             job = replace(job, market=row["market"], region=placement.get("region", ""),
-                          placement_score=placement.get("placement_score", ""))
+                          placement_score=placement.get("placement_score", ""),
+                          boot_by=int(placement["boot_by"]), stop_by=int(placement["stop_by"]))
             process_id = None
             for probe in range(2):
                 try:
@@ -2828,7 +2856,8 @@ class UnitDispatcher:
                 # A live worker is registered at once, so a recovery step that fails still stops it.
                 wrapper = DetachedWrapper(process_id, self.arguments.campaign_id, job, row["detail"], self.result_root)
                 workers[job.host_epoch] = self.workers[job.host_epoch] = UnitWorker(
-                    job, wrapper, log, slot=slot, slot_failures=slot_failures, launched_at=time.monotonic())
+                    job, wrapper, log, slot=slot, slot_failures=slot_failures, launched_at=time.monotonic(),
+                    stop_by=job.stop_by)
             elif session is not None and (session / "cleanup-manifest.txt").is_file():
                 workers[job.host_epoch] = UnitWorker(job, None, None, session=session,
                                                      slot=slot, slot_failures=slot_failures)
@@ -2870,6 +2899,8 @@ class UnitDispatcher:
                 if identity is not None:
                     worker.lease_groups[sequence] = tuple(row["groups"].split(","))
                     worker.units.add(self.items[identity].unit_id)
+                    worker.lease_stop_by[sequence] = int(launch_record(row)["stop_by"])
+                    worker.stop_by = max(worker.stop_by, worker.lease_stop_by[sequence])
             if row["outcome"] == "stop":
                 worker.stopping = True
             if row["outcome"] in SETTLED_UNIT_OUTCOMES:
@@ -3264,16 +3295,41 @@ class UnitDispatcher:
             return {**document, "stop": True}
         item = self.items[identity]
         return {**document, "phase": self.arguments.phase, "unit_id": item.unit_id, "replica_id": item.replica,
-                "groups": list(worker.lease_groups[sequence]), "protocol": phase_protocol(self.arguments)}
+                "groups": list(worker.lease_groups[sequence]), "protocol": phase_protocol(self.arguments),
+                "stop_by": worker.lease_stop_by[sequence]}
 
-    def issue(self, worker, item):
-        """Record a lease, or a stop lease without an item, before it is written; a lease runs the item's
-        remaining groups."""
+    def lease_stop_by(self, worker, item):
+        """The host stop time a further lease of the item needs, never earlier than the host's current one: the
+        timeouts of that lease and each lease the worker still holds, run one after another from now, or from the
+        end of its boot allowance when that is later, then its idle stop and wind-down."""
+        timeouts = [lease_timeout(self.remaining_seconds(item))]
+        for sequence in worker.outstanding():
+            identity = worker.leases[sequence]
+            if identity is not None:
+                seconds = dict(self.items[identity].groups)
+                timeouts.append(lease_timeout(sum(seconds[group] for group in worker.lease_groups[sequence])))
+        start = max(math.ceil(time.time()), worker.job.boot_by)
+        return max(worker.stop_by, start + sum(timeouts) + UNIT_WORKER_IDLE_SECONDS + UNIT_WORKER_WIND_DOWN_SECONDS)
+
+    def extend(self, worker, stop_by):
+        """Whether the fleet budget covers the host until stop_by and its teardown, extending its reservation."""
+        if not self.budget or stop_by <= worker.stop_by:
+            return True
+        admitted, _ = self.budget.extend(self.arguments.campaign_id, worker.job.host_epoch,
+                                         until=stop_by + UNIT_WORKER_TEARDOWN_SECONDS)
+        return admitted
+
+    def issue(self, worker, item, stop_by=None):
+        """Record a lease, or a stop lease without an item or stop_by, before it is written; a lease runs the item's
+        remaining groups, and its host's stop time becomes stop_by."""
+        if (item is None) != (stop_by is None):
+            raise ValueError("a lease of an item needs a stop time, and a stop lease takes none")
         sequence = max(worker.leases, default=0) + 1
         if not worker.outstanding():
             worker.running_since = time.monotonic()
         groups = tuple(group for group, _ in self.remaining(item)) if item else ()
-        write_unit_attempt(self.leases_path, worker, sequence, item, "leased" if item else "stop", groups=groups)
+        write_unit_attempt(self.leases_path, worker, sequence, item, "leased" if item else "stop",
+                           f"stop_by={stop_by}" if item else "-", groups=groups)
         worker.leases[sequence] = item.identity if item else None
         worker.unsent.add(sequence)
         if item is None:
@@ -3281,6 +3337,8 @@ class UnitDispatcher:
             worker.stopping = True
         else:
             worker.lease_groups[sequence] = groups
+            worker.lease_stop_by[sequence] = stop_by
+            worker.stop_by = max(worker.stop_by, stop_by)
             worker.units.add(item.unit_id)
             self.held[item.identity] = (worker.job.host_epoch, sequence)
 
@@ -3336,7 +3394,13 @@ class UnitDispatcher:
                     if not outstanding or self.final(worker):
                         self.issue(worker, None)
                     break
-                self.issue(worker, item)
+                stop_by = self.lease_stop_by(worker, item)
+                if not self.extend(worker, stop_by):
+                    # The budget refused the lease, so an idle worker stops rather than waiting for its idle stop.
+                    if not outstanding:
+                        self.issue(worker, None)
+                    break
+                self.issue(worker, item, stop_by)
                 outstanding = worker.outstanding()
         self.send(worker)
 
@@ -3458,6 +3522,11 @@ class UnitDispatcher:
                 candidate = self.candidate(pool, market)
                 if candidate.market == "on-demand" and self.on_demand_ready.get(pool, 0) > now:
                     break
+                # A launch reserves the worker's boot and a first lease of the pool's longest queued item.
+                boot_by = math.ceil(time.time()) + UNIT_WORKER_BOOT_ALLOWANCE_SECONDS
+                first_lease = lease_timeout(max(map(self.remaining_seconds, self.queued(pool)), default=0))
+                candidate = replace(candidate, boot_by=boot_by, stop_by=boot_by + first_lease +
+                                    UNIT_WORKER_IDLE_SECONDS + UNIT_WORKER_WIND_DOWN_SECONDS)
                 if self.budget and blocked_vcpus is not None and candidate.platform.vcpus >= blocked_vcpus:
                     break
                 candidate, ready_at, admitted, scan, blocked = admit_launch(
@@ -3503,7 +3572,7 @@ class UnitDispatcher:
         # The worker boots from the poll that launched it, so a projection in that poll counts it as booting
         # no later than a further launch would.
         worker = self.workers[job.host_epoch] = UnitWorker(job, process, log, slot=slot, slot_failures=slot_failures,
-                                                           launched_at=now)
+                                                           launched_at=now, stop_by=job.stop_by)
         if job.market == "on-demand" and pool in self.tail:
             self.tail_on_demand[pool] = self.tail_on_demand.get(pool, 0) + 1
         write_attempt(self.attempts_path, job, "started", f"wrapper_pid={process.pid}")
