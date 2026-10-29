@@ -87,6 +87,10 @@ In comments mode, whitespace and comments are skipped exactly where the JDK
 skips them, which is not everywhere. `(?x)a{1 2}` is `a{12}`, but `(?x)a{ 1}`
 is an error; `(?x)( ?<n>a)` is a named group, but `(?x)(? <n>a)` is an error.
 
+As in the JDK, a count with no atom before it repeats the empty match, so
+`{2}x` matches `x`. A count in atom position does so even right after another
+repetition, so `x{2}{3}` matches `xx`. Leading `*`, `+`, and `?` are errors.
+
 Repetition counts are limited to 1,000. The implementation preserves Java's
 final-terminator behavior, multiline CRLF handling, Unix-lines mode, Unicode
 case folding, and Unicode character classes.

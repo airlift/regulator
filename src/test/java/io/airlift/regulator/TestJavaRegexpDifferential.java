@@ -456,6 +456,23 @@ public class TestJavaRegexpDifferential
     }
 
     @Test
+    public void testCountsWithoutAtomsMatchJava25()
+    {
+        // A count in atom position, including right after another repetition, repeats the empty
+        // match, but a leading '*', '+', or '?' is an error.
+        for (String pattern : List.of("{2}x", "a|{0}x", "({0}x)", "(?i){2}a", "\\Q\\E{2}", "x{2}{3}", "x*{2}", "(?x)x{2} {3}")) {
+            assertMatchesJava25(pattern, OptionProfile.DEFAULT, List.of("", "a", "x", "xx", "xxx", "X", "A"));
+        }
+        for (String pattern : List.of("*x", "+x", "?x")) {
+            assertRejectsJava25(pattern, OptionProfile.DEFAULT, RegexpParseErrorCode.REPEAT_ARGUMENT);
+        }
+        assertRejectsJava25("{x", OptionProfile.DEFAULT, RegexpParseErrorCode.REPEAT_ARGUMENT);
+        for (String pattern : List.of("x**", "x{2}*", "{2}?*")) {
+            assertRejectsJava25(pattern, OptionProfile.DEFAULT, RegexpParseErrorCode.BAD_REPEAT_OP);
+        }
+    }
+
+    @Test
     public void testInlineFlagsMatchJava25()
     {
         // Canonical equivalence is off unless a flag group turns it on, so clearing it changes nothing.
