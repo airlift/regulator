@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import base64
 import contextlib
 import csv
 import fcntl
@@ -27,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 import aggregate_results
+import cloud
 import engine_build
 import unit_session
 import work_units
@@ -34,8 +34,8 @@ from acceptance import normalize_heap_size
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, REGION_PATTERN, BudgetError, FleetBudget, FleetHalted, on_demand_regions,
     region_limits, spend_by_owner)
-from campaign_io import (
-    UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger)
+from campaign_io import UnsafeCampaignError, check_output, fsync_directory, write_ledger
+from cloud import CloudError
 from unit_dispatch import (
     UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, UNRESOLVED_UNIT_FIELDS, completion_key, extract_unit_result,
     get_unit_worker_result, group_identity, heartbeat_key, heartbeat_sequence, interruption_key,
@@ -52,8 +52,6 @@ import released_artifact
 
 PROACTIVE_SPOT_CAPACITY_THRESHOLD = 32
 DEFAULT_MAX_CONCURRENT = 64
-STANDARD_ON_DEMAND_QUOTA_CODE = "L-1216C47A"
-STANDARD_SPOT_QUOTA_CODE = "L-34B43A08"
 STANDARD_INSTANCE_FAMILIES = frozenset("acdhimrtz")
 SPOT_VCPU_SAFETY_RESERVE = 32
 CAPACITY_RETRY_SECONDS = 30
@@ -152,9 +150,10 @@ PINNED_AMI_REGION = "us-west-2"
 AMAZON_AMI_OWNER = "137112412989"
 # Spot placement scores are rate-limited per configuration, so reuse each answer briefly.
 PLACEMENT_SCORE_CACHE_SECONDS = 5 * 60
-# A shared archive upload slower than this has stalled; it is retried rather than left to
-# hold every launch behind it.
-SHARED_ARCHIVE_UPLOAD_MINIMUM_RATE = 256 * 1024
+# A JDK download slower than this for a minute has stalled.
+JDK_DOWNLOAD_MINIMUM_RATE = 256 * 1024
+# A shared archive upload that stalls for the SDK's read timeout is retried rather than left to hold every launch
+# behind it.
 SHARED_ARCHIVE_UPLOAD_ATTEMPTS = 3
 CANDIDATE_PROVENANCE_FIELDS = (
     "candidate_ref",
@@ -1274,13 +1273,6 @@ def validate_dependencies(root, arguments):
         subprocess.run([str(root / "tools/re2-benchmark/baseline/validate-manifest.py")], check=True)
 
 
-def describe_image(arguments, region, ami_id):
-    return check_output(aws_output(arguments, region) + [
-        "ec2", "describe-images", "--image-ids", ami_id,
-        "--query", "Images[0].[Architecture,State,OwnerId,Name]", "--output", "text",
-    ]).split("\t")
-
-
 def validate_aws(arguments, platforms, jobs=None):
     required_platforms = list({
         (platform.name, platform.instance_type): platform
@@ -1290,8 +1282,8 @@ def validate_aws(arguments, platforms, jobs=None):
         required_platforms = platforms
     regions = list(dict.fromkeys(campaign_regions(arguments) + [
         region for platform in required_platforms for region in platform_regions(arguments, platform.name)]))
-    account = check_output(aws_output(arguments, regions[0]) + [
-        "sts", "get-caller-identity", "--query", "Account", "--output", "text"])
+    aws = arguments.cloud
+    account = aws.account(regions[0])
     budget = getattr(arguments, "shared_budget", None)
     if budget and (account != budget.policy["account"] or not set(regions) <= set(region_limits(budget.policy))):
         raise SystemExit("AWS account or region differs from the shared fleet policy")
@@ -1299,22 +1291,10 @@ def validate_aws(arguments, platforms, jobs=None):
     # The wrapper launches into a public subnet of each region's default VPC.
     public_zones = {}
     for region in regions:
-        prefix = aws_output(arguments, region)
-        vpc = check_output(prefix + ["ec2", "describe-vpcs", "--filters", "Name=is-default,Values=true",
-                                     "--query", "Vpcs[0].VpcId", "--output", "text"])
-        public_zones[region] = set() if vpc in ("", "None") else set(check_output(prefix + [
-            "ec2", "describe-subnets", "--filters", f"Name=vpc-id,Values={vpc}", "Name=state,Values=available",
-            "--query", "Subnets[?MapPublicIpOnLaunch].AvailabilityZone", "--output", "text"]).split())
+        public_zones[region] = {zone for _, zone in aws.network(region).subnets}
         if not public_zones[region]:
             raise SystemExit(f"allowed region {region} has no public default-VPC subnet")
-        spot_quota = float(check_output(prefix + [
-            "service-quotas", "get-service-quota", "--service-code", "ec2",
-            "--quota-code", STANDARD_SPOT_QUOTA_CODE, "--query", "Quota.Value", "--output", "text",
-        ]))
-        on_demand_quota = float(check_output(prefix + [
-            "service-quotas", "get-service-quota", "--service-code", "ec2",
-            "--quota-code", STANDARD_ON_DEMAND_QUOTA_CODE, "--query", "Quota.Value", "--output", "text",
-        ]))
+        spot_quota, on_demand_quota = aws.vcpu_quota(region, "spot"), aws.vcpu_quota(region, "on-demand")
         if budget:
             limits = region_limits(budget.policy)[region]
             if limits["max_vcpus"] > spot_quota - limits["spot_vcpu_reserve"]:
@@ -1352,26 +1332,21 @@ def validate_aws(arguments, platforms, jobs=None):
     for platform in required_platforms:
         expected_architecture = "x86_64" if platform.architecture == "intel" else "arm64"
         if platform.name not in names:
-            image = describe_image(arguments, PINNED_AMI_REGION, platform.ami_id)
-            if (len(image) != 4 or image[:3] != [expected_architecture, "available", AMAZON_AMI_OWNER] or
-                    image[3] in ("", "None")):
+            image = aws.image(PINNED_AMI_REGION, platform.ami_id)
+            if (image is None or (image.architecture, image.state, image.owner) !=
+                    (expected_architecture, "available", AMAZON_AMI_OWNER) or not image.name):
                 raise SystemExit(f"unexpected AMI identity for {platform.name}: {image}")
-            names[platform.name] = image[3]
+            names[platform.name] = image.name
         offered = []
         for region in platform_regions(arguments, platform.name):
-            zones = check_output(aws_output(arguments, region) + [
-                "ec2", "describe-instance-type-offerings", "--location-type", "availability-zone",
-                "--filters", f"Name=instance-type,Values={platform.instance_type}",
-                "--query", "InstanceTypeOfferings[].Location", "--output", "text",
-            ]).split()
-            if not set(zones) & public_zones[region]:
+            if not aws.zones_offering(region, platform.instance_type) & public_zones[region]:
                 continue
             ami_id = platform.ami_id if amis is None else amis.get((platform.name, region))
             if ami_id is None:
                 raise SystemExit(f"platform-regions.tsv has no {platform.name} AMI for {region}")
             if (platform.name, region) not in verified and (region, ami_id) != (PINNED_AMI_REGION, platform.ami_id):
-                image = describe_image(arguments, region, ami_id)
-                if image != [expected_architecture, "available", AMAZON_AMI_OWNER, names[platform.name]]:
+                image = aws.image(region, ami_id)
+                if image != cloud.Image(expected_architecture, "available", AMAZON_AMI_OWNER, names[platform.name]):
                     raise SystemExit(f"{platform.name} AMI {ami_id} in {region} is not {names[platform.name]}: {image}")
             verified.add((platform.name, region))
             offered.append(region)
@@ -1379,17 +1354,10 @@ def validate_aws(arguments, platforms, jobs=None):
             raise SystemExit(f"{platform.instance_type} is not offered in any region of {platform.name}'s list")
         offerings[platform.instance_type] = offered
     for region, bucket in shared_transfer_buckets(arguments).items():
-        prefix = aws_output(arguments, region)
-        location = check_output(prefix + ["s3api", "get-bucket-location", "--bucket", bucket,
-                                          "--query", "LocationConstraint", "--output", "text"])
-        # S3 reports us-east-1 as no constraint and keeps the legacy EU name for eu-west-1.
-        location = {"None": "us-east-1", "": "us-east-1", "EU": "eu-west-1"}.get(location, location)
-        tagged = check_output(prefix + ["s3api", "get-bucket-tagging", "--bucket", bucket, "--query",
-                                        "length(TagSet[?Key==`Project` && Value==`regulator-benchmark`])",
-                                        "--output", "text"])
-        if location != region or tagged != "1":
+        info = aws.bucket(region, bucket)
+        if info.region != region or info.tags.get("Project") != "regulator-benchmark":
             raise SystemExit(f"shared transfer bucket {bucket} is not a tagged Project=regulator-benchmark "
-                             f"bucket in {region}: location={location}")
+                             f"bucket in {region}: location={info.region}")
     arguments.ami_names = names
     arguments.region_offerings = offerings
 
@@ -1451,9 +1419,8 @@ def stage_jdks(arguments, jobs):
                 continue
             download = path.with_name(path.name + ".download")
             print(f"downloading the {job.platform.name} JDK", flush=True)
-            # A download slower than the uploads' minimum rate for a minute fails, as a stalled upload times out.
             subprocess.run(["curl", "--fail", "--silent", "--show-error", "--location", "--retry", "5",
-                            "--connect-timeout", "60", "--speed-limit", str(SHARED_ARCHIVE_UPLOAD_MINIMUM_RATE),
+                            "--connect-timeout", "60", "--speed-limit", str(JDK_DOWNLOAD_MINIMUM_RATE),
                             "--speed-time", "60", "--output", str(download), job.platform.jdk_url], check=True)
             if engine_build.sha256_file(download) != job.platform.jdk_sha256:
                 download.unlink()
@@ -1472,26 +1439,19 @@ def upload_shared_archives(arguments, uploads):
     """Put each content-addressed archive, {(region, key): (path, sha256, label)}, in its region's transfer bucket."""
     buckets = shared_transfer_buckets(arguments)
     for (region, key), (path, sha256, label) in sorted(uploads.items()):
-        checksum = base64.b64encode(bytes.fromhex(sha256)).decode()
-        prefix = aws_output(arguments, region) + ["s3api"]
         for attempt in range(1, SHARED_ARCHIVE_UPLOAD_ATTEMPTS + 1):
             try:
-                existing = check_output(prefix + [
-                    "head-object", "--bucket", buckets[region], "--key", key, "--checksum-mode", "ENABLED",
-                    "--query", "ChecksumSHA256", "--output", "text"], stderr=subprocess.DEVNULL, timeout=60)
-            except subprocess.SubprocessError:
+                existing = arguments.cloud.head_sha256(region, buckets[region], key)
+            except CloudError:
                 existing = None
-            if existing == checksum:
+            if existing == sha256:
                 break
             print(f"uploading {label} to {region} (attempt {attempt})", flush=True)
             try:
                 # A single PUT keeps S3's checksum the whole-object SHA-256, which S3 verifies on upload.
-                check_output(prefix + [
-                    "put-object", "--bucket", buckets[region], "--key", key, "--body", str(path),
-                    "--checksum-algorithm", "SHA256", "--checksum-sha256", checksum],
-                    timeout=60 + path.stat().st_size / SHARED_ARCHIVE_UPLOAD_MINIMUM_RATE)
+                arguments.cloud.put(region, buckets[region], key, path, sha256=sha256)
                 break
-            except subprocess.SubprocessError as error:
+            except CloudError as error:
                 if attempt == SHARED_ARCHIVE_UPLOAD_ATTEMPTS:
                     raise SystemExit(f"could not upload the {label} to s3://{buckets[region]}/{key}: {error}") from error
 
@@ -1508,16 +1468,10 @@ def spot_placement_scores(arguments, instance_type, regions):
     # A campaign-constant target keeps every query the same configuration.
     target = min(arguments.max_concurrent, getattr(arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT))
     try:
-        output = check_output(aws_output(arguments, regions[0]) + [
-            "ec2", "get-spot-placement-scores", "--instance-types", instance_type,
-            "--target-capacity", str(target), "--region-names", *regions,
-            "--query", "SpotPlacementScores[].[Region,Score]", "--output", "text"])
-        scores = {}
-        for line in output.splitlines():
-            region, score = line.split()
-            if region in regions and 1 <= int(score) <= 10:
-                scores[region] = int(score)
-    except (OSError, ValueError, subprocess.SubprocessError):
+        scores = {region: score for region, score in
+                  arguments.cloud.placement_scores(instance_type, regions, target).items()
+                  if region in regions and 1 <= score <= 10}
+    except CloudError:
         scores = None
     arguments.placement_scores[key] = (now, scores)
     return scores
@@ -1568,7 +1522,7 @@ def place_with_headroom(job, placements, query):
             capacity = query(placement[0])
         except UnsafeCampaignError:
             raise
-        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        except (OSError, RuntimeError) as error:
             failure = error
             continue
         if capacity["available"] >= job.platform.vcpus:
@@ -1588,39 +1542,30 @@ def is_standard_instance_type(instance_type):
     return bool(instance_type) and instance_type[0].lower() in STANDARD_INSTANCE_FAMILIES
 
 
-def shared_fleet_snapshot(arguments, region=None, market="spot"):
-    prefix = aws_output(arguments, region)
+def shared_fleet_snapshot(arguments, region, market="spot"):
+    """The region's Standard quota for the market and the pending and running Standard instances, and for Spot the
+    open and active requests, that use it, each with its vCPUs and the campaign and host epoch its tags name."""
+    aws = arguments.cloud
     spot = market == "spot"
-    quota = int(float(check_output(prefix + ["service-quotas", "get-service-quota", "--service-code", "ec2",
-                      "--quota-code", STANDARD_SPOT_QUOTA_CODE if spot else STANDARD_ON_DEMAND_QUOTA_CODE,
-                      "--query", "Quota.Value", "--output", "text"])))
-    instances = json.loads(check_output(prefix + ["ec2", "describe-instances", "--filters",
-                           *(["Name=instance-lifecycle,Values=spot"] if spot else []),
-                           "Name=instance-state-name,Values=pending,running", "--query",
-                           "Reservations[].Instances[].{id:InstanceId,type:InstanceType,lifecycle:InstanceLifecycle,tags:Tags}",
-                           "--output", "json"]))
-    # EC2 cannot filter for the absent lifecycle of On-Demand instances.
-    instances = [item for item in instances if (item.pop("lifecycle", None) == "spot") == spot]
-    requests = json.loads(check_output(prefix + ["ec2", "describe-spot-instance-requests", "--filters",
-                          "Name=state,Values=open,active", "--query",
-                          "SpotInstanceRequests[].{id:SpotInstanceRequestId,instance_id:InstanceId,type:LaunchSpecification.InstanceType,tags:Tags}",
-                          "--output", "json"])) if spot else []
-    if any(not item.get("type") for item in instances + requests):
+    instances = [instance for instance in aws.instances(region)
+                 if instance.state in ("pending", "running") and (instance.lifecycle == "spot") == spot]
+    requests = aws.spot_requests(region) if spot else []
+    if any(not item.type for item in instances + requests):
         raise BudgetError(f"cannot account for {'a Spot instance or request' if spot else 'an On-Demand instance'} "
                           "with no instance type")
-    instances = [item for item in instances if is_standard_instance_type(item["type"])]
-    requests = [item for item in requests if is_standard_instance_type(item["type"])]
-    types = sorted({item["type"] for item in instances + requests})
-    metadata = json.loads(check_output(prefix + ["ec2", "describe-instance-types", "--instance-types", *types,
-                          "--query", "InstanceTypes[].{type:InstanceType,vcpus:VCpuInfo.DefaultVCpus}",
-                          "--output", "json"])) if types else []
-    vcpus = {item["type"]: int(item["vcpus"]) for item in metadata}
-    for item in instances + requests:
-        if item["type"] not in vcpus:
-            raise BudgetError("AWS omitted requested vCPU metadata")
-        tags = {tag["Key"]: tag["Value"] for tag in item.pop("tags", None) or []}
-        item.update(vcpus=vcpus[item["type"]], campaign_id=tags.get("BaselineCampaign"), host_epoch=tags.get("HostEpoch"))
-    return {"quota": quota, "instances": instances, "requests": requests}
+    instances = [item for item in instances if is_standard_instance_type(item.type)]
+    requests = [item for item in requests if is_standard_instance_type(item.type)]
+    vcpus = aws.vcpus(region, {item.type for item in instances + requests})
+    if any(item.type not in vcpus for item in instances + requests):
+        raise BudgetError("AWS omitted requested vCPU metadata")
+
+    def resource(item, **fields):
+        return {**fields, "type": item.type, "vcpus": vcpus[item.type], "campaign_id": item.tags.get("BaselineCampaign"),
+                "host_epoch": item.tags.get("HostEpoch")}
+
+    return {"quota": aws.vcpu_quota(region, market),
+            "instances": [resource(item, id=item.id) for item in instances],
+            "requests": [resource(item, id=item.id, instance_id=item.instance_id or None) for item in requests]}
 
 
 def region_jobs(arguments, running_jobs, region):
@@ -1630,36 +1575,16 @@ def region_jobs(arguments, running_jobs, region):
     return [job for job in running_jobs if (job.region or platform_regions(arguments, job.platform.name)[0]) == region]
 
 
-def current_on_demand_capacity(arguments, campaign_id, running_jobs, region=None):
-    prefix = aws_output(arguments, region)
+def current_on_demand_capacity(arguments, campaign_id, running_jobs, region):
+    aws = arguments.cloud
     running_jobs = region_jobs(arguments, running_jobs, region)
-    quota = int(float(check_output(prefix + [
-        "service-quotas", "get-service-quota", "--service-code", "ec2",
-        "--quota-code", STANDARD_ON_DEMAND_QUOTA_CODE,
-        "--query", "Quota.Value", "--output", "text",
-    ])))
-    instances = json.loads(check_output(prefix + [
-        "ec2", "describe-instances",
-        "--filters", "Name=instance-state-name,Values=pending,running",
-        "--query", "Reservations[].Instances[].{instance_type:InstanceType,lifecycle:InstanceLifecycle,tags:Tags}",
-        "--output", "json",
-    ]) or "[]")
-    instance_types = sorted({
-        instance["instance_type"]
+    quota = aws.vcpu_quota(region, "on-demand")
+    instances = [instance for instance in aws.instances(region) if instance.state in ("pending", "running")]
+    vcpus_by_type = aws.vcpus(region, {
+        instance.type
         for instance in instances
-        if instance.get("lifecycle") != "spot" and is_standard_instance_type(instance.get("instance_type"))
+        if instance.lifecycle != "spot" and is_standard_instance_type(instance.type)
     })
-    vcpus_by_type = {}
-    if instance_types:
-        descriptions = json.loads(check_output(prefix + [
-            "ec2", "describe-instance-types", "--instance-types", *instance_types,
-            "--query", "InstanceTypes[].{instance_type:InstanceType,vcpus:VCpuInfo.DefaultVCpus}",
-            "--output", "json",
-        ]))
-        vcpus_by_type = {
-            description["instance_type"]: int(description["vcpus"])
-            for description in descriptions
-        }
 
     running_epochs = {
         str(job.host_epoch)
@@ -1669,13 +1594,10 @@ def current_on_demand_capacity(arguments, campaign_id, running_jobs, region=None
     used_vcpus = 0
     observed_running_epochs = set()
     for instance in instances:
-        instance_type = instance.get("instance_type")
-        if instance.get("lifecycle") == "spot" or not is_standard_instance_type(instance_type):
+        instance_type = instance.type
+        if instance.lifecycle == "spot" or not is_standard_instance_type(instance_type):
             continue
-        tags = {
-            tag["Key"]: tag["Value"]
-            for tag in instance.get("tags") or []
-        }
+        tags = instance.tags
         if tags.get("BaselineCampaign") == campaign_id and tags.get("HostEpoch") in running_epochs:
             # The local reservation below already covers this instance. This also
             # covers the interval before a newly launched instance is visible.
@@ -1707,48 +1629,24 @@ def current_on_demand_capacity(arguments, campaign_id, running_jobs, region=None
     }
 
 
-def current_spot_capacity(arguments, campaign_id, running_jobs, region=None):
-    prefix = aws_output(arguments, region)
+def current_spot_capacity(arguments, campaign_id, running_jobs, region):
+    aws = arguments.cloud
     running_jobs = region_jobs(arguments, running_jobs, region)
-    quota = int(float(check_output(prefix + [
-        "service-quotas", "get-service-quota", "--service-code", "ec2",
-        "--quota-code", STANDARD_SPOT_QUOTA_CODE,
-        "--query", "Quota.Value", "--output", "text",
-    ])))
-    instances = json.loads(check_output(prefix + [
-        "ec2", "describe-instances",
-        "--filters", "Name=instance-state-name,Values=pending,running",
-        "--query", "Reservations[].Instances[].{instance_id:InstanceId,instance_type:InstanceType,lifecycle:InstanceLifecycle,tags:Tags}",
-        "--output", "json",
-    ]) or "[]")
-    requests = json.loads(check_output(prefix + [
-        "ec2", "describe-spot-instance-requests",
-        "--filters", "Name=state,Values=open,active",
-        "--query", "SpotInstanceRequests[].{instance_id:InstanceId,instance_type:LaunchSpecification.InstanceType,tags:Tags}",
-        "--output", "json",
-    ]) or "[]")
-    instance_types = sorted(
+    quota = aws.vcpu_quota(region, "spot")
+    instances = [instance for instance in aws.instances(region) if instance.state in ("pending", "running")]
+    requests = aws.spot_requests(region)
+    vcpus_by_type = aws.vcpus(
+        region,
         {
-            instance["instance_type"]
+            instance.type
             for instance in instances
-            if instance.get("lifecycle") == "spot" and is_standard_instance_type(instance.get("instance_type"))
+            if instance.lifecycle == "spot" and is_standard_instance_type(instance.type)
         } |
         {
-            request["instance_type"]
+            request.type
             for request in requests
-            if is_standard_instance_type(request.get("instance_type"))
+            if is_standard_instance_type(request.type)
         })
-    vcpus_by_type = {}
-    if instance_types:
-        descriptions = json.loads(check_output(prefix + [
-            "ec2", "describe-instance-types", "--instance-types", *instance_types,
-            "--query", "InstanceTypes[].{instance_type:InstanceType,vcpus:VCpuInfo.DefaultVCpus}",
-            "--output", "json",
-        ]))
-        vcpus_by_type = {
-            description["instance_type"]: int(description["vcpus"])
-            for description in descriptions
-        }
 
     running_epochs = {
         str(job.host_epoch)
@@ -1757,15 +1655,12 @@ def current_spot_capacity(arguments, campaign_id, running_jobs, region=None):
     }
     used_vcpus = 0
     observed_running_epochs = set()
-    visible_instance_ids = {instance.get("instance_id") for instance in instances if instance.get("instance_id")}
+    visible_instance_ids = {instance.id for instance in instances}
     for instance in instances:
-        instance_type = instance.get("instance_type")
-        if instance.get("lifecycle") != "spot" or not is_standard_instance_type(instance_type):
+        instance_type = instance.type
+        if instance.lifecycle != "spot" or not is_standard_instance_type(instance_type):
             continue
-        tags = {
-            tag["Key"]: tag["Value"]
-            for tag in instance.get("tags") or []
-        }
+        tags = instance.tags
         if tags.get("BaselineCampaign") == campaign_id and tags.get("HostEpoch") in running_epochs:
             host_epoch = tags["HostEpoch"]
             if host_epoch in observed_running_epochs:
@@ -1778,13 +1673,10 @@ def current_spot_capacity(arguments, campaign_id, running_jobs, region=None):
         except KeyError as error:
             raise RuntimeError(f"AWS omitted vCPU metadata for {instance_type}") from error
     for request in requests:
-        instance_type = request.get("instance_type")
-        if request.get("instance_id") in visible_instance_ids or not is_standard_instance_type(instance_type):
+        instance_type = request.type
+        if request.instance_id in visible_instance_ids or not is_standard_instance_type(instance_type):
             continue
-        tags = {
-            tag["Key"]: tag["Value"]
-            for tag in request.get("tags") or []
-        }
+        tags = request.tags
         if tags.get("BaselineCampaign") == campaign_id and tags.get("HostEpoch") in running_epochs:
             host_epoch = tags["HostEpoch"]
             if host_epoch in observed_running_epochs:
@@ -2483,7 +2375,7 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
                     until=candidate.stop_by + UNIT_WORKER_TEARDOWN_SECONDS)
             except BudgetError:
                 raise
-            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            except (OSError, RuntimeError) as error:
                 admitted, reason = False, f"shared capacity query failed: {error}"
             if admitted:
                 candidate = place(candidate, placement)
@@ -3256,7 +3148,7 @@ class UnitDispatcher:
                     continue
                 started = self.lease_started(worker, sequence, keys, fetch)
                 self.abandon(worker, sequence, "lost" if started else "released", f"heartbeat {age:.0f}s old")
-        except (OSError, ValueError, subprocess.SubprocessError):
+        except (CloudError, OSError, ValueError):
             # S3 may be unavailable for a moment; the next poll, or cleanup's recovered uploads, retries.
             return
 
@@ -3434,7 +3326,7 @@ class UnitDispatcher:
         for sequence in sorted(worker.unsent):
             try:
                 put_unit_lease(self.arguments, worker, sequence, self.lease_document(worker, sequence))
-            except (OSError, subprocess.SubprocessError):
+            except (CloudError, OSError):
                 return
             worker.unsent.discard(sequence)
 
@@ -4552,6 +4444,7 @@ def main():
         print("\n".join(lines))
         return
     arguments = parse_args()
+    arguments.cloud = cloud.AwsCloud()
     if arguments.fleet_budget:
         arguments.shared_budget = FleetBudget(arguments.fleet_budget)
     directory = Path(__file__).resolve().parent

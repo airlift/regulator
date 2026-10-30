@@ -26,10 +26,12 @@ from unittest.mock import Mock, patch
 SCRIPT = Path(__file__).parents[1] / "run-campaign.py"
 AWS_RUNNER = SCRIPT.parents[1] / "aws" / "run-campaign.sh"
 sys.path.insert(0, str(SCRIPT.parent))
+import cloud  # noqa: E402
 import test_engine_build  # noqa: E402
 import test_fleet_budget  # noqa: E402
 import unit_dispatch  # noqa: E402
 from shard_results import write_tsv  # noqa: E402
+from test_cloud import AMAZON_LINUX, FakeCloud  # noqa: E402
 from test_unit_session import UnitCampaign, UnitFixture  # noqa: E402
 SPEC = importlib.util.spec_from_file_location("baseline_run_campaign", SCRIPT)
 RUN_CAMPAIGN = importlib.util.module_from_spec(SPEC)
@@ -218,39 +220,38 @@ class TestRunCampaign(unittest.TestCase):
                 transfer_buckets={"us-west-2": "west", "us-east-2": "east"},
                 engine_build_directories={"r8i": build}, engine_build_policy={"r8i": manifest})
             jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
-            present = {("east", f"prefix/engine-builds/{sha256}.tar.zst"):
-                       base64.b64encode(bytes.fromhex(sha256)).decode() for sha256 in (trino, classes, native)}
             for stalls, expected_puts in ((1, 4), (RUN_CAMPAIGN.SHARED_ARCHIVE_UPLOAD_ATTEMPTS, None)):
                 with self.subTest(stalls=stalls):
+                    # Ohio already holds every archive.
+                    aws = arguments.cloud = FakeCloud()
+                    for name in RUN_CAMPAIGN.engine_build.ARCHIVES:
+                        aws.put("us-east-2", "east", f"prefix/engine-builds/{archives[name]['sha256']}.tar.zst",
+                                name.encode(), sha256=archives[name]["sha256"])
                     puts = []
 
-                    def aws(command, **kwargs):
-                        bucket, key = command[command.index("--bucket") + 1], command[command.index("--key") + 1]
-                        if "head-object" in command:
-                            if (bucket, key) not in present:
-                                raise subprocess.CalledProcessError(254, command)
-                            return present[bucket, key]
+                    def put(region, bucket, key, body, **kwargs):
                         puts.append((bucket, key))
-                        self.assertIn("timeout", kwargs)
                         if len(puts) <= stalls:
-                            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-                        return ""
+                            raise RUN_CAMPAIGN.CloudError("RequestTimeout")
+                        return FakeCloud.put(aws, region, bucket, key, body, **kwargs)
 
                     with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), \
-                            patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws), \
-                            contextlib.redirect_stdout(io.StringIO()):
+                            patch.object(aws, "put", side_effect=put), contextlib.redirect_stdout(io.StringIO()):
                         if expected_puts is None:
                             with self.assertRaisesRegex(SystemExit, "could not upload the r8i (classes|trino|native) "
                                                                     "archive to s3://west/"):
                                 RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
                             continue
                         RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
-                    # Every region but Ohio, which already holds them, gets one copy of each archive a baseline unit
-                    # runs, and the stalled first upload is retried.
+                    # Every region but Ohio gets one copy of each archive a baseline unit runs, and the stalled first
+                    # upload is retried.
                     self.assertEqual(sorted([("west", f"prefix/engine-builds/{trino}.tar.zst"),
                                              ("west", f"prefix/engine-builds/{classes}.tar.zst"),
                                              ("west", f"prefix/engine-builds/{native}.tar.zst")]), sorted(set(puts)))
                     self.assertEqual(expected_puts, len(puts))
+                    self.assertEqual({(bucket, key): sha256 for (bucket, key), (_, _, sha256) in aws.objects.items()
+                                      if bucket == "west"},
+                                     {(bucket, key): key.split("/")[-1].split(".")[0] for bucket, key in puts})
 
     def test_spot_only_launcher_rejects_on_demand_before_aws(self):
         environment = dict(os.environ, CAMPAIGN_SPOT_ONLY="1", INSTANCE_MARKET_TYPE="on-demand")
@@ -1245,72 +1246,47 @@ class TestRunCampaign(unittest.TestCase):
     def test_shared_policy_checks_the_actual_aws_account_and_region(self):
         policy = {"account": "123456789012", "region": "us-east-2",
                   "regions": {"us-east-1": {"max_vcpus": 8, "spot_vcpu_reserve": 0}}}
-        arguments = SimpleNamespace(shared_budget=SimpleNamespace(policy=policy))
+        arguments = SimpleNamespace(shared_budget=SimpleNamespace(policy=policy), cloud=FakeCloud())
         for account, region, regions in (("234567890123", "us-east-2", None),
                                          ("123456789012", "us-west-2", None),
                                          ("123456789012", "us-east-2", ["us-east-2", "eu-west-1"])):
             arguments.platform_regions = {"r8i": regions} if regions else {}
+            arguments.cloud.account_id = account
             with self.subTest(account=account, region=region, regions=regions), \
                     patch.dict(os.environ, {"AWS_REGION": region}), \
-                    patch.object(RUN_CAMPAIGN, "check_output", return_value=account), \
                     self.assertRaisesRegex(SystemExit, "differs from the shared fleet policy"):
                 RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
 
     def test_aws_preflight_requires_each_region_to_run_the_pinned_image(self):
+        aws = FakeCloud()
         arguments = SimpleNamespace(
-            shared_budget=None, purchases={"r8i": "spot"}, spot_vcpu_reserve=0,
+            shared_budget=None, purchases={"r8i": "spot"}, spot_vcpu_reserve=0, cloud=aws,
             platform_regions={"r8i": ["eu-west-1", "us-west-2", "ap-south-1"]},
             regional_amis={("r8i", "us-west-2"): "ami-test", ("r8i", "eu-west-1"): "ami-ireland"},
             transfer_buckets={"eu-west-1": "bucket-ireland"})
-        names = {"ami-test": "al2023-pinned", "ami-ireland": "al2023-pinned"}
-        location = "EU"
-        public_subnets = {"eu-west-1", "us-west-2", "ap-south-1"}
+        aws.default_quota = 64
+        # The Oregon pin names the image even when Oregon does not offer the type.
+        aws.images[("us-west-2", "ami-test")] = aws.images[("eu-west-1", "ami-ireland")] = replace(
+            AMAZON_LINUX, name="al2023-pinned")
+        aws.offerings[("us-west-2", "r8i.2xlarge")] = aws.offerings[("ap-south-1", "r8i.2xlarge")] = set()
+        aws.buckets["bucket-ireland"] = cloud.BucketInfo("eu-west-1", {"Project": "regulator-benchmark"})
 
-        def aws_result(command, **_):
-            region = command[command.index("--region") + 1]
-            if "get-caller-identity" in command:
-                return "123456789012"
-            if "describe-vpcs" in command:
-                return "vpc-" + region
-            if "describe-subnets" in command:
-                self.assertIn("Name=vpc-id,Values=vpc-" + region, command)
-                return region + "a" if region in public_subnets else ""
-            if "get-service-quota" in command:
-                return "64"
-            if "describe-images" in command:
-                image = command[command.index("--image-ids") + 1]
-                # The Oregon pin names the image even when Oregon does not offer the type.
-                self.assertEqual(region, "us-west-2" if image == "ami-test" else "eu-west-1")
-                return f"x86_64\tavailable\t137112412989\t{names[image]}"
-            if "describe-instance-type-offerings" in command:
-                return "" if region in ("ap-south-1", "us-west-2") else region + "a"
-            if "get-bucket-location" in command:
-                return location
-            if "get-bucket-tagging" in command:
-                return "1"
-            raise AssertionError(command)
-
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
-            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+        RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
         self.assertEqual(arguments.ami_names, {"r8i": "al2023-pinned"})
         self.assertEqual(arguments.region_offerings, {"r8i.2xlarge": ["eu-west-1"]})
 
-        public_subnets.discard("ap-south-1")
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
-                self.assertRaisesRegex(SystemExit, "ap-south-1 has no public default-VPC subnet"):
+        aws.networks["ap-south-1"] = cloud.Network("vpc-ap-south-1", ())
+        with self.assertRaisesRegex(SystemExit, "ap-south-1 has no public default-VPC subnet"):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
-        public_subnets.add("ap-south-1")
-        location = "us-west-2"
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
-                self.assertRaisesRegex(SystemExit, "bucket-ireland is not a tagged"):
+        del aws.networks["ap-south-1"]
+        aws.buckets["bucket-ireland"] = cloud.BucketInfo("us-west-2", {"Project": "regulator-benchmark"})
+        with self.assertRaisesRegex(SystemExit, "bucket-ireland is not a tagged"):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
-        names["ami-ireland"] = "al2023-other"
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
-                self.assertRaisesRegex(SystemExit, "ami-ireland in eu-west-1 is not al2023-pinned"):
+        aws.images[("eu-west-1", "ami-ireland")] = replace(AMAZON_LINUX, name="al2023-other")
+        with self.assertRaisesRegex(SystemExit, "ami-ireland in eu-west-1 is not al2023-pinned"):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
         del arguments.regional_amis[("r8i", "eu-west-1")]
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
-                self.assertRaisesRegex(SystemExit, "no r8i AMI for eu-west-1"):
+        with self.assertRaisesRegex(SystemExit, "no r8i AMI for eu-west-1"):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
 
     def test_spot_launch_takes_the_best_scored_region_with_headroom(self):
@@ -1330,20 +1306,16 @@ class TestRunCampaign(unittest.TestCase):
                 arguments.platform_regions = {"r8i": regions}
                 arguments.regional_amis = {("r8i", region): "ami-" + region for region in regions}
                 arguments.transfer_buckets = {"ap-south-1": "bucket-mumbai"}
+                arguments.cloud = FakeCloud()
+                if scored:
+                    arguments.cloud.scores = {"us-west-2": 3, "eu-west-1": 9, "ap-south-1": 9}
                 queried = []
 
                 def spot_capacity(_, __, ___, region):
                     queried.append(region)
                     return {"available": 0 if region == "eu-west-1" else 8}
 
-                def placement_scores(command, **_):
-                    self.assertIn("get-spot-placement-scores", command)
-                    if not scored:
-                        raise subprocess.CalledProcessError(254, command)
-                    return "us-west-2\t3\neu-west-1\t9\nap-south-1\t9\n"
-
-                with patch.object(RUN_CAMPAIGN, "check_output", side_effect=placement_scores), \
-                        patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=spot_capacity):
+                with patch.object(RUN_CAMPAIGN, "current_spot_capacity", side_effect=spot_capacity):
                     launched, _ = self.admit(arguments, result_root, job)
                 environment = RUN_CAMPAIGN.job_environment(launched, arguments, root, result_root)
                 self.assertEqual(queried, expected_queries)
@@ -1358,30 +1330,24 @@ class TestRunCampaign(unittest.TestCase):
                                             (["us-west-2", "eu-west-1", "ap-south-1"], ("us-west-2", "ap-south-1"),
                                              [("eu-west-1", "")])):
             with self.subTest(regions=regions):
-                arguments = SimpleNamespace(platform_regions={"r8i": regions})
+                arguments = SimpleNamespace(platform_regions={"r8i": regions}, cloud=FakeCloud())
                 job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot", spot_capacity_failures=failures)
-                with patch.object(RUN_CAMPAIGN, "check_output", side_effect=AssertionError("scores queried")):
-                    self.assertEqual(expected, RUN_CAMPAIGN.launch_placements(arguments, job))
+                self.assertEqual(expected, RUN_CAMPAIGN.launch_placements(arguments, job))
+                self.assertEqual([], arguments.cloud.calls)
 
     def test_each_platform_launches_in_its_own_regions_order(self):
         # The October 28, 2026 scores: r8i's three regions tie, so its list order stands, while r9g's best-scored
         # regions come first. On-Demand takes each list as given.
         platforms = {platform.name: platform for platform in RUN_CAMPAIGN.read_platforms(SCRIPT.parent)}
-        arguments = SimpleNamespace(max_concurrent=64,
+        arguments = SimpleNamespace(max_concurrent=64, cloud=FakeCloud(),
                                     platform_regions={"r8i": ["eu-west-1", "eu-central-1", "ap-south-1"],
                                                       "r9g": ["us-west-2", "us-east-2", "eu-central-1"]})
-
-        def placement_scores(command, **_):
-            self.assertIn("get-spot-placement-scores", command)
-            return "\n".join(f"{region}\t{score}" for region, score in (
-                ("eu-west-1", 3), ("eu-central-1", 3), ("ap-south-1", 3), ("us-west-2", 1), ("us-east-2", 3))) + "\n"
-
+        arguments.cloud.scores = {"eu-west-1": 3, "eu-central-1": 3, "ap-south-1": 3, "us-west-2": 1, "us-east-2": 3}
         for name, market, expected in (
                 ("r8i", "spot", ["eu-west-1", "eu-central-1", "ap-south-1"]),
                 ("r9g", "spot", ["us-east-2", "eu-central-1", "us-west-2"]),
                 ("r9g", "on-demand", ["us-west-2", "us-east-2", "eu-central-1"])):
-            with self.subTest(platform=name, market=market), \
-                    patch.object(RUN_CAMPAIGN, "check_output", side_effect=placement_scores):
+            with self.subTest(platform=name, market=market):
                 job = RUN_CAMPAIGN.unit_worker_job(platforms[name], 1, 10, market)
                 self.assertEqual(expected, [region for region, _ in RUN_CAMPAIGN.launch_placements(arguments, job)])
 
@@ -1394,65 +1360,34 @@ class TestRunCampaign(unittest.TestCase):
             concurrency_vcpus=8)
         # A unit worker runs on the instance its plan allocates, here the platform's multicore worker.
         jobs = [RUN_CAMPAIGN.unit_worker_job(replace(platform, instance_type="r8i.2xlarge", vcpus=8), 1, 1, "spot")]
-        arguments = SimpleNamespace(shared_budget=None, purchases={"r8i": "spot"}, spot_vcpu_reserve=4)
-        spot_quota = 11
-
-        def aws_result(command, **_):
-            if "get-caller-identity" in command:
-                return "123456789012"
-            if RUN_CAMPAIGN.STANDARD_SPOT_QUOTA_CODE in command:
-                return str(spot_quota)
-            if RUN_CAMPAIGN.STANDARD_ON_DEMAND_QUOTA_CODE in command:
-                return "100"
-            if "describe-images" in command:
-                return "x86_64\tavailable\t137112412989\tal2023-test"
-            if "describe-instance-type-offerings" in command:
-                return "us-west-2a" if "Name=instance-type,Values=r8i.large" in command else ""
-            if "describe-vpcs" in command:
-                return "vpc-default"
-            if "describe-subnets" in command:
-                return "us-west-2a"
-            raise AssertionError(command)
-
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
-                self.assertRaisesRegex(SystemExit, "cannot admit one host"):
+        aws = FakeCloud()
+        arguments = SimpleNamespace(shared_budget=None, purchases={"r8i": "spot"}, spot_vcpu_reserve=4, cloud=aws,
+                                    platform_regions={"r8i": ["us-west-2"]})
+        aws.quotas[("us-west-2", "spot")] = 11
+        aws.images[("us-west-2", platform.ami_id)] = AMAZON_LINUX
+        aws.offerings[("us-west-2", "r8i.2xlarge")] = set()
+        with self.assertRaisesRegex(SystemExit, "cannot admit one host"):
             RUN_CAMPAIGN.validate_aws(arguments, [platform], jobs)
 
-        spot_quota = 12
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
-                self.assertRaisesRegex(SystemExit, "r8i.2xlarge is not offered"):
+        aws.quotas[("us-west-2", "spot")] = 12
+        with self.assertRaisesRegex(SystemExit, "r8i.2xlarge is not offered"):
             RUN_CAMPAIGN.validate_aws(arguments, [platform], jobs)
 
     def test_aws_preflight_rejects_deadline_capacity_above_effective_spot_quota(self):
         policy = {"account": "123456789012", "region": "us-west-2",
                   "max_vcpus": 64, "spot_vcpu_reserve": 16}
+        aws = FakeCloud()
         arguments = SimpleNamespace(
-            shared_budget=SimpleNamespace(policy=policy), purchases={"r8i": "spot"}, spot_vcpu_reserve=16)
-
-        def aws_result(command, **_):
-            if "get-caller-identity" in command:
-                return policy["account"]
-            if RUN_CAMPAIGN.STANDARD_SPOT_QUOTA_CODE in command:
-                return "64"
-            if RUN_CAMPAIGN.STANDARD_ON_DEMAND_QUOTA_CODE in command:
-                # Below the On-Demand safety reserve, which binds only a region with an allowance.
-                return "16"
-            if "describe-images" in command:
-                return "x86_64\tavailable\t137112412989\tal2023-test"
-            if "describe-instance-type-offerings" in command:
-                return "us-west-2a"
-            if "describe-vpcs" in command:
-                return "vpc-default"
-            if "describe-subnets" in command:
-                return "us-west-2a"
-            raise AssertionError(command)
-
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result), \
-                self.assertRaisesRegex(SystemExit, "max_vcpus exceeds"):
+            shared_budget=SimpleNamespace(policy=policy), purchases={"r8i": "spot"}, spot_vcpu_reserve=16, cloud=aws,
+            platform_regions={"r8i": ["us-west-2"]})
+        aws.quotas[("us-west-2", "spot")] = 64
+        # Below the On-Demand safety reserve, which binds only a region with an allowance.
+        aws.quotas[("us-west-2", "on-demand")] = 16
+        aws.images[("us-west-2", self.platform.ami_id)] = AMAZON_LINUX
+        with self.assertRaisesRegex(SystemExit, "max_vcpus exceeds"):
             RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
         policy["max_vcpus"] = 48
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
-            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+        RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
 
     @staticmethod
     def replica_items(arguments, platforms, units, seconds):
@@ -1895,20 +1830,6 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
         self.assertEqual((1, ["retryable-infrastructure|launch-preflight", "attempted=0"]),
                          (result.returncode, result.stdout.splitlines()))
 
-    def test_aws_command_uses_standard_credential_chain_without_profile(self):
-        with patch.dict(os.environ, {"AWS_REGION": "us-east-1"}, clear=True):
-            self.assertEqual(
-                RUN_CAMPAIGN.aws_output(SimpleNamespace()),
-                ["aws", "--region", "us-east-1"])
-
-        with patch.dict(
-                os.environ,
-                {"AWS_PROFILE": "benchmark", "AWS_REGION": "us-east-1"},
-                clear=True):
-            self.assertEqual(
-                RUN_CAMPAIGN.aws_output(SimpleNamespace()),
-                ["aws", "--profile", "benchmark", "--region", "us-east-1"])
-
     def test_aws_wrapper_omits_empty_profile(self):
         source = AWS_RUNNER.read_text()
         function_start = source.index("aws_cli()\n{")
@@ -1938,11 +1859,11 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz
                 patch.dict(os.environ, {}, clear=True):
             root = Path(temporary_directory)
             arguments = self.arguments(root)
+            arguments.cloud = FakeCloud()
             job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
 
-            with patch.object(RUN_CAMPAIGN, "check_output"):
-                environment = RUN_CAMPAIGN.job_environment(
-                    RUN_CAMPAIGN.place(job, RUN_CAMPAIGN.launch_placements(arguments, job)[0]), arguments, root, root)
+            environment = RUN_CAMPAIGN.job_environment(
+                RUN_CAMPAIGN.place(job, RUN_CAMPAIGN.launch_placements(arguments, job)[0]), arguments, root, root)
 
             self.assertNotIn("AWS_PROFILE", environment)
 
@@ -2783,43 +2704,17 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_on_demand_capacity_accounts_for_unrelated_work_and_local_reservations(self):
         running_job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "on-demand")
-        instances = [
-            {
-                "instance_type": "m8gd.4xlarge",
-                "lifecycle": None,
-                "tags": [],
-            },
-            {
-                "instance_type": "r8i.2xlarge",
-                "lifecycle": None,
-                "tags": [
-                    {"Key": "BaselineCampaign", "Value": "baseline"},
-                    {"Key": "HostEpoch", "Value": "10"},
-                ],
-            },
-            {
-                "instance_type": "r8i.2xlarge",
-                "lifecycle": "spot",
-                "tags": [],
-            },
-        ]
-        descriptions = [
-            {"instance_type": "r8i.2xlarge", "vcpus": 8},
-            {"instance_type": "m8gd.4xlarge", "vcpus": 16},
-        ]
-
-        def aws_result(command, **_):
-            if "get-service-quota" in command:
-                return "500"
-            if "describe-instances" in command:
-                return json.dumps(instances)
-            if "describe-instance-types" in command:
-                return json.dumps(descriptions)
-            raise AssertionError(command)
-
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
-            capacity = RUN_CAMPAIGN.current_on_demand_capacity(
-                self.arguments(Path(".")), "baseline", [running_job])
+        aws = FakeCloud()
+        aws.quotas[("us-west-2", "on-demand")] = 500
+        aws.instance_vcpus["m8gd.4xlarge"] = 16
+        aws.region_instances["us-west-2"] = [
+            cloud.Instance("i-external", "m8gd.4xlarge", "on-demand", "running", "", {}, 0),
+            cloud.Instance("i-local", "r8i.2xlarge", "on-demand", "running", "",
+                           {"BaselineCampaign": "baseline", "HostEpoch": "10"}, 0),
+            cloud.Instance("i-spot", "r8i.2xlarge", "spot", "running", "", {}, 0)]
+        arguments = self.arguments(Path("."))
+        arguments.cloud, arguments.platform_regions = aws, {"r8i": ["us-west-2"]}
+        capacity = RUN_CAMPAIGN.current_on_demand_capacity(arguments, "baseline", [running_job], "us-west-2")
 
         self.assertEqual(capacity, {
             "quota": 500,
@@ -2831,61 +2726,19 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
 
     def test_spot_capacity_accounts_for_unrelated_work_and_local_reservations(self):
         running_job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
-        instances = [
-            {
-                "instance_id": "i-external",
-                "instance_type": "m8gd.4xlarge",
-                "lifecycle": "spot",
-                "tags": [],
-            },
-            {
-                "instance_id": "i-local",
-                "instance_type": "r8i.2xlarge",
-                "lifecycle": "spot",
-                "tags": [
-                    {"Key": "BaselineCampaign", "Value": "baseline"},
-                    {"Key": "HostEpoch", "Value": "10"},
-                ],
-            },
-            {
-                "instance_id": "i-on-demand",
-                "instance_type": "r8i.2xlarge",
-                "lifecycle": None,
-                "tags": [],
-            },
-        ]
-        requests = [
-            {
-                "instance_id": "i-local",
-                "instance_type": "r8i.2xlarge",
-                "tags": [],
-            },
-            {
-                "instance_id": None,
-                "instance_type": "r8g.large",
-                "tags": [],
-            },
-        ]
-        descriptions = [
-            {"instance_type": "r8i.2xlarge", "vcpus": 8},
-            {"instance_type": "r8g.large", "vcpus": 2},
-            {"instance_type": "m8gd.4xlarge", "vcpus": 16},
-        ]
-
-        def aws_result(command, **_):
-            if "get-service-quota" in command:
-                return "352"
-            if "describe-instances" in command:
-                return json.dumps(instances)
-            if "describe-spot-instance-requests" in command:
-                return json.dumps(requests)
-            if "describe-instance-types" in command:
-                return json.dumps(descriptions)
-            raise AssertionError(command)
-
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
-            capacity = RUN_CAMPAIGN.current_spot_capacity(
-                self.arguments(Path(".")), "baseline", [running_job])
+        aws = FakeCloud()
+        aws.quotas[("us-west-2", "spot")] = 352
+        aws.instance_vcpus.update({"m8gd.4xlarge": 16, "r8g.large": 2})
+        aws.region_instances["us-west-2"] = [
+            cloud.Instance("i-external", "m8gd.4xlarge", "spot", "running", "", {}, 0),
+            cloud.Instance("i-local", "r8i.2xlarge", "spot", "running", "",
+                           {"BaselineCampaign": "baseline", "HostEpoch": "10"}, 0),
+            cloud.Instance("i-on-demand", "r8i.2xlarge", "on-demand", "running", "", {}, 0)]
+        aws.region_requests["us-west-2"] = [cloud.SpotRequest("sir-local", "i-local", "r8i.2xlarge", {}),
+                                            cloud.SpotRequest("sir-open", "", "r8g.large", {})]
+        arguments = self.arguments(Path("."))
+        arguments.cloud, arguments.platform_regions = aws, {"r8i": ["us-west-2"]}
+        capacity = RUN_CAMPAIGN.current_spot_capacity(arguments, "baseline", [running_job], "us-west-2")
 
         self.assertEqual(capacity, {
             "quota": 352,
@@ -2947,37 +2800,23 @@ launch_instance intel x86_64 r8i.large parameter result.tar.gz || cleanup
             rates["on_demand_total"] = 2 * rates["total"]
         fixture.path.write_text(json.dumps(policy))
         job = RUN_CAMPAIGN.Job(self.platform, "unit-worker", 1, 10, 1, "on-demand", "unit-worker")
-        queried = []
-
-        def aws_result(command, **_):
-            region = command[command.index("--region") + 1]
-            queried.append(region)
-            if "get-service-quota" in command:
-                self.assertIn(RUN_CAMPAIGN.STANDARD_ON_DEMAND_QUOTA_CODE, command)
-                return "64"
-            if "describe-instances" in command:
-                self.assertNotIn("Name=instance-lifecycle,Values=spot", command)
-                return json.dumps([{"id": "i-spot", "type": "r8i.2xlarge", "lifecycle": "spot"},
-                                   {"id": "i-other", "type": "r8i.2xlarge", "lifecycle": None}])
-            if "describe-instance-types" in command:
-                return json.dumps([{"type": "r8i.2xlarge", "vcpus": 8}])
-            raise AssertionError(command)
-
+        aws = FakeCloud()
+        aws.quotas[("eu-west-1", "on-demand")] = 64
+        aws.region_instances["eu-west-1"] = [cloud.Instance("i-spot", "r8i.2xlarge", "spot", "running", "", {}, 0),
+                                             cloud.Instance("i-other", "r8i.2xlarge", "on-demand", "running", "", {}, 0)]
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             arguments = self.arguments(root)
-            arguments.shared_budget = RUN_CAMPAIGN.FleetBudget(fixture.path)
+            arguments.shared_budget, arguments.cloud = RUN_CAMPAIGN.FleetBudget(fixture.path), aws
             arguments.spot_vcpu_reserve, arguments.platform_regions = 0, {"r8i": ["us-west-2", "eu-west-1"]}
-            with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
-                launched, admitted = self.admit(arguments, root, job)
+            launched, admitted = self.admit(arguments, root, job)
         # Oregon has no allowance; Ireland's quota, less its reserve and other work, fits the host.
-        self.assertEqual(set(queried), {"eu-west-1"})
+        self.assertEqual({"eu-west-1"}, {call[1] for call in aws.calls})
         self.assertEqual(("eu-west-1", "on-demand", True), (launched.region, launched.market, admitted))
         reserved = json.loads(arguments.shared_budget.state_path.read_text())["reservations"]
         self.assertEqual([(item["region"], item["market"], item["hourly_rate"]) for item in reserved.values()],
                          [("eu-west-1", "on-demand", 0.60)])
-        with patch.object(RUN_CAMPAIGN, "check_output", side_effect=aws_result):
-            snapshot = RUN_CAMPAIGN.shared_fleet_snapshot(arguments, "eu-west-1", "on-demand")
+        snapshot = RUN_CAMPAIGN.shared_fleet_snapshot(arguments, "eu-west-1", "on-demand")
         self.assertEqual(snapshot["instances"],
                          [{"id": "i-other", "type": "r8i.2xlarge", "vcpus": 8, "campaign_id": None, "host_epoch": None}])
 
@@ -3024,7 +2863,8 @@ def measure_release(directory):
 
 
 class FakeUnitHost:
-    """A unit worker host behind a stubbed wrapper and S3: each lease runs as fixture evidence.
+    """A unit worker host behind a stubbed wrapper, exchanging its leases and uploads through the fleet's S3: each lease
+    runs as fixture evidence.
 
     A lease runs its groups in order, uploading each group's result and marker as it finishes, and a failed
     group ends the lease. A script names what a lease does instead of completing: "interrupt" uploads an
@@ -3086,8 +2926,6 @@ class FakeUnitHost:
         if self.full:
             fleet.full_spot[self.platform] -= 1
         self.refused = fleet.refused_inputs(self)
-        self.objects = {}
-        self.leases = {}
         self.sequence = 1
         self.booted = False
         self.stalled = False
@@ -3153,8 +2991,7 @@ class FakeUnitHost:
             return self.interrupt(lease["unit_id"], lease["groups"][:1], lease["groups"][1])
         if behavior in ("stall", "stall-interrupt", "stall-semantic", "stall-semantic-early"):
             key = f"heartbeat/{self.sequence}.json"
-            self.objects[key] = (self.objects[key][0],
-                                 RUN_CAMPAIGN.time.time() - RUN_CAMPAIGN.UNIT_HEARTBEAT_LOST_SECONDS - 60)
+            self.put(key, self.objects[key][0], self.fleet.time() - RUN_CAMPAIGN.UNIT_HEARTBEAT_LOST_SECONDS - 60)
             self.stalled = True
             return
         self.run(lease)
@@ -3175,8 +3012,24 @@ class FakeUnitHost:
             return
         self.put(f"heartbeat/{self.sequence}.json", json.dumps({"sequence": self.sequence, "unit_id": unit_id}).encode())
 
-    def put(self, key, body):
-        self.objects[key] = (body, RUN_CAMPAIGN.time.time())
+    @property
+    def leases(self):
+        """The leases the controller wrote for this host, by sequence."""
+        prefix = f"{self.session}/input/leases/"
+        return {int(key[len(prefix):-len(".json")]): json.loads(body)
+                for (bucket, key), (body, _, _) in self.fleet.objects.items()
+                if bucket == "bucket" and key.startswith(prefix)}
+
+    @property
+    def objects(self):
+        """The host's uploads, by key below its result prefix, as (body, modification time)."""
+        prefix = f"{self.session}/results/"
+        return {key[len(prefix):]: (body, modified) for (bucket, key), (body, modified, _) in self.fleet.objects.items()
+                if bucket == "bucket" and key.startswith(prefix)}
+
+    def put(self, key, body, modified=None):
+        self.fleet.objects["bucket", f"{self.session}/results/{key}"] = (
+            body, self.fleet.time() if modified is None else modified, None)
 
     def run(self, lease):
         behavior = self.script.get(self.sequence, self.fleet.unit_scripts.get(lease["unit_id"]))
@@ -3271,12 +3124,14 @@ class FakeUnitHost:
         self.status = -9
 
 
-class FakeUnitFleet:
-    """Unit worker hosts the stubbed wrapper launches, with their S3 leases and uploads."""
+class FakeUnitFleet(FakeCloud):
+    """AWS with the unit worker hosts the stubbed wrapper launches, which exchange their leases and uploads with the
+    controller through its S3."""
 
     def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None,
                  failed_boot=lambda host: False, refused_inputs=lambda host: False, unit_scripts=None,
                  unverified_cleanup=lambda host: False, slow_boot=lambda host: False, slow_cleanup=lambda host: False):
+        super().__init__()
         self.scratch = scratch
         self.failed_boot = failed_boot
         self.slow_boot = slow_boot
@@ -3292,8 +3147,6 @@ class FakeUnitFleet:
         self.full_spot = dict(full_spot or {})
         # The shared fleet's reservations a restart recovers, or None to leave recovery stubbed.
         self.reservations = None
-        # Seconds the controller has slept, added to its monotonic clock.
-        self.clock = 0
         self.units = RUN_CAMPAIGN.work_units.load(SCRIPT.parent)
         self.hosts = []
         self.log = []
@@ -3301,33 +3154,19 @@ class FakeUnitFleet:
         # The digest of the tooling the controller runs.
         self.tooling = "c" * 64
 
-    def host(self, worker):
-        return next(host for host in self.hosts if host.session == worker.metadata["session"])
-
     def popen(self, command, **kwargs):
         host = FakeUnitHost(self, len(self.hosts) + 1, command[1:], kwargs["env"])
         self.hosts.append(host)
         return host
 
-    def list_results(self, arguments, worker):
-        return {key: modified for key, (_, modified) in self.host(worker).objects.items()}
-
-    def get_result(self, arguments, worker, key, path):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(self.host(worker).objects[key][0])
-
-    def put_lease(self, arguments, worker, sequence, document):
-        host = self.host(worker)
-        if sequence in host.leases:
-            if host.leases[sequence] != document:
-                raise AssertionError(f"lease {sequence} of {host.session} rewritten")
-            return
-        host.leases[sequence] = document
-        self.log.append(("lease", host.session, sequence, document.get("unit_id")))
+    def put(self, region, bucket, key, body, *, if_none_match=False, sha256=None):
+        written = super().put(region, bucket, key, body, if_none_match=if_none_match, sha256=sha256)
+        lease = re.fullmatch(r"(.+)/input/leases/([0-9]+)\.json", key)
+        if written and lease:
+            self.log.append(("lease", lease[1], int(lease[2]), json.loads(body).get("unit_id")))
+        return written
 
     def check_output(self, command, **kwargs):
-        if "get-spot-placement-scores" in command:
-            raise subprocess.CalledProcessError(254, command)
         if command[:2] == ["ps", "-p"]:
             host = next(host for host in self.hosts if host.pid == int(command[2]))
             if host.status is not None:
@@ -3352,19 +3191,15 @@ class FakeUnitFleet:
 
     def stubs(self):
         stack = contextlib.ExitStack()
-        for name, value in (
-                ("list_unit_worker_results", self.list_results), ("get_unit_worker_result", self.get_result),
-                ("put_unit_lease", self.put_lease), ("check_output", self.check_output)):
-            stack.enter_context(patch.object(RUN_CAMPAIGN, name, side_effect=value))
-        stack.enter_context(patch.object(RUN_CAMPAIGN, "unit_worker_instance_state", return_value="running"))
+        stack.enter_context(patch.object(RUN_CAMPAIGN, "check_output", side_effect=self.check_output))
         stack.enter_context(patch.object(RUN_CAMPAIGN, "frozen_input_fingerprint", return_value=None))
         stack.enter_context(patch.object(RUN_CAMPAIGN, "tooling_digest", side_effect=lambda root: self.tooling))
         if self.reservations is None:
             stack.enter_context(patch.object(RUN_CAMPAIGN, "recover_budget_reservations"))
         stack.enter_context(patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=self.popen))
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "sleep", side_effect=self.sleep))
-        monotonic = RUN_CAMPAIGN.time.monotonic
-        stack.enter_context(patch.object(RUN_CAMPAIGN.time, "monotonic", side_effect=lambda: monotonic() + self.clock))
+        stack.enter_context(patch.object(RUN_CAMPAIGN.time, "monotonic", side_effect=self.monotonic))
+        stack.enter_context(patch.object(RUN_CAMPAIGN.time, "time", side_effect=self.time))
         stack.enter_context(patch.object(RUN_CAMPAIGN.os, "kill", side_effect=self.kill))
         return stack
 
@@ -3399,7 +3234,7 @@ class TestUnitWorkers(unittest.TestCase):
             phase=phase, campaign_id="campaign", campaign_root=root, max_concurrent=max_concurrent,
             max_concurrent_per_platform=per_platform, candidate_archive=root / "candidate.tar.gz",
             candidate_commit="a" * 40, candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
-            shared_budget=budget, selected_shards=shards, platform_regions=platform_regions or {},
+            cloud=fleet, shared_budget=budget, selected_shards=shards, platform_regions=platform_regions or {},
             purchases=purchases or {}, topology_deadline_seconds=deadline, primary_results=primary_results,
             release_version=release_version)
         self.arguments = arguments
@@ -3454,48 +3289,34 @@ class TestUnitWorkers(unittest.TestCase):
             "aws_region": "eu-west-1", "bucket": "bucket", "input_prefix": "campaign/input/r8i-session-1",
             "result_prefix": "campaign/results/r8i-session-1"})
         body = json.dumps({"sequence": 1, "unit_id": "unit"}, sort_keys=True) + "\n"
-        listing = json.dumps({"Contents": [
-            {"Key": "campaign/results/r8i-session-1/heartbeat/1.json", "LastModified": "2026-10-26T16:00:00+00:00"},
-            {"Key": "campaign/results/r8i-session-10/heartbeat/1.json", "LastModified": "2026-10-26T16:00:01+00:00"}]})
+        lease = ("eu-west-1", "bucket", "campaign/input/r8i-session-1/leases/1.json")
         # A lease written before a restart or a lost response conflicts, and stands only if it is this one.
         for case, existing, operations, error in (
-                ("new key", None, ["put-object"], None),
-                ("same lease", body, ["put-object", "get-object"], None),
-                ("another lease", '{"sequence": 1, "unit_id": "other"}\n', ["put-object", "get-object"],
+                ("new key", None, ["put"], None),
+                ("same lease", body, ["put", "get"], None),
+                ("another lease", '{"sequence": 1, "unit_id": "other"}\n', ["put", "get"],
                  "lease 1 differs from its ledger"),
-                ("listing", None, ["list-objects-v2"], None)):
+                ("listing", None, ["list"], None)):
             with self.subTest(case=case):
-                calls = []
-
-                def s3(command, **_):
-                    operation = command[command.index("s3api") + 1]
-                    calls.append(operation)
-                    self.assertEqual(["eu-west-1", "bucket"], [command[command.index("--region") + 1],
-                                                              command[command.index("--bucket") + 1]])
-                    if operation == "list-objects-v2":
-                        self.assertEqual("campaign/results/r8i-session-1/", command[command.index("--prefix") + 1])
-                        return listing
-                    self.assertEqual("campaign/input/r8i-session-1/leases/1.json",
-                                     command[command.index("--key") + 1])
-                    if operation == "put-object":
-                        self.assertEqual("*", command[command.index("--if-none-match") + 1])
-                        self.assertEqual(body, Path(command[command.index("--body") + 1]).read_text())
-                        if existing is not None:
-                            raise subprocess.CalledProcessError(254, command)
-                    else:
-                        Path(command[-1]).write_text(existing)
-                    return ""
-
-                with patch.object(unit_dispatch, "check_output", side_effect=s3):
-                    if case == "listing":
-                        self.assertEqual({"heartbeat/1.json": 1793030400.0},
-                                         RUN_CAMPAIGN.list_unit_worker_results(SimpleNamespace(), worker))
-                    elif error:
-                        with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, error):
-                            RUN_CAMPAIGN.put_unit_lease(SimpleNamespace(), worker, 1, json.loads(body))
-                    else:
-                        RUN_CAMPAIGN.put_unit_lease(SimpleNamespace(), worker, 1, json.loads(body))
-                self.assertEqual(operations, calls)
+                aws = FakeCloud()
+                arguments = SimpleNamespace(cloud=aws)
+                if existing is not None:
+                    aws.put(*lease, existing.encode())
+                aws.objects["bucket", "campaign/results/r8i-session-1/heartbeat/1.json"] = (b"{}", 1793030400.0, None)
+                aws.objects["bucket", "campaign/results/r8i-session-10/heartbeat/1.json"] = (b"{}", 1793030401.0, None)
+                aws.calls.clear()
+                if case == "listing":
+                    self.assertEqual({"heartbeat/1.json": 1793030400.0},
+                                     RUN_CAMPAIGN.list_unit_worker_results(arguments, worker))
+                    self.assertEqual([("list", "eu-west-1", "bucket", "campaign/results/r8i-session-1/")], aws.calls)
+                    continue
+                if error:
+                    with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, error):
+                        RUN_CAMPAIGN.put_unit_lease(arguments, worker, 1, json.loads(body))
+                else:
+                    RUN_CAMPAIGN.put_unit_lease(arguments, worker, 1, json.loads(body))
+                self.assertEqual([(operation, *lease) for operation in operations], aws.calls)
+                self.assertEqual((existing or body).encode(), aws.objects[lease[1:]][0])
 
     def test_phase_drains_through_workers_with_one_lease_ahead(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3791,13 +3612,13 @@ class TestUnitWorkers(unittest.TestCase):
                     # A failure halts the fleet, and only its own controller's restart clears that halt.
                     other.budget.resume(other.root / "other")
                     with self.assertRaisesRegex(RuntimeError, "shared fleet is halted: controller stopped"):
-                        other.reserve(1, campaign="other", now=RUN_CAMPAIGN.time.time())
+                        other.reserve(1, campaign="other", now=fleet.time())
                 else:
-                    self.assertTrue(other.reserve(1, campaign="other", now=RUN_CAMPAIGN.time.time())[0])
+                    self.assertTrue(other.reserve(1, campaign="other", now=fleet.time())[0])
                 fleet.abort_after = None
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
                                purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
-                self.assertTrue(other.reserve(2, campaign="other", now=RUN_CAMPAIGN.time.time())[0])
+                self.assertTrue(other.reserve(2, campaign="other", now=fleet.time())[0])
 
     def test_cancelled_controller_with_a_host_awaiting_cleanup_halts_the_fleet_until_its_own_restart(self):
         # A controller cancelled before its recovery adopted a host that an earlier run left halts the fleet, since

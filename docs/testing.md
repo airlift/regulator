@@ -79,9 +79,11 @@ does not compile or run the matching engines.
 ## Benchmark setup
 
 Before changing collectors, campaign orchestration, manifests, or reducers, run
-the same offline gate used by CI:
+the same offline gate used by CI, after installing the tooling's pinned Python
+packages:
 
 ```bash
+python3 -m pip install -r tools/re2-benchmark/requirements.txt
 python3 tools/re2-benchmark/validate-tooling.py
 ```
 
@@ -94,8 +96,9 @@ commands in these unit tests use fixtures or mocks.
 The gate clears `LANGUAGE_NATIVE_RUNNER`, `LANGUAGE_NATIVE_BULK_RUNNER`,
 `LANGUAGE_NATIVE_RUST_RUNNER`, and `LANGUAGE_NATIVE_RUST_BULK_RUNNER`, so native
 integration tests remain explicitly skipped even in a prepared shell.
-It needs Python 3.11 or newer, Git, Bash, zstd, and standard Unix tools, but no Java
-build, external comparator checkout, AWS credentials, or benchmark collection.
+It needs Python 3.11 or newer with those packages, Git, Bash, zstd, and standard
+Unix tools, but no Java build, external comparator checkout, AWS credentials, or
+benchmark collection.
 See the [language guide](../tools/re2-benchmark/language/README.md) for opt-in
 native integration checks and the comparator guides for source preparation.
 
