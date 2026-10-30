@@ -1,7 +1,6 @@
 # Benchmark mode inventory
 
-The AWS wrappers, `aws/run-campaign.sh` and `aws/run-host.sh`, accept one
-mode, `unit-worker`, and reject any other.
+`aws/run-host.sh` accepts one mode, `unit-worker`, and rejects any other.
 
 ## Accepted modes
 

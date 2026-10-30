@@ -52,7 +52,7 @@ CloudTrail launch/shutdown events and verified cleanup. Wrapper lifetimes
 include local preparation and recovery; they are not exact billed running
 time. Saved price estimates are not a reconciled AWS invoice.
 
-A Spot launch that finds no capacity in its zone tries each other zone of its
+A launch that finds no capacity in its zone tries each other zone of its
 region that offers the type before it fails. A unit whose worker is reclaimed
 or fails goes back to its pool, as [unit dispatch](#unit-dispatch) describes.
 Each platform launches in its own regions and buys hosts by its own purchase
@@ -238,6 +238,7 @@ Execution requires:
   and stages each platform's pinned JDK
 - working AWS credentials from the standard AWS credential chain, or an
   explicitly selected profile, and the configured region
+- the account's [worker profile](#worker-profile), which workers run under
 
 Keep the campaign root outside Maven's `target` directory. The controller
 rejects volatile paths and revalidates the candidate, manifests, and accepted
@@ -582,11 +583,11 @@ launches and the session records no score. On-Demand launches take the first
 region of the list with headroom. The budget's headroom counts the region's
 quota, read once per controller, and its instances and Spot requests, described
 at most once per dispatch loop. A list of one region asks for no score.
-Within the chosen region, each attempt starts in a different zone that offers
-the worker type, and a Spot launch that finds a zone without capacity moves on
-to the region's next zone. Each session runs and verifies its cleanup in its own
-region, and its unit receipts record the region and the market the host read
-from instance metadata.
+Within the chosen region, each worker starts in a zone its identity picks among
+those that offer the worker type, and a launch that finds a zone without
+capacity moves on to the region's next zone. The controller cleans up each
+worker in its own region, and its unit receipts record the region and the
+market the host read from instance metadata.
 
 A worker type's Spot shortage starts when one of its Spot launches finds no
 capacity in a region. It ends when one of its Spot workers starts. A
@@ -639,7 +640,7 @@ Hosts read campaign inputs from a shared bucket in their launch region. Give
 each launch region's bucket with `--transfer-bucket REGION=BUCKET` and set
 `TRANSFER_PREFIX`; the controller refuses to launch in a region without one.
 Each shared bucket must carry the `Project=regulator-benchmark` tag, and
-preflight checks the tag and the bucket's region. Each session keeps its
+preflight checks the tag and the bucket's region. Each worker keeps its
 leases and results under its own prefix, `TRANSFER_PREFIX/<session>`, and
 cleanup removes that prefix; the shared archives described below stay. To
 create a shared bucket, omitting `--create-bucket-configuration` in
@@ -731,20 +732,20 @@ key and checksum. The frozen candidate archive, which every host unpacks first,
 travels the same way under `TRANSFER_PREFIX/candidates/<sha256>.tar.gz`. A
 language plan's bundle, which a language unit worker
 installs, travels the same way under
-`TRANSFER_PREFIX/language-plans/<sha256>.tar.zst`; the wrapper takes the bundles
-of a session's own pool shards in `LANGUAGE_PLAN_BUNDLE_SHA256S`, with the
-candidate provenance their units measure. The platform's pinned JDK travels the
+`TRANSFER_PREFIX/language-plans/<sha256>.tar.zst`; a worker's user data names
+the bundles of its own pool's shards. The candidate provenance their units
+measure travels under `TRANSFER_PREFIX/candidates/<sha256>.tsv`. The platform's
+pinned JDK travels the
 same way under `TRANSFER_PREFIX/jdks/<sha256>.tar.gz`: the controller downloads
 it once per campaign from its pinned URL into the campaign root's `jdks/`,
 checks it against the pinned SHA-256, and puts it in each region, so hosts never
 fetch it from its publisher.
 Each upload is one request, which fails once a read waits 60 seconds, and is
-retried; the campaign stops after three failed attempts. A
-session whose archive is missing from its bucket fails as
-`retryable-infrastructure` before it launches. Each session's instance role may
-read exactly those archive keys, in addition to its own session prefix. These
-archives are campaign inputs rather than session resources, so session cleanup
-leaves them in place. Remove them once the campaign is done:
+retried; the campaign stops after three failed attempts. The
+[worker profile](#worker-profile) may read those archive keys, in addition to
+each worker's own input prefix. These archives are campaign inputs rather than
+worker resources, so worker cleanup leaves them in place. Remove them once the
+campaign is done:
 
 ```bash
 aws s3 rm "s3://<bucket>/<transfer-prefix>/candidates/" --recursive --region <region>
@@ -753,20 +754,38 @@ aws s3 rm "s3://<bucket>/<transfer-prefix>/language-plans/" --recursive --region
 aws s3 rm "s3://<bucket>/<transfer-prefix>/jdks/" --recursive --region <region>
 ```
 
-## Single-job wrapper
+## Launching a worker
 
-The controller uses `run-campaign.sh` to run one AWS job, a
-`CAMPAIGN_MODE=unit-worker` job that leases [work units](#unit-workers). The
-wrapper reads only its environment; the controller names it with the campaign
-ID and the job's identity as its arguments, so a restarted controller adopts
-only its own campaign's wrappers. The
-wrapper verifies the archive, provisions an isolated
-instance that reads its inputs from the region's shared bucket, downloads the
-result, and verifies instance, IAM, and session prefix cleanup.
+The controller launches each [unit worker](#unit-workers) itself. It names the
+worker's host session `<campaign>-e<host epoch>-<UTC second>`, such as
+`baseline.a-e12-20261024T120000Z`, records the session and its prefix in the
+worker's `starting` row of `job-attempts.tsv`, and then calls `RunInstances`
+in the worker's region with:
 
-The fleet controller should normally invoke this wrapper. Direct invocation is
-appropriate only while diagnosing one qualification job and still requires all
-pinned identity variables.
+- the platform's AMI, the worker type, and a 40 GiB encrypted gp3 root;
+- a public subnet of the region's default VPC and its default security group;
+- the [worker profile](#worker-profile), IMDSv2 required, and
+  `InstanceInitiatedShutdownBehavior=terminate`, so a host that powers off
+  terminates;
+- Spot as a one-time request whose maximum price is the shared policy's hourly
+  rate, or On-Demand;
+- tags naming the campaign, phase, platform, replica, host epoch, and session;
+- a client token derived from the session and zone;
+- user data that exports the worker's settings, its prefixes, archives, stop
+  time, and pinned identities, after the first line of
+  `worker-user-data.sh`.
+
+A launch AWS refuses for capacity moves on to the region's next zone. A
+refused Spot launch, for capacity, quota, or price, is `retryable-spot`; an
+On-Demand quota is `retryable-capacity`; anything else is
+`retryable-infrastructure`. A request whose answer never comes is sent again
+with the same client token, so AWS launches at most one instance, and the
+controller then finds the instance by its session's tag.
+
+`worker-user-data.sh` starts the host's stop-time watchdog and startup
+timeline, waits for the profile's credentials, downloads and checks the frozen
+candidate, and runs `run-host.sh`. On exit it uploads the host evidence to
+`<result_prefix>/host.tar.gz` and powers off.
 
 `run-host.sh` runs on the instance. It verifies the AMI, JDK, package,
 candidate, comparator, and manifest identities, and runs `run-unit-worker.sh`.
@@ -776,15 +795,39 @@ toolchain: the pinned compiler, CMake, Cargo, and Rust packages with git, make,
 and ninja, because it builds the native runners, the pinned `regex` crate, and
 the Trino harness. A measuring host records those packages as `not-installed`.
 
+### Worker profile
+
+Every worker runs under one permanent instance profile,
+`regulator-benchmark-worker`, whose role may read any campaign's inputs and
+shared archives, and write its results and lease claims, in the
+`regulator-benchmark-938463256137-*` buckets; `worker-policy.json` is its
+policy. Preflight checks that the profile exists, with one IAM read, and the
+controller never writes IAM. Create it once per account:
+
+```bash
+aws iam create-role --role-name regulator-benchmark-worker \
+  --assume-role-policy-document '{"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+    "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}]}'
+aws iam put-role-policy --role-name regulator-benchmark-worker \
+  --policy-name regulator-benchmark-worker \
+  --policy-document file://tools/re2-benchmark/aws/worker-policy.json
+aws iam create-instance-profile --instance-profile-name regulator-benchmark-worker
+aws iam add-role-to-instance-profile --instance-profile-name regulator-benchmark-worker \
+  --role-name regulator-benchmark-worker
+```
+
+The controller's own credentials need `iam:GetInstanceProfile` on the profile
+and `iam:PassRole` on its role, in addition to EC2 launch, describe, and
+terminate and S3 access to the shared buckets.
+
 ## Unit workers
 
-A `CAMPAIGN_MODE=unit-worker` job launches a host that measures the work units
-its controller leases to it, one at a time, instead of one shard. It requires
-`CAMPAIGN_SHARD_ID=unit-worker` and `TIMEOUT_SECONDS` of the worker lifetime,
+A unit worker is a host that measures the work units its controller leases to
+it, one at a time. Its planned span is the worker lifetime,
 `UNIT_WORKER_LIFETIME_SECONDS` (default 21600), plus 4500 seconds for host setup
 and final uploads, plus the time its last unit may take: 900, or the pool's
-longest estimated unit when that is longer. It also requires
-`CAMPAIGN_HOST_STOP_BY`, the epoch second its
+longest estimated unit when that is longer. Its user data names
+`HOST_STOP_BY`, the epoch second its
 [fleet reservation](#shared-fleet-budget) covers the host until, and passes
 `UNIT_WORKER_IDLE_SECONDS` (default 600) to the worker. The user data keeps the
 host's stop time in `/var/tmp/re2-stop-by` and starts a watchdog before anything
@@ -804,9 +847,10 @@ data, then `credentials`, `candidate`, `packages`, each archive by name,
 The controller reports the time from boot to that first unit as
 `boot_to_first_unit_seconds=` in the detail of the attempt's `job-attempts.tsv`
 row. The host runs `run-unit-worker.sh`, which runs `../baseline/run-unit.sh`
-for each measured group of each lease. The wrapper's `session.txt` records the
-host session (`session`), `bucket`, `input_prefix`, and `result_prefix`; every
-key below is under one of those prefixes.
+for each measured group of each lease. The worker's `starting` row records its
+host session (`session`) and its prefix (`prefix`); its input prefix is
+`<prefix>/input` and its result prefix `<prefix>/results`, and every key below
+is under one of those.
 
 | Key | Writer | Holds |
 |---|---|---|
@@ -815,7 +859,7 @@ key below is under one of those prefixes.
 | `<result_prefix>/units/<seq>/groups/<g>/result.tar.gz` | host | the directory of group `g` of lease `seq` |
 | `<result_prefix>/units/<seq>/groups/<g>/completion.json` | host | the group's completion marker, written after its result |
 | `<result_prefix>/events/<seq>-interrupted.tar.gz` | host | an interruption record and the running group's log |
-| the job's result key | host user data | the host evidence, once the worker exits |
+| `<result_prefix>/host.tar.gz` | host user data | the host evidence, once the worker exits |
 
 Every upload of `run-unit-worker.sh` except a heartbeat is one PUT with its
 SHA-256 checksum and `If-None-Match: *`, so no key is overwritten. Each request
@@ -833,15 +877,14 @@ a group result's stretched attempt time; a call within an upload's budget also
 ends when that budget does. The interruption bundle and
 the final heartbeat after it share one budget. The user data's upload of the
 host evidence, once the worker exits, is a plain `aws s3 cp` outside these
-rules. The host's role adds only `s3:ListBucket` restricted to
-`<input_prefix>/leases/`, so the worker tells a lease not yet written from one
-it cannot read.
+rules. The worker profile allows `s3:ListBucket` only below an input prefix's
+`leases/`, so the worker tells a lease not yet written from one it cannot read.
 
 A lease is a JSON object:
 
 ```json
 {"schema_version": 2, "campaign_id": "primary-20261024", "phase": "primary",
- "platform": "r8i", "host_session": "20261024T120000Z-4242", "sequence": 3,
+ "platform": "r8i", "host_session": "primary-20261024-e12-20261024T120000Z", "sequence": 3,
  "unit_id": "<64 hex digits>", "replica_id": 2, "groups": ["2", "1"],
  "protocol": "qualification", "stop_by": 1793102400}
 ```
@@ -896,9 +939,10 @@ kills the running group's process group. The host uploads
 `notice_time`, `action`, `action_time`) and the running group's
 `worker-unit.log`, then exits 43; the finished groups are already uploaded.
 Its user data uploads the host evidence if the instance lasts. A group whose
-marker had not landed never completes. The wrapper classifies status 43
-as `retryable-spot`, and a host that vanishes without uploading is classified
-as any other host. A rebalance recommendation is only a hint that EC2 may
+marker had not landed never completes. The controller reads the worker's exit
+status from the host evidence and classifies status 43 as `retryable-spot`. A
+host EC2 reclaims before it uploads is also `retryable-spot`, and any other
+host that ends without uploading is `retryable-infrastructure`. A rebalance recommendation is only a hint that EC2 may
 reclaim the instance, so the worker goes on leasing until the notice comes.
 
 The worker stops, with its reason in the final heartbeat and
@@ -958,7 +1002,7 @@ its [bounded wait](#launch-regions-and-purchase); a `spot-then-on-demand`
 pool's new workers then launch On-Demand, and Spot resumes in each region once
 its cool-down ends. A restarted controller forgets the cool-downs.
 
-Once a worker's session exists, the controller writes its first lease and
+Once a worker's instance is known, the controller writes its first lease and
 keeps one lease written ahead while no idle worker of the pool could take the
 item. Eligible items lease by On-Demand priority, then replica, then remaining
 work: On-Demand work first, then the item of the lowest replica, and of those
@@ -993,7 +1037,7 @@ accepted first elsewhere. Other outcomes:
   names no unit, from a notice while the host waited for its next lease,
   releases that lease without spending an attempt.
 - A heartbeat 30 minutes old, or 10 minutes old on an instance no longer
-  running, marks the host lost, and its wrapper is stopped. A lease has
+  running, marks the host lost, and the controller terminates its instance. A lease has
   started if one of its groups finished or a heartbeat shows it began; the
   lost host's started lease is requeued, and an unstarted one is released.
   Cleanup still recovers a completion that lands, which is accepted if it is
@@ -1005,10 +1049,7 @@ accepted first elsewhere. Other outcomes:
   replacement. A worker whose uploads include a heartbeat, a completion or an
   interruption bundle has started, even if no heartbeat landed. The host
   evidence its user data uploads on exit, even after a failed bootstrap, does
-  not show a start. A slot whose worker has failed 3 times gives up. A worker
-  whose wrapper refused its inputs (`input-rejection`, under
-  [recovery and evidence](#recovery-and-evidence)) gives up its whole pool,
-  free slots included, since every launch would be refused the same way. Once
+  not show a start. A slot whose worker has failed 3 times gives up. Once
   the pool has no worker or slot left, its queued work stays unresolved. Each
   worker's `starting` record in `job-attempts.tsv` names its slot (`slot`, the
   host epoch of the slot's first worker) and the failures it inherited
@@ -1028,8 +1069,10 @@ accepted first elsewhere. Other outcomes:
   rejection or is missing.
 - Work queued after the phase deadline, including work a lost, failed, or
   interrupted lease hands back, stays unresolved.
-- A marker that names another lease, unproven cleanup, and changed frozen
-  inputs stop the campaign as unsafe.
+- A marker that names another lease and changed frozen inputs stop the
+  campaign as unsafe.
+- A worker whose cleanup cannot be proven keeps its reservation, and each loop
+  tries its cleanup again; the phase does not complete while one remains.
 
 When a pool's remaining estimated work, the groups not yet accepted, falls to
 10% of its total, its remaining items become On-Demand work, leased first, and
@@ -1051,23 +1094,24 @@ complete.
 A phase restarts from its ledgers, and only with the tooling that
 started it: `tooling-digest.txt` records a digest of the tracked benchmark
 tooling when the phase starts, and a restart that finds a different digest, or
-none, is refused. The controller adopts each worker whose wrapper is still
-running, rewrites its outstanding leases, which must match what was written,
-and settles each exited worker from its recovered uploads, so no accepted group
-runs again and no unit is leased to two live hosts. Each item's remaining
+none, is refused. The controller adopts each worker its `job-attempts.tsv`
+shows launched and not settled, finding its instance by ID or, when the
+launch's answer never came, by its session's tag, rewrites its outstanding
+leases, which must match what was written, and settles it once its cleanup is
+proven, so no accepted group runs again and no unit is leased to two live
+hosts. A worker EC2 still lists none of by its boot deadline settles as
+`retryable-infrastructure`. A root whose workers the earlier per-host wrapper
+launched is refused; run the phase in a new root. Each item's remaining
 groups are rebuilt from the ledgers. A unit rejected for a
 semantic failure stays unresolved across restarts, so measuring it again
 means running the whole phase again in a new result root.
 
-Failed jobs record their failure type. A session that fails before its first
-RunInstances request, in setup such as the default VPC lookup or the instance
-profile, is `retryable-infrastructure`, since no instance can exist; cleanup
-still removes and verifies the bucket and profile it created. A session whose
-frozen inputs fail their checks before launch, such as uncommitted tooling or a
-candidate archive whose SHA-256 or engine tree differs, is instead
-`input-rejection`, since a retry would fail them again; the worker's whole pool
-gives up. [Unit dispatch](#unit-dispatch) retries a failed unit instead.
-Unverifiable cleanup and other unsafe controller failures stop admissions.
+Failed jobs record their failure type, as [launching a worker](#launching-a-worker)
+and [unit workers](#unit-workers) describe. Frozen inputs that fail their checks
+before a launch, such as a candidate archive whose SHA-256 or engine tree
+differs, stop the campaign as unsafe, since a retry would fail them again.
+[Unit dispatch](#unit-dispatch) retries a failed unit instead. Unsafe
+controller failures stop admissions.
 
 See:
 
@@ -1078,14 +1122,17 @@ See:
 
 ### Recovering uploads during cleanup
 
-After verifying instance termination, the wrapper inventories and downloads
-all uploaded result objects into the session's `recovered-uploads` directory.
-It records each object's size and local SHA-256 before deleting the transfer
-prefix. A failed inventory or download retains that prefix and fails cleanup.
-A unit worker's recovered uploads are settled as
+A worker's cleanup is two proofs, in order. First, EC2 lists its instance as
+terminated; the controller asks EC2 to terminate one still running. Then the
+controller downloads every object under the worker's result prefix into
+`<session>/recovered-uploads/objects/`, by its key below that prefix, deletes
+the worker's whole prefix, leases included, and lists it empty. A failed
+listing, download, or deletion keeps the prefix and the worker's reservation,
+and the next loop tries again. Only once both proofs hold does the controller
+release the reservation and settle the worker from its recovered uploads, as
 [unit dispatch](#unit-dispatch) describes.
 
 This covers late uploads and results available when a controller aborts.
 Measurements still on an interrupted or forcibly terminated host may never
-reach S3; the recovery receipt states that limitation. After cleanup is proven, a benchmark or artifact
-rejection leaves its unit unaccepted while unrelated units finish.
+reach S3. After cleanup is proven, a benchmark or artifact rejection leaves
+its unit unaccepted while unrelated units finish.

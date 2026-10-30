@@ -193,7 +193,7 @@ class TestFleetBudget(unittest.TestCase):
                     return count
             self.fail("the fleet admitted more hosts than its limit")
 
-        # Reserving each worker's whole wrapper lifetime and cleanup, 7.75 hours, admitted 10 workers; reserving a
+        # Reserving each worker's whole planned span and cleanup, 7.75 hours, admitted 10 workers; reserving a
         # launch's boot and first lease, as the controller does, 1.5 hours, admits 53.
         self.assertEqual(10, admitted(27900))
         self.assertEqual(53, admitted(5400))

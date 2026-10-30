@@ -120,7 +120,7 @@ def affordable(policy, state, reservations, now):
 
 
 def capacity(snapshot, reservations, policy, *, region=None, market="spot", remember=False):
-    """Count one region's and market's instance/request unions and wrappers not yet visible in EC2."""
+    """Count one region's and market's instance/request unions and reserved hosts not yet visible in EC2."""
     region = region or policy["region"]
     limits = region_limits(policy)[region]
     # Reservations made before regions and markets were recorded all launched on Spot in the home region.

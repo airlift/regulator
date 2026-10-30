@@ -90,7 +90,7 @@ These are empty when unknown, such as an availability zone the launch never
 chose, a placement score the controller did not supply, or a session that
 reported no failure. A reclaimed host, or a launch that failed for capacity,
 quota, or another retryable reason, is recorded as an `interruption` whose
-`reason` is the wrapper's classified detail, such as `launch-capacity:...`.
+`reason` is the controller's classified detail, such as `launch-capacity:...`.
 Event files written before these columns existed still reduce, and a resumed
 campaign keeps the columns its event file started with.
 
