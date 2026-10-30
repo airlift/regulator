@@ -2255,8 +2255,9 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
         if admitted:
             candidate = place(candidate, placement)
             break
-        # Fleet-wide host, spending and launch-rate limits, and a spending stop, hold in every region.
-        if reason in ("fleet launch limit", "fleet spending or machine-hour ceiling", "spending_stop"):
+        # Fleet-wide host, spending and launch-rate limits, the boot window, and a spending stop, hold in every
+        # region.
+        if reason in ("fleet launch limit", "fleet spending or machine-hour ceiling", "boot window", "spending_stop"):
             break
     if not admitted:
         if (candidate.identity, reason) not in capacity_waits:
@@ -2519,6 +2520,8 @@ class UnitDispatcher:
         # Each lease, as its worker's host epoch and sequence, that spent one of its item's attempts.
         self.counted = set()
         self.capacity_waits = set()
+        # How many more hosts the fleet's boot window admits this loop.
+        self.boot_room = 0
         # When the controller decided to stop each host it terminates, by host epoch.
         self.terminated = {}
         # The loop's round trips run on the request threads, and gathering group completions on the acceptance
@@ -3133,11 +3136,16 @@ class UnitDispatcher:
     def finish(self, worker):
         """Settle a worker whose cleanup was proven, from the uploads its cleanup recovered and its host's exit."""
         validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
-        self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
-        self.workers.pop(worker.job.host_epoch, None)
         status, classification, detail = self.host_exit(worker)
         objects = worker.directory / "recovered-uploads" / "objects"
         keys = recovered_keys(objects)
+        worker.started |= shows_worker_start(keys)
+        if not (worker.started or worker.launch_failure) and classification not in (
+                "none", "retryable-spot", "controller-abort"):
+            # Its host ended before it reported, for a reason other than a Spot reclaim or the controller's stop.
+            self.budget.boot_failed(self.arguments.campaign_id, worker.job.host_epoch)
+        self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
+        self.workers.pop(worker.job.host_epoch, None)
 
         def fetch(key, path):
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -3146,7 +3154,6 @@ class UnitDispatcher:
         self.reconcile(worker, keys, fetch, classification if status != 0 else "none")
         for key in [key for key in self.accepting if key[0] == worker.job.host_epoch]:
             del self.accepting[key]
-        worker.started |= shows_worker_start(keys)
         # The attempt's record reports how long its host took from boot to its first unit.
         startup = boot_to_first_unit(worker.directory, worker.job)
         details = [] if status == 0 else [detail]
@@ -3382,12 +3389,12 @@ class UnitDispatcher:
                 outstanding = worker.outstanding()
 
     def launch_room(self, pool):
-        """How many more workers the pool may run beside those it has, within the phase's and its platform's
-        limits."""
+        """How many more workers the pool may launch this loop beside those it has, within the phase's and its
+        platform's limits and the fleet's boot window."""
         platform = self.platforms[pool].name
         per_platform = getattr(self.arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT)
         return max(0, min(self.arguments.max_concurrent - len(self.workers), per_platform - sum(
-            other.job.platform.name == platform for other in self.workers.values())))
+            other.job.platform.name == platform for other in self.workers.values()), self.boot_room))
 
     def unneeded(self, worker):
         """Whether a worker that has not started, nor missed its boot deadline, holds no lease of an open item and
@@ -3535,7 +3542,7 @@ class UnitDispatcher:
         running = [worker.job for worker in self.workers.values()]
         blocked_vcpus = None
         for pool in self.pools:
-            while len(self.workers) < self.arguments.max_concurrent and self.pool_ready.get(pool, 0) <= now:
+            while self.launch_room(pool) and self.pool_ready.get(pool, 0) <= now:
                 market = self.pool_demand(pool, now)
                 # A worker is planned only once its platform has room for it.
                 if market is None or not platform_has_capacity(
@@ -3572,6 +3579,7 @@ class UnitDispatcher:
     def start(self, pool, job, now):
         """Record an admitted worker and issue its first leases, before its launch."""
         del self.candidates[pool]
+        self.boot_room -= 1
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
         slots = self.free_slots.get(pool)
         slot, slot_failures = slots.pop(0) if slots else (job.host_epoch, 0)
@@ -3677,6 +3685,8 @@ class UnitDispatcher:
         now = time.monotonic()
         deadline_reached = now >= deadline
         self.poll()
+        self.boot_room = self.budget.report_boots(
+            self.arguments.campaign_id, [epoch for epoch, worker in self.workers.items() if worker.started])
         # Work handed back after the deadline, or to a pool that gave up, is not leased again.
         self.resolve_unlaunchable(deadline_reached)
         self.update_tail()

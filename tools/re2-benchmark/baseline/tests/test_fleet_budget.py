@@ -34,8 +34,11 @@ class TestFleetBudget(unittest.TestCase):
                                                         vcpus=8 if large else 2))
 
     def reserve(self, epoch, large=False, campaign="baseline", now=1000, seconds=7200):
-        return self.budget.reserve(campaign, self.job(epoch, large), self.root / campaign,
-                                   lambda: self.snapshot, now, until=now + seconds)
+        """Reserve a host, which reports at once, so the boot window never holds it."""
+        admitted = self.budget.reserve(campaign, self.job(epoch, large), self.root / campaign,
+                                       lambda: self.snapshot, now, until=now + seconds)
+        self.budget.report_boots(campaign, [epoch], now)
+        return admitted
 
     def test_two_controllers_cannot_reserve_the_same_remaining_vcpus(self):
         self.snapshot["quota"] = 2
@@ -374,6 +377,36 @@ class TestFleetBudget(unittest.TestCase):
         self.assertEqual((False, "spending_stop"), self.reserve(3, campaign="language", now=1004))
         other.clear_spending_stop()
         self.assertTrue(self.reserve(3, campaign="language", now=1005)[0])
+
+    def test_boot_window_holds_hosts_not_yet_reporting_and_halves_on_a_boot_failure(self):
+        self.policy["max_pending_launches"] = self.policy["max_hosts"]
+        self.path.write_text(json.dumps(self.policy))
+        self.budget = fleet_budget.FleetBudget(self.path)
+
+        def launch(epoch, now):
+            return self.budget.reserve("baseline", self.job(epoch), self.root / "baseline", lambda: self.snapshot,
+                                       now, until=now + 7200)
+
+        def window():
+            return json.loads(self.budget.state_path.read_text())["boot_window"]["size"]
+
+        # Ten hosts may boot at once. One gone before it reported, as a Spot reclaim is, frees its place without
+        # judging the window.
+        self.assertEqual([(True, "reserved")] * 10 + [(False, "boot window")],
+                         [launch(epoch, 1000) for epoch in range(1, 12)])
+        self.budget.release("baseline", 1, cleanup_verified=True, now=1100)
+        self.assertTrue(launch(11, 1100)[0])
+        self.assertEqual(10, window())
+        # A host that ended before it reported halves the window, never below five, and starts a new wave, which
+        # the hosts launched before it are no part of.
+        for epoch, now in ((2, 1200), (3, 1210)):
+            self.budget.boot_failed("baseline", epoch, now=now)
+            self.budget.release("baseline", epoch, cleanup_verified=True, now=now)
+        self.assertEqual(5, window())
+        self.assertEqual(5, self.budget.report_boots("baseline", range(4, 12), now=1250))
+        self.assertTrue(launch(12, 1300)[0])
+        self.budget.boot_failed("baseline", 12, now=1350)
+        self.assertEqual(5, window())
 
     def test_failure_stops_admission_until_its_owner_cleans_up_and_resumes(self):
         self.reserve(1)
