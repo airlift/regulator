@@ -317,7 +317,8 @@ only its own candidate's later phases. A controller that fails while it
 recovers or dispatches its hosts also halts the
 [shared fleet](#shared-fleet-budget), which stops every candidate's running
 phases. With `--language-plan`, each candidate also runs the plan's smoke and
-primary on its build.
+primary on its build; the command refuses plans its language phases would
+refuse, such as two plans of one shard, before it freezes anything.
 
 ```bash
 TRANSFER_PREFIX=<transfer-prefix> \
@@ -335,16 +336,28 @@ one, so `before=main` works only while `main` carries the same benchmark
 tooling as the checkout running the controller.
 
 Several candidates share one fleet, so they require `--fleet-budget`. Each
-phase starts with an even share of `--max-concurrent` and
-`--max-concurrent-per-platform` among the sequences of phases still running,
-a candidate's language plan counting as another sequence, and keeps that share
-through restarts. The command refuses a limit that is not positive or is
-smaller than the number of sequences that run together, so every share is at
-least one host. A phase starts only once its share fits the hosts the running
-phases leave free, so a restart that retries a failed candidate waits for the
-hosts its phase froze. A restart whose limits are smaller than a share some
-running or unfinished phase froze stops at once, naming the smallest limits
-that hold it. The other options pass to each phase that takes them.
+phase starts with a share of `--max-concurrent` and
+`--max-concurrent-per-platform`. When a phase's share is first set, it is
+capped at its work items not yet accepted, in all and on its busiest platform,
+since a host runs one at a time, and is at least one host; a restart keeps
+that share. While another sequence of phases, a candidate's language plan
+counting as another sequence, still has a phase to start, each limit gives
+every sequence still running one host, and spare hosts are divided in
+proportion to each sequence's estimated seconds left in its remaining phases'
+work items not yet accepted. A phase several sequences share, such as a
+candidate's build, counts once. So a language primary, most of a release
+campaign's work, starts with most of the hosts beside the baseline's primary.
+Once no other sequence has a phase left to start, a phase takes the free hosts
+it can use, such as a baseline confirmation beside a running language primary.
+Freed hosts go to the next phase that starts.
+
+The command refuses a limit that is not positive or is smaller than the
+number of sequences that run together, so every share is at least one host. A
+phase starts only once its share fits the hosts the running phases leave free,
+so a restart that retries a failed candidate waits for the hosts its phase
+froze. A restart whose limits are smaller than a share some running or
+unfinished phase froze stops at once, naming the smallest limits that hold it.
+The other options pass to each phase that takes them.
 
 With `--detach`, the command checks its options, starts the campaign driver
 in its own session, and returns. The driver logs to `campaign-driver.log` in
