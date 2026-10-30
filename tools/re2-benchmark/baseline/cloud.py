@@ -125,8 +125,9 @@ class AwsCloud:
             key = (service, region)
             if key not in self.clients:
                 from botocore.config import Config
+                # A connection for each of the controller's 16 request threads and 4 acceptance threads.
                 self.clients[key] = self.session.client(service, region_name=region, config=Config(
-                    retries={"mode": "standard"}, connect_timeout=10, read_timeout=60))
+                    retries={"mode": "standard"}, connect_timeout=10, read_timeout=60, max_pool_connections=20))
             return self.clients[key]
 
     def call(self, service, region, operation, **parameters):

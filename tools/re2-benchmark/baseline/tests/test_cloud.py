@@ -1,4 +1,5 @@
 import base64
+import bisect
 import hashlib
 import io
 import os
@@ -6,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import Future
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +18,89 @@ import cloud  # noqa: E402
 from cloud import CloudError, LaunchRejected  # noqa: E402
 
 AMAZON_LINUX = cloud.Image("x86_64", "available", "137112412989", "al2023-test", "/dev/xvda")
+
+
+class Objects(dict):
+    """S3's objects by (bucket, key), with their keys kept in order, so a listing reads only its prefix's keys."""
+
+    def __init__(self):
+        super().__init__()
+        self.keys_in_order = []
+
+    def __setitem__(self, name, value):
+        if name not in self:
+            bisect.insort(self.keys_in_order, name)
+        super().__setitem__(name, value)
+
+    def __delitem__(self, name):
+        super().__delitem__(name)
+        del self.keys_in_order[bisect.bisect_left(self.keys_in_order, name)]
+
+    def pop(self, name, *default):
+        if name in self:
+            del self.keys_in_order[bisect.bisect_left(self.keys_in_order, name)]
+        return super().pop(name, *default)
+
+    def under(self, bucket, prefix):
+        """The keys of the bucket under the prefix, in order."""
+        index = bisect.bisect_left(self.keys_in_order, (bucket, prefix))
+        while index < len(self.keys_in_order):
+            name, key = self.keys_in_order[index]
+            if name != bucket or not key.startswith(prefix):
+                return
+            yield key
+            index += 1
+
+
+class FakeFuture(Future):
+    """A task's result on the simulated clock: done once the clock reaches the time its task finished, and waiting for
+    it advances the clock to then."""
+
+    def __init__(self, cloud, finished):
+        super().__init__()
+        self.cloud = cloud
+        self.finished = finished
+
+    def done(self):
+        return self.finished <= self.cloud.clock
+
+    def result(self, timeout=None):
+        self.cloud.clock = max(self.cloud.clock, self.finished)
+        return super().result(timeout)
+
+    def exception(self, timeout=None):
+        self.cloud.clock = max(self.cloud.clock, self.finished)
+        return super().exception(timeout)
+
+
+class FakeExecutor:
+    """A thread pool on the simulated clock: each of its threads is a lane of simulated time. A task runs at once, on
+    the lane free soonest, from when it was submitted or when that lane is free, whichever is later, and its calls
+    take that lane's time rather than the caller's; so tasks on separate lanes overlap, and tasks beyond the pool's
+    size queue, as on real threads."""
+
+    def __init__(self, cloud, max_workers):
+        self.cloud = cloud
+        self.lanes = [0.0] * max_workers
+
+    def submit(self, function, *arguments, **keywords):
+        lane = min(range(len(self.lanes)), key=self.lanes.__getitem__)
+        submitted = self.cloud.clock
+        self.cloud.clock = max(submitted, self.lanes[lane])
+        try:
+            value, error = function(*arguments, **keywords), None
+        except BaseException as exception:
+            value, error = None, exception
+        self.lanes[lane], self.cloud.clock = self.cloud.clock, submitted
+        future = FakeFuture(self.cloud, self.lanes[lane])
+        if error is None:
+            future.set_result(value)
+        else:
+            future.set_exception(error)
+        return future
+
+    def shutdown(self, wait=True, *, cancel_futures=False):
+        pass
 
 
 class FakeCloud:
@@ -29,7 +114,8 @@ class FakeCloud:
     or None. A terminated instance stays listed as terminated.
 
     Time is simulated: every call advances the clock by its cost, as its round trip would, and time() and
-    monotonic() read it, so a scenario takes the time its calls would.
+    monotonic() read it, so a scenario takes the time its calls would. Calls made on a pool's threads, as executor
+    gives them, take the time of their thread's lane.
     """
 
     # Seconds of a round trip: an S3 object call is short, an EC2 description longer, and a placement query longer
@@ -60,11 +146,14 @@ class FakeCloud:
         self.region_instances = {}
         self.region_requests = {}
         # By (bucket, key), as (body, modified, SHA-256 or None).
-        self.objects = {}
+        self.objects = Objects()
         self.profiles = {"regulator-benchmark-worker": ("regulator-benchmark-worker",)}
         self.rejections = []
         # Each launch's instance ID, by region and client token.
         self.launched = {}
+
+    def executor(self, max_workers):
+        return FakeExecutor(self, max_workers)
 
     def time(self):
         return self.EPOCH + self.clock
@@ -82,6 +171,9 @@ class FakeCloud:
 
     def network(self, region):
         self.call("network", region)
+        return self.region_network(region)
+
+    def region_network(self, region):
         return self.networks.get(region, cloud.Network(f"vpc-{region}", f"sg-{region}",
                                                        ((f"subnet-{region}a", f"{region}a"),)))
 
@@ -145,8 +237,8 @@ class FakeCloud:
 
     def list(self, region, bucket, prefix):
         self.call("list", region, bucket, prefix)
-        return {key: (len(body), modified) for (name, key), (body, modified, _) in self.objects.items()
-                if name == bucket and key.startswith(prefix)}
+        return {key: (len(self.objects[bucket, key][0]), self.objects[bucket, key][1])
+                for key in self.objects.under(bucket, prefix)}
 
     def get(self, region, bucket, key, path):
         self.call("get", region, bucket, key)

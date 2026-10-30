@@ -1028,13 +1028,20 @@ slow language comparison isolated in its own unit, is On-Demand work unless its
 platform buys only Spot; it leases first because only the On-Demand hosts
 launched for it may take it.
 
-The controller polls each worker's uploads and processes a lease's markers in
-its groups' order, each as it lands. A completion marker's result must match
-`result_sha256` and its lease; the group then passes the unit gate, is
-retained, and is added to `accepted-units.tsv`, one row per group, and the
-marker's upload timings to `unit-uploads.tsv`. Once the lease's last group is
-processed, the lease is `accepted`, or `superseded` when every group was
-accepted first elsewhere. Other outcomes:
+Each loop lists every live worker's uploads at once, one listing per worker
+on a pool of request threads, and writes the loop's leases and launches on the
+same threads. The controller processes a lease's markers in its groups' order,
+each as it lands. Four acceptance threads gather a group's completion, one
+group of a lease at a time: its result must match `result_sha256` and its
+lease, and the group then passes the unit gate. The controller applies each
+gathered group on the loop's own thread, normally the loop after it landed: it
+retains the group and appends it to `accepted-units.tsv`, one row per group,
+and the marker's upload timings to `unit-uploads.tsv`. Once its row is durable,
+the group's marker and result are deleted from S3, and a settled lease's
+heartbeat and lease object go too, so a worker's prefix holds only its current
+leases however long it runs; the ledgers keep the group finished across a
+restart. Once the lease's last group is processed, the lease is `accepted`,
+or `superseded` when every group was accepted first elsewhere. Other outcomes:
 
 - An interruption record, or a status-43 exit while a lease ran, records an
   `interruption` event. Once a group of the lease was accepted, the lease is

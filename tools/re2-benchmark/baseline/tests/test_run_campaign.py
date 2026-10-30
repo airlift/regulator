@@ -175,7 +175,7 @@ class TestRunCampaign(unittest.TestCase):
                     directory = RUN_CAMPAIGN.unit_attempt_directory(builds, receipt)
                     directory.parent.mkdir(parents=True)
                     (root / platform[0]).rename(directory)
-                    RUN_CAMPAIGN.persist_accepted_unit(builds / "accepted-units.tsv", directory / "unit-receipt.tsv")
+                    RUN_CAMPAIGN.persist_accepted_unit(builds / "accepted-units.tsv", receipt)
                     receipts.append(receipt)
                 builder = SimpleNamespace(phase="build", campaign_id="baseline", heap_size="8g")
                 RUN_CAMPAIGN.campaign_started_at(builds / "campaign-state.tsv", builder)
@@ -1729,7 +1729,8 @@ class TestRunCampaign(unittest.TestCase):
                     f"us-west-2{zone}" for zone in "abc"}
                 aws.rejections = [] if rejection is None else [rejection]
                 try:
-                    instance_id, zone = RUN_CAMPAIGN.launch_worker(arguments, job, metadata)
+                    instance_id, zone = RUN_CAMPAIGN.launch_worker(
+                        aws, job, RUN_CAMPAIGN.launch_requests(arguments, job, metadata))
                 except RUN_CAMPAIGN.LaunchFailed as failure:
                     self.assertEqual(expected, (failure.classification, failure.detail))
                     continue
@@ -2338,7 +2339,7 @@ class FakeUnitHost:
         self.prefix = self.result_prefix.removesuffix("results/")
         self.release_version = settings["REGULATOR_RELEASE_VERSION"]
         self.idle_seconds = int(settings["UNIT_WORKER_IDLE_SECONDS"])
-        self.zone = next(zone for subnet, zone in fleet.network(region).subnets if subnet == spec.subnet)
+        self.zone = next(zone for subnet, zone in fleet.region_network(region).subnets if subnet == spec.subnet)
         self.launched_at = fleet.clock
         self.setup_seconds = fleet.setup_seconds(self)
         self.instance_id = None
@@ -2581,7 +2582,8 @@ class FakeUnitFleet(FakeCloud):
     timed fleet's hosts measure each group for its estimate; otherwise a lease takes no time. Given synthetic units,
     which own no rows to measure, a host uploads only each group's receipt, and the campaign accepts the receipt
     alone. The fleet records each controller loop's seconds and calls by operation, from one sleep between polls to the
-    next.
+    next, with the most keys one of its listings returned and the age of the oldest completion marker S3 holds at its
+    end.
     """
 
     def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None, failed_boot=lambda host: False,
@@ -2594,6 +2596,7 @@ class FakeUnitFleet(FakeCloud):
         self.timed = timed
         self.loops = []
         self.loop_started = (self.clock, 0)
+        self.listed = 0
         self.failed_boot = failed_boot
         self.slow_boot = slow_boot
         self.slow_cleanup = slow_cleanup
@@ -2665,6 +2668,11 @@ class FakeUnitFleet(FakeCloud):
             self.log.append(("lease", lease[1], int(lease[2]), json.loads(body).get("unit_id")))
         return written
 
+    def list(self, region, bucket, prefix):
+        listing = super().list(region, bucket, prefix)
+        self.listed = max(self.listed, len(listing))
+        return listing
+
     def group_seconds(self, host, lease, group):
         if not self.timed:
             return 0
@@ -2673,19 +2681,31 @@ class FakeUnitFleet(FakeCloud):
     def sleep(self, seconds):
         if seconds == RUN_CAMPAIGN.UNIT_POLL_SECONDS:
             started, calls = self.loop_started
+            markers = [modified for (_, key), (_, modified, _) in self.objects.items() if key.endswith("/completion.json")]
             self.loops.append(SimpleNamespace(seconds=self.clock - started, calls=collections.Counter(
-                call[0] for call in self.calls[calls:])))
+                call[0] for call in self.calls[calls:]), listed=self.listed,
+                oldest_marker=self.time() - min(markers, default=self.time())))
             self.loop_started = (self.clock + seconds, len(self.calls))
+            self.listed = 0
         self.clock += seconds
         if seconds != RUN_CAMPAIGN.UNIT_POLL_SECONDS:
             return
         self.sleeps += 1
         if self.sleeps > 2000:
             raise AssertionError("the controller never finished the phase")
-        for host in list(self.hosts):
-            host.tick()
+        self.tick()
         if self.sleeps == self.abort_after:
             raise self.abort("controller stopped")
+
+    def tick(self):
+        for host in list(self.hosts):
+            host.tick()
+
+    def outage(self, seconds):
+        """Let the hosts act, as often as the controller polls, for seconds with no controller running."""
+        for _ in range(seconds // RUN_CAMPAIGN.UNIT_POLL_SECONDS):
+            self.clock += RUN_CAMPAIGN.UNIT_POLL_SECONDS
+            self.tick()
 
     def stubs(self):
         stack = contextlib.ExitStack()
@@ -2695,6 +2715,7 @@ class FakeUnitFleet(FakeCloud):
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "sleep", side_effect=self.sleep))
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "monotonic", side_effect=self.monotonic))
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "time", side_effect=self.time))
+        stack.enter_context(patch.object(RUN_CAMPAIGN, "ThreadPoolExecutor", side_effect=self.executor))
         if self.synthetic:
             validation = RUN_CAMPAIGN.unit_validation
             stack.enter_context(patch.object(RUN_CAMPAIGN, "validate_unit_artifacts"))
@@ -2817,9 +2838,9 @@ class TestUnitWorkers(unittest.TestCase):
                     continue
                 if isinstance(outcome, str):
                     with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, outcome):
-                        RUN_CAMPAIGN.put_unit_lease(arguments, worker, 1, json.loads(body))
+                        RUN_CAMPAIGN.write_leases(arguments, worker, [(1, json.loads(body))])
                 else:
-                    self.assertIs(outcome, RUN_CAMPAIGN.put_unit_lease(arguments, worker, 1, json.loads(body)))
+                    self.assertEqual([(1, outcome)], RUN_CAMPAIGN.write_leases(arguments, worker, [(1, json.loads(body))]))
                 self.assertEqual([(operation, *lease) for operation in operations], aws.calls)
                 self.assertEqual((existing or body).encode(), aws.objects[lease[1:]][0])
 
@@ -3073,15 +3094,65 @@ class TestUnitWorkers(unittest.TestCase):
                                   "unit_id" in sessions[entry[1]].leases.get(entry[2], {})])
             # No host measuring between its heartbeats is judged lost.
             self.assertEqual([], self.leases("lost"))
-            # A loop that only polls, launching nothing and downloading nothing, covers all 200 workers in under 30 s.
-            self.assertLess(max(loop.seconds for loop in fleet.loops if not {"run_instance", "get"} & set(loop.calls)),
-                            30)
+            # Every loop covers all 200 workers in under 30 s, the one launching them and those accepting their
+            # units among them.
+            self.assertLess(max(loop.seconds for loop in fleet.loops), 30)
+
+    def test_steady_fleet_keeps_its_slack_and_its_listings_short_for_hours(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # 200 hosts of two platforms measure 15-minute units for about six hours.
+            units = {f"steady-{index}": {"unit_id": f"steady-{index}", "shard_id": "steady", "unit_index": str(index),
+                                         "estimated_seconds": "900",
+                                         "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                     for index in range(1, 2301)}
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
+                                  setup_seconds=lambda host: 67)
+            self.run_phase(Path(temporary), fleet, "smoke", ["steady"], 200, 100)
+            self.assertEqual(200, len(fleet.hosts))
+            # Every host finds its next lease waiting as each lease ends, until the queue is empty.
+            sessions = {host.session: host for host in fleet.hosts}
+            self.assertEqual([], [entry for entry in fleet.log if entry[0] == "absent" and
+                                  "unit_id" in sessions[entry[1]].leases.get(entry[2], {})])
+            # Acceptance keeps up: each loop accepts, and deletes from S3, every completion the loop before it found,
+            # so a session's listing holds only its current leases' objects however long it has run. Every loop,
+            # even one accepting most of the fleet's units, takes under 30 s.
+            self.assertLess(max(loop.oldest_marker for loop in fleet.loops), RUN_CAMPAIGN.UNIT_POLL_SECONDS)
+            self.assertLessEqual(max(loop.listed for loop in fleet.loops), 4)
+            self.assertLess(max(loop.seconds for loop in fleet.loops), 30)
+
+    def test_hosts_work_through_a_controller_outage_on_their_slack(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # 20 hosts of two platforms measure four 15-minute units each. The controller stops seven minutes in,
+            # with every host on its first lease and its second waiting, and is gone for 10 minutes, during which
+            # every host finishes its first lease.
+            units = {f"outage-{index}": {"unit_id": f"outage-{index}", "shard_id": "outage", "unit_index": str(index),
+                                         "estimated_seconds": "900",
+                                         "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                     for index in range(1, 41)}
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
+                                  abort_after=28)
+            with self.assertRaisesRegex(SystemExit, "controller stopped"):
+                self.run_phase(Path(temporary), fleet, "smoke", ["outage"], 20, 10)
+            fleet.abort_after = None
+            fleet.outage(600)
+            self.assertEqual(20, sum(entry[0] == "complete" for entry in fleet.log))
+            self.run_phase(Path(temporary), fleet, "smoke", ["outage"], 20, 10)
+            self.assertEqual(20, len(fleet.hosts))
+            # Each host that finished a lease found its next waiting, and none went idle and stopped itself. The
+            # restarted controller leased no item twice.
+            sessions = {host.session: host for host in fleet.hosts}
+            self.assertEqual([], [entry for entry in fleet.log if entry[0] == "claim" or entry[0] == "absent" and
+                                  "unit_id" in sessions[entry[1]].leases.get(entry[2], {})])
+            leased = [(row["platform"], row["unit_id"], row["replica"]) for row in self.leases()]
+            self.assertEqual((80, 80), (len(leased), len(set(leased))))
 
     def test_lease_written_after_the_hosts_idle_claim_requeues_its_unit_without_an_attempt(self):
         with tempfile.TemporaryDirectory() as temporary:
-            # Each of the two r8i hosts takes one unit. The second's fails, and the first claims its next lease as
-            # its idle stop as its own unit ends, before the controller leases it the failed unit.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {2: "claim"}, 2: {1: "fail"}})
+            # Each of the two r8i hosts takes one unit. The second's fails at once. The first boots two polls later
+            # and claims its next lease as its idle stop as its own unit ends, before the controller, its unit not
+            # yet accepted, leases it the failed unit as its slack.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={1: {2: "claim"}, 2: {1: "fail"}},
+                                  setup_seconds=lambda host: 40 if host.number == 1 else 0)
             with self.dispatchers() as dispatchers:
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 4, 2)
             claimed, failed = fleet.hosts[:2]

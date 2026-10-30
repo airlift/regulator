@@ -22,6 +22,7 @@ import tarfile
 import tempfile
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -39,11 +40,11 @@ from campaign_io import UnsafeCampaignError, check_output, fsync_directory, writ
 from cloud import CloudError
 from unit_dispatch import (
     UNIT_COMPLETION_FIELDS, UNIT_UPLOADS, UNRESOLVED_UNIT_FIELDS, completion_key, extract_unit_result,
-    get_unit_worker_result, group_identity, heartbeat_key, heartbeat_sequence, interruption_key,
-    list_unit_worker_results, persist_accepted_unit, persist_semantic_rejection, persist_unit_upload, put_unit_lease,
+    get_unit_worker_result, group_identity, heartbeat_key, heartbeat_sequence, interruption_key, lease_key,
+    list_unit_worker_results, persist_accepted_unit, persist_semantic_rejection, persist_unit_upload,
     read_accepted_units, read_semantic_rejections, read_unit_attempts, read_unit_receipt, read_unit_uploads,
     recovered_keys, result_key, retain_unit_attempt, shows_worker_start, unit_attempt_directory,
-    unit_logical_identity, unresolved_unit_rows, write_unit_attempt,
+    unit_logical_identity, unit_upload_row, unresolved_unit_rows, write_leases, write_unit_attempt,
     write_unresolved_units)
 from unit_session import PROTOCOL_REJECTION_STATUS, SEMANTIC_FAILURE_STATUS
 
@@ -73,6 +74,11 @@ UNIT_WORKER_LIFETIME_SECONDS = 6 * 60 * 60
 UNIT_WORKER_SETUP_AND_UPLOAD_SECONDS = 75 * 60
 UNIT_WORKER_LAST_UNIT_SECONDS = work_units.UNIT_SECONDS
 UNIT_POLL_SECONDS = 15
+# A loop's round trips, its listings, lease writes, launches, cleanups and deletions, run on this many threads, so the
+# listings of 200 workers take under a second.
+REQUEST_THREADS = 16
+# Group completions are downloaded, checked and extracted on this many threads, beside the loop.
+ACCEPTANCE_THREADS = 4
 # A unit pool's new Spot workers skip a region this long after it found no Spot capacity.
 SPOT_REGION_COOL_DOWN_SECONDS = 15 * 60
 # How a platform's workers buy capacity: Spot only, waiting for it however long; Spot, turning to On-Demand once
@@ -255,7 +261,7 @@ class WorkItem:
     # Instances a confirmation must avoid: those that measured the unit's primary replicas.
     excluded_instances: frozenset = frozenset()
 
-    @property
+    @functools.cached_property
     def identity(self):
         return f"{self.platform}/{self.unit_id}/replica-{self.replica}"
 
@@ -1788,11 +1794,11 @@ def check_purchase(arguments, job):
         raise UnsafeCampaignError(f"{job.platform.name} buys only On-Demand, so it may not launch a Spot job")
 
 
-def launch_worker(arguments, job, metadata):
-    """Launch the worker's instance in its region's public subnets that offer its type, each zone in turn from the
-    one the worker's identity picks while AWS reports no capacity there. Returns the instance ID, or "" when AWS's
-    answer never came and only the session's tag can find the instance, and the zone; raises LaunchFailed when AWS
-    launched none."""
+def launch_requests(arguments, job, metadata):
+    """The worker's launch requests, as (zone, launch spec), one per public subnet of its region that offers its type,
+    each zone in turn from the one the worker's identity picks. Its region's network, offerings and image are
+    described once per controller, so only the launch itself is a round trip. Raises LaunchFailed when no subnet
+    offers the type."""
     region, instance_type, session = job.region, job.platform.instance_type, metadata["session"]
     network = region_network(arguments, region)
     offered = zones_offering(arguments, region, instance_type)
@@ -1802,6 +1808,7 @@ def launch_worker(arguments, job, metadata):
                            f"launch-preflight:no public default-VPC subnet offers {instance_type}")
     amis = getattr(arguments, "regional_amis", None)
     ami = job.platform.ami_id if amis is None else amis[job.platform.name, region]
+    root_device = region_image(arguments, region, ami).root_device
     user_data = worker_user_data(arguments, job, metadata)
     tags = {"Name": f"re2-qualification-{job.platform.architecture}-{session}", "Project": "re2-port-benchmark",
             "BaselineCampaign": arguments.campaign_id, "Phase": arguments.phase, "Platform": job.platform.name,
@@ -1809,18 +1816,24 @@ def launch_worker(arguments, job, metadata):
     max_price = (str(arguments.shared_budget.policy["hourly_rates"][instance_type]["spot"])
                  if job.market == "spot" else "")
     first = int(hashlib.sha256(job.logical_identity.encode()).hexdigest(), 16) % len(subnets)
-    for offset in range(len(subnets)):
-        zone, subnet = subnets[(first + offset) % len(subnets)]
-        # Each zone has its own token, since a token names one exact request.
-        spec = cloud.LaunchSpec(ami, instance_type, region_image(arguments, region, ami).root_device, subnet,
-                                network.security_group, WORKER_PROFILE, job.market, max_price, user_data, tags,
-                                hashlib.sha256(f"{session}/{zone}".encode()).hexdigest())
+    # Each zone has its own token, since a token names one exact request.
+    return [(zone, cloud.LaunchSpec(ami, instance_type, root_device, subnet, network.security_group, WORKER_PROFILE,
+                                    job.market, max_price, user_data, tags,
+                                    hashlib.sha256(f"{session}/{zone}".encode()).hexdigest()))
+            for zone, subnet in subnets[first:] + subnets[:first]]
+
+
+def launch_worker(aws, job, requests):
+    """Launch the worker's instance by its requests in turn while AWS reports no capacity in their zone. Returns the
+    instance ID, or "" when AWS's answer never came and only the session's tag can find the instance, and the zone;
+    raises LaunchFailed when AWS launched none."""
+    for offset, (zone, spec) in enumerate(requests):
         try:
-            return arguments.cloud.run_instance(region, spec), zone
+            return aws.run_instance(job.region, spec), zone
         except cloud.LaunchUnknown:
             return "", zone
         except cloud.LaunchRejected as rejection:
-            if rejection.kind != "capacity" or offset + 1 == len(subnets):
+            if rejection.kind != "capacity" or offset + 1 == len(requests):
                 raise LaunchFailed(*launch_failure(job.market, rejection)) from rejection
 
 
@@ -2040,6 +2053,79 @@ def validate_unit_artifacts(validation, result_root, receipt, directory=None):
                                   f"{mismatches}")
 
 
+@dataclass
+class GroupEvidence:
+    """What the acceptance threads found of one group's completion: its marker, or why the marker stops the campaign;
+    and where the group needed its result, why the result was rejected, or its extracted directory with, for a failed
+    group, its capacity record, and for a complete one its receipt or why its artifacts were not accepted."""
+    marker: dict = None
+    problem: str = None
+    rejection: str = None
+    directory: Path = None
+    capacity: dict = None
+    receipt: dict = None
+    invalid: str = None
+
+
+def gather_group(validation, result_root, staging, item, expected, needs_result, launched, fetch):
+    """Download and check one group's completion, on an acceptance thread: its marker against expected, the fields
+    its lease gives it, and unless the group needs no result or failed semantically, its result against the marker,
+    extracted into staging, and its receipt against the lease, the region and market the worker launched in, and the
+    campaign. Reads no controller state and writes only staging; raises CloudError or OSError for a download the next
+    poll retries."""
+    sequence, group, attempt = expected["sequence"], expected["group_id"], expected["unit_attempt_id"]
+    context = f"{attempt} group {group}"
+    marker_path = staging / f"lease-{sequence}-group-{group}-completion.json"
+    fetch(completion_key(sequence, group), marker_path)
+    try:
+        marker = json.loads(marker_path.read_text())
+    except ValueError:
+        return GroupEvidence(problem=f"unit completion marker {context} is not JSON")
+    absent = [key for key in UNIT_COMPLETION_FIELDS if key not in marker]
+    if absent:
+        return GroupEvidence(problem=f"unit completion marker {context} lacks {absent}")
+    mismatches = [key for key, value in expected.items() if marker.get(key) != value]
+    if mismatches:
+        return GroupEvidence(problem=f"unit completion marker {context} does not match its lease: {mismatches}")
+    evidence = GroupEvidence(marker)
+    if not needs_result or marker.get("exit_status") == SEMANTIC_FAILURE_STATUS:
+        return evidence
+    archive = staging / f"lease-{sequence}-group-{group}.tar.gz"
+    fetch(result_key(sequence, group), archive)
+    if engine_build.sha256_file(archive) != marker.get("result_sha256"):
+        evidence.rejection = "result archive does not match its completion marker"
+        return evidence
+    directory = staging / f"lease-{sequence}-group-{group}"
+    try:
+        extract_unit_result(archive, directory)
+    except (OSError, tarfile.TarError) as error:
+        evidence.rejection = f"result archive is unreadable: {error}"
+        return evidence
+    evidence.directory = directory
+    if marker.get("unit_status") != "complete" or marker.get("exit_status") != 0:
+        try:
+            evidence.capacity = read_properties(directory / "unit-capacity.txt")
+        except (OSError, RuntimeError):
+            evidence.capacity = {}
+        return evidence
+    try:
+        receipt = read_unit_receipt(directory / "unit-receipt.tsv")
+        if (unit_logical_identity(receipt), receipt["group_id"], receipt["unit_attempt_id"]) != (
+                item.identity, group, attempt):
+            raise RuntimeError(f"unit receipt names {group_identity(receipt)} attempt {receipt['unit_attempt_id']}, "
+                               f"expected {item.identity}/group-{group} attempt {attempt}")
+        # The host's receipt names the region and market it ran in, which must be those the worker launched in.
+        if (receipt["region"], receipt["market"]) != launched:
+            raise RuntimeError(f"unit receipt names a {receipt['market']} host in {receipt['region']}, but the "
+                               f"worker launched as {launched[1]} in {launched[0]}")
+        validate_unit_artifacts(validation, result_root, receipt, directory)
+    except (OSError, RuntimeError) as error:
+        evidence.invalid = str(error)
+        return evidence
+    evidence.receipt = receipt
+    return evidence
+
+
 def recover_accepted_units(validation, result_root, accepted_units):
     """Revalidate accepted-units.tsv against retained attempts and add a completed group it lacks; returns each
     unit replica's accepted receipts by group.
@@ -2061,7 +2147,8 @@ def recover_accepted_units(validation, result_root, accepted_units):
         if receipt["group_id"] in groups:
             continue
         validate_unit_artifacts(validation, result_root, receipt)
-        groups[receipt["group_id"]] = persist_accepted_unit(accepted_units, receipt_path)
+        persist_accepted_unit(accepted_units, receipt)
+        groups[receipt["group_id"]] = receipt
     return accepted
 
 
@@ -2318,6 +2405,8 @@ class UnitWorker:
     missed_boot: bool = False
     instance: cloud.Instance = None
     terminating: bool = False
+    # The full keys of uploads and leases whose outcomes are durable, which the next deletion removes from S3.
+    deletions: set = field(default_factory=set)
 
     @property
     def pool(self):
@@ -2368,6 +2457,12 @@ class UnitDispatcher:
         self.result_root = result_root
         self.items = {item.identity: item for item in items}
         self.pools = sorted({item.pool for item in items})
+        # Each pool's items with a group not yet accepted, by identity, and its items' estimated seconds.
+        self.open = {pool: {} for pool in self.pools}
+        self.pool_seconds = dict.fromkeys(self.pools, 0)
+        for item in items:
+            self.open[item.pool][item.identity] = item
+            self.pool_seconds[item.pool] += sum(seconds for _, seconds in item.groups)
         self.platforms = pool_platforms(platforms, items)
         self.budget = getattr(arguments, "shared_budget", None)
         # Each region's fleet as this loop described it, once, when the loop first needed it.
@@ -2383,8 +2478,12 @@ class UnitDispatcher:
         # The frozen inputs' fingerprint, taken when the phase runs; each launch checks it.
         self.fingerprint = None
         self.uploads_path = result_root / UNIT_UPLOADS
-        # Each work item's accepted receipts, by group.
+        # The groups whose upload timings unit-uploads.tsv records, as (host session, sequence, group).
+        self.uploads = set()
+        # Each work item's accepted receipts, by group, and the instances that measured each unit, by platform and
+        # unit.
         self.accepted = {}
+        self.measured = {}
         # Each leased item's live lease, as its worker's host epoch and lease sequence.
         self.held = {}
         self.failures = {}
@@ -2417,22 +2516,28 @@ class UnitDispatcher:
         self.capacity_waits = set()
         # When the controller decided to stop each host it terminates, by host epoch.
         self.terminated = {}
+        # The loop's round trips run on the request threads, and gathering group completions on the acceptance
+        # threads; each group being gathered is kept by its worker's host epoch, lease and group until it is applied.
+        self.requests = ThreadPoolExecutor(REQUEST_THREADS)
+        self.acceptances = ThreadPoolExecutor(ACCEPTANCE_THREADS)
+        self.accepting = {}
 
     def remaining(self, item):
         """The item's groups not yet accepted, in its run order, each as (group ID, estimated seconds)."""
-        accepted = self.accepted.get(item.identity, {})
+        accepted = self.accepted.get(item.identity)
+        if not accepted:
+            return item.groups
         return [(group, seconds) for group, seconds in item.groups if group not in accepted]
 
     def remaining_seconds(self, item):
         return sum(seconds for _, seconds in self.remaining(item))
 
     def done(self, identity):
-        return not self.remaining(self.items[identity])
+        return identity not in self.open[self.items[identity].pool]
 
     def queued(self, pool=None):
-        return [item for identity, item in self.items.items()
-                if (pool is None or item.pool == pool) and identity not in self.unresolved and identity not in self.held
-                and not self.done(identity)]
+        return [item for open_items in (self.open.values() if pool is None else [self.open[pool]])
+                for identity, item in open_items.items() if identity not in self.unresolved and identity not in self.held]
 
     def on_demand_only(self, item):
         """Whether only On-Demand hosts may take the item, unless its pool's platform buys only Spot: a Spot
@@ -2458,7 +2563,14 @@ class UnitDispatcher:
 
         Each launch slot is rebuilt from its latest worker's starting record: a worker not yet settled holds it, and
         one settled leaves it free with its count, or given up.
+
+        A settled lease's uploads and an accepted group's are deleted from S3, so the ledgers alone show them: a
+        worker with a settled work lease started, a lease's groups accepted for it are finished, and a settled lease
+        is never written again.
         """
+        attempts = read_unit_attempts(self.leases_path)
+        ran = {int(row["host_epoch"]) for row in attempts
+               if row["unit_id"] != "-" and row["outcome"] in SETTLED_UNIT_OUTCOMES}
         latest = {}
         placements = {}
         instances = {}
@@ -2488,7 +2600,8 @@ class UnitDispatcher:
             if row["outcome"] not in ("starting", "started"):
                 if slots[slot] == job.host_epoch:
                     # The earlier controller settled this worker; its slot is as that settlement left it.
-                    self.release_slot(job, slot, slot_failures, self.recovered_start(directory),
+                    self.release_slot(job, slot, slot_failures,
+                                      job.host_epoch in ran or self.recovered_start(directory),
                                       0 if row["outcome"] == "stopped" else 1, row["outcome"], row["detail"])
                 continue
             # The starting record names the region the worker was placed in.
@@ -2505,14 +2618,18 @@ class UnitDispatcher:
                                     set(workers))
         # A halt this controller's failure set clears once no host of its own awaits verified cleanup.
         self.budget.resume(self.result_root)
-        self.accepted = recover_accepted_units(self.validation, self.result_root, self.accepted_path)
+        for groups in recover_accepted_units(self.validation, self.result_root, self.accepted_path).values():
+            for receipt in groups.values():
+                self.accept(receipt)
+        self.uploads = {(row["host_session"], row["sequence"], row["group_id"])
+                        for row in read_unit_uploads(self.uploads_path)}
         for row in read_semantic_rejections(self.rejections_path):
             identity = unit_logical_identity(row)
             if identity not in self.items:
                 raise UnsafeCampaignError(f"semantic-rejection ledger names an unexpected work item: {identity}")
             self.semantic.setdefault(identity, row["unit_attempt_id"])
         outcomes = {}
-        for row in read_unit_attempts(self.leases_path):
+        for row in attempts:
             epoch, sequence = int(row["host_epoch"]), int(row["sequence"])
             identity = None if row["unit_id"] == "-" else f"{row['platform']}/{row['unit_id']}/replica-{row['replica']}"
             if identity is not None and identity not in self.items:
@@ -2555,6 +2672,21 @@ class UnitDispatcher:
             for sequence in worker.outstanding():
                 if worker.leases[sequence] is not None:
                     self.held[worker.leases[sequence]] = (epoch, sequence)
+            worker.started = epoch in ran
+            for sequence, identity in worker.leases.items():
+                if identity is None:
+                    continue
+                attempt = unit_session.format_unit_attempt(worker.host_session, sequence)
+                accepted = [group for group in worker.lease_groups[sequence]
+                            if self.accepted.get(identity, {}).get(group, {}).get("unit_attempt_id") == attempt]
+                worker.finished[sequence] = dict.fromkeys(accepted)
+                # A deletion the earlier controller had not made yet is made again.
+                worker.deletions.update(f"{worker.metadata['result_prefix']}/{key}" for group in accepted
+                                        for key in (completion_key(sequence, group), result_key(sequence, group)))
+                if sequence in worker.settled:
+                    worker.unsent.discard(sequence)
+                    worker.deletions.update((f"{worker.metadata['result_prefix']}/{heartbeat_key(sequence)}",
+                                             lease_key(worker.metadata, sequence)))
 
     @staticmethod
     def recovered_start(directory):
@@ -2576,6 +2708,9 @@ class UnitDispatcher:
         write_unit_attempt(self.leases_path, worker, sequence, self.items[identity], outcome, detail,
                            worker.finished.get(sequence, {}))
         worker.settled.add(sequence)
+        # Its heartbeat and lease go from S3 once its outcome is durable; a restart needs neither.
+        worker.deletions.update((f"{worker.metadata['result_prefix']}/{heartbeat_key(sequence)}",
+                                 lease_key(worker.metadata, sequence)))
         # The worker goes on to its next lease.
         worker.running_since = time.monotonic()
         if self.held.get(identity) == (worker.job.host_epoch, sequence):
@@ -2629,17 +2764,21 @@ class UnitDispatcher:
                     f"replacement_market={'on-demand' if self.on_demand_only(item) else 'any'}",
                     **self.event_unit(worker, sequence))
 
-    def complete_groups(self, worker, sequence, keys, fetch):
+    def complete_groups(self, worker, sequence, keys, fetch, wait=False):
         """Process the completion markers of the lease's groups in run order; returns whether the lease settled.
 
         The lease is done once its last group's marker is processed, or once a marker ends it: a group that
-        failed, or failed its checks, settles the lease, and a semantic failure rejects the unit.
+        failed, or failed its checks, settles the lease, and a semantic failure rejects the unit. A group is
+        processed once the acceptance threads have gathered it, unless wait.
         """
         finished = worker.finished.setdefault(sequence, {})
         for group in worker.lease_groups[sequence]:
             if group in finished:
                 continue
-            if completion_key(sequence, group) not in keys or not self.complete(worker, sequence, group, fetch):
+            if completion_key(sequence, group) not in keys:
+                return sequence in worker.settled
+            evidence = self.group_evidence(worker, sequence, group, fetch, wait)
+            if evidence is None or not self.complete(worker, sequence, group, evidence):
                 return sequence in worker.settled
         superseded = "; ".join(f"group {group}: {detail}" for group, detail in finished.items() if detail)
         if None in finished.values():
@@ -2648,31 +2787,45 @@ class UnitDispatcher:
             self.settle(worker, sequence, "superseded", superseded)
         return True
 
-    def complete(self, worker, sequence, group, fetch):
-        """Accept or supersede one group of a lease from its completion marker and result, or settle the lease;
-        returns whether the group finished and the lease goes on."""
+    def group_evidence(self, worker, sequence, group, fetch, wait):
+        """What the acceptance threads found of the group's completion, or None while they are still gathering it.
+        A lease's groups are gathered one at a time, so they are processed in run order. A gathering that failed is
+        retried, at once when wait."""
+        key = (worker.job.host_epoch, sequence, group)
+        future = self.accepting.get(key)
+        if future is not None and wait and future.exception() is not None:
+            future = None
+        if future is None:
+            item = self.items[worker.leases[sequence]]
+            expected = {
+                "schema_version": 2, "host_session": worker.host_session, "sequence": sequence,
+                "campaign_id": self.arguments.campaign_id, "phase": self.arguments.phase, "platform": item.platform,
+                "unit_id": item.unit_id, "replica_id": item.replica, "group_id": group,
+                "unit_attempt_id": unit_session.format_unit_attempt(worker.host_session, sequence),
+            }
+            # A group already settled needs none of this lease's result.
+            needs_result = (self.accepted.get(item.identity, {}).get(group) is None and
+                            item.identity not in self.semantic)
+            future = self.accepting[key] = self.acceptances.submit(
+                gather_group, self.validation, self.result_root,
+                self.result_root / "unit-results" / worker.host_session, item, expected, needs_result,
+                (worker.metadata.get("aws_region"), worker.job.market), fetch)
+        if not (wait or future.done()):
+            return None
+        del self.accepting[key]
+        return future.result()
+
+    def complete(self, worker, sequence, group, evidence):
+        """Accept or supersede one group of a lease from what the acceptance threads found of its completion, or
+        settle the lease; returns whether the group finished and the lease goes on."""
+        if evidence.problem is not None:
+            raise UnsafeCampaignError(evidence.problem)
         item = self.items[worker.leases[sequence]]
         attempt = unit_session.format_unit_attempt(worker.host_session, sequence)
-        context = f"{attempt} group {group}"
-        staging = self.result_root / "unit-results" / worker.host_session
-        marker_path = staging / f"lease-{sequence}-group-{group}-completion.json"
-        fetch(completion_key(sequence, group), marker_path)
-        try:
-            marker = json.loads(marker_path.read_text())
-        except ValueError as error:
-            raise UnsafeCampaignError(f"unit completion marker {context} is not JSON") from error
-        absent = [key for key in UNIT_COMPLETION_FIELDS if key not in marker]
-        if absent:
-            raise UnsafeCampaignError(f"unit completion marker {context} lacks {absent}")
-        expected = {
-            "schema_version": 2, "host_session": worker.host_session, "sequence": sequence,
-            "campaign_id": self.arguments.campaign_id, "phase": self.arguments.phase, "platform": item.platform,
-            "unit_id": item.unit_id, "replica_id": item.replica, "group_id": group, "unit_attempt_id": attempt,
-        }
-        mismatches = [key for key, value in expected.items() if marker.get(key) != value]
-        if mismatches:
-            raise UnsafeCampaignError(f"unit completion marker {context} does not match its lease: {mismatches}")
-        persist_unit_upload(self.uploads_path, item, worker.host_session, sequence, marker)
+        marker = evidence.marker
+        if (worker.host_session, str(sequence), group) not in self.uploads:
+            persist_unit_upload(self.uploads_path, unit_upload_row(item, worker.host_session, sequence, marker))
+            self.uploads.add((worker.host_session, str(sequence), group))
         finished = worker.finished[sequence]
         if marker.get("exit_status") == SEMANTIC_FAILURE_STATUS:
             # A verdict that the semantics are wrong rejects the unit for good, before or after another attempt.
@@ -2681,7 +2834,6 @@ class UnitDispatcher:
             self.semantic.setdefault(item.identity, attempt)
             self.reject(worker, sequence, SEMANTIC_FAILURE_DETAIL)
             return False
-        # A group already settled needs none of this lease's evidence.
         accepted = self.accepted.get(item.identity, {}).get(group)
         if accepted is not None:
             # Another attempt was accepted first, or this one was and the controller stopped before recording the
@@ -2692,56 +2844,43 @@ class UnitDispatcher:
         if item.identity in self.semantic:
             finished[group] = f"{self.semantic[item.identity]} was rejected for a semantic failure"
             return True
-        archive = staging / f"lease-{sequence}-group-{group}.tar.gz"
-        fetch(result_key(sequence, group), archive)
-        if engine_build.sha256_file(archive) != marker.get("result_sha256"):
-            self.reject(worker, sequence, "result archive does not match its completion marker")
-            return False
-        directory = staging / f"lease-{sequence}-group-{group}"
-        try:
-            extract_unit_result(archive, directory)
-        except (OSError, tarfile.TarError) as error:
-            self.reject(worker, sequence, f"result archive is unreadable: {error}")
+        if evidence.rejection is not None:
+            self.reject(worker, sequence, evidence.rejection)
             return False
         if marker.get("unit_status") != "complete" or marker.get("exit_status") != 0:
             if marker.get("exit_status") == PROTOCOL_REJECTION_STATUS:
                 self.reject(worker, sequence, f"numerical protocol rejection: status {PROTOCOL_REJECTION_STATUS}")
                 return False
-            try:
-                capacity = read_properties(directory / "unit-capacity.txt")
-            except (OSError, RuntimeError):
-                capacity = {}
-            if capacity.get("capacity_status") == "rejected":
+            if evidence.capacity.get("capacity_status") == "rejected":
                 self.reject(worker, sequence, "unit capacity gate rejected the host's resources")
                 return False
             detail = f"unit failed with status {marker.get('exit_status')}"
             self.settle(worker, sequence, "failed", detail)
             self.count(item, detail, (worker.job.host_epoch, sequence))
             return False
-        try:
-            receipt = read_unit_receipt(directory / "unit-receipt.tsv")
-            if (unit_logical_identity(receipt), receipt["group_id"], receipt["unit_attempt_id"]) != (
-                    item.identity, group, attempt):
-                raise RuntimeError(f"unit receipt names {group_identity(receipt)} attempt "
-                                   f"{receipt['unit_attempt_id']}, expected {item.identity}/group-{group} attempt "
-                                   f"{attempt}")
-            # The host's receipt names the region and market it ran in, which must be those the worker launched in.
-            launched = (worker.metadata.get("aws_region"), worker.job.market)
-            if (receipt["region"], receipt["market"]) != launched:
-                raise RuntimeError(f"unit receipt names a {receipt['market']} host in {receipt['region']}, but the "
-                                   f"worker launched as {launched[1]} in {launched[0]}")
-            validate_unit_artifacts(self.validation, self.result_root, receipt, directory)
-        except (OSError, RuntimeError) as error:
-            self.reject(worker, sequence, f"artifact gate: {error}")
+        if evidence.invalid is not None:
+            self.reject(worker, sequence, f"artifact gate: {evidence.invalid}")
             return False
-        final = unit_attempt_directory(self.result_root, receipt)
-        retain_unit_attempt(directory, final)
-        self.accepted.setdefault(item.identity, {})[group] = persist_accepted_unit(
-            self.accepted_path, final / "unit-receipt.tsv")
+        retain_unit_attempt(evidence.directory, unit_attempt_directory(self.result_root, evidence.receipt))
+        persist_accepted_unit(self.accepted_path, evidence.receipt)
+        self.accept(evidence.receipt)
         if self.done(item.identity):
             self.unresolved.pop(item.identity, None)
         finished[group] = None
+        # Once its acceptance is durable the group's uploads go from S3; the worker's state, or after a restart the
+        # accepted ledger, keeps the group finished.
+        worker.deletions.update(f"{worker.metadata['result_prefix']}/{key}"
+                                for key in (completion_key(sequence, group), result_key(sequence, group)))
         return True
+
+    def accept(self, receipt):
+        """Record an accepted group, and the instance that measured its unit."""
+        identity = unit_logical_identity(receipt)
+        self.accepted.setdefault(identity, {})[receipt["group_id"]] = receipt
+        item = self.items.get(identity)
+        if item is not None and not self.remaining(item):
+            self.open[item.pool].pop(identity, None)
+        self.measured.setdefault((receipt["platform"], receipt["unit_id"]), set()).add(receipt["instance_id"])
 
     def lease_started(self, worker, sequence, keys, fetch):
         """Whether the host began the lease: a group of it finished, or its heartbeats show it began."""
@@ -2769,11 +2908,12 @@ class UnitDispatcher:
         return notice.get("unit_id") is not None
 
     def reconcile(self, worker, keys, fetch, classification=None):
-        """Settle the worker's leases from its uploads; classification is that of an exited worker."""
+        """Settle the worker's leases from its uploads; classification is that of an exited worker, whose leases are
+        settled from its last uploads at once."""
         for sequence in sorted(worker.leases):
             if sequence in worker.settled or worker.leases[sequence] is None:
                 continue
-            if self.complete_groups(worker, sequence, keys, fetch):
+            if self.complete_groups(worker, sequence, keys, fetch, wait=classification is not None):
                 continue
             if interruption_key(sequence) in keys:
                 if self.interruption_names_unit(worker, sequence, fetch):
@@ -2789,10 +2929,43 @@ class UnitDispatcher:
                 else:
                     self.abandon(worker, sequence, "lost", f"worker exited: classification={classification}")
 
-    def poll(self, worker):
+    def poll(self):
+        """Follow every worker: list each live one's uploads and process them, and clean up each ended one, the
+        workers' round trips on the request threads; then delete from S3 what accepted groups and settled leases no
+        longer need."""
+        live, ended = [], []
+        for worker in list(self.workers.values()):
+            (ended if self.ended(worker) else live).append(worker)
+        for worker, objects in zip(live, self.concurrently(self.listing, live)):
+            if objects is not None:
+                self.follow(worker, objects)
+        for worker in self.clean_up(ended):
+            self.finish(worker)
+        deleting = [(worker, sorted(worker.deletions)) for worker in self.workers.values() if worker.deletions]
+        for (worker, keys), deleted in zip(deleting, self.concurrently(self.delete, deleting)):
+            if deleted:
+                worker.deletions.difference_update(keys)
+
+    def listing(self, worker):
+        """The worker's uploads, or None while S3 cannot list them; the next poll, or cleanup's recovered uploads,
+        retries."""
+        try:
+            return list_unit_worker_results(self.arguments, worker)
+        except CloudError:
+            return None
+
+    def delete(self, entry):
+        """Delete a worker's keys from S3; returns whether that held, or the next poll tries again."""
+        worker, keys = entry
+        try:
+            self.arguments.cloud.delete(worker.metadata["aws_region"], worker.metadata["bucket"], keys)
+        except CloudError:
+            return False
+        return True
+
+    def follow(self, worker, objects):
         """Process a live worker's uploads and decide whether its host was lost."""
         try:
-            objects = list_unit_worker_results(self.arguments, worker)
             keys = set(objects)
             # Worker evidence shows the worker started, even one whose heartbeats never landed; its first lease
             # runs from then.
@@ -2876,20 +3049,29 @@ class UnitDispatcher:
             # The next loop asks again.
             return
 
-    def clean_up(self, worker):
-        """Prove an ended worker's cleanup: its instance terminated, then its prefix recovered, deleted, and found
-        empty. Until both hold, its reservation stays and each loop tries again."""
-        if not worker.launch_failure:
-            try:
-                instance = self.instance(worker)
-            except CloudError:
-                return False
-            if instance is not None and instance.state != "terminated":
-                self.stop_host(worker)
-                return False
-            worker.instance = instance
-        return recover_uploads(self.arguments.cloud, worker.metadata,
-                               worker.directory / "recovered-uploads" / "objects")
+    def clean_up(self, workers):
+        """Prove ended workers' cleanup: each one's instance terminated, then its prefix recovered, deleted, and found
+        empty, the prefixes on the request threads. Returns the workers whose cleanup was proven; the rest keep their
+        reservations, and each loop tries again."""
+        terminated = [worker for worker in workers if self.instance_terminated(worker)]
+        proven = self.concurrently(lambda worker: recover_uploads(
+            self.arguments.cloud, worker.metadata, worker.directory / "recovered-uploads" / "objects"), terminated)
+        return [worker for worker, held in zip(terminated, proven) if held]
+
+    def instance_terminated(self, worker):
+        """The first half of an ended worker's cleanup proof: AWS launched no instance, or EC2 lists it terminated or
+        no longer lists it. A host still running is asked to terminate."""
+        if worker.launch_failure:
+            return True
+        try:
+            instance = self.instance(worker)
+        except CloudError:
+            return False
+        if instance is not None and instance.state != "terminated":
+            self.stop_host(worker)
+            return False
+        worker.instance = instance
+        return True
 
     def host_exit(self, worker):
         """How the worker's host ended, as its status, classification, and detail: its launch's refusal; the
@@ -2937,6 +3119,8 @@ class UnitDispatcher:
             shutil.copyfile(objects / key, path)
 
         self.reconcile(worker, keys, fetch, classification if status != 0 else "none")
+        for key in [key for key in self.accepting if key[0] == worker.job.host_epoch]:
+            del self.accepting[key]
         worker.started |= shows_worker_start(keys)
         # The attempt's record reports how long its host took from boot to its first unit.
         startup = boot_to_first_unit(worker.directory, worker.job)
@@ -2998,10 +3182,11 @@ class UnitDispatcher:
         """The items left unresolved, each with its reason: a semantic failure, even where another attempt was
         accepted, or spent attempts, a rejection, the phase's launch limit, or no worker left to take it; once the
         phase ends, also every other item not accepted, as "not accepted"."""
-        return [(item, SEMANTIC_FAILURE_DETAIL if identity in self.semantic else
+        identities = self.items if ending else self.semantic.keys() | self.unresolved.keys()
+        return [(self.items[identity], SEMANTIC_FAILURE_DETAIL if identity in self.semantic else
                  self.unresolved.get(identity, "not accepted"))
-                for identity, item in sorted(self.items.items())
-                if identity in self.semantic or ((ending or identity in self.unresolved) and not self.done(identity))]
+                for identity in sorted(identities) if identity in self.items and (
+                    identity in self.semantic or ((ending or identity in self.unresolved) and not self.done(identity)))]
 
     def write_status(self):
         """Record the live workers' states, the number of items queued, and the items unresolved so far, in
@@ -3019,11 +3204,15 @@ class UnitDispatcher:
 
     def resolve_unlaunchable(self, deadline_reached):
         """Leave unresolved the queued items no worker can take: past the deadline, or in a pool that gave up."""
-        for item in self.queued():
+        for pool in self.pools:
             if deadline_reached:
-                self.unresolved[item.identity] = f"{self.arguments.phase} campaign reached its wall-clock launch limit"
-            elif self.gave_up(item.pool) and not self.pool_workers(item.pool):
-                self.unresolved[item.identity] = self.exhausted[item.pool]
+                reason = f"{self.arguments.phase} campaign reached its wall-clock launch limit"
+            elif self.gave_up(pool) and not self.pool_workers(pool):
+                reason = self.exhausted[pool]
+            else:
+                continue
+            for item in self.queued(pool):
+                self.unresolved[item.identity] = reason
 
     def lease_document(self, worker, sequence):
         document = {"schema_version": 2, "campaign_id": self.arguments.campaign_id,
@@ -3080,15 +3269,21 @@ class UnitDispatcher:
             worker.units.add(item.unit_id)
             self.held[item.identity] = (worker.job.host_epoch, sequence)
 
-    def send(self, worker):
-        """Write the worker's unsent leases in order, but none that was abandoned, whose item may already run
-        elsewhere. A lease the host claimed first as its idle stop is `claimed`, and those behind it are released,
-        all without spending an attempt; the host gets nothing more."""
-        for sequence in sorted(worker.unsent - worker.abandoned):
-            try:
-                held = put_unit_lease(self.arguments, worker, sequence, self.lease_document(worker, sequence))
-            except (CloudError, OSError):
-                return
+    def send(self, workers):
+        """Write the workers' unsent leases, each worker's in order and the workers on the request threads, but none
+        that was abandoned, whose item may already run elsewhere. A lease that could not be written is retried each
+        loop."""
+        pending = [(worker, [(sequence, self.lease_document(worker, sequence))
+                             for sequence in sorted(worker.unsent - worker.abandoned)]) for worker in workers]
+        pending = [(worker, documents) for worker, documents in pending if documents]
+        for (worker, _), written in zip(pending, self.concurrently(
+                lambda entry: write_leases(self.arguments, *entry), pending)):
+            self.sent(worker, written)
+
+    def sent(self, worker, written):
+        """Apply the leases written for a worker. One the host claimed first as its idle stop is `claimed`, and those
+        behind it are released, all without spending an attempt; the host gets nothing more."""
+        for sequence, held in written:
             worker.unsent.discard(sequence)
             if not held:
                 worker.stopping = True
@@ -3098,6 +3293,10 @@ class UnitDispatcher:
                         self.abandon(worker, later, "claimed" if later == sequence else "released",
                                      SELF_STOP_CLAIMED)
                 return
+
+    def concurrently(self, function, items):
+        """function's result for each item, run on the request threads, so a loop's round trips overlap."""
+        return [future.result() for future in [self.requests.submit(function, item) for item in items]]
 
     def next_item(self, worker, queued=None, units=None):
         """The eligible queued item to lease next: On-Demand work first, then the lowest replica, then the longest
@@ -3110,25 +3309,21 @@ class UnitDispatcher:
         still comes first: only an On-Demand host may take an On-Demand-only item, and the pool launched the host for
         it, so taking a later replica's Spot work first would buy another On-Demand host for the item. A Spot host's
         eligible items, and a tail pool's, are all On-Demand work or all not, so for them the replica decides."""
-        used = {}
-        for groups in self.accepted.values():
-            for receipt in groups.values():
-                used.setdefault((receipt["platform"], receipt["unit_id"]), set()).add(receipt["instance_id"])
         on_demand_worker = worker.job.market == "on-demand"
         units = worker.units if units is None else units
         # A Spot worker keeps taking its pool's tail items until an On-Demand worker replaces it.
         candidates = [
             item for item in (self.queued(worker.pool) if queued is None else queued)
             if item.unit_id not in units and worker.instance_id not in item.excluded_instances and
-            worker.instance_id not in used.get((item.platform, item.unit_id), ()) and
+            worker.instance_id not in self.measured.get((item.platform, item.unit_id), ()) and
             (on_demand_worker or not self.on_demand_only(item))]
         return min(candidates, key=lambda item: (not self.on_demand(item), item.replica,
                                                  -self.remaining_seconds(item), item.identity), default=None)
 
     def lease(self, worker, launching=False):
-        """Keep the worker's next lease written one ahead of its current one, or stop it. A worker is leased as it
-        launches, before its instance exists, and again once it reports; until then it keeps the leases it was
-        launched with."""
+        """Keep the worker's next lease issued one ahead of its current one, or stop it; the loop then writes them. A
+        worker is leased as it launches, before its instance exists, and again once it reports; until then it keeps
+        the leases it was launched with."""
         if (worker.open() and worker.job.market == "spot" and self.purchases[worker.pool] != "spot" and
                 worker.pool in self.tail and
                 self.retired.get(worker.pool, 0) < self.tail_on_demand.get(worker.pool, 0)):
@@ -3160,7 +3355,6 @@ class UnitDispatcher:
                     break
                 self.issue(worker, item, stop_by)
                 outstanding = worker.outstanding()
-        self.send(worker)
 
     def launch_room(self, pool):
         """How many more workers the pool may run beside those it has, within the phase's and its platform's
@@ -3192,9 +3386,9 @@ class UnitDispatcher:
         for pool in self.pools:
             if self.purchases[pool] != "spot-then-on-demand":
                 continue
-            items = [item for item in self.items.values() if item.pool == pool]
-            remaining = sum(self.remaining_seconds(item) for item in items if item.identity not in self.unresolved)
-            if remaining <= sum(seconds for item in items for _, seconds in item.groups) * ON_DEMAND_TAIL_PERCENT / 100:
+            remaining = sum(self.remaining_seconds(item) for identity, item in self.open[pool].items()
+                            if identity not in self.unresolved)
+            if remaining <= self.pool_seconds[pool] * ON_DEMAND_TAIL_PERCENT / 100:
                 self.tail.add(pool)
 
     def free_at(self, worker, now):
@@ -3277,6 +3471,42 @@ class UnitDispatcher:
         return candidate
 
     def launch(self, now):
+        """Admit each pool's launches, then write each admitted worker's first leases and launch it, the workers on the
+        request threads. A launch AWS refused leaves a worker that has ended, settled once its cleanup is proven."""
+        starting = []
+        self.admit(now, starting)
+        requests = {}
+        for worker in starting:
+            try:
+                requests[worker.job.host_epoch] = launch_requests(self.arguments, worker.job, worker.metadata)
+            except LaunchFailed as failure:
+                worker.launch_failure = (failure.classification, failure.detail)
+        pending = [(worker, [(sequence, self.lease_document(worker, sequence)) for sequence in sorted(worker.unsent)])
+                   for worker in starting if worker.job.host_epoch in requests]
+
+        def write_and_launch(entry):
+            # The host finds its work waiting when its setup ends; a lease that could not be written is retried
+            # each loop.
+            worker, documents = entry
+            written = write_leases(self.arguments, worker, documents)
+            try:
+                return written, launch_worker(self.arguments.cloud, worker.job, requests[worker.job.host_epoch])
+            except LaunchFailed as failure:
+                return written, failure
+
+        for (worker, _), (written, launched) in zip(pending, self.concurrently(write_and_launch, pending)):
+            self.sent(worker, written)
+            if isinstance(launched, LaunchFailed):
+                worker.launch_failure = (launched.classification, launched.detail)
+                continue
+            worker.metadata["instance_id"], worker.metadata["availability_zone"] = launched
+            if worker.instance_id:
+                write_attempt(self.attempts_path, worker.job, "started",
+                              f"instance_id={worker.instance_id};availability_zone={launched[1]}")
+
+    def admit(self, now, starting):
+        """Admit the launches the pools need now, recording each admitted worker, with its first leases issued, in
+        starting."""
         running = [worker.job for worker in self.workers.values()]
         blocked_vcpus = None
         for pool in self.pools:
@@ -3311,11 +3541,11 @@ class UnitDispatcher:
                     if not scan:
                         return
                     break
-                running.append(self.start(pool, candidate, now).job)
+                starting.append(self.start(pool, candidate, now))
+                running.append(candidate)
 
     def start(self, pool, job, now):
-        """Record an admitted worker, write its first leases, and launch it. A launch AWS refused leaves a worker that
-        has ended, settled once its cleanup is proven."""
+        """Record an admitted worker and issue its first leases, before its launch."""
         del self.candidates[pool]
         # A launch takes over a free slot, and its failures, before it opens a new one named for it.
         slots = self.free_slots.get(pool)
@@ -3339,17 +3569,7 @@ class UnitDispatcher:
             launched_at=now, stop_by=job.stop_by)
         if job.market == "on-demand" and pool in self.tail:
             self.tail_on_demand[pool] = self.tail_on_demand.get(pool, 0) + 1
-        # The host finds its work waiting when its setup ends; a lease that could not be written is retried each
-        # loop.
         self.lease(worker, launching=True)
-        try:
-            metadata["instance_id"], metadata["availability_zone"] = launch_worker(self.arguments, job, metadata)
-        except LaunchFailed as failure:
-            worker.launch_failure = (failure.classification, failure.detail)
-            return worker
-        if worker.instance_id:
-            write_attempt(self.attempts_path, job, "started",
-                          f"instance_id={worker.instance_id};availability_zone={metadata['availability_zone']}")
         return worker
 
     def stop_all(self):
@@ -3361,11 +3581,11 @@ class UnitDispatcher:
             self.terminated.setdefault(epoch, time.time())
         while True:
             self.observed = {}
-            for epoch, worker in list(self.workers.items()):
+            for worker in self.workers.values():
                 self.stop_host(worker)
-                if self.ended(worker) and self.clean_up(worker):
-                    self.budget.release(self.arguments.campaign_id, epoch, cleanup_verified=True)
-                    del self.workers[epoch]
+            for worker in self.clean_up([worker for worker in self.workers.values() if self.ended(worker)]):
+                self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
+                del self.workers[worker.job.host_epoch]
             if not self.workers:
                 return
             if time.monotonic() >= deadline:
@@ -3415,16 +3635,13 @@ class UnitDispatcher:
                 self.observed = {}
                 now = time.monotonic()
                 deadline_reached = now >= deadline
-                for worker in list(self.workers.values()):
-                    if not self.ended(worker):
-                        self.poll(worker)
-                    elif self.clean_up(worker):
-                        self.finish(worker)
+                self.poll()
                 # Work handed back after the deadline, or to a pool that gave up, is not leased again.
                 self.resolve_unlaunchable(deadline_reached)
                 self.update_tail()
                 for worker in self.workers.values():
                     self.lease(worker)
+                self.send(self.workers.values())
                 if not deadline_reached:
                     self.launch(now)
                 for epoch, worker in self.workers.items():
@@ -3445,6 +3662,9 @@ class UnitDispatcher:
         except (Exception, KeyboardInterrupt) as error:
             halt_and_clean_up(self.result_root, self.budget, self.stop_all, error)
             raise
+        finally:
+            self.requests.shutdown(cancel_futures=True)
+            self.acceptances.shutdown(cancel_futures=True)
         unresolved = self.unresolved_items(ending=True)
         write_unresolved_units(self.result_root / "unresolved-units.tsv", unresolved)
         if unresolved:
