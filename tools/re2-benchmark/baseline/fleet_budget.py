@@ -234,6 +234,8 @@ class FleetBudget:
             refuse_halted(state)
             if key in state["reservations"] or key in state["completed"]:
                 raise BudgetError("host epoch already used by the shared fleet")
+            if "spending_stop" in state:
+                return False, "spending_stop"
             active = state["reservations"]
             policy = self.policy
             if len(active) >= policy["max_hosts"] or now - state["last_launch_at"] < policy["minimum_launch_interval_seconds"]:
@@ -269,6 +271,8 @@ class FleetBudget:
                 raise BudgetError("host epoch holds no shared fleet reservation")
             if until <= item["reserved_until"]:
                 return True, "reserved"
+            if "spending_stop" in state:
+                return False, "spending_stop"
             if not affordable(self.policy, state, {**state["reservations"], key: {**item, "reserved_until": until}},
                               now):
                 return False, "fleet spending or machine-hour ceiling"
@@ -306,6 +310,17 @@ class FleetBudget:
             if owner in state.get("halts", {}) and not any(
                     item["owner"] == owner for item in state["reservations"].values()):
                 del state["halts"][owner]
+
+    def stop_spending(self, reason):
+        """Stop the fleet's spending: no owner's launch or extension is admitted until clear_spending_stop, while
+        every host keeps the reservation it holds, so running leases finish. The first reason stands. Unlike a halt,
+        it stops no controller."""
+        with self.locked() as state:
+            state.setdefault("spending_stop", reason)
+
+    def clear_spending_stop(self):
+        with self.locked() as state:
+            state.pop("spending_stop", None)
 
     def check(self):
         """Raise FleetHalted while the fleet is halted. A host past its reservation's end is no halt: it stops at its

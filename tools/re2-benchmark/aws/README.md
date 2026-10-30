@@ -196,8 +196,8 @@ hours; crashes never expire them, and one past its stop time counts as spent
 to now until then. A
 rejected work unit follows the [unit dispatch](#unit-dispatch) retry rules.
 A controller that fails while it recovers or dispatches its hosts, through
-unproven cleanup, changed frozen inputs, conflicting accepted identities, a
-shared resource-policy failure, or any other error, halts every collector
+changed frozen inputs, conflicting accepted identities, a shared
+resource-policy failure, or any other error, halts every collector
 sharing the policy and records its result root as the halt's owner. Stopping a
 controller with Ctrl-C or SIGTERM halts nothing once it has verified the cleanup
 of every host it holds a reservation for. A failure in its startup checks
@@ -1098,7 +1098,13 @@ or `superseded` when every group was accepted first elsewhere. Other outcomes:
 - A marker that names another lease and changed frozen inputs stop the
   campaign as unsafe.
 - A worker whose cleanup cannot be proven keeps its reservation, and each loop
-  tries its cleanup again; the phase does not complete while one remains.
+  tries its cleanup again; the phase does not complete while one remains. A
+  leftover, a terminated worker's prefix that will not empty, is logged each
+  loop and pauses nothing. A leak, an instance not terminated 15 minutes after
+  the controller asked EC2 to terminate it, is logged and sets the shared
+  fleet's spending stop, as
+  [recovering uploads during cleanup](#recovering-uploads-during-cleanup)
+  describes.
 
 When a pool's remaining estimated work, the groups not yet accepted, falls to
 10% of its total, its remaining items become On-Demand work, leased first, and
@@ -1149,7 +1155,7 @@ See:
 ### Recovering uploads during cleanup
 
 A worker's cleanup is two proofs, in order. First, EC2 lists its instance as
-terminated; the controller asks EC2 to terminate one still running. Then the
+terminated; the controller asks EC2 to terminate one not yet terminated. Then the
 controller downloads every object under the worker's result prefix into
 `<session>/recovered-uploads/objects/`, by its key below that prefix, deletes
 the worker's whole prefix, leases included, and lists it empty. A failed
@@ -1157,6 +1163,16 @@ listing, download, or deletion keeps the prefix and the worker's reservation,
 and the next loop tries again. Only once both proofs hold does the controller
 release the reservation and settle the worker from its recovered uploads, as
 [unit dispatch](#unit-dispatch) describes.
+
+An instance still not terminated 15 minutes after the request is a leak: the
+controller logs it and sets the spending stop in the shared fleet state. While
+the stop stands, the budget admits no launch and no lease extension for any
+owner, refusing each with reason `spending_stop`, but halts no controller, so
+every host finishes the leases it holds within its reservation. The stop stands
+until an operator clears it with `FleetBudget.clear_spending_stop`, once the
+instance is gone. A controller reaching its teardown deadline with an
+instance still not terminated treats it as a leak and exits, leaving the
+worker's reservation for its restart.
 
 This covers late uploads and results available when a controller aborts.
 Measurements still on an interrupted or forcibly terminated host may never

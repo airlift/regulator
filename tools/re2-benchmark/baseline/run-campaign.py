@@ -109,6 +109,9 @@ UNIT_WORKER_IDLE_SECONDS = 10 * 60
 UNIT_WORKER_WIND_DOWN_SECONDS = 15 * 60
 # From the host's stop time until its cleanup is verified and its reservation released.
 UNIT_WORKER_TEARDOWN_SECONDS = 15 * 60
+# An instance EC2 has still not terminated this long after the controller asked it to has leaked, which stops the
+# fleet's spending until the stop is cleared.
+TERMINATION_LEAK_SECONDS = 15 * 60
 # A lease's timeout is this multiple of its groups' estimate, or of the unit budget when that is longer.
 UNIT_LEASE_TIMEOUT_FACTOR = 2
 # A running host whose lease outran its lease timeout from its latest heartbeat has stalled, and loses that lease.
@@ -2252,8 +2255,8 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
         if admitted:
             candidate = place(candidate, placement)
             break
-        # Fleet-wide host, spending and launch-rate limits hold in every region.
-        if reason in ("fleet launch limit", "fleet spending or machine-hour ceiling"):
+        # Fleet-wide host, spending and launch-rate limits, and a spending stop, hold in every region.
+        if reason in ("fleet launch limit", "fleet spending or machine-hour ceiling", "spending_stop"):
             break
     if not admitted:
         if (candidate.identity, reason) not in capacity_waits:
@@ -2273,7 +2276,7 @@ def launch_record(row):
 
 def halt_and_clean_up(result_root, budget, stop_hosts, error):
     """Stop a controller that failed with error: stop_hosts terminates its hosts, proves their cleanup, and releases
-    their reservations, raising RuntimeError for any it cannot prove. A failure halts the fleet budget in the name of
+    their reservations, keeping those it cannot prove. A failure halts the fleet budget in the name of
     result_root, its owner, whose restart clears it once its cleanup is verified. A cancellation, Ctrl-C or SIGTERM,
     or FleetHalted, which another owner's halt raises, halts it only when cleanup cannot be proven for every host the
     owner holds a reservation for, so a halt stays its owner's alone to clear. The caller then re-raises error."""
@@ -2400,11 +2403,13 @@ class UnitWorker:
     stop_by: int = 0
     lease_stop_by: dict = field(default_factory=dict)
     # A launch AWS refused, as its classification and detail; whether its host never reported by its boot deadline;
-    # the instance as its cleanup last saw it; and whether the controller asked EC2 to terminate it.
+    # the instance as its cleanup last saw it; when the controller asked EC2 to terminate it, in epoch seconds; and
+    # whether it leaked.
     launch_failure: tuple = None
     missed_boot: bool = False
     instance: cloud.Instance = None
-    terminating: bool = False
+    terminate_requested: float = 0.0
+    leaked: bool = False
     # The full keys of uploads and leases whose outcomes are durable, which the next deletion removes from S3.
     deletions: set = field(default_factory=set)
 
@@ -3038,16 +3043,31 @@ class UnitDispatcher:
         return instance.state not in ("pending", "running")
 
     def stop_host(self, worker):
-        """Ask EC2, once, to terminate the worker's instance while it may still run."""
+        """Ask EC2, once, to terminate the worker's instance until it lists it terminated; one still not terminated
+        TERMINATION_LEAK_SECONDS after that has leaked."""
         try:
             instance = None if worker.launch_failure else self.instance(worker)
-            if (instance is not None and not worker.terminating and
-                    instance.state in ("pending", "running", "stopping", "stopped")):
+            if instance is None or instance.state == "terminated":
+                return
+            if not worker.terminate_requested:
                 self.arguments.cloud.terminate(worker.metadata["aws_region"], [instance.id])
-                worker.terminating = True
+                worker.terminate_requested = time.time()
+            elif time.time() - worker.terminate_requested >= TERMINATION_LEAK_SECONDS:
+                self.leak(worker)
         except CloudError:
             # The next loop asks again.
             return
+
+    def leak(self, worker):
+        """Stop the fleet's spending, once, for the worker's instance, which EC2 has not terminated; its reservation
+        stays until its cleanup is proven, and other hosts' running leases finish."""
+        if worker.leaked:
+            return
+        worker.leaked = True
+        reason = f"instance {worker.instance_id} of {worker.host_session} did not terminate"
+        print(f"leak: {reason}; no launch or lease extension is admitted until the spending stop is cleared",
+              flush=True)
+        self.budget.stop_spending(reason)
 
     def clean_up(self, workers):
         """Prove ended workers' cleanup: each one's instance terminated, then its prefix recovered, deleted, and found
@@ -3056,6 +3076,11 @@ class UnitDispatcher:
         terminated = [worker for worker in workers if self.instance_terminated(worker)]
         proven = self.concurrently(lambda worker: recover_uploads(
             self.arguments.cloud, worker.metadata, worker.directory / "recovered-uploads" / "objects"), terminated)
+        for worker, held in zip(terminated, proven):
+            if not held:
+                # A leftover: the host is gone, so it costs nothing, halts nothing, and is retried.
+                print(f"leftover: the prefix of {worker.host_session}, whose instance terminated, is not yet "
+                      f"recovered and empty; retrying", flush=True)
         return [worker for worker, held in zip(terminated, proven) if held]
 
     def instance_terminated(self, worker):
@@ -3573,9 +3598,9 @@ class UnitDispatcher:
         return worker
 
     def stop_all(self):
-        """Terminate every worker's host and prove its cleanup, releasing its reservation, within the teardown;
-        raises RuntimeError naming the workers whose cleanup it could not prove. A restart settles them from their
-        ledger rows."""
+        """Terminate every worker's host and prove its cleanup, releasing its reservation, within the teardown. A host
+        EC2 has not terminated by then has leaked, and one whose prefix will not empty is a leftover; each keeps its
+        reservation, and a restart settles it from its ledger rows."""
         deadline = time.monotonic() + UNIT_WORKER_TEARDOWN_SECONDS
         for epoch in self.workers:
             self.terminated.setdefault(epoch, time.time())
@@ -3589,8 +3614,10 @@ class UnitDispatcher:
             if not self.workers:
                 return
             if time.monotonic() >= deadline:
-                raise RuntimeError("cleanup could not be proven for unit workers " +
-                                   ", ".join(worker.job.identity for worker in self.workers.values()))
+                for worker in self.workers.values():
+                    if not self.instance_terminated(worker):
+                        self.leak(worker)
+                return
             time.sleep(UNIT_POLL_SECONDS)
 
     def start_campaign(self):
@@ -3622,42 +3649,10 @@ class UnitDispatcher:
         return campaign_started_at(state, self.arguments)
 
     def run(self):
-        arguments = self.arguments
-        validate_execution_policy(arguments, self.result_root)
-        self.fingerprint = frozen_input_fingerprint(self.root, arguments, self.items_path)
-        started_at = self.start_campaign()
-        remaining_seconds = max(0, phase_timeout(arguments) - max(0, time.time() - started_at))
-        deadline = time.monotonic() + remaining_seconds
+        deadline = self.begin()
         try:
             self.recover()
-            while True:
-                self.budget.check()
-                self.observed = {}
-                now = time.monotonic()
-                deadline_reached = now >= deadline
-                self.poll()
-                # Work handed back after the deadline, or to a pool that gave up, is not leased again.
-                self.resolve_unlaunchable(deadline_reached)
-                self.update_tail()
-                for worker in self.workers.values():
-                    self.lease(worker)
-                self.send(self.workers.values())
-                if not deadline_reached:
-                    self.launch(now)
-                for epoch, worker in self.workers.items():
-                    # A lost host is stopped at once; its cleanup still recovers a completion that lands.
-                    # So is a booting host once the pool has nothing it could take. Its stop lease first records
-                    # it stopping, so through its cleanup neither this controller nor a restarted one counts it
-                    # as open for work.
-                    if (worker.lost or self.unneeded(worker)) and epoch not in self.terminated:
-                        if not (worker.lost or worker.stopping):
-                            self.issue(worker, None)
-                        self.terminated[epoch] = time.time()
-                    if epoch in self.terminated:
-                        self.stop_host(worker)
-                self.write_status()
-                if not self.workers and not self.queued():
-                    break
+            while not self.step(deadline):
                 time.sleep(UNIT_POLL_SECONDS)
         except (Exception, KeyboardInterrupt) as error:
             halt_and_clean_up(self.result_root, self.budget, self.stop_all, error)
@@ -3665,6 +3660,47 @@ class UnitDispatcher:
         finally:
             self.requests.shutdown(cancel_futures=True)
             self.acceptances.shutdown(cancel_futures=True)
+        self.end()
+
+    def begin(self):
+        """Check that the phase may run and record its start; returns when, on the monotonic clock, its launches
+        end. The caller then recovers it."""
+        validate_execution_policy(self.arguments, self.result_root)
+        self.fingerprint = frozen_input_fingerprint(self.root, self.arguments, self.items_path)
+        started_at = self.start_campaign()
+        return time.monotonic() + max(0, phase_timeout(self.arguments) - max(0, time.time() - started_at))
+
+    def step(self, deadline):
+        """One loop of the phase; returns whether it is over, with every worker settled and nothing queued."""
+        self.budget.check()
+        self.observed = {}
+        now = time.monotonic()
+        deadline_reached = now >= deadline
+        self.poll()
+        # Work handed back after the deadline, or to a pool that gave up, is not leased again.
+        self.resolve_unlaunchable(deadline_reached)
+        self.update_tail()
+        for worker in self.workers.values():
+            self.lease(worker)
+        self.send(self.workers.values())
+        if not deadline_reached:
+            self.launch(now)
+        for epoch, worker in self.workers.items():
+            # A lost host is stopped at once; its cleanup still recovers a completion that lands.
+            # So is a booting host once the pool has nothing it could take. Its stop lease first records
+            # it stopping, so through its cleanup neither this controller nor a restarted one counts it
+            # as open for work.
+            if (worker.lost or self.unneeded(worker)) and epoch not in self.terminated:
+                if not (worker.lost or worker.stopping):
+                    self.issue(worker, None)
+                self.terminated[epoch] = time.time()
+            if epoch in self.terminated:
+                self.stop_host(worker)
+        self.write_status()
+        return not self.workers and not self.queued()
+
+    def end(self):
+        """Record the phase's unresolved items, and with none, validate it and mark it complete."""
         unresolved = self.unresolved_items(ending=True)
         write_unresolved_units(self.result_root / "unresolved-units.tsv", unresolved)
         if unresolved:
@@ -3674,7 +3710,7 @@ class UnitDispatcher:
         if self.validation.kind == "language" and self.arguments.phase == "primary":
             aggregate_language_plans(self.arguments, self.result_root)
         # Every worker has exited, each settled only once its cleanup was verified.
-        write_phase_complete(self.result_root, arguments)
+        write_phase_complete(self.result_root, self.arguments)
 
     def validate_phase(self):
         """The phase gate: every unit replica of the phase accepted as one campaign."""

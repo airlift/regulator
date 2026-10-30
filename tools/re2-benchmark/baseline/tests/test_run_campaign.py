@@ -2304,7 +2304,7 @@ class FakeUnitHost:
     is launched without RunInstances's answer and is missing from EC2's listing while it stays unlisted, and one
     whose cleanup the fleet slows keeps shutting down once terminated until every other host has exited. Every host
     that booted uploads its host archive as it exits, as the user data's exit trap does, even one that failed during
-    bootstrap, and its instance then terminates. A lease completes failed with "semantic-failure" (status 44),
+    bootstrap, and its instance then terminates, or while the fleet leaks it, keeps shutting down. A lease completes failed with "semantic-failure" (status 44),
     "protocol-rejection" (status 42), "fail" (status 1), or "capacity-rejected", whose capacity gate failed it with
     status 1. "corrupt-archive" uploads a result that differs from its marker's checksum, and "foreign-receipt" a
     receipt that names another attempt. "foreign-marker" completes with a marker naming another campaign, and
@@ -2356,8 +2356,12 @@ class FakeUnitHost:
         self.stopping = False
         self.terminations = 0
         self.status = None
+        self.leaking = False
 
     def tick(self):
+        if self.leaking and not self.fleet.leaked(self):
+            self.leaking = False
+            self.fleet.set_state(self, "terminated", self.shutdown_reason)
         if self.stopping and self.status is None and not self.stalled:
             if all(host is self or host.status is not None for host in self.fleet.hosts):
                 self.exit(143)
@@ -2559,9 +2563,13 @@ class FakeUnitHost:
                     host.addfile(member, io.BytesIO(content.encode()))
             self.put("host.tar.gz", archive.getvalue())
         self.status = status
-        self.fleet.set_state(self, "terminated", "Client.UserInitiatedShutdown" if self.terminations
-                             else "Client.InstanceInitiatedShutdown")
+        self.leaking = self.fleet.leaked(self)
+        self.fleet.set_state(self, "shutting-down" if self.leaking else "terminated", self.shutdown_reason)
         self.fleet.log.append(("exit", self.session))
+
+    @property
+    def shutdown_reason(self):
+        return "Client.UserInitiatedShutdown" if self.terminations else "Client.InstanceInitiatedShutdown"
 
     def terminate(self):
         self.terminations += 1
@@ -2589,7 +2597,7 @@ class FakeUnitFleet(FakeCloud):
     def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None, failed_boot=lambda host: False,
                  unit_scripts=None, stuck_prefix=lambda host: False, unlisted=lambda host: False,
                  slow_boot=lambda host: False, slow_cleanup=lambda host: False, setup_seconds=lambda host: 0,
-                 timed=False, units=None):
+                 timed=False, units=None, leaked=lambda host: False):
         super().__init__()
         self.scratch = scratch
         self.setup_seconds = setup_seconds
@@ -2601,6 +2609,7 @@ class FakeUnitFleet(FakeCloud):
         self.slow_boot = slow_boot
         self.slow_cleanup = slow_cleanup
         self.stuck_prefix = stuck_prefix
+        self.leaked = leaked
         self.unlisted = unlisted
         self.scripts = scripts or {}
         self.unit_scripts = unit_scripts or {}
@@ -2727,14 +2736,39 @@ class FakeUnitFleet(FakeCloud):
 class TestUnitWorkers(unittest.TestCase):
     PLATFORMS = RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
 
-    def run_phase(self, root, fleet, phase, shards, max_concurrent, per_platform, platform_regions=None, purchases=None,
-                  on_demand=True, deadline=None, confirmations=(), primary_results=None, release_version="",
-                  extend=True, budget=None):
-        """Drain the phase's work items through the fleet; return the result directory. Unless given a shared
-        fleet budget, the stub budget admits every extension of a host's reservation if extend, logging each, and
-        refuses every one otherwise.
+    def run_phase(self, root, fleet, phase, shards, max_concurrent, per_platform, **options):
+        """Drain the phase's work items through the fleet, as dispatcher's options build its controller; return the
+        result directory.
 
         The unit attempt ledger is left in self.ledger."""
+        with fleet.stubs():
+            dispatcher = self.dispatcher(root, fleet, phase, shards, max_concurrent, per_platform, **options)
+            try:
+                dispatcher.run()
+            finally:
+                self.ledger = self.unit_attempts(dispatcher.result_root)
+        self.assert_accepted(dispatcher)
+        return dispatcher.result_root
+
+    def unit_attempts(self, result_root):
+        if not (result_root / "unit-attempts.tsv").exists():
+            return []
+        with (result_root / "unit-attempts.tsv").open(newline="") as ledger:
+            return list(csv.DictReader(ledger, delimiter="\t"))
+
+    def assert_accepted(self, dispatcher):
+        """Assert that every group of the phase's work items was accepted."""
+        accepted = RUN_CAMPAIGN.read_accepted_units(dispatcher.accepted_path)
+        self.assertEqual(sorted(f"{identity}/group-{group}" for identity, item in dispatcher.items.items()
+                                for group, _ in item.groups),
+                         sorted(RUN_CAMPAIGN.group_identity(receipt) for receipt in accepted))
+
+    def dispatcher(self, root, fleet, phase, shards, max_concurrent, per_platform, platform_regions=None,
+                   purchases=None, on_demand=True, deadline=None, confirmations=(), primary_results=None,
+                   release_version="", extend=True, budget=None):
+        """The controller of the phase's work items, with the fleet's stubs in place, its result directory in root.
+        Unless given a shared fleet budget, the stub budget admits every extension of a host's reservation if extend,
+        logging each, and refuses every one otherwise."""
         if budget is None:
             budget = Mock(policy={"hourly_rates": {
                 instance_type: {"spot": 0.2} for platform in self.PLATFORMS
@@ -2766,20 +2800,9 @@ class TestUnitWorkers(unittest.TestCase):
         result_root = root / "results"
         result_root.mkdir(exist_ok=True)
         RUN_CAMPAIGN.write_work_items(result_root / "work-items.tsv", items)
-        with fleet.stubs():
-            self.validation = RUN_CAMPAIGN.unit_validation(SCRIPT.parents[3], arguments, "baseline")
-            try:
-                RUN_CAMPAIGN.UnitDispatcher(arguments, SCRIPT.parents[3], result_root, items, self.PLATFORMS,
-                                            self.validation).run()
-            finally:
-                self.ledger = []
-                if (result_root / "unit-attempts.tsv").exists():
-                    with (result_root / "unit-attempts.tsv").open(newline="") as ledger:
-                        self.ledger = list(csv.DictReader(ledger, delimiter="\t"))
-        accepted = RUN_CAMPAIGN.read_accepted_units(result_root / "accepted-units.tsv")
-        self.assertEqual(sorted(f"{item.identity}/group-{group}" for item in items for group, _ in item.groups),
-                         sorted(RUN_CAMPAIGN.group_identity(receipt) for receipt in accepted))
-        return result_root
+        self.validation = RUN_CAMPAIGN.unit_validation(SCRIPT.parents[3], arguments, "baseline")
+        return RUN_CAMPAIGN.UnitDispatcher(arguments, SCRIPT.parents[3], result_root, items, self.PLATFORMS,
+                                           self.validation)
 
     def leases(self, outcome="leased"):
         return [row for row in self.ledger if row["outcome"] == outcome]
@@ -2914,19 +2937,6 @@ class TestUnitWorkers(unittest.TestCase):
                                                         "smoke phase has no completion marker after verified cleanup"):
                     RUN_CAMPAIGN.validate_unit_phase_prerequisite(
                         self.arguments, self.validation, result_root, "smoke")
-        with tempfile.TemporaryDirectory() as temporary:
-            # A worker whose prefix will not empty keeps its reservation, and its cleanup is retried, so the phase
-            # is never marked complete; a controller stopped then cannot prove it either.
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", stuck_prefix=lambda host: host.number == 1,
-                                  abort_after=200)
-            fleet.abort = RuntimeError
-            with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError,
-                                        "controller stopped; cleanup could not be proven for unit workers r8i/"):
-                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
-            stuck = fleet.hosts[0]
-            self.assertEqual(0, stuck.status)
-            self.assertNotIn(int(stuck.epoch), {call.args[1] for call in self.budget.release.call_args_list})
-            self.assertFalse((Path(temporary) / "results" / RUN_CAMPAIGN.PHASE_COMPLETE).exists())
 
     def test_confirmation_runs_on_a_new_instance_and_is_accepted_beside_the_primary_campaign(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3145,6 +3155,78 @@ class TestUnitWorkers(unittest.TestCase):
                                   "unit_id" in sessions[entry[1]].leases.get(entry[2], {})])
             leased = [(row["platform"], row["unit_id"], row["replica"]) for row in self.leases()]
             self.assertEqual((80, 80), (len(leased), len(set(leased))))
+
+    def test_leftover_is_retried_and_a_leak_stops_spending_while_the_other_phase_finishes_its_leases(self):
+        units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
+                                      "estimated_seconds": "900",
+                                      "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                 for shard, count in (("short", 1), ("long", 4)) for index in range(1, count + 1)}
+        fixture = test_fleet_budget.TestFleetBudget()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.policy["hourly_rates"]["r9g.large"] = {"spot": 0.065, "total": 0.075}
+        fixture.path.write_text(json.dumps(fixture.policy))
+        budget = RUN_CAMPAIGN.FleetBudget(fixture.path)
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log, \
+                patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot",
+                             return_value={"quota": 736, "instances": [], "requests": []}):
+            # Two phases share the fleet. The smoke phase's two hosts measure a unit each and stop: the r8i host's
+            # prefix will not empty, and the r9g host's instance never terminates. The primary phase's four hosts
+            # measure 15-minute units meanwhile.
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, setup_seconds=lambda host: 67,
+                                  stuck_prefix=lambda host: host.epoch == "1", leaked=lambda host: host.epoch == "2")
+            with fleet.stubs():
+                running = {}
+                for phase, shard, limits in (("smoke", "short", (2, 1)), ("primary", "long", (4, 2))):
+                    (Path(temporary) / phase).mkdir()
+                    dispatcher = self.dispatcher(Path(temporary) / phase, fleet, phase, [shard], *limits,
+                                                 purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
+                    running[dispatcher] = dispatcher.begin()
+                    dispatcher.recover()
+                smoke, primary = phases = list(running)
+
+                def run(until):
+                    # Each loop runs each phase not yet over, as one controller would.
+                    while running and not until():
+                        for dispatcher, deadline in list(running.items()):
+                            if dispatcher.step(deadline):
+                                del running[dispatcher]
+                        fleet.sleep(RUN_CAMPAIGN.UNIT_POLL_SECONDS)
+
+                def spending_stop():
+                    return json.loads(budget.state_path.read_text()).get("spending_stop")
+
+                run(spending_stop)
+                stuck, leaked = (next(host for host in fleet.hosts if host.epoch == epoch) for epoch in "12")
+                # The smoke host whose instance never terminated stopped the fleet's spending, while the primary
+                # phase's hosts measured their leases.
+                self.assertEqual(f"instance {leaked.instance_id} of {leaked.session} did not terminate",
+                                 spending_stop())
+                self.assertIn(f"leak: instance {leaked.instance_id}", log.getvalue())
+                self.assertEqual(4, len(primary.workers))
+                launches = len(fleet.launches)
+                run(lambda: not primary.workers)
+                # The stop halted no controller, and the primary phase's hosts finished every lease they held: each
+                # unit leased was accepted. With no extension or launch admitted, its remaining work waits.
+                budget.check()
+                ledger = self.unit_attempts(primary.result_root)
+                self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
+                                          if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
+                self.assertEqual(launches, len(fleet.launches))
+                self.assertIn("queued-capacity\tspending_stop", primary.attempts_path.read_text())
+                # The prefix that would not empty was retried every loop since its host stopped, and the primary
+                # phase went on leasing meanwhile.
+                self.assertGreater(log.getvalue().count(f"leftover: the prefix of {stuck.session},"), 100)
+                self.assertIn("lease", [entry[0] for entry in fleet.log[fleet.log.index(("exit", stuck.session)):]
+                                        if entry[1] not in (stuck.session, leaked.session)])
+                # Once the prefix empties, the instance terminates and the stop is cleared, both phases finish.
+                fleet.stuck_prefix = fleet.leaked = lambda host: False
+                budget.clear_spending_stop()
+                run(lambda: False)
+                for dispatcher in phases:
+                    dispatcher.end()
+                    self.assert_accepted(dispatcher)
+                    self.assertEqual([], budget.reservations(dispatcher.result_root))
 
     def test_lease_written_after_the_hosts_idle_claim_requeues_its_unit_without_an_attempt(self):
         with tempfile.TemporaryDirectory() as temporary:

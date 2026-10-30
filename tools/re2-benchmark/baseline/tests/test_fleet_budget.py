@@ -356,6 +356,25 @@ class TestFleetBudget(unittest.TestCase):
         self.budget.release("baseline", 1, cleanup_verified=True, now=1000 + 1000 * 3600)
         self.assertTrue(self.reserve(2, campaign="language", now=1000 + 1500 * 3600)[0])
 
+    def test_spending_stop_refuses_launches_and_extensions_until_cleared(self):
+        self.reserve(1)
+        self.budget.stop_spending("instance i-1 did not terminate")
+        # The first reason stands, and the stop halts no controller.
+        self.budget.stop_spending("instance i-2 did not terminate")
+        self.budget.check()
+        other = fleet_budget.FleetBudget(self.path)
+        self.assertEqual((False, "spending_stop"), self.reserve(2, campaign="language", now=1001))
+        self.assertEqual((False, "spending_stop"), other.extend("baseline", 1, now=1002, until=9000))
+        # A host keeps what it holds, and verified cleanup still returns it; no owner's resume clears the stop.
+        self.assertEqual((True, "reserved"), other.extend("baseline", 1, now=1002, until=8200))
+        other.release("baseline", 1, cleanup_verified=True, now=1003)
+        other.resume(self.root / "baseline")
+        self.assertEqual("instance i-1 did not terminate",
+                         json.loads(self.budget.state_path.read_text())["spending_stop"])
+        self.assertEqual((False, "spending_stop"), self.reserve(3, campaign="language", now=1004))
+        other.clear_spending_stop()
+        self.assertTrue(self.reserve(3, campaign="language", now=1005)[0])
+
     def test_failure_stops_admission_until_its_owner_cleans_up_and_resumes(self):
         self.reserve(1)
         self.assertTrue(self.reserve(2, campaign="language", now=1001)[0])
