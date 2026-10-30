@@ -168,8 +168,8 @@ PLACEMENT_SCORE_CACHE_SECONDS = 5 * 60
 PLACEMENT_SCORE_MAXIMUM_TARGET = 50
 # A JDK download slower than this for a minute has stalled.
 JDK_DOWNLOAD_MINIMUM_RATE = 256 * 1024
-# A shared archive upload that stalls for the SDK's read timeout is retried rather than left to hold every launch
-# behind it.
+# A shared archive upload that fails, a part stalled past the SDK's read timeout among the causes, is retried rather
+# than left to hold every launch behind it.
 SHARED_ARCHIVE_UPLOAD_ATTEMPTS = 3
 # Every archive the campaign has put in its regions' shared buckets, by key, in the campaign root, so a region added
 # later gets each one before any phase may launch there.
@@ -1527,8 +1527,7 @@ def put_shared_archive(aws, region, bucket, key, path, sha256, label):
             return
         print(f"uploading {label} to {region} (attempt {attempt})", flush=True)
         try:
-            # A single PUT keeps S3's checksum the whole-object SHA-256, which S3 verifies on upload.
-            aws.put(region, bucket, key, path, sha256=sha256)
+            aws.upload(region, bucket, key, path, sha256)
             return
         except CloudError as error:
             if attempt == SHARED_ARCHIVE_UPLOAD_ATTEMPTS:

@@ -775,7 +775,7 @@ each route.
 Before it launches any host, the controller puts each archive once in every
 region that may launch a host installing it, under
 `TRANSFER_PREFIX/engine-builds/<sha256>.tar.zst`, and skips an object with that
-key and checksum. The frozen candidate archive, which every host unpacks first,
+key whose metadata records the archive's SHA-256. The frozen candidate archive, which every host unpacks first,
 travels the same way under `TRANSFER_PREFIX/candidates/<sha256>.tar.gz`. A
 language plan's bundle, which a language unit worker
 installs, travels the same way under
@@ -787,8 +787,13 @@ same way under `TRANSFER_PREFIX/jdks/<sha256>.tar.gz`: the controller downloads
 it once per campaign from its pinned URL into the campaign root's `jdks/`,
 checks it against the pinned SHA-256, and puts it in each region, so hosts never
 fetch it from its publisher.
-Each upload is one request, which fails once a read waits 60 seconds, and is
-retried; the campaign stops after three failed attempts. The
+Each upload is the SDK's managed transfer, in parallel parts once the archive
+is large, each part checked by S3 against its own SHA-256; a multipart
+object's checksum is not the whole archive's, so the upload keeps the
+archive's SHA-256 in the object's `sha256` metadata, and hosts check the
+whole archive against its pin after download. A failed upload, such as one
+whose part waited 60 seconds for a read, is retried; the campaign stops after
+three failed attempts. The
 [worker profile](#worker-profile) may read those archive keys, in addition to
 each worker's own input prefix. These archives are campaign inputs rather than
 worker resources, so worker cleanup leaves them in place. Remove them once the

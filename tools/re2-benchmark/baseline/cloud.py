@@ -5,7 +5,6 @@ method takes and returns plain values, and every SDK failure arrives as CloudErr
 use, so the commands that never reach AWS, such as status, run without it.
 """
 
-import base64
 import contextlib
 import shutil
 import threading
@@ -282,27 +281,27 @@ class AwsCloud:
         with translated(), contextlib.closing(body), path.open("wb") as output:
             shutil.copyfileobj(body, output)
 
-    def put(self, region, bucket, key, body, *, if_none_match=False, sha256=None):
-        """Write the object, bytes or the file at a path, in one request. With if_none_match it is written only
-        where no object has the key, and returns False where one does; with sha256, S3 verifies the body against
-        it and keeps it as the object's checksum."""
-        parameters = {"Bucket": bucket, "Key": key}
+    def put(self, region, bucket, key, body, *, if_none_match=False):
+        """Write the object's bytes in one request. With if_none_match it is written only where no object has the
+        key, and returns False where one does."""
+        parameters = {"Bucket": bucket, "Key": key, "Body": body}
         if if_none_match:
             parameters["IfNoneMatch"] = "*"
-        if sha256 is not None:
-            parameters.update(ChecksumAlgorithm="SHA256",
-                              ChecksumSHA256=base64.b64encode(bytes.fromhex(sha256)).decode())
         try:
-            if isinstance(body, bytes):
-                self.call("s3", region, "put_object", Body=body, **parameters)
-            else:
-                with body.open("rb") as content:
-                    self.call("s3", region, "put_object", Body=content, **parameters)
+            self.call("s3", region, "put_object", **parameters)
         except CloudError as error:
             if if_none_match and error_code(error.__cause__) == "PreconditionFailed":
                 return False
             raise
         return True
+
+    def upload(self, region, bucket, key, path, sha256):
+        """Write the file at the path with the SDK's managed transfer, in parallel parts once it is large, each part
+        checked by S3 against its own SHA-256. A multipart object's checksum is not the whole file's, so sha256, the
+        whole file's, is kept in the object's metadata."""
+        with translated():
+            self.client("s3", region).upload_file(str(path), bucket, key, ExtraArgs={
+                "Metadata": {"sha256": sha256}, "ChecksumAlgorithm": "SHA256"})
 
     def delete(self, region, bucket, keys):
         """Delete the objects, a thousand to a request, as S3 allows."""
@@ -315,15 +314,15 @@ class AwsCloud:
                                  f"{failed[0]['Key']}: {failed[0].get('Code')}")
 
     def head_sha256(self, region, bucket, key):
-        """The object's whole-object SHA-256, in hex, or None where there is no object or it has no checksum."""
+        """The whole-object SHA-256 that upload kept in the object's metadata, or None where there is no object or it
+        has none."""
         try:
-            head = self.call("s3", region, "head_object", Bucket=bucket, Key=key, ChecksumMode="ENABLED")
+            head = self.call("s3", region, "head_object", Bucket=bucket, Key=key)
         except CloudError as error:
             if error_code(error.__cause__) in ("404", "NoSuchKey", "NotFound"):
                 return None
             raise
-        checksum = head.get("ChecksumSHA256")
-        return base64.b64decode(checksum).hex() if checksum and "-" not in checksum else None
+        return head.get("Metadata", {}).get("sha256")
 
 
 def error_code(error):
@@ -333,9 +332,10 @@ def error_code(error):
 
 @contextlib.contextmanager
 def translated():
-    """Raise an SDK failure, or a failure to reach AWS, as CloudError."""
+    """Raise an SDK failure, a managed transfer's among them, or a failure to reach AWS, as CloudError."""
+    from boto3.exceptions import Boto3Error
     from botocore.exceptions import BotoCoreError, ClientError
     try:
         yield
-    except (BotoCoreError, ClientError, OSError) as error:
+    except (Boto3Error, BotoCoreError, ClientError, OSError) as error:
         raise CloudError(str(error)) from error
