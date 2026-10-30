@@ -34,7 +34,8 @@ import engine_build
 import unit_session
 import work_units
 from acceptance import normalize_heap_size
-from campaign_settings import REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError
+from campaign_settings import (
+    PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError)
 from fleet_budget import (
     ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, BudgetError, FleetBudget, FleetHalted, on_demand_regions, spend_by_owner)
 from campaign_io import UnsafeCampaignError, check_output, fsync_directory, write_ledger
@@ -303,7 +304,8 @@ def parse_args():
     parser = argparse.ArgumentParser(
         allow_abbrev=False,
         epilog=f"{Path(__file__).name} status ROOT reports a campaign's or one phase's progress from its ledgers, "
-               "and with --results each primary phase's, or the given phase's, ratios so far")
+               "and with --results each primary phase's, or the given phase's, ratios so far; "
+               f"{Path(__file__).name} control ROOT --actor ACTOR COMMAND changes a campaign's live settings")
     parser.add_argument("phase", choices=("campaign", *PHASE_TIMEOUT_SECONDS),
                         help="one phase of a candidate, or campaign to run every candidate's phases")
     parser.add_argument("campaign",
@@ -2524,8 +2526,12 @@ class UnitDispatcher:
             ThreadPoolExecutor(REQUEST_THREADS), ThreadPoolExecutor(ACCEPTANCE_THREADS))
         self.accepting = {}
         # The hosts of each platform the phase may hold, as its campaign shares them; a phase run alone holds up to
-        # the limits.
+        # the limits. The hosts of each platform it gives up, and how its campaign steers it: running; paused, which
+        # leases and launches nothing; draining, which leases its live workers but launches none; or stopping, as
+        # its campaign stops, which stop-leases every worker.
         self.share = None
+        self.shed = {}
+        self.steering = "running"
 
     def remaining(self, item):
         """The item's groups not yet accepted, in its run order, each as (group ID, estimated seconds)."""
@@ -3388,9 +3394,20 @@ class UnitDispatcher:
                 self.issue(worker, item, stop_by)
                 outstanding = worker.outstanding()
 
-    def holding(self):
-        """The hosts the phase holds on each platform."""
-        return Counter(worker.job.platform.name for worker in self.workers.values())
+    def holding(self, open_only=False):
+        """The hosts the phase holds on each platform, or only those not stopping."""
+        return Counter(worker.job.platform.name for worker in self.workers.values() if worker.open() or not open_only)
+
+    def shed_hosts(self):
+        """Stop-lease the hosts the phase gives up on each platform: idle workers first, then those holding the least
+        work, each behind the leases it holds, so no lease is interrupted."""
+        for platform, count in self.shed.items():
+            workers = sorted((worker for worker in self.workers.values()
+                              if worker.open() and worker.job.platform.name == platform),
+                             key=lambda worker: (worker.state() != "idle", len(worker.outstanding()),
+                                                 worker.job.host_epoch))
+            for worker in workers[:count]:
+                self.issue(worker, None)
 
     def demand(self):
         """The phase's work left on each platform, as its pools' corrected seconds and the number of its open items
@@ -3707,10 +3724,17 @@ class UnitDispatcher:
         # Work handed back after the deadline, or to a pool that gave up, is not leased again.
         self.resolve_unlaunchable(deadline_reached)
         self.update_tail()
-        for worker in self.workers.values():
-            self.lease(worker)
+        if self.steering == "stopping":
+            for worker in self.workers.values():
+                if worker.open():
+                    self.issue(worker, None)
+        else:
+            self.shed_hosts()
+        if self.steering in ("running", "draining"):
+            for worker in self.workers.values():
+                self.lease(worker)
         self.send(self.workers.values())
-        if not deadline_reached:
+        if not deadline_reached and self.steering == "running":
             self.launch(now)
         for epoch, worker in self.workers.items():
             # A lost host is stopped at once; its cleanup still recovers a completion that lands.
@@ -3810,22 +3834,32 @@ def divide(hosts, weights, caps):
     return shares
 
 
-def allocate(demands, max_hosts, per_platform):
+def allocate(demands, max_hosts, per_platform, pinned=None):
     """Each running phase's target hosts by platform. demands holds each phase's work left on each platform, as
-    (estimated seconds, items); a host runs one item at a time, so a share never passes the items it holds. The
-    campaign's hosts are split across platforms by their seconds left, each platform capped at its limit and its
-    items, and then a platform's hosts among its phases by their seconds left, each capped at its items. Every
-    platform, and every phase on it, with work left takes one host first while hosts last."""
-    platforms = sorted({platform for demand in demands.values() for platform in demand})
+    (estimated seconds, items); a host runs one item at a time, so a share never passes the items it holds. A phase
+    pinned, in pinned, to a number of hosts takes them first, split across its platforms by their seconds left. The
+    hosts the pins leave are split across platforms by their seconds left, each platform capped at what its limit
+    leaves and its items, and then a platform's hosts among its phases by their seconds left, each capped at its
+    items. Every platform, and every phase on it, with work left takes one host first while hosts last."""
+    shares = {key: {} for key in demands}
+    caps = {platform: per_platform for demand in demands.values() for platform in demand}
+    for key, hosts in (pinned or {}).items():
+        shares[key] = divide(min(hosts, max_hosts), {platform: seconds for platform, (seconds, _) in
+                                                     demands[key].items()},
+                             {platform: min(caps[platform], items) for platform, (_, items) in demands[key].items()})
+        max_hosts -= sum(shares[key].values())
+        for platform, share in shares[key].items():
+            caps[platform] -= share
+    automatic = {key: demand for key, demand in demands.items() if key not in (pinned or {})}
+    platforms = sorted({platform for demand in automatic.values() for platform in demand})
 
     def left(platform, index):
-        return sum(demand[platform][index] for demand in demands.values() if platform in demand)
+        return sum(demand[platform][index] for demand in automatic.values() if platform in demand)
 
     hosts = divide(max_hosts, {platform: left(platform, 0) for platform in platforms},
-                   {platform: min(per_platform, left(platform, 1)) for platform in platforms})
-    shares = {key: {} for key in demands}
+                   {platform: min(caps[platform], left(platform, 1)) for platform in platforms})
     for platform in platforms:
-        phases = [key for key, demand in demands.items() if platform in demand]
+        phases = [key for key, demand in automatic.items() if platform in demand]
         for key, share in divide(hosts[platform], {key: demands[key][platform][0] for key in phases},
                                  {key: demands[key][platform][1] for key in phases}).items():
             shares[key][platform] = share
@@ -3929,15 +3963,23 @@ class Campaign:
         self.recorded = {}
 
     def run(self):
-        """Run every step that can run; returns the steps that failed."""
+        """Run every step that can run, or once the campaign is stopped, until every worker's cleanup is proven;
+        returns the steps that failed."""
         try:
             while True:
                 self.reload()
                 self.advance()
                 self.record()
                 running = [phase for phase in self.phases.values() if phase.state == "running"]
-                if not running and not any(phase.state == "starting" for phase in self.phases.values()):
+                starting = any(phase.state == "starting" for phase in self.phases.values())
+                if not running and not starting:
                     break
+                stop = live_settings(self.arguments)["stop"]
+                if stop and not starting and not any(phase.dispatcher.workers for phase in running):
+                    print(f"campaign stopped by {stop['by']}: {stop['reason']}; every worker's cleanup is proven",
+                          flush=True)
+                    break
+                self.steer(running)
                 self.assign_shares(running)
                 observed = {}
                 for phase in running:
@@ -3966,7 +4008,8 @@ class Campaign:
     def record(self):
         """Record in the settings each phase whose state changed since the settings last recorded it, one starting as
         running, or while the file does not validate, try again next loop. A reduction holds no hosts, so the
-        settings never name it."""
+        settings never name it. A phase that ends is recorded complete or failed; until then a phase paused or
+        draining stays so, and a pending one only gains its entry, so a restart keeps how the phases were steered."""
         states = {phase.key: "running" if phase.state == "starting" else phase.state
                   for phase in self.phases.values() if not phase.reduction}
         changed = {key: state for key, state in states.items() if self.recorded.get(key) != state}
@@ -3975,7 +4018,11 @@ class Campaign:
 
         def update(settings):
             for key, state in changed.items():
-                settings["phases"].setdefault(key, {"state": "pending", "share": "auto"})["state"] = state
+                steering = settings["phases"].setdefault(key, {"state": "pending", "share": "auto"})
+                if state in ("complete", "failed") or state == "running" and steering["state"] not in (
+                        "paused", "draining"):
+                    steering.pop("reason", None)
+                    steering["state"] = state
 
         try:
             self.arguments.settings.change("controller",
@@ -4007,6 +4054,10 @@ class Campaign:
                 if phase.complete() or not phase.needed():
                     phase.state = "complete"
                     continue
+                # Once the campaign is stopped, a phase starts only to stop the hosts an earlier controller left it.
+                if (live_settings(self.arguments)["stop"] and not phase.reduction and
+                        not self.arguments.shared_budget.reservations(phase.root)):
+                    continue
                 print(f"{phase.key}: starting", flush=True)
                 phase.state = "starting"
                 if phase.reduction:
@@ -4015,19 +4066,38 @@ class Campaign:
                     arguments = SimpleNamespace(**{**vars(self.arguments), **phase.options})
                     phase.future = self.setup.submit(prepare_phase, arguments, self.root)
 
+    def steer(self, running):
+        """Steer each running phase as the settings say: stopping once the campaign is stopped, else as its state
+        is, running, paused, or draining."""
+        settings = live_settings(self.arguments)
+        for phase in running:
+            state = settings["phases"].get(phase.key, {}).get("state")
+            phase.dispatcher.steering = ("stopping" if settings["stop"] else
+                                         state if state in ("paused", "draining") else "running")
+
     def assign_shares(self, running):
-        """Give each running phase its share of each platform's hosts: the hosts it holds, and whatever the limits
-        leave free toward the target its work left gives it."""
+        """Give each running phase that launches its share of each platform's hosts: the hosts it holds, and whatever
+        the limits leave free toward the target its work left, or its pinned share, gives it. The hosts a paused or
+        draining phase holds count against the limits until they stop.
+
+        A phase above its target gives up the hosts past it while its share is pinned, or while another phase is
+        below its target on that platform, or anywhere once the fleet's limit leaves no host free. Hosts move between
+        phases only when a phase is waiting for them, so the shares' changes as the work left is corrected move none
+        on their own."""
         settings = live_settings(self.arguments)
         limits = settings["max_hosts"], settings["max_hosts_per_platform"]
-        targets = allocate({phase.key: phase.dispatcher.demand() for phase in running}, *limits)
+        launching = [phase for phase in running if phase.dispatcher.steering == "running"]
+        pinned = {phase.key: share for phase in launching
+                  if (share := settings["phases"].get(phase.key, {}).get("share", "auto")) != "auto"}
+        targets = allocate({phase.key: phase.dispatcher.demand() for phase in launching}, *limits, pinned)
         held = {phase.key: phase.dispatcher.holding() for phase in running}
         free = limits[0] - sum(sum(counts.values()) for counts in held.values())
         free_platform = {}
         for counts in held.values():
             for platform, hosts in counts.items():
                 free_platform[platform] = free_platform.get(platform, limits[1]) - hosts
-        for phase in running:
+        waiting = set()
+        for phase in launching:
             share = {}
             for platform, target in targets[phase.key].items():
                 own = held[phase.key].get(platform, 0)
@@ -4035,7 +4105,17 @@ class Campaign:
                 free -= room
                 free_platform[platform] = free_platform.get(platform, limits[1]) - room
                 share[platform] = own + room
+                if share[platform] < target:
+                    waiting.add((phase.key, platform))
             phase.dispatcher.share = share
+        for phase in running:
+            shed = {}
+            for platform, hosts in phase.dispatcher.holding(open_only=True).items():
+                excess = hosts - targets.get(phase.key, {}).get(platform, 0)
+                if phase in launching and excess > 0 and (phase.key in pinned or any(
+                        key != phase.key and (other == platform or free <= 0) for key, other in waiting)):
+                    shed[platform] = excess
+            phase.dispatcher.shed = shed
 
     def end(self, phase):
         try:
@@ -4184,8 +4264,13 @@ def run_campaign(arguments, root):
         check_campaign_options(arguments)
         failed = Campaign(arguments, root, candidate_phases(arguments, candidates)).run()
     if failed:
-        raise SystemExit("campaign finished with failed phases:\n" +
-                         "\n".join(f"{phase.key}: {phase.failure}" for phase in failed))
+        message = "campaign finished with failed phases:\n" + "\n".join(
+            f"{phase.key}: {phase.failure}" for phase in failed)
+        # A stopped campaign ends as it was asked to, so nothing restarts it.
+        if live_settings(arguments)["stop"]:
+            print(message, flush=True)
+            return
+        raise SystemExit(message)
 
 
 def controller_process(campaign_root):
@@ -4507,7 +4592,142 @@ def results_lines(phases, tsv=False):
     return table.getvalue().split("\n")[:-1] if tsv else lines
 
 
+CONTROL_LIMITS = {"max-hosts": "max_hosts", "max-hosts-per-platform": "max_hosts_per_platform",
+                  "max-usd": "max_usd", "max-machine-hours": "max_machine_hours"}
+
+
+def control_parser():
+    parser = argparse.ArgumentParser(
+        prog=f"{Path(sys.argv[0]).name} control", allow_abbrev=False,
+        description="change a running campaign's live settings, which its controller applies on its next loop")
+    parser.add_argument("root", type=Path, help="the campaign root")
+    parser.add_argument("--actor", required=True, choices=("dain", "monitor"),
+                        help="who makes the change, which the settings' events record")
+    commands = parser.add_subparsers(dest="command", required=True)
+    command = commands.add_parser("set-limit", help="set max-hosts, max-hosts-per-platform, max-usd, or "
+                                                    "max-machine-hours N, or region REGION max-vcpus N")
+    command.add_argument("limit", nargs="+")
+    command = commands.add_parser("set-purchase", help="set how a platform buys hosts")
+    command.add_argument("platform")
+    command.add_argument("purchase", choices=PURCHASE_POLICIES)
+    command = commands.add_parser("set-share", help="pin a phase's hosts to N, or give it its share by work left")
+    command.add_argument("phase")
+    command.add_argument("share")
+    for name, description in (("pause", "lease and launch nothing for a phase; its running leases finish"),
+                              ("resume", "run a paused or draining phase again"),
+                              ("drain", "launch nothing for a phase; its live workers take its queued work")):
+        command = commands.add_parser(name, help=description)
+        command.add_argument("phase")
+        if name == "pause":
+            command.add_argument("--reason")
+    commands.add_parser("clear-spending-stop", help="admit launches and lease extensions again")
+    command = commands.add_parser("stop", help="stop-lease every worker, prove their cleanup, and end the campaign")
+    command.add_argument("--reason")
+    command = commands.add_parser("authorize", help="set the envelope the monitor raises limits within: max-hosts "
+                                                    "N, max-usd N, or regions REGION...")
+    command.add_argument("envelope", nargs="+")
+    return parser
+
+
+def control_number(text, integer):
+    """A command's number, an integer where the setting takes one, and otherwise as JSON would write it."""
+    try:
+        return int(text) if integer or text.isdigit() else float(text)
+    except ValueError:
+        raise SettingsError(f"{text} is not a number") from None
+
+
+def control_change(arguments, now):
+    """The change a control command makes, as its description and the update that makes it."""
+    command = arguments.command
+    actor = arguments.actor
+
+    def phase(settings, *states):
+        steering = settings["phases"].get(arguments.phase)
+        if steering is None:
+            raise SettingsError(f"the campaign has no phase {arguments.phase}; its phases are "
+                                f"{', '.join(settings['phases']) or 'not yet recorded'}")
+        if states and steering["state"] not in states:
+            raise SettingsError(f"{arguments.phase} is {steering['state']}; {command} takes a phase that is "
+                                f"{' or '.join(states)}")
+        return steering
+
+    if command == "set-limit":
+        limit = arguments.limit
+        if len(limit) == 4 and limit[0] == "region" and limit[2] == "max-vcpus":
+            region, vcpus = limit[1], control_number(limit[3], True)
+
+            def update(settings):
+                if region not in settings["regions"]:
+                    raise SettingsError(f"the campaign has no region {region}; add it with add-region")
+                settings["regions"][region]["max_vcpus"] = vcpus
+            return f"{region} max_vcpus to {vcpus}", update
+        if len(limit) != 2 or limit[0] not in CONTROL_LIMITS:
+            raise SettingsError(f"set-limit takes {', '.join(CONTROL_LIMITS)} N, or region REGION max-vcpus N")
+        name, value = CONTROL_LIMITS[limit[0]], control_number(limit[1], limit[0].startswith("max-hosts"))
+        return f"{name} to {value:g}", lambda settings: settings.update({name: value})
+    if command == "set-purchase":
+        def update(settings):
+            if arguments.platform not in settings["platform_regions"]:
+                raise SettingsError(f"the campaign has no platform {arguments.platform}")
+            settings["purchase"][arguments.platform] = arguments.purchase
+        return f"{arguments.platform} purchase to {arguments.purchase}", update
+    if command == "set-share":
+        share = "auto" if arguments.share == "auto" else control_number(arguments.share, True)
+        return (f"{arguments.phase} share to {share}",
+                lambda settings: phase(settings).update(share=share))
+    if command == "pause":
+        reason = arguments.reason or f"paused by {actor}"
+
+        def update(settings):
+            phase(settings, "running", "draining", "paused").update(state="paused", reason=reason)
+        return f"{arguments.phase} paused: {reason}", update
+    if command in ("resume", "drain"):
+        state, states = ("running", ("paused", "draining")) if command == "resume" else (
+            "draining", ("running", "paused"))
+
+        def update(settings):
+            steering = phase(settings, *states)
+            steering.pop("reason", None)
+            steering["state"] = state
+        return f"{arguments.phase} {state}", update
+    if command == "clear-spending-stop":
+        return "spending stop cleared", lambda settings: settings.update(spending_stop=None)
+    if command == "stop":
+        stop = {"by": actor, "at": round(now), "reason": arguments.reason or f"stopped by {actor}"}
+        return f"campaign stop: {stop['reason']}", lambda settings: settings.update(stop=settings["stop"] or stop)
+    envelope = arguments.envelope
+    if actor != "dain":
+        raise SettingsError("only dain changes the authorized envelope")
+    if len(envelope) >= 2 and envelope[0] == "regions":
+        regions = sorted(set(envelope[1:]))
+        return (f"authorized regions to {', '.join(regions)}",
+                lambda settings: settings["authorized"].update(regions=regions))
+    if len(envelope) != 2 or envelope[0] not in ("max-hosts", "max-usd"):
+        raise SettingsError("authorize takes max-hosts N, max-usd N, or regions REGION...")
+    name, value = CONTROL_LIMITS[envelope[0]], control_number(envelope[1], envelope[0] == "max-hosts")
+    return f"authorized {name} to {value:g}", lambda settings: settings["authorized"].update({name: value})
+
+
+def control(arguments):
+    """Change the campaign's live settings as the actor's control command."""
+    try:
+        store = CampaignSettings(arguments.root)
+        description, update = control_change(arguments, time.time())
+        before = store.current["version"]
+        settings = store.change(arguments.actor, description, update)
+    except SettingsError as error:
+        raise SystemExit(str(error)) from error
+    if settings["version"] == before:
+        print(f"campaign settings version {before} already hold {description}")
+    else:
+        print(f"campaign settings version {settings['version']}: {description}")
+
+
 def main():
+    if sys.argv[1:2] == ["control"]:
+        control(control_parser().parse_args(sys.argv[2:]))
+        return
     if sys.argv[1:2] == ["status"]:
         parser = argparse.ArgumentParser(
             prog=f"{Path(sys.argv[0]).name} status",

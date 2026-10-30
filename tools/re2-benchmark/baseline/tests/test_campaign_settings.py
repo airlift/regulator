@@ -43,6 +43,29 @@ class TestCampaignSettings(unittest.TestCase):
         self.assertEqual((2, 200), (settings.reload()["version"], settings.current["max_hosts"]))
         self.assertEqual([("1", "dain", "seed"), ("2", "monitor", "max_hosts 368 to 200")], self.events())
 
+    def test_the_monitor_raises_limits_only_within_what_dain_authorized(self):
+        settings = seed_settings(self.root, max_hosts=100, max_hosts_per_platform=50, max_usd=60)
+        settings.change("dain", "authorize", lambda current: current["authorized"].update(
+            max_hosts=200, max_usd=100, regions=["us-west-2", "us-east-2"]))
+        east = {"bucket": "east", "max_vcpus": 64}
+        for update, refusal in (
+                (lambda current: current.update(max_hosts=201), "max_hosts only within"),
+                (lambda current: current.update(max_hosts_per_platform=201), "max_hosts_per_platform only within"),
+                (lambda current: current.update(max_usd=101), "max_usd only within"),
+                (lambda current: current.update(max_machine_hours=1501), "max_machine_hours only within"),
+                (lambda current: current["regions"].update({"eu-west-1": east}), "not eu-west-1"),
+                (lambda current: current["authorized"].update(max_usd=1), "only dain")):
+            with self.subTest(refusal=refusal), self.assertRaisesRegex(SettingsError, refusal):
+                settings.change("monitor", refusal, update)
+        # Within the envelope the monitor raises hosts, spending, and an authorized region's vCPUs, and adds one;
+        # it may lower any limit, and only Dain changes the envelope itself.
+        settings.change("monitor", "raise", lambda current: (
+            current.update(max_hosts=200, max_hosts_per_platform=200, max_usd=100, max_machine_hours=1000),
+            current["regions"].update({"us-east-2": east}), current["regions"]["us-west-2"].update(max_vcpus=900)))
+        with self.assertRaisesRegex(SettingsError, "only dain"):
+            settings.change("controller", "authorize", lambda current: current["authorized"].update(max_hosts=1))
+        self.assertEqual(["dain", "dain", "monitor"], [actor for _, actor, _ in self.events()])
+
     def test_settings_the_controller_could_not_run_under_are_refused(self):
         on_demand = copy.deepcopy(SETTINGS)
         on_demand["regions"]["us-west-2"]["on_demand_max_vcpus"] = 8
