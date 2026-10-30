@@ -5,6 +5,7 @@ import base64
 import contextlib
 import csv
 import fcntl
+import functools
 import hashlib
 import io
 import json
@@ -546,18 +547,25 @@ def language_plans(arguments):
     shard. A language campaign has no confirmation phase and runs every phase at the qualification protocol."""
     if arguments.phase not in ("smoke", "primary"):
         raise SystemExit("a language campaign runs only smoke and primary phases")
-    plans, arguments.language_plans = {}, {}
-    for directory in arguments.language_plan:
+    plans = validate_language_plans(arguments.language_plan)
+    arguments.language_plans = {plan["shard_id"]: directory for directory, plan in plans.items()}
+    arguments.smoke_protocol = "qualification"
+    return plans
+
+
+def validate_language_plans(directories):
+    """Each language plan, validated, by its directory, refusing plans that share a shard."""
+    plans, shards = {}, set()
+    for directory in directories:
         directory = directory.resolve()
         try:
             plan = language_fleet.validate(directory)
         except (OSError, ValueError, KeyError) as error:
             raise SystemExit(f"invalid language plan {directory}: {error}") from error
-        if plan["shard_id"] in arguments.language_plans:
+        if plan["shard_id"] in shards:
             raise SystemExit(f"language plans share shard {plan['shard_id']}")
         plans[directory] = plan
-        arguments.language_plans[plan["shard_id"]] = directory
-    arguments.smoke_protocol = "qualification"
+        shards.add(plan["shard_id"])
     return plans
 
 
@@ -3751,6 +3759,9 @@ class CampaignStep:
     # Whether the child is a phase controller, whose command takes a concurrency share and which records its
     # process ID in root; a reduction is not.
     shared: bool = True
+    # The step's work items not yet accepted, each as its platform and the estimated seconds left of it, which weight
+    # its chain's share of the hosts and cap its own. None for a step whose share is not capped.
+    remaining: object = None
 
 
 @dataclass
@@ -3854,13 +3865,67 @@ def frozen_share(step):
     return recorded["max_concurrent"], recorded["max_concurrent_per_platform"]
 
 
-def step_share(step, open_chains, limits, free):
+def step_share(step, chains, limits, free):
     """The share a phase starts with, as (max concurrent, max concurrent per platform), or None while the hosts free
-    of the campaign's limits cannot hold it. A restarted phase needs the share its execution policy froze. A new one
-    takes an even share, rounded down, of the limits among the chains still open, or what is free of it, at least one
-    host; the campaign refuses limits smaller than its number of chains, so an even share is at least one host."""
-    share = frozen_share(step) or tuple(min(limit // open_chains, left) for limit, left in zip(limits, free))
+    of the campaign's limits cannot hold it. A restarted phase needs the share its execution policy froze.
+
+    A new one takes no more hosts than it has work items not yet accepted, in all and on its busiest platform, as a
+    host runs one at a time, and at least one. While another chain has a phase still to start, each limit sets one
+    host aside for each step the open chains are at, chains sharing a step counting once. This step takes its one
+    plus, of the hosts left, the part its chains' estimated work left is of every open chain's, rounded down, or what
+    is free of it. Weighting by the work left gives a phase holding most of the campaign's work, such as the language
+    primary beside the baseline's, most of the hosts for its whole run rather than an even part, and the shares of
+    one moment fit the limits together. The campaign refuses limits smaller than its number of chains, so a share is
+    at least one host. With no work estimated, each step takes an even share. Once no other chain has a phase to
+    start, no hosts are kept for one, so the phase takes what is free, such as a confirmation beside a running
+    language primary."""
+    share = frozen_share(step)
+    if share is None:
+        if min(free) < 1:
+            return None
+        left = {}
+
+        def work_left(later):
+            # Each step's work left is read once, as reading it reads its phase's ledger.
+            if id(later) not in left:
+                left[id(later)] = later.remaining()
+            return left[id(later)]
+
+        open_chains = [chain for chain in chains if not chain.finished]
+        # Chains at this step, such as those sharing its build, start their next phases with the hosts it frees.
+        if any(later.shared for chain in open_chains if chain.step is not step
+               for later in chain.steps[chain.position + (chain.child is not None):]):
+            steps = len({id(chain.step) for chain in open_chains})
+            step_work = total_work = 0
+            for chain in open_chains:
+                work = sum(seconds for later in chain.steps[chain.position:] if later.remaining is not None
+                           for _, seconds in work_left(later))
+                total_work += work
+                if chain.step is step:
+                    step_work += work
+            share = tuple(min(free_hosts, 1 + (limit - steps) * step_work // total_work if total_work else
+                              limit // steps) for limit, free_hosts in zip(limits, free))
+        else:
+            share = tuple(free)
+        if step.remaining is not None:
+            remaining = work_left(step)
+            platforms = Counter(platform for platform, _ in remaining)
+            share = (min(share[0], max(1, len(remaining))), min(share[1], max(platforms.values(), default=1)))
     return share if all(1 <= want <= left for want, left in zip(share, free)) else None
+
+
+def phase_remaining(root, items):
+    """The given work items that a unit phase has not yet accepted, each as its platform and the estimated
+    seconds of its groups not yet accepted, each group's rounded up so that a share stays a whole number of hosts."""
+    accepted = {(row["platform"], row["unit_id"], row["replica_id"], row["group_id"])
+                for row in read_accepted_units(root / "accepted-units.tsv")}
+    remaining = []
+    for item in items:
+        left = [seconds for group, seconds in item.groups
+                if (item.platform, item.unit_id, str(item.replica), group) not in accepted]
+        if left:
+            remaining.append((item.platform, sum(math.ceil(seconds) for seconds in left)))
+    return remaining
 
 
 def run_chains(chains, maximum, per_platform, start=start_child, adopt=adopt_child, poll_seconds=DRIVER_POLL_SECONDS):
@@ -3897,7 +3962,7 @@ def run_chains(chains, maximum, per_platform, start=start_child, adopt=adopt_chi
             raise SystemExit("phases froze shares past the campaign's limits: " + ", ".join(
                 f"{phase} {share[0]} hosts, {share[1]} per platform" for phase, share in oversized.values()) +
                 f"; give at least --max-concurrent {needed[0]} --max-concurrent-per-platform {needed[1]}")
-        open_chains = sum(not chain.finished for chain in chains)
+        unfinished = sum(not chain.finished for chain in chains)
         waiting = [chain for chain in chains if chain.child is None and not chain.finished]
         for chain in waiting:
             if not join(chain):
@@ -3917,13 +3982,13 @@ def run_chains(chains, maximum, per_platform, start=start_child, adopt=adopt_chi
                 continue
             share = None
             if step.shared:
-                share = None if free is None else step_share(step, open_chains, limits, free)
+                share = None if free is None else step_share(step, chains, limits, free)
                 if share is None:
                     continue
                 free = [left - want for left, want in zip(free, share)]
             print(f"{chain.name}: starting {step.label}" + (f" with {share[0]} hosts" if share else ""), flush=True)
             chain.child, chain.share = start(step, share), share
-        if open_chains == 0:
+        if unfinished == 0:
             return
         time.sleep(poll_seconds)
         for chain in chains:
@@ -3944,10 +4009,12 @@ def confirmation_jobs_listed(path):
         return any(True for _ in csv.DictReader(input_file, delimiter="\t"))
 
 
-def campaign_chains(arguments, candidates):
+def campaign_chains(arguments, candidates, language_units):
     """Each candidate's chain, build, smoke, primary, reduction, and confirmation when the reduction lists jobs, and
     with language plans, a second chain running their smoke and primary on the same build. The reduction takes the
-    primary's events; a campaign archive, and with it any retrieval metadata, exists only once the campaign ends."""
+    primary's events; a campaign archive, and with it any retrieval metadata, exists only once the campaign ends.
+    language_units holds the language plans' campaign units by phase, as the campaign checked them before it
+    started."""
     script = str(Path(__file__).resolve())
     common = [f"--spot-vcpu-reserve={arguments.spot_vcpu_reserve}",
               *([f"--release-version={arguments.release_version}"] if arguments.release_version else []),
@@ -3958,24 +4025,55 @@ def campaign_chains(arguments, candidates):
               *(f"--purchase={value}" for value in arguments.purchase_values),
               *(f"--transfer-bucket={value}" for value in arguments.transfer_bucket)]
     shards = [f"--shard={shard}" for shard in arguments.selected_shards or ()]
+    tooling = Path(__file__).resolve().parent
+    platforms = read_platforms(tooling)
+    measured = arguments.selected_shards or read_shards(tooling)
 
-    def phase(candidate, label, root, *options):
+    @functools.cache
+    def baseline_units():
+        return work_units.load(tooling)
+
+    # Each phase's work items, as its controller plans them, weight its chain's share of the hosts. A language
+    # phase's come from the units checked before the campaign started, so a plan changed on disk since stops only
+    # the phase that plans it, not the driver.
+    @functools.cache
+    def planned(label, language=False):
+        if label == "build":
+            return build_work_items(label, platforms, engine_build.units(), [engine_build.SHARD])
+        if language:
+            campaign = language_units[label]
+            return build_work_items(label, platforms, campaign["units"], sorted(campaign["allocations"]),
+                                    allocations=campaign["allocations"])
+        return build_work_items(label, platforms, baseline_units(), measured)
+
+    def confirmations(reduction, jobs):
+        # The jobs are listed only once the reduction has written its output. The estimate reads them without the
+        # strict reader's validation, which the confirmation phase applies, so the driver cannot exit on them.
+        if not reduction.complete():
+            return []
+        with jobs.open(newline="") as input_file:
+            listed = [(row["platform"], row["unit_id"], 4, frozenset())
+                      for row in csv.DictReader(input_file, delimiter="\t")]
+        return build_work_items("confirmation", platforms, baseline_units(), measured, listed)
+
+    def phase(candidate, label, root, items, *options):
         selection = f"{candidate.name}={candidate.commit}"
         return CampaignStep(label, root, lambda share: [
             sys.executable, script, label, arguments.campaign, "--execute", f"--candidate={selection}",
             f"--campaign-root={arguments.campaign_root.resolve()}", f"--max-concurrent={share[0]}",
-            f"--max-concurrent-per-platform={share[1]}", *common, *options], lambda: (root / PHASE_COMPLETE).is_file())
+            f"--max-concurrent-per-platform={share[1]}", *common, *options], lambda: (root / PHASE_COMPLETE).is_file(),
+            remaining=lambda: phase_remaining(root, items()))
 
     chains = []
     for candidate in candidates:
         directory = arguments.campaign_root / candidate.name
-        reduction = directory / "reduction"
-        build = phase(candidate, "build", directory / "build")
-        chains.append(CampaignChain(candidate_campaign_id(arguments.campaign, candidate.name), [
-            build,
-            phase(candidate, "smoke", directory / "smoke", f"--smoke-protocol={arguments.smoke_protocol}", *shards),
-            phase(candidate, "primary", directory / "primary", *shards),
-            CampaignStep("reduction", reduction, lambda share, primary=directory / "primary", output=reduction: [
+        reduction, jobs = directory / "reduction", directory / "reduction" / "confirmation-jobs.tsv"
+        # The build serves each of the candidate's chains, so its items, which cap its share, count no seconds of
+        # work on any of them.
+        build = phase(candidate, "build", directory / "build", lambda: planned("build"))
+        build = replace(build, remaining=lambda counted=build.remaining: [(platform, 0) for platform, _ in counted()])
+        reduction_step = CampaignStep(
+            "reduction", reduction, lambda share, primary=directory / "primary", output=reduction: [
                 sys.executable, str(Path(script).with_name("aggregate_results.py")),
                 f"--primary-receipts={primary / 'accepted-units.tsv'}", f"--artifacts-root={primary}",
                 # A phase writes its events file with its first event.
@@ -3983,16 +4081,25 @@ def campaign_chains(arguments, candidates):
                   else []),
                 f"--output-dir={output.resolve()}", *shards,
                 *([f"--release-version={arguments.release_version}"] if arguments.release_version else [])],
-                lambda output=reduction: (output / "output-checksums.tsv").is_file(), shared=False),
+            lambda output=reduction: (output / "output-checksums.tsv").is_file(), shared=False)
+        chains.append(CampaignChain(candidate_campaign_id(arguments.campaign, candidate.name), [
+            build,
+            phase(candidate, "smoke", directory / "smoke", lambda: planned("smoke"),
+                  f"--smoke-protocol={arguments.smoke_protocol}", *shards),
+            phase(candidate, "primary", directory / "primary", lambda: planned("primary"), *shards),
+            reduction_step,
             replace(phase(candidate, "confirmation", directory / "confirmation",
-                          f"--confirmation-jobs={(reduction / 'confirmation-jobs.tsv').resolve()}", *shards),
-                    needed=lambda jobs=reduction / "confirmation-jobs.tsv": confirmation_jobs_listed(jobs))]))
+                          lambda step=reduction_step, jobs=jobs: confirmations(step, jobs),
+                          f"--confirmation-jobs={jobs.resolve()}", *shards),
+                    needed=lambda jobs=jobs: confirmation_jobs_listed(jobs))]))
         if arguments.language_plan:
             plans = [f"--language-plan={plan.resolve()}" for plan in arguments.language_plan]
             chains.append(CampaignChain(candidate_campaign_id(arguments.campaign, candidate.name, language=True), [
                 build,
-                phase(candidate, "smoke", directory / "lang" / "smoke", *plans),
-                phase(candidate, "primary", directory / "lang" / "primary", *plans)]))
+                phase(candidate, "smoke", directory / "lang" / "smoke", lambda: planned("smoke", language=True),
+                      *plans),
+                phase(candidate, "primary", directory / "lang" / "primary",
+                      lambda: planned("primary", language=True), *plans)]))
     return chains
 
 
@@ -4052,6 +4159,16 @@ def run_campaign(arguments, root):
         if limit < len(chain_names):
             raise SystemExit(f"{option} {limit} cannot give each of the campaign's {len(chain_names)} phase sequences "
                              f"running together a host; give at least {len(chain_names)}")
+    # The driver plans every language phase's units to weight its hosts among the sequences, so plans its phases
+    # would refuse are refused here, before anything is frozen or launched.
+    plans = validate_language_plans(arguments.language_plan)
+    language_units = {}
+    for phase in ("smoke", "primary") if plans else ():
+        try:
+            language_units[phase] = language_fleet.campaign_units(plans, phase)
+        except (OSError, ValueError, KeyError) as error:
+            raise SystemExit(f"cannot plan {phase} language units from {', '.join(map(str, plans))}: "
+                             f"{error}") from error
     if not arguments.execute:
         for name, commitish in arguments.candidates:
             print(f"candidate {name}: {resolve_commit(root, commitish)}, campaign "
@@ -4071,7 +4188,7 @@ def run_campaign(arguments, root):
         for candidate in candidates:
             record_candidate(arguments.campaign_root, candidate)
         check_campaign_options(arguments)
-        chains = campaign_chains(arguments, candidates)
+        chains = campaign_chains(arguments, candidates, language_units)
         run_chains(chains, arguments.max_concurrent, arguments.max_concurrent_per_platform)
     failed = [f"{chain.name}: {chain.failure}" for chain in chains if chain.failure]
     if failed:

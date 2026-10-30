@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import shlex
@@ -438,7 +439,9 @@ class TestRunCampaign(unittest.TestCase):
             # Each step's child runs this many polls; A's smoke is slow and then fails. A's reduction lists a job.
             polls = {"a/smoke": 4}
             failing = {"a/smoke"}
-            confirmed = {"a/reduction": "r8i\ttrino-like\tunit-1\n"}
+            unit_id = next(unit_id for unit_id, unit in sorted(RUN_CAMPAIGN.work_units.load(SCRIPT.parent).items())
+                           if unit["shard_id"] == "trino-like")
+            confirmed = {"a/reduction": f"r8i\ttrino-like\t{unit_id}\n"}
             events = []
 
             class Child:
@@ -491,12 +494,18 @@ class TestRunCampaign(unittest.TestCase):
                 run()
 
             order = [event[:2] for event in events]
-            # B's primary starts once B's smoke passed, while A's smoke still runs, at half the campaign's hosts.
+            # A build takes a host for each platform's one engine build, leaving the rest for the other chain.
+            command = next(event[2] for event in events if event[:2] == ("start", "a/build"))
+            self.assertIn("--max-concurrent=2", command)
+            self.assertIn("--max-concurrent-per-platform=1", command)
+            # B's primary starts once B's smoke passed, while A's smoke still runs. B's primary holds three of the
+            # seven replica sets left, so it gets its reserved host plus 3/7 of the other 14; its per-platform share
+            # is capped at its 18 items.
             self.assertLess(order.index(("start", "b/primary")), order.index(("exit", "a/smoke")))
             command = next(event[2] for event in events if event[:2] == ("start", "b/primary"))
             self.assertIn(f"--candidate=b={'b' * 40}", command)
-            self.assertIn("--max-concurrent=8", command)
-            self.assertIn("--max-concurrent-per-platform=32", command)
+            self.assertIn("--max-concurrent=7", command)
+            self.assertIn("--max-concurrent-per-platform=18", command)
             # B's reduction takes its primary's events.
             command = next(event[2] for event in events if event[:2] == ("start", "b/reduction"))
             self.assertIn(f"--events={campaign_root / 'b' / 'primary' / 'campaign-events.tsv'}", command)
@@ -506,16 +515,25 @@ class TestRunCampaign(unittest.TestCase):
             self.assertNotIn(("start", "b/confirmation"), order)
             self.assertNotIn("tournament.b", str(failed.exception))
 
-            # A restart skips every completed step: A resumes at its smoke, alone, with every host, and confirms the
-            # job its reduction listed on the shards it measured.
+            # A restart skips every completed step: A resumes at its smoke, alone, with a host for each of its 12
+            # work items, and confirms the job its reduction listed on the shards it measured, with one host.
             failing.clear()
             run()
 
             self.assertEqual([("start", "a/smoke"), ("start", "a/primary"), ("start", "a/reduction"),
                               ("start", "a/confirmation")], [event[:2] for event in events if event[0] == "start"])
-            self.assertIn("--max-concurrent=16", events[0][2])
-            self.assertIn("--shard=trino-like",
-                          next(event[2] for event in events if event[:2] == ("start", "a/confirmation")))
+            self.assertIn("--max-concurrent=12", events[0][2])
+            command = next(event[2] for event in events if event[:2] == ("start", "a/confirmation"))
+            self.assertIn("--shard=trino-like", command)
+            self.assertIn("--max-concurrent=1", command)
+            # The confirmation's jobs weigh on its chain's share only once the reduction that lists them completed.
+            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates, {})
+            (campaign_root / "a" / "reduction" / "output-checksums.tsv").unlink()
+            self.assertEqual([], chain.steps[4].remaining())
+            (campaign_root / "a" / "reduction" / "output-checksums.tsv").touch()
+            self.assertEqual([("r8i", sum(math.ceil(float(group["estimated_seconds"])) for group in
+                                          RUN_CAMPAIGN.work_units.load(SCRIPT.parent)[unit_id]["groups"]))],
+                             chain.steps[4].remaining())
             # A restart measures what the campaign started measuring, of the candidates it started with.
             with self.assertRaisesRegex(SystemExit, "candidates differ"):
                 run(names=("a",))
@@ -528,7 +546,7 @@ class TestRunCampaign(unittest.TestCase):
             # changed its --purchase, and leaves the phase's lock to any controller starting meanwhile. Once the
             # controller exited, the record's process ID may name a process started since, which is not adopted.
             arguments.purchase_values = ["r8i=on-demand"]
-            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates)
+            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates, {})
             record = chain.steps[2].root / RUN_CAMPAIGN.DRIVER_CHILD
             with RUN_CAMPAIGN.controller_lock(chain.steps[2].root, RUN_CAMPAIGN.DRIVER_CHILD), \
                     patch.object(RUN_CAMPAIGN.fcntl, "flock", side_effect=AssertionError("took the phase's lock")):
@@ -538,7 +556,7 @@ class TestRunCampaign(unittest.TestCase):
             # A reduction keeps no record, so a restart adopts it only from a process running its command for this
             # campaign root, from any interpreter path, and not for another root, even one differing only in spaces.
             arguments.campaign_root = campaign_root / "campaign root"
-            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates)
+            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates, {})
             step = chain.steps[3]
             command = " ".join(step.command(None)[1:])
             others = "\n".join(f"10{index} python3 " + command.replace("campaign root", root)
@@ -549,7 +567,7 @@ class TestRunCampaign(unittest.TestCase):
             with patch.object(RUN_CAMPAIGN, "check_output", return_value=others):
                 self.assertIsNone(RUN_CAMPAIGN.child_process_id(step))
 
-    def test_restarted_driver_starts_a_phase_once_the_hosts_for_its_frozen_share_are_free(self):
+    def test_restarted_phase_waits_for_its_frozen_share_and_a_new_one_takes_free_hosts(self):
         # Under limits of four, A's phase froze half of them and failed, and B's next phase then took all four. A
         # restarted driver adopts B's phase, which still runs, before restarting A's, which waits for B's hosts.
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -608,6 +626,30 @@ class TestRunCampaign(unittest.TestCase):
 
             run([c], start_duplicate, lambda step: owner[0] if owner else None)
             self.assertEqual([("start", "c", (4, 4)), ("exit", "c")], events)
+
+            # Beside another chain's last phase, which leaves no phase to start, a phase takes the free hosts its
+            # three work items can use rather than its sliver of the work left.
+            f, g = phase("f", 2), RUN_CAMPAIGN.CampaignStep(
+                "g", Path(temporary_directory) / "g", None,
+                lambda: (Path(temporary_directory) / "g" / RUN_CAMPAIGN.PHASE_COMPLETE).is_file(),
+                remaining=lambda: [("r8i", 600)] * 3)
+            f.remaining = lambda: [("r8i", 1_000_000)]
+            g.root.mkdir()
+            run([f, g], start, lambda step: Child(step, 2) if step is f else None)
+            self.assertEqual(("start", "g", (2, 2)), events[0])
+
+            # New phases split the hosts left after one each by their seconds of work left, not their work items: h's
+            # three items of 1000 seconds take one of the two spare hosts, where counting items, k's nine to its
+            # three, would give it none; k, with no other phase left to start, then takes the rest.
+            h, k = (RUN_CAMPAIGN.CampaignStep(name, Path(temporary_directory) / name, None,
+                                              lambda name=name: (Path(temporary_directory) / name /
+                                                                 RUN_CAMPAIGN.PHASE_COMPLETE).is_file(),
+                                              remaining=lambda work=work: work)
+                    for name, work in (("h", [("r8i", 1000)] * 3), ("k", [("r8i", 10)] * 9)))
+            for step in (h, k):
+                step.root.mkdir()
+            run([h, k], start, lambda step: None)
+            self.assertEqual([("start", "h", (2, 2)), ("start", "k", (2, 2))], events[:2])
 
             # Limits that cannot hold a share a phase froze stop the driver, though that phase runs adopted, naming
             # the limits that hold it.
@@ -1467,13 +1509,39 @@ class TestRunCampaign(unittest.TestCase):
                     self.assertEqual(sorted((item["platform"], item["unit_id"], item["replica"]) for item in items),
                                      sorted((platform, unit_id, replica) for platform in ("r8i", "r9g")
                                             for unit_id in selected for replica in replicas))
-            for phase, plans, environment, refusal in (
+            # A campaign weights each language phase's share of the hosts by the work its controller plans, from the
+            # units it checked before it started. The driver keeps weighing shares from the validated units even if
+            # the plan files later change.
+            arguments = SimpleNamespace(
+                campaign="language", campaign_root=root, language_plan=[root / "plan"], selected_shards=None,
+                smoke_protocol="smoke", spot_vcpu_reserve=16, release_version="", phase_timeout_seconds=None,
+                fleet_budget=None, platform_region_values=[], purchase_values=[], transfer_bucket=[])
+            plans = RUN_CAMPAIGN.validate_language_plans(arguments.language_plan)
+            [_, language] = RUN_CAMPAIGN.campaign_chains(arguments, [RUN_CAMPAIGN.FrozenCandidate(
+                "lifecycle", "a" * 40, "refs/benchmarks/language/lifecycle", root / "lifecycle" / "candidate", "0" * 64,
+                "e" * 40)], {phase: fleet.campaign_units(plans, phase) for phase in ("smoke", "primary")})
+            planned_units = (root / "plan" / "units.tsv").read_bytes()
+            (root / "plan" / "units.tsv").write_text("changed after the campaign started\n")
+            for step in language.steps[1:]:
+                with (step.root / "work-items.tsv").open(newline="") as manifest:
+                    groups = [(item, *group.split(":")) for item in csv.DictReader(manifest, delimiter="\t")
+                              for group in item["groups"].split(",")]
+                # A group the phase accepted leaves the work left.
+                item, group_id, _ = groups[0]
+                write_tsv(step.root / "accepted-units.tsv", RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, [
+                    {**dict.fromkeys(RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, "-"), "platform": item["platform"],
+                     "unit_id": item["unit_id"], "replica_id": item["replica"], "group_id": group_id,
+                     "unit_attempt_id": "session/1"}])
+                self.assertEqual(sum(math.ceil(float(seconds)) for _, _, seconds in groups[1:]),
+                                 sum(seconds for _, seconds in step.remaining()))
+            (root / "plan" / "units.tsv").write_bytes(planned_units)
+            for phase, plan_count, environment, refusal in (
                     ("confirmation", 1, {}, "only smoke and primary"),
                     ("primary", 2, {}, "language plans share shard"),
                     ("primary", 1, {"BENCHMARK_HEAP_SIZE": "16g"}, "language protocol requires an 8g heap")):
                 with self.subTest(refusal=refusal), \
                         patch.object(sys, "argv", ["run-campaign.py", phase, "language",
-                                                   *["--language-plan", str(root / "plan")] * plans,
+                                                   *["--language-plan", str(root / "plan")] * plan_count,
                                                    "--candidate", "lifecycle=HEAD",
                                                    "--campaign-root", str(root / "refused")]), \
                         patch.dict(os.environ, environment), self.assertRaisesRegex(SystemExit, refusal):
@@ -1492,6 +1560,11 @@ class TestRunCampaign(unittest.TestCase):
                     (["tournament", "--candidate", "a=HEAD", "--language-plan", str(root / "plan"),
                       "--max-concurrent-per-platform", "1"],
                      "--max-concurrent-per-platform 1 cannot give each of the campaign's 2 phase sequences"),
+                    # The driver plans its language phases' units, so it refuses plans they would refuse.
+                    (["tournament", "--candidate", "a=HEAD", "--language-plan", str(root / "source")],
+                     f"invalid language plan {(root / 'source').resolve()}"),
+                    (["tournament", "--candidate", "a=HEAD", *["--language-plan", str(root / "plan")] * 2],
+                     "language plans share shard"),
                     (["tournament", "--candidate", "a=HEAD", "--execute", "--det"], "unrecognized arguments: --det")):
                 errors = io.StringIO()
                 with self.subTest(refusal=refusal):
