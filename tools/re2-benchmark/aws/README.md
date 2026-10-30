@@ -199,17 +199,15 @@ Reservations remain until verified cleanup, which charges the host's actual
 hours; crashes never expire them, and one past its stop time counts as spent
 to now until then. A
 rejected work unit follows the [unit dispatch](#unit-dispatch) retry rules.
-A controller that fails while it recovers or dispatches its hosts, through
-changed frozen inputs, conflicting accepted identities, a shared
-resource-policy failure, or any other error, halts every phase of the campaign
-and records its result root as the halt's owner. Stopping a
-controller with Ctrl-C or SIGTERM halts nothing once it has verified the cleanup
-of every host it holds a reservation for. A failure in its startup checks
-before recovery, or in its final validation once every host's cleanup is
-verified, halts nothing: hosts an earlier run left stay charged to the budget,
-and their stop times bound them. Each owner's restart clears its own halt once
-its recovery has verified the cleanup of every host it held; the fleet stays
-halted while another owner's halt stands. See the
+A fault while the controller recovers or dispatches a phase's hosts, through
+changed frozen inputs, a completion marker unlike its lease, conflicting
+accepted identities, a ledger error, or any other error, pauses that phase
+alone, as [steering a campaign](#steer-a-campaign) describes, and the other
+phases go on. A resource AWS lists that the fleet cannot account for, like a
+leak, sets a [spending stop](#recovering-uploads-during-cleanup). SIGTERM stops
+only the controller: it logs one line and exits with status 0, and its hosts
+keep their leases and reservations for the next controller, which adopts them.
+See the
 [protocol rules](../baseline/SHARD_DISPATCH.md#jmh-protocol). Preserve the
 campaign root, its settings and fleet state together, across restarts.
 
@@ -323,12 +321,12 @@ runs its semantic verifiers, and CI runs the full suite.
 controller process: build, smoke, primary, the reduction of its primary, and a
 confirmation of the jobs that reduction lists, if any. Each candidate starts a
 phase as soon as its own previous phase completes, and a failed phase stops
-only its own candidate's later phases. A failure while the controller recovers
-or dispatches a phase's hosts also halts the
-[shared fleet](#shared-fleet-budget), which stops every candidate's running
-phases. With `--language-plan`, each candidate also runs the plan's smoke and
-primary on its build; the command refuses plans its language phases would
-refuse, such as two plans of one shard, before it freezes anything.
+only its own candidate's later phases. A fault while the controller recovers
+or dispatches a phase's hosts pauses only that phase, as
+[steering a campaign](#steer-a-campaign) describes. With `--language-plan`,
+each candidate also runs the plan's smoke and primary on its build; the
+command refuses plans its language phases would refuse, such as two plans of
+one shard, before it freezes anything.
 
 ```bash
 TRANSFER_PREFIX=<transfer-prefix> \
@@ -362,8 +360,8 @@ idle workers first, then those holding the least work, each behind the leases
 it holds, so no lease is interrupted. Hosts move only while a phase waits for
 them, so the shares' changes as the work left is corrected move none on their
 own. A phase's share is never frozen, and the controller records each phase's
-state, `pending`, `running`, `complete`, or `failed`, in the settings'
-`phases`.
+state, `pending`, `running`, `paused` with its fault, `complete`, or `failed`,
+in the settings' `phases`.
 
 ### Steer a campaign
 
@@ -404,6 +402,14 @@ python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<camp
   only in its regions, where admission still holds the fleet within the
   region's quota after its reserve; it never raises `max_machine_hours`, which
   the envelope does not name. Any actor may lower a limit.
+
+The controller pauses a phase itself for a fault in its dispatch, logging
+`<phase>: paused: <fault>` and recording the fault as the phase's `reason`.
+It trusts nothing more the phase's hosts report and only proves each one's
+cleanup as it stops at its idle stop. `resume` restarts the phase's dispatch
+from its ledgers, as a restarted controller would, and the phase pauses again
+while its fault stands. The controller keeps running while a phase is paused
+for a fault; `stop` ends the campaign.
 
 Each phase's setup, which plans its work items, checks its prerequisites and
 AWS, and uploads what its hosts read, runs on a setup thread, and a
@@ -992,8 +998,8 @@ needs nothing from the host evidence.
 
 The first accepted attempt of a platform, unit, replica, and group wins. A
 later completed attempt of the same group, such as one leased again after a
-lost heartbeat, is recorded as superseded, not accepted, and does not halt the
-campaign.
+lost heartbeat, is recorded as superseded, not accepted, and does not pause
+the phase.
 
 ### Unit dispatch
 
@@ -1117,8 +1123,8 @@ or `superseded` when every group was accepted first elsewhere. Other outcomes:
   rejection or is missing.
 - Work queued after the phase deadline, including work a lost, failed, or
   interrupted lease hands back, stays unresolved.
-- A marker that names another lease and changed frozen inputs stop the
-  campaign as unsafe.
+- A marker that names another lease and changed frozen inputs pause the
+  phase.
 - A worker whose cleanup cannot be proven keeps its reservation, and each loop
   tries its cleanup again; the phase does not complete while one remains. A
   leftover, a terminated worker's prefix that will not empty, is logged each
@@ -1163,9 +1169,8 @@ means running the whole phase again in a new result root.
 Failed jobs record their failure type, as [launching a worker](#launching-a-worker)
 and [unit workers](#unit-workers) describe. Frozen inputs that fail their checks
 before a launch, such as a candidate archive whose SHA-256 or engine tree
-differs, stop the campaign as unsafe, since a retry would fail them again.
-[Unit dispatch](#unit-dispatch) retries a failed unit instead. Unsafe
-controller failures stop admissions.
+differs, pause the phase, since a retry would fail them again.
+[Unit dispatch](#unit-dispatch) retries a failed unit instead.
 
 See:
 
@@ -1190,11 +1195,11 @@ An instance still not terminated 15 minutes after the request is a leak: the
 controller logs it and sets the campaign settings' `spending_stop`, as its
 own settings change naming the reason. While the stop stands, the budget admits
 no launch and no lease extension for any phase, refusing each with reason
-`spending_stop`, but halts no controller, so every host finishes the leases it
+`spending_stop`, but stops no controller, so every host finishes the leases it
 holds within its reservation. The stop stands until Dain clears it, once the
-instance is gone, with `control ... --actor dain clear-spending-stop`. A controller reaching its teardown deadline with an
-instance still not terminated treats it as a leak and exits, leaving the
-worker's reservation for its restart.
+instance is gone, with `control ... --actor dain clear-spending-stop`. An
+instance or Spot request AWS lists with no instance type, or whose vCPUs AWS
+omits, sets the stop in the same way, since the fleet cannot account for it.
 
 This covers late uploads and results available when a controller aborts.
 Measurements still on an interrupted or forcibly terminated host may never

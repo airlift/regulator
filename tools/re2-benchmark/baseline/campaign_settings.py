@@ -220,3 +220,14 @@ class CampaignSettings:
                                                                "change": change})
         self.current = settings
         return settings
+
+    def controller_change(self, change, update):
+        """Make the controller's own change, as change does; returns whether it was recorded. While the settings
+        cannot be read, or the change does not validate, the controller logs why and goes on under the last settings
+        that validated, and its caller tries again later."""
+        try:
+            self.change("controller", change, update)
+        except (OSError, SettingsError) as error:
+            print(f"cannot record {change} in the campaign settings: {error}", flush=True)
+            return False
+        return True

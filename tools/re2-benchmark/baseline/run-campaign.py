@@ -37,7 +37,8 @@ from acceptance import normalize_heap_size
 from campaign_settings import (
     PURCHASE_POLICIES, REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError)
 from fleet_budget import (
-    ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, BudgetError, FleetBudget, FleetHalted, on_demand_regions, spend_by_owner)
+    ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, AccountMismatch, BudgetError, FleetBudget, on_demand_regions,
+    spend_by_owner)
 from campaign_io import UnsafeCampaignError, check_output, fsync_directory, write_ledger
 from cloud import CloudError
 from unit_dispatch import (
@@ -1604,8 +1605,8 @@ def shared_fleet_snapshot(arguments, region, market, observed):
                  if instance.state in ("pending", "running") and (instance.lifecycle == "spot") == spot]
     requests = described(arguments, observed, region, "spot_requests") if spot else []
     if any(not item.type for item in instances + requests):
-        raise BudgetError(f"cannot account for {'a Spot instance or request' if spot else 'an On-Demand instance'} "
-                          "with no instance type")
+        raise AccountMismatch(f"cannot account for {'a Spot instance or request' if spot else 'an On-Demand instance'} "
+                              "with no instance type")
     instances = [item for item in instances if is_standard_instance_type(item.type)]
     requests = [item for item in requests if is_standard_instance_type(item.type)]
     # An instance type's vCPUs are the same in every region and never change.
@@ -1613,7 +1614,7 @@ def shared_fleet_snapshot(arguments, region, market, observed):
     if missing := {item.type for item in instances + requests} - set(vcpus):
         vcpus.update(arguments.cloud.vcpus(region, missing))
     if any(item.type not in vcpus for item in instances + requests):
-        raise BudgetError("AWS omitted requested vCPU metadata")
+        raise AccountMismatch("AWS omitted requested vCPU metadata")
 
     def resource(item, **fields):
         return {**fields, "type": item.type, "vcpus": vcpus[item.type],
@@ -2269,40 +2270,6 @@ def launch_record(row):
     return dict(item.split("=", 1) for item in row["detail"].split(";") if "=" in item)
 
 
-def halt_and_clean_up(result_root, budget, stop_hosts, error):
-    """Stop a controller that failed with error: stop_hosts terminates its hosts, proves their cleanup, and releases
-    their reservations, keeping those it cannot prove. A failure halts the fleet budget in the name of
-    result_root, its owner, whose restart clears it once its cleanup is verified. A cancellation, Ctrl-C or SIGTERM,
-    or FleetHalted, which another owner's halt raises, halts it only when cleanup cannot be proven for every host the
-    owner holds a reservation for, so a halt stays its owner's alone to clear. The caller then re-raises error."""
-    reason = str(error) or type(error).__name__
-
-    def halt(reason):
-        # Cleanup must still run if persisting the stop marker fails.
-        try:
-            budget.halt(reason, result_root)
-        except (OSError, RuntimeError):
-            pass
-
-    cancelled = isinstance(error, (KeyboardInterrupt, FleetHalted))
-    if budget and not cancelled:
-        # Stop the other collectors' admissions and ask them to drain too.
-        halt(reason)
-    try:
-        stop_hosts()
-        # A host the controller had not adopted yet, such as one an earlier run left, still awaits cleanup.
-        if budget and cancelled and budget.reservations(result_root):
-            halt(f"{reason}; hosts of {result_root} await verified cleanup")
-    except (OSError, RuntimeError) as cleanup_error:
-        if budget and cancelled:
-            halt(f"{reason}; {cleanup_error}")
-        raise UnsafeCampaignError(f"{reason}; {cleanup_error}") from error
-
-
-def interrupt(signal_number, frame):
-    raise KeyboardInterrupt
-
-
 def process_start(process_id):
     """When the process process_id names started, as ps reports it, or None while no process has that ID. With the
     process ID, it identifies the process, as a later one given the same ID starts later. It is read in one time zone
@@ -2317,9 +2284,7 @@ def process_start(process_id):
 @contextlib.contextmanager
 def controller_lock(campaign_root):
     """Own campaign_root as its only controller, and once it does, record this process's ID and start time in its
-    controller record. While another controller owns it, refuse. While it does, SIGTERM stops it as Ctrl-C does:
-    its workers are cleaned up, and the shared fleet keeps running unless their cleanup cannot be proven or their
-    release cannot be recorded."""
+    controller record. While another controller owns it, refuse."""
     campaign_root.mkdir(parents=True, exist_ok=True)
     lock_path = campaign_root / CONTROLLER_LOCK
     with lock_path.open("w") as lock_file:
@@ -2333,11 +2298,7 @@ def controller_lock(campaign_root):
         temporary = campaign_root / (CONTROLLER_RECORD + ".new")
         temporary.write_text(f"pid={os.getpid()}\nstarted={process_start(os.getpid())}\n")
         os.replace(temporary, campaign_root / CONTROLLER_RECORD)
-        previous = signal.signal(signal.SIGTERM, interrupt)
-        try:
-            yield
-        finally:
-            signal.signal(signal.SIGTERM, previous)
+        yield
 
 
 def read_unit_workers(path, platforms):
@@ -2631,8 +2592,6 @@ class UnitDispatcher:
                 stop_by=job.stop_by)
         recover_budget_reservations(self.budget, self.arguments, self.result_root, self.planned, self.attempts_path,
                                     set(workers))
-        # A halt this controller's failure set clears once no host of its own awaits verified cleanup.
-        self.budget.resume(self.result_root)
         for groups in recover_accepted_units(self.validation, self.result_root, self.accepted_path).values():
             for receipt in groups.values():
                 self.accept(receipt)
@@ -3072,11 +3031,11 @@ class UnitDispatcher:
         stays until its cleanup is proven, and other hosts' running leases finish."""
         if worker.leaked:
             return
-        worker.leaked = True
         reason = f"instance {worker.instance_id} of {worker.host_session} did not terminate"
         print(f"leak: {reason}; no launch or lease extension is admitted until the spending stop is cleared",
               flush=True)
-        self.budget.stop_spending(reason)
+        # Until the stop is recorded, the next loop tries again.
+        worker.leaked = self.budget.stop_spending(reason)
 
     def clean_up(self, workers):
         """Prove ended workers' cleanup: each one's instance terminated, then its prefix recovered, deleted, and found
@@ -3087,7 +3046,7 @@ class UnitDispatcher:
             self.arguments.cloud, worker.metadata, worker.directory / "recovered-uploads" / "objects"), terminated)
         for worker, held in zip(terminated, proven):
             if not held:
-                # A leftover: the host is gone, so it costs nothing, halts nothing, and is retried.
+                # A leftover: the host is gone, so it costs nothing, pauses nothing, and is retried.
                 print(f"leftover: the prefix of {worker.host_session}, whose instance terminated, is not yet "
                       f"recovered and empty; retrying", flush=True)
         return [worker for worker, held in zip(terminated, proven) if held]
@@ -3638,28 +3597,18 @@ class UnitDispatcher:
         self.lease(worker, launching=True)
         return worker
 
-    def stop_all(self):
-        """Terminate every worker's host and prove its cleanup, releasing its reservation, within the teardown. A host
-        EC2 has not terminated by then has leaked, and one whose prefix will not empty is a leftover; each keeps its
-        reservation, and a restart settles it from its ledger rows."""
-        deadline = time.monotonic() + UNIT_WORKER_TEARDOWN_SECONDS
-        for epoch in self.workers:
-            self.terminated.setdefault(epoch, time.time())
-        while True:
-            self.observed = {}
-            for worker in self.workers.values():
+    def sweep(self, observed):
+        """One loop of a phase paused for a fault, which trusts nothing more its hosts report: prove each ended
+        worker's cleanup, releasing its reservation, and go on stopping the hosts asked to terminate. Its other hosts
+        finish the leases they hold and stop themselves once their idle time runs out. The phase's next dispatch,
+        once it is resumed, settles each worker from its ledgers and recovered uploads, as a restart does."""
+        self.observed = observed
+        for epoch, worker in self.workers.items():
+            if epoch in self.terminated:
                 self.stop_host(worker)
-            for worker in self.clean_up([worker for worker in self.workers.values() if self.ended(worker)]):
-                self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
-                del self.workers[worker.job.host_epoch]
-            if not self.workers:
-                return
-            if time.monotonic() >= deadline:
-                for worker in self.workers.values():
-                    if not self.instance_terminated(worker):
-                        self.leak(worker)
-                return
-            time.sleep(UNIT_POLL_SECONDS)
+        for worker in self.clean_up([worker for worker in self.workers.values() if self.ended(worker)]):
+            self.budget.release(self.arguments.campaign_id, worker.job.host_epoch, cleanup_verified=True)
+            del self.workers[worker.job.host_epoch]
 
     def start_campaign(self):
         """The phase's start time. A first start records the tooling digest and an empty semantic-rejection
@@ -3690,14 +3639,12 @@ class UnitDispatcher:
         return campaign_started_at(state, self.arguments)
 
     def run(self):
+        """Run the phase alone, as the campaign's controller would with no other phase."""
         deadline = self.begin()
         try:
             self.recover()
             while not self.step(deadline):
                 time.sleep(UNIT_POLL_SECONDS)
-        except (Exception, KeyboardInterrupt) as error:
-            halt_and_clean_up(self.result_root, self.budget, self.stop_all, error)
-            raise
         finally:
             self.requests.shutdown(cancel_futures=True)
             self.acceptances.shutdown(cancel_futures=True)
@@ -3714,7 +3661,6 @@ class UnitDispatcher:
     def step(self, deadline, observed=None):
         """One loop of the phase, sharing what observed holds of each region's fleet with the campaign's other
         phases; returns whether it is over, with every worker settled and nothing queued."""
-        self.budget.check()
         self.observed = {} if observed is None else observed
         now = time.monotonic()
         deadline_reached = now >= deadline
@@ -3795,6 +3741,8 @@ class Phase:
     # A running phase's dispatcher, and when, on the monotonic clock, its launches end.
     dispatcher: object = None
     deadline: float = None
+    # Why the phase is paused for a fault in its dispatch, until it is resumed and its dispatch restarts.
+    fault: str = ""
 
     @property
     def reduction(self):
@@ -3946,7 +3894,7 @@ class Campaign:
     the reduction thread, so a loop never waits for either. Each loop steps every running phase's dispatch, the
     phases sharing the request and acceptance threads, the caches of what AWS offers, and one look at each region's
     fleet, after setting each phase's share of the hosts from the work every phase has left. A failed step stops
-    only the steps after it."""
+    only the steps after it, and a fault in a phase's dispatch pauses only that phase."""
 
     def __init__(self, arguments, root, phases):
         self.arguments = arguments
@@ -3957,16 +3905,18 @@ class Campaign:
         arguments.pools = (ThreadPoolExecutor(REQUEST_THREADS), ThreadPoolExecutor(ACCEPTANCE_THREADS))
         for cache in ("networks", "images", "zone_offerings", "placement_scores"):
             vars(arguments).setdefault(cache, {})
-        # The phase whose dispatch the loop is running.
-        self.stepping = None
         # Each phase's state as the settings last recorded it.
         self.recorded = {}
+        self.terminated = False
 
     def run(self):
         """Run every step that can run, or once the campaign is stopped, until every worker's cleanup is proven;
-        returns the steps that failed."""
+        returns the steps that failed. A paused phase, even one paused for a fault, is still running. SIGTERM stops
+        only this process: its hosts go on with the leases they hold, which the next controller adopts, so it returns
+        none."""
+        previous = signal.signal(signal.SIGTERM, self.terminate)
         try:
-            while True:
+            while not self.terminated:
                 self.reload()
                 self.advance()
                 self.record()
@@ -3983,19 +3933,20 @@ class Campaign:
                 self.assign_shares(running)
                 observed = {}
                 for phase in running:
-                    self.stepping = phase
-                    finished = phase.dispatcher.step(phase.deadline, observed)
-                    self.stepping = None
-                    if finished:
-                        self.end(phase)
+                    self.step(phase, observed)
                 time.sleep(UNIT_POLL_SECONDS)
-        except (Exception, KeyboardInterrupt) as error:
-            self.halt(error)
-            raise
+            else:
+                print("controller stopped by SIGTERM; the campaign's hosts keep their leases for the next controller",
+                      flush=True)
+                return []
         finally:
+            signal.signal(signal.SIGTERM, previous)
             for pool in (self.setup, self.reductions, *self.arguments.pools):
                 pool.shutdown(cancel_futures=True)
         return [phase for phase in self.phases.values() if phase.state == "failed"]
+
+    def terminate(self, signal_number, frame):
+        self.terminated = True
 
     def reload(self):
         """Read the settings as they stand now, or keep the last good ones while the file does not validate."""
@@ -4007,10 +3958,11 @@ class Campaign:
 
     def record(self):
         """Record in the settings each phase whose state changed since the settings last recorded it, one starting as
-        running, or while the file does not validate, try again next loop. A reduction holds no hosts, so the
-        settings never name it. A phase that ends is recorded complete or failed; until then a phase paused or
-        draining stays so, and a pending one only gains its entry, so a restart keeps how the phases were steered."""
-        states = {phase.key: "running" if phase.state == "starting" else phase.state
+        running and one faulted as paused with its fault, or while the change cannot be recorded, try again next loop.
+        A reduction holds no hosts, so the settings never name it. A phase that ends is recorded complete or failed;
+        until then a phase paused or draining stays so, and a pending one only gains its entry, so a restart keeps
+        how the phases were steered."""
+        states = {phase.key: "paused" if phase.fault else "running" if phase.state == "starting" else phase.state
                   for phase in self.phases.values() if not phase.reduction}
         changed = {key: state for key, state in states.items() if self.recorded.get(key) != state}
         if not changed:
@@ -4019,22 +3971,24 @@ class Campaign:
         def update(settings):
             for key, state in changed.items():
                 steering = settings["phases"].setdefault(key, {"state": "pending", "share": "auto"})
-                if state in ("complete", "failed") or state == "running" and steering["state"] not in (
+                if state == "paused":
+                    steering.update(state="paused", reason=self.phases[key].fault)
+                elif state in ("complete", "failed") or state == "running" and steering["state"] not in (
                         "paused", "draining"):
                     steering.pop("reason", None)
                     steering["state"] = state
 
-        try:
-            self.arguments.settings.change("controller",
-                                           "; ".join(f"{key} {state}" for key, state in changed.items()), update)
-        except SettingsError:
-            return
-        self.recorded.update(changed)
+        if self.arguments.settings.controller_change("; ".join(
+                f"{key} {state}" + (f": {self.phases[key].fault}" if state == "paused" else "")
+                for key, state in changed.items()), update):
+            self.recorded.update(changed)
 
     def advance(self):
         """Adopt each phase whose setup finished, recovering its dispatch from its ledgers, settle each finished
         reduction, and start each step whose predecessors completed, unless it is complete already or has nothing
-        to do."""
+        to do. A phase paused for a fault starts again once it is resumed, as it would under a restarted controller,
+        which rebuilds its dispatch from its ledgers."""
+        settings = live_settings(self.arguments)
         for phase in self.phases.values():
             if phase.state == "starting" and phase.future.done():
                 try:
@@ -4046,34 +4000,65 @@ class Campaign:
                     self.finish(phase)
                     continue
                 phase.dispatcher, phase.deadline = result
-                self.stepping = phase
-                phase.dispatcher.recover()
-                self.stepping = None
                 phase.state = "running"
+                try:
+                    phase.dispatcher.recover()
+                except (Exception, SystemExit) as error:
+                    self.fault(phase, error)
+            elif phase.fault:
+                # Resumed once its pause was recorded.
+                if self.recorded.get(phase.key) == "paused" and settings["phases"][phase.key]["state"] != "paused":
+                    phase.fault, phase.dispatcher = "", None
+                    self.start(phase)
             elif phase.state == "pending" and all(self.phases[key].state == "complete" for key in phase.after):
                 if phase.complete() or not phase.needed():
                     phase.state = "complete"
                     continue
                 # Once the campaign is stopped, a phase starts only to stop the hosts an earlier controller left it.
-                if (live_settings(self.arguments)["stop"] and not phase.reduction and
+                if (settings["stop"] and not phase.reduction and
                         not self.arguments.shared_budget.reservations(phase.root)):
                     continue
-                print(f"{phase.key}: starting", flush=True)
-                phase.state = "starting"
-                if phase.reduction:
-                    phase.future = self.reductions.submit(reduce_primary, self.arguments, phase)
-                else:
-                    arguments = SimpleNamespace(**{**vars(self.arguments), **phase.options})
-                    phase.future = self.setup.submit(prepare_phase, arguments, self.root)
+                self.start(phase)
+
+    def start(self, phase):
+        print(f"{phase.key}: starting", flush=True)
+        phase.state = "starting"
+        if phase.reduction:
+            phase.future = self.reductions.submit(reduce_primary, self.arguments, phase)
+        else:
+            arguments = SimpleNamespace(**{**vars(self.arguments), **phase.options})
+            phase.future = self.setup.submit(prepare_phase, arguments, self.root)
 
     def steer(self, running):
         """Steer each running phase as the settings say: stopping once the campaign is stopped, else as its state
-        is, running, paused, or draining."""
+        is, running, paused, or draining. A phase paused for a fault launches nothing whatever they say."""
         settings = live_settings(self.arguments)
         for phase in running:
-            state = settings["phases"].get(phase.key, {}).get("state")
+            state = "paused" if phase.fault else settings["phases"].get(phase.key, {}).get("state")
             phase.dispatcher.steering = ("stopping" if settings["stop"] else
                                          state if state in ("paused", "draining") else "running")
+
+    def step(self, phase, observed):
+        """Run one loop of the phase's dispatch, or of a phase paused for a fault, its cleanup. A fault in its
+        dispatch, such as a marker unlike its lease, changed frozen inputs, conflicting receipts, or a ledger error,
+        pauses it alone. A resource AWS lists that the fleet cannot account for stops the fleet's spending."""
+        if phase.fault:
+            try:
+                phase.dispatcher.sweep(observed)
+            except (Exception, SystemExit) as error:
+                print(f"{phase.key}: cleanup failed: {error}; retrying", flush=True)
+            return
+        try:
+            finished = phase.dispatcher.step(phase.deadline, observed)
+        except AccountMismatch as error:
+            print(f"spending stop: {error}; no launch or lease extension is admitted until it is cleared", flush=True)
+            self.arguments.shared_budget.stop_spending(str(error))
+            return
+        except (Exception, SystemExit) as error:
+            self.fault(phase, error)
+            return
+        if finished:
+            self.end(phase)
 
     def assign_shares(self, running):
         """Give each running phase that launches its share of each platform's hosts: the hosts it holds, and whatever
@@ -4133,22 +4118,9 @@ class Campaign:
         phase.state, phase.failure = "failed", str(error) or type(error).__name__
         print(f"{phase.key}: failed: {phase.failure}", flush=True)
 
-    def halt(self, error):
-        """Until a faulted phase pauses alone, a failure of a phase's dispatch halts the shared fleet, which stops
-        every phase: each running phase's hosts are terminated and their cleanup proven, as halt_and_clean_up does
-        for the failed phase and for each phase its halt cancels. A failure outside any phase's dispatch, such as
-        Ctrl-C, cancels every phase."""
-        cleanup_error = None
-        for phase in self.phases.values():
-            if phase.dispatcher is None or phase.state != "running":
-                continue
-            cause = error if self.stepping in (None, phase) else FleetHalted(str(error))
-            try:
-                halt_and_clean_up(phase.root, self.arguments.shared_budget, phase.dispatcher.stop_all, cause)
-            except UnsafeCampaignError as unsafe:
-                cleanup_error = cleanup_error or unsafe
-        if cleanup_error is not None:
-            raise cleanup_error from error
+    def fault(self, phase, error):
+        phase.fault = str(error) or type(error).__name__
+        print(f"{phase.key}: paused: {phase.fault}", flush=True)
 
 
 def refuse_old_root(campaign_root):

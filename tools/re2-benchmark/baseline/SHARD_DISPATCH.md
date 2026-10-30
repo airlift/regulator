@@ -96,7 +96,7 @@ iteration counts while avoiding a new forked JVM for every row:
 - Numerical protocol rejection has exit status 42. It leaves the unit
   unresolved and the campaign incomplete, without terminating unrelated work
   or automatically retrying the rejected timings. Malformed evidence and
-  resource failures retain the shared fleet stop behavior.
+  resource failures pause the phase.
 - A failed check of a route's correctness stage has exit status 44: a
   semantic test, the DFA probe, a differential verifier or its count of
   verified cases, or the pinned Trino comparator's verification, including
