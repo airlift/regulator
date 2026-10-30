@@ -318,12 +318,12 @@ runs its semantic verifiers, and CI runs the full suite.
 
 ## Run a campaign
 
-`campaign` freezes every candidate and runs each through its phases as its own
-controller: build, smoke, primary, the reduction of its primary, and a
+`campaign` freezes every candidate and runs each through its phases in one
+controller process: build, smoke, primary, the reduction of its primary, and a
 confirmation of the jobs that reduction lists, if any. Each candidate starts a
 phase as soon as its own previous phase completes, and a failed phase stops
-only its own candidate's later phases. A controller that fails while it
-recovers or dispatches its hosts also halts the
+only its own candidate's later phases. A failure while the controller recovers
+or dispatches a phase's hosts also halts the
 [shared fleet](#shared-fleet-budget), which stops every candidate's running
 phases. With `--language-plan`, each candidate also runs the plan's smoke and
 primary on its build; the command refuses plans its language phases would
@@ -332,7 +332,7 @@ refuse, such as two plans of one shard, before it freezes anything.
 ```bash
 TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
-  campaign <campaign> --execute --detach \
+  campaign <campaign> --execute \
   --candidate before=main --candidate after=user/me/faster-scan \
   --campaign-root /durable/path/<campaign> \
   --transfer-bucket us-west-2=<bucket> \
@@ -344,50 +344,45 @@ Every candidate's `tools/re2-benchmark` tree must be the controller's committed
 one, so `before=main` works only while `main` carries the same benchmark
 tooling as the checkout running the controller.
 
-Several candidates share one fleet, so they require `--fleet-budget`. Each
-phase starts with a share of `--max-concurrent` and
-`--max-concurrent-per-platform`. When a phase's share is first set, it is
-capped at its work items not yet accepted, in all and on its busiest platform,
-since a host runs one at a time, and is at least one host; a restart keeps
-that share. While another sequence of phases, a candidate's language plan
-counting as another sequence, still has a phase to start, each limit gives
-every sequence still running one host, and spare hosts are divided in
-proportion to each sequence's estimated seconds left in its remaining phases'
-work items not yet accepted. A phase several sequences share, such as a
-candidate's build, counts once. So a language primary, most of a release
-campaign's work, starts with most of the hosts beside the baseline's primary.
-Once no other sequence has a phase left to start, a phase takes the free hosts
-it can use, such as a baseline confirmation beside a running language primary.
-Freed hosts go to the next phase that starts.
+Several candidates share one fleet, so they require `--fleet-budget`. The
+running phases share `--max-concurrent` and `--max-concurrent-per-platform`,
+and their shares follow the work left, set again every poll. The hosts are
+split across platforms by the estimated seconds left in each platform's work
+items not yet accepted, and a platform's hosts among its phases the same way.
+No platform takes more than its limit, and no phase more hosts on a platform
+than its work items left there, since a host runs one at a time. Every
+platform, and every phase on it, with work left first takes one host while
+hosts last, so a build, whose items carry no estimate, runs beside the
+others. A phase holding more hosts than its share keeps them, and the others
+grow only into hosts the limits leave free, so a language primary, most of a
+release campaign's work, takes most of the hosts as they free up beside the
+baseline's primary. A phase's share is never frozen, so a restart may change
+the limits.
 
-The command refuses a limit that is not positive or is smaller than the
-number of sequences that run together, so every share is at least one host. A
-phase starts only once its share fits the hosts the running phases leave free,
-so a restart that retries a failed candidate waits for the hosts its phase
-froze. A restart whose limits are smaller than a share some running or
-unfinished phase froze stops at once, naming the smallest limits that hold it.
-The other options pass to each phase that takes them.
+Each phase's setup, which plans its work items, checks its prerequisites and
+AWS, and uploads what its hosts read, runs on a setup thread, and a
+reduction runs on its own thread, so the controller's poll never waits for
+them. The phases share the controller's request and acceptance threads and
+what it has learned of each region's networks, images, offerings, and
+placement scores.
 
-With `--detach`, the command checks its options, starts the campaign driver
-in its own session, and returns. The driver logs to `campaign-driver.log` in
-the campaign root and, once it holds the root's `controller.lock`, records its
-process ID and start time in `campaign-driver.txt` there. Without
-`--detach` the driver runs in the foreground. Each phase runs as a child
-process in its own session, logging to `driver-child.log` in its root; a
-phase's controller takes its root's lock before its setup and records its
-process ID and start time in `driver-child.txt`. A controller that finds the
-lock held exits with status 75, and the driver then adopts the controller that
-holds it. Stopping the driver leaves its children running. Run the same
-command again to resume: while a driver holds the campaign root's
-`controller.lock`, the command with `--detach` reports it and exits
-successfully, and without it exits with status 75; otherwise it starts a
-driver that adopts each live child, the process with the ID and start time its phase's
-record names, skips every completed phase, whose root holds
-`phase-complete.txt`, and restarts the others, which resume from their
-ledgers. Stop a phase by sending its child SIGTERM. The driver records the
-options that decide what its phases measure, the selected shards, smoke
-protocol, release version, and language plans, in `campaign-options.json`, and
-refuses a restart that changes them.
+The controller takes the campaign root's `controller.lock` before it freezes
+anything and records its process ID and start time in `controller.txt` there;
+a second controller of the root stops at once. Run the command under
+`nohup` or a terminal multiplexer to keep it running after the shell ends.
+Run the same command again to resume: it skips every completed phase, whose
+root holds `phase-complete.txt`, and every completed reduction, whose root
+holds `output-checksums.tsv`, and resumes the others from their ledgers. The
+controller records the options that decide what its phases measure, the
+selected shards, smoke protocol, release version, and language plans, in
+`campaign-options.json`, and refuses a restart that changes them.
+
+The command refuses a campaign root the earlier controllers started, which ran
+each phase as its own process: one holding `campaign-driver.txt`, a phase
+holding `driver-child.txt`, or a phase's `execution-policy.json` that froze its
+share of the hosts. It names the file it found, and the root is never
+migrated; start a new campaign root. `status`, `--results`, the reduction, and
+archiving still read such a root's ledgers.
 
 See a campaign's progress, or one phase's, without disturbing it:
 
@@ -396,11 +391,11 @@ python3 tools/re2-benchmark/baseline/run-campaign.py status /durable/path/<campa
 ```
 
 ```text
-campaign /durable/path/<campaign>: driver running as process 4242
+campaign /durable/path/<campaign>: controller running as process 4242
 candidate before at 0c1d2e3f4a5b
   build             complete
   smoke             complete
-  primary           running as process 4310
+  primary           running as process 4242
     units     212/449 accepted (530/1104 groups), 1 unresolved, 180 queued
     workers   2 booting, 24 running, 1 idle, as of 12s ago
               r8i r8i.large us-east-2 spot: 2 booting, 14 running
@@ -417,10 +412,11 @@ state of the policy its `execution-policy.json` names, `job-attempts.tsv`, and
 `unit-uploads.tsv`. Spend is the phase's completed hosts' cost plus the cost of
 its live hosts' hours so far; reserved is what their reservations hold beyond
 now. The workers, and the queued count and unresolved units while the phase
-runs, come from `dispatch-status.json`, which the phase's controller rewrites
+runs, come from `dispatch-status.json`, which the controller rewrites for the phase
 every poll; its age shows how current they are. The finish is the estimated
 seconds of groups not yet accepted, divided among the running workers, as a
-local clock time. Given a phase's root, the command reports that phase alone.
+local clock time. A phase that is not complete runs while the campaign's
+controller does. Given a phase's root, the command reports that phase alone.
 
 With `--results`, the command reads each primary phase's accepted groups so
 far instead, or the given phase's, from the phase's retained group
@@ -470,11 +466,10 @@ one tab-separated table with the columns `candidate`, `phase`, `platform`,
 
 ## Run a phase
 
-Each phase can also run alone. Without `--execute`, the controller writes the
-phase's work items to `work-items.tsv` without allocating AWS resources. With
-`--execute --detach`, the command plans the phase, starts its controller in its
-own session, logging to `driver-child.log` in the phase's root, and returns;
-running it again reports a live controller or resumes a stopped one:
+A phase runs only inside its campaign's controller. Given one phase, the
+command plans it: it writes the phase's work items to `work-items.tsv` without
+allocating AWS resources, and with `--execute` it refuses and names the
+`campaign` command to run instead:
 
 ```bash
 python3 tools/re2-benchmark/baseline/run-campaign.py \
@@ -484,68 +479,20 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
 
 Every execution requires a shared transfer bucket in every launch region and
 `TRANSFER_PREFIX`; see [launch regions](#launch-regions-and-purchase). The
-examples below run in one region with one shared bucket.
+campaign example above runs in one region with one shared bucket.
 
-Build each platform's engines once before the smoke. The build phase leases
-one `engine-build` unit per platform to a unit worker of its pinned instance
-type and AMI; see [engine builds](#engine-builds):
-
-```bash
-TRANSFER_PREFIX=<transfer-prefix> \
-python3 tools/re2-benchmark/baseline/run-campaign.py \
-  build <campaign> --execute --candidate <name>=<commit> \
-  --campaign-root /durable/path/<campaign> \
-  --transfer-bucket us-west-2=<bucket> \
-  --purchase r8i=spot --purchase r9g=spot \
-  --spot-vcpu-reserve 16 --fleet-budget /durable/path/fleet-policy.json
-```
-
-A measuring phase installs the candidate's build, or the accepted build
-`--engine-builds` names.
-
-Execute the smoke after inspecting the smoke plan above:
-
-```bash
-TRANSFER_PREFIX=<transfer-prefix> \
-python3 tools/re2-benchmark/baseline/run-campaign.py \
-  smoke <campaign> --execute --candidate <name>=<commit> \
-  --campaign-root /durable/path/<campaign> \
-  --transfer-bucket us-west-2=<bucket> \
-  --max-concurrent 16 --purchase r8i=spot --purchase r9g=spot \
-  --spot-vcpu-reserve 16 \
-  --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
-```
+The campaign builds each platform's engines once before the smoke. The build
+phase leases one `engine-build` unit per platform to a unit worker of its
+pinned instance type and AMI; see [engine builds](#engine-builds). A measuring
+phase installs the candidate's build, or the accepted build `--engine-builds`
+names.
 
 The primary phase requires the candidate's accepted smoke, or the one
 `--smoke-results` names, and measures three independent replicas of every
-work unit of every platform and shard:
-
-```bash
-TRANSFER_PREFIX=<transfer-prefix> \
-python3 tools/re2-benchmark/baseline/run-campaign.py \
-  primary <campaign> --execute --candidate <name>=<commit> \
-  --campaign-root /durable/path/<campaign> \
-  --transfer-bucket us-west-2=<bucket> \
-  --max-concurrent 16 --purchase r8i=spot --purchase r9g=spot \
-  --spot-vcpu-reserve 16 \
-  --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
-```
-
-Use confirmation only for the bounded list emitted by preliminary reduction.
-It requires the candidate's accepted primary, or the one `--primary-results`
-names:
-
-```bash
-TRANSFER_PREFIX=<transfer-prefix> \
-python3 tools/re2-benchmark/baseline/run-campaign.py \
-  confirmation <campaign> --execute --candidate <name>=<commit> \
-  --campaign-root /durable/path/<campaign> \
-  --confirmation-jobs /durable/path/<campaign>/<name>/reduction/confirmation-jobs.tsv \
-  --transfer-bucket us-west-2=<bucket> \
-  --max-concurrent 16 --purchase r8i=spot --purchase r9g=spot \
-  --spot-vcpu-reserve 16 \
-  --release-version 2.0 --fleet-budget /durable/path/fleet-policy.json
-```
+work unit of every platform and shard. The confirmation phase measures only the
+bounded list the preliminary reduction emits in its
+`confirmation-jobs.tsv`, and requires the candidate's accepted primary, or the
+one `--primary-results` names.
 
 Start with one canary per platform, then run full smoke before primary.
 Use `--smoke-protocol qualification` for baseline duration qualification. The

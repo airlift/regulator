@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import aggregate_results
 import cloud
@@ -123,21 +124,16 @@ SELF_STOP_CLAIMED = "host claimed the lease as its idle stop"
 # a lease released before it started does not count.
 MAX_UNIT_ATTEMPTS = MAX_REPLACEMENTS_PER_JOB + 1
 SEMANTIC_FAILURE_DETAIL = f"semantic failure: status {SEMANTIC_FAILURE_STATUS}"
-# A controller holds this lock in the root it owns, a phase's result root or the campaign root.
+# The campaign's controller holds this lock in the campaign root for as long as it runs, and once it does,
+# records its process ID and start time in the record beside it.
 CONTROLLER_LOCK = "controller.lock"
-# A controller that finds another owning its root exits with this status, so a campaign driver that started it
-# adopts the owner rather than failing the phase.
-CONTROLLER_BUSY_STATUS = 75
-# A phase's controller records its process ID and start time here, in its result root, once it holds the root's
-# controller lock.
-DRIVER_CHILD = "driver-child.txt"
-# A detached phase controller, or any step's child a campaign driver started, writes its output here, in its root.
-DRIVER_CHILD_LOG = "driver-child.log"
-# A campaign driver records its process ID and start time here, in the campaign root, once it holds the root's
-# controller lock, and a detached one writes its output beside it.
-CAMPAIGN_DRIVER = "campaign-driver.txt"
-CAMPAIGN_DRIVER_LOG = "campaign-driver.log"
-DRIVER_POLL_SECONDS = 30
+CONTROLLER_RECORD = "controller.txt"
+# What only the earlier controllers, which ran each phase as its own process, wrote: the campaign driver's record in
+# the campaign root, a phase's own controller's record in its root, and a phase's frozen share of the hosts in its
+# execution policy.
+OLD_DRIVER_RECORD = "campaign-driver.txt"
+OLD_PHASE_RECORD = "driver-child.txt"
+OLD_EXECUTION_POLICY_FIELDS = ("max_concurrent", "max_concurrent_per_platform")
 # A unit campaign phase's digest of the tooling that started it, in its result root.
 TOOLING_DIGEST = "tooling-digest.txt"
 # Written once a unit phase's controller has verified every worker's cleanup and its phase gate has passed;
@@ -305,7 +301,6 @@ def campaign_engine_tree(arguments):
 
 
 def parse_args():
-    # No abbreviations: a detached controller drops only the exact --detach from the command it runs again.
     parser = argparse.ArgumentParser(
         allow_abbrev=False,
         epilog=f"{Path(__file__).name} status ROOT reports a campaign's or one phase's progress from its ledgers, "
@@ -322,10 +317,8 @@ def parse_args():
     parser.add_argument("--campaign-root", type=Path,
                         help="the campaign's results, holding candidates.tsv and <name>/candidate and each phase "
                              "(default: benchmark-results/pre-review-baseline/<campaign>)")
-    parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--detach", action="store_true",
-                        help="with --execute, start the controller in its own session, logging beside its results, "
-                             "and return; run the same command again to resume one that stopped")
+    parser.add_argument("--execute", action="store_true",
+                        help="run the campaign; a phase alone only plans its work items")
     parser.add_argument("--confirmation-jobs", type=Path)
     parser.add_argument("--smoke-results", type=Path,
                         help="accepted smoke a primary requires (default: the candidate's smoke)")
@@ -427,13 +420,12 @@ def campaign_regions(arguments):
 
 
 def execution_policy(arguments):
-    """What a restart must repeat. Launch regions and purchase are not part of it: each result records its host's
-    region and market, so a restarted phase may move to other regions or buy differently."""
+    """What a restart must repeat. Launch regions, purchase, and the hosts the phase may hold are not part of it:
+    each result records its host's region and market, so a restarted phase may move to other regions or buy
+    differently, and its share of the hosts follows the work every phase has left."""
     return {"spot_vcpu_reserve": getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE),
             "release_version": getattr(arguments, "release_version", ""),
             "smoke_protocol": getattr(arguments, "smoke_protocol", "smoke"),
-            "max_concurrent": getattr(arguments, "max_concurrent", DEFAULT_MAX_CONCURRENT),
-            "max_concurrent_per_platform": getattr(arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT),
             "phase_timeout_seconds": getattr(arguments, "topology_deadline_seconds", None),
             "fleet_budget": str(arguments.shared_budget.policy_path) if getattr(arguments, "shared_budget", None) else None,
             "fleet_policy": arguments.shared_budget.policy if getattr(arguments, "shared_budget", None) else None,
@@ -680,14 +672,9 @@ def pool_shards(items):
     return {pool: sorted(names) for pool, names in shards.items()}
 
 
-def platform_has_capacity(candidate, running, arguments):
-    """Whether the candidate's platform has room beside the running jobs."""
-    limit = getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT)
-    return sum(job.platform.name == candidate.platform.name for job in running) < limit
-
-
-def validate_configuration(arguments, items):
-    """Check the campaign's limits and derive its phase deadline from the phase's work items."""
+def validate_configuration(arguments, items, frozen_deadline=None):
+    """Check the campaign's limits and derive the phase's deadline from its work items, or keep the frozen deadline
+    its first start derived, whatever the limits are now."""
     campaign_heap_size(arguments)
     if getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) < 0:
         raise SystemExit("Spot vCPU reserve must not be negative")
@@ -752,9 +739,12 @@ def validate_configuration(arguments, items):
         raise SystemExit("shared fleet vCPU limit cannot admit every worker type")
     required_seconds = unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus)
     explicit_deadline = getattr(arguments, "phase_timeout_seconds", None)
-    arguments.topology_deadline_seconds = (explicit_deadline if explicit_deadline is not None else
-                                          max(PHASE_TIMEOUT_SECONDS[arguments.phase], required_seconds + 3600))
-    if arguments.topology_deadline_seconds < required_seconds:
+    if frozen_deadline is not None:
+        arguments.topology_deadline_seconds = frozen_deadline
+    else:
+        arguments.topology_deadline_seconds = (explicit_deadline if explicit_deadline is not None else
+                                              max(PHASE_TIMEOUT_SECONDS[arguments.phase], required_seconds + 3600))
+    if frozen_deadline is None and arguments.topology_deadline_seconds < required_seconds:
         raise SystemExit("campaign topology cannot fit its phase deadline with one retry wave: "
                          f"requires {required_seconds}s, allows {arguments.topology_deadline_seconds}s")
     if getattr(arguments, "language_plans", None) and campaign_heap_size(arguments) != "8g":
@@ -1309,7 +1299,8 @@ def validate_aws(arguments, platforms, jobs=None):
     spot_quotas, on_demand_quotas = {}, {}
     # The controller launches into a public subnet of each region's default VPC. A check describes the account
     # afresh, and launches reuse what it found.
-    arguments.networks, arguments.images, arguments.zone_offerings = {}, {}, {}
+    for cache in ("networks", "images", "zone_offerings"):
+        vars(arguments).setdefault(cache, {})
     public_zones = {}
     for region in regions:
         public_zones[region] = {zone for _, zone in region_network(arguments, region).subnets}
@@ -2321,22 +2312,24 @@ def process_start(process_id):
 
 
 @contextlib.contextmanager
-def controller_lock(result_root, record):
-    """Own result_root as its only controller, and once it does, record this process's ID and start time in record
-    there. While another controller owns it, exit with CONTROLLER_BUSY_STATUS. While it does, SIGTERM stops it as
-    Ctrl-C does: its workers are cleaned up, and the shared fleet keeps running unless their cleanup cannot be
-    proven or their release cannot be recorded."""
-    result_root.mkdir(parents=True, exist_ok=True)
-    lock_path = result_root / CONTROLLER_LOCK
+def controller_lock(campaign_root):
+    """Own campaign_root as its only controller, and once it does, record this process's ID and start time in its
+    controller record. While another controller owns it, refuse. While it does, SIGTERM stops it as Ctrl-C does:
+    its workers are cleaned up, and the shared fleet keeps running unless their cleanup cannot be proven or their
+    release cannot be recorded."""
+    campaign_root.mkdir(parents=True, exist_ok=True)
+    lock_path = campaign_root / CONTROLLER_LOCK
     with lock_path.open("w") as lock_file:
         try:
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print(f"another controller owns campaign result root {result_root}", file=sys.stderr, flush=True)
-            raise SystemExit(CONTROLLER_BUSY_STATUS) from None
-        temporary = result_root / (record + ".new")
+            owner = controller_process(campaign_root)
+            raise SystemExit(f"another controller{f' (process {owner})' if owner else ''} owns campaign root "
+                             f"{campaign_root}; see its progress with {Path(__file__).name} status "
+                             f"{campaign_root}") from None
+        temporary = campaign_root / (CONTROLLER_RECORD + ".new")
         temporary.write_text(f"pid={os.getpid()}\nstarted={process_start(os.getpid())}\n")
-        os.replace(temporary, result_root / record)
+        os.replace(temporary, campaign_root / CONTROLLER_RECORD)
         previous = signal.signal(signal.SIGTERM, interrupt)
         try:
             yield
@@ -2525,10 +2518,14 @@ class UnitDispatcher:
         # When the controller decided to stop each host it terminates, by host epoch.
         self.terminated = {}
         # The loop's round trips run on the request threads, and gathering group completions on the acceptance
-        # threads; each group being gathered is kept by its worker's host epoch, lease and group until it is applied.
-        self.requests = ThreadPoolExecutor(REQUEST_THREADS)
-        self.acceptances = ThreadPoolExecutor(ACCEPTANCE_THREADS)
+        # threads, which a campaign's phases share; each group being gathered is kept by its worker's host epoch,
+        # lease and group until it is applied.
+        self.requests, self.acceptances = getattr(arguments, "pools", None) or (
+            ThreadPoolExecutor(REQUEST_THREADS), ThreadPoolExecutor(ACCEPTANCE_THREADS))
         self.accepting = {}
+        # The hosts of each platform the phase may hold, as its campaign shares them; a phase run alone holds up to
+        # the limits.
+        self.share = None
 
     def remaining(self, item):
         """The item's groups not yet accepted, in its run order, each as (group ID, estimated seconds)."""
@@ -3388,13 +3385,33 @@ class UnitDispatcher:
                 self.issue(worker, item, stop_by)
                 outstanding = worker.outstanding()
 
+    def holding(self):
+        """The hosts the phase holds on each platform."""
+        return Counter(worker.job.platform.name for worker in self.workers.values())
+
+    def demand(self):
+        """The phase's work left on each platform, as the estimated seconds and the number of its open items not
+        left unresolved."""
+        demand = {}
+        for pool, items in self.open.items():
+            platform = self.platforms[pool].name
+            left = [item for identity, item in items.items() if identity not in self.unresolved]
+            if left:
+                seconds, count = demand.get(platform, (0, 0))
+                demand[platform] = (seconds + sum(map(self.remaining_seconds, left)), count + len(left))
+        return demand
+
     def launch_room(self, pool):
-        """How many more workers the pool may launch this loop beside those it has, within the phase's and its
-        platform's limits and the fleet's boot window."""
+        """How many more workers the pool may launch this loop beside the hosts the phase holds, within its share of
+        its platform's hosts, or alone, the limits, and the fleet's boot window."""
         platform = self.platforms[pool].name
-        per_platform = getattr(self.arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT)
-        return max(0, min(self.arguments.max_concurrent - len(self.workers), per_platform - sum(
-            other.job.platform.name == platform for other in self.workers.values()), self.boot_room))
+        holding = self.holding()
+        if self.share is None:
+            per_platform = getattr(self.arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT)
+            room = min(self.arguments.max_concurrent - sum(holding.values()), per_platform - holding[platform])
+        else:
+            room = self.share.get(platform, 0) - holding[platform]
+        return max(0, min(room, self.boot_room))
 
     def unneeded(self, worker):
         """Whether a worker that has not started, nor missed its boot deadline, holds no lease of an open item and
@@ -3539,14 +3556,12 @@ class UnitDispatcher:
     def admit(self, now, starting):
         """Admit the launches the pools need now, recording each admitted worker, with its first leases issued, in
         starting."""
-        running = [worker.job for worker in self.workers.values()]
         blocked_vcpus = None
         for pool in self.pools:
+            # A worker is planned only once its platform has room for it.
             while self.launch_room(pool) and self.pool_ready.get(pool, 0) <= now:
                 market = self.pool_demand(pool, now)
-                # A worker is planned only once its platform has room for it.
-                if market is None or not platform_has_capacity(
-                        unit_worker_job(self.platforms[pool], 0, 0, market), running, self.arguments):
+                if market is None:
                     break
                 candidate = self.candidate(pool, market)
                 if candidate.market == "on-demand" and self.on_demand_ready.get(pool, 0) > now:
@@ -3574,7 +3589,6 @@ class UnitDispatcher:
                         return
                     break
                 starting.append(self.start(pool, candidate, now))
-                running.append(candidate)
 
     def start(self, pool, job, now):
         """Record an admitted worker and issue its first leases, before its launch."""
@@ -3678,10 +3692,11 @@ class UnitDispatcher:
         started_at = self.start_campaign()
         return time.monotonic() + max(0, phase_timeout(self.arguments) - max(0, time.time() - started_at))
 
-    def step(self, deadline):
-        """One loop of the phase; returns whether it is over, with every worker settled and nothing queued."""
+    def step(self, deadline, observed=None):
+        """One loop of the phase, sharing what observed holds of each region's fleet with the campaign's other
+        phases; returns whether it is over, with every worker settled and nothing queued."""
         self.budget.check()
-        self.observed = {}
+        self.observed = {} if observed is None else observed
         now = time.monotonic()
         deadline_reached = now >= deadline
         self.poll()
@@ -3736,262 +3751,83 @@ class UnitDispatcher:
 
 
 @dataclass
-class CampaignStep:
-    """One step of a candidate's chain: a phase's controller, or the reduction that lists its confirmation jobs.
-    It runs as a child process the driver can adopt after a restart."""
-    label: str
+class Phase:
+    """One step of a candidate's campaign, run by the campaign's controller once every step it comes after is
+    complete: a unit phase, whose options its namespace sets over the campaign's, or with no options, the reduction
+    of the candidate's primary. Its key is its root relative to the campaign root."""
+    key: str
     root: Path
-    # The child's command, given the step's (max concurrent, max concurrent per platform) share.
-    command: object
-    complete: object
-    # Whether the step has anything to do once its predecessors completed; confirmation runs only for listed jobs.
+    after: tuple
+    options: dict = None
+    # Whether the step has anything to do once those it comes after completed; confirmation runs only for listed jobs.
     needed: object = lambda: True
-    # Whether the child is a phase controller, whose command takes a concurrency share and which records its
-    # process ID in root; a reduction is not.
-    shared: bool = True
-    # The step's work items not yet accepted, each as its platform and the estimated seconds left of it, which weight
-    # its chain's share of the hosts and cap its own. None for a step whose share is not capped.
-    remaining: object = None
-
-
-@dataclass
-class CampaignChain:
-    """A candidate's steps, each started once the one before it completed."""
-    name: str
-    steps: list
-    position: int = 0
-    child: object = None
-    # The share of the campaign's hosts the driver started its child with; an adopted child's is its frozen one.
-    share: object = None
+    # pending; starting while its setup or reduction runs on its thread; running while its dispatch does; then
+    # complete, or failed, with why.
+    state: str = "pending"
     failure: str = ""
+    future: object = None
+    # A running phase's dispatcher, and when, on the monotonic clock, its launches end.
+    dispatcher: object = None
+    deadline: float = None
 
     @property
-    def step(self):
-        return self.steps[self.position]
+    def reduction(self):
+        return self.options is None
 
-    @property
-    def finished(self):
-        return bool(self.failure) or self.position == len(self.steps)
-
-
-class AdoptedChild:
-    """A step's child process an earlier driver started, followed through its process ID."""
-
-    def __init__(self, process_id, step):
-        self.pid = process_id
-        self.step = step
-
-    def poll(self):
-        return None if child_process_id(self.step) == self.pid else 0
+    def complete(self):
+        return (self.root / ("output-checksums.tsv" if self.reduction else PHASE_COMPLETE)).is_file()
 
 
-def child_process_id(step):
-    """The process ID of the step's live child. A phase's is its controller, found by the process ID and start time it
-    records, whatever options a restarted driver gives it. A reduction keeps no record of itself, so its command,
-    which names the step's root, is the one way to find it."""
-    if step.shared:
-        return controller_process(step.root, DRIVER_CHILD)
-    # ps joins the arguments with spaces, so the step's are matched exactly as joined, whatever spaces its root
-    # holds. The interpreter's path is ps's, which may name another path to the same interpreter, spaces and all.
-    expected = re.compile(r".+? " + " ".join(re.escape(argument) for argument in step.command(None)[1:]))
-    for line in check_output(["ps", "ax", "-o", "pid=,command="]).splitlines():
-        process_id, _, command = line.lstrip().partition(" ")
-        if expected.fullmatch(command):
-            return int(process_id)
-    return None
+def divide(hosts, weights, caps):
+    """Split hosts among the keys of weights: each key with room first takes one host, in order, while hosts last,
+    and the rest go in proportion to the keys' weights, evenly when none weighs anything, none past its cap, a capped
+    key's part going to the others. Rounding leaves its hosts to the largest remainders."""
+    shares = {key: 0 for key in weights}
+    left = hosts
+    for key in weights:
+        if left and caps[key] > 0:
+            shares[key], left = 1, left - 1
+    open_keys = [key for key in weights if shares[key] < caps[key]]
+    while left > 0 and open_keys:
+        total = sum(weights[key] for key in open_keys)
+        exact = {key: left * (weights[key] / total if total else 1 / len(open_keys)) for key in open_keys}
+        capped = [key for key in open_keys if shares[key] + exact[key] >= caps[key]]
+        if capped:
+            for key in capped:
+                left -= caps[key] - shares[key]
+                shares[key] = caps[key]
+            open_keys = [key for key in open_keys if key not in capped]
+            continue
+        whole = {key: math.floor(exact[key]) for key in open_keys}
+        left -= sum(whole.values())
+        for key in sorted(open_keys, key=lambda key: whole[key] - exact[key])[:left]:
+            whole[key] += 1
+        for key in open_keys:
+            shares[key] += whole[key]
+        break
+    return shares
 
 
-def adopt_child(step):
-    process_id = child_process_id(step)
-    return None if process_id is None else AdoptedChild(process_id, step)
+def allocate(demands, max_hosts, per_platform):
+    """Each running phase's target hosts by platform. demands holds each phase's work left on each platform, as
+    (estimated seconds, items); a host runs one item at a time, so a share never passes the items it holds. The
+    campaign's hosts are split across platforms by their seconds left, each platform capped at its limit and its
+    items, and then a platform's hosts among its phases by their seconds left, each capped at its items. Every
+    platform, and every phase on it, with work left takes one host first while hosts last."""
+    platforms = sorted({platform for demand in demands.values() for platform in demand})
 
+    def left(platform, index):
+        return sum(demand[platform][index] for demand in demands.values() if platform in demand)
 
-def start_detached(command, root, log):
-    """Start a command in its own session, so it outlives its starter, with its output appended to the log in root.
-    A controller records its own process ID and start time there once it holds root's controller lock."""
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / log).open("a") as output:
-        return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
-                                start_new_session=True)
-
-
-def start_child(step, share):
-    """Start the step's child in its own session, so it outlives the driver."""
-    return start_detached(step.command(share), step.root, DRIVER_CHILD_LOG)
-
-
-def detach(root, record, log):
-    """Run this command again without --detach, in its own session, as the controller of root, and return.
-
-    While a live controller holds root's lock, only report it. Otherwise the new controller resumes from the
-    ledgers, adopting whatever its predecessor left running.
-    """
-    root.mkdir(parents=True, exist_ok=True)
-    with (root / CONTROLLER_LOCK).open("a") as lock_file:
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            try:
-                owner = f" as process {read_properties(root / record)['pid']}"
-            except (OSError, RuntimeError, KeyError):
-                owner = ""
-            print(f"a controller already runs{owner} for {root}; its log is {root / log}; "
-                  f"see its progress with {Path(__file__).name} status {root}")
-            return
-    command = [sys.executable, str(Path(__file__).resolve()),
-               *(argument for argument in sys.argv[1:] if argument != "--detach")]
-    process = start_detached(command, root, log)
-    print(f"started controller process {process.pid} for {root}; its log is {root / log}; "
-          f"see its progress with {Path(__file__).name} status {root}")
-
-
-def frozen_share(step):
-    """The (max concurrent, max concurrent per platform) share a phase's execution policy froze, or None before the
-    phase froze one."""
-    policy = step.root / "execution-policy.json"
-    if not policy.exists():
-        return None
-    recorded = json.loads(policy.read_text())
-    return recorded["max_concurrent"], recorded["max_concurrent_per_platform"]
-
-
-def step_share(step, chains, limits, free):
-    """The share a phase starts with, as (max concurrent, max concurrent per platform), or None while the hosts free
-    of the campaign's limits cannot hold it. A restarted phase needs the share its execution policy froze.
-
-    A new one takes no more hosts than it has work items not yet accepted, in all and on its busiest platform, as a
-    host runs one at a time, and at least one. While another chain has a phase still to start, each limit sets one
-    host aside for each step the open chains are at, chains sharing a step counting once. This step takes its one
-    plus, of the hosts left, the part its chains' estimated work left is of every open chain's, rounded down, or what
-    is free of it. Weighting by the work left gives a phase holding most of the campaign's work, such as the language
-    primary beside the baseline's, most of the hosts for its whole run rather than an even part, and the shares of
-    one moment fit the limits together. The campaign refuses limits smaller than its number of chains, so a share is
-    at least one host. With no work estimated, each step takes an even share. Once no other chain has a phase to
-    start, no hosts are kept for one, so the phase takes what is free, such as a confirmation beside a running
-    language primary."""
-    share = frozen_share(step)
-    if share is None:
-        if min(free) < 1:
-            return None
-        left = {}
-
-        def work_left(later):
-            # Each step's work left is read once, as reading it reads its phase's ledger.
-            if id(later) not in left:
-                left[id(later)] = later.remaining()
-            return left[id(later)]
-
-        open_chains = [chain for chain in chains if not chain.finished]
-        # Chains at this step, such as those sharing its build, start their next phases with the hosts it frees.
-        if any(later.shared for chain in open_chains if chain.step is not step
-               for later in chain.steps[chain.position + (chain.child is not None):]):
-            steps = len({id(chain.step) for chain in open_chains})
-            step_work = total_work = 0
-            for chain in open_chains:
-                work = sum(seconds for later in chain.steps[chain.position:] if later.remaining is not None
-                           for _, seconds in work_left(later))
-                total_work += work
-                if chain.step is step:
-                    step_work += work
-            share = tuple(min(free_hosts, 1 + (limit - steps) * step_work // total_work if total_work else
-                              limit // steps) for limit, free_hosts in zip(limits, free))
-        else:
-            share = tuple(free)
-        if step.remaining is not None:
-            remaining = work_left(step)
-            platforms = Counter(platform for platform, _ in remaining)
-            share = (min(share[0], max(1, len(remaining))), min(share[1], max(platforms.values(), default=1)))
-    return share if all(1 <= want <= left for want, left in zip(share, free)) else None
-
-
-def phase_remaining(root, items):
-    """The given work items that a unit phase has not yet accepted, each as its platform and the estimated
-    seconds of its groups not yet accepted, each group's rounded up so that a share stays a whole number of hosts."""
-    accepted = {(row["platform"], row["unit_id"], row["replica_id"], row["group_id"])
-                for row in read_accepted_units(root / "accepted-units.tsv")}
-    remaining = []
-    for item in items:
-        left = [seconds for group, seconds in item.groups
-                if (item.platform, item.unit_id, str(item.replica), group) not in accepted]
-        if left:
-            remaining.append((item.platform, sum(math.ceil(seconds) for seconds in left)))
-    return remaining
-
-
-def run_chains(chains, maximum, per_platform, start=start_child, adopt=adopt_child, poll_seconds=DRIVER_POLL_SECONDS):
-    """Advance every chain until each completes or fails, starting each chain's next step once the one before it
-    completed and the campaign's hosts are free for its share. A chain's failure starts no more of its steps, though
-    a phase's dispatch failure also halts any fleet budget it shares, which stops every phase sharing it. A step
-    already complete is skipped, and a step whose child still runs is adopted before any step starts, so the hosts
-    it holds stay counted: an adopted phase holds the share its execution policy froze, and until it freezes one, no
-    other phase starts. A child that exits because another controller owns its phase leaves the step to be adopted,
-    or started again once that controller is gone. Any chain's current phase, adopted or not, that froze a share
-    past the limits stops the driver, naming the limits that hold it."""
-    limits = (maximum, per_platform)
-
-    def join(chain):
-        # A candidate's language chain shares its build with the candidate's baseline chain.
-        other = next((other for other in chains if other.child is not None and other.step is chain.step), None)
-        if other is not None:
-            chain.child, chain.share = other.child, other.share
-        return other is not None
-
-    while True:
-        for chain in chains:
-            while chain.child is None and not chain.finished and (chain.step.complete() or not chain.step.needed()):
-                chain.position += 1
-        # A phase keeps the share it froze, adopted or restarted, so limits that cannot hold it stop the driver.
-        oversized = {}
-        for chain in chains:
-            share = None if chain.finished or not chain.step.shared else frozen_share(chain.step)
-            if share and any(want > limit for want, limit in zip(share, limits)):
-                oversized.setdefault(chain.step.root, (f"{chain.name} {chain.step.label}", share))
-        if oversized:
-            needed = [max(limit, *(share[index] for _, share in oversized.values()))
-                      for index, limit in enumerate(limits)]
-            raise SystemExit("phases froze shares past the campaign's limits: " + ", ".join(
-                f"{phase} {share[0]} hosts, {share[1]} per platform" for phase, share in oversized.values()) +
-                f"; give at least --max-concurrent {needed[0]} --max-concurrent-per-platform {needed[1]}")
-        unfinished = sum(not chain.finished for chain in chains)
-        waiting = [chain for chain in chains if chain.child is None and not chain.finished]
-        for chain in waiting:
-            if not join(chain):
-                chain.child, chain.share = adopt(chain.step), None
-            if chain.child is not None:
-                print(f"{chain.name}: adopted the running {chain.step.label}", flush=True)
-        held = {id(chain.child): chain.share or frozen_share(chain.step)
-                for chain in chains if chain.child is not None and chain.step.shared}
-        free = None if None in held.values() else [limit - sum(share[index] for share in held.values())
-                                                   for index, limit in enumerate(limits)]
-        for chain in waiting:
-            if chain.child is not None:
-                continue
-            step = chain.step
-            if join(chain):
-                print(f"{chain.name}: adopted the running {step.label}", flush=True)
-                continue
-            share = None
-            if step.shared:
-                share = None if free is None else step_share(step, chains, limits, free)
-                if share is None:
-                    continue
-                free = [left - want for left, want in zip(free, share)]
-            print(f"{chain.name}: starting {step.label}" + (f" with {share[0]} hosts" if share else ""), flush=True)
-            chain.child, chain.share = start(step, share), share
-        if unfinished == 0:
-            return
-        time.sleep(poll_seconds)
-        for chain in chains:
-            if chain.child is not None and (status := chain.child.poll()) is not None:
-                chain.child = None
-                if chain.step.complete():
-                    print(f"{chain.name}: {chain.step.label} complete", flush=True)
-                    chain.position += 1
-                elif status == CONTROLLER_BUSY_STATUS:
-                    print(f"{chain.name}: another controller owns {chain.step.label}; adopting it", flush=True)
-                else:
-                    chain.failure = f"{chain.step.label} failed; see {chain.step.root / DRIVER_CHILD_LOG}"
-                    print(f"{chain.name}: {chain.failure}", flush=True)
+    hosts = divide(max_hosts, {platform: left(platform, 0) for platform in platforms},
+                   {platform: min(per_platform, left(platform, 1)) for platform in platforms})
+    shares = {key: {} for key in demands}
+    for platform in platforms:
+        phases = [key for key, demand in demands.items() if platform in demand]
+        for key, share in divide(hosts[platform], {key: demands[key][platform][0] for key in phases},
+                                 {key: demands[key][platform][1] for key in phases}).items():
+            shares[key][platform] = share
+    return shares
 
 
 def confirmation_jobs_listed(path):
@@ -3999,104 +3835,224 @@ def confirmation_jobs_listed(path):
         return any(True for _ in csv.DictReader(input_file, delimiter="\t"))
 
 
-def campaign_chains(arguments, candidates, language_units):
-    """Each candidate's chain, build, smoke, primary, reduction, and confirmation when the reduction lists jobs, and
-    with language plans, a second chain running their smoke and primary on the same build. The reduction takes the
-    primary's events; a campaign archive, and with it any retrieval metadata, exists only once the campaign ends.
-    language_units holds the language plans' campaign units by phase, as the campaign checked them before it
-    started."""
-    script = str(Path(__file__).resolve())
-    common = [f"--spot-vcpu-reserve={arguments.spot_vcpu_reserve}",
-              *([f"--release-version={arguments.release_version}"] if arguments.release_version else []),
-              *([f"--phase-timeout-seconds={arguments.phase_timeout_seconds}"]
-                if arguments.phase_timeout_seconds is not None else []),
-              *([f"--fleet-budget={arguments.fleet_budget.resolve()}"] if arguments.fleet_budget else []),
-              *(f"--platform-regions={value}" for value in arguments.platform_region_values),
-              *(f"--purchase={value}" for value in arguments.purchase_values),
-              *(f"--transfer-bucket={value}" for value in arguments.transfer_bucket)]
-    shards = [f"--shard={shard}" for shard in arguments.selected_shards or ()]
-    tooling = Path(__file__).resolve().parent
-    platforms = read_platforms(tooling)
-    measured = arguments.selected_shards or read_shards(tooling)
-
-    @functools.cache
-    def baseline_units():
-        return work_units.load(tooling)
-
-    # Each phase's work items, as its controller plans them, weight its chain's share of the hosts. A language
-    # phase's come from the units checked before the campaign started, so a plan changed on disk since stops only
-    # the phase that plans it, not the driver.
-    @functools.cache
-    def planned(label, language=False):
-        if label == "build":
-            return build_work_items(label, platforms, engine_build.units(), [engine_build.SHARD])
-        if language:
-            campaign = language_units[label]
-            return build_work_items(label, platforms, campaign["units"], sorted(campaign["allocations"]),
-                                    allocations=campaign["allocations"])
-        return build_work_items(label, platforms, baseline_units(), measured)
-
-    def confirmations(reduction, jobs):
-        # The jobs are listed only once the reduction has written its output. The estimate reads them without the
-        # strict reader's validation, which the confirmation phase applies, so the driver cannot exit on them.
-        if not reduction.complete():
-            return []
-        with jobs.open(newline="") as input_file:
-            listed = [(row["platform"], row["unit_id"], 4, frozenset())
-                      for row in csv.DictReader(input_file, delimiter="\t")]
-        return build_work_items("confirmation", platforms, baseline_units(), measured, listed)
-
-    def phase(candidate, label, root, items, *options):
-        selection = f"{candidate.name}={candidate.commit}"
-        return CampaignStep(label, root, lambda share: [
-            sys.executable, script, label, arguments.campaign, "--execute", f"--candidate={selection}",
-            f"--campaign-root={arguments.campaign_root.resolve()}", f"--max-concurrent={share[0]}",
-            f"--max-concurrent-per-platform={share[1]}", *common, *options], lambda: (root / PHASE_COMPLETE).is_file(),
-            remaining=lambda: phase_remaining(root, items()))
-
-    chains = []
+def candidate_phases(arguments, candidates):
+    """Each candidate's steps in the order they start: build, smoke, primary, the reduction of its primary, and a
+    confirmation when the reduction lists jobs, and with language plans, the plans' smoke and primary on the same
+    build. A phase takes the candidate's frozen commit and the options that decide what it measures."""
+    phases = []
     for candidate in candidates:
         directory = arguments.campaign_root / candidate.name
-        reduction, jobs = directory / "reduction", directory / "reduction" / "confirmation-jobs.tsv"
-        # The build serves each of the candidate's chains, so its items, which cap its share, count no seconds of
-        # work on any of them.
-        build = phase(candidate, "build", directory / "build", lambda: planned("build"))
-        build = replace(build, remaining=lambda counted=build.remaining: [(platform, 0) for platform, _ in counted()])
-        reduction_step = CampaignStep(
-            "reduction", reduction, lambda share, primary=directory / "primary", output=reduction: [
-                sys.executable, str(Path(script).with_name("aggregate_results.py")),
-                f"--primary-receipts={primary / 'accepted-units.tsv'}", f"--artifacts-root={primary}",
-                # A phase writes its events file with its first event.
-                *([f"--events={primary / 'campaign-events.tsv'}"] if (primary / "campaign-events.tsv").is_file()
-                  else []),
-                f"--output-dir={output.resolve()}", *shards,
-                *([f"--release-version={arguments.release_version}"] if arguments.release_version else [])],
-            lambda output=reduction: (output / "output-checksums.tsv").is_file(), shared=False)
-        chains.append(CampaignChain(candidate_campaign_id(arguments.campaign, candidate.name), [
-            build,
-            phase(candidate, "smoke", directory / "smoke", lambda: planned("smoke"),
-                  f"--smoke-protocol={arguments.smoke_protocol}", *shards),
-            phase(candidate, "primary", directory / "primary", lambda: planned("primary"), *shards),
-            reduction_step,
-            replace(phase(candidate, "confirmation", directory / "confirmation",
-                          lambda step=reduction_step, jobs=jobs: confirmations(step, jobs),
-                          f"--confirmation-jobs={jobs.resolve()}", *shards),
-                    needed=lambda jobs=jobs: confirmation_jobs_listed(jobs))]))
+        jobs = directory / "reduction" / "confirmation-jobs.tsv"
+
+        def phase(key, after, candidate=candidate, directory=directory, **options):
+            return Phase(f"{candidate.name}/{key}", directory / key,
+                         tuple(f"{candidate.name}/{step}" for step in after), {
+                             "phase": key.rsplit("/", 1)[-1], "candidates": [(candidate.name, candidate.commit)],
+                             "selected_shards": arguments.selected_shards, "smoke_protocol": "smoke",
+                             "language_plan": [], "confirmation_jobs": None, **options})
+
+        phases += [
+            phase("build", (), selected_shards=None),
+            phase("smoke", ("build",), smoke_protocol=arguments.smoke_protocol),
+            phase("primary", ("smoke",)),
+            Phase(f"{candidate.name}/reduction", directory / "reduction", (f"{candidate.name}/primary",)),
+            replace(phase("confirmation", ("reduction",), confirmation_jobs=jobs),
+                    needed=lambda jobs=jobs: confirmation_jobs_listed(jobs))]
         if arguments.language_plan:
-            plans = [f"--language-plan={plan.resolve()}" for plan in arguments.language_plan]
-            chains.append(CampaignChain(candidate_campaign_id(arguments.campaign, candidate.name, language=True), [
-                build,
-                phase(candidate, "smoke", directory / "lang" / "smoke", lambda: planned("smoke", language=True),
-                      *plans),
-                phase(candidate, "primary", directory / "lang" / "primary",
-                      lambda: planned("primary", language=True), *plans)]))
-    return chains
+            plans = {"language_plan": arguments.language_plan, "selected_shards": None}
+            phases += [phase("lang/smoke", ("build",), **plans), phase("lang/primary", ("lang/smoke",), **plans)]
+    return phases
 
 
-def check_campaign_options(arguments, record=True):
+def reduce_primary(arguments, phase):
+    """Reduce the candidate's primary into the reduction's root, as aggregate_results does, with the primary's events,
+    which its first event writes. The reduction writes output-checksums.tsv last, so an interrupted one runs again."""
+    primary = phase.root.parent / "primary"
+    events = primary / "campaign-events.tsv"
+    options = aggregate_results.parser().parse_args([
+        f"--primary-receipts={primary / 'accepted-units.tsv'}", f"--artifacts-root={primary}",
+        *([f"--events={events}"] if events.is_file() else []), f"--output-dir={phase.root}",
+        *(f"--shard={shard}" for shard in arguments.selected_shards or ()),
+        *([f"--release-version={arguments.release_version}"] if arguments.release_version else [])])
+    try:
+        aggregate_results.aggregate(options)
+    except aggregate_results.ReductionError as error:
+        raise SystemExit(f"cannot reduce {primary}: {error}") from error
+
+
+def prepare_phase(arguments, root):
+    """Plan one of the campaign's phases, check that it may run, stage what its hosts read, and begin its dispatch;
+    returns its dispatcher and when, on the monotonic clock, its launches end. This runs on the campaign's setup
+    thread, so the controller's loop never waits for it."""
+    items, kind, plans, platforms, result_root = plan_phase(arguments, root)
+    validate_source(root, arguments)
+    validate_dependencies(root, arguments)
+    resolve_engine_builds(root, arguments)
+    validation = unit_validation(root, arguments, kind, plans)
+    validate_prerequisites(arguments, validation)
+    workers = [unit_worker_job(arguments.unit_platforms[pool], 0, 0, "spot")
+               for pool in sorted({item.pool for item in items})]
+    validate_aws(arguments, platforms, workers)
+    stage_jdks(arguments, workers)
+    upload_candidate_archive(arguments, workers)
+    upload_engine_builds(arguments, workers)
+    if arguments.language_plan:
+        write_language_bundles(arguments, result_root)
+        upload_language_bundles(arguments, workers)
+    dispatcher = UnitDispatcher(arguments, root, result_root, items, platforms, validation)
+    return dispatcher, dispatcher.begin()
+
+
+class Campaign:
+    """The campaign's controller: every candidate's phases in this one process, sharing the fleet's hosts.
+
+    A phase starts once every step it comes after is complete. Its setup runs on the setup thread and a reduction on
+    the reduction thread, so a loop never waits for either. Each loop steps every running phase's dispatch, the
+    phases sharing the request and acceptance threads, the caches of what AWS offers, and one look at each region's
+    fleet, after setting each phase's share of the hosts from the work every phase has left. A failed step stops
+    only the steps after it."""
+
+    def __init__(self, arguments, root, phases):
+        self.arguments = arguments
+        self.root = root
+        self.phases = {phase.key: phase for phase in phases}
+        self.setup = ThreadPoolExecutor(1)
+        self.reductions = ThreadPoolExecutor(1)
+        arguments.pools = (ThreadPoolExecutor(REQUEST_THREADS), ThreadPoolExecutor(ACCEPTANCE_THREADS))
+        for cache in ("networks", "images", "zone_offerings", "placement_scores"):
+            vars(arguments).setdefault(cache, {})
+        # The phase whose dispatch the loop is running.
+        self.stepping = None
+
+    def run(self):
+        """Run every step that can run; returns the steps that failed."""
+        try:
+            while True:
+                self.advance()
+                running = [phase for phase in self.phases.values() if phase.state == "running"]
+                if not running and not any(phase.state == "starting" for phase in self.phases.values()):
+                    break
+                self.assign_shares(running)
+                observed = {}
+                for phase in running:
+                    self.stepping = phase
+                    finished = phase.dispatcher.step(phase.deadline, observed)
+                    self.stepping = None
+                    if finished:
+                        self.end(phase)
+                time.sleep(UNIT_POLL_SECONDS)
+        except (Exception, KeyboardInterrupt) as error:
+            self.halt(error)
+            raise
+        finally:
+            for pool in (self.setup, self.reductions, *self.arguments.pools):
+                pool.shutdown(cancel_futures=True)
+        return [phase for phase in self.phases.values() if phase.state == "failed"]
+
+    def advance(self):
+        """Adopt each phase whose setup finished, recovering its dispatch from its ledgers, settle each finished
+        reduction, and start each step whose predecessors completed, unless it is complete already or has nothing
+        to do."""
+        for phase in self.phases.values():
+            if phase.state == "starting" and phase.future.done():
+                try:
+                    result = phase.future.result()
+                except (Exception, SystemExit) as error:
+                    self.fail(phase, error)
+                    continue
+                if phase.reduction:
+                    self.finish(phase)
+                    continue
+                phase.dispatcher, phase.deadline = result
+                self.stepping = phase
+                phase.dispatcher.recover()
+                self.stepping = None
+                phase.state = "running"
+            elif phase.state == "pending" and all(self.phases[key].state == "complete" for key in phase.after):
+                if phase.complete() or not phase.needed():
+                    phase.state = "complete"
+                    continue
+                print(f"{phase.key}: starting", flush=True)
+                phase.state = "starting"
+                if phase.reduction:
+                    phase.future = self.reductions.submit(reduce_primary, self.arguments, phase)
+                else:
+                    arguments = SimpleNamespace(**{**vars(self.arguments), **phase.options})
+                    phase.future = self.setup.submit(prepare_phase, arguments, self.root)
+
+    def assign_shares(self, running):
+        """Give each running phase its share of each platform's hosts: the hosts it holds, and whatever the limits
+        leave free toward the target its work left gives it."""
+        limits = self.arguments.max_concurrent, self.arguments.max_concurrent_per_platform
+        targets = allocate({phase.key: phase.dispatcher.demand() for phase in running}, *limits)
+        held = {phase.key: phase.dispatcher.holding() for phase in running}
+        free = limits[0] - sum(sum(counts.values()) for counts in held.values())
+        free_platform = {}
+        for counts in held.values():
+            for platform, hosts in counts.items():
+                free_platform[platform] = free_platform.get(platform, limits[1]) - hosts
+        for phase in running:
+            share = {}
+            for platform, target in targets[phase.key].items():
+                own = held[phase.key].get(platform, 0)
+                room = max(0, min(target - own, free, free_platform.get(platform, limits[1])))
+                free -= room
+                free_platform[platform] = free_platform.get(platform, limits[1]) - room
+                share[platform] = own + room
+            phase.dispatcher.share = share
+
+    def end(self, phase):
+        try:
+            phase.dispatcher.end()
+        except (Exception, SystemExit) as error:
+            self.fail(phase, error)
+        else:
+            self.finish(phase)
+
+    def finish(self, phase):
+        phase.state = "complete"
+        print(f"{phase.key}: complete", flush=True)
+
+    def fail(self, phase, error):
+        phase.state, phase.failure = "failed", str(error) or type(error).__name__
+        print(f"{phase.key}: failed: {phase.failure}", flush=True)
+
+    def halt(self, error):
+        """Until a faulted phase pauses alone, a failure of a phase's dispatch halts the shared fleet, which stops
+        every phase: each running phase's hosts are terminated and their cleanup proven, as halt_and_clean_up does
+        for the failed phase and for each phase its halt cancels. A failure outside any phase's dispatch, such as
+        Ctrl-C, cancels every phase."""
+        cleanup_error = None
+        for phase in self.phases.values():
+            if phase.dispatcher is None or phase.state != "running":
+                continue
+            cause = error if self.stepping in (None, phase) else FleetHalted(str(error))
+            try:
+                halt_and_clean_up(phase.root, self.arguments.shared_budget, phase.dispatcher.stop_all, cause)
+            except UnsafeCampaignError as unsafe:
+                cleanup_error = cleanup_error or unsafe
+        if cleanup_error is not None:
+            raise cleanup_error from error
+
+
+def refuse_old_root(campaign_root):
+    """Refuse a campaign root the earlier controllers started, which ran each phase as its own process with its
+    share of the hosts frozen in its execution policy; a root is never migrated. status, --results, the reduction,
+    and archiving still read its ledgers."""
+    candidates = [campaign_root / OLD_DRIVER_RECORD]
+    for pattern in ("*/*/", "*/lang/*/"):
+        candidates += sorted(campaign_root.glob(pattern + OLD_PHASE_RECORD))
+        candidates += [path for path in sorted(campaign_root.glob(pattern + "execution-policy.json"))
+                       if set(OLD_EXECUTION_POLICY_FIELDS) & set(json.loads(path.read_text()))]
+    found = next((path for path in candidates if path.is_file()), None)
+    if found is not None:
+        raise SystemExit(f"{campaign_root} was started by the earlier per-phase controllers, as {found} shows; this "
+                         "controller cannot resume it, so start a new campaign root")
+
+
+def check_campaign_options(arguments):
     """Record the options that decide what the campaign's phases measure, or refuse a restart that changes them: the
-    restart skips each completed phase, so it would measure nothing under the new options. Without record, only
-    compare them with any the campaign records."""
+    restart skips each completed phase, so it would measure nothing under the new options."""
     options = json.dumps({
         "selected_shards": sorted(arguments.selected_shards) if arguments.selected_shards else None,
         "smoke_protocol": arguments.smoke_protocol,
@@ -4105,7 +4061,7 @@ def check_campaign_options(arguments, record=True):
                            for plan in arguments.language_plan},
     }, indent=2, sort_keys=True) + "\n"
     path = arguments.campaign_root / CAMPAIGN_OPTIONS
-    written = record and write_new_file(path, options.encode())
+    written = write_new_file(path, options.encode())
     if not written and path.is_file() and path.read_text() != options:
         raise SystemExit(f"the campaign's options differ from those {path} records; a restart measures what the "
                          f"campaign started measuring, so start another campaign for these:\n{options}")
@@ -4122,7 +4078,7 @@ def check_campaign_candidates(campaign_root, candidates):
 
 
 def run_campaign(arguments, root):
-    """Freeze every candidate, then run each candidate's phases as their own controllers, side by side."""
+    """Freeze every candidate, then run every candidate's phases in this process, side by side."""
     if not arguments.candidates:
         raise SystemExit("a campaign requires at least one --candidate NAME=COMMITISH")
     if arguments.execute and arguments.fleet_budget is None:
@@ -4133,29 +4089,26 @@ def run_campaign(arguments, root):
                                           ("--engine-builds", arguments.engine_builds)) if value is not None]
     if given:
         raise SystemExit(f"a campaign passes each phase its prerequisites itself; it takes no {', '.join(given)}")
-    # Each chain reserves the fleet and numbers its hosts under its own campaign ID.
-    chain_names = {}
+    for option, limit in (("--max-concurrent", arguments.max_concurrent),
+                          ("--max-concurrent-per-platform", arguments.max_concurrent_per_platform)):
+        if limit < 1:
+            raise SystemExit(f"{option} must be a positive number of hosts")
+    # Each candidate's phases, and its language phases, reserve the fleet and number their hosts under their own
+    # campaign ID.
+    names = {}
     for name, _ in arguments.candidates:
         for language in (False, True) if arguments.language_plan else (False,):
             campaign_id = candidate_campaign_id(arguments.campaign, name, language)
             validate_campaign_id(campaign_id, f"candidate {name}'s campaign ID")
-            if campaign_id in chain_names:
-                raise SystemExit(f"candidates {chain_names[campaign_id]} and {name} would both run as campaign "
+            if campaign_id in names:
+                raise SystemExit(f"candidates {names[campaign_id]} and {name} would both run as campaign "
                                  f"{campaign_id}; rename one")
-            chain_names[campaign_id] = name
-    # Each chain's running phase takes at least one host.
-    for option, limit in (("--max-concurrent", arguments.max_concurrent),
-                          ("--max-concurrent-per-platform", arguments.max_concurrent_per_platform)):
-        if limit < len(chain_names):
-            raise SystemExit(f"{option} {limit} cannot give each of the campaign's {len(chain_names)} phase sequences "
-                             f"running together a host; give at least {len(chain_names)}")
-    # The driver plans every language phase's units to weight its hosts among the sequences, so plans its phases
-    # would refuse are refused here, before anything is frozen or launched.
+            names[campaign_id] = name
+    # Plans the language phases would refuse are refused here, before anything is frozen or launched.
     plans = validate_language_plans(arguments.language_plan)
-    language_units = {}
     for phase in ("smoke", "primary") if plans else ():
         try:
-            language_units[phase] = language_fleet.campaign_units(plans, phase)
+            language_fleet.campaign_units(plans, phase)
         except (OSError, ValueError, KeyError) as error:
             raise SystemExit(f"cannot plan {phase} language units from {', '.join(map(str, plans))}: "
                              f"{error}") from error
@@ -4164,33 +4117,26 @@ def run_campaign(arguments, root):
             print(f"candidate {name}: {resolve_commit(root, commitish)}, campaign "
                   f"{candidate_campaign_id(arguments.campaign, name)}, results {arguments.campaign_root / name}")
         return
-    if arguments.detach:
-        # The detached driver checks again under the campaign's lock; checking here puts a refusal in this shell.
-        check_campaign_candidates(arguments.campaign_root, [
-            {"name": name, "commit": resolve_commit(root, commitish)} for name, commitish in arguments.candidates])
-        check_campaign_options(arguments, record=False)
-        detach(arguments.campaign_root, CAMPAIGN_DRIVER, CAMPAIGN_DRIVER_LOG)
-        return
-    with controller_lock(arguments.campaign_root, CAMPAIGN_DRIVER):
+    refuse_old_root(arguments.campaign_root)
+    with controller_lock(arguments.campaign_root):
         candidates = [freeze_candidate(root, arguments.campaign_root, arguments.campaign, name, commitish)
                       for name, commitish in arguments.candidates]
         check_campaign_candidates(arguments.campaign_root, [candidate.row for candidate in candidates])
         for candidate in candidates:
             record_candidate(arguments.campaign_root, candidate)
         check_campaign_options(arguments)
-        chains = campaign_chains(arguments, candidates, language_units)
-        run_chains(chains, arguments.max_concurrent, arguments.max_concurrent_per_platform)
-    failed = [f"{chain.name}: {chain.failure}" for chain in chains if chain.failure]
+        failed = Campaign(arguments, root, candidate_phases(arguments, candidates)).run()
     if failed:
-        raise SystemExit("campaign finished with failed candidates:\n" + "\n".join(failed))
+        raise SystemExit("campaign finished with failed phases:\n" +
+                         "\n".join(f"{phase.key}: {phase.failure}" for phase in failed))
 
 
-def controller_process(root, record):
-    """The process ID root's controller records in record, while the process with that ID started when the record
-    says. The record outlives its controller, whose process ID may since name another process. Root's controller
+def controller_process(campaign_root):
+    """The process ID the campaign root's controller records, while the process with that ID started when the record
+    says. The record outlives its controller, whose process ID may since name another process. The root's controller
     lock is left alone, as even a shared hold of it would stop a controller that is starting from taking it."""
     try:
-        values = read_properties(root / record)
+        values = read_properties(campaign_root / CONTROLLER_RECORD)
         process_id, started = int(values["pid"]), values["started"]
     except (OSError, RuntimeError, KeyError, ValueError):
         return None
@@ -4222,14 +4168,15 @@ def phase_unresolved(root, snapshot, live):
     return snapshot["unresolved"] if snapshot else []
 
 
-def phase_status(label, root, now, fleets, zone=None):
-    """A unit phase's lines for the status command, read from its ledgers and its controller's latest snapshot.
-    fleets holds each fleet policy's spend_by_owner, so the phases sharing a fleet read its state once."""
+def phase_status(label, root, now, fleets, controller, zone=None):
+    """A unit phase's lines for the status command, read from its ledgers and its controller's latest snapshot, given
+    the process ID of its campaign's live controller, or None. fleets holds each fleet policy's spend_by_owner, so
+    the phases sharing a fleet read its state once."""
     live = False
     if (root / PHASE_COMPLETE).is_file():
         state = "complete"
-    elif (process_id := controller_process(root, DRIVER_CHILD)) is not None:
-        state = f"running as process {process_id}"
+    elif controller is not None:
+        state = f"running as process {controller}"
         live = True
     else:
         state = "no live controller"
@@ -4301,16 +4248,16 @@ def phase_status(label, root, now, fleets, zone=None):
 
 
 def phase_root(root):
-    """The candidate and label of a phase's root, which holds the phase's work items, or only its controller's process
-    file while that controller starts, or None for any other root. A phase root inside a campaign takes its candidate
-    and the campaign status's label; any other takes "-" and its directory's name."""
-    if not ((root / "work-items.tsv").is_file() or (root / DRIVER_CHILD).is_file()):
+    """The candidate, label, and campaign root of a phase's root, which holds the phase's work items, or None for any
+    other root. A phase root inside a campaign takes its candidate and the campaign status's label; any other takes
+    "-", its directory's name, and no campaign root."""
+    if not (root / "work-items.tsv").is_file():
         return None
     for prefix, candidate in (("lang ", root.parent.parent), ("", root.parent)):
         if (not prefix or root.parent.name == "lang") and candidate.name in {
                 row["name"] for row in read_candidates(candidate.parent)}:
-            return candidate.name, prefix + root.name
-    return "-", root.name
+            return candidate.name, prefix + root.name, candidate.parent
+    return "-", root.name, None
 
 
 def campaign_phases(root):
@@ -4327,16 +4274,18 @@ def campaign_status(root, now=None, zone=None):
     """The status command's lines for a campaign root, or for one phase's root."""
     now = time.time() if now is None else now
     if (phase := phase_root(root)) is not None:
-        return [f"phase {root}", *phase_status(phase[1], root, now, {}, zone)]
+        controller = controller_process(phase[2]) if phase[2] else None
+        return [f"phase {root}", *phase_status(phase[1], root, now, {}, controller, zone)]
     phases = campaign_phases(root)
-    driver = controller_process(root, CAMPAIGN_DRIVER)
-    lines = [f"campaign {root}: " + (f"driver running as process {driver}" if driver else "no live driver")]
+    controller = controller_process(root)
+    lines = [f"campaign {root}: " + (f"controller running as process {controller}" if controller else
+                                     "no live controller")]
     fleets = {}
     for candidate in read_candidates(root):
         lines.append(f"candidate {candidate['name']} at {candidate['commit'][:12]}")
         for name, label, directory in phases:
             if name == candidate["name"]:
-                lines.extend(phase_status(label, directory, now, fleets, zone))
+                lines.extend(phase_status(label, directory, now, fleets, controller, zone))
     return lines
 
 
@@ -4356,7 +4305,7 @@ def release_1_0_ratios():
     return ratios
 
 
-def phase_results(root):
+def phase_results(root, live=False):
     """A unit phase's results so far: each row's Regulator-to-comparator ratio on every host whose group the phase
     has accepted, above 1 when Regulator is slower, each unit it left unresolved, and how many accepted groups have
     no retained results. Baseline rows are paired by comparison and estimated by the median of their host ratios, as
@@ -4442,7 +4391,7 @@ def phase_results(root):
             result(platform, row, len(hosts), flags=[reduced["state"], reduced["reason"]], rank=3)
     # The snapshot lists the units unresolved so far; unresolved-units.tsv, written when the controller ends, lists
     # every item not accepted.
-    for unit in phase_unresolved(root, dispatch_snapshot(root), controller_process(root, DRIVER_CHILD) is not None):
+    for unit in phase_unresolved(root, dispatch_snapshot(root), live):
         result(unit["platform"], f"{unit['unit_id']} replica {unit['replica']}", None,
                flags=[f"unresolved: {unit['detail']}"], rank=0, kind="unit")
     return sorted(results, key=lambda item: (item["rank"], -item["ratio"] if item["ratio"] is not None else 0,
@@ -4454,12 +4403,14 @@ def campaign_results(root):
     root or for one phase's root. A phase whose results cannot be read has none, and the error that stopped them, so
     one phase's error does not hide the others' results."""
     phase = phase_root(root)
-    phases = ([(*phase, root)] if phase else
+    phases = ([(*phase[:2], root)] if phase else
               [entry for entry in campaign_phases(root) if entry[1] in ("primary", "lang primary")])
+    campaign_root = (phase[2] if phase else root)
+    live = campaign_root is not None and controller_process(campaign_root) is not None
     results = []
     for candidate, label, directory in phases:
         try:
-            results.append((candidate, label, phase_results(directory), None))
+            results.append((candidate, label, phase_results(directory, live), None))
         except (OSError, RuntimeError, ValueError, KeyError, TypeError, EOFError, tarfile.TarError) as error:
             results.append((candidate, label, [], f"{type(error).__name__}: {error}"))
     return results
@@ -4530,11 +4481,23 @@ def main():
     platforms = read_platforms(directory)
     parse_launch_options(arguments, platforms)
     arguments.transfer_buckets = parse_transfer_buckets(arguments.transfer_bucket)
-    if arguments.detach and not arguments.execute:
-        raise SystemExit("--detach starts an execution; it requires --execute")
     if arguments.phase == "campaign":
         run_campaign(arguments, root)
         return
+    if arguments.execute:
+        raise SystemExit(f"a phase runs only inside its campaign's controller; run {Path(__file__).name} campaign "
+                         f"{arguments.campaign} --execute with the phase's candidate")
+    items, *_ = plan_phase(arguments, root)
+    print(f"planned {len(items)} work items with maximum concurrency {arguments.max_concurrent}")
+    print(f"work item manifest: {arguments.result_root / 'work-items.tsv'}")
+
+
+def plan_phase(arguments, root):
+    """Plan a phase of one candidate: its work items, written to work-items.tsv in its result root, its kind, any
+    language plans, the platforms, and its result root, kept on arguments with what its dispatch reads. A restarted
+    phase keeps the deadline its execution policy froze."""
+    directory = Path(__file__).resolve().parent
+    platforms = read_platforms(directory)
     if len(arguments.candidates) != 1:
         raise SystemExit("a phase measures one --candidate NAME=COMMITISH")
     [(name, commitish)] = arguments.candidates
@@ -4543,7 +4506,7 @@ def main():
     arguments.campaign_id = candidate_campaign_id(arguments.campaign, name, language=bool(arguments.language_plan))
     candidate_root = arguments.campaign_root / name
     phases = candidate_root / "lang" if arguments.language_plan else candidate_root
-    result_root = phases / arguments.phase
+    result_root = arguments.result_root = phases / arguments.phase
     if arguments.phase != "build" and arguments.engine_builds is None:
         arguments.engine_builds = candidate_root / "build"
     arguments.smoke_results = arguments.smoke_results or phases / "smoke"
@@ -4587,34 +4550,12 @@ def main():
     arguments.unit_platforms = pool_platforms(platforms, items)
     arguments.longest_units = longest_units(items)
     arguments.pool_shards = pool_shards(items)
-    validate_configuration(arguments, items)
+    policy = result_root / "execution-policy.json"
+    validate_configuration(arguments, items,
+                           json.loads(policy.read_text())["phase_timeout_seconds"] if policy.is_file() else None)
     validate_durable_paths(root, arguments, result_root)
-    items_path = result_root / "work-items.tsv"
-    write_work_items(items_path, items)
-    print(f"planned {len(items)} work items with maximum concurrency {arguments.max_concurrent}")
-    print(f"work item manifest: {items_path}")
-    if arguments.detach:
-        # The plan is checked here; the detached controller plans again and executes it.
-        detach(result_root, DRIVER_CHILD, DRIVER_CHILD_LOG)
-        return
-    if arguments.execute:
-        # The controller owns its result root before its slow setup, so a second one stops at once.
-        with controller_lock(result_root, DRIVER_CHILD):
-            validate_source(root, arguments)
-            validate_dependencies(root, arguments)
-            resolve_engine_builds(root, arguments)
-            validation = unit_validation(root, arguments, kind, plans)
-            validate_prerequisites(arguments, validation)
-            workers = [unit_worker_job(arguments.unit_platforms[pool], 0, 0, "spot")
-                       for pool in sorted({item.pool for item in items})]
-            validate_aws(arguments, platforms, workers)
-            stage_jdks(arguments, workers)
-            upload_candidate_archive(arguments, workers)
-            upload_engine_builds(arguments, workers)
-            if arguments.language_plan:
-                write_language_bundles(arguments, result_root)
-                upload_language_bundles(arguments, workers)
-            UnitDispatcher(arguments, root, result_root, items, platforms, validation).run()
+    write_work_items(result_root / "work-items.tsv", items)
+    return items, kind, plans, platforms, result_root
 
 
 if __name__ == "__main__":
