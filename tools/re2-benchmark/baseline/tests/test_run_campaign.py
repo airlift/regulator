@@ -808,7 +808,8 @@ class TestRunCampaign(unittest.TestCase):
 
     def test_status_results_rank_rows_by_ratio_worst_first(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
-            campaign_root = Path(temporary_directory) / "tournament"
+            # A line separator in the campaign root's name stays inside the field that shows it.
+            campaign_root = Path(temporary_directory) / "tourna\u2028ment"
             primary, language = campaign_root / "a" / "primary", campaign_root / "a" / "lang" / "primary"
             unreadable = campaign_root / "b" / "primary"
             write_tsv(campaign_root / "candidates.tsv", RUN_CAMPAIGN.CANDIDATE_FIELDS, [
@@ -871,7 +872,7 @@ class TestRunCampaign(unittest.TestCase):
                 with patch.object(sys, "argv", ["run-campaign.py", "status", str(root), *options]), \
                         contextlib.redirect_stdout(output):
                     RUN_CAMPAIGN.main()
-                return output.getvalue().splitlines()
+                return output.getvalue().split("\n")[:-1]
 
             lines, table = status(campaign_root, "--results"), status(campaign_root, "--results", "--tsv")
             # Given one phase's root, the command reports that phase as the campaign labels it.
