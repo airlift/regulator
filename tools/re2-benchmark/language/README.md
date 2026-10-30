@@ -562,11 +562,11 @@ the usual first workload for each language.
 ## AWS dispatch and recovery
 
 A language campaign runs its plans' work units on the baseline's unit
-workers, as its own controller invocation under the candidate's `lang`
-directory and campaign ID `<campaign>.<name>.lang`. `run-campaign.py campaign
---language-plan` runs it beside each candidate's baseline phases, on the same
-build; language plans add coverage and do not replace the baseline's LIKE and
-Trino-operation shards. Keep both source manifests and fleet
+workers, as phases under the candidate's `lang` directory with campaign ID
+`<campaign>.<name>.lang`. `run-campaign.py campaign --language-plan` runs them
+in the campaign's one controller beside each candidate's baseline phases, on
+the same build; language plans add coverage and do not replace the baseline's
+LIKE and Trino-operation shards. Keep both source manifests and fleet
 plans outside Maven's `target` directory for a final campaign.
 
 ```sh
@@ -577,9 +577,9 @@ python3 tools/re2-benchmark/baseline/run-campaign.py smoke final-v1 \
   --campaign-root /path/to/final-v1
 ```
 
-Without `--execute`, this only writes `work-items.tsv`, here under
-`/path/to/final-v1/release/lang/smoke`. Execution also freezes the candidate
-and requires the candidate's accepted build phase, or the one
+This only writes `work-items.tsv`, here under
+`/path/to/final-v1/release/lang/smoke`; the campaign's controller executes
+it. Execution also freezes the candidate and requires the candidate's accepted build phase, or the one
 `--engine-builds` names, which carries the candidate classes and native
 runners. Each plan must name a distinct shard.
 

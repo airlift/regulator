@@ -20,6 +20,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,15 +84,26 @@ class TestRunCampaign(unittest.TestCase):
             engine_tree="d" * 40,
             transfer_buckets={region: "bucket" for region in RUN_CAMPAIGN.default_regions()})
 
-    def test_platform_limit_applies_independently_of_global_capacity(self):
-        arguments = SimpleNamespace(max_concurrent=9, max_concurrent_per_platform=3)
-        job = SimpleNamespace(platform=SimpleNamespace(name='r9g'))
-        other = SimpleNamespace(platform=SimpleNamespace(name='r8i'))
-        running = [job] * 3
-        self.assertFalse(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
-        self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(other, running, arguments))
-        running.pop()
-        self.assertTrue(RUN_CAMPAIGN.platform_has_capacity(job, running, arguments))
+    def test_hosts_are_shared_by_the_seconds_left_within_the_limits_and_each_phases_items(self):
+        # The platforms split 20 hosts by their seconds left, and each platform's phases split its hosts the same
+        # way, every phase with work first taking a host, so the build, whose items hold no estimate, runs beside
+        # the others.
+        self.assertEqual({"a/build": {"r8i": 1, "r9g": 1}, "a/primary": {"r8i": 7, "r9g": 8}, "b/smoke": {"r8i": 3}},
+                         RUN_CAMPAIGN.allocate({"a/build": {"r8i": (0, 1), "r9g": (0, 1)},
+                                                "a/primary": {"r8i": (9000, 40), "r9g": (9000, 40)},
+                                                "b/smoke": {"r8i": (3000, 5)}}, 20, 14))
+        # No platform takes past its limit, and no phase past its items, as a host runs one at a time; what a cap
+        # leaves goes to the others.
+        self.assertEqual({"a": {"r8i": 2}, "b": {"r8i": 4}},
+                         RUN_CAMPAIGN.allocate({"a": {"r8i": (100, 2)}, "b": {"r8i": (100, 50)}}, 20, 6))
+        # A phase over its target keeps the hosts it holds, never interrupted; the other's share grows only by what
+        # the limits leave free.
+        running = [SimpleNamespace(key=key, dispatcher=SimpleNamespace(
+            demand=lambda seconds=seconds: {"r8i": (seconds, 50)}, holding=lambda held=held: Counter(r8i=held)))
+            for key, seconds, held in (("a", 100, 8), ("b", 900, 0))]
+        RUN_CAMPAIGN.Campaign.assign_shares(SimpleNamespace(arguments=SimpleNamespace(
+            max_concurrent=10, max_concurrent_per_platform=10)), running)
+        self.assertEqual([{"r8i": 8}, {"r8i": 2}], [phase.dispatcher.share for phase in running])
 
     def test_reserve_is_frozen_on_resume_but_launch_regions_and_purchase_are_not(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -100,7 +112,9 @@ class TestRunCampaign(unittest.TestCase):
                                         purchases={"r8i": "spot"}, spot_vcpu_reserve=0)
             RUN_CAMPAIGN.validate_execution_policy(arguments, root)
             # A restart may move to other regions or buy differently; each result records its region and market.
-            for change in ({"purchases": {}}, {"platform_regions": {"r8i": ["ap-south-1", "eu-west-1"]}}):
+            # Nor do the hosts it may hold freeze: its share follows the work every phase has left.
+            for change in ({"purchases": {}}, {"platform_regions": {"r8i": ["ap-south-1", "eu-west-1"]}},
+                          {"max_concurrent": 5, "max_concurrent_per_platform": 2}):
                 RUN_CAMPAIGN.validate_execution_policy(SimpleNamespace(**{**vars(arguments), **change}), root)
             with self.assertRaisesRegex(RUN_CAMPAIGN.UnsafeCampaignError, "changed on restart"):
                 RUN_CAMPAIGN.validate_execution_policy(SimpleNamespace(**{**vars(arguments), "spot_vcpu_reserve": 32}),
@@ -433,118 +447,116 @@ class TestRunCampaign(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "other benchmark tooling"):
                 RUN_CAMPAIGN.validate_source(repository, arguments)
 
-    def test_campaign_advances_each_candidate_as_its_own_phases_complete(self):
+    def test_campaign_runs_every_candidates_phases_in_one_controller_as_their_steps_complete(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             campaign_root = Path(temporary_directory)
             arguments = SimpleNamespace(
                 campaign="tournament", campaign_root=campaign_root, language_plan=[], selected_shards=["trino-like"],
-                max_concurrent=16, max_concurrent_per_platform=64, spot_vcpu_reserve=16, release_version="",
-                phase_timeout_seconds=None, fleet_budget=campaign_root / "fleet-policy.json", platform_region_values=[],
-                purchase_values=[], transfer_bucket=[], smoke_protocol="smoke", smoke_results=None,
-                primary_results=None, confirmation_jobs=None, engine_builds=None, execute=True, detach=False)
+                max_concurrent=16, max_concurrent_per_platform=64, release_version="", smoke_protocol="smoke",
+                smoke_results=None, primary_results=None, confirmation_jobs=None, engine_builds=None, execute=True,
+                fleet_budget=campaign_root / "fleet-policy.json", shared_budget=Mock())
             candidates = [RUN_CAMPAIGN.FrozenCandidate(name, commit * 40, f"refs/benchmarks/tournament/{name}",
                                                        campaign_root / name / "candidate", "0" * 64, "e" * 40)
                           for name, commit in (("a", "a"), ("b", "b"))]
             frozen = {candidate.name: candidate for candidate in candidates}
-            run_chains = RUN_CAMPAIGN.run_chains
-            # Each step's child runs this many polls; A's smoke is slow and then fails. A's reduction lists a job.
-            polls = {"a/smoke": 4}
+            # Each phase's dispatch runs this many loops; A's smoke is slow and then fails. A's reduction lists a job.
+            loops = {"a/smoke": 4}
             failing = {"a/smoke"}
             unit_id = next(unit_id for unit_id, unit in sorted(RUN_CAMPAIGN.work_units.load(SCRIPT.parent).items())
                            if unit["shard_id"] == "trino-like")
-            confirmed = {"a/reduction": f"r8i\ttrino-like\t{unit_id}\n"}
+            confirmed = {"a": f"r8i\ttrino-like\t{unit_id}\n"}
             events = []
 
-            class Child:
-                def __init__(self, step):
-                    self.step = step
-                    self.name = str(step.root.relative_to(campaign_root))
-                    self.remaining = polls.get(self.name, 1)
+            class Dispatch:
+                """A phase's dispatch, as prepare_phase begins it for the phase's namespace."""
 
-                def poll(self):
-                    self.remaining -= 1
-                    if self.remaining:
-                        return None
-                    events.append(("exit", self.name))
-                    if self.name in failing:
-                        return 1
-                    self.step.root.mkdir(parents=True, exist_ok=True)
-                    if self.step.label == "reduction":
-                        (self.step.root / "confirmation-jobs.tsv").write_text(
-                            "platform\tshard_id\tunit_id\n" + confirmed.get(self.name, ""))
-                        (self.step.root / "output-checksums.tsv").touch()
-                    else:
-                        (self.step.root / "campaign-events.tsv").touch()
-                        (self.step.root / RUN_CAMPAIGN.PHASE_COMPLETE).touch()
-                    return 0
+                def __init__(self, arguments):
+                    [(name, commit)] = arguments.candidates
+                    self.arguments, self.loops = arguments, None
+                    self.key = f"{name}/{'lang/' if arguments.language_plan else ''}{arguments.phase}"
+                    self.share = None
 
-            def start(step, share):
-                child = Child(step)
-                events.append(("start", child.name, step.command(share)))
-                return child
+                def recover(self):
+                    self.loops = loops.get(self.key, 1)
+                    events.append(("start", self.key, self.arguments))
+
+                def demand(self):
+                    return {"r8i": (900, 1)}
+
+                def holding(self):
+                    return Counter()
+
+                def step(self, deadline, observed):
+                    self.loops -= 1
+                    return not self.loops
+
+                def end(self):
+                    events.append(("end", self.key))
+                    if self.key in failing:
+                        raise SystemExit("campaign completed with unresolved units")
+                    root = campaign_root / self.key
+                    root.mkdir(parents=True, exist_ok=True)
+                    (root / "campaign-events.tsv").touch()
+                    (root / RUN_CAMPAIGN.PHASE_COMPLETE).touch()
+
+            def reduce(options):
+                name = options.output_dir.parent.name
+                events.append(("reduce", name, options))
+                options.output_dir.mkdir(parents=True)
+                (options.output_dir / "confirmation-jobs.tsv").write_text(
+                    "platform\tshard_id\tunit_id\n" + confirmed.get(name, ""))
+                (options.output_dir / "output-checksums.tsv").touch()
 
             def run(names=("a", "b")):
                 events.clear()
                 arguments.candidates = [(name, frozen[name].commit) for name in names]
-                driver_polls = iter(range(100))
+                controller_loops = iter(range(100))
 
                 def sleep(_):
-                    # A driver that never finishes fails rather than hangs.
-                    if next(driver_polls, None) is None:
-                        self.fail("the campaign driver never finished")
+                    # A controller that never finishes fails rather than hangs.
+                    if next(controller_loops, None) is None:
+                        self.fail("the campaign's controller never finished")
 
                 with patch.object(RUN_CAMPAIGN, "freeze_candidate",
                                   side_effect=lambda root, campaign_root, campaign, name, commitish: frozen[name]), \
-                        patch.object(RUN_CAMPAIGN, "run_chains", lambda chains, maximum, per_platform: run_chains(
-                            chains, maximum, per_platform, start=start, adopt=lambda step: None, poll_seconds=0)), \
+                        patch.object(RUN_CAMPAIGN, "prepare_phase", side_effect=lambda arguments, root: (
+                            Dispatch(arguments), 0)), \
+                        patch.object(RUN_CAMPAIGN.aggregate_results, "aggregate", side_effect=reduce), \
+                        patch.object(RUN_CAMPAIGN, "ThreadPoolExecutor", side_effect=FakeCloud().executor), \
                         patch.object(RUN_CAMPAIGN.time, "sleep", sleep), contextlib.redirect_stdout(io.StringIO()):
                     RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
 
             # A's failure stops only A, and the campaign then exits naming it.
-            with self.assertRaisesRegex(SystemExit, "failed candidates:\ntournament.a: smoke failed") as failed:
+            with self.assertRaisesRegex(SystemExit, "failed phases:\na/smoke: campaign completed with unresolved") \
+                    as failed:
                 run()
 
             order = [event[:2] for event in events]
-            # A build takes a host for each platform's one engine build, leaving the rest for the other chain.
-            command = next(event[2] for event in events if event[:2] == ("start", "a/build"))
-            self.assertIn("--max-concurrent=2", command)
-            self.assertIn("--max-concurrent-per-platform=1", command)
-            # B's primary starts once B's smoke passed, while A's smoke still runs. B's primary holds three of the
-            # seven replica sets left, so it gets its reserved host plus 3/7 of the other 14; its per-platform share
-            # is capped at its 18 items.
-            self.assertLess(order.index(("start", "b/primary")), order.index(("exit", "a/smoke")))
-            command = next(event[2] for event in events if event[:2] == ("start", "b/primary"))
-            self.assertIn(f"--candidate=b={'b' * 40}", command)
-            self.assertIn("--max-concurrent=7", command)
-            self.assertIn("--max-concurrent-per-platform=18", command)
-            # B's reduction takes its primary's events.
-            command = next(event[2] for event in events if event[:2] == ("start", "b/reduction"))
-            self.assertIn(f"--events={campaign_root / 'b' / 'primary' / 'campaign-events.tsv'}", command)
-            # B reduces its primary and, with no confirmation jobs listed, completes.
+            # B's primary starts once B's smoke passed, while A's smoke still runs, each phase taking the
+            # candidate's frozen commit.
+            self.assertLess(order.index(("start", "b/primary")), order.index(("end", "a/smoke")))
+            [primary] = [event[2] for event in events if event[:2] == ("start", "b/primary")]
+            self.assertEqual(([("b", "b" * 40)], ["trino-like"]), (primary.candidates, primary.selected_shards))
+            # B's reduction takes its primary's events, and with no confirmation jobs listed, B completes.
+            [reduction] = [event[2] for event in events if event[:2] == ("reduce", "b")]
+            self.assertEqual([campaign_root / "b" / "primary" / "campaign-events.tsv"], reduction.events)
             self.assertNotIn(("start", "a/primary"), order)
-            self.assertIn(("exit", "b/reduction"), order)
             self.assertNotIn(("start", "b/confirmation"), order)
-            self.assertNotIn("tournament.b", str(failed.exception))
+            self.assertNotIn("b/", str(failed.exception))
+            # The controller records itself in the campaign root.
+            self.assertEqual(str(os.getpid()), RUN_CAMPAIGN.read_properties(
+                campaign_root / RUN_CAMPAIGN.CONTROLLER_RECORD)["pid"])
 
-            # A restart skips every completed step: A resumes at its smoke, alone, with a host for each of its 12
-            # work items, and confirms the job its reduction listed on the shards it measured, with one host.
+            # A restart skips every completed step: A resumes at its smoke, and confirms the job its reduction
+            # listed on the shards it measured.
             failing.clear()
             run()
 
-            self.assertEqual([("start", "a/smoke"), ("start", "a/primary"), ("start", "a/reduction"),
-                              ("start", "a/confirmation")], [event[:2] for event in events if event[0] == "start"])
-            self.assertIn("--max-concurrent=12", events[0][2])
-            command = next(event[2] for event in events if event[:2] == ("start", "a/confirmation"))
-            self.assertIn("--shard=trino-like", command)
-            self.assertIn("--max-concurrent=1", command)
-            # The confirmation's jobs weigh on its chain's share only once the reduction that lists them completed.
-            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates, {})
-            (campaign_root / "a" / "reduction" / "output-checksums.tsv").unlink()
-            self.assertEqual([], chain.steps[4].remaining())
-            (campaign_root / "a" / "reduction" / "output-checksums.tsv").touch()
-            self.assertEqual([("r8i", sum(math.ceil(float(group["estimated_seconds"])) for group in
-                                          RUN_CAMPAIGN.work_units.load(SCRIPT.parent)[unit_id]["groups"]))],
-                             chain.steps[4].remaining())
+            self.assertEqual([("start", "a/smoke"), ("start", "a/primary"), ("reduce", "a"),
+                              ("start", "a/confirmation")], [event[:2] for event in events if event[0] != "end"])
+            confirmation = events[-2][2]
+            self.assertEqual((campaign_root / "a" / "reduction" / "confirmation-jobs.tsv", ["trino-like"]),
+                             (confirmation.confirmation_jobs, confirmation.selected_shards))
             # A restart measures what the campaign started measuring, of the candidates it started with.
             with self.assertRaisesRegex(SystemExit, "candidates differ"):
                 run(names=("a",))
@@ -553,168 +565,14 @@ class TestRunCampaign(unittest.TestCase):
                 run()
             self.assertEqual([], events)
 
-            # A restart adopts a phase's controller by the process ID and start time it records, though the restart
-            # changed its --purchase, and leaves the phase's lock to any controller starting meanwhile. Once the
-            # controller exited, the record's process ID may name a process started since, which is not adopted.
-            arguments.purchase_values = ["r8i=on-demand"]
-            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates, {})
-            record = chain.steps[2].root / RUN_CAMPAIGN.DRIVER_CHILD
-            with RUN_CAMPAIGN.controller_lock(chain.steps[2].root, RUN_CAMPAIGN.DRIVER_CHILD), \
-                    patch.object(RUN_CAMPAIGN.fcntl, "flock", side_effect=AssertionError("took the phase's lock")):
-                self.assertEqual(os.getpid(), RUN_CAMPAIGN.child_process_id(chain.steps[2]))
-                record.write_text(f"pid={os.getpid()}\nstarted=Thu Jan  1 00:00:00 1970\n")
-                self.assertIsNone(RUN_CAMPAIGN.child_process_id(chain.steps[2]))
-            # A reduction keeps no record, so a restart adopts it only from a process running its command for this
-            # campaign root, from any interpreter path, and not for another root, even one differing only in spaces.
-            arguments.campaign_root = campaign_root / "campaign root"
-            [chain, _] = RUN_CAMPAIGN.campaign_chains(arguments, candidates, {})
-            step = chain.steps[3]
-            command = " ".join(step.command(None)[1:])
-            others = "\n".join(f"10{index} python3 " + command.replace("campaign root", root)
-                               for index, root in ((1, "elsewhere"), (2, "campaign  root")))
-            with patch.object(RUN_CAMPAIGN, "check_output",
-                              return_value=f"{others}\n103 /opt/Python 3/bin/python3 {command}"):
-                self.assertEqual(103, RUN_CAMPAIGN.child_process_id(step))
-            with patch.object(RUN_CAMPAIGN, "check_output", return_value=others):
-                self.assertIsNone(RUN_CAMPAIGN.child_process_id(step))
-
-    def test_restarted_phase_waits_for_its_frozen_share_and_a_new_one_takes_free_hosts(self):
-        # Under limits of four, A's phase froze half of them and failed, and B's next phase then took all four. A
-        # restarted driver adopts B's phase, which still runs, before restarting A's, which waits for B's hosts.
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            events = []
-
-            def phase(name, frozen):
-                root = Path(temporary_directory) / name
-                root.mkdir()
-                (root / "execution-policy.json").write_text(
-                    json.dumps({"max_concurrent": frozen, "max_concurrent_per_platform": frozen}))
-                return RUN_CAMPAIGN.CampaignStep(name, root, None,
-                                                 lambda: (root / RUN_CAMPAIGN.PHASE_COMPLETE).is_file())
-
-            class Child:
-                def __init__(self, step, polls):
-                    self.step, self.polls = step, polls
-
-                def poll(self):
-                    self.polls -= 1
-                    if self.polls:
-                        return None
-                    events.append(("exit", self.step.label))
-                    (self.step.root / RUN_CAMPAIGN.PHASE_COMPLETE).touch()
-                    return 0
-
-            def start(step, share):
-                events.append(("start", step.label, share))
-                return Child(step, 1)
-
-            def run(steps, start, adopt):
-                events.clear()
-                chains = [RUN_CAMPAIGN.CampaignChain(step.label, [step]) for step in steps]
-                driver_polls = iter(range(10))
-
-                def sleep(_):
-                    # A driver that never finishes fails rather than hangs.
-                    if next(driver_polls, None) is None:
-                        self.fail("the campaign driver never finished")
-
-                with patch.object(RUN_CAMPAIGN.time, "sleep", sleep), contextlib.redirect_stdout(io.StringIO()):
-                    RUN_CAMPAIGN.run_chains(chains, 4, 4, start=start, adopt=adopt)
-                self.assertEqual(["" for _ in chains], [chain.failure for chain in chains])
-
-            a, b = phase("a", 2), phase("b", 4)
-            run([a, b], start, lambda step: Child(step, 2) if step is b else None)
-            self.assertEqual([("exit", "b"), ("start", "a", (2, 2)), ("exit", "a")], events)
-
-            # A restarted driver can start a phase whose controller holds its lock but has not yet recorded itself.
-            # The duplicate exits finding the lock held, and the driver then adopts the running controller.
-            c, owner = phase("c", 4), []
-
-            def start_duplicate(step, share):
-                events.append(("start", step.label, share))
-                owner.append(Child(step, 2))
-                return SimpleNamespace(poll=lambda: RUN_CAMPAIGN.CONTROLLER_BUSY_STATUS)
-
-            run([c], start_duplicate, lambda step: owner[0] if owner else None)
-            self.assertEqual([("start", "c", (4, 4)), ("exit", "c")], events)
-
-            # Beside another chain's last phase, which leaves no phase to start, a phase takes the free hosts its
-            # three work items can use rather than its sliver of the work left.
-            f, g = phase("f", 2), RUN_CAMPAIGN.CampaignStep(
-                "g", Path(temporary_directory) / "g", None,
-                lambda: (Path(temporary_directory) / "g" / RUN_CAMPAIGN.PHASE_COMPLETE).is_file(),
-                remaining=lambda: [("r8i", 600)] * 3)
-            f.remaining = lambda: [("r8i", 1_000_000)]
-            g.root.mkdir()
-            run([f, g], start, lambda step: Child(step, 2) if step is f else None)
-            self.assertEqual(("start", "g", (2, 2)), events[0])
-
-            # New phases split the hosts left after one each by their seconds of work left, not their work items: h's
-            # three items of 1000 seconds take one of the two spare hosts, where counting items, k's nine to its
-            # three, would give it none; k, with no other phase left to start, then takes the rest.
-            h, k = (RUN_CAMPAIGN.CampaignStep(name, Path(temporary_directory) / name, None,
-                                              lambda name=name: (Path(temporary_directory) / name /
-                                                                 RUN_CAMPAIGN.PHASE_COMPLETE).is_file(),
-                                              remaining=lambda work=work: work)
-                    for name, work in (("h", [("r8i", 1000)] * 3), ("k", [("r8i", 10)] * 9)))
-            for step in (h, k):
-                step.root.mkdir()
-            run([h, k], start, lambda step: None)
-            self.assertEqual([("start", "h", (2, 2)), ("start", "k", (2, 2))], events[:2])
-
-            # Limits that cannot hold a share a phase froze stop the driver, though that phase runs adopted, naming
-            # the limits that hold it.
-            d = phase("d", 8)
-            with self.assertRaisesRegex(SystemExit, "d d 8 hosts, 8 per platform; give at least --max-concurrent 8 "
-                                                    "--max-concurrent-per-platform 8"):
-                run([d, phase("e", 2)], start, lambda step: Child(step, 1) if step is d else None)
-            self.assertEqual([], events)
-
-    def test_detached_campaign_returns_and_a_second_launch_reports_the_live_driver(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            campaign_root = Path(temporary_directory)
-            arguments = SimpleNamespace(
-                campaign="tournament", campaign_root=campaign_root, candidates=[("a", "main")],
-                fleet_budget=campaign_root / "fleet-policy.json", smoke_results=None, primary_results=None,
-                confirmation_jobs=None, engine_builds=None, language_plan=[], execute=True, detach=True, max_concurrent=1, max_concurrent_per_platform=1,
-                selected_shards=None, smoke_protocol="smoke", release_version="")
-            argv = ["run-campaign.py", "campaign", "tournament", "--execute", "--detach", "--candidate=a=main"]
-            output = io.StringIO()
-
-            def start(command, **_):
-                # The driver takes the campaign's controller lock as it starts, and records itself.
-                driver.enter_context(RUN_CAMPAIGN.controller_lock(campaign_root, RUN_CAMPAIGN.CAMPAIGN_DRIVER))
-                return SimpleNamespace(pid=os.getpid())
-
-            # Popen starts only the driver here, so the driver's start time is given.
-            with contextlib.ExitStack() as driver, patch.object(RUN_CAMPAIGN.sys, "argv", argv), \
-                    contextlib.redirect_stdout(output), \
-                    patch.object(RUN_CAMPAIGN.subprocess, "Popen", side_effect=start) as popen, \
-                    patch.object(RUN_CAMPAIGN, "process_start", return_value="Thu Oct 29 00:00:00 2026"), \
-                    patch.object(RUN_CAMPAIGN, "resolve_commit", return_value="a" * 40), \
-                    patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze:
-                RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
-                RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
-
-            # Only the driver freezes and runs; the launch returns once it started it in its own session.
-            freeze.assert_not_called()
-            popen.assert_called_once()
-            command, options = popen.call_args
-            self.assertEqual([sys.executable, str(SCRIPT.resolve()), "campaign", "tournament", "--execute",
-                              "--candidate=a=main"], command[0])
-            self.assertTrue(options["start_new_session"])
-            self.assertEqual(str(campaign_root / RUN_CAMPAIGN.CAMPAIGN_DRIVER_LOG), options["stdout"].name)
-            started, reported = output.getvalue().splitlines()
-            self.assertIn(f"started controller process {os.getpid()}", started)
-            self.assertIn(f"already runs as process {os.getpid()}", reported)
-
     def test_campaign_refuses_candidates_whose_chains_share_a_campaign_id(self):
         # With a language plan, candidate a's language chain and candidate a.lang's baseline chain are both
         # tournament.a.lang, so they would reserve the fleet and number their hosts as one campaign.
         arguments = SimpleNamespace(
             campaign="tournament", campaign_root=Path("unused"), candidates=[("a", "main"), ("a.lang", "main")],
             fleet_budget=Path("fleet-policy.json"), smoke_results=None, primary_results=None, confirmation_jobs=None,
-            engine_builds=None, language_plan=[Path("plan")], execute=True, detach=False)
+            engine_builds=None, language_plan=[Path("plan")], execute=True, max_concurrent=1,
+            max_concurrent_per_platform=1)
         with patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze, \
                 self.assertRaisesRegex(SystemExit, "a and a.lang would both run as campaign tournament.a.lang"):
             RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
@@ -752,15 +610,15 @@ class TestRunCampaign(unittest.TestCase):
                                                   settled={2}, stopping=True),
                        4: RUN_CAMPAIGN.UnitWorker(jobs[3], None, None, started=True, leases={1: None}, stopping=True),
                        5: RUN_CAMPAIGN.UnitWorker(jobs[4], None, None, started=True, leases={1: "u1"}, settled={1})}
-            # Candidate b's language smoke stopped with its controller, so its snapshot's workers may have stopped.
+            # Candidate b's language smoke has no worker yet.
             language_smoke.mkdir(parents=True)
             write_tsv(language_smoke / "work-items.tsv", RUN_CAMPAIGN.WORK_ITEM_FIELDS, [
                 {"platform": "r8i", "instance_type": "r8i.2xlarge", "shard_id": "s", "unit_id": "u1", "replica": "1",
                  "estimated_seconds": "-", "groups": "1:600", "excluded_instances": "-"}])
-            for result_root in (primary, language_smoke):
+            for result_root, members in ((primary, workers), (language_smoke, {})):
                 with patch.object(RUN_CAMPAIGN.time, "time", return_value=now - 20):
                     RUN_CAMPAIGN.UnitDispatcher.write_status(SimpleNamespace(
-                        result_root=result_root, queued=lambda: [], workers=workers, terminated=set(),
+                        result_root=result_root, queued=lambda: [], workers=members, terminated=set(),
                         unresolved_items=lambda: [(SimpleNamespace(platform="r8i", unit_id="u4", replica=1), "spent")]))
             # A restarted controller's snapshot supersedes the unresolved units its predecessor left.
             write_tsv(primary / "unresolved-units.tsv", ("platform", "unit_id", "replica", "detail"),
@@ -782,10 +640,10 @@ class TestRunCampaign(unittest.TestCase):
                 {**dict.fromkeys(unit_dispatch.UNIT_UPLOAD_FIELDS, "-"), "upload_seconds": seconds}
                 for seconds in ("3", "5")])
 
-            # A phase's controller runs as its record names it; status leaves the phase's lock to any controller
-            # starting meanwhile.
-            with RUN_CAMPAIGN.controller_lock(primary, RUN_CAMPAIGN.DRIVER_CHILD), \
-                    patch.object(RUN_CAMPAIGN.fcntl, "flock", side_effect=AssertionError("took the phase's lock")):
+            # The campaign's controller runs as its record names it; status leaves the campaign's lock to any
+            # controller starting meanwhile.
+            with RUN_CAMPAIGN.controller_lock(campaign_root), \
+                    patch.object(RUN_CAMPAIGN.fcntl, "flock", side_effect=AssertionError("took the campaign's lock")):
                 lines = RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc)
                 # The command reports a campaign root or one phase's root.
                 for status_root, expected in ((campaign_root, lines[:4]), (primary, [f"phase {primary}", lines[3]])):
@@ -796,13 +654,15 @@ class TestRunCampaign(unittest.TestCase):
                     self.assertEqual(expected, output.getvalue().splitlines()[:len(expected)])
             # Its record outlives it, and once its process ID names a process started since, names no running
             # controller.
-            (primary / RUN_CAMPAIGN.DRIVER_CHILD).write_text(f"pid={os.getpid()}\nstarted=Thu Jan  1 00:00:00 1970\n")
-            self.assertIn("  primary           no live controller",
-                          RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc))
+            (campaign_root / RUN_CAMPAIGN.CONTROLLER_RECORD).write_text(
+                f"pid={os.getpid()}\nstarted=Thu Jan  1 00:00:00 1970\n")
+            stopped = RUN_CAMPAIGN.campaign_status(campaign_root, now, timezone.utc)
+            self.assertEqual(f"campaign {campaign_root}: no live controller", stopped[0])
+            self.assertIn("  primary           no live controller", stopped)
 
         # 2700 estimated seconds remain over two running workers.
         self.assertEqual([
-            f"campaign {campaign_root}: no live driver",
+            f"campaign {campaign_root}: controller running as process {os.getpid()}",
             "candidate a at aaaaaaaaaaaa",
             "  build             complete",
             f"  primary           running as process {os.getpid()}",
@@ -814,8 +674,10 @@ class TestRunCampaign(unittest.TestCase):
             "    finish    about 12:02 a.m. UTC on Thu Oct 29",
             "    medians   boot to first unit 175s, upload 4s",
             "candidate b at bbbbbbbbbbbb",
-            "  lang smoke        no live controller",
-            "    units     0/1 accepted (0/1 groups), 1 unresolved, 0 queued"], lines)
+            f"  lang smoke        running as process {os.getpid()}",
+            "    units     0/1 accepted (0/1 groups), 1 unresolved, 0 queued",
+            "    workers   none, as of 20s ago",
+            "    finish    unknown; no worker runs"], lines)
 
     def test_status_results_rank_rows_by_ratio_worst_first(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1255,19 +1117,25 @@ class TestRunCampaign(unittest.TestCase):
         self.assertEqual(arguments.ami_names, {"r8i": "al2023-pinned"})
         self.assertEqual(arguments.region_offerings, {"r8i.2xlarge": ["eu-west-1"]})
 
+        # A campaign's phases share what AWS showed it; a restarted controller looks again.
+        def restarted():
+            RUN_CAMPAIGN.validate_aws(SimpleNamespace(**{key: value for key, value in vars(arguments).items()
+                                                         if key not in ("networks", "images", "zone_offerings")}),
+                                      [self.platform])
+
         aws.networks["ap-south-1"] = cloud.Network("vpc-ap-south-1", "sg-ap-south-1", ())
         with self.assertRaisesRegex(SystemExit, "ap-south-1 has no public default-VPC subnet"):
-            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+            restarted()
         del aws.networks["ap-south-1"]
         aws.buckets["bucket-ireland"] = cloud.BucketInfo("us-west-2", {"Project": "regulator-benchmark"})
         with self.assertRaisesRegex(SystemExit, "bucket-ireland is not a tagged"):
-            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+            restarted()
         aws.images[("eu-west-1", "ami-ireland")] = replace(AMAZON_LINUX, name="al2023-other")
         with self.assertRaisesRegex(SystemExit, "ami-ireland in eu-west-1 is not al2023-pinned"):
-            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+            restarted()
         del arguments.regional_amis[("r8i", "eu-west-1")]
         with self.assertRaisesRegex(SystemExit, "no r8i AMI for eu-west-1"):
-            RUN_CAMPAIGN.validate_aws(arguments, [self.platform])
+            restarted()
 
     def test_spot_launch_takes_the_best_scored_region_with_headroom(self):
         job = RUN_CAMPAIGN.unit_worker_job(self.platform, 1, 10, "spot")
@@ -1520,32 +1388,6 @@ class TestRunCampaign(unittest.TestCase):
                     self.assertEqual(sorted((item["platform"], item["unit_id"], item["replica"]) for item in items),
                                      sorted((platform, unit_id, replica) for platform in ("r8i", "r9g")
                                             for unit_id in selected for replica in replicas))
-            # A campaign weights each language phase's share of the hosts by the work its controller plans, from the
-            # units it checked before it started. The driver keeps weighing shares from the validated units even if
-            # the plan files later change.
-            arguments = SimpleNamespace(
-                campaign="language", campaign_root=root, language_plan=[root / "plan"], selected_shards=None,
-                smoke_protocol="smoke", spot_vcpu_reserve=16, release_version="", phase_timeout_seconds=None,
-                fleet_budget=None, platform_region_values=[], purchase_values=[], transfer_bucket=[])
-            plans = RUN_CAMPAIGN.validate_language_plans(arguments.language_plan)
-            [_, language] = RUN_CAMPAIGN.campaign_chains(arguments, [RUN_CAMPAIGN.FrozenCandidate(
-                "lifecycle", "a" * 40, "refs/benchmarks/language/lifecycle", root / "lifecycle" / "candidate", "0" * 64,
-                "e" * 40)], {phase: fleet.campaign_units(plans, phase) for phase in ("smoke", "primary")})
-            planned_units = (root / "plan" / "units.tsv").read_bytes()
-            (root / "plan" / "units.tsv").write_text("changed after the campaign started\n")
-            for step in language.steps[1:]:
-                with (step.root / "work-items.tsv").open(newline="") as manifest:
-                    groups = [(item, *group.split(":")) for item in csv.DictReader(manifest, delimiter="\t")
-                              for group in item["groups"].split(",")]
-                # A group the phase accepted leaves the work left.
-                item, group_id, _ = groups[0]
-                write_tsv(step.root / "accepted-units.tsv", RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, [
-                    {**dict.fromkeys(RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, "-"), "platform": item["platform"],
-                     "unit_id": item["unit_id"], "replica_id": item["replica"], "group_id": group_id,
-                     "unit_attempt_id": "session/1"}])
-                self.assertEqual(sum(math.ceil(float(seconds)) for _, _, seconds in groups[1:]),
-                                 sum(seconds for _, seconds in step.remaining()))
-            (root / "plan" / "units.tsv").write_bytes(planned_units)
             for phase, plan_count, environment, refusal in (
                     ("confirmation", 1, {}, "only smoke and primary"),
                     ("primary", 2, {}, "language plans share shard"),
@@ -1557,8 +1399,7 @@ class TestRunCampaign(unittest.TestCase):
                                                    "--campaign-root", str(root / "refused")]), \
                         patch.dict(os.environ, environment), self.assertRaisesRegex(SystemExit, refusal):
                     RUN_CAMPAIGN.main()
-            # A campaign refuses malformed options before it plans anything. Options are never abbreviated, so --det
-            # is no --detach a detached driver would pass on to itself.
+            # A campaign refuses malformed options before it plans anything. Options are never abbreviated.
             for options, refusal in (
                     (["tournament", "--candidate", "a"], "--candidate takes one NAME=COMMITISH"),
                     (["tournament", "--candidate", "a/b=HEAD"], "--candidate takes one NAME=COMMITISH"),
@@ -1567,10 +1408,7 @@ class TestRunCampaign(unittest.TestCase):
                      "--platform-regions takes one PLATFORM=VALUE"),
                     (["tournament", "--candidate", "a=HEAD", "--purchase", "r8i=cheap"], "--purchase policies are"),
                     (["tournament", "--candidate", "a=HEAD", "--max-concurrent", "0"],
-                     "--max-concurrent 0 cannot give each of the campaign's 1 phase sequences"),
-                    (["tournament", "--candidate", "a=HEAD", "--language-plan", str(root / "plan"),
-                      "--max-concurrent-per-platform", "1"],
-                     "--max-concurrent-per-platform 1 cannot give each of the campaign's 2 phase sequences"),
+                     "--max-concurrent must be a positive number of hosts"),
                     # The driver plans its language phases' units, so it refuses plans they would refuse.
                     (["tournament", "--candidate", "a=HEAD", "--language-plan", str(root / "source")],
                      f"invalid language plan {(root / 'source').resolve()}"),
@@ -1585,26 +1423,42 @@ class TestRunCampaign(unittest.TestCase):
                         RUN_CAMPAIGN.main()
                     self.assertIn(refusal, f"{refused.exception}{errors.getvalue()}")
             self.assertFalse((root / "refused").exists())
-            # A second controller of a phase stops at once, before its slow setup, while the first owns the root, with
-            # the status that tells a campaign driver to adopt the first.
-            errors = io.StringIO()
+            # A phase runs only inside its campaign's controller, and a second controller of a campaign stops at
+            # once, before it freezes anything, while the first owns the campaign root.
             fleet_policy = test_fleet_budget.TestFleetBudget()
             fleet_policy.setUp()
             self.addCleanup(fleet_policy.doCleanups)
-            with patch.object(sys, "argv", ["run-campaign.py", "smoke", "language", "--language-plan",
-                                            str(root / "plan"), "--candidate", "lifecycle=HEAD",
-                                            "--campaign-root", str(root), "--execute",
-                                            "--fleet-budget", str(fleet_policy.path), "--spot-vcpu-reserve", "0",
-                                            "--purchase", "r8i=spot", "--purchase", "r9g=spot",
-                                            "--transfer-bucket", f"{RUN_CAMPAIGN.default_regions()[0]}=bucket"]), \
-                    patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), \
-                    RUN_CAMPAIGN.controller_lock(root / "lifecycle/lang/smoke", RUN_CAMPAIGN.DRIVER_CHILD), \
-                    patch.object(RUN_CAMPAIGN, "validate_source") as setup, contextlib.redirect_stdout(io.StringIO()), \
-                    contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as busy:
-                RUN_CAMPAIGN.main()
-            setup.assert_not_called()
-            self.assertEqual(RUN_CAMPAIGN.CONTROLLER_BUSY_STATUS, busy.exception.code)
-            self.assertIn("another controller owns", errors.getvalue())
+            execute = ["--candidate", "lifecycle=HEAD", "--campaign-root", str(root), "--execute",
+                       "--fleet-budget", str(fleet_policy.path), "--purchase", "r8i=spot", "--purchase", "r9g=spot",
+                       "--transfer-bucket", f"{RUN_CAMPAIGN.default_regions()[0]}=bucket"]
+            for command, refusal in ((["smoke", "language", *execute], "a phase runs only inside its campaign's"),
+                                     (["campaign", "language", *execute], f"owns campaign root {root}")):
+                with self.subTest(refusal=refusal), patch.object(sys, "argv", ["run-campaign.py", *command]), \
+                        patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), RUN_CAMPAIGN.controller_lock(root), \
+                        patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze, \
+                        patch.object(RUN_CAMPAIGN, "validate_source") as setup, \
+                        self.assertRaisesRegex(SystemExit, refusal):
+                    RUN_CAMPAIGN.main()
+                freeze.assert_not_called()
+                setup.assert_not_called()
+            # A campaign root the earlier per-phase controllers started is refused, naming what shows it, and left
+            # as it was.
+            for path, content in ((root / "old" / "campaign-driver.txt", "pid=1\n"),
+                                  (root / "old" / "a" / "lang" / "smoke" / "driver-child.txt", "pid=1\n"),
+                                  (root / "old" / "a" / "primary" / "execution-policy.json",
+                                   json.dumps({"max_concurrent": 16}))):
+                with self.subTest(path=path.name), tempfile.TemporaryDirectory() as old:
+                    path = Path(old) / path.relative_to(root)
+                    path.parent.mkdir(parents=True)
+                    path.write_text(content)
+                    arguments = SimpleNamespace(
+                        campaign="tournament", campaign_root=Path(old) / "old", candidates=[("a", "main")],
+                        fleet_budget=fleet_policy.path, smoke_results=None, primary_results=None,
+                        confirmation_jobs=None, engine_builds=None, language_plan=[], execute=True, max_concurrent=1,
+                        max_concurrent_per_platform=1)
+                    with self.assertRaisesRegex(SystemExit, f"as {re.escape(str(path))} shows"):
+                        RUN_CAMPAIGN.run_campaign(arguments, SCRIPT.parents[3])
+                    self.assertFalse((Path(old) / "old" / RUN_CAMPAIGN.CONTROLLER_LOCK).exists())
 
     def test_language_primary_accepts_its_attempts_and_exports_each_plan_once(self):
         fixture = test_fleet.TestFleet()
@@ -3435,7 +3289,7 @@ class TestUnitWorkers(unittest.TestCase):
                 fleet = FakeUnitFleet(Path(temporary) / "hosts", abort_after=2)
                 fleet.abort = abort
                 with self.assertRaisesRegex(stopped, message), \
-                        RUN_CAMPAIGN.controller_lock(Path(temporary) / "results", RUN_CAMPAIGN.DRIVER_CHILD):
+                        RUN_CAMPAIGN.controller_lock(Path(temporary)):
                     self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1,
                                    purchases={"r8i": "spot", "r9g": "spot"}, budget=budget)
                 self.assertEqual([], budget.reservations(Path(temporary) / "results"))
