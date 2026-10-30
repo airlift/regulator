@@ -10,14 +10,13 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import tarfile
 import tempfile
-from datetime import datetime
 from pathlib import Path
 
 import unit_session
-from campaign_io import UnsafeCampaignError, aws_output, check_output, fsync_directory, write_ledger
+from campaign_io import UnsafeCampaignError, fsync_directory, write_ledger
+from cloud import CloudError
 
 # A lease row's groups are those it leased, in run order; an outcome row's are those whose markers it processed.
 UNIT_ATTEMPT_FIELDS = (
@@ -244,56 +243,41 @@ def recovered_keys(objects):
     return {path.relative_to(objects).as_posix() for path in objects.rglob("*") if path.is_file()}
 
 
-def unit_worker_aws(arguments, worker):
-    return aws_output(arguments, worker.metadata["aws_region"])
-
-
 def list_unit_worker_results(arguments, worker):
     """Each object under a worker's result prefix, by its key below the prefix, with its modification time."""
     prefix = worker.metadata["result_prefix"] + "/"
-    listing = json.loads(check_output(unit_worker_aws(arguments, worker) + [
-        "s3api", "list-objects-v2", "--bucket", worker.metadata["bucket"], "--prefix", prefix,
-        "--output", "json"]) or "{}")
-    return {item["Key"][len(prefix):]: datetime.fromisoformat(item["LastModified"]).timestamp()
-            for item in listing.get("Contents") or [] if item["Key"].startswith(prefix)}
+    objects = arguments.cloud.list(worker.metadata["aws_region"], worker.metadata["bucket"], prefix)
+    return {key[len(prefix):]: modified for key, (_, modified) in objects.items()}
 
 
 def get_unit_worker_result(arguments, worker, key, path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    check_output(unit_worker_aws(arguments, worker) + [
-        "s3api", "get-object", "--bucket", worker.metadata["bucket"],
-        "--key", f"{worker.metadata['result_prefix']}/{key}", str(path)])
+    arguments.cloud.get(worker.metadata["aws_region"], worker.metadata["bucket"],
+                        f"{worker.metadata['result_prefix']}/{key}", path)
 
 
 def put_unit_lease(arguments, worker, sequence, document):
     """Write a worker's lease once; a lease already written, before a restart or a lost response, must
     hold this same document."""
-    bucket = worker.metadata["bucket"]
+    region, bucket = worker.metadata["aws_region"], worker.metadata["bucket"]
     key = f"{worker.metadata['input_prefix']}/leases/{sequence}.json"
     body = json.dumps(document, sort_keys=True) + "\n"
-    command = unit_worker_aws(arguments, worker) + ["s3api"]
+    if arguments.cloud.put(region, bucket, key, body.encode(), if_none_match=True):
+        return
     with tempfile.TemporaryDirectory(prefix="unit-lease-") as temporary:
-        path = Path(temporary) / "lease.json"
-        path.write_text(body)
-        try:
-            check_output(command + ["put-object", "--bucket", bucket, "--key", key, "--body", str(path),
-                                    "--if-none-match", "*"])
-        except subprocess.CalledProcessError as error:
-            existing = Path(temporary) / "existing.json"
-            check_output(command + ["get-object", "--bucket", bucket, "--key", key, str(existing)])
-            if existing.read_text() != body:
-                raise UnsafeCampaignError(
-                    f"unit worker {worker.host_session} lease {sequence} differs from its ledger") from error
+        existing = Path(temporary) / "existing.json"
+        arguments.cloud.get(region, bucket, key, existing)
+        if existing.read_text() != body:
+            raise UnsafeCampaignError(f"unit worker {worker.host_session} lease {sequence} differs from its ledger")
 
 
 def unit_worker_instance_state(arguments, worker):
     if not worker.instance_id:
         return "unknown"
     try:
-        return check_output(unit_worker_aws(arguments, worker) + [
-            "ec2", "describe-instances", "--instance-ids", worker.instance_id,
-            "--query", "Reservations[0].Instances[0].State.Name", "--output", "text"])
-    except (OSError, subprocess.SubprocessError):
+        return next((instance.state for instance in arguments.cloud.instances(worker.metadata["aws_region"])
+                     if instance.id == worker.instance_id), "unknown")
+    except CloudError:
         return "unknown"
 
 

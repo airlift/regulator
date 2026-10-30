@@ -547,7 +547,9 @@ of each `--confirmation-jobs` row, which names `platform`, `shard_id`, and
 accepted primary.
 
 Set `AWS_PROFILE` before any execution command when selecting a named profile;
-otherwise the AWS CLI uses its standard credential chain.
+otherwise the controller and the AWS CLI use the standard credential chain. The
+controller reaches AWS through boto3, from the pinned
+`tools/re2-benchmark/requirements.txt`.
 
 ### Launch regions and purchase
 
@@ -736,8 +738,8 @@ same way under `TRANSFER_PREFIX/jdks/<sha256>.tar.gz`: the controller downloads
 it once per campaign from its pinned URL into the campaign root's `jdks/`,
 checks it against the pinned SHA-256, and puts it in each region, so hosts never
 fetch it from its publisher. A session without a shared bucket uploads it with its own inputs.
-Each upload attempt times out after 60 seconds plus a second per 256 KiB of the
-archive and is retried; the campaign stops after three failed attempts. A
+Each upload is one request, which fails once a read waits 60 seconds, and is
+retried; the campaign stops after three failed attempts. A
 session whose archive is missing from its bucket fails as
 `retryable-infrastructure` before it launches. Each session's instance role may
 read exactly those archive keys, in addition to its own session prefix. These
