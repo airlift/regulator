@@ -85,9 +85,12 @@ def validate(settings):
               rate["spot"] < rate["total"], f"{instance_type} hourly price ceiling")
     check(isinstance(settings["phases"], dict), "phases")
     for phase, steering in settings["phases"].items():
-        check(isinstance(steering, dict) and set(steering) == {"state", "share"} and
+        # A paused phase records why it was paused.
+        check(isinstance(steering, dict) and set(steering) == {"state", "share"} | (
+                  {"reason"} if steering.get("state") == "paused" else set()) and
               steering["state"] in PHASE_STATES and (steering["share"] == "auto" or positive_integer(
-                  steering["share"])), f"{phase} phase")
+                  steering["share"])) and (steering["state"] != "paused" or isinstance(steering["reason"], str) and
+                                           steering["reason"]), f"{phase} phase")
     window = settings["boot_window"]
     check(isinstance(window, dict) and set(window) == {"initial", "max", "size"} and
           all(map(positive_integer, window.values())) and
@@ -103,6 +106,42 @@ def validate(settings):
         check(value is None or isinstance(value, dict) and set(value) == {"by", "at", "reason"} and
               value["by"] in ACTORS and positive_number(value["at"]) and isinstance(value["reason"], str) and
               value["reason"], name)
+
+
+def check_actor(actor, before, after):
+    """Refuse a change its actor may not make. Only Dain changes the authorized envelope. The monitor raises no
+    limit past it: hosts in all and per platform up to its hosts, spending up to its dollars, and a region's vCPUs, or
+    a new region, only among its regions, where admission still holds the fleet within the region's quota after its
+    reserve. The envelope names no machine hours, so the monitor never raises their limit. Any actor may lower a
+    limit."""
+    if after["authorized"] != before["authorized"] and actor != "dain":
+        raise SettingsError("only dain changes the authorized envelope")
+    if actor != "monitor":
+        return
+    authorized = after["authorized"]
+    for name, ceiling in (("max_hosts", authorized["max_hosts"]), ("max_hosts_per_platform", authorized["max_hosts"]),
+                          ("max_usd", authorized["max_usd"]), ("max_machine_hours", before["max_machine_hours"])):
+        if after[name] > before[name] and after[name] > ceiling:
+            raise SettingsError(f"the monitor raises {name} only within the authorized envelope, to {ceiling:g}")
+    for region, limits in after["regions"].items():
+        earlier = before["regions"].get(region, {})
+        if region not in authorized["regions"] and any(
+                limits.get(name, 0) > earlier.get(name, 0) for name in ("max_vcpus", "on_demand_max_vcpus")):
+            raise SettingsError(f"the monitor adds or raises only the authorized regions, "
+                                f"{', '.join(authorized['regions'])}, not {region}")
+
+
+def changed(before, actor, update):
+    """The settings update makes of before, as the actor's change, once they validate and the actor may make it."""
+    if actor not in ACTORS:
+        raise SettingsError(f"a settings change names its actor, one of {', '.join(ACTORS)}")
+    settings = copy.deepcopy(before)
+    update(settings)
+    if settings != before:
+        settings["version"] = before["version"] + 1
+        validate(settings)
+        check_actor(actor, before, settings)
+    return settings
 
 
 def read(path):
@@ -168,18 +207,13 @@ class CampaignSettings:
 
     def change(self, actor, change, update):
         """Apply update to the settings as they stand, as the actor's change, described by change: once the result
-        validates, it takes the next version and its event is recorded. An update that changes nothing records
-        nothing. Returns the settings."""
-        if actor not in ACTORS:
-            raise SettingsError(f"a settings change names its actor, one of {', '.join(ACTORS)}")
+        validates, and check_actor finds the actor may make it, it takes the next version and its event is recorded.
+        An update that changes nothing records nothing. Returns the settings."""
         with self.lock_path.open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             before = read(self.path)
-            settings = copy.deepcopy(before)
-            update(settings)
+            settings = changed(before, actor, update)
             if settings != before:
-                settings["version"] = before["version"] + 1
-                validate(settings)
                 write(self.path, settings)
                 append_ledger(self.events_path, EVENT_FIELDS, {"version": settings["version"],
                                                                "at": round(time.time()), "actor": actor,

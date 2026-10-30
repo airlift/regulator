@@ -356,9 +356,54 @@ hosts last, so a build, whose items carry no estimate, runs beside the
 others. A phase holding more hosts than its share keeps them, and the others
 grow only into hosts the limits leave free, so a language primary, most of a
 release campaign's work, takes most of the hosts as they free up beside the
-baseline's primary. A phase's share is never frozen, and the controller records
-each phase's state, `pending`, `running`, `complete`, or `failed`, in the
-settings' `phases`.
+baseline's primary. Once the limits leave no host free for a phase below its
+target, a phase above its own gives up the hosts past it: it stop-leases its
+idle workers first, then those holding the least work, each behind the leases
+it holds, so no lease is interrupted. Hosts move only while a phase waits for
+them, so the shares' changes as the work left is corrected move none on their
+own. A phase's share is never frozen, and the controller records each phase's
+state, `pending`, `running`, `complete`, or `failed`, in the settings'
+`phases`.
+
+### Steer a campaign
+
+`control` changes a running campaign's settings, which its controller applies
+on its next loop. `--actor dain` or `--actor monitor` is required, and the
+settings' events record it:
+
+```bash
+python3 tools/re2-benchmark/baseline/run-campaign.py control /durable/path/<campaign> --actor dain \
+  set-limit max-hosts 300
+```
+
+- `set-limit max-hosts|max-hosts-per-platform|max-usd|max-machine-hours N`
+  and `set-limit region <region> max-vcpus N` change a limit.
+- `set-purchase <platform> spot|spot-then-on-demand|on-demand` changes how a
+  platform buys hosts.
+- `set-share <phase> N|auto` pins a phase, named by its key in the settings'
+  `phases` such as `after/lang/primary`, to N hosts, which it takes before the
+  phases sharing by work left; above its pin it gives up hosts as above
+  whether or not another phase waits. `auto` returns it to its share by work
+  left.
+- `pause <phase> [--reason TEXT]` leases and launches nothing for a running
+  or draining phase: its running leases, and the leases its workers already
+  hold, finish, and its workers stop at their idle stop. `drain <phase>`
+  launches nothing for it, while its live workers take its queued work until
+  they stop. `resume <phase>` runs a paused or draining phase again. A restart
+  keeps a phase paused or draining.
+- `clear-spending-stop` admits launches and lease extensions again after a
+  [spending stop](#recovering-uploads-during-cleanup).
+- `stop [--reason TEXT]` stop-leases every worker, each behind the leases it
+  holds, waits for every worker's cleanup to be proven, and ends the
+  controller with status 0; the phases keep their queued work. A restart of a
+  stopped campaign only stops the hosts an earlier controller left.
+- `authorize max-hosts N`, `authorize max-usd N`, and
+  `authorize regions <region>...` set the `authorized` envelope, which only
+  `--actor dain` changes. The monitor raises `max_hosts`,
+  `max_hosts_per_platform`, and `max_usd` only within it, and a region's vCPUs
+  only in its regions, where admission still holds the fleet within the
+  region's quota after its reserve; it never raises `max_machine_hours`, which
+  the envelope does not name. Any actor may lower a limit.
 
 Each phase's setup, which plans its work items, checks its prerequisites and
 AWS, and uploads what its hosts read, runs on a setup thread, and a
@@ -1147,7 +1192,7 @@ own settings change naming the reason. While the stop stands, the budget admits
 no launch and no lease extension for any phase, refusing each with reason
 `spending_stop`, but halts no controller, so every host finishes the leases it
 holds within its reservation. The stop stands until Dain clears it, once the
-instance is gone, with a settings change that sets `spending_stop` to `null`. A controller reaching its teardown deadline with an
+instance is gone, with `control ... --actor dain clear-spending-stop`. A controller reaching its teardown deadline with an
 instance still not terminated treats it as a leak and exits, leaving the
 worker's reservation for its restart.
 

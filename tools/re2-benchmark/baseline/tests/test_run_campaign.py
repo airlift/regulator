@@ -117,14 +117,36 @@ class TestRunCampaign(unittest.TestCase):
         # leaves goes to the others.
         self.assertEqual({"a": {"r8i": 2}, "b": {"r8i": 4}},
                          RUN_CAMPAIGN.allocate({"a": {"r8i": (100, 2)}, "b": {"r8i": (100, 50)}}, 20, 6))
-        # A phase over its target keeps the hosts it holds, never interrupted; the other's share grows only by what
-        # the limits leave free.
-        running = [SimpleNamespace(key=key, dispatcher=SimpleNamespace(
-            demand=lambda seconds=seconds: {"r8i": (seconds, 50)}, holding=lambda held=held: Counter(r8i=held)))
-            for key, seconds, held in (("a", 100, 8), ("b", 900, 0))]
-        RUN_CAMPAIGN.Campaign.assign_shares(SimpleNamespace(arguments=SimpleNamespace(
-            settings=self.settings(max_hosts=10, max_hosts_per_platform=10))), running)
-        self.assertEqual([{"r8i": 8}, {"r8i": 2}], [phase.dispatcher.share for phase in running])
+        # A pinned phase takes its hosts first, and the others share the rest.
+        self.assertEqual({"a": {"r8i": 2, "r9g": 1}, "b": {"r8i": 2}},
+                         RUN_CAMPAIGN.allocate({"a": {"r8i": (900, 50), "r9g": (100, 50)}, "b": {"r8i": (100, 50)}},
+                                               20, 4, {"a": 3}))
+
+        def shares(held, pinned=None, waiting=50, paused=()):
+            # Phases a and b, a with little work left and b with much, of waiting items, holding hosts. A paused
+            # phase launches nothing, and neither takes nor gives up hosts.
+            running = [SimpleNamespace(key=key, dispatcher=SimpleNamespace(
+                demand=lambda seconds=seconds, items=items: {"r8i": (seconds, items)},
+                holding=lambda open_only=False, held=held[key]: Counter(r8i=held),
+                steering="paused" if key in paused else "running", share=None))
+                for key, seconds, items in (("a", 100, 50), ("b", 900, waiting))]
+            settings = self.settings(max_hosts=10, max_hosts_per_platform=10)
+            if pinned:
+                settings.change("dain", "pin", lambda current: current["phases"].update(
+                    a={"state": "running", "share": pinned}))
+            RUN_CAMPAIGN.Campaign.assign_shares(SimpleNamespace(arguments=SimpleNamespace(settings=settings)),
+                                                running)
+            return [(phase.dispatcher.share, phase.dispatcher.shed) for phase in running]
+
+        # A phase over its target keeps the hosts it holds; the other's share grows only by what the limits leave
+        # free, and once they leave none while it waits for more, the phase over its target gives up the hosts past
+        # it.
+        self.assertEqual([({"r8i": 6}, {"r8i": 4}), ({"r8i": 4}, {})], shares({"a": 6, "b": 0}))
+        # It keeps them while the other phase needs no more, as all its work has hosts, and gives up those past its
+        # pin whether or not another phase waits.
+        self.assertEqual([({"r8i": 8}, {}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, waiting=2))
+        self.assertEqual([({"r8i": 8}, {"r8i": 5}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, 3, waiting=2))
+        self.assertEqual([(None, {}), ({"r8i": 2}, {})], shares({"a": 8, "b": 2}, paused="a"))
 
     def test_engine_builds_are_frozen(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -473,7 +495,7 @@ class TestRunCampaign(unittest.TestCase):
                     [(name, commit)] = arguments.candidates
                     self.arguments, self.loops = arguments, None
                     self.key = f"{name}/{'lang/' if arguments.language_plan else ''}{arguments.phase}"
-                    self.share = None
+                    self.share, self.workers = None, {}
 
                 def recover(self):
                     self.loops = loops.get(self.key, 1)
@@ -482,7 +504,7 @@ class TestRunCampaign(unittest.TestCase):
                 def demand(self):
                     return {"r8i": (900, 1)}
 
-                def holding(self):
+                def holding(self, open_only=False):
                     return Counter()
 
                 def step(self, deadline, observed):
@@ -577,6 +599,61 @@ class TestRunCampaign(unittest.TestCase):
                         self.assertRaisesRegex(SystemExit, "options differ"):
                     run()
                 self.assertEqual([], events)
+
+    def test_control_commands_change_the_live_settings_in_their_actors_name(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            settings = campaign_settings(root, max_hosts=100, max_usd=50)
+            # The controller has recorded its phases' states.
+            settings.change("controller", "phases", lambda current: current["phases"].update({
+                "a/primary": {"state": "running", "share": "auto"},
+                "a/confirmation": {"state": "pending", "share": "auto"}}))
+            settings.change("controller", "spending stop", lambda current: current.update(
+                spending_stop={"by": "controller", "at": 1, "reason": "leak"}))
+
+            def control(*command, actor="dain"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args(
+                        [str(root), "--actor", actor, *command]))
+                return settings.reload()
+
+            region = RUN_CAMPAIGN.default_regions()[0]
+            for command, actor, field, value in (
+                    (["set-limit", "max-hosts", "80"], "monitor", "max_hosts", 80),
+                    (["set-limit", "max-usd", "45.5"], "dain", "max_usd", 45.5),
+                    (["set-limit", "region", region, "max-vcpus", "640"], "monitor", "regions",
+                     {region: {"bucket": "bucket", "max_vcpus": 640}}),
+                    (["set-purchase", "r9g", "on-demand"], "dain", "purchase", {"r9g": "on-demand"}),
+                    (["set-share", "a/primary", "40"], "dain", "phases", {"state": "running", "share": 40}),
+                    (["pause", "a/primary", "--reason", "bad AMI"], "monitor", "phases",
+                     {"state": "paused", "share": 40, "reason": "bad AMI"}),
+                    (["drain", "a/primary"], "dain", "phases", {"state": "draining", "share": 40}),
+                    (["resume", "a/primary"], "monitor", "phases", {"state": "running", "share": 40}),
+                    (["set-share", "a/primary", "auto"], "dain", "phases", {"state": "running", "share": "auto"}),
+                    (["clear-spending-stop"], "dain", "spending_stop", None),
+                    (["authorize", "regions", "us-east-2", region], "dain", "authorized",
+                     {"max_hosts": 100, "max_usd": 50, "regions": sorted(["us-east-2", region])}),
+                    (["stop", "--reason", "release run done"], "dain", "stop",
+                     {"by": "dain", "at": round(RUN_CAMPAIGN.time.time()), "reason": "release run done"})):
+                with self.subTest(command=command):
+                    current = control(*command, actor=actor)[field]
+                    self.assertEqual(value, current.get("a/primary", current) if field == "phases" else
+                                     {key: current[key] for key in value} if field in ("regions", "purchase") else
+                                     current)
+            with open(root / EVENTS, newline="") as events:
+                rows = list(csv.DictReader(events, delimiter="\t"))
+            self.assertIn(("monitor", "a/primary paused: bad AMI"), [(row["actor"], row["change"]) for row in rows])
+            # A command the settings cannot take, or its actor may not make, changes nothing.
+            for command, actor, refusal in (
+                    (["set-limit", "max-hosts", "101"], "monitor", "max_hosts only within the authorized"),
+                    (["authorize", "max-hosts", "500"], "monitor", "only dain"),
+                    (["set-limit", "hosts", "5"], "dain", "set-limit takes"),
+                    (["pause", "a/confirmation"], "dain", "a/confirmation is pending"),
+                    (["resume", "a/primary"], "dain", "a/primary is running"),
+                    (["drain", "b/primary"], "dain", "no phase b/primary")):
+                with self.subTest(command=command), self.assertRaisesRegex(SystemExit, refusal):
+                    control(*command, actor=actor)
+            self.assertEqual(len(rows), len((root / EVENTS).read_text().splitlines()) - 1)
 
     def test_campaign_refuses_candidates_whose_chains_share_a_campaign_id(self):
         # With a language plan, candidate a's language chain and candidate a.lang's baseline chain are both
@@ -2659,21 +2736,10 @@ class TestUnitWorkers(unittest.TestCase):
         shared_budgets = vars(self).setdefault("shared_budgets", {})
         if shared and root in shared_budgets:
             settings = shared_budgets[root].settings
-        elif (root / RUN_CAMPAIGN.CAMPAIGN_SETTINGS).is_file():
-            settings = CampaignSettings(root)
         else:
-            settings = campaign_settings(
-                root, {**{platform.name: RUN_CAMPAIGN.default_regions() for platform in self.PLATFORMS},
-                       **(platform_regions or {})}, purchases, max_hosts=max_concurrent,
-                max_hosts_per_platform=per_platform)
-        if shared and root not in shared_budgets:
-            snapshot = patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot",
-                                    return_value={"quota": 736, "instances": [], "requests": []})
-            snapshot.start()
-            self.addCleanup(snapshot.stop)
-            shared_budgets[root] = RUN_CAMPAIGN.FleetBudget(root, settings, 0)
+            settings = self.campaign_settings(root, max_concurrent, per_platform, platform_regions, purchases)
         if shared:
-            budget = shared_budgets[root]
+            budget = self.shared_budget(root, settings)
         elif budget is None:
             budget = Mock()
             budget.reserve.side_effect = lambda campaign, job, *_, **__: (
@@ -2702,6 +2768,64 @@ class TestUnitWorkers(unittest.TestCase):
         self.validation = RUN_CAMPAIGN.unit_validation(SCRIPT.parents[3], arguments, "baseline")
         return RUN_CAMPAIGN.UnitDispatcher(arguments, SCRIPT.parents[3], result_root, items, self.PLATFORMS,
                                            self.validation)
+
+    def campaign_settings(self, root, max_hosts, per_platform, platform_regions=None, purchases=None):
+        """The settings the campaign root holds, or else those dispatcher seeds there."""
+        if (root / RUN_CAMPAIGN.CAMPAIGN_SETTINGS).is_file():
+            return CampaignSettings(root)
+        return campaign_settings(root, {**{platform.name: RUN_CAMPAIGN.default_regions() for platform in self.PLATFORMS},
+                                        **(platform_regions or {})}, purchases, max_hosts=max_hosts,
+                                 max_hosts_per_platform=per_platform)
+
+    def shared_budget(self, root, settings):
+        """The campaign's own budget, as its controller keeps it for every phase, which sees EC2 hold none of its
+        hosts."""
+        shared_budgets = vars(self).setdefault("shared_budgets", {})
+        if root not in shared_budgets:
+            snapshot = patch.object(RUN_CAMPAIGN, "shared_fleet_snapshot",
+                                    return_value={"quota": 736, "instances": [], "requests": []})
+            snapshot.start()
+            self.addCleanup(snapshot.stop)
+            shared_budgets[root] = RUN_CAMPAIGN.FleetBudget(root, settings, 0)
+        return shared_budgets[root]
+
+    def run_campaign(self, root, fleet, phases, max_hosts, per_platform, loop=lambda: None, **options):
+        """Run phases, each (key, phase, shards, after), as the campaign's controller runs them over the fleet, each
+        phase's dispatcher built as dispatcher builds it with options, its key naming its results, and the campaign's
+        budget; loop runs before each of the controller's polls. Returns the steps that failed and each phase's
+        dispatcher by key."""
+        settings = self.campaign_settings(root, max_hosts, per_platform, options.get("platform_regions"),
+                                          options.get("purchases"))
+        arguments = SimpleNamespace(settings=settings, shared_budget=self.shared_budget(root, settings))
+        dispatchers = {}
+
+        def prepare(phase, _):
+            dispatcher = dispatchers[phase.key] = self.dispatcher(
+                root, fleet, phase.phase, phase.shards, max_hosts, per_platform, shared=True, results=phase.key,
+                **options)
+            return dispatcher, dispatcher.begin()
+
+        poll = fleet.sleep
+
+        def sleep(seconds):
+            if seconds == RUN_CAMPAIGN.UNIT_POLL_SECONDS:
+                loop()
+            poll(seconds)
+
+        fleet.sleep = sleep
+        try:
+            with fleet.stubs(), patch.object(RUN_CAMPAIGN, "prepare_phase", side_effect=prepare):
+                failed = RUN_CAMPAIGN.Campaign(arguments, SCRIPT.parents[3], [
+                    RUN_CAMPAIGN.Phase(key, root / key, after, {"key": key, "phase": phase, "shards": shards})
+                    for key, phase, shards, after in phases]).run()
+        finally:
+            fleet.sleep = poll
+        return failed, dispatchers
+
+    def control(self, root, *command, actor="dain"):
+        """Run a control command on the campaign root, as the actor."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            RUN_CAMPAIGN.control(RUN_CAMPAIGN.control_parser().parse_args([str(root), "--actor", actor, *command]))
 
     def leases(self, outcome="leased"):
         return [row for row in self.ledger if row["outcome"] == outcome]
@@ -3141,6 +3265,65 @@ class TestUnitWorkers(unittest.TestCase):
             launched = sorted(host.launched_at for host in fleet.hosts)
             self.assertEqual(20, len(launched))
             self.assertGreaterEqual(launched[10], launched[0] + 360)
+
+    def test_paused_phase_leases_nothing_a_draining_one_launches_nothing_and_a_stop_ends_every_worker(self):
+        units = {f"steer-{index}": {"unit_id": f"steer-{index}", "shard_id": "steer", "unit_index": str(index),
+                                    "estimated_seconds": "900", "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                 for index in range(1, 17)}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()) as log:
+            # Four hosts measure 15-minute units. Two and a half minutes in, with every host running its first
+            # lease and holding its next, Dain pauses the phase, and resumes it once its hosts have stopped. Once
+            # the four hosts launched then all run, he drains it, and 20 minutes later stops the campaign.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, setup_seconds=lambda host: 67)
+            marks = {}
+
+            def loop():
+                if fleet.sleeps == 10:
+                    self.control(root, "pause", "smoke", "--reason", "checking the image")
+                    marks["paused"] = len(fleet.log)
+                elif "paused" in marks and "resumed" not in marks and all(host.status is not None
+                                                                         for host in fleet.hosts):
+                    self.control(root, "resume", "smoke")
+                    marks["resumed"] = len(fleet.log)
+                elif "resumed" in marks and "drained" not in marks and len(fleet.hosts) == 8 and all(
+                        host.booted for host in fleet.hosts[4:]):
+                    self.control(root, "drain", "smoke")
+                    marks["drained"] = (len(fleet.log), len(fleet.launches), fleet.sleeps)
+                elif "drained" in marks and "stopped" not in marks and fleet.sleeps == marks["drained"][2] + 80:
+                    self.control(root, "stop", "--reason", "enough")
+                    marks["stopped"] = len(fleet.log)
+
+            failed, dispatchers = self.run_campaign(root, fleet, [("smoke", "smoke", ["steer"], ())], 4, 2, loop,
+                                                    purchases={"r8i": "spot", "r9g": "spot"})
+            [dispatcher] = dispatchers.values()
+            self.ledger = self.unit_attempts(dispatcher.result_root)
+            paused, resumed = fleet.hosts[:4], fleet.hosts[4:]
+            # While the phase was paused it wrote no lease, and its hosts finished the leases they held, each one
+            # accepted, and stopped themselves when their idle time ran out.
+            self.assertEqual([], [entry for entry in fleet.log[marks["paused"]:marks["resumed"]] if entry[0] == "lease"])
+            sessions = {host.session for host in paused}
+            self.assertEqual(*(sorted((row["host_session"], row["sequence"]) for row in self.ledger
+                                      if row["outcome"] == outcome and row["host_session"] in sessions)
+                               for outcome in ("leased", "accepted")))
+            self.assertEqual(sessions, {entry[1] for entry in fleet.log if entry[0] == "claim"})
+            # Draining, it launched no host, while its live hosts took its queued work.
+            log_mark, launches, _ = marks["drained"]
+            self.assertEqual((8, launches), (len(fleet.hosts), len(fleet.launches)))
+            self.assertTrue(any(entry[0] == "lease" and entry[3] for entry in fleet.log[log_mark:marks["stopped"]]))
+            # The stop gave every host a stop lease behind the leases it held, none interrupted, and the controller
+            # ended once their cleanup was proven, with the phase's remaining work still queued.
+            self.assertEqual({host.session for host in resumed},
+                             {entry[1] for entry in fleet.log[marks["stopped"]:] if entry[0] == "lease" and
+                              entry[3] is None})
+            self.assertEqual([], [entry for entry in fleet.log[marks["stopped"]:] if entry[0] == "lease" and
+                                  entry[3]])
+            self.assertEqual(([], {}, set()), (failed, dispatcher.workers, {
+                state for instances in fleet.region_instances.values() for state in
+                {instance.state for instance in instances}} - {"terminated"}))
+            self.assertTrue(dispatcher.queued())
+            self.assertFalse((dispatcher.result_root / RUN_CAMPAIGN.PHASE_COMPLETE).exists())
+            self.assertIn("campaign stopped by dain: enough", log.getvalue())
 
     def test_leftover_is_retried_and_a_leak_stops_spending_while_the_other_phase_finishes_its_leases(self):
         units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
