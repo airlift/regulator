@@ -2620,6 +2620,14 @@ class FakeUnitFleet(FakeCloud):
         self.sleeps = 0
         # The digest of the tooling the controller runs.
         self.tooling = "c" * 64
+        # The default region's shared bucket, and each arm platform's image.
+        self.buckets["bucket"] = cloud.BucketInfo(RUN_CAMPAIGN.default_regions()[0], RUN_CAMPAIGN.SHARED_BUCKET_TAGS)
+        self.arm_images = {platform.ami_id for platform in RUN_CAMPAIGN.read_platforms(SCRIPT.parent)
+                           if platform.architecture == "arm"}
+
+    def image(self, region, ami):
+        image = super().image(region, ami)
+        return replace(image, architecture="arm64") if ami in self.arm_images else image
 
     def run_instance(self, region, spec):
         if (region, spec.token) not in self.launched:
@@ -2833,6 +2841,10 @@ class TestUnitWorkers(unittest.TestCase):
             dispatcher = dispatchers[phase.key] = self.dispatcher(
                 root, fleet, phase.phase, phase.shards, max_hosts, per_platform, shared=True, results=phase.key,
                 **options)
+            # As its setup does, the phase checks AWS for its workers in their regions; the fleet's hosts install
+            # no JDK and no candidate archive.
+            vars(dispatcher.arguments).update(unit_platforms=dispatcher.platforms, language_plan=[])
+            RUN_CAMPAIGN.check_regions(dispatcher.arguments, list(dispatcher.platforms.values()))
             return dispatcher, dispatcher.begin()
 
         poll = fleet.sleep
@@ -2844,7 +2856,8 @@ class TestUnitWorkers(unittest.TestCase):
 
         fleet.sleep = sleep
         try:
-            with fleet.stubs(), patch.object(RUN_CAMPAIGN, "prepare_phase", side_effect=prepare):
+            with fleet.stubs(), patch.object(RUN_CAMPAIGN, "prepare_phase", side_effect=prepare), \
+                    patch.object(RUN_CAMPAIGN, "stage_jdks"), patch.object(RUN_CAMPAIGN, "upload_candidate_archive"):
                 failed = RUN_CAMPAIGN.Campaign(arguments, SCRIPT.parents[3], [
                     RUN_CAMPAIGN.Phase(key, root / key, after, {"key": key, "phase": phase, "shards": shards})
                     for key, phase, shards, after in phases]).run()
@@ -3355,6 +3368,80 @@ class TestUnitWorkers(unittest.TestCase):
             self.assertTrue(dispatcher.queued())
             self.assertFalse((dispatcher.result_root / RUN_CAMPAIGN.PHASE_COMPLETE).exists())
             self.assertIn("campaign stopped by dain: enough", log.getvalue())
+
+    def test_a_new_region_a_raised_limit_a_pin_and_a_finished_phase_move_hosts_the_next_loop(self):
+        units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
+                                      "estimated_seconds": "900",
+                                      "groups": [{"group_id": "1", "estimated_seconds": 900}]}
+                 for shard, count in (("short", 2), ("long", 6)) for index in range(1, count + 1)}
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            # The smoke and primary phases share four hosts, all Oregon's vCPUs allow, measuring 15-minute units.
+            # Once the hosts run, Dain adds Frankfurt, and two loops later raises the limits to eight hosts. Once the
+            # smoke phase completes and the primary runs eight hosts, he pauses it, and once a host of each platform
+            # has finished its leases while others still run theirs, pins it to six hosts and resumes it.
+            root = Path(temporary)
+            fleet = FakeUnitFleet(root / "hosts", units=units, timed=True, setup_seconds=lambda host: 67)
+            self.campaign_settings(root, 4, 2)
+            self.control(root, "set-limit", "region", "us-west-2", "max-vcpus", "8")
+            primary = root / "primary"
+            marks = {}
+
+            def workers(state):
+                """The primary's workers in the state, as its latest snapshot records them, by host epoch."""
+                return {worker["host_epoch"]: worker["platform"]
+                        for worker in RUN_CAMPAIGN.dispatch_snapshot(primary)["workers"] if worker["state"] == state}
+
+            def finish():
+                return RUN_CAMPAIGN.phase_progress(primary, RUN_CAMPAIGN.dispatch_snapshot(primary), True).finish
+
+            def loop():
+                if "added" not in marks and len(fleet.hosts) == 4 and all(host.booted for host in fleet.hosts):
+                    self.control(root, "add-region", "eu-central-1", "--max-vcpus", "8", aws=fleet)
+                    marks["added"] = fleet.sleeps
+                elif "raised" not in marks and "added" in marks and fleet.sleeps == marks["added"] + 2:
+                    self.control(root, "set-limit", "max-hosts", "8")
+                    self.control(root, "set-limit", "max-hosts-per-platform", "4")
+                    marks["raised"] = (len(fleet.launches), finish())
+                elif "raised" in marks and "estimate" not in marks:
+                    marks["estimate"] = (fleet.launches[marks["raised"][0]:], finish())
+                elif "finished" not in marks and (root / "smoke" / RUN_CAMPAIGN.PHASE_COMPLETE).exists():
+                    marks["finished"] = len(fleet.launches)
+                elif "finished" in marks and "flowed" not in marks:
+                    marks["flowed"] = fleet.launches[marks["finished"]:]
+                elif "flowed" in marks and "paused" not in marks and len(workers("running")) == 8:
+                    self.control(root, "pause", "primary")
+                    marks["paused"] = True
+                elif "paused" in marks and "pinned" not in marks and workers("running") and set(
+                        workers("idle").values()) == {"r8i", "r9g"}:
+                    self.control(root, "set-share", "primary", "6")
+                    self.control(root, "resume", "primary")
+                    marks["pinned"] = (len(fleet.log), workers("idle"))
+                elif "pinned" in marks and "shed" not in marks:
+                    marks["shed"] = [entry[1] for entry in fleet.log[marks["pinned"][0]:]
+                                     if entry[0] == "lease" and entry[3] is None]
+
+            failed, dispatchers = self.run_campaign(root, fleet, [("smoke", "smoke", ["short"], ()),
+                                                                  ("primary", "primary", ["long"], ())], 4, 2, loop,
+                                                    purchases={"r8i": "spot", "r9g": "spot"})
+            self.assertEqual([], failed)
+            for dispatcher in dispatchers.values():
+                self.assert_accepted(dispatcher)
+            # The loop after the raise launched the primary's four new hosts, every one in Frankfurt, and its finish
+            # estimate fell to a third as its pools went from one host each to three.
+            launched, estimate = marks["estimate"]
+            self.assertEqual(([("eu-central-1", "r8i")] * 2 + [("eu-central-1", "r9g")] * 2, marks["raised"][1] / 3),
+                             (sorted((launch.region, launch.platform) for launch in launched), estimate))
+            # The loop after the smoke phase completed, its two Oregon hosts' places went to the primary.
+            self.assertEqual([("us-west-2", "r8i"), ("us-west-2", "r9g")],
+                             sorted((launch.region, launch.platform) for launch in marks["flowed"]))
+            # The pin stop-leased one idle host of each platform and none running a lease, and every lease the
+            # primary wrote was accepted.
+            _, idle = marks["pinned"]
+            epochs = {host.session: int(host.epoch) for host in fleet.hosts}
+            self.assertEqual(["r8i", "r9g"], sorted(idle.get(epochs[session], "running") for session in marks["shed"]))
+            ledger = self.unit_attempts(dispatchers["primary"].result_root)
+            self.assertEqual(*(sorted((row["platform"], row["unit_id"], row["replica"]) for row in ledger
+                                      if row["outcome"] == outcome) for outcome in ("leased", "accepted")))
 
     def test_leftover_is_retried_and_a_leak_stops_spending_while_the_other_phase_finishes_its_leases(self):
         units = {f"{shard}-{index}": {"unit_id": f"{shard}-{index}", "shard_id": shard, "unit_index": str(index),
