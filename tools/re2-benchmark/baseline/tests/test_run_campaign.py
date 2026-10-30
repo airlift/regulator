@@ -749,8 +749,8 @@ class TestRunCampaign(unittest.TestCase):
             for result_root in (primary, language_smoke):
                 with patch.object(RUN_CAMPAIGN.time, "time", return_value=now - 20):
                     RUN_CAMPAIGN.UnitDispatcher.write_status(SimpleNamespace(
-                        result_root=result_root, queued=lambda: [], unresolved={"u4": "spent"}, semantic={},
-                        workers=workers, terminated=set()))
+                        result_root=result_root, queued=lambda: [], workers=workers, terminated=set(),
+                        unresolved_items=lambda: [(SimpleNamespace(platform="r8i", unit_id="u4", replica=1), "spent")]))
             # A restarted controller's snapshot supersedes the unresolved units its predecessor left.
             write_tsv(primary / "unresolved-units.tsv", ("platform", "unit_id", "replica", "detail"),
                       [{"platform": "r8i", "unit_id": unit, "replica": "1", "detail": "not accepted"}
@@ -805,6 +805,112 @@ class TestRunCampaign(unittest.TestCase):
             "candidate b at bbbbbbbbbbbb",
             "  lang smoke        no live controller",
             "    units     0/1 accepted (0/1 groups), 1 unresolved, 0 queued"], lines)
+
+    def test_status_results_rank_rows_by_ratio_worst_first(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            campaign_root = Path(temporary_directory) / "tournament"
+            primary, language = campaign_root / "a" / "primary", campaign_root / "a" / "lang" / "primary"
+            unreadable = campaign_root / "b" / "primary"
+            write_tsv(campaign_root / "candidates.tsv", RUN_CAMPAIGN.CANDIDATE_FIELDS, [
+                {"name": name, "commit": name * 40, "ref": f"refs/benchmarks/tournament/{name}",
+                 "archive_sha256": "0" * 64} for name in ("a", "b")])
+            for root in (primary, language, unreadable):
+                write_tsv(root / "work-items.tsv", RUN_CAMPAIGN.WORK_ITEM_FIELDS, [])
+            # B's primary has a ledger no controller writes, which hides neither of A's phases.
+            (unreadable / "accepted-units.tsv").write_text("platform\n")
+            receipts = {root: [{**dict.fromkeys(RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, "-"), "platform": "r9g",
+                                "unit_id": "u1", "replica_id": str(replica), "group_id": "1",
+                                "unit_attempt_id": f"session-{replica}/1", "instance_id": f"i-{replica}",
+                                "host_epoch": str(replica), "shard_id": "like-compile"} for replica in replicas]
+                        for root, replicas in ((primary, (1, 2, 3)), (language, (1, 2)))}
+            # Regulator's compile ran 1, 2, and 9 times Trino's on the three hosts, whose median 1.0 measured at
+            # 0.29; the second host's comparator missed its precision target. Every host also measured a row this
+            # checkout's rows.tsv does not list.
+            for receipt, score, outcome in zip(receipts[primary], ("100", "200", "900"),
+                                               ("accepted", "precision-rejected", "accepted")):
+                write_tsv(unit_dispatch.unit_attempt_directory(primary, receipt) / "observed-rows.tsv",
+                          RUN_CAMPAIGN.unit_session.OBSERVED_FIELDS, [
+                              {**dict.fromkeys(RUN_CAMPAIGN.unit_session.OBSERVED_FIELDS, "-"),
+                               "row_id": f"like-compile/{case}/{system}", "shard_id": "like-compile",
+                               "system": system, "score": value, "score_unit": "ns/op", "outcome": state}
+                              for case, system, value, state in (
+                                  ("CONTAINS_ABSENT", "regulator", score, "accepted"),
+                                  ("CONTAINS_ABSENT", "trino-sql", "100", outcome),
+                                  ("RETIRED", "regulator", score, "accepted"))])
+            # The phase ended with a unit that spent its attempts, and another accepted group's retained directory is
+            # gone.
+            write_tsv(primary / "unresolved-units.tsv", ("platform", "unit_id", "replica", "detail"), [
+                {"platform": "r9g", "unit_id": "u2", "replica": "3",
+                 "detail": "unit failed with status 1; spent its 3 attempts"}])
+            receipts[primary].append({**receipts[primary][0], "unit_id": "u3", "unit_attempt_id": "session-4/1"})
+            # Java's native memory mode, a 1.0 win, now takes 2 and 3 times JDK Pattern's mean time on the two hosts,
+            # though its median sample ties on the first, 2.75 times over both; so does its long-words case, already a
+            # 1.0 loss. Its pure Java mode takes 1.04 times, within the material limit. Regulator cannot run the
+            # lookbehind case.
+            for receipt, native, safe, jdk in zip(receipts[language], ([100, 100, 400], [900]), ([104], [312]),
+                                                  ([100], [300])):
+                partition = unit_dispatch.unit_attempt_directory(language, receipt) / "partitions" / "p1"
+                partition.mkdir(parents=True)
+                (partition / "language-results.json").write_text(json.dumps({
+                    "manifest": {"suite": "language-bulk"},
+                    "observations": {
+                        **{name: {"outcome": "compared", "samples_ns": [samples]}
+                           for name, samples in (("native", native), ("safe", safe), ("jdk", jdk))},
+                        "lookbehind": {"outcome": "not-compatible", "reason": "no lookbehind"}},
+                    "comparisons": [{"language": "java", "mode": mode, "logical_case": case,
+                                     "operation": "execute", "candidate": candidate, "comparator": "jdk"}
+                                    for mode, case, candidate in (("native", "grep/every-line", "native"),
+                                                                  ("native", "grep/long-words-ascii", "native"),
+                                                                  ("safe", "grep/every-line", "safe"),
+                                                                  ("native", "grep/lookbehind", "lookbehind"))]}))
+            for root in (primary, language):
+                write_tsv(root / "accepted-units.tsv", RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, receipts[root])
+
+            def status(root, *options):
+                output = io.StringIO()
+                with patch.object(sys, "argv", ["run-campaign.py", "status", str(root), *options]), \
+                        contextlib.redirect_stdout(output):
+                    RUN_CAMPAIGN.main()
+                return output.getvalue().splitlines()
+
+            lines, table = status(campaign_root, "--results"), status(campaign_root, "--results", "--tsv")
+            # Given one phase's root, the command reports that phase as the campaign labels it.
+            self.assertEqual(lines[6:12], status(language, "--results"))
+
+        # Missing results and an unresolved unit come first, then a row this checkout's rows.tsv does not list, then
+        # the slowest rows, each against its 1.0 ratio, then a row the comparison does not time, counting the hosts
+        # that landed it.
+        self.assertEqual([
+            "candidate a primary: rows 2, slower 1, 1.0 wins lost 1, unresolved 1",
+            "   ratio  n  host ratios                    1.0  platform row  flags",
+            "       -  -                                   -  -        -  accepted groups without retained results: 1",
+            "       -  -                                   -  r9g      u2 replica 3  "
+            "unresolved: unit failed with status 1; spent its 3 attempts",
+            "       -  3                                   -  r9g      like-compile/RETIRED/regulator  "
+            "not in this checkout's rows.tsv",
+            "   2.000  3  r1=1.000 r2=2.000 r3=9.000   0.293  r9g      like-compile/CONTAINS_ABSENT/regulator::trino-sql  "
+            "slower, 1.0 win now a loss, precision rejected",
+            "candidate a lang primary: rows 4, slower 2, 1.0 wins lost 1, unresolved 0",
+            "   ratio  n  host ratios                    1.0  platform row  flags",
+            "   2.750  2  r1=2.000 r2=3.000            0.082  r9g      java/native/language-bulk/grep/every-line/execute  "
+            "slower, 1.0 win now a loss",
+            "   2.750  2  r1=2.000 r2=3.000            6.332  r9g      "
+            "java/native/language-bulk/grep/long-words-ascii/execute  slower",
+            "   1.040  2  r1=1.040 r2=1.040            0.082  r9g      java/safe/language-bulk/grep/every-line/execute",
+            "       -  2                                   -  r9g      java/native/language-bulk/grep/lookbehind/execute  "
+            "not-compatible, candidate: no lookbehind",
+            "candidate b primary: unreadable: UnsafeCampaignError: unexpected unit receipt schema in "
+            f"{unreadable / 'accepted-units.tsv'}"],
+            lines)
+        self.assertEqual(["\t".join(RUN_CAMPAIGN.RESULT_FIELDS),
+                          "a\tprimary\tr9g\tu2 replica 3\t-\t-\t\t-\t"
+                          "unresolved: unit failed with status 1; spent its 3 attempts",
+                          "a\tprimary\tr9g\tlike-compile/CONTAINS_ABSENT/regulator::trino-sql\t2.000\t3\t"
+                          "r1=1.000 r2=2.000 r3=9.000\t0.293\tslower, 1.0 win now a loss, precision rejected",
+                          "b\tprimary\t-\t-\t-\t-\t-\t-\tunreadable: UnsafeCampaignError: unexpected unit receipt "
+                          f"schema in {unreadable / 'accepted-units.tsv'}"],
+                         [table[0], table[2], table[4], table[-1]])
+        self.assertEqual(10, len(table))
 
     def test_primary_requires_accepted_smoke_results(self):
         arguments = SimpleNamespace(phase="primary", smoke_results=None)
@@ -3980,6 +4086,28 @@ class TestUnitWorkers(unittest.TestCase):
                                                     f"status 1; spent its {RUN_CAMPAIGN.MAX_UNIT_ATTEMPTS} attempts"):
                 self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 2, 1)
             self.assertEqual(RUN_CAMPAIGN.MAX_UNIT_ATTEMPTS, self.lease_count({"unit_id": unit_id, "replica_id": 1}))
+
+    def test_results_list_a_unit_lost_on_every_attempt_but_not_one_whose_retry_was_accepted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            # One host at a time: the first r8i unit's host goes silent on each attempt, and the next unit fails once.
+            attempts = RUN_CAMPAIGN.MAX_UNIT_ATTEMPTS
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", scripts={
+                **{host: {1: "stall"} for host in range(1, attempts + 1)}, attempts + 1: {1: "fail"}})
+            with self.assertRaisesRegex(SystemExit, "unresolved units"):
+                self.run_phase(Path(temporary), fleet, "smoke", ["trino-like-specialized"], 1, 1)
+            lost, retried = fleet.hosts[0].leases[1]["unit_id"], fleet.hosts[attempts].leases[1]["unit_id"]
+            self.assertEqual([("lost", lost)] * attempts + [("failed", retried), ("accepted", retried)],
+                             [(row["outcome"], row["unit_id"]) for row in self.ledger
+                              if row["platform"] == "r8i" and row["outcome"] in ("lost", "failed", "accepted")])
+            # The status command's results list the lost unit with its reason: from unresolved-units.tsv once its
+            # controller ended, and without it from the snapshot the controller rewrote each poll.
+            result_root = Path(temporary) / "results"
+            for source in ("unresolved-units.tsv", "snapshot"):
+                [(_, _, results, _)] = RUN_CAMPAIGN.campaign_results(result_root)
+                [unit] = [item for item in results if item["kind"] == "unit"]
+                self.assertEqual(("r8i", f"{lost} replica 1"), (unit["platform"], unit["row"]))
+                self.assertRegex(unit["flags"][0], f"^unresolved: heartbeat .*; spent its {attempts} attempts$")
+                (result_root / "unresolved-units.tsv").unlink(missing_ok=True)
 
     def test_lease_that_finished_a_group_spends_an_attempt_though_no_heartbeat_landed(self):
         with tempfile.TemporaryDirectory() as temporary:
