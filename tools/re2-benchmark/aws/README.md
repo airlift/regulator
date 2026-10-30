@@ -894,7 +894,10 @@ A measuring phase's `unit_id` is 64 hex digits; the build phase's one unit is
 [measured groups](../baseline/SHARD_DISPATCH.md#work-units) the lease runs, in
 order: those of the replica not yet accepted, in the replica's run order. A
 stop lease replaces `phase`, `unit_id`, `replica_id`, `groups`, `protocol`, and
-`stop_by` with `"stop": true`. `stop_by` is the host's shutdown time, in epoch
+`stop_by` with `"stop": true`. Before an idle stop the host claims its next
+lease as its own, a stop lease that adds `"by": "worker"`, with the same
+conditional write, so either the claim or the controller's lease lands; when
+the controller's landed first, the host reads and runs it. `stop_by` is the host's shutdown time, in epoch
 seconds, that the controller's fleet reservation covers once the host holds
 this lease; the worker moves the host's stop time to it when that is later.
 The host reads lease `seq` only after lease `seq - 1` is done, so the
@@ -952,7 +955,7 @@ The worker stops, with its reason in the final heartbeat and
 | Reason | When | Status |
 |---|---|---|
 | `stop-lease` | it reads a stop lease | 0 |
-| `idle` | its next lease is absent for `UNIT_WORKER_IDLE_SECONDS` (600) | 0 |
+| `idle` | its next lease is absent for `UNIT_WORKER_IDLE_SECONDS` (600) and its claim of it lands | 0 |
 | `lifetime` | its lifetime has passed; no lease starts after it, a running unit finishes | 0 |
 | `interrupted` | a Spot instance-action notice | 43 |
 | `invalid-lease`, `lease-unreadable`, `upload-failure` | a malformed lease, 12 failed lease reads in a row, or an upload still failing at its bound | 1 |
@@ -1041,6 +1044,9 @@ accepted first elsewhere. Other outcomes:
   item for On-Demand only, unless its platform buys only Spot. A record that
   names no unit, from a notice while the host waited for its next lease,
   releases that lease without spending an attempt.
+- A lease the controller writes after its host claimed that sequence as its
+  idle stop never runs: it is `claimed`, those behind it are released, its item
+  is requeued without spending an attempt, and the host gets nothing more.
 - A host whose instance is no longer pending or running, or that EC2 still
   lists none of by its boot deadline, is lost. A lease has started if one of
   its groups finished or a heartbeat shows it began; the lost host's started

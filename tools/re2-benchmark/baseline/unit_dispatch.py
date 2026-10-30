@@ -255,18 +255,27 @@ def get_unit_worker_result(arguments, worker, key, path):
 
 
 def put_unit_lease(arguments, worker, sequence, document):
-    """Write a worker's lease once; a lease already written, before a restart or a lost response, must
-    hold this same document."""
+    """Write a worker's lease once, returning whether its host holds it: False when the idle host already claimed
+    the sequence as its own stop. Any other lease already written, before a restart or a lost response, must hold
+    this same document."""
     region, bucket = worker.metadata["aws_region"], worker.metadata["bucket"]
     key = f"{worker.metadata['input_prefix']}/leases/{sequence}.json"
     body = json.dumps(document, sort_keys=True) + "\n"
     if arguments.cloud.put(region, bucket, key, body.encode(), if_none_match=True):
-        return
+        return True
     with tempfile.TemporaryDirectory(prefix="unit-lease-") as temporary:
         existing = Path(temporary) / "existing.json"
         arguments.cloud.get(region, bucket, key, existing)
-        if existing.read_text() != body:
-            raise UnsafeCampaignError(f"unit worker {worker.host_session} lease {sequence} differs from its ledger")
+        text = existing.read_text()
+    if text == body:
+        return True
+    try:
+        claim = json.loads(text)
+    except ValueError:
+        claim = None
+    if isinstance(claim, dict) and claim.get("by") == "worker" and claim.get("stop") is True:
+        return False
+    raise UnsafeCampaignError(f"unit worker {worker.host_session} lease {sequence} differs from its ledger")
 
 
 def extract_unit_result(archive, directory):
