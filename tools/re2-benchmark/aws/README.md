@@ -20,7 +20,7 @@ A machine-hour means one entire EC2 instance running for one hour, not one
 vCPU-hour. Parallel workers shorten elapsed time; they do not reduce total
 machine-hours. Estimate each frozen cohort from complete pilot-job durations,
 including startup, verification, result recovery and retries. Record limits
-in the campaign policy and account for other users' capacity reservations.
+in the campaign settings and account for other users' capacity reservations.
 
 The [1.0 cost ledger](../../../docs/benchmarks/RESULTS_1.0.md#cost-and-reproduction-budget)
 separates the initial campaign, measurement-quality follow-up, and successful
@@ -62,21 +62,18 @@ estimated work falls to 10% of its total, its last items run on On-Demand
 workers, so a phase's last units do not wait on Spot capacity. Budget these
 hours at On-Demand prices.
 
-Buy a platform's hosts with `--purchase PLATFORM=spot` to prohibit its
-On-Demand workers. Other users' running and pending Spot work still consumes
-quota. Keep one owner for each mutable capacity limit. Transfer reservations
-only after cleanup or a complete finite-inventory bound proves they are
-available. A temporary gap between worker launches is not free reserved
-capacity.
+Set a platform's `purchase` to `spot` in the
+[campaign settings](#shared-fleet-budget) to prohibit its On-Demand workers.
+Other users' running and pending Spot work still consumes quota. Keep one
+owner for each mutable capacity limit. Transfer reservations only after
+cleanup or a complete finite-inventory bound proves they are available. A
+temporary gap between worker launches is not free reserved capacity.
 
 ## Shared fleet budget
 
-Run both collectors on one persistent coordinator filesystem with renewable
-AWS credentials. Supply the same `--fleet-budget PATH` to every phase, buying
-each platform's hosts with `--purchase PLATFORM=spot` unless the policy allows
-On-Demand in one of its regions. Set `--spot-vcpu-reserve` to the policy's
-reserved headroom and use `--release-version 2.0` when measuring the 2.0
-release. The option names the release manifest
+Run the controller on one persistent filesystem with renewable AWS
+credentials, and use `--release-version 2.0` when measuring the 2.0 release.
+The option names the release manifest
 `tools/re2-benchmark/baseline/releases/<version>.json`, and the named
 candidate's committed `src/main` tree must match that release. The
 [maintenance guide](../../../docs/MAINTAINING_REGULATOR.md#final-qualification)
@@ -88,36 +85,74 @@ and publishes preliminary results. Remeasure the 1.0 artifact with
 [commit `32406d25`](https://github.com/airlift/regulator/tree/32406d25a6032b15d366cddb414ade57c972d0ee);
 the published campaign's collector revisions are in its capture provenance.
 
-The policy records the expected AWS account and home region, resource and
-spending ceilings, and hourly price ceilings for each selected worker type.
-The controller checks the active account against it, and every region of
-every platform's list against the policy's regions, before execution. The
-top-level `max_vcpus` and `spot_vcpu_reserve` limit the home region. A
-campaign that may launch elsewhere adds a `regions` object naming each other
-region's own `max_vcpus` and `spot_vcpu_reserve`, because Spot quotas are
-regional:
+A campaign's limits are its live settings, in `campaign-settings.json` at the
+campaign root, which the controller reloads every loop, so a changed limit
+applies to the next launch, lease extension, and share. The campaign's first
+execution seeds them from the JSON file `--settings FILE` names; a restart runs
+under the settings the root holds. For example, settings for at most 16
+ordinary workers in one region could be:
 
 ```json
-"regions": {"eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 16}}
+{
+  "max_hosts": 16,
+  "max_hosts_per_platform": 16,
+  "max_usd": 20,
+  "max_machine_hours": 100,
+  "regions": {"us-west-2": {"bucket": "<bucket>", "max_vcpus": 32}},
+  "platform_regions": {"r8i": ["us-west-2"], "r9g": ["us-west-2"]},
+  "purchase": {"r8i": "spot", "r9g": "spot"},
+  "hourly_rates": {
+    "r8i.large": {"spot": 0.08, "total": 0.10},
+    "r9g.large": {"spot": 0.08, "total": 0.10}
+  }
+}
 ```
 
-Admission counts each region's quota, reserve, vCPU limit, and pending
-launches against that region's instances and reservations in the same market.
-Each reservation records its region and market. Hosts, machine hours,
-spending, and the launch interval remain fleet-wide. The hourly price ceilings
-apply in every region, so set them for the most expensive launch region.
-Policies without `regions` keep their single-region meaning. The worker types
-remain those in `platforms.tsv`.
+- `max_hosts` and `max_hosts_per_platform` bound the running phases' hosts in
+  all and on each platform.
+- `max_usd` and `max_machine_hours` bound the campaign's spending and machine
+  hours.
+- `regions` gives each launch region's shared transfer bucket and the fleet's
+  `max_vcpus` there, and `platform_regions` lists each platform's launch
+  regions among them; see [launch regions](#launch-regions-and-purchase).
+- `purchase` names how each platform buys hosts.
+- `hourly_rates` gives each worker type's price ceilings: `spot` is the
+  maximum Spot bid, `total` includes storage and other hourly costs, and
+  `on_demand_total` is that hourly total for an On-Demand host. They apply in
+  every region, so set them for the most expensive launch region, and include
+  the R9g `.2xlarge` ceilings when running the language lifecycle suite.
 
-A policy without `on_demand_max_vcpus` refuses On-Demand, so its campaigns
-buy every platform's hosts with `--purchase PLATFORM=spot`. To allow
-On-Demand replacements and phase tails, set `on_demand_max_vcpus` at the top
-level for the home region, or in a region's entry for that region, and give
-every worker type an `on_demand_total` hourly cost:
+Seeding adds `version` 1, the `boot_window` described below, the `authorized`
+envelope of hosts, spending, and regions, which defaults to the given limits,
+an empty `phases`, where the controller records each phase's state, and no
+`spending_stop` or `stop`. The
+controller refuses settings it could not run under when it seeds them; on a
+reload it keeps the last version it loaded and logs why. Every change takes
+`campaign-settings.lock` while it rewrites the file, takes the next version,
+and appends a row naming its actor, `dain`, `monitor`, or `controller`, to
+`campaign-settings-events.tsv`. The controller itself changes only the phases'
+states, the boot window's size, and the spending stop.
+
+What decides the measurements stays frozen in `campaign-options.json`: the AWS
+account of the settings' buckets, `--spot-vcpu-reserve`, the vCPUs of each
+region's Standard Spot quota the fleet leaves free (default 32), and
+`--phase-timeout-seconds`, beside the options [a campaign](#run-a-campaign)
+freezes. A restart that changes them is refused.
+
+Admission counts each region's quota, Spot reserve, and `max_vcpus` against
+that region's instances, requests, and reservations in the same market. Each
+reservation records its region and market. Hosts, machine hours, and spending
+remain fleet-wide. Preflight refuses a region whose `max_vcpus` exceeds its
+Spot quota after the reserve. The worker types remain those in
+`platforms.tsv`.
+
+Settings without `on_demand_max_vcpus` refuse On-Demand, so their platforms buy
+with `purchase` `spot`. To allow On-Demand replacements and phase tails, set
+`on_demand_max_vcpus` in a region's entry, and give every worker type an
+`on_demand_total` hourly cost:
 
 ```json
-"on_demand_max_vcpus": 400,
-"regions": {"eu-west-1": {"max_vcpus": 64, "spot_vcpu_reserve": 16, "on_demand_max_vcpus": 16}}
+"regions": {"us-west-2": {"bucket": "<bucket>", "max_vcpus": 32, "on_demand_max_vcpus": 16}}
 ```
 
 The allowance bounds only the fleet's own On-Demand vCPUs in that region.
@@ -129,42 +164,12 @@ only Spot, and an On-Demand launch takes the first region of its platform's
 list that admits it. Each platform whose purchase is not `spot` needs an
 allowance in a region of its list.
 
-For example, a policy for at most 16 ordinary workers could contain:
-
-```json
-{
-  "schema_version": 1,
-  "account": "123456789012",
-  "region": "us-west-2",
-  "market": "spot",
-  "spot_vcpu_reserve": 16,
-  "max_vcpus": 32,
-  "max_hosts": 16,
-  "max_pending_launches": 4,
-  "max_machine_hours": 100,
-  "max_usd": 20,
-  "ancillary_reserve_usd": 5,
-  "minimum_launch_interval_seconds": 1,
-  "hourly_rates": {
-    "r8i.large": {"spot": 0.08, "total": 0.10},
-    "r9g.large": {"spot": 0.08, "total": 0.10}
-  }
-}
-```
-
-Replace the example account, limits, and rates with the selected campaign
-values. Include the R9g `.2xlarge` price ceiling when running the language
-lifecycle suite. `spot` is the maximum Spot bid; `total` includes storage and
-other hourly costs, and `on_demand_total` is that hourly total for an
-On-Demand host. The controller validates the policy when loading it. Freeze it
-with the job inventory; changing it requires a new campaign rather than a
-resume.
-
-The neighboring `fleet-state.json` coordinates both collectors with `flock`. It
-counts instances, outstanding requests, and launches not yet visible to EC2.
-Each host's reservation holds its hours and cost only until a stop time that
-covers the work it was issued, so a fleet admits as many hosts as the work
-they hold, not their whole lifetimes, can pay for:
+`fleet-state.json` at the campaign root holds the campaign's reservations,
+changed under `fleet-budget.lock`. It counts instances, outstanding requests,
+and launches not yet visible to EC2. Each host's reservation holds its hours
+and cost only until a stop time that covers the work it was issued, so a fleet
+admits as many hosts as the work they hold, not their whole lifetimes, can pay
+for:
 
 - A launch reserves the host's boot allowance of 20 minutes, a first lease of
   its pool's longest queued item, the worker's 10-minute idle stop, a 15-minute
@@ -178,15 +183,14 @@ they hold, not their whole lifetimes, can pay for:
   issued; a worker holding no other lease gets a stop lease instead.
 - Admission and every extension must keep the completed hosts' actual hours,
   plus each reservation's hours to its stop time, or to now once a host ran
-  longer, within `max_machine_hours`, and their cost plus the ancillary reserve
-  within `max_usd`.
+  longer, within `max_machine_hours`, and their cost within `max_usd`.
 
 At $0.10 an `r8i.large` hour, a launch's 90 minutes reserve $0.15, and each
 lease of a 15-minute unit is budgeted at $0.05 more. These are estimates: a
 lease that outruns its allowance leaves the next extension, counted from now,
 to cover the extra time. The earlier reservation of a worker's whole
-7.75-hour wrapper lifetime held $0.78. A $10 policy with a $2 ancillary
-reserve admits 53 such launches where it admitted 10.
+7.75-hour wrapper lifetime held $0.78, so $10 admits 66 such launches where it
+admitted 12.
 
 The host enforces the same stop time: it powers off at the time its launch or
 its latest lease names, whatever it is doing, as [unit workers](#unit-workers)
@@ -197,8 +201,8 @@ to now until then. A
 rejected work unit follows the [unit dispatch](#unit-dispatch) retry rules.
 A controller that fails while it recovers or dispatches its hosts, through
 changed frozen inputs, conflicting accepted identities, a shared
-resource-policy failure, or any other error, halts every collector
-sharing the policy and records its result root as the halt's owner. Stopping a
+resource-policy failure, or any other error, halts every phase of the campaign
+and records its result root as the halt's owner. Stopping a
 controller with Ctrl-C or SIGTERM halts nothing once it has verified the cleanup
 of every host it holds a reservation for. A failure in its startup checks
 before recovery, or in its final validation once every host's cleanup is
@@ -207,30 +211,27 @@ and their stop times bound them. Each owner's restart clears its own halt once
 its recovery has verified the cleanup of every host it held; the fleet stays
 halted while another owner's halt stands. See the
 [protocol rules](../baseline/SHARD_DISPATCH.md#jmh-protocol). Preserve the
-policy and state together across restarts. Every execution requires this
-shared policy. Ramp from canaries to the approved cap, using the configured
-pending-launch limit and frozen launch interval.
+campaign root, its settings and fleet state together, across restarts.
 
-The shared state's boot window also paces launches: it caps the fleet's hosts
-launched but not yet reporting, across every collector, so a bad image,
-region, or user-data change costs at most one window of hosts before it
-shows. The window starts at 10. Its wave is the hosts admitted since it last
-changed; once as many of them as it holds report within 5 minutes of launch,
-it doubles, up to 50, and once any is late, or ends before it reported for a
-reason other than a Spot reclaim, it halves, down to 5. A launch it refuses
+The boot window also paces launches: it caps the campaign's hosts launched but
+not yet reporting, so a bad image, region, or user-data change costs at most
+one window of hosts before it shows. The window starts at the settings'
+`boot_window` `initial`, 10 unless the seed names another. Its wave is the
+hosts admitted since it last changed; once as many of them as it holds report
+within 5 minutes of launch, it doubles, up to its `max`, 50 by default, and
+once any is late, or ends before it reported for a reason other than a Spot
+reclaim, it halves, down to 5. Each resize is the controller's settings change
+of its `size`, so the events record the window's history. A launch it refuses
 waits with reason `boot window`.
 
-The controller defaults to 64 concurrent workers. Set `--max-concurrent` and
-`--max-concurrent-per-platform` for the planned campaign; the shared policy
-and live quota checks enforce aggregate capacity across collectors. Multicore
-workers, reserved headroom, unrelated Spot use, and spending reservations can
-reduce actual concurrency. Derived phase deadlines use the configured host,
-per-platform, and shared vCPU limits, plus one retry wave and a capacity
-allowance; the shared limit is the sum of the launch regions' `max_vcpus`.
-Every worker type, including each unit pool's host, must fit the largest
-`max_vcpus` among the regions of its platform's list. An explicit
-`--phase-timeout-seconds` is frozen on first execution and cannot change on
-resume.
+Multicore workers, the Spot reserve, unrelated Spot use, and spending
+reservations can keep the fleet below `max_hosts`. A phase's derived deadline
+uses the settings' host, per-platform, and vCPU limits when it first starts,
+plus one retry wave and a capacity allowance; the vCPU limit is the sum of the
+launch regions' `max_vcpus`. Every worker type, including each unit pool's
+host, must fit the largest `max_vcpus` among the regions of its platform's
+list. An explicit `--phase-timeout-seconds` is frozen on first execution and
+cannot change on resume.
 
 For a focused change, budget only the affected cases and protected controls.
 Preserve accepted work and resume with unchanged frozen inputs instead
@@ -335,18 +336,17 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   campaign <campaign> --execute \
   --candidate before=main --candidate after=user/me/faster-scan \
   --campaign-root /durable/path/<campaign> \
-  --transfer-bucket us-west-2=<bucket> \
-  --max-concurrent 32 --purchase r8i=spot --purchase r9g=spot \
-  --spot-vcpu-reserve 16 --fleet-budget /durable/path/fleet-policy.json
+  --settings /durable/path/<campaign>-settings.json --spot-vcpu-reserve 16
 ```
 
 Every candidate's `tools/re2-benchmark` tree must be the controller's committed
 one, so `before=main` works only while `main` carries the same benchmark
 tooling as the checkout running the controller.
 
-Several candidates share one fleet, so they require `--fleet-budget`. The
-running phases share `--max-concurrent` and `--max-concurrent-per-platform`,
-and their shares follow the work left, set again every poll. The hosts are
+The first execution seeds the campaign's [settings](#shared-fleet-budget)
+from `--settings`, and every candidate's phases share them. The running phases
+share the settings' `max_hosts` and `max_hosts_per_platform`, and their shares
+follow the work left, set again every poll. The hosts are
 split across platforms by the corrected seconds left in each platform's work
 items not yet accepted, as `status` computes them below, and a platform's
 hosts among its phases the same way. No platform takes more than its limit,
@@ -356,8 +356,9 @@ hosts last, so a build, whose items carry no estimate, runs beside the
 others. A phase holding more hosts than its share keeps them, and the others
 grow only into hosts the limits leave free, so a language primary, most of a
 release campaign's work, takes most of the hosts as they free up beside the
-baseline's primary. A phase's share is never frozen, so a restart may change
-the limits.
+baseline's primary. A phase's share is never frozen, and the controller records
+each phase's state, `pending`, `running`, `complete`, or `failed`, in the
+settings' `phases`.
 
 Each phase's setup, which plans its work items, checks its prerequisites and
 AWS, and uploads what its hosts read, runs on a setup thread, and a
@@ -375,14 +376,15 @@ root holds `phase-complete.txt`, and every completed reduction, whose root
 holds `output-checksums.tsv`, and resumes the others from their ledgers. The
 controller records the options that decide what its phases measure, the
 selected shards, smoke protocol, release version, and language plans, in
-`campaign-options.json`, and refuses a restart that changes them.
+`campaign-options.json` with the [frozen fleet options](#shared-fleet-budget),
+and refuses a restart that changes them.
 
 The command refuses a campaign root the earlier controllers started, which ran
 each phase as its own process: one holding `campaign-driver.txt`, a phase
 holding `driver-child.txt`, or a phase's `execution-policy.json` that froze its
-share of the hosts. It names the file it found, and the root is never
-migrated; start a new campaign root. `status`, `--results`, the reduction, and
-archiving still read such a root's ledgers.
+share of the hosts or named a fleet policy file. It names the file it found,
+and the root is never migrated; start a new campaign root. `status`,
+`--results`, the reduction, and archiving still read such a root's ledgers.
 
 See a campaign's progress, or one phase's, without disturbing it:
 
@@ -407,8 +409,9 @@ candidate before at 0c1d2e3f4a5b
 
 The command only reads files. Units and groups accepted, the estimate left,
 spend, and medians come from the phase's ledgers: `work-items.tsv`,
-`accepted-units.tsv`, `unresolved-units.tsv` once the phase ends, the fleet
-state of the policy its `execution-policy.json` names, `job-attempts.tsv`, and
+`accepted-units.tsv`, `unresolved-units.tsv` once the phase ends, the
+campaign root's `fleet-state.json`, or in an old root the fleet state beside
+the policy its `execution-policy.json` names, `job-attempts.tsv`, and
 `unit-uploads.tsv`. Spend is the phase's completed hosts' cost plus the cost of
 its live hosts' hours so far; reserved is what their reservations hold beyond
 now. The workers, and the queued count and unresolved units while the phase
@@ -484,7 +487,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
 
 Every execution requires a shared transfer bucket in every launch region and
 `TRANSFER_PREFIX`; see [launch regions](#launch-regions-and-purchase). The
-campaign example above runs in one region with one shared bucket.
+[settings example](#shared-fleet-budget) names one region with one shared
+bucket.
 
 The campaign builds each platform's engines once before the smoke. The build
 phase leases one `engine-build` unit per platform to a unit worker of its
@@ -519,20 +523,22 @@ controller reaches AWS through boto3, from the pinned
 ### Launch regions and purchase
 
 Each platform has its own ordered list of launch regions and its own purchase
-policy, both set on the command line; benchmarks do not depend on the region.
+policy, both in the [campaign settings](#shared-fleet-budget); benchmarks do
+not depend on the region.
 
-- `--platform-regions PLATFORM=REGION[,REGION...]` names the platform's
-  regions. A platform without a list launches in `AWS_REGION`, or `us-west-2`
-  when it is unset.
-- `--purchase PLATFORM=POLICY` names how the platform buys hosts. The default,
+- `platform_regions` names each platform's regions, in the order its ties go,
+  from the settings' `regions`. The controller refuses a platform without a
+  list.
+- `purchase` names how each platform buys hosts. The default,
   `spot-then-on-demand`, buys Spot and turns to On-Demand for interrupted and
   oversized items, the phase tail, and a Spot shortage outlasting its bounded
   wait. `spot` buys only Spot and never falls back. `on-demand` buys only
   On-Demand.
 
-Neither is frozen: a restarted phase takes the lists and purchases its command
-names, or the defaults, so a campaign whose Spot capacity ran dry can resume in
-other regions. Every result records its host's region and market.
+Neither is frozen. The controller reads both every loop, and each phase checks
+its platforms' regions when it starts, so a campaign whose Spot capacity ran
+dry can restart in other regions. Every result records its host's region and
+market.
 
 For each Spot launch, the controller asks AWS for the Spot placement score of
 the worker type in every region of its platform's list that offers it, for the
@@ -568,19 +574,28 @@ Mumbai, and r9g scored 3 in Ohio and Frankfurt. A campaign then could send
 r8i to Europe and Mumbai on Spot alone, and r9g to Ohio and Frankfurt with
 Oregon's On-Demand quota behind it:
 
-```bash
---platform-regions r8i=eu-west-1,eu-central-1,ap-south-1 \
---purchase r8i=spot \
---platform-regions r9g=us-east-2,eu-central-1,us-west-2
+```json
+"regions": {
+  "eu-west-1": {"bucket": "<bucket>", "max_vcpus": 224},
+  "eu-central-1": {"bucket": "<bucket>", "max_vcpus": 224},
+  "ap-south-1": {"bucket": "<bucket>", "max_vcpus": 224},
+  "us-east-2": {"bucket": "<bucket>", "max_vcpus": 224},
+  "us-west-2": {"bucket": "<bucket>", "max_vcpus": 704, "on_demand_max_vcpus": 400}
+},
+"platform_regions": {
+  "r8i": ["eu-west-1", "eu-central-1", "ap-south-1"],
+  "r9g": ["us-east-2", "eu-central-1", "us-west-2"]
+},
+"purchase": {"r8i": "spot", "r9g": "spot-then-on-demand"}
 ```
 
 r8i launches in Ireland until its quota or capacity runs out, then Frankfurt,
 then Mumbai, since equal scores keep the list's order. r9g launches Spot in
 its best-scored region, Ohio before Frankfurt at equal scores, and after a
-15-minute shortage turns to On-Demand, which the policy allows only in Oregon.
-Each region needs the platform's AMI in `platform-regions.tsv`, a shared
-transfer bucket, and a shared policy entry, and the policy's
-`on_demand_max_vcpus` bounds r9g's On-Demand hosts in Oregon.
+15-minute shortage turns to On-Demand, which the settings allow only in
+Oregon, where `on_demand_max_vcpus` bounds r9g's On-Demand hosts. Each region
+needs the platform's AMI in `platform-regions.tsv` and its entry in the
+settings' `regions`, with a shared transfer bucket.
 
 `platforms.tsv` pins each AMI by its ID in `us-west-2`. Preflight resolves that
 image's name and requires each launch region's AMI in `platform-regions.tsv`
@@ -597,9 +612,9 @@ aws ec2 describe-images --region <region> --owners 137112412989 --include-deprec
   --query 'Images[0].ImageId' --output text
 ```
 
-Hosts read campaign inputs from a shared bucket in their launch region. Give
-each launch region's bucket with `--transfer-bucket REGION=BUCKET` and set
-`TRANSFER_PREFIX`; the controller refuses to launch in a region without one.
+Hosts read campaign inputs from a shared bucket in their launch region. Name
+each launch region's bucket as its `bucket` in the settings' `regions` and set
+`TRANSFER_PREFIX`.
 Each shared bucket must carry the `Project=regulator-benchmark` tag, and
 preflight checks the tag and the bucket's region. Each worker keeps its
 leases and results under its own prefix, `TRANSFER_PREFIX/<session>`, and
@@ -728,7 +743,7 @@ in the worker's region with:
 - the [worker profile](#worker-profile), IMDSv2 required, and
   `InstanceInitiatedShutdownBehavior=terminate`, so a host that powers off
   terminates;
-- Spot as a one-time request whose maximum price is the shared policy's hourly
+- Spot as a one-time request whose maximum price is the settings' Spot hourly
   rate, or On-Demand;
 - tags naming the campaign, phase, platform, replica, host epoch, and session;
 - a client token derived from the session and zone;
@@ -941,8 +956,8 @@ The controller keeps a queue of the phase's work items and a pool of workers
 per platform and instance type: a unit runs on the instance type its shard is
 allocated on that platform, which is the platform's frozen type for every
 baseline shard. Each worker is a job of the controller's ordinary launch path,
-so regions, placement scores, Spot launch retries in the next region,
-`--max-concurrent`, the per-platform limit, and the shared budget apply to it,
+so regions, placement scores, Spot launch retries in the next region, the
+settings' host limits, and the shared budget apply to it,
 and its reservation lasts until its cleanup is verified. `unit-workers.tsv`
 freezes each worker before its launch.
 
@@ -1063,8 +1078,8 @@ or `superseded` when every group was accepted first elsewhere. Other outcomes:
   tries its cleanup again; the phase does not complete while one remains. A
   leftover, a terminated worker's prefix that will not empty, is logged each
   loop and pauses nothing. A leak, an instance not terminated 15 minutes after
-  the controller asked EC2 to terminate it, is logged and sets the shared
-  fleet's spending stop, as
+  the controller asked EC2 to terminate it, is logged and sets the
+  campaign's spending stop, as
   [recovering uploads during cleanup](#recovering-uploads-during-cleanup)
   describes.
 
@@ -1127,12 +1142,12 @@ release the reservation and settle the worker from its recovered uploads, as
 [unit dispatch](#unit-dispatch) describes.
 
 An instance still not terminated 15 minutes after the request is a leak: the
-controller logs it and sets the spending stop in the shared fleet state. While
-the stop stands, the budget admits no launch and no lease extension for any
-owner, refusing each with reason `spending_stop`, but halts no controller, so
-every host finishes the leases it holds within its reservation. The stop stands
-until an operator clears it with `FleetBudget.clear_spending_stop`, once the
-instance is gone. A controller reaching its teardown deadline with an
+controller logs it and sets the campaign settings' `spending_stop`, as its
+own settings change naming the reason. While the stop stands, the budget admits
+no launch and no lease extension for any phase, refusing each with reason
+`spending_stop`, but halts no controller, so every host finishes the leases it
+holds within its reservation. The stop stands until Dain clears it, once the
+instance is gone, with a settings change that sets `spending_stop` to `null`. A controller reaching its teardown deadline with an
 instance still not terminated treats it as a leak and exits, leaving the
 worker's reservation for its restart.
 

@@ -633,12 +633,11 @@ A restart must reproduce each export byte for byte. The release importer reads
 `accepted-units.tsv` beside the exports and accepts them only as one complete
 campaign of the imported plans, with no semantic rejection.
 
-`--max-concurrent`, `--max-concurrent-per-platform`, `--platform-regions`,
-`--purchase`, `--fleet-budget`, and `--release-version` work as they do for the
+The campaign settings and `--release-version` work as they do for the
 baseline.
 Select `--release-version 2.0` to measure the published 2.0 artifact. See the
-[AWS guide](../aws/README.md#shared-fleet-budget) for the fleet budget, release
-manifests and remeasuring 1.0. For the
+[AWS guide](../aws/README.md#shared-fleet-budget) for the settings, the fleet
+budget, release manifests and remeasuring 1.0. For the
 complete bulk corpus, prepare the plan with `--duration-policy PATH`: its
 frozen per-comparison estimates raise unit estimates, and each operation of
 an isolated pair runs as a unit alone. Local controller tests use synthetic

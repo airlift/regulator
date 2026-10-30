@@ -34,9 +34,9 @@ import engine_build
 import unit_session
 import work_units
 from acceptance import normalize_heap_size
+from campaign_settings import REGION_PATTERN, SETTINGS as CAMPAIGN_SETTINGS, CampaignSettings, SettingsError
 from fleet_budget import (
-    ON_DEMAND_VCPU_SAFETY_RESERVE, REGION_PATTERN, BudgetError, FleetBudget, FleetHalted, on_demand_regions,
-    region_limits, spend_by_owner)
+    ON_DEMAND_VCPU_SAFETY_RESERVE, STATE_FILE, BudgetError, FleetBudget, FleetHalted, on_demand_regions, spend_by_owner)
 from campaign_io import UnsafeCampaignError, check_output, fsync_directory, write_ledger
 from cloud import CloudError
 from unit_dispatch import (
@@ -53,7 +53,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "language"))
 import fleet as language_fleet
 import released_artifact
 
-DEFAULT_MAX_CONCURRENT = 64
 STANDARD_INSTANCE_FAMILIES = frozenset("acdhimrtz")
 SPOT_VCPU_SAFETY_RESERVE = 32
 CAPACITY_RETRY_SECONDS = 30
@@ -82,9 +81,9 @@ REQUEST_THREADS = 16
 ACCEPTANCE_THREADS = 4
 # A unit pool's new Spot workers skip a region this long after it found no Spot capacity.
 SPOT_REGION_COOL_DOWN_SECONDS = 15 * 60
-# How a platform's workers buy capacity: Spot only, waiting for it however long; Spot, turning to On-Demand once
-# Spot has fallen short for SPOT_SHORTAGE_WAIT_SECONDS; or On-Demand only.
-PURCHASE_POLICIES = ("spot", "spot-then-on-demand", "on-demand")
+# How a platform's workers buy capacity, unless the settings name a purchase policy for it: Spot only, waiting for it
+# however long; Spot, turning to On-Demand once Spot has fallen short for SPOT_SHORTAGE_WAIT_SECONDS; or On-Demand
+# only.
 DEFAULT_PURCHASE = "spot-then-on-demand"
 # A spot-then-on-demand pool keeps trying Spot this long after its first launch that found no Spot capacity, and
 # then launches On-Demand while every one of its platform's configured regions cools, until one of its Spot
@@ -129,11 +128,11 @@ SEMANTIC_FAILURE_DETAIL = f"semantic failure: status {SEMANTIC_FAILURE_STATUS}"
 CONTROLLER_LOCK = "controller.lock"
 CONTROLLER_RECORD = "controller.txt"
 # What only the earlier controllers, which ran each phase as its own process, wrote: the campaign driver's record in
-# the campaign root, a phase's own controller's record in its root, and a phase's frozen share of the hosts in its
-# execution policy.
+# the campaign root, a phase's own controller's record in its root, and a phase's frozen share of the hosts, or the
+# shared fleet policy whose limits it froze, in its execution policy.
 OLD_DRIVER_RECORD = "campaign-driver.txt"
 OLD_PHASE_RECORD = "driver-child.txt"
-OLD_EXECUTION_POLICY_FIELDS = ("max_concurrent", "max_concurrent_per_platform")
+OLD_EXECUTION_POLICY_FIELDS = ("max_concurrent", "max_concurrent_per_platform", "fleet_budget", "fleet_policy")
 # A unit campaign phase's digest of the tooling that started it, in its result root.
 TOOLING_DIGEST = "tooling-digest.txt"
 # Written once a unit phase's controller has verified every worker's cleanup and its phase gate has passed;
@@ -324,93 +323,66 @@ def parse_args():
                         help="accepted smoke a primary requires (default: the candidate's smoke)")
     parser.add_argument("--primary-results", type=Path,
                         help="accepted primary a confirmation requires (default: the candidate's primary)")
-    parser.add_argument("--max-concurrent", type=int, default=DEFAULT_MAX_CONCURRENT)
-    parser.add_argument("--max-concurrent-per-platform", type=int, default=DEFAULT_MAX_CONCURRENT)
-    parser.add_argument("--spot-vcpu-reserve", type=int, default=SPOT_VCPU_SAFETY_RESERVE)
+    parser.add_argument("--settings", type=Path,
+                        help="the campaign's first live settings, which a campaign's first execution requires and "
+                             "seeds as version 1 of its campaign-settings.json; a restart runs under the settings "
+                             "the campaign holds")
+    parser.add_argument("--spot-vcpu-reserve", type=int, default=SPOT_VCPU_SAFETY_RESERVE,
+                        help="the vCPUs of each region's Standard Spot quota the fleet leaves free, frozen when the "
+                             "campaign starts")
     parser.add_argument("--release-version", default="",
                         help="measure the pinned published JAR for this version instead of source-built classes")
     parser.add_argument("--smoke-protocol", choices=("smoke", "qualification"), default="smoke",
                         help="use qualification timing in baseline smoke to validate full shard durations")
     parser.add_argument("--phase-timeout-seconds", type=int,
                         help="frozen phase wall-clock limit; otherwise derive from topology plus capacity waits")
-    parser.add_argument("--fleet-budget", type=Path,
-                        help="shared fleet policy; all controllers must use the same coordinator directory")
     parser.add_argument("--shard", action="append", dest="selected_shards",
                         help="baseline shard to recollect; repeat to select a subset")
     parser.add_argument("--language-plan", action="append", type=Path, default=[],
                         help="language plan prepared by fleet.py, whose units a phase measures instead of the "
                              "baseline's and a campaign measures in language phases beside the baseline's; repeat "
                              "for lifecycle and bulk")
-    parser.add_argument("--platform-regions", action="append", default=[], dest="platform_region_values",
-                        metavar="PLATFORM=REGION[,REGION...]",
-                        help="AWS regions the platform's hosts may launch in; with several, Spot placement scores "
-                             "choose, ties going to the earlier region (default: AWS_REGION or us-west-2)")
-    parser.add_argument("--purchase", action="append", default=[], dest="purchase_values",
-                        metavar="PLATFORM=POLICY",
-                        help="how the platform's hosts buy capacity: spot never launches On-Demand, on-demand "
-                             f"never launches Spot, and {DEFAULT_PURCHASE}, the default, turns to On-Demand where "
-                             "Spot falls short")
     parser.add_argument("--engine-builds", type=Path,
                         help="accepted build-phase result root whose per-platform prebuilt archives every "
                              "measuring unit worker installs, verified against their pinned SHA-256 (default: the "
                              "candidate's build)")
-    parser.add_argument("--transfer-bucket", action="append", default=[], metavar="REGION=BUCKET",
-                        help="shared transfer bucket for hosts launched in REGION, required in every region "
-                             "the campaign launches in")
     return parser.parse_args()
-
-
-def parse_transfer_buckets(values):
-    buckets = {}
-    for value in values:
-        region, separator, bucket = value.partition("=")
-        if not separator or not region or not bucket or region in buckets:
-            raise SystemExit(f"--transfer-bucket takes one REGION=BUCKET value per region: {value}")
-        buckets[region] = bucket
-    return buckets
-
-
-def parse_platform_settings(values, option, platforms):
-    """Each named platform's setting from repeated PLATFORM=SETTING values."""
-    settings = {}
-    for value in values:
-        platform, separator, setting = value.partition("=")
-        if not separator or not setting or platform in settings:
-            raise SystemExit(f"{option} takes one PLATFORM=VALUE per platform: {value}")
-        if platform not in platforms:
-            raise SystemExit(f"{option} names a platform not in platforms.tsv: {value}")
-        settings[platform] = setting
-    return settings
-
-
-def parse_launch_options(arguments, platforms):
-    names = {platform.name for platform in platforms}
-    arguments.platform_regions = {
-        platform: regions.split(",") for platform, regions in parse_platform_settings(
-            arguments.platform_region_values, "--platform-regions", names).items()}
-    arguments.purchases = parse_platform_settings(arguments.purchase_values, "--purchase", names)
-    invalid = sorted(set(arguments.purchases.values()) - set(PURCHASE_POLICIES))
-    if invalid:
-        raise SystemExit(f"--purchase policies are {', '.join(PURCHASE_POLICIES)}, not {', '.join(invalid)}")
 
 
 def default_regions():
     return [os.environ.get("AWS_REGION", "us-west-2")]
 
 
+def live_settings(arguments):
+    """The campaign's settings as the controller last loaded them, or None for a phase planned alone before its
+    campaign has any."""
+    store = getattr(arguments, "settings", None)
+    return store.current if store else None
+
+
 def platform_regions(arguments, platform):
-    """The regions the platform's hosts may launch in, in the order its ties go."""
-    return getattr(arguments, "platform_regions", {}).get(platform) or default_regions()
+    """The regions the platform's hosts may launch in, in the order its ties go; a phase planned alone, before its
+    campaign has settings, plans for the default region."""
+    settings = live_settings(arguments)
+    return settings["platform_regions"].get(platform, []) if settings else default_regions()
 
 
 def purchase_policy(arguments, platform):
-    return getattr(arguments, "purchases", {}).get(platform, DEFAULT_PURCHASE)
+    settings = live_settings(arguments)
+    return settings["purchase"].get(platform, DEFAULT_PURCHASE) if settings else DEFAULT_PURCHASE
+
+
+def region_bucket(arguments, region):
+    """The region's shared transfer bucket, which its hosts read every input from."""
+    return live_settings(arguments)["regions"][region]["bucket"]
 
 
 def campaign_platforms(arguments):
-    """The platforms whose workers the phase launches, or before its work is planned, those given regions."""
+    """The platforms whose workers the phase launches, or before its work is planned, those the settings give
+    regions."""
+    settings = live_settings(arguments)
     return sorted({platform.name for platform in getattr(arguments, "unit_platforms", {}).values()} or
-                  set(getattr(arguments, "platform_regions", {})))
+                  set(settings["platform_regions"] if settings else ()))
 
 
 def campaign_regions(arguments):
@@ -420,15 +392,12 @@ def campaign_regions(arguments):
 
 
 def execution_policy(arguments):
-    """What a restart must repeat. Launch regions, purchase, and the hosts the phase may hold are not part of it:
-    each result records its host's region and market, so a restarted phase may move to other regions or buy
-    differently, and its share of the hosts follows the work every phase has left."""
-    return {"spot_vcpu_reserve": getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE),
-            "release_version": getattr(arguments, "release_version", ""),
+    """What a restart must repeat. None of the campaign's settings are part of it: each result records its host's
+    region and market, so a phase may move to other regions or buy differently, and its share of the hosts follows
+    the work every phase has left."""
+    return {"release_version": getattr(arguments, "release_version", ""),
             "smoke_protocol": getattr(arguments, "smoke_protocol", "smoke"),
             "phase_timeout_seconds": getattr(arguments, "topology_deadline_seconds", None),
-            "fleet_budget": str(arguments.shared_budget.policy_path) if getattr(arguments, "shared_budget", None) else None,
-            "fleet_policy": arguments.shared_budget.policy if getattr(arguments, "shared_budget", None) else None,
             # Each platform's engine-build manifest SHA-256, or "local" for phases that install no
             # prebuilt engines.
             "engine_builds": getattr(arguments, "engine_build_policy", "local"),
@@ -725,71 +694,57 @@ def pool_shards(items):
 
 
 def validate_configuration(arguments, items, frozen_deadline=None):
-    """Check the campaign's limits and derive the phase's deadline from its work items, or keep the frozen deadline
-    its first start derived, whatever the limits are now."""
+    """Check the phase against the campaign's settings and derive its deadline from its work items at the settings'
+    limits, or keep the frozen deadline its first start derived, whatever the limits are now. A phase planned alone,
+    before its campaign has settings, is checked against no limits."""
     campaign_heap_size(arguments)
     if getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) < 0:
         raise SystemExit("Spot vCPU reserve must not be negative")
-    regions = campaign_regions(arguments)
+    settings = live_settings(arguments)
     amis = getattr(arguments, "regional_amis", None)
     for platform in campaign_platforms(arguments):
         listed = platform_regions(arguments, platform)
-        if len(listed) != len(set(listed)) or not all(re.fullmatch(REGION_PATTERN, region) for region in listed):
-            raise SystemExit(f"{platform} regions must be distinct AWS region names: {listed}")
+        if not listed or not all(re.fullmatch(REGION_PATTERN, region) for region in listed):
+            raise SystemExit(f"{platform} needs launch regions named in the campaign settings' platform_regions: "
+                             f"{listed}")
         # A platform launches only in regions holding its image.
         missing = [region for region in listed if amis is not None and (platform, region) not in amis]
         if missing:
             raise SystemExit(f"platform-regions.tsv has no {platform} AMI for its regions: {missing}")
-    buckets = getattr(arguments, "transfer_buckets", None) or {}
-    if not set(buckets) <= set(regions):
-        raise SystemExit(
-            f"--transfer-bucket names regions the campaign does not allow: {sorted(set(buckets) - set(regions))}")
     prefix = os.environ.get("TRANSFER_PREFIX", "")
-    if buckets and not prefix:
-        raise SystemExit("--transfer-bucket requires TRANSFER_PREFIX")
+    if getattr(arguments, "execute", False) and not prefix:
+        raise SystemExit("launching hosts requires TRANSFER_PREFIX")
     if prefix and (prefix.startswith("/") or prefix.endswith("/") or ".." in prefix or
                    not re.fullmatch(r"[A-Za-z0-9._/-]+", prefix)):
         raise SystemExit(f"TRANSFER_PREFIX must be a safe relative S3 prefix without '..' or a trailing slash: {prefix}")
-    budget = getattr(arguments, "shared_budget", None)
+    if getattr(arguments, "execute", False) and settings is None:
+        raise SystemExit("launching hosts requires the campaign's settings")
     unit_platforms = getattr(arguments, "unit_platforms", {})
     workers = [unit_platforms[pool] for pool in sorted({item.pool for item in items}) if pool in unit_platforms]
-    launchable = {platform.name: platform_regions(arguments, platform.name) for platform in workers}
-    fleet_limits, fleet_vcpus = {}, None
-    if budget:
-        limits = region_limits(budget.policy)
-        fleet_limits = {region: limits[region] for region in regions if region in limits}
-        # A wave fills every allowed region's limit at once.
-        fleet_vcpus = max(1, sum(fleet_limits[region]["max_vcpus"] for region in fleet_limits))
-    if budget and getattr(arguments, "spot_vcpu_reserve", None) != budget.policy["spot_vcpu_reserve"]:
-        raise SystemExit("shared fleet requires a reserve matching its policy")
-    on_demand = set(on_demand_regions(budget.policy)) if budget else set()
-    refused = sorted({platform.name for platform in workers
-                      if purchase_policy(arguments, platform.name) != "spot" and
-                      not on_demand & set(launchable[platform.name])})
-    if budget and refused:
-        raise SystemExit(f"shared fleet allows no On-Demand in a region of {', '.join(refused)}; give the "
-                         "policy an On-Demand allowance in one of its regions, or buy with --purchase PLATFORM=spot")
-    if getattr(arguments, "execute", False) and budget is None:
-        raise SystemExit("launching hosts requires a shared fleet budget; name its policy with --fleet-budget")
-    missing = [region for region in regions if region not in buckets]
-    if getattr(arguments, "execute", False) and missing:
-        # Hosts read every input from a bucket in their own region, uploaded once before launch.
-        raise SystemExit(f"launching hosts requires a shared transfer bucket in every allowed region; name one for "
-                         f"{missing} with --transfer-bucket REGION=BUCKET, created as aws/README.md \"Launch "
-                         "regions\" describes")
     validate_campaign_id(arguments.campaign_id)
-    if type(arguments.max_concurrent) is not int or arguments.max_concurrent < 1:
-        raise SystemExit("max concurrency must be a positive integer")
-    per_platform = getattr(arguments, 'max_concurrent_per_platform', DEFAULT_MAX_CONCURRENT)
-    if type(per_platform) is not int or per_platform < 1:
-        raise SystemExit("per-platform concurrency must be a positive integer")
     if arguments.phase == "primary" and not items:
         raise SystemExit("primary campaign has no work items")
-    host_limit = min(arguments.max_concurrent, budget.policy["max_hosts"]) if budget else arguments.max_concurrent
-    if budget and any(platform.vcpus > max((fleet_limits[region]["max_vcpus"] for region in launchable[platform.name]
-                                            if region in fleet_limits), default=0) for platform in workers):
-        raise SystemExit("shared fleet vCPU limit cannot admit every worker type")
-    required_seconds = unit_phase_seconds(arguments, items, host_limit, per_platform, fleet_vcpus)
+    required_seconds = 0
+    if settings:
+        launchable = {platform.name: platform_regions(arguments, platform.name) for platform in workers}
+        unpriced = sorted({platform.instance_type for platform in workers} - set(settings["hourly_rates"]))
+        if unpriced:
+            raise SystemExit(f"the campaign settings' hourly_rates price no {', '.join(unpriced)} hour")
+        on_demand = set(on_demand_regions(settings))
+        refused = sorted({platform.name for platform in workers
+                          if purchase_policy(arguments, platform.name) != "spot" and
+                          not on_demand & set(launchable[platform.name])})
+        if refused:
+            raise SystemExit(f"the campaign settings allow no On-Demand in a region of {', '.join(refused)}; give "
+                             "one of its regions an On-Demand allowance, or set its purchase to spot")
+        regions = settings["regions"]
+        if any(platform.vcpus > max(regions[region]["max_vcpus"] for region in launchable[platform.name])
+               for platform in workers):
+            raise SystemExit("the campaign settings' vCPU limits cannot admit every worker type")
+        # A wave fills every allowed region's limit at once.
+        fleet_vcpus = sum(regions[region]["max_vcpus"] for region in campaign_regions(arguments))
+        required_seconds = unit_phase_seconds(arguments, items, settings["max_hosts"],
+                                              settings["max_hosts_per_platform"], fleet_vcpus)
     explicit_deadline = getattr(arguments, "phase_timeout_seconds", None)
     if frozen_deadline is not None:
         arguments.topology_deadline_seconds = frozen_deadline
@@ -826,7 +781,6 @@ def validate_durable_paths(root, arguments, result_root):
     paths = (
         ("result root", result_root),
         ("campaign root", getattr(arguments, "campaign_root", None)),
-        ("shared fleet policy", getattr(arguments, "fleet_budget", None)),
         ("engine builds", getattr(arguments, "engine_builds", None)),
     )
     for label, path in paths:
@@ -1340,10 +1294,7 @@ def validate_aws(arguments, platforms, jobs=None):
     regions = list(dict.fromkeys(campaign_regions(arguments) + [
         region for platform in required_platforms for region in platform_regions(arguments, platform.name)]))
     aws = arguments.cloud
-    account = aws.account(regions[0])
-    budget = getattr(arguments, "shared_budget", None)
-    if budget and (account != budget.policy["account"] or not set(regions) <= set(region_limits(budget.policy))):
-        raise SystemExit("AWS account or region differs from the shared fleet policy")
+    settings = live_settings(arguments)
     # Every worker runs under the account's permanent worker profile, which the controller never creates.
     if not aws.instance_profile(regions[0], WORKER_PROFILE):
         raise SystemExit(f"the account has no {WORKER_PROFILE} instance profile; create it as aws/README.md "
@@ -1359,22 +1310,20 @@ def validate_aws(arguments, platforms, jobs=None):
         if not public_zones[region]:
             raise SystemExit(f"allowed region {region} has no public default-VPC subnet")
         spot_quota, on_demand_quota = vcpu_quota(arguments, region, "spot"), vcpu_quota(arguments, region, "on-demand")
-        if budget:
-            limits = region_limits(budget.policy)[region]
-            if limits["max_vcpus"] > spot_quota - limits["spot_vcpu_reserve"]:
-                raise SystemExit(
-                    f"shared fleet max_vcpus exceeds the Standard Spot quota after its reserve in {region}")
-            # A region without an On-Demand allowance never launches On-Demand, whatever its quota.
-            if ("on_demand_max_vcpus" in limits and
-                    limits["on_demand_max_vcpus"] > on_demand_quota - ON_DEMAND_VCPU_SAFETY_RESERVE):
-                raise SystemExit(
-                    f"shared fleet on_demand_max_vcpus exceeds the Standard On-Demand quota after its reserve in {region}")
+        limits = settings["regions"][region]
+        if limits["max_vcpus"] > spot_quota - arguments.spot_vcpu_reserve:
+            raise SystemExit(f"the campaign settings' max_vcpus exceeds the Standard Spot quota after its reserve in "
+                             f"{region}")
+        # A region without an On-Demand allowance never launches On-Demand, whatever its quota.
+        if ("on_demand_max_vcpus" in limits and
+                limits["on_demand_max_vcpus"] > on_demand_quota - ON_DEMAND_VCPU_SAFETY_RESERVE):
+            raise SystemExit(f"the campaign settings' on_demand_max_vcpus exceeds the Standard On-Demand quota after "
+                             f"its reserve in {region}")
         spot_quotas[region], on_demand_quotas[region] = spot_quota, on_demand_quota
     # Each platform needs room for one host, after the safety reserves, in a region of its list in a market it buys.
     for platform in required_platforms:
         listed = platform_regions(arguments, platform.name)
-        spot = any(spot_quotas[region] >= getattr(arguments, "spot_vcpu_reserve", SPOT_VCPU_SAFETY_RESERVE) +
-                   platform.vcpus for region in listed)
+        spot = any(spot_quotas[region] >= arguments.spot_vcpu_reserve + platform.vcpus for region in listed)
         on_demand = any(on_demand_quotas[region] >= ON_DEMAND_VCPU_SAFETY_RESERVE + platform.vcpus for region in listed)
         purchase = purchase_policy(arguments, platform.name)
         quotas = "; ".join(f"{region}: spot={spot_quotas[region]:g}, on-demand={on_demand_quotas[region]:g}"
@@ -1418,7 +1367,8 @@ def validate_aws(arguments, platforms, jobs=None):
         if not offered:
             raise SystemExit(f"{platform.instance_type} is not offered in any region of {platform.name}'s list")
         offerings[platform.instance_type] = offered
-    for region, bucket in getattr(arguments, "transfer_buckets", {}).items():
+    for region in regions:
+        bucket = region_bucket(arguments, region)
         info = aws.bucket(region, bucket)
         if info.region != region or info.tags.get("Project") != "regulator-benchmark":
             raise SystemExit(f"shared transfer bucket {bucket} is not a tagged Project=regulator-benchmark "
@@ -1520,11 +1470,11 @@ def stage_jdks(arguments, jobs):
 
 def upload_shared_archives(arguments, uploads):
     """Put each content-addressed archive, {(region, key): (path, sha256, label)}, in its region's transfer bucket."""
-    buckets = arguments.transfer_buckets
     for (region, key), (path, sha256, label) in sorted(uploads.items()):
+        bucket = region_bucket(arguments, region)
         for attempt in range(1, SHARED_ARCHIVE_UPLOAD_ATTEMPTS + 1):
             try:
-                existing = arguments.cloud.head_sha256(region, buckets[region], key)
+                existing = arguments.cloud.head_sha256(region, bucket, key)
             except CloudError:
                 existing = None
             if existing == sha256:
@@ -1532,25 +1482,25 @@ def upload_shared_archives(arguments, uploads):
             print(f"uploading {label} to {region} (attempt {attempt})", flush=True)
             try:
                 # A single PUT keeps S3's checksum the whole-object SHA-256, which S3 verifies on upload.
-                arguments.cloud.put(region, buckets[region], key, path, sha256=sha256)
+                arguments.cloud.put(region, bucket, key, path, sha256=sha256)
                 break
             except CloudError as error:
                 if attempt == SHARED_ARCHIVE_UPLOAD_ATTEMPTS:
-                    raise SystemExit(f"could not upload the {label} to s3://{buckets[region]}/{key}: {error}") from error
+                    raise SystemExit(f"could not upload the {label} to s3://{bucket}/{key}: {error}") from error
 
 
 def spot_placement_scores(arguments, instance_type, regions):
     """Return each region's 1-10 Spot placement score, or None when AWS cannot say."""
     if not hasattr(arguments, "placement_scores"):
         arguments.placement_scores = {}
-    key = (instance_type, tuple(regions))
+    # A target the limits set keeps every query the same configuration while they hold.
+    settings = live_settings(arguments)
+    target = min(PLACEMENT_SCORE_MAXIMUM_TARGET, settings["max_hosts"], settings["max_hosts_per_platform"])
+    key = (instance_type, tuple(regions), target)
     cached = arguments.placement_scores.get(key)
     now = time.monotonic()
     if cached is not None and now - cached[0] < PLACEMENT_SCORE_CACHE_SECONDS:
         return cached[1]
-    # A campaign-constant target keeps every query the same configuration.
-    target = min(PLACEMENT_SCORE_MAXIMUM_TARGET, arguments.max_concurrent,
-                 getattr(arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT))
     try:
         scores = {region: score for region, score in
                   arguments.cloud.placement_scores(instance_type, regions, target).items()
@@ -1723,7 +1673,7 @@ def worker_session(campaign_id, job):
 
 def worker_metadata(arguments, job, session, prefix):
     """Where a worker's host exchanges leases and results: its session's prefix in its region's shared bucket."""
-    return {"session": session, "aws_region": job.region, "bucket": arguments.transfer_buckets[job.region],
+    return {"session": session, "aws_region": job.region, "bucket": region_bucket(arguments, job.region),
             "prefix": prefix, "input_prefix": f"{prefix}/input", "result_prefix": f"{prefix}/results",
             "placement_score": job.placement_score, "instance_id": "", "availability_zone": ""}
 
@@ -1859,8 +1809,7 @@ def launch_requests(arguments, job, metadata):
     tags = {"Name": f"re2-qualification-{job.platform.architecture}-{session}", "Project": "re2-port-benchmark",
             "BaselineCampaign": arguments.campaign_id, "Phase": arguments.phase, "Platform": job.platform.name,
             "Shard": job.shard, "Replica": str(job.replica), "HostEpoch": str(job.host_epoch), "Session": session}
-    max_price = (str(arguments.shared_budget.policy["hourly_rates"][instance_type]["spot"])
-                 if job.market == "spot" else "")
+    max_price = str(live_settings(arguments)["hourly_rates"][instance_type]["spot"]) if job.market == "spot" else ""
     first = int(hashlib.sha256(job.logical_identity.encode()).hexdigest(), 16) % len(subnets)
     # Each zone has its own token, since a token names one exact request.
     return [(zone, cloud.LaunchSpec(ami, instance_type, root_device, subnet, network.security_group, WORKER_PROFILE,
@@ -2306,7 +2255,7 @@ def admit_launch(arguments, result_root, attempts_path, capacity_waits, candidat
         if (candidate.identity, reason) not in capacity_waits:
             capacity_waits.add((candidate.identity, reason))
             write_attempt(attempts_path, candidate, "queued-capacity", reason)
-        if reason != "fleet quota or pending-launch limit" or candidate.platform.vcpus == 2:
+        if reason != "fleet quota" or candidate.platform.vcpus == 2:
             return candidate, now + CAPACITY_RETRY_SECONDS, False, False, None
         return candidate, now + CAPACITY_RETRY_SECONDS, False, True, candidate.platform.vcpus
     return candidate, ready_at, True, False, None
@@ -2518,7 +2467,6 @@ class UnitDispatcher:
         self.budget = getattr(arguments, "shared_budget", None)
         # Each region's fleet as this loop described it, once, when the loop first needed it.
         self.observed = {}
-        self.purchases = {pool: purchase_policy(arguments, platform.name) for pool, platform in self.platforms.items()}
         self.attempts_path = result_root / "job-attempts.tsv"
         self.leases_path = result_root / "unit-attempts.tsv"
         self.workers_path = result_root / "unit-workers.tsv"
@@ -2596,15 +2544,19 @@ class UnitDispatcher:
         return [item for open_items in (self.open.values() if pool is None else [self.open[pool]])
                 for identity, item in open_items.items() if identity not in self.unresolved and identity not in self.held]
 
+    def purchase(self, pool):
+        """How the pool's workers buy capacity, as the settings say now."""
+        return purchase_policy(self.arguments, self.platforms[pool].name)
+
     def on_demand_only(self, item):
         """Whether only On-Demand hosts may take the item, unless its pool's platform buys only Spot: a Spot
         interruption stopped it before any group of the lease was accepted, or its longest remaining group outlasts
         the 15-minute budget, which would risk more Spot interruptions than it can absorb."""
-        return self.purchases[item.pool] != "spot" and (item.identity in self.interrupted or max(
+        return self.purchase(item.pool) != "spot" and (item.identity in self.interrupted or max(
             (seconds for _, seconds in self.remaining(item)), default=0) > work_units.UNIT_SECONDS)
 
     def on_demand(self, item):
-        purchase = self.purchases[item.pool]
+        purchase = self.purchase(item.pool)
         return purchase == "on-demand" or self.on_demand_only(item) or (purchase != "spot" and item.pool in self.tail)
 
     def pool_workers(self, pool):
@@ -3234,7 +3186,7 @@ class UnitDispatcher:
 
     def spot_waited(self, pool, now):
         """Whether a spot-then-on-demand pool has been short of Spot capacity for its whole bounded wait."""
-        return (self.purchases[pool] == "spot-then-on-demand" and pool in self.spot_shortages and
+        return (self.purchase(pool) == "spot-then-on-demand" and pool in self.spot_shortages and
                 now - self.spot_shortages[pool] >= SPOT_SHORTAGE_WAIT_SECONDS)
 
     def release_slot(self, job, slot, failures, started, status, classification, detail, terminated=False):
@@ -3404,7 +3356,7 @@ class UnitDispatcher:
         """Keep the worker's next lease issued one ahead of its current one, or stop it; the loop then writes them. A
         worker is leased as it launches, before its instance exists, and again once it reports; until then it keeps
         the leases it was launched with."""
-        if (worker.open() and worker.job.market == "spot" and self.purchases[worker.pool] != "spot" and
+        if (worker.open() and worker.job.market == "spot" and self.purchase(worker.pool) != "spot" and
                 worker.pool in self.tail and
                 self.retired.get(worker.pool, 0) < self.tail_on_demand.get(worker.pool, 0)):
             # A tail Spot worker retires once an On-Demand worker admitted in the tail replaces it.
@@ -3456,8 +3408,9 @@ class UnitDispatcher:
         platform = self.platforms[pool].name
         holding = self.holding()
         if self.share is None:
-            per_platform = getattr(self.arguments, "max_concurrent_per_platform", DEFAULT_MAX_CONCURRENT)
-            room = min(self.arguments.max_concurrent - sum(holding.values()), per_platform - holding[platform])
+            settings = live_settings(self.arguments)
+            room = min(settings["max_hosts"] - sum(holding.values()),
+                       settings["max_hosts_per_platform"] - holding[platform])
         else:
             room = self.share.get(platform, 0) - holding[platform]
         return max(0, min(room, self.boot_room))
@@ -3482,7 +3435,7 @@ class UnitDispatcher:
         Its Spot workers keep taking tail items until an On-Demand worker admitted in the tail replaces them.
         """
         for pool in self.pools:
-            if self.purchases[pool] != "spot-then-on-demand":
+            if self.purchase(pool) != "spot-then-on-demand":
                 continue
             remaining = sum(self.remaining_seconds(item) for identity, item in self.open[pool].items()
                             if identity not in self.unresolved)
@@ -3539,7 +3492,7 @@ class UnitDispatcher:
                 return "on-demand"
             return "spot" if late else None
         # While On-Demand admission is refused, Spot workers take every item Spot may still run.
-        return "spot" if self.purchases[pool] != "on-demand" and any(
+        return "spot" if self.purchase(pool) != "on-demand" and any(
             not self.on_demand_only(item) for item in late) else None
 
     def candidate(self, pool, market):
@@ -3972,12 +3925,16 @@ class Campaign:
             vars(arguments).setdefault(cache, {})
         # The phase whose dispatch the loop is running.
         self.stepping = None
+        # Each phase's state as the settings last recorded it.
+        self.recorded = {}
 
     def run(self):
         """Run every step that can run; returns the steps that failed."""
         try:
             while True:
+                self.reload()
                 self.advance()
+                self.record()
                 running = [phase for phase in self.phases.values() if phase.state == "running"]
                 if not running and not any(phase.state == "starting" for phase in self.phases.values()):
                     break
@@ -3997,6 +3954,35 @@ class Campaign:
             for pool in (self.setup, self.reductions, *self.arguments.pools):
                 pool.shutdown(cancel_futures=True)
         return [phase for phase in self.phases.values() if phase.state == "failed"]
+
+    def reload(self):
+        """Read the settings as they stand now, or keep the last good ones while the file does not validate."""
+        settings = self.arguments.settings
+        try:
+            settings.reload()
+        except SettingsError as error:
+            print(f"keeping campaign settings version {settings.current['version']}: {error}", flush=True)
+
+    def record(self):
+        """Record in the settings each phase whose state changed since the settings last recorded it, one starting as
+        running, or while the file does not validate, try again next loop. A reduction holds no hosts, so the
+        settings never name it."""
+        states = {phase.key: "running" if phase.state == "starting" else phase.state
+                  for phase in self.phases.values() if not phase.reduction}
+        changed = {key: state for key, state in states.items() if self.recorded.get(key) != state}
+        if not changed:
+            return
+
+        def update(settings):
+            for key, state in changed.items():
+                settings["phases"].setdefault(key, {"state": "pending", "share": "auto"})["state"] = state
+
+        try:
+            self.arguments.settings.change("controller",
+                                           "; ".join(f"{key} {state}" for key, state in changed.items()), update)
+        except SettingsError:
+            return
+        self.recorded.update(changed)
 
     def advance(self):
         """Adopt each phase whose setup finished, recovering its dispatch from its ledgers, settle each finished
@@ -4032,7 +4018,8 @@ class Campaign:
     def assign_shares(self, running):
         """Give each running phase its share of each platform's hosts: the hosts it holds, and whatever the limits
         leave free toward the target its work left gives it."""
-        limits = self.arguments.max_concurrent, self.arguments.max_concurrent_per_platform
+        settings = live_settings(self.arguments)
+        limits = settings["max_hosts"], settings["max_hosts_per_platform"]
         targets = allocate({phase.key: phase.dispatcher.demand() for phase in running}, *limits)
         held = {phase.key: phase.dispatcher.holding() for phase in running}
         free = limits[0] - sum(sum(counts.values()) for counts in held.values())
@@ -4099,10 +4086,33 @@ def refuse_old_root(campaign_root):
                          "controller cannot resume it, so start a new campaign root")
 
 
+def load_settings(arguments):
+    """The campaign's settings: those its root holds, or on its first execution, the ones --settings names as their
+    version 1. A restart keeps the root's whatever --settings names, so the command that started the campaign restarts
+    it."""
+    path = arguments.campaign_root / CAMPAIGN_SETTINGS
+    try:
+        if path.is_file():
+            if arguments.settings is not None:
+                print(f"the campaign runs under its own settings, {path}; {arguments.settings} goes unread", flush=True)
+            return CampaignSettings(arguments.campaign_root)
+        try:
+            given = json.loads(arguments.settings.read_text())
+        except (OSError, ValueError) as error:
+            raise SystemExit(f"cannot read the campaign settings {arguments.settings}: {error}") from error
+        return CampaignSettings.seed(arguments.campaign_root, given)
+    except SettingsError as error:
+        raise SystemExit(str(error)) from error
+
+
 def check_campaign_options(arguments):
-    """Record the options that decide what the campaign's phases measure, or refuse a restart that changes them: the
-    restart skips each completed phase, so it would measure nothing under the new options."""
+    """Record the options that decide what the campaign's phases measure, and the AWS account its settings' buckets
+    are in, or refuse a restart that changes them: the restart skips each completed phase, so it would measure
+    nothing under the new options."""
     options = json.dumps({
+        "account": arguments.cloud.account(next(iter(live_settings(arguments)["regions"]))),
+        "spot_vcpu_reserve": arguments.spot_vcpu_reserve,
+        "phase_timeout_seconds": arguments.phase_timeout_seconds,
         "selected_shards": sorted(arguments.selected_shards) if arguments.selected_shards else None,
         "smoke_protocol": arguments.smoke_protocol,
         "release_version": arguments.release_version,
@@ -4130,18 +4140,12 @@ def run_campaign(arguments, root):
     """Freeze every candidate, then run every candidate's phases in this process, side by side."""
     if not arguments.candidates:
         raise SystemExit("a campaign requires at least one --candidate NAME=COMMITISH")
-    if arguments.execute and arguments.fleet_budget is None:
-        raise SystemExit("launching hosts requires a shared fleet budget; name its policy with --fleet-budget")
     given = [option for option, value in (("--smoke-results", arguments.smoke_results),
                                           ("--primary-results", arguments.primary_results),
                                           ("--confirmation-jobs", arguments.confirmation_jobs),
                                           ("--engine-builds", arguments.engine_builds)) if value is not None]
     if given:
         raise SystemExit(f"a campaign passes each phase its prerequisites itself; it takes no {', '.join(given)}")
-    for option, limit in (("--max-concurrent", arguments.max_concurrent),
-                          ("--max-concurrent-per-platform", arguments.max_concurrent_per_platform)):
-        if limit < 1:
-            raise SystemExit(f"{option} must be a positive number of hosts")
     # Each candidate's phases, and its language phases, reserve the fleet and number their hosts under their own
     # campaign ID.
     names = {}
@@ -4167,7 +4171,11 @@ def run_campaign(arguments, root):
                   f"{candidate_campaign_id(arguments.campaign, name)}, results {arguments.campaign_root / name}")
         return
     refuse_old_root(arguments.campaign_root)
+    if arguments.settings is None and not (arguments.campaign_root / CAMPAIGN_SETTINGS).is_file():
+        raise SystemExit("a campaign's first execution seeds its settings; name them with --settings FILE")
     with controller_lock(arguments.campaign_root):
+        arguments.settings = load_settings(arguments)
+        arguments.shared_budget = FleetBudget(arguments.campaign_root, arguments.settings, arguments.spot_vcpu_reserve)
         candidates = [freeze_candidate(root, arguments.campaign_root, arguments.campaign, name, commitish)
                       for name, commitish in arguments.candidates]
         check_campaign_candidates(arguments.campaign_root, [candidate.row for candidate in candidates])
@@ -4234,10 +4242,10 @@ def phase_progress(root, snapshot, live):
                            finish=finish_seconds(pools, hosts) if live and snapshot else None)
 
 
-def phase_status(label, root, now, fleets, controller, zone=None):
+def phase_status(label, root, now, fleets, controller, zone=None, campaign_root=None):
     """A unit phase's lines for the status command, read from its ledgers and its controller's latest snapshot, given
-    the process ID of its campaign's live controller, or None. fleets holds each fleet policy's spend_by_owner, so
-    the phases sharing a fleet read its state once."""
+    the process ID of its campaign's live controller, or None, and its campaign root, if any. fleets holds each fleet
+    state's spend_by_owner, so the phases sharing a fleet read its state once."""
     live = False
     if (root / PHASE_COMPLETE).is_file():
         state = "complete"
@@ -4276,15 +4284,16 @@ def phase_status(label, root, now, fleets, controller, zone=None):
             members = [worker for worker in workers
                        if (worker["platform"], worker["instance_type"], worker["region"], worker["market"]) == key]
             line("", f"{' '.join(key)}: {counts(members)}")
+    # The fleet's state is at the campaign root, or for an old root's phase, beside the fleet policy it names.
     policy_path = root / "execution-policy.json"
-    budget = json.loads(policy_path.read_text()).get("fleet_budget") if policy_path.is_file() else None
-    if budget and budget not in fleets:
-        fleets[budget] = spend_by_owner(budget, now)
-    if budget and fleets[budget] is not None:
-        spent, reserved = fleets[budget].get(str(root.resolve()), (0.0, 0.0))
+    policy = json.loads(policy_path.read_text()).get("fleet_budget") if policy_path.is_file() else None
+    state = (Path(policy).with_name(STATE_FILE) if policy else
+             campaign_root / STATE_FILE if campaign_root else None)
+    if state and state not in fleets:
+        fleets[state] = spend_by_owner(state, now)
+    if state and fleets[state] is not None:
+        spent, reserved = fleets[state].get(str(root.resolve()), (0.0, 0.0))
         line("spend", f"${spent:.2f} so far, ${reserved:.2f} reserved")
-    elif budget is None and policy_path.is_file():
-        line("spend", "no fleet budget")
     if live and any(left.items for left in phase.pools.values()):
         line("finish", "unknown; no worker runs" if phase.finish is None else clock_time(now + phase.finish, now, zone))
     boot = [float(match.group(1)) for row in read_attempts(root / "job-attempts.tsv")
@@ -4325,7 +4334,7 @@ def campaign_status(root, now=None, zone=None):
     now = time.time() if now is None else now
     if (phase := phase_root(root)) is not None:
         controller = controller_process(phase[2]) if phase[2] else None
-        return [f"phase {root}", *phase_status(phase[1], root, now, {}, controller, zone)]
+        return [f"phase {root}", *phase_status(phase[1], root, now, {}, controller, zone, phase[2])]
     phases = campaign_phases(root)
     controller = controller_process(root)
     lines = [f"campaign {root}: " + (f"controller running as process {controller}" if controller else
@@ -4335,7 +4344,7 @@ def campaign_status(root, now=None, zone=None):
         lines.append(f"candidate {candidate['name']} at {candidate['commit'][:12]}")
         for name, label, directory in phases:
             if name == candidate["name"]:
-                lines.extend(phase_status(label, directory, now, fleets, controller, zone))
+                lines.extend(phase_status(label, directory, now, fleets, controller, zone, root))
     return lines
 
 
@@ -4521,24 +4530,21 @@ def main():
         return
     arguments = parse_args()
     arguments.cloud = cloud.AwsCloud()
-    if arguments.fleet_budget:
-        arguments.shared_budget = FleetBudget(arguments.fleet_budget)
-    directory = Path(__file__).resolve().parent
     root = REPOSITORY
     arguments.candidates = parse_candidates(arguments.candidate_values)
     arguments.campaign_root = (arguments.campaign_root or
                                root / "benchmark-results" / "pre-review-baseline" / arguments.campaign).absolute()
-    platforms = read_platforms(directory)
-    parse_launch_options(arguments, platforms)
-    arguments.transfer_buckets = parse_transfer_buckets(arguments.transfer_bucket)
     if arguments.phase == "campaign":
         run_campaign(arguments, root)
         return
     if arguments.execute:
         raise SystemExit(f"a phase runs only inside its campaign's controller; run {Path(__file__).name} campaign "
                          f"{arguments.campaign} --execute with the phase's candidate")
+    # A phase planned alone plans under its campaign's settings once the campaign has some.
+    arguments.settings = (CampaignSettings(arguments.campaign_root)
+                          if (arguments.campaign_root / CAMPAIGN_SETTINGS).is_file() else None)
     items, *_ = plan_phase(arguments, root)
-    print(f"planned {len(items)} work items with maximum concurrency {arguments.max_concurrent}")
+    print(f"planned {len(items)} work items")
     print(f"work item manifest: {arguments.result_root / 'work-items.tsv'}")
 
 
