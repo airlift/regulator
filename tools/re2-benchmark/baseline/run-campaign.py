@@ -3417,11 +3417,16 @@ class UnitDispatcher:
             worker.unsent.discard(sequence)
 
     def next_item(self, worker, queued=None, units=None):
-        """The eligible queued item to lease next: On-Demand work first, then the longest remaining. An item
-        is never a unit this host already held, nor one on an instance that measured any group of any replica
-        of its unit or that its confirmation excludes, and On-Demand-only items go to On-Demand hosts;
+        """The eligible queued item to lease next: On-Demand work first, then the lowest replica, then the longest
+        remaining. An item is never a unit this host already held, nor one on an instance that measured any group
+        of any replica of its unit or that its confirmation excludes, and On-Demand-only items go to On-Demand hosts;
         On-Demand hosts also take the rest. A projection passes the items still queued in it and the units the
-        worker would hold by then."""
+        worker would hold by then.
+
+        Taking the lowest replica first gives a first reading of every unit as early as possible. On-Demand work
+        still comes first: only an On-Demand host may take an On-Demand-only item, and the pool launched the host for
+        it, so taking a later replica's Spot work first would buy another On-Demand host for the item. A Spot host's
+        eligible items, and a tail pool's, are all On-Demand work or all not, so for them the replica decides."""
         used = {}
         for groups in self.accepted.values():
             for receipt in groups.values():
@@ -3434,8 +3439,8 @@ class UnitDispatcher:
             if item.unit_id not in units and worker.instance_id not in item.excluded_instances and
             worker.instance_id not in used.get((item.platform, item.unit_id), ()) and
             (on_demand_worker or not self.on_demand_only(item))]
-        return min(candidates, key=lambda item: (not self.on_demand(item), -self.remaining_seconds(item),
-                                                 item.identity), default=None)
+        return min(candidates, key=lambda item: (not self.on_demand(item), item.replica,
+                                                 -self.remaining_seconds(item), item.identity), default=None)
 
     def lease(self, worker):
         """Keep the worker's next lease written one ahead of its current one, or stop it."""
