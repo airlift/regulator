@@ -6,11 +6,8 @@
       "Effect": "Allow",
       "Action": "s3:GetObject",
       "Resource": [
-        "arn:aws:s3:::regulator-benchmark-938463256137-*/*/input/*",
-        "arn:aws:s3:::regulator-benchmark-938463256137-*/*/candidates/*",
-        "arn:aws:s3:::regulator-benchmark-938463256137-*/*/jdks/*",
-        "arn:aws:s3:::regulator-benchmark-938463256137-*/*/engine-builds/*",
-        "arn:aws:s3:::regulator-benchmark-938463256137-*/*/language-plans/*"
+        "arn:aws:s3:::regulator-benchmark-938463256137-*/campaigns/*/input/*",
+        "arn:aws:s3:::regulator-benchmark-938463256137-*/shared/*"
       ]
     },
     {
@@ -18,8 +15,8 @@
       "Effect": "Allow",
       "Action": "s3:PutObject",
       "Resource": [
-        "arn:aws:s3:::regulator-benchmark-938463256137-*/*/results/*",
-        "arn:aws:s3:::regulator-benchmark-938463256137-*/*/input/leases/*"
+        "arn:aws:s3:::regulator-benchmark-938463256137-*/campaigns/*/results/*",
+        "arn:aws:s3:::regulator-benchmark-938463256137-*/campaigns/*/input/leases/*"
       ]
     },
     {
@@ -27,7 +24,7 @@
       "Effect": "Allow",
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::regulator-benchmark-938463256137-*",
-      "Condition": {"StringLike": {"s3:prefix": "*/input/leases/*"}}
+      "Condition": {"StringLike": {"s3:prefix": "campaigns/*/input/leases/*"}}
     }
   ]
 }

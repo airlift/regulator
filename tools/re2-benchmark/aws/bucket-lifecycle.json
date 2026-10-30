@@ -1,13 +1,29 @@
 {
   "Rules": [
     {
-      "ID": "ExpireCampaignArtifacts",
+      "ID": "ExpireSharedArchives",
       "Status": "Enabled",
       "Filter": {
-        "Prefix": ""
+        "Prefix": "shared/"
+      },
+      "Expiration": {
+        "Days": 7
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 1
+      }
+    },
+    {
+      "ID": "ExpireCampaignSessions",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "campaigns/"
       },
       "Expiration": {
         "Days": 1
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 1
       }
     }
   ]

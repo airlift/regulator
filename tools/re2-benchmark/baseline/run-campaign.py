@@ -171,6 +171,12 @@ JDK_DOWNLOAD_MINIMUM_RATE = 256 * 1024
 # A shared archive upload that fails, a part stalled past the SDK's read timeout among the causes, is retried rather
 # than left to hold every launch behind it.
 SHARED_ARCHIVE_UPLOAD_ATTEMPTS = 3
+# Each shared bucket keeps every campaign's content-addressed archives under this prefix, which its lifecycle rule
+# expires seven days after upload, and each campaign's host sessions under campaigns/<campaign>, which it expires
+# after one day. A phase, or a region added to the campaign, puts an archive again once it is older than this, so it
+# outlives the phase.
+SHARED_PREFIX = "shared"
+SHARED_ARCHIVE_REFRESH_SECONDS = 5 * 24 * 60 * 60
 # Every archive the campaign has put in its regions' shared buckets, by key, in the campaign root, so a region added
 # later gets each one before any phase may launch there.
 SHARED_ARCHIVES = "shared-archives.tsv"
@@ -723,12 +729,6 @@ def validate_configuration(arguments, items, frozen_deadline=None):
         missing = [region for region in listed if amis is not None and (platform, region) not in amis]
         if missing:
             raise SystemExit(f"platform-regions.tsv has no {platform} AMI for its regions: {missing}")
-    prefix = os.environ.get("TRANSFER_PREFIX", "")
-    if getattr(arguments, "execute", False) and not prefix:
-        raise SystemExit("launching hosts requires TRANSFER_PREFIX")
-    if prefix and (prefix.startswith("/") or prefix.endswith("/") or ".." in prefix or
-                   not re.fullmatch(r"[A-Za-z0-9._/-]+", prefix)):
-        raise SystemExit(f"TRANSFER_PREFIX must be a safe relative S3 prefix without '..' or a trailing slash: {prefix}")
     if getattr(arguments, "execute", False) and settings is None:
         raise SystemExit("launching hosts requires the campaign's settings")
     unit_platforms = getattr(arguments, "unit_platforms", {})
@@ -1421,7 +1421,7 @@ def upload_candidate_archive(arguments, jobs):
     one, under its SHA-256."""
     sha256 = arguments.candidate_archive_sha256
     upload_shared_archives(arguments, {
-        (region, f"{os.environ['TRANSFER_PREFIX']}/candidates/{sha256}.tar.gz"): (
+        (region, f"{SHARED_PREFIX}/candidates/{sha256}.tar.gz"): (
             arguments.candidate_archive, sha256, "candidate archive")
         for job in jobs for region in launch_regions(arguments, job)})
 
@@ -1435,7 +1435,7 @@ def upload_engine_builds(arguments, jobs):
     for job in jobs:
         for name, archive in engine_archives(arguments, job.platform.name).items():
             for region in launch_regions(arguments, job):
-                uploads[region, f"{os.environ['TRANSFER_PREFIX']}/engine-builds/{archive['sha256']}.tar.zst"] = (
+                uploads[region, f"{SHARED_PREFIX}/engine-builds/{archive['sha256']}.tar.zst"] = (
                     directories[job.platform.name] / archive["file"], archive["sha256"],
                     f"{job.platform.name} {name} archive")
     upload_shared_archives(arguments, uploads)
@@ -1449,7 +1449,7 @@ def upload_language_bundles(arguments, jobs):
     uploads = {(region, provenance[0]): (arguments.candidate_provenance, provenance[1], "candidate provenance")
                for job in jobs for region in launch_regions(arguments, job)}
     upload_shared_archives(arguments, {**uploads, **{
-        (region, f"{os.environ['TRANSFER_PREFIX']}/language-plans/{bundles[shard][1]}.tar.zst"): (
+        (region, f"{SHARED_PREFIX}/language-plans/{bundles[shard][1]}.tar.zst"): (
             bundles[shard][0], bundles[shard][1], f"{shard} language plan bundle")
         for job in jobs for shard in arguments.pool_shards[unit_worker_pool(job)]
         for region in launch_regions(arguments, job)}})
@@ -1458,7 +1458,7 @@ def upload_language_bundles(arguments, jobs):
 def candidate_provenance_key(arguments):
     """The shared key of the language candidate's provenance, and its SHA-256."""
     sha256 = engine_build.sha256_file(arguments.candidate_provenance)
-    return f"{os.environ['TRANSFER_PREFIX']}/candidates/{sha256}.tsv", sha256
+    return f"{SHARED_PREFIX}/candidates/{sha256}.tsv", sha256
 
 
 def jdk_archive(campaign_root, platform):
@@ -1492,7 +1492,7 @@ def stage_jdks(arguments, jobs):
     for job in jobs:
         path = jdk_archive(arguments.campaign_root, job.platform)
         for region in launch_regions(arguments, job):
-            uploads[region, f"{os.environ['TRANSFER_PREFIX']}/jdks/{job.platform.jdk_sha256}.tar.gz"] = (
+            uploads[region, f"{SHARED_PREFIX}/jdks/{job.platform.jdk_sha256}.tar.gz"] = (
                 path, job.platform.jdk_sha256, f"{job.platform.name} JDK")
     upload_shared_archives(arguments, uploads)
 
@@ -1517,13 +1517,14 @@ def read_shared_archives(path):
 
 
 def put_shared_archive(aws, region, bucket, key, path, sha256, label):
-    """Put the archive in the bucket unless it holds it already, as its SHA-256 says."""
+    """Put the archive in the bucket unless it holds it already, as its SHA-256 says, with days to go before its
+    lifecycle rule expires it."""
     for attempt in range(1, SHARED_ARCHIVE_UPLOAD_ATTEMPTS + 1):
         try:
-            existing = aws.head_sha256(region, bucket, key)
+            existing = aws.head(region, bucket, key)
         except CloudError:
             existing = None
-        if existing == sha256:
+        if existing and existing.sha256 == sha256 and existing.age < SHARED_ARCHIVE_REFRESH_SECONDS:
             return
         print(f"uploading {label} to {region} (attempt {attempt})", flush=True)
         try:
@@ -1735,19 +1736,19 @@ def worker_user_data(arguments, job, metadata):
     """The worker's EC2 user data: aws/worker-user-data.sh with every setting it and the host scripts read exported
     after its first line."""
     platform = job.platform
-    prefix = os.environ["TRANSFER_PREFIX"]
     bucket = metadata["bucket"]
-    archives = [("jdk", platform.jdk_sha256, f"{prefix}/jdks/{platform.jdk_sha256}.tar.gz")]
+    archives = [("jdk", platform.jdk_sha256, f"{SHARED_PREFIX}/jdks/{platform.jdk_sha256}.tar.gz")]
     # Only a measuring phase's workers install engine builds.
     manifest = ""
     if getattr(arguments, "engine_build_directories", None):
         manifest = arguments.engine_build_policy[platform.name]
-        archives += [(name, archive["sha256"], f"{prefix}/engine-builds/{archive['sha256']}.tar.zst")
+        archives += [(name, archive["sha256"], f"{SHARED_PREFIX}/engine-builds/{archive['sha256']}.tar.zst")
                      for name, archive in engine_archives(arguments, platform.name).items()]
     provenance = ("", "")
     if bundles := getattr(arguments, "language_bundles", None):
         # A language worker installs the bundles of its pool's plans and the candidate provenance their units measure.
-        archives += [("language-plan", bundles[shard][1], f"{prefix}/language-plans/{bundles[shard][1]}.tar.zst")
+        archives += [("language-plan", bundles[shard][1],
+                      f"{SHARED_PREFIX}/language-plans/{bundles[shard][1]}.tar.zst")
                      for shard in arguments.pool_shards[unit_worker_pool(job)]]
         key, sha256 = candidate_provenance_key(arguments)
         provenance = (f"s3://{bucket}/{key}", sha256)
@@ -1755,7 +1756,7 @@ def worker_user_data(arguments, job, metadata):
     settings = {
         "HOST_STOP_BY": job.stop_by,
         "HOST_ARCHIVE_URI": f"s3://{bucket}/{metadata['result_prefix']}/host.tar.gz",
-        "CANDIDATE_URI": f"s3://{bucket}/{prefix}/candidates/{arguments.candidate_archive_sha256}.tar.gz",
+        "CANDIDATE_URI": f"s3://{bucket}/{SHARED_PREFIX}/candidates/{arguments.candidate_archive_sha256}.tar.gz",
         "LANGUAGE_CANDIDATE_PROVENANCE_URI": provenance[0],
         "LANGUAGE_CANDIDATE_PROVENANCE_SHA256": provenance[1],
         "ENGINE_BUILD_MANIFEST_SHA256": manifest,
@@ -3620,7 +3621,7 @@ class UnitDispatcher:
         validate_frozen_inputs(self.root, self.arguments, self.items_path, self.fingerprint)
         check_purchase(self.arguments, job)
         session = worker_session(self.arguments.campaign_id, job)
-        metadata = worker_metadata(self.arguments, job, session, f"{os.environ['TRANSFER_PREFIX']}/{session}")
+        metadata = worker_metadata(self.arguments, job, session, f"campaigns/{self.arguments.campaign}/{session}")
         # The starting record names the session before the launch, so a restart finds its instance by its tag.
         write_attempt(
             self.attempts_path, job, "starting",

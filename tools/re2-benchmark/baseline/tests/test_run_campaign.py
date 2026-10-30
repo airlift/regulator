@@ -260,7 +260,7 @@ class TestRunCampaign(unittest.TestCase):
                     # Ohio already holds every archive.
                     aws = arguments.cloud = FakeCloud()
                     for name in RUN_CAMPAIGN.engine_build.ARCHIVES:
-                        aws.upload("us-east-2", "east", f"prefix/engine-builds/{archives[name]['sha256']}.tar.zst",
+                        aws.upload("us-east-2", "east", f"shared/engine-builds/{archives[name]['sha256']}.tar.zst",
                                    build / archives[name]["file"], archives[name]["sha256"])
                     puts = []
 
@@ -270,8 +270,7 @@ class TestRunCampaign(unittest.TestCase):
                             raise RUN_CAMPAIGN.CloudError("RequestTimeout")
                         return FakeCloud.upload(aws, region, bucket, key, path, sha256)
 
-                    with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), \
-                            patch.object(aws, "upload", side_effect=upload), contextlib.redirect_stdout(io.StringIO()):
+                    with patch.object(aws, "upload", side_effect=upload), contextlib.redirect_stdout(io.StringIO()):
                         if expected_puts is None:
                             with self.assertRaisesRegex(SystemExit, "could not upload the r8i (classes|trino|native) "
                                                                     "archive to s3://west/"):
@@ -280,9 +279,9 @@ class TestRunCampaign(unittest.TestCase):
                         RUN_CAMPAIGN.upload_engine_builds(arguments, jobs)
                     # Every region but Ohio gets one copy of each archive a baseline unit runs, and the stalled first
                     # upload is retried.
-                    self.assertEqual(sorted([("west", f"prefix/engine-builds/{trino}.tar.zst"),
-                                             ("west", f"prefix/engine-builds/{classes}.tar.zst"),
-                                             ("west", f"prefix/engine-builds/{native}.tar.zst")]), sorted(set(puts)))
+                    self.assertEqual(sorted([("west", f"shared/engine-builds/{trino}.tar.zst"),
+                                             ("west", f"shared/engine-builds/{classes}.tar.zst"),
+                                             ("west", f"shared/engine-builds/{native}.tar.zst")]), sorted(set(puts)))
                     self.assertEqual(expected_puts, len(puts))
                     self.assertEqual({(bucket, key): sha256 for (bucket, key), (_, _, sha256) in aws.objects.items()
                                       if bucket == "west"},
@@ -299,14 +298,19 @@ class TestRunCampaign(unittest.TestCase):
                                        buckets={"us-west-2": "west", "us-east-2": "east"}),
                 candidate_archive=archive, candidate_archive_sha256=sha256, cloud=aws, campaign_root=Path(temporary))
             jobs = [RUN_CAMPAIGN.unit_worker_job(self.platform, ordinal, 10, "spot") for ordinal in range(1, 5)]
-            with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(io.StringIO()):
                 RUN_CAMPAIGN.upload_candidate_archive(arguments, jobs)
                 # A later phase of the campaign finds each copy in place.
                 RUN_CAMPAIGN.upload_candidate_archive(arguments, jobs)
-            key = f"prefix/candidates/{sha256}.tar.gz"
+                self.assertEqual(2, sum(call[0] == "upload" for call in aws.calls))
+                # Five days on, a phase puts each copy again, so the bucket's seven-day rule cannot expire it while
+                # the phase runs.
+                aws.clock += RUN_CAMPAIGN.SHARED_ARCHIVE_REFRESH_SECONDS
+                RUN_CAMPAIGN.upload_candidate_archive(arguments, jobs)
+                self.assertEqual(4, sum(call[0] == "upload" for call in aws.calls))
+            key = f"shared/candidates/{sha256}.tar.gz"
             self.assertEqual({("west", key): sha256, ("east", key): sha256},
                              {name: checksum for name, (_, _, checksum) in aws.objects.items()})
-            self.assertEqual(2, sum(call[0] == "upload" for call in aws.calls))
             # The campaign records it once among its shared archives, for a region added later.
             self.assertEqual([(key, sha256, str(archive))], [
                 (row["key"], row["sha256"], row["path"]) for row in RUN_CAMPAIGN.read_shared_archives(
@@ -651,7 +655,7 @@ class TestRunCampaign(unittest.TestCase):
             archive = root / "candidate.tar.gz"
             archive.write_bytes(b"candidate")
             sha256 = hashlib.sha256(b"candidate").hexdigest()
-            key = f"campaign/candidates/{sha256}.tar.gz"
+            key = f"shared/candidates/{sha256}.tar.gz"
             with contextlib.redirect_stdout(io.StringIO()):
                 RUN_CAMPAIGN.upload_shared_archives(SimpleNamespace(cloud=aws, campaign_root=root, settings=settings),
                                                     {(region, key): (archive, sha256, "candidate archive")})
@@ -963,8 +967,7 @@ class TestRunCampaign(unittest.TestCase):
             RUN_CAMPAIGN.campaign_heap_size(arguments)
         job = replace(RUN_CAMPAIGN.unit_worker_job(platform, 1, 10, market), region="us-west-2", stop_by=1800000045)
         metadata = RUN_CAMPAIGN.worker_metadata(arguments, job, "baseline-e10-20261030T000000Z",
-                                                "campaign/baseline-e10-20261030T000000Z")
-        self.enterContext(patch.dict(os.environ, {"TRANSFER_PREFIX": "campaign"}))
+                                                "campaigns/campaign/baseline-e10-20261030T000000Z")
         return arguments, job, metadata, archives
 
     def worker_user_data(self, root, language):
@@ -986,22 +989,22 @@ class TestRunCampaign(unittest.TestCase):
             with self.subTest(language=language), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 user_data, settings, archives = self.worker_user_data(root, language)
-                bundle_lines = [f"language-plan {sha256} s3://bucket/campaign/language-plans/{sha256}.tar.zst"
+                bundle_lines = [f"language-plan {sha256} s3://bucket/shared/language-plans/{sha256}.tar.zst"
                                 for sha256 in bundles]
                 self.assertEqual(
-                    [f"jdk {'0' * 64} s3://bucket/campaign/jdks/{'0' * 64}.tar.gz",
-                     *(f"{name} {archives[name]['sha256']} s3://bucket/campaign/engine-builds/"
+                    [f"jdk {'0' * 64} s3://bucket/shared/jdks/{'0' * 64}.tar.gz",
+                     *(f"{name} {archives[name]['sha256']} s3://bucket/shared/engine-builds/"
                        f"{archives[name]['sha256']}.tar.zst" for name in expected), *bundle_lines],
                     settings["HOST_ARCHIVES"].splitlines())
                 provenance = hashlib.sha256(b"provenance\n").hexdigest() if language else ""
                 self.assertEqual(
-                    (f"s3://bucket/campaign/candidates/{provenance}.tsv" if language else "", provenance),
+                    (f"s3://bucket/shared/candidates/{provenance}.tsv" if language else "", provenance),
                     (settings["LANGUAGE_CANDIDATE_PROVENANCE_URI"], settings["LANGUAGE_CANDIDATE_PROVENANCE_SHA256"]))
                 self.assertEqual((hashlib.sha256(b"candidate").hexdigest(), "smoke", "d" * 40, "8g"),
                                  tuple(settings[name] for name in (
                                      "REGULATOR_CONTENT_SHA256", "BASELINE_PROTOCOL", "BASELINE_EXPECTED_ENGINE_TREE",
                                      "BENCHMARK_HEAP_SIZE")))
-                self.assertEqual("s3://bucket/campaign/baseline-e10-20261030T000000Z/results/host.tar.gz",
+                self.assertEqual("s3://bucket/campaigns/campaign/baseline-e10-20261030T000000Z/results/host.tar.gz",
                                  settings["HOST_ARCHIVE_URI"])
                 (root / "user-data.sh").write_text(user_data)
                 subprocess.run(["bash", "-n", str(root / "user-data.sh")], check=True)
@@ -1374,17 +1377,9 @@ class TestRunCampaign(unittest.TestCase):
         # A phase planned alone, before its campaign has settings, plans for the default region.
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.execute = True
-        with patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), \
-                self.assertRaisesRegex(SystemExit, "requires the campaign's settings"):
+        with self.assertRaisesRegex(SystemExit, "requires the campaign's settings"):
             RUN_CAMPAIGN.validate_configuration(arguments, items)
         arguments.settings = self.settings(platform_regions={"r8i": ["us-west-2"]}, purchase={"r8i": "spot"})
-        # The controller names every host's prefix under the transfer prefix.
-        for prefix, error in (("", "requires TRANSFER_PREFIX"), ("../another-campaign", "safe relative S3 prefix"),
-                              ("prefix/", "safe relative S3 prefix")):
-            with self.subTest(prefix=prefix), patch.dict(os.environ, {"TRANSFER_PREFIX": prefix}), \
-                    self.assertRaisesRegex(SystemExit, error):
-                RUN_CAMPAIGN.validate_configuration(arguments, items)
-        self.enterContext(patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}))
         RUN_CAMPAIGN.validate_configuration(arguments, items)
         # A campaign runs On-Demand only where its settings allow it.
         arguments.settings.change("dain", "r8i may buy On-Demand", lambda settings: settings["purchase"].clear())
@@ -1550,7 +1545,7 @@ class TestRunCampaign(unittest.TestCase):
             for command, refusal in ((["smoke", "language", *execute], "a phase runs only inside its campaign's"),
                                      (["campaign", "language", *execute], f"owns campaign root {root}")):
                 with self.subTest(refusal=refusal), patch.object(sys, "argv", ["run-campaign.py", *command]), \
-                        patch.dict(os.environ, {"TRANSFER_PREFIX": "prefix"}), RUN_CAMPAIGN.controller_lock(root), \
+                        RUN_CAMPAIGN.controller_lock(root), \
                         patch.object(RUN_CAMPAIGN, "freeze_candidate") as freeze, \
                         patch.object(RUN_CAMPAIGN, "validate_source") as setup, \
                         self.assertRaisesRegex(SystemExit, refusal):
@@ -2715,7 +2710,6 @@ class FakeUnitFleet(FakeCloud):
 
     def stubs(self):
         stack = contextlib.ExitStack()
-        stack.enter_context(patch.dict(os.environ, {"TRANSFER_PREFIX": "campaign"}))
         stack.enter_context(patch.object(RUN_CAMPAIGN, "frozen_input_fingerprint", return_value=None))
         stack.enter_context(patch.object(RUN_CAMPAIGN, "tooling_digest", side_effect=lambda root: self.tooling))
         stack.enter_context(patch.object(RUN_CAMPAIGN.time, "sleep", side_effect=self.sleep))
@@ -2791,7 +2785,7 @@ class TestUnitWorkers(unittest.TestCase):
             budget.report_boots.return_value = BOOT_WINDOW_MAX
         self.budget = budget
         arguments = SimpleNamespace(
-            phase=phase, campaign_id="campaign", campaign_root=root, candidate_archive=root / "candidate.tar.gz",
+            phase=phase, campaign="campaign", campaign_id="campaign", campaign_root=root, candidate_archive=root / "candidate.tar.gz",
             candidate_commit="a" * 40, candidate_archive_sha256="not-recorded", engine_tree="b" * 40, heap_size="8g",
             cloud=fleet, settings=settings, spot_vcpu_reserve=0, shared_budget=budget, selected_shards=shards,
             topology_deadline_seconds=deadline, primary_results=primary_results, release_version=release_version)

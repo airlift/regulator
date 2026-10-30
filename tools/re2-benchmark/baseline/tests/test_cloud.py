@@ -120,7 +120,7 @@ class FakeCloud:
 
     # Seconds of a round trip: an S3 object call is short, an EC2 description longer, and a placement query longer
     # still.
-    COSTS = {"list": 0.05, "get": 0.05, "put": 0.05, "upload": 0.05, "delete": 0.05, "head_sha256": 0.05,
+    COSTS = {"list": 0.05, "get": 0.05, "put": 0.05, "upload": 0.05, "delete": 0.05, "head": 0.05,
              "instances": 0.5, "spot_requests": 0.5, "placement_scores": 1.0, "run_instance": 1.0}
     DEFAULT_COST = 0.2
     # The simulated epoch's start, 2026-10-26 07:33:20 UTC.
@@ -268,9 +268,12 @@ class FakeCloud:
         for key in keys:
             self.objects.pop((bucket, key), None)
 
-    def head_sha256(self, region, bucket, key):
-        self.call("head_sha256", region, bucket, key)
-        return self.objects[bucket, key][2] if (bucket, key) in self.objects else None
+    def head(self, region, bucket, key):
+        self.call("head", region, bucket, key)
+        if (bucket, key) not in self.objects:
+            return None
+        _, modified, sha256 = self.objects[bucket, key]
+        return cloud.ObjectHead(sha256, self.time() - modified)
 
 
 class TestAwsCloud(unittest.TestCase):
@@ -409,7 +412,10 @@ class TestAwsCloud(unittest.TestCase):
         s3.add_response("put_object", {}, {"Bucket": "bucket", "Key": "archive", "Body": ANY,
                                            "Metadata": {"sha256": archive_sha256}, "ChecksumAlgorithm": "SHA256"})
         s3.add_client_error("put_object", "SlowDown", http_status_code=503)
-        s3.add_response("head_object", {"Metadata": {"sha256": archive_sha256}}, {"Bucket": "bucket", "Key": "archive"})
+        # Its age is by S3's clock, the response's date, whatever the controller's clock says.
+        s3.add_response("head_object", {"Metadata": {"sha256": archive_sha256}, "LastModified": modified,
+                                        "ResponseMetadata": {"HTTPHeaders": {"date": "Sat, 31 Oct 2026 00:00:30 GMT"}}},
+                        {"Bucket": "bucket", "Key": "archive"})
         s3.add_client_error("head_object", "404", http_status_code=404)
 
         aws = self.cloud
@@ -427,8 +433,8 @@ class TestAwsCloud(unittest.TestCase):
             aws.upload("us-west-2", "bucket", "archive", path, archive_sha256)
             with self.assertRaisesRegex(CloudError, "SlowDown"):
                 aws.upload("us-west-2", "bucket", "archive", path, archive_sha256)
-            self.assertEqual(archive_sha256, aws.head_sha256("us-west-2", "bucket", "archive"))
-            self.assertIsNone(aws.head_sha256("us-west-2", "bucket", "absent"))
+            self.assertEqual(cloud.ObjectHead(archive_sha256, 86430), aws.head("us-west-2", "bucket", "archive"))
+            self.assertIsNone(aws.head("us-west-2", "bucket", "absent"))
 
     def test_launch_classifies_refusals_and_resubmits_an_unanswered_request(self):
         ec2 = self.stub("ec2")

@@ -329,7 +329,6 @@ command refuses plans its language phases would refuse, such as two plans of
 one shard, before it freezes anything.
 
 ```bash
-TRANSFER_PREFIX=<transfer-prefix> \
 python3 tools/re2-benchmark/baseline/run-campaign.py \
   campaign <campaign> --execute \
   --candidate before=main --candidate after=user/me/faster-scan \
@@ -544,8 +543,8 @@ python3 tools/re2-benchmark/baseline/run-campaign.py \
   --campaign-root /durable/path/<campaign>
 ```
 
-Every execution requires a shared transfer bucket in every launch region and
-`TRANSFER_PREFIX`; see [launch regions](#launch-regions-and-purchase). The
+Every execution requires a shared transfer bucket in every launch region; see
+[launch regions](#launch-regions-and-purchase). The
 [settings example](#shared-fleet-budget) names one region with one shared
 bucket.
 
@@ -677,16 +676,23 @@ aws ec2 describe-images --region <region> --owners 137112412989 --include-deprec
 ```
 
 Hosts read campaign inputs from a shared bucket in their launch region. Name
-each launch region's bucket as its `bucket` in the settings' `regions` and set
-`TRANSFER_PREFIX`.
+each launch region's bucket as its `bucket` in the settings' `regions`.
 Each shared bucket must carry the `Project=regulator-benchmark` tag, and
-preflight checks the tag and the bucket's region. Each worker keeps its
-leases and results under its own prefix, `TRANSFER_PREFIX/<session>`, and
-cleanup removes that prefix; the shared archives described below stay. To
-create a shared bucket by hand as `add-region` does, omitting
-`--create-bucket-configuration` in `us-east-1`; its lifecycle rule,
-`ExpireCampaignArtifacts` in `bucket-lifecycle.json`, sweeps what a lost
-controller leaves:
+preflight checks the tag and the bucket's region. A bucket holds two trees:
+
+- `shared/` holds the content-addressed archives described below, which
+  every campaign reuses by key. The `ExpireSharedArchives` rule in
+  `bucket-lifecycle.json` expires an object seven days after its upload, and a
+  phase, or a region `add-region` adds, puts an archive again once it is five
+  days old, so an archive outlives any phase that uses it.
+- `campaigns/<campaign>/<session>/` holds each worker's leases and results.
+  Cleanup removes the session's prefix, and the `ExpireCampaignSessions` rule
+  expires what a lost controller leaves one day after it was written.
+
+Both rules also abort a multipart upload left incomplete for a day. An object
+outside both trees never expires, so remove any left by an older layout by
+hand. To create a shared bucket by hand as `add-region` does, omitting
+`--create-bucket-configuration` in `us-east-1`:
 
 ```bash
 aws s3api create-bucket --bucket <bucket> --region <region> \
@@ -774,16 +780,17 @@ each route.
 
 Before it launches any host, the controller puts each archive once in every
 region that may launch a host installing it, under
-`TRANSFER_PREFIX/engine-builds/<sha256>.tar.zst`, and skips an object with that
-key whose metadata records the archive's SHA-256. The frozen candidate archive, which every host unpacks first,
-travels the same way under `TRANSFER_PREFIX/candidates/<sha256>.tar.gz`. A
+`shared/engine-builds/<sha256>.tar.zst`, and skips an object with that key
+whose metadata records the archive's SHA-256 and which is under five days old.
+The frozen candidate archive, which every host unpacks first,
+travels the same way under `shared/candidates/<sha256>.tar.gz`. A
 language plan's bundle, which a language unit worker
 installs, travels the same way under
-`TRANSFER_PREFIX/language-plans/<sha256>.tar.zst`; a worker's user data names
+`shared/language-plans/<sha256>.tar.zst`; a worker's user data names
 the bundles of its own pool's shards. The candidate provenance their units
-measure travels under `TRANSFER_PREFIX/candidates/<sha256>.tsv`. The platform's
+measure travels under `shared/candidates/<sha256>.tsv`. The platform's
 pinned JDK travels the
-same way under `TRANSFER_PREFIX/jdks/<sha256>.tar.gz`: the controller downloads
+same way under `shared/jdks/<sha256>.tar.gz`: the controller downloads
 it once per campaign from its pinned URL into the campaign root's `jdks/`,
 checks it against the pinned SHA-256, and puts it in each region, so hosts never
 fetch it from its publisher.
@@ -796,15 +803,8 @@ whose part waited 60 seconds for a read, is retried; the campaign stops after
 three failed attempts. The
 [worker profile](#worker-profile) may read those archive keys, in addition to
 each worker's own input prefix. These archives are campaign inputs rather than
-worker resources, so worker cleanup leaves them in place. Remove them once the
-campaign is done:
-
-```bash
-aws s3 rm "s3://<bucket>/<transfer-prefix>/candidates/" --recursive --region <region>
-aws s3 rm "s3://<bucket>/<transfer-prefix>/engine-builds/" --recursive --region <region>
-aws s3 rm "s3://<bucket>/<transfer-prefix>/language-plans/" --recursive --region <region>
-aws s3 rm "s3://<bucket>/<transfer-prefix>/jdks/" --recursive --region <region>
-```
+worker resources, so worker cleanup leaves them in place for the lifecycle rule
+to expire.
 
 ## Launching a worker
 
