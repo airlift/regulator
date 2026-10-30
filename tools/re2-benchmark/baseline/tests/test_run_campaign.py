@@ -593,8 +593,9 @@ class TestRunCampaign(unittest.TestCase):
             # Three units: one accepted, one half accepted with 900 seconds left, and one of 1800 seconds untouched.
             write_tsv(primary / "work-items.tsv", RUN_CAMPAIGN.WORK_ITEM_FIELDS, [
                 {"platform": "r8i", "instance_type": "r8i.2xlarge", "shard_id": "s", "unit_id": unit, "replica": "1",
-                 "estimated_seconds": "-", "groups": groups, "excluded_instances": "-"}
-                for unit, groups in (("u1", "1:600,2:300"), ("u2", "1:900,2:900"), ("u3", "1:1800"))])
+                 "estimated_seconds": seconds, "groups": groups, "excluded_instances": "-"}
+                for unit, seconds, groups in (("u1", "900", "1:600,2:300"), ("u2", "1800", "1:900,2:900"),
+                                              ("u3", "1800", "1:1800"))])
             write_tsv(primary / "accepted-units.tsv", RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, [
                 {**dict.fromkeys(RUN_CAMPAIGN.unit_session.UNIT_RECEIPT_FIELDS, "-"), "platform": "r8i",
                  "unit_id": unit, "replica_id": "1", "group_id": group, "unit_attempt_id": f"session/{unit}"}
@@ -614,7 +615,7 @@ class TestRunCampaign(unittest.TestCase):
             language_smoke.mkdir(parents=True)
             write_tsv(language_smoke / "work-items.tsv", RUN_CAMPAIGN.WORK_ITEM_FIELDS, [
                 {"platform": "r8i", "instance_type": "r8i.2xlarge", "shard_id": "s", "unit_id": "u1", "replica": "1",
-                 "estimated_seconds": "-", "groups": "1:600", "excluded_instances": "-"}])
+                 "estimated_seconds": "600", "groups": "1:600", "excluded_instances": "-"}])
             for result_root, members in ((primary, workers), (language_smoke, {})):
                 with patch.object(RUN_CAMPAIGN.time, "time", return_value=now - 20):
                     RUN_CAMPAIGN.UnitDispatcher.write_status(SimpleNamespace(
@@ -636,9 +637,15 @@ class TestRunCampaign(unittest.TestCase):
             for seconds in ("170.0", "180.0"):
                 RUN_CAMPAIGN.write_attempt(primary / "job-attempts.tsv", jobs[0], "stopped",
                                            f"boot_to_first_unit_seconds={seconds}")
+            # Each accepted group took twice its estimate.
             write_tsv(primary / unit_dispatch.UNIT_UPLOADS, unit_dispatch.UNIT_UPLOAD_FIELDS, [
-                {**dict.fromkeys(unit_dispatch.UNIT_UPLOAD_FIELDS, "-"), "upload_seconds": seconds}
-                for seconds in ("3", "5")])
+                {**dict.fromkeys(unit_dispatch.UNIT_UPLOAD_FIELDS, "-"), "host_session": "session", "sequence": unit,
+                 "group_id": group, "group_seconds": measured, "upload_seconds": seconds}
+                for unit, group, measured, seconds in (("u1", "1", "1200", "3"), ("u1", "2", "600", "4"),
+                                                       ("u2", "1", "1800", "5"))])
+            # An earlier controller recorded no group's measured seconds.
+            write_tsv(language_smoke / unit_dispatch.UNIT_UPLOADS, unit_dispatch.UNIT_UPLOAD_FIELDS[:-1], [
+                {**dict.fromkeys(unit_dispatch.UNIT_UPLOAD_FIELDS[:-1], "-"), "upload_seconds": "7"}])
 
             # The campaign's controller runs as its record names it; status leaves the campaign's lock to any
             # controller starting meanwhile.
@@ -660,7 +667,7 @@ class TestRunCampaign(unittest.TestCase):
             self.assertEqual(f"campaign {campaign_root}: no live controller", stopped[0])
             self.assertIn("  primary           no live controller", stopped)
 
-        # 2700 estimated seconds remain over two running workers.
+        # 2700 estimated seconds remain, twice that at the accepted groups' pace, over the four live workers.
         self.assertEqual([
             f"campaign {campaign_root}: controller running as process {os.getpid()}",
             "candidate a at aaaaaaaaaaaa",
@@ -677,7 +684,8 @@ class TestRunCampaign(unittest.TestCase):
             f"  lang smoke        running as process {os.getpid()}",
             "    units     0/1 accepted (0/1 groups), 1 unresolved, 0 queued",
             "    workers   none, as of 20s ago",
-            "    finish    unknown; no worker runs"], lines)
+            "    finish    unknown; no worker runs",
+            "    medians   upload 7s"], lines)
 
     def test_status_results_rank_rows_by_ratio_worst_first(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -2409,7 +2417,10 @@ class FakeUnitHost:
             "unit_attempt_id": f"{self.session}/{sequence}", "exit_status": status,
             "unit_status": "failed" if status else "complete",
             "result_sha256": hashlib.sha256(archive.getvalue()).hexdigest(), "result_bytes": len(archive.getvalue()),
-            "pack_seconds": 0.5, "upload_seconds": 1.5, "upload_attempts": 1}
+            "pack_seconds": 0.5, "upload_seconds": 1.5, "upload_attempts": 1,
+            **{field: datetime.fromtimestamp(moment, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+               for field, moment in (("started_at", self.fleet.time() - self.fleet.group_seconds(self, lease, group)),
+                                     ("finished_at", self.fleet.time()))}}
         if behavior == "partial-marker":
             del marker["result_sha256"]
         self.put(f"{prefix}/completion.json", json.dumps(marker).encode())
@@ -2457,7 +2468,7 @@ class FakeUnitFleet(FakeCloud):
     controller through its S3.
 
     A host's setup takes the seconds setup_seconds gives it, none by default, so it boots the first time it acts. A
-    timed fleet's hosts measure each group for its estimate; otherwise a lease takes no time. Given synthetic units,
+    timed fleet's hosts measure each group for pace times its estimate; otherwise a lease takes no time. Given synthetic units,
     which own no rows to measure, a host uploads only each group's receipt, and the campaign accepts the receipt
     alone. The fleet records each controller loop's seconds and calls by operation, from one sleep between polls to the
     next, with the most keys one of its listings returned and the age of the oldest completion marker S3 holds at its
@@ -2467,11 +2478,12 @@ class FakeUnitFleet(FakeCloud):
     def __init__(self, scratch, scripts=None, abort_after=None, full_spot=None, failed_boot=lambda host: False,
                  unit_scripts=None, stuck_prefix=lambda host: False, unlisted=lambda host: False,
                  slow_boot=lambda host: False, slow_cleanup=lambda host: False, setup_seconds=lambda host: 0,
-                 timed=False, units=None, leaked=lambda host: False):
+                 timed=False, pace=1, units=None, leaked=lambda host: False):
         super().__init__()
         self.scratch = scratch
         self.setup_seconds = setup_seconds
         self.timed = timed
+        self.pace = pace
         self.loops = []
         self.loop_started = (self.clock, 0)
         self.listed = 0
@@ -2555,7 +2567,7 @@ class FakeUnitFleet(FakeCloud):
     def group_seconds(self, host, lease, group):
         if not self.timed:
             return 0
-        return RUN_CAMPAIGN.work_units.unit_group(self.units[lease["unit_id"]], group)["estimated_seconds"]
+        return self.pace * RUN_CAMPAIGN.work_units.unit_group(self.units[lease["unit_id"]], group)["estimated_seconds"]
 
     def sleep(self, seconds):
         if seconds == RUN_CAMPAIGN.UNIT_POLL_SECONDS:
@@ -3017,15 +3029,34 @@ class TestUnitWorkers(unittest.TestCase):
 
     def test_steady_fleet_keeps_its_slack_and_its_listings_short_for_hours(self):
         with tempfile.TemporaryDirectory() as temporary:
-            # 200 hosts of two platforms measure 15-minute units for about six hours.
+            # 200 hosts of two platforms measure 15-minute units for about five hours, each in 90% of its estimate.
             units = {f"steady-{index}": {"unit_id": f"steady-{index}", "shard_id": "steady", "unit_index": str(index),
                                          "estimated_seconds": "900",
                                          "groups": [{"group_id": "1", "estimated_seconds": 900}]}
                      for index in range(1, 2301)}
-            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True,
+            fleet = FakeUnitFleet(Path(temporary) / "hosts", units=units, timed=True, pace=0.9,
                                   setup_seconds=lambda host: 67)
+            results = Path(temporary) / "results"
+            finishes = []
+            poll = fleet.sleep
+
+            def sleep(seconds):
+                # Every 20 polls, status estimates the finish from the phase's ledgers and its controller's snapshot.
+                snapshot = RUN_CAMPAIGN.dispatch_snapshot(results)
+                if seconds == RUN_CAMPAIGN.UNIT_POLL_SECONDS and snapshot and fleet.sleeps % 20 == 0:
+                    progress = RUN_CAMPAIGN.phase_progress(results, snapshot, True)
+                    if progress.finish is not None:
+                        finishes.append((bool(progress.accepted), fleet.time() + progress.finish))
+                poll(seconds)
+
+            fleet.sleep = sleep
             self.run_phase(Path(temporary), fleet, "smoke", ["steady"], 200, 100)
             self.assertEqual(200, len(fleet.hosts))
+            # The estimate from the units' estimates alone is late by more than a unit, and once the first groups
+            # are accepted their measured seconds correct it to within one unit's 15 minutes of the actual finish.
+            finished = fleet.EPOCH + max(host.idle_since for host in fleet.hosts)
+            self.assertGreater(finishes[0][1] - finished, 900)
+            self.assertEqual([], [finish for accepted, finish in finishes if accepted and abs(finish - finished) >= 900])
             # Every host finds its next lease waiting as each lease ends, until the queue is empty.
             sessions = {host.session: host for host in fleet.hosts}
             self.assertEqual([], [entry for entry in fleet.log if entry[0] == "absent" and

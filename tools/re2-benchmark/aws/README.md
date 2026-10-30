@@ -347,11 +347,11 @@ tooling as the checkout running the controller.
 Several candidates share one fleet, so they require `--fleet-budget`. The
 running phases share `--max-concurrent` and `--max-concurrent-per-platform`,
 and their shares follow the work left, set again every poll. The hosts are
-split across platforms by the estimated seconds left in each platform's work
-items not yet accepted, and a platform's hosts among its phases the same way.
-No platform takes more than its limit, and no phase more hosts on a platform
-than its work items left there, since a host runs one at a time. Every
-platform, and every phase on it, with work left first takes one host while
+split across platforms by the corrected seconds left in each platform's work
+items not yet accepted, as `status` computes them below, and a platform's
+hosts among its phases the same way. No platform takes more than its limit,
+and no phase more hosts on a platform than its work items left there, since a
+host runs one at a time. Every platform, and every phase on it, with work left first takes one host while
 hosts last, so a build, whose items carry no estimate, runs beside the
 others. A phase holding more hosts than its share keeps them, and the others
 grow only into hosts the limits leave free, so a language primary, most of a
@@ -413,10 +413,15 @@ state of the policy its `execution-policy.json` names, `job-attempts.tsv`, and
 its live hosts' hours so far; reserved is what their reservations hold beyond
 now. The workers, and the queued count and unresolved units while the phase
 runs, come from `dispatch-status.json`, which the controller rewrites for the phase
-every poll; its age shows how current they are. The finish is the estimated
-seconds of groups not yet accepted, divided among the running workers, as a
-local clock time. A phase that is not complete runs while the campaign's
-controller does. Given a phase's root, the command reports that phase alone.
+every poll; its age shows how current they are. The finish is when the
+latest of the phase's pools, a platform's workers of one instance type,
+finishes its work left at its live workers, those not stopping, as a local
+clock time. A pool's work left is the estimated seconds of its groups not yet
+accepted, of units not left unresolved, corrected by the ratio of measured to
+estimated seconds over its groups accepted so far, and the controller weights
+the phases' shares of the hosts by the same corrected seconds. A phase that is
+not complete runs while the campaign's controller does. Given a phase's root,
+the command reports that phase alone.
 
 With `--results`, the command reads each primary phase's accepted groups so
 far instead, or the given phase's, from the phase's retained group
@@ -992,7 +997,8 @@ group of a lease at a time: its result must match `result_sha256` and its
 lease, and the group then passes the unit gate. The controller applies each
 gathered group on the loop's own thread, normally the loop after it landed: it
 retains the group and appends it to `accepted-units.tsv`, one row per group,
-and the marker's upload timings to `unit-uploads.tsv`. Once its row is durable,
+and the marker's upload timings and the seconds between its `started_at` and
+`finished_at`, the group's measured seconds, to `unit-uploads.tsv`. Once its row is durable,
 the group's marker and result are deleted from S3, and a settled lease's
 heartbeat and lease object go too, so a worker's prefix holds only its current
 leases however long it runs; the ledgers keep the group finished across a
